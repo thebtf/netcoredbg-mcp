@@ -77,6 +77,10 @@ GENERATED_DIRECTORY_NAMES = {"bin", "obj"}
 GENERATED_ROOT_NAMES = {".sonarqube", ".scannerwork"}
 COVERAGE_PROCESS_CLEANUP_SECONDS = 5
 COVERAGE_PRODUCER_TIMEOUT_SECONDS = 30 * 60
+COVERAGE_HOST_BUILD_CONFIGURATION = "Debug"
+COVERAGE_MTP_PROPERTIES = frozenset(
+    {"UseMicrosoftTestingPlatformRunner", "TestingPlatformDotnetTestSupport"}
+)
 COVERAGE_FAILURE_STAGES = frozenset(
     {
         "process_owner",
@@ -3163,6 +3167,82 @@ def coverage_dotnet_environment(
     return dotnet_environment
 
 
+def _stateless_host_output(context: GitContext) -> Path:
+    return (
+        context.repository_root
+        / "host"
+        / "NetCoreDbg.Mcp.Stateless"
+        / "bin"
+        / COVERAGE_HOST_BUILD_CONFIGURATION
+        / "net8.0"
+    )
+
+
+def stateless_host_restore_snapshot(context: GitContext) -> dict[str, str]:
+    output = _stateless_host_output(context)
+    snapshot: dict[str, str] = {}
+    for filename in ("NetCoreDbg.Mcp.Stateless.dll", "NetCoreDbg.Mcp.Stateless.pdb"):
+        path = output / filename
+        if path.is_symlink() or not path.is_file():
+            raise CoverageFailureError(
+                "dotnet_producer", "dotnet", "COVERAGE_STATELESS_HOST_ARTIFACT_MISSING"
+            )
+        try:
+            snapshot[filename] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as error:
+            raise CoverageFailureError(
+                "dotnet_producer", "dotnet", "COVERAGE_STATELESS_HOST_ARTIFACT_UNREADABLE"
+            ) from error
+    return snapshot
+
+
+def assert_stateless_host_restored(context: GitContext, before: Mapping[str, str]) -> None:
+    if stateless_host_restore_snapshot(context) != dict(before):
+        raise CoverageFailureError(
+            "dotnet_producer", "dotnet", "COVERAGE_STATELESS_HOST_RESTORATION_FAILED"
+        )
+
+
+def assert_vstest_compatible(context: GitContext, project: Path) -> None:
+    configuration_paths = [project]
+    for directory in (project.parent, *project.parent.parents):
+        try:
+            directory.relative_to(context.repository_root)
+        except ValueError:
+            break
+        configuration_paths.append(directory / "Directory.Build.props")
+    for configuration_path in configuration_paths:
+        if not configuration_path.is_file():
+            continue
+        try:
+            properties = ElementTree.parse(configuration_path).getroot()
+        except (OSError, ElementTree.ParseError) as error:
+            raise CoverageFailureError(
+                "dotnet_producer", "dotnet", "COVERAGE_VSTEST_CONFIGURATION_UNREADABLE"
+            ) from error
+        for element in properties.iter():
+            if (
+                _xml_local_name(element.tag) in COVERAGE_MTP_PROPERTIES
+                and (element.text or "").strip().casefold() == "true"
+            ):
+                raise CoverageFailureError("dotnet_producer", "dotnet", "COVERAGE_MTP_UNSUPPORTED")
+    global_json = context.repository_root / "global.json"
+    if not global_json.is_file():
+        return
+    try:
+        document = json.loads(global_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise CoverageFailureError(
+            "dotnet_producer", "dotnet", "COVERAGE_VSTEST_CONFIGURATION_UNREADABLE"
+        ) from error
+    test_configuration = document.get("test") if isinstance(document, dict) else None
+    if (
+        isinstance(test_configuration, dict)
+        and test_configuration.get("runner") == "Microsoft.Testing.Platform"
+    ):
+        raise CoverageFailureError("dotnet_producer", "dotnet", "COVERAGE_MTP_UNSUPPORTED")
+
+
 def coverage_producer_commands(context: GitContext, plan: CoveragePlan) -> list[list[str]]:
     commands = [
         ["uv", "sync", "--locked", "--extra", "dev"],
@@ -3201,12 +3281,18 @@ def coverage_producer_commands(context: GitContext, plan: CoveragePlan) -> list[
                 "dotnet",
                 "test",
                 str(context.repository_root / report.project),
+                "--no-build",
+                "--no-restore",
                 "-nr:false",
                 "/p:CollectCoverage=true",
                 "/p:CoverletOutputFormat=opencover",
                 f"/p:CoverletOutput={report.absolute_path}",
             ]
         )
+        if report.project == HOST_REAL_PYTHON_TEST_PROJECT:
+            commands[-1].extend(["--", "xUnit.ParallelizeTestCollections=false"])
+        if report.project.endswith("NetCoreDbg.Mcp.Stateless.Tests.csproj"):
+            commands[-1].append(f"/p:IncludeDirectory={_stateless_host_output(context)}")
     return commands
 
 
@@ -3244,7 +3330,6 @@ def run_coverage_producers(
         ("Python coverage tests", "python_producer", "python"),
         ("Python Cobertura XML", "python_producer", "python"),
     )
-    coverage_command_count = len(plan.dotnet_reports)
     dotnet_environment = coverage_dotnet_environment(context, plan, environment)
     environment_claim: CoverageEnvironmentClaim | None = None
     for index, command in enumerate(commands):
@@ -3252,17 +3337,23 @@ def run_coverage_producers(
             claim.assert_current()
         if environment_claim is not None:
             environment_claim.assert_current()
+        host_restore: dict[str, str] | None = None
         if index < len(metadata):
             label, stage, language = metadata[index]
-        elif index < len(metadata) + coverage_command_count:
-            label, stage, language = (".NET OpenCover tests", "dotnet_producer", "dotnet")
+            producer_environment = environment
         else:
-            label, stage, language = (
-                ".NET real Python Host validation",
-                "dotnet_producer",
-                "dotnet",
-            )
-        producer_environment = environment if index < len(metadata) else dotnet_environment
+            report_index = index - len(metadata)
+            try:
+                report = plan.dotnet_reports[report_index]
+            except IndexError as error:
+                raise RunnerError("Coverage producer command plan is invalid.") from error
+            if report.project is None:
+                raise RunnerError("Coverage report project is invalid.")
+            assert_vstest_compatible(context, context.repository_root / report.project)
+            if report.project.endswith("NetCoreDbg.Mcp.Stateless.Tests.csproj"):
+                host_restore = stateless_host_restore_snapshot(context)
+            label, stage, language = (".NET OpenCover tests", "dotnet_producer", "dotnet")
+            producer_environment = dotnet_environment
         run_coverage_process(
             command,
             cwd=context.repository_root,
@@ -3273,6 +3364,8 @@ def run_coverage_producers(
             stage=stage,
             language=language,
         )
+        if host_restore is not None:
+            assert_stateless_host_restored(context, host_restore)
         if index == 0:
             environment_claim = capture_coverage_environment_claim(context, plan)
     if environment_claim is None:
@@ -3387,7 +3480,7 @@ def project_inventory(repository_root: Path) -> tuple[Path, list[Path], list[Pat
     ]
     if not solution_projects or any(not project.is_file() for project in solution_projects):
         raise RunnerError("Solution project inventory is incomplete.")
-    excluded_parts = {".git", ".agent", ".sonarqube", "bin", "obj", "fixtures", "test-app"}
+    excluded_parts = {".git", ".agent", ".sonarqube", ".venv", "bin", "obj", "fixtures", "test-app"}
     discovered_projects = {
         path.resolve()
         for path in iter_scanner_tree(repository_root, "*.csproj")
@@ -5241,13 +5334,11 @@ def receipt_base(
 
 
 def execute(role: str, scanner_override: str | None) -> Path:
-    if role == DIAGNOSTIC_ROLE:
-        raise RunnerError("DIAGNOSTIC_SCAN_PREREQUISITES_INCOMPLETE")
     inherited_environment = process_environment()
     clean_environment = scrub_sonar_environment(inherited_environment)
     context = git_context(Path.cwd(), clean_environment)
     run_id = str(uuid.uuid4())
-    target = receipt_target(context, role, None)
+    target = receipt_target(context, role, run_id if role == DIAGNOSTIC_ROLE else None)
     receipt = receipt_base(context, target, run_id)
     secrets = sonar_secret_values(inherited_environment)
     coverage_plan: CoveragePlan | None = None

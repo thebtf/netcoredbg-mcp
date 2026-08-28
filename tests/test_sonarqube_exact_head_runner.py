@@ -2,14 +2,19 @@
 
 import importlib.util
 import json
-from contextlib import ExitStack, nullcontext
-from datetime import datetime, timezone
 import stat
 import sys
+from contextlib import ExitStack, nullcontext
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 
 
 RUNNER_PATH = Path(__file__).resolve().parents[1] / "scripts" / "run_sonarqube_exact_head.py"
@@ -133,6 +138,20 @@ class TestSonarqubeExactHeadRunner(TestCase):
             with self.assertRaisesRegex(runner.RunnerError, "release version"):
                 runner.project_version(root)
 
+    def test_coverage_configuration_preserves_repository_relative_source_mappings(self):
+        configuration = tomllib.loads(
+            (RUNNER_PATH.parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(
+            configuration["tool"]["coverage"]["run"],
+            {
+                "branch": True,
+                "include": ["src/netcoredbg_mcp/*"],
+                "relative_files": True,
+            },
+        )
+
     def test_coverage_plan_is_side_effect_free_and_has_import_properties(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory) / "scanner-worktree"
@@ -223,8 +242,104 @@ class TestSonarqubeExactHeadRunner(TestCase):
             self.assertIn("/p:CollectCoverage=true", command)
             self.assertIn("/p:CoverletOutputFormat=opencover", command)
             self.assertIn(f"/p:CoverletOutput={report.absolute_path}", command)
-            self.assertNotIn("--no-build", command)
-            self.assertNotIn("--no-restore", command)
+            self.assertIn("--no-build", command)
+            self.assertIn("--no-restore", command)
+        stateless = next(
+            command
+            for command, report in zip(dotnet_commands, plan.dotnet_reports, strict=True)
+            if report.project
+            == "host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj"
+        )
+        host_output = (
+            context.repository_root
+            / "host"
+            / "NetCoreDbg.Mcp.Stateless"
+            / "bin"
+            / "Debug"
+            / "net8.0"
+        )
+        self.assertIn(f"/p:IncludeDirectory={host_output}", stateless)
+        self.assertFalse(any(argument.startswith("/p:Include=") for argument in stateless))
+        self.assertNotIn("--filter", stateless)
+        host_real_python = next(
+            command
+            for command, report in zip(dotnet_commands, plan.dotnet_reports, strict=True)
+            if report.project == runner.HOST_REAL_PYTHON_TEST_PROJECT
+        )
+        self.assertEqual(host_real_python[-2:], ["--", "xUnit.ParallelizeTestCollections=false"])
+        self.assertTrue(
+            all(
+                "xUnit.ParallelizeTestCollections=false" not in command
+                for command in dotnet_commands
+                if command is not host_real_python
+            )
+        )
+        self.assertTrue(all("--filter" not in command for command in dotnet_commands))
+
+    def test_vstest_guard_rejects_all_mtp_opt_ins(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            project = root / "host" / "Tests" / "Tests.csproj"
+            project.parent.mkdir(parents=True)
+            context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
+
+            for configuration_path, contents in (
+                (
+                    project,
+                    "<Project><PropertyGroup><UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner></PropertyGroup></Project>",
+                ),
+                (
+                    project.parent / "Directory.Build.props",
+                    "<Project><PropertyGroup><TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport></PropertyGroup></Project>",
+                ),
+                (
+                    root / "Directory.Build.props",
+                    "<Project><PropertyGroup><UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner></PropertyGroup></Project>",
+                ),
+                (root / "global.json", '{"test":{"runner":"Microsoft.Testing.Platform"}}'),
+            ):
+                project.write_text("<Project />", encoding="utf-8")
+                configuration_path.parent.mkdir(parents=True, exist_ok=True)
+                configuration_path.write_text(contents, encoding="utf-8")
+                with self.subTest(configuration_path=configuration_path):
+                    with self.assertRaisesRegex(
+                        runner.CoverageFailureError, "COVERAGE_MTP_UNSUPPORTED"
+                    ):
+                        runner.assert_vstest_compatible(context, project)
+                if configuration_path != project:
+                    configuration_path.unlink()
+
+    def test_coverage_producers_check_vstest_before_dotnet_launch(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000089")
+            runner.claim_coverage_run(plan, context)
+            environment = runner.coverage_environment(context, plan, {"SAFE": "kept"})
+            calls = []
+
+            def record(command, **_kwargs):
+                calls.append(command)
+                if command[:2] == ["uv", "sync"]:
+                    runner.coverage_environment_directory(context, plan).mkdir(parents=True)
+
+            with (
+                patch.object(
+                    runner,
+                    "assert_vstest_compatible",
+                    side_effect=runner.CoverageFailureError(
+                        "dotnet_producer", "dotnet", "COVERAGE_MTP_UNSUPPORTED"
+                    ),
+                ) as guard,
+                patch.object(runner, "run_coverage_process", side_effect=record),
+                self.assertRaisesRegex(runner.CoverageFailureError, "COVERAGE_MTP_UNSUPPORTED"),
+            ):
+                runner.run_coverage_producers(
+                    context, plan, environment, (), runner.time.monotonic() + 60
+                )
+
+        self.assertEqual(calls, runner.coverage_producer_commands(context, plan)[:3])
+        guard.assert_called_once()
 
     def test_dotnet_coverage_environment_selects_external_python(self):
         with TemporaryDirectory() as temporary_directory:
@@ -447,6 +562,13 @@ class TestSonarqubeExactHeadRunner(TestCase):
             environment = runner.coverage_environment(
                 context, plan, {"SONAR_TOKEN": "must-not-reach-child", "SAFE": "kept"}
             )
+            stateless_output = (
+                root / "host" / "NetCoreDbg.Mcp.Stateless" / "bin" / "Debug" / "net8.0"
+            )
+            stateless_output.mkdir(parents=True)
+            (stateless_output / "NetCoreDbg.Mcp.Stateless.dll").write_bytes(b"dll")
+            (stateless_output / "NetCoreDbg.Mcp.Stateless.pdb").write_bytes(b"pdb")
+
             calls = []
 
             def record(command, **kwargs):
@@ -488,6 +610,35 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 for _, kwargs in calls[3:]
             )
         )
+
+    def test_stateless_producer_rejects_unrestored_host_artifacts(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000090")
+            runner.claim_coverage_run(plan, context)
+            environment = runner.coverage_environment(context, plan, {"SAFE": "kept"})
+            host_output = root / "host" / "NetCoreDbg.Mcp.Stateless" / "bin" / "Debug" / "net8.0"
+            host_output.mkdir(parents=True)
+            host_dll = host_output / "NetCoreDbg.Mcp.Stateless.dll"
+            host_dll.write_bytes(b"original dll")
+            (host_output / "NetCoreDbg.Mcp.Stateless.pdb").write_bytes(b"original pdb")
+
+            def record(command, **_kwargs):
+                if command[:2] == ["uv", "sync"]:
+                    runner.coverage_environment_directory(context, plan).mkdir(parents=True)
+                if any("NetCoreDbg.Mcp.Stateless.Tests" in argument for argument in command):
+                    host_dll.write_bytes(b"mutated dll")
+
+            with (
+                patch.object(runner, "run_coverage_process", side_effect=record),
+                self.assertRaisesRegex(
+                    runner.CoverageFailureError, "COVERAGE_STATELESS_HOST_RESTORATION_FAILED"
+                ),
+            ):
+                runner.run_coverage_producers(
+                    context, plan, environment, (), runner.time.monotonic() + 60
+                )
 
     def test_report_parent_creation_rejects_reparse_before_producer(self):
         with TemporaryDirectory() as temporary_directory:
@@ -1421,6 +1572,27 @@ class TestSonarqubeExactHeadRunner(TestCase):
             _, projects, standalone_projects = runner.project_inventory(root)
 
         self.assertEqual((projects, standalone_projects), ([project.resolve()], []))
+
+    def test_project_inventory_excludes_virtual_environment_projects(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            solution_project = root / "host" / "App.csproj"
+            standalone_project = root / "tools" / "Tool.csproj"
+            virtual_environment_project = (
+                root / ".venv" / "Lib" / "site-packages" / "package" / "Package.csproj"
+            )
+            for project in (solution_project, standalone_project, virtual_environment_project):
+                project.parent.mkdir(parents=True, exist_ok=True)
+                project.write_text("<Project />", encoding="utf-8")
+            (root / "netcoredbg-mcp.sln").write_text(
+                'Project("{guid}") = "App", "host\\App.csproj", "{id}"\nEndProject\n',
+                encoding="utf-8",
+            )
+
+            _, projects, standalone_projects = runner.project_inventory(root)
+
+        self.assertEqual(projects, [solution_project.resolve(), standalone_project.resolve()])
+        self.assertEqual(standalone_projects, [standalone_project.resolve()])
 
     def test_compute_engine_readback_uses_submitted_task_and_scan_credential(self):
         calls = []
@@ -2737,29 +2909,36 @@ class TestSonarqubeExactHeadRunner(TestCase):
             / f"{run_id}.json",
         )
 
-    def test_diagnostic_execution_refuses_before_context_credentials_or_scanner(self):
-        with (
-            patch.object(runner, "process_environment", return_value={}),
-            patch.object(runner, "scrub_sonar_environment", return_value={}),
-            patch.object(
-                runner,
-                "git_context",
-                side_effect=AssertionError("git context must not be read"),
-            ) as git_context,
-            patch.object(
-                runner,
-                "load_credentials",
-                side_effect=AssertionError("credentials must not be read"),
-            ) as load_credentials,
-            self.assertRaisesRegex(
-                runner.RunnerError,
-                "DIAGNOSTIC_SCAN_PREREQUISITES_INCOMPLETE",
-            ),
-        ):
-            runner.execute("diagnostic", None)
+    def test_diagnostic_execution_resolves_run_namespaced_target_before_credentials(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            target_calls = []
+            original_receipt_target = runner.receipt_target
 
-        git_context.assert_not_called()
+            def capture_target(target_context, role, run_id):
+                target_calls.append((target_context, role, run_id))
+                return original_receipt_target(target_context, role, run_id)
+
+            with (
+                patch.object(runner, "process_environment", return_value={}),
+                patch.object(runner, "scrub_sonar_environment", return_value={}),
+                patch.object(runner, "git_context", return_value=context) as git_context,
+                patch.object(runner, "receipt_target", side_effect=capture_target),
+                patch.object(
+                    runner,
+                    "project_lock",
+                    side_effect=runner.RunnerError("stop before credential load"),
+                ),
+                patch.object(runner, "load_credentials") as load_credentials,
+                self.assertRaisesRegex(runner.RunnerError, "stop before credential load"),
+            ):
+                runner.execute("diagnostic", None)
+
+        git_context.assert_called_once()
         load_credentials.assert_not_called()
+        self.assertEqual(target_calls[0][:2], (context, "diagnostic"))
+        self.assertEqual(str(runner.uuid.UUID(target_calls[0][2])), target_calls[0][2])
 
     def test_receipt_dispatch_preserves_historical_v2_and_refuses_unknown_v3_shape(self):
         historical = runner.receipt_dispatch({"schema_version": 2, "outcome": "BLOCKED"})

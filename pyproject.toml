@@ -120,3 +120,8 @@ testpaths = ["tests"]
 markers = [
     "critical: project-wide release gate tests",
 ]
+
+[tool.coverage.run]
+branch = true
+include = ["src/netcoredbg_mcp/*"]
+relative_files = true
