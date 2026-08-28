@@ -301,7 +301,7 @@ class DAPClient:
                     self._handle_message(data)
 
                 except asyncio.CancelledError:
-                    break
+                    raise
                 except Exception:
                     logger.exception("Error reading DAP message")
                     break

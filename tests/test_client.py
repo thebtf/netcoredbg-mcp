@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -179,6 +179,75 @@ class TestDAPClientResponseHandling:
         result = future.result()
         assert isinstance(result, DAPResponse)
         assert result.success is True
+
+
+class _BlockingStdout:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self._release = asyncio.Event()
+
+    async def readline(self) -> bytes:
+        self.entered.set()
+        await self._release.wait()
+        return b""
+
+
+def _blocking_reader_process(stdout: _BlockingStdout) -> MagicMock:
+    process = MagicMock()
+    process.returncode = None
+    process.stdout = stdout
+    process.terminate = MagicMock()
+    process.wait = AsyncMock(return_value=0)
+    return process
+
+
+class TestDAPClientReaderCancellation:
+    """Cancellation ownership for the DAP reader task."""
+
+    @pytest.mark.asyncio
+    async def test_reader_task_propagates_cancellation_after_cleanup(self):
+        client = DAPClient("/path")
+        stdout = _BlockingStdout()
+        process = _blocking_reader_process(stdout)
+        client._process = process
+        pending = asyncio.get_running_loop().create_future()
+        client._pending[1] = pending
+        reader = asyncio.create_task(client._read_loop())
+        await stdout.entered.wait()
+
+        reader.cancel()
+        cancelled = False
+        try:
+            await reader
+        except asyncio.CancelledError:
+            cancelled = True
+
+        assert client._pending == {}
+        with pytest.raises(RuntimeError, match="netcoredbg process died"):
+            pending.result()
+        process.terminate.assert_called_once()
+        assert cancelled is True
+
+    @pytest.mark.asyncio
+    async def test_stop_consumes_reader_cancellation_after_cleanup(self):
+        client = DAPClient("/path")
+        stdout = _BlockingStdout()
+        process = _blocking_reader_process(stdout)
+        client._process = process
+        pending = asyncio.get_running_loop().create_future()
+        client._pending[1] = pending
+        client._read_task = asyncio.create_task(client._read_loop())
+        await stdout.entered.wait()
+
+        await client.stop()
+
+        assert client._read_task is None
+        assert client._process is None
+        assert client._pending == {}
+        with pytest.raises(RuntimeError, match="netcoredbg process died"):
+            pending.result()
+        assert process.terminate.call_count == 2
+        process.wait.assert_awaited_once()
 
 
 class TestDAPClientRequestBuilding:
