@@ -185,6 +185,23 @@ class TestTransform:
         assert result["unsupported"] is True
         assert "TransformPattern" in result["reason"]
 
+    @pytest.mark.asyncio
+    async def test_unsupported_transform_pattern_preserves_keyword_payload_and_freshness(self):
+        backend = PywinautoBackend()
+        expected = {
+            "unsupported": True,
+            "reason": "FlaUI bridge required for TransformPattern",
+        }
+
+        moved = await backend.move_window(11, 22, window_title="Move dialog")
+
+        assert moved == expected
+        moved["reason"] = "mutated"
+
+        resized = await backend.resize_window(333, 444, window_title="Resize dialog")
+
+        assert resized == expected
+
 
 # ─────────────────────────────────────────────────────────────
 # TestExpandCollapse

@@ -810,6 +810,13 @@ class PywinautoBackend:
             "reason": "FlaUI bridge required for Clipboard (STA threading)",
         }
 
+    @staticmethod
+    def _unsupported_transform_pattern() -> dict[str, Any]:
+        return {
+            "unsupported": True,
+            "reason": "FlaUI bridge required for TransformPattern",
+        }
+
     async def close_window(self, window_title: str | None = None) -> dict[str, Any]:
         """WindowPattern requires FlaUI bridge backend."""
         return self._unsupported_window_pattern()
@@ -828,10 +835,7 @@ class PywinautoBackend:
 
     async def move_window(self, x: int, y: int, window_title: str | None = None) -> dict[str, Any]:
         """TransformPattern requires FlaUI bridge backend."""
-        return {
-            "unsupported": True,
-            "reason": "FlaUI bridge required for TransformPattern",
-        }
+        return self._unsupported_transform_pattern()
 
     async def resize_window(
         self,
@@ -840,10 +844,7 @@ class PywinautoBackend:
         window_title: str | None = None,
     ) -> dict[str, Any]:
         """TransformPattern requires FlaUI bridge backend."""
-        return {
-            "unsupported": True,
-            "reason": "FlaUI bridge required for TransformPattern",
-        }
+        return self._unsupported_transform_pattern()
 
     async def expand(self, automation_id: str) -> dict[str, Any]:
         """ExpandCollapsePattern requires FlaUI bridge backend."""
