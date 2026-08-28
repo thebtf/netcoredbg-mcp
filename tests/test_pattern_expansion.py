@@ -100,6 +100,24 @@ class TestWindowControl:
         result = await backend.restore_window()
         assert result["unsupported"] is True
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "method_name",
+        ("close_window", "maximize_window", "minimize_window", "restore_window"),
+    )
+    async def test_unsupported_window_pattern_preserves_keyword_payload(
+        self,
+        method_name: str,
+    ) -> None:
+        backend = PywinautoBackend()
+
+        result = await getattr(backend, method_name)(window_title="Dialog")
+
+        assert result == {
+            "unsupported": True,
+            "reason": "FlaUI bridge required for WindowPattern",
+        }
+
 
 # ─────────────────────────────────────────────────────────────
 # TestTransform

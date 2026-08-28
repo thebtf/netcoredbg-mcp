@@ -789,33 +789,28 @@ class PywinautoBackend:
     # All methods below require the FlaUI bridge and return {unsupported: True}
     # on the pywinauto backend, consistent with v0.10.0 fallback pattern.
 
-    async def close_window(self, window_title: str | None = None) -> dict[str, Any]:
-        """WindowPattern requires FlaUI bridge backend."""
+    @staticmethod
+    def _unsupported_window_pattern() -> dict[str, Any]:
         return {
             "unsupported": True,
             "reason": "FlaUI bridge required for WindowPattern",
         }
+
+    async def close_window(self, window_title: str | None = None) -> dict[str, Any]:
+        """WindowPattern requires FlaUI bridge backend."""
+        return self._unsupported_window_pattern()
 
     async def maximize_window(self, window_title: str | None = None) -> dict[str, Any]:
         """WindowPattern requires FlaUI bridge backend."""
-        return {
-            "unsupported": True,
-            "reason": "FlaUI bridge required for WindowPattern",
-        }
+        return self._unsupported_window_pattern()
 
     async def minimize_window(self, window_title: str | None = None) -> dict[str, Any]:
         """WindowPattern requires FlaUI bridge backend."""
-        return {
-            "unsupported": True,
-            "reason": "FlaUI bridge required for WindowPattern",
-        }
+        return self._unsupported_window_pattern()
 
     async def restore_window(self, window_title: str | None = None) -> dict[str, Any]:
         """WindowPattern requires FlaUI bridge backend."""
-        return {
-            "unsupported": True,
-            "reason": "FlaUI bridge required for WindowPattern",
-        }
+        return self._unsupported_window_pattern()
 
     async def move_window(self, x: int, y: int, window_title: str | None = None) -> dict[str, Any]:
         """TransformPattern requires FlaUI bridge backend."""
