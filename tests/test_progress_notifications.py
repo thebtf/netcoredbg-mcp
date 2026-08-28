@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from netcoredbg_mcp.tools.debug import _safe_notify
+
 
 class TestBuildOutputCallback:
     """Tests for output_callback in BuildSession._run_command."""
@@ -95,6 +97,48 @@ class TestSafeNotify:
 
         await safe_notify(ctx, "error", "warning")
         ctx.warning.assert_awaited_once_with("error")
+
+
+class TestProductionSafeNotify:
+    """Direct contract tests for the production notification boundary."""
+
+    @pytest.mark.asyncio
+    async def test_returns_true_after_successful_notification(self):
+        async def succeeds():
+            return None
+
+        assert await _safe_notify(succeeds()) is True
+
+    @pytest.mark.asyncio
+    async def test_returns_false_after_actual_wait_timeout(self, monkeypatch):
+        async def blocks():
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr("netcoredbg_mcp.tools.debug.NOTIFY_TIMEOUT", 0.01)
+
+        assert await _safe_notify(blocks()) is False
+
+    @pytest.mark.asyncio
+    async def test_returns_false_after_ordinary_notification_error(self):
+        async def fails():
+            raise ConnectionError("client disconnected")
+
+        assert await _safe_notify(fails()) is False
+
+    @pytest.mark.asyncio
+    async def test_propagates_outer_cancellation(self):
+        started = asyncio.Event()
+
+        async def blocks():
+            started.set()
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(_safe_notify(blocks()))
+        await started.wait()
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
 
 class TestBuildLineThrottling:

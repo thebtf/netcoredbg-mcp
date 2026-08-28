@@ -31,7 +31,7 @@ async def _safe_notify(coro: Any) -> bool:
     try:
         await asyncio.wait_for(coro, timeout=NOTIFY_TIMEOUT)
         return True
-    except (asyncio.TimeoutError, Exception):
+    except Exception:
         return False
 
 async def _noop_resource_notification(_ctx: Any) -> None:
