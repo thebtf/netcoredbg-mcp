@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Foreground-restore join paths now use explicit helpers while preserving cancellation, retry, logging, and cleanup behavior.
 - Grid and text range paths use explicit validated-state guards rather than assertions inside broad tool error handling.
 
-## [0.23.10] - 2026-08-25
+## [0.23.10] - Unreleased candidate (2026-08-25)
 
 ### Fixed
 - `ui_take_screenshot` now uses the explicit validated crop and strict-capture values throughout its public execution path, so malformed input returns the documented validation error rather than relying on an internal assertion.
