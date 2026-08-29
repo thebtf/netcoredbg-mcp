@@ -32,6 +32,28 @@ def _environment(name: str) -> str:
     return value
 
 
+def _select_cases(
+    cases: tuple[tuple[Any, ...], ...],
+) -> tuple[tuple[Any, ...], ...]:
+    selection = os.environ.get("NETCOREDBG_TYPED_BITBLT_CASES")
+    if selection is None:
+        return cases
+
+    requested = tuple(name.strip() for name in selection.split(","))
+    assert requested and all(requested), (
+        "NETCOREDBG_TYPED_BITBLT_CASES must select at least one named case"
+    )
+    assert len(set(requested)) == len(requested), (
+        "NETCOREDBG_TYPED_BITBLT_CASES must not select a case more than once"
+    )
+    known = {case[0] for case in cases}
+    unknown = set(requested) - known
+    assert not unknown, (
+        f"NETCOREDBG_TYPED_BITBLT_CASES contains unknown case names: {', '.join(sorted(unknown))}"
+    )
+    return tuple(case for case in cases if case[0] in requested)
+
+
 def _payload(result: CallToolResult) -> dict[str, Any]:
     assert result.isError is False, f"tools/call isError must be explicit false: {result}"
     assert result.structuredContent is None, (
@@ -574,36 +596,6 @@ async def main() -> None:
             root / "fallback.trace",
         ),
         (
-            "ordinary_fallback",
-            test_bridge,
-            test_hash,
-            host_bridge_library,
-            host_bridge_library_hash,
-            {"NETCOREDBG_TEST_CAPTURE_CALIBRATION": "marker"},
-            "ordinary_fallback",
-            root / "ordinary-fallback.trace",
-        ),
-        (
-            "final_black",
-            test_bridge,
-            test_hash,
-            host_bridge_library,
-            host_bridge_library_hash,
-            {"NETCOREDBG_TEST_CAPTURE_CALIBRATION": "black"},
-            "final_black",
-            root / "final-black.trace",
-        ),
-        (
-            "ordinary_final_black",
-            test_bridge,
-            test_hash,
-            host_bridge_library,
-            host_bridge_library_hash,
-            {"NETCOREDBG_TEST_CAPTURE_CALIBRATION": "black"},
-            "ordinary_final_black",
-            root / "ordinary-final-black.trace",
-        ),
-        (
             "primary_malformed",
             test_bridge,
             test_hash,
@@ -649,7 +641,38 @@ async def main() -> None:
             "foreign_reject",
             root / "foreign-target.trace",
         ),
+        (
+            "final_black",
+            test_bridge,
+            test_hash,
+            host_bridge_library,
+            host_bridge_library_hash,
+            {"NETCOREDBG_TEST_CAPTURE_CALIBRATION": "black"},
+            "final_black",
+            root / "final-black.trace",
+        ),
+        (
+            "ordinary_fallback",
+            test_bridge,
+            test_hash,
+            host_bridge_library,
+            host_bridge_library_hash,
+            {"NETCOREDBG_TEST_CAPTURE_CALIBRATION": "marker"},
+            "ordinary_fallback",
+            root / "ordinary-fallback.trace",
+        ),
+        (
+            "ordinary_final_black",
+            test_bridge,
+            test_hash,
+            host_bridge_library,
+            host_bridge_library_hash,
+            {"NETCOREDBG_TEST_CAPTURE_CALIBRATION": "black"},
+            "ordinary_final_black",
+            root / "ordinary-final-black.trace",
+        ),
     )
+    cases = _select_cases(cases)
     evidence = []
     try:
         for (
