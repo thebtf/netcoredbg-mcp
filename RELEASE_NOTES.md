@@ -1,10 +1,10 @@
-# netcoredbg-mcp v0.23.10
+# netcoredbg-mcp v0.23.11
 
-Prepared: 2026-08-25
+Prepared: 2026-08-29
 
 ## Summary
 
-`v0.23.10` is a PATCH release candidate for public screenshot-capture reliability. `ui_take_screenshot` carries validated crop and strict-capture inputs through the complete request path without internal assertions. Stealth foreground restoration runs off the MCP event loop and completes before later bridge/capture foreground mutations, preventing a launch-restoration race.
+v0.23.11 delivers the public screenshot-capture reliability correction prepared in the untagged v0.23.10 candidate. `ui_take_screenshot` carries validated crop and strict-capture inputs through the complete request path without internal assertions. Stealth foreground restoration runs off the MCP event loop and completes before later bridge/capture foreground mutations, preventing a launch-restoration race.
 
 ## Consumer Claims
 
@@ -14,10 +14,6 @@ Prepared: 2026-08-25
 4. During a stealth debug launch, native foreground restoration runs off the MCP event loop and is joined before later bridge or capture foreground mutations, preventing a competing restore from racing UI evidence.
 5. Strict screenshot capture remains fail-closed: incomplete, black, malformed, foreign-target, or mismatched strict evidence is not persisted as accepted evidence.
 
-## Retained Reliability Guarantee
-
-`search_source` now runs regex matching in a bounded dedicated Python subprocess. Source-file enumeration and waiting for that worker remain in the MCP server process. Worker failures are surfaced as tool errors and do not crash the MCP server process.
-
 ## Compatibility and Upgrade
 
 There is no intentional breaking change to the published Python API or CLI.
@@ -25,7 +21,7 @@ There is no intentional breaking change to the published Python API or CLI.
 Upgrade an existing installation:
 
 ```powershell
-python -m pip install --upgrade netcoredbg-mcp==0.23.10
+python -m pip install --upgrade netcoredbg-mcp==0.23.11
 # or
 pipx upgrade netcoredbg-mcp
 ```
@@ -33,7 +29,7 @@ pipx upgrade netcoredbg-mcp
 For a new workstation:
 
 ```powershell
-pipx install netcoredbg-mcp==0.23.10
+pipx install netcoredbg-mcp==0.23.11
 netcoredbg-mcp --setup
 ```
 
@@ -43,4 +39,4 @@ netcoredbg-mcp --setup
 
 ## Release Evidence
 
-The exact candidate wheel build and installed consumer proof are complete. The installed consumer proof covers CLI and MCP catalog smoke plus negative stealth/foreground journeys. PR review, candidate Sonar, merge, tag, and publication evidence remain pending; no pending gate is represented as complete.
+The predecessor v0.23.10 candidate is untagged and remains immutable evidence. This v0.23.11 candidate requires fresh build, installed-consumer, review, scoped Sonar-replacement, merge, tag, and publication evidence; no pending gate is represented as complete.

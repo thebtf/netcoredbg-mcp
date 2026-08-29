@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.11] - 2026-08-29
+
+### Fixed
+- Delivers the public screenshot-capture and stealth foreground-restoration reliability correction prepared in the unreleased v0.23.10 candidate.
+- Foreground-restore join paths now use explicit helpers while preserving cancellation, retry, logging, and cleanup behavior.
+- Grid and text range paths use explicit validated-state guards rather than assertions inside broad tool error handling.
+
 ## [0.23.10] - 2026-08-25
 
 ### Fixed
