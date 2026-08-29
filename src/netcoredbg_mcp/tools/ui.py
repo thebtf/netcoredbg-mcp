@@ -19,6 +19,7 @@ _SUPPORTED_SYSTEM_EVENTS = {"theme_change"}
 _SUPPORTED_THEME_MODES = {"toggle", "light", "dark"}
 UI_TREE_DISCOVERY_TIMEOUT_SECONDS = 10.0
 BRIDGE_NOT_CONNECTED_DIAGNOSTIC = "Not connected. Call 'connect' first."
+BRIDGE_RAW_PNG_INVALID_DIAGNOSTIC = "Bridge screenshot raw PNG is invalid"
 
 
 class _PhysicalCaptureProvenanceUnavailableError(ValueError):
@@ -1802,11 +1803,11 @@ def register_ui_tools(
                         except Exception as error:
                             if strict_target_requested:
                                 raise _PhysicalCaptureProvenanceUnavailableError(
-                                    "Bridge screenshot raw PNG is invalid"
+                                    BRIDGE_RAW_PNG_INVALID_DIAGNOSTIC
                                 ) from error
                             if evidence:
                                 return _capture_provenance_unavailable_response(
-                                    "Bridge screenshot raw PNG is invalid",
+                                    BRIDGE_RAW_PNG_INVALID_DIAGNOSTIC,
                                     bridge_screenshot=bridge_screenshot,
                                 )
                             raise
@@ -1929,10 +1930,10 @@ def register_ui_tools(
                                 except Exception as error:
                                     if strict_target_requested:
                                         raise _PhysicalCaptureProvenanceUnavailableError(
-                                            "Bridge screenshot raw PNG is invalid"
+                                            BRIDGE_RAW_PNG_INVALID_DIAGNOSTIC
                                         ) from error
                                     return _capture_provenance_unavailable_response(
-                                        "Bridge screenshot raw PNG is invalid",
+                                        BRIDGE_RAW_PNG_INVALID_DIAGNOSTIC,
                                         bridge_screenshot=bridge_screenshot,
                                     )
                                 if (decoded_width, decoded_height) != (raw_width, raw_height):
