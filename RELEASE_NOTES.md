@@ -14,6 +14,10 @@ v0.23.11 delivers the public screenshot-capture reliability correction prepared 
 4. During a stealth debug launch, native foreground restoration runs off the MCP event loop and is joined before later bridge or capture foreground mutations, preventing a competing restore from racing UI evidence.
 5. Strict screenshot capture remains fail-closed: incomplete, black, malformed, foreign-target, or mismatched strict evidence is not persisted as accepted evidence.
 
+## Retained Reliability Guarantee
+
+`search_source` now runs regex matching in a bounded dedicated Python subprocess. Source-file enumeration and waiting for that worker remain in the MCP server process. Worker failures are surfaced as tool errors and do not crash the MCP server process.
+
 ## Compatibility and Upgrade
 
 There is no intentional breaking change to the published Python API or CLI.
