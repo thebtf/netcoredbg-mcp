@@ -483,7 +483,9 @@ def test_native_screenshot_capture_transport_binds_renamed_foreground_exports() 
     ) in transport
 
 
-def test_bridge_typed_bitblt_fallback_discards_black_printwindow_and_revalidates_target() -> None:
+def test_bridge_evidence_fallback_discards_black_printwindow_for_ordinary_and_strict_calls() -> (
+    None
+):
     command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
         encoding="utf-8"
     )
@@ -503,9 +505,7 @@ def test_bridge_typed_bitblt_fallback_discards_black_printwindow_and_revalidates
 
     assert "var printWindowResult = EncodeBitmap(printWindowBitmap);" in evidence_capture
     assert "IsBlankFrame(printWindowBitmap)" not in evidence_capture
-    assert (
-        "if (!typedBitBltFallback || !IsProbablyBlackFrame(printWindowBitmap))" in evidence_capture
-    )
+    assert "if (!IsProbablyBlackFrame(printWindowBitmap))" in evidence_capture
     assert "EnsureStrictExpectedHandle(expectedTarget);" in evidence_capture
     assert (
         "EnsureStrictCaptureProcess(printWindowBefore, strictBefore.ExpectedProcessId);"
@@ -515,6 +515,10 @@ def test_bridge_typed_bitblt_fallback_discards_black_printwindow_and_revalidates
         "EnsureStrictCaptureProcess(printWindowAfter, strictAfter.ExpectedProcessId);"
         in evidence_capture
     )
+    assert (
+        "var fallbackTarget = strictCaptureTarget ?? new StrictCaptureTarget(" in evidence_capture
+    )
+    assert "hwnd.ToInt64(), printWindowAfter.ProcessId" in evidence_capture
     assert "CaptureEvidenceWithVerifiedBitBltFallback" in evidence_capture
     assert "var fallbackBefore = ReadCaptureSnapshot(hwnd);" in fallback_capture
     assert "EnsureStableCaptureSnapshot(printWindowAfter, fallbackBefore);" in fallback_capture
@@ -3020,6 +3024,156 @@ def _typed_bitblt_backend(result: dict[str, object]):
     backend._client = MagicMock()
     backend._client.call = AsyncMock(return_value=result)
     return backend
+
+
+@pytest.mark.asyncio
+async def test_ui_take_screenshot_ordinary_evidence_uses_connected_flaui_typed_bitblt_fallback(
+    tmp_path,
+) -> None:
+    from PIL import Image
+
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    fallback_png = io.BytesIO()
+    Image.new("RGB", (8, 8), (255, 255, 255)).save(fallback_png, format="PNG")
+    backend = _typed_bitblt_backend(_typed_bitblt_bridge_screenshot(fallback_png.getvalue()))
+    backend._process_id = None
+    backend._client.is_running = True
+    backend.bring_to_front = AsyncMock(return_value={"activated": True, "hwnd": 777})
+    bundle_calls: list[tuple[str, str, str | None, int]] = []
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+        session_id="ordinary-typed-bitblt",
+        temp_manager=SimpleNamespace(
+            save_screenshot_bundle=_save_evidence_bundle(tmp_path, bundle_calls),
+            save_screenshot=lambda _sid, data, name: (tmp_path / name).write_bytes(data)
+            and tmp_path / name,
+        ),
+    )
+    registry = ToolRegistry()
+
+    async def connect_backend(ui, process_id: int, *, stealth_mode: bool) -> None:
+        assert ui is backend
+        assert process_id == 42
+        assert stealth_mode is False
+        backend._process_id = process_id
+
+    with (
+        patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend),
+        patch(
+            "netcoredbg_mcp.ui.backend.connect_backend", side_effect=connect_backend
+        ) as reconnect,
+        patch("netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid", return_value=777),
+        patch(
+            "netcoredbg_mcp.ui.screenshot.capture_window_evidence",
+            side_effect=AssertionError("connected FlaUI evidence must use the bridge"),
+        ),
+    ):
+        register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+        activation = await registry.tools["ui_bring_to_front"](SimpleNamespace())
+        assert activation["data"]["activated"] is True, activation
+        content = await registry.tools["ui_take_screenshot"](
+            SimpleNamespace(), evidence=True, format="png"
+        )
+
+    assert isinstance(content, list), content
+    reconnect.assert_awaited_once_with(backend, 42, stealth_mode=False)
+    backend.bring_to_front.assert_awaited_once_with()
+    backend._client.call.assert_awaited_once_with("screenshot", {"evidence": True})
+    metadata = json.loads(content[1].text)
+    assert metadata["evidence_grade"] == "typed_bitblt_fallback"
+    assert metadata["target_comparability"] == {"status": "UNASSERTED"}
+    assert metadata["method"] == "BitBlt"
+    assert metadata["hwnd"] == 777
+    assert metadata["process_id"] == 42
+    assert metadata["dpi"] == 144
+    assert metadata["client_rect"]["right"] == 8
+    assert metadata["window_bounds"]["right"] - metadata["window_bounds"]["left"] == 8
+    assert metadata["capture_stability"]["before"] == metadata["capture_stability"]["after"]
+    assert metadata["foreground"]["activation"]["verified"] is True
+    assert metadata["foreground"]["restoration"]["verified"] is True
+    assert metadata["printwindow_analysis"]["classification"] == "PROBABLE_BLACK_FRAME"
+    assert metadata["alternate_attempts"] == 1
+    assert metadata["capture_metadata"]["dpi"] == 144
+    assert metadata["capture_metadata"]["physical_width"] == 8
+    raw_path = Path(metadata["raw_path"])
+    assert raw_path.read_bytes() == fallback_png.getvalue()
+    assert metadata["raw_sha256"] == hashlib.sha256(fallback_png.getvalue()).hexdigest()
+    assert len(bundle_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_ui_take_screenshot_ordinary_evidence_with_disconnected_flaui_uses_direct_capture(
+    tmp_path,
+) -> None:
+    from PIL import Image
+
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    black_png = io.BytesIO()
+    Image.new("RGB", (8, 8), (0, 0, 0)).save(black_png, format="PNG")
+    backend = _typed_bitblt_backend(_typed_bitblt_bridge_screenshot(black_png.getvalue()))
+    backend._process_id = None
+    backend._client.is_running = True
+    backend.bring_to_front = AsyncMock(return_value={"activated": True, "hwnd": 777})
+    capture_metadata = _capture_metadata("PrintWindow", 8, 8)
+    capture_metadata["hwnd"] = 777
+    capture = MagicMock(return_value=(black_png.getvalue(), 8, 8, capture_metadata))
+    bundle_calls: list[tuple[str, str, str | None, int]] = []
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+        session_id="ordinary-final-black",
+        temp_manager=SimpleNamespace(
+            save_screenshot_bundle=_save_evidence_bundle(tmp_path, bundle_calls),
+            save_screenshot=lambda _sid, data, name: (tmp_path / name).write_bytes(data)
+            and tmp_path / name,
+        ),
+    )
+    registry = ToolRegistry()
+
+    async def connect_backend(ui, process_id: int, *, stealth_mode: bool) -> None:
+        assert ui is backend
+        assert process_id == 42
+        assert stealth_mode is False
+        backend._process_id = process_id
+
+    with (
+        patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend),
+        patch(
+            "netcoredbg_mcp.ui.backend.connect_backend", side_effect=connect_backend
+        ) as reconnect,
+        patch("netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid", return_value=777),
+        patch("netcoredbg_mcp.ui.screenshot.capture_window_evidence", capture),
+    ):
+        register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+        activation = await registry.tools["ui_bring_to_front"](SimpleNamespace())
+        assert activation["data"]["activated"] is True, activation
+        reconnect.assert_awaited_once_with(backend, 42, stealth_mode=False)
+        backend._process_id = None
+        reconnect.reset_mock()
+        response = await registry.tools["ui_take_screenshot"](
+            SimpleNamespace(), evidence=True, format="png"
+        )
+
+    reconnect.assert_not_awaited()
+    backend._client.call.assert_not_awaited()
+    capture.assert_called_once_with(777)
+    assert response["classification"] == "PROBABLE_BLACK_FRAME"
+    assert response["data"]["frame_analysis"]["probable_black"] is True
+    assert response["data"]["foreground_mutation_attempted"] is False
+    diagnostics = response["data"]["capture_diagnostics"]
+    assert diagnostics["producer"] == "python_win32"
+    assert diagnostics["capture_method"] == "PrintWindow"
+    assert diagnostics["hwnd"] == 777
+    assert diagnostics["raster_analysis"]["probable_black"] is True
+    assert bundle_calls == []
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.asyncio

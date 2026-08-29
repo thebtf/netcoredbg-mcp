@@ -255,7 +255,7 @@ public static class ScreenshotCommands
             if (typedBitBltFallback && strictCaptureTarget is StrictCaptureTarget strictAfter)
                 EnsureStrictCaptureProcess(printWindowAfter, strictAfter.ExpectedProcessId);
             printWindowVariance = NormalizedPixelVariance(printWindowBitmap);
-            if (!typedBitBltFallback || !IsProbablyBlackFrame(printWindowBitmap))
+            if (!IsProbablyBlackFrame(printWindowBitmap))
             {
                 var printWindowResult = EncodeBitmap(printWindowBitmap);
                 printWindowResult["method"] = "PrintWindow";
@@ -265,10 +265,10 @@ public static class ScreenshotCommands
             }
         }
 
-        if (strictCaptureTarget is not StrictCaptureTarget target)
-            throw new InvalidOperationException("Typed BitBlt fallback target is unavailable.");
+        var fallbackTarget = strictCaptureTarget ?? new StrictCaptureTarget(
+            hwnd.ToInt64(), printWindowAfter.ProcessId);
         return CaptureEvidenceWithVerifiedBitBltFallback(
-            hwnd, target, printWindowAfter, printWindowVariance);
+            hwnd, fallbackTarget, printWindowAfter, printWindowVariance);
     }
 
     private static JsonObject CaptureEvidenceWithVerifiedBitBltFallback(

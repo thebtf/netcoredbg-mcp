@@ -136,11 +136,76 @@ def register_ui_tools(
             return False
         return (await cast(Callable[[], Awaitable[Any]], join)()) is True
 
+    def _capture_route_diagnostics(
+        *,
+        bridge_screenshot: dict[str, Any] | None,
+        capture_metadata: dict[str, Any] | None,
+        frame_analysis: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        source = bridge_screenshot if bridge_screenshot is not None else capture_metadata
+        diagnostics: dict[str, Any] = {
+            "producer": "flaui_bridge" if bridge_screenshot is not None else "python_win32",
+        }
+        if not isinstance(source, dict):
+            return diagnostics
+
+        method = source.get("method")
+        if isinstance(method, str):
+            diagnostics["capture_method"] = method
+        for key in (
+            "hwnd",
+            "process_id",
+            "dpi",
+            "client_rect",
+            "window_bounds",
+            "flags",
+            "fallback",
+            "fallback_reason",
+            "authority",
+            "capture_authority",
+            "source_api",
+            "rop",
+            "alternate_attempts",
+            "foreground",
+        ):
+            if key in source:
+                diagnostics[key] = source[key]
+
+        primary_analysis = source.get("printwindow_analysis")
+        if isinstance(primary_analysis, dict):
+            diagnostics["primary_analysis"] = primary_analysis
+        elif isinstance(source.get("printwindow_classification"), str):
+            diagnostics["primary_analysis"] = {
+                "classification": source["printwindow_classification"],
+                "variance": source.get("printwindow_variance"),
+            }
+        if frame_analysis is not None:
+            diagnostics["fallback_analysis" if method == "BitBlt" else "raster_analysis"] = (
+                frame_analysis
+            )
+        return diagnostics
+
+    def _capture_provenance_unavailable_response(
+        message: str,
+        *,
+        bridge_screenshot: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        response = build_error_response(message, state=session.state.state)
+        response["code"] = "CAPTURE_PROVENANCE_UNAVAILABLE"
+        response["data"] = {
+            "capture_diagnostics": _capture_route_diagnostics(
+                bridge_screenshot=bridge_screenshot,
+                capture_metadata=None,
+            )
+        }
+        return response
+
     def _probable_black_frame_response(
         frame_analysis: dict[str, Any],
         *,
         retry_tool: str,
         foreground_mutation_attempted: bool,
+        capture_diagnostics: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         next_step = f"Call ui_bring_to_front explicitly, then retry {retry_tool}."
         response = build_error_response(
@@ -154,6 +219,8 @@ def register_ui_tools(
             "foreground_mutation_attempted": foreground_mutation_attempted,
             "next_step": next_step,
         }
+        if capture_diagnostics is not None:
+            response["data"]["capture_diagnostics"] = capture_diagnostics
         return response
 
     async def _reconnect_ui_backend(backend: Any, process_id: int) -> None:
@@ -173,6 +240,9 @@ def register_ui_tools(
         from ..ui.flaui_client import FlaUIBackend
 
         return isinstance(ui_inst, FlaUIBackend)
+
+    def _has_live_flaui_connection(ui_inst: Any, process_id: int) -> bool:
+        return _is_flaui_backend(ui_inst) and ui_inst.process_id == process_id
 
     def _selection_items_payload(
         result: Any,
@@ -377,7 +447,7 @@ def register_ui_tools(
             return "flash-focus"
         return "stealth"
 
-    def _is_strict_typed_bitblt_fallback(
+    def _is_verified_typed_bitblt_fallback(
         result: dict[str, Any],
         process_id: int,
         hwnd: int,
@@ -413,6 +483,17 @@ def register_ui_tools(
             or result["alternate_attempts"] != 1
             or type(result.get("process_id")) is not int
             or result["process_id"] != process_id
+        ):
+            return False
+
+        bridge_assembly = result.get("bridge_assembly")
+        if (
+            not isinstance(bridge_assembly, dict)
+            or not isinstance(bridge_assembly.get("path"), str)
+            or not bridge_assembly["path"]
+            or not isinstance(bridge_assembly.get("sha256"), str)
+            or len(bridge_assembly["sha256"]) != 64
+            or any(character not in "0123456789abcdef" for character in bridge_assembly["sha256"])
         ):
             return False
 
@@ -1524,11 +1605,12 @@ def register_ui_tools(
         Returns inline ImageContent (WebP at max_width resolution) directly
         to your vision pipeline, plus TextContent with metadata and HD file path.
 
-        Set evidence to retain a raw PNG for the active debug session. With strict
-        physical assertions, a probable-black PrintWindow raster may make one
-        independently verified BitBlt attempt. Its explicit
-        ``typed_bitblt_fallback`` evidence grade is a distinct capture authority.
-        Crop coordinates require evidence mode and are applied to the accepted raw PNG.
+        Set evidence to retain a raw PNG for the active debug session. A probable-black
+        PrintWindow raster may make one independently verified BitBlt attempt through
+        the FlaUI bridge. Its explicit ``typed_bitblt_fallback`` evidence grade is a
+        distinct capture authority; strict physical assertions separately validate the
+        caller-supplied target. Crop coordinates require evidence mode and are applied
+        to the accepted raw PNG.
 
         Args:
             max_width: Maximum image width. Default 1280; max useful is 1568.
@@ -1648,7 +1730,14 @@ def register_ui_tools(
             loop = asyncio.get_running_loop()
             restore_joined = False
 
-            if strict_target_requested or getattr(session, "stealth_mode", False):
+            bridge_capture_requested = strict_target_requested or getattr(
+                session, "stealth_mode", False
+            )
+            if evidence and not bridge_capture_requested:
+                bridge_capture_requested = _has_live_flaui_connection(
+                    _backend_holder["instance"], pid
+                )
+            if bridge_capture_requested:
                 ui = await _ensure_ui_connected(restore_joined=True)
                 from ..ui.flaui_client import FlaUIBackend
 
@@ -1695,20 +1784,31 @@ def register_ui_tools(
                                 "Physical target assertions require valid bridge "
                                 "screenshot provenance"
                             )
+                        if evidence:
+                            return _capture_provenance_unavailable_response(
+                                "Evidence capture requires valid bridge screenshot provenance",
+                                bridge_screenshot=(
+                                    bridge_result if isinstance(bridge_result, dict) else None
+                                ),
+                            )
                         logger.warning(
                             "screenshot: bridge returned invalid screenshot response; "
                             "falling back to HWND capture"
                         )
                     else:
+                        bridge_screenshot = bridge_result
                         try:
-                            png_bytes = base64.b64decode(
-                                bridge_result["base64"], validate=strict_target_requested
-                            )
+                            png_bytes = base64.b64decode(bridge_result["base64"], validate=evidence)
                         except Exception as error:
                             if strict_target_requested:
                                 raise _PhysicalCaptureProvenanceUnavailableError(
                                     "Bridge screenshot raw PNG is invalid"
                                 ) from error
+                            if evidence:
+                                return _capture_provenance_unavailable_response(
+                                    "Bridge screenshot raw PNG is invalid",
+                                    bridge_screenshot=bridge_screenshot,
+                                )
                             raise
                         bridge_width = bridge_result.get("width")
                         bridge_height = bridge_result.get("height")
@@ -1722,13 +1822,17 @@ def register_ui_tools(
                                 raise _PhysicalCaptureProvenanceUnavailableError(
                                     "Bridge screenshot requires positive integer dimensions"
                                 )
+                            if evidence:
+                                return _capture_provenance_unavailable_response(
+                                    "Bridge screenshot response requires positive integer width and height",
+                                    bridge_screenshot=bridge_screenshot,
+                                )
                             raise ValueError(
                                 "Bridge screenshot response requires positive integer "
                                 "width and height"
                             )
                         raw_width = bridge_width
                         raw_height = bridge_height
-                        bridge_screenshot = bridge_result
                         if evidence:
                             method = bridge_result.get("method")
                             bridge_hwnd = bridge_result.get("hwnd")
@@ -1762,13 +1866,12 @@ def register_ui_tools(
                                 and bridge_window_bounds.get("source_api") == "GetWindowRect"
                             )
                             typed_bitblt_fallback = (
-                                strict_target_requested
-                                and type(bridge_hwnd) is int
+                                type(bridge_hwnd) is int
                                 and bridge_hwnd != 0
                                 and isinstance(bridge_client_rect, dict)
                                 and isinstance(bridge_window_bounds, dict)
                                 and type(bridge_dpi) is int
-                                and _is_strict_typed_bitblt_fallback(
+                                and _is_verified_typed_bitblt_fallback(
                                     bridge_result,
                                     pid,
                                     bridge_hwnd,
@@ -1780,7 +1883,7 @@ def register_ui_tools(
                             if (
                                 (method != "PrintWindow" and not typed_bitblt_fallback)
                                 or (
-                                    strict_target_requested
+                                    (strict_target_requested or typed_bitblt_fallback)
                                     and (
                                         type(bridge_process_id) is not int
                                         or bridge_process_id != pid
@@ -1798,19 +1901,23 @@ def register_ui_tools(
                                 or type(bridge_dpi) is not int
                                 or bridge_dpi <= 0
                                 or not valid_client_rect
-                                or (strict_target_requested and not valid_window_bounds)
+                                or (
+                                    (strict_target_requested or typed_bitblt_fallback)
+                                    and not valid_window_bounds
+                                )
                             ):
                                 if strict_target_requested:
                                     raise _PhysicalCaptureProvenanceUnavailableError(
                                         "Physical target assertions require valid bridge "
                                         "screenshot provenance"
                                     )
-                                raise ValueError(
-                                    "Evidence capture requires valid bridge screenshot provenance"
+                                return _capture_provenance_unavailable_response(
+                                    "Evidence capture requires valid bridge screenshot provenance",
+                                    bridge_screenshot=bridge_screenshot,
                                 )
                             if typed_bitblt_fallback:
                                 foreground_mutation_attempted = True
-                            if strict_target_requested:
+                            if strict_target_requested or typed_bitblt_fallback:
                                 from PIL import Image
 
                                 try:
@@ -1820,22 +1927,39 @@ def register_ui_tools(
                                         raw_png.load()
                                         decoded_width, decoded_height = raw_png.size
                                 except Exception as error:
-                                    raise _PhysicalCaptureProvenanceUnavailableError(
-                                        "Bridge screenshot raw PNG is invalid"
-                                    ) from error
+                                    if strict_target_requested:
+                                        raise _PhysicalCaptureProvenanceUnavailableError(
+                                            "Bridge screenshot raw PNG is invalid"
+                                        ) from error
+                                    return _capture_provenance_unavailable_response(
+                                        "Bridge screenshot raw PNG is invalid",
+                                        bridge_screenshot=bridge_screenshot,
+                                    )
                                 if (decoded_width, decoded_height) != (raw_width, raw_height):
-                                    raise _PhysicalCaptureProvenanceUnavailableError(
+                                    if strict_target_requested:
+                                        raise _PhysicalCaptureProvenanceUnavailableError(
+                                            "Bridge screenshot dimensions do not match decoded PNG "
+                                            "dimensions"
+                                        )
+                                    return _capture_provenance_unavailable_response(
                                         "Bridge screenshot dimensions do not match decoded PNG "
-                                        "dimensions"
+                                        "dimensions",
+                                        bridge_screenshot=bridge_screenshot,
                                     )
                                 window_bounds = cast(dict[str, Any], bridge_window_bounds)
                                 if (
                                     window_bounds["right"] - window_bounds["left"],
                                     window_bounds["bottom"] - window_bounds["top"],
                                 ) != (raw_width, raw_height):
-                                    raise _PhysicalCaptureProvenanceUnavailableError(
+                                    if strict_target_requested:
+                                        raise _PhysicalCaptureProvenanceUnavailableError(
+                                            "Bridge window bounds do not match claimed raw raster "
+                                            "dimensions"
+                                        )
+                                    return _capture_provenance_unavailable_response(
                                         "Bridge window bounds do not match claimed raw raster "
-                                        "dimensions"
+                                        "dimensions",
+                                        bridge_screenshot=bridge_screenshot,
                                     )
                             capture_metadata = await loop.run_in_executor(
                                 None,
@@ -1985,6 +2109,11 @@ def register_ui_tools(
                     frame_analysis,
                     retry_tool="ui_take_screenshot",
                     foreground_mutation_attempted=foreground_mutation_attempted,
+                    capture_diagnostics=_capture_route_diagnostics(
+                        bridge_screenshot=bridge_screenshot,
+                        capture_metadata=capture_metadata,
+                        frame_analysis=frame_analysis,
+                    ),
                 )
 
             raw_path = None
