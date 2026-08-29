@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -530,27 +531,34 @@ public static class ScreenshotCommands
 
     private static bool IsProbablyBlackFrame(Bitmap bitmap)
     {
-        const int sampleAxisLimit = 100;
+        const int classificationAxisLimit = 100;
         const double maxMeanLuminance = 8.0;
         const int darkLuminanceThreshold = 16;
         const double minimumDarkPixelFraction = 0.995;
-        var sampleColumns = Math.Min(bitmap.Width, sampleAxisLimit);
-        var sampleRows = Math.Min(bitmap.Height, sampleAxisLimit);
-        var sampleCount = sampleColumns * sampleRows;
+        var classificationColumns = Math.Min(bitmap.Width, classificationAxisLimit);
+        var classificationRows = Math.Min(bitmap.Height, classificationAxisLimit);
+        var classificationPixelCount = classificationColumns * classificationRows;
+        using var classificationBitmap = new Bitmap(
+            classificationColumns, classificationRows, PixelFormat.Format24bppRgb);
+        using (var graphics = Graphics.FromImage(classificationBitmap))
+        {
+            graphics.CompositingMode = CompositingMode.SourceCopy;
+            graphics.InterpolationMode = InterpolationMode.HighQualityBilinear;
+            graphics.PixelOffsetMode = PixelOffsetMode.Half;
+            graphics.DrawImage(
+                bitmap,
+                new Rectangle(0, 0, classificationColumns, classificationRows),
+                new Rectangle(0, 0, bitmap.Width, bitmap.Height),
+                GraphicsUnit.Pixel);
+        }
+
         double luminanceSum = 0;
         var darkPixelCount = 0;
-
-        for (var sampleY = 0; sampleY < sampleRows; sampleY++)
+        for (var y = 0; y < classificationRows; y++)
         {
-            var y = sampleRows == 1
-                ? 0
-                : (int)((long)sampleY * (bitmap.Height - 1) / (sampleRows - 1));
-            for (var sampleX = 0; sampleX < sampleColumns; sampleX++)
+            for (var x = 0; x < classificationColumns; x++)
             {
-                var x = sampleColumns == 1
-                    ? 0
-                    : (int)((long)sampleX * (bitmap.Width - 1) / (sampleColumns - 1));
-                var color = bitmap.GetPixel(x, y);
+                var color = classificationBitmap.GetPixel(x, y);
                 var luminance = (0.299 * color.R) + (0.587 * color.G) + (0.114 * color.B);
                 luminanceSum += luminance;
                 if (luminance <= darkLuminanceThreshold)
@@ -558,8 +566,8 @@ public static class ScreenshotCommands
             }
         }
 
-        return luminanceSum / sampleCount <= maxMeanLuminance
-            && (double)darkPixelCount / sampleCount >= minimumDarkPixelFraction;
+        return luminanceSum / classificationPixelCount <= maxMeanLuminance
+            && (double)darkPixelCount / classificationPixelCount >= minimumDarkPixelFraction;
     }
 
     private static double NormalizedPixelVariance(Bitmap bitmap)

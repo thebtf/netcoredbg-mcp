@@ -530,7 +530,11 @@ def test_bridge_evidence_fallback_discards_black_printwindow_for_ordinary_and_st
     )
 
 
-def test_bridge_probable_black_frame_uses_bounded_spatial_samples() -> None:
+def test_bridge_probable_black_frame_uses_bounded_area_averages() -> None:
+    from PIL import Image
+
+    from netcoredbg_mcp.ui.screenshot import analyze_screenshot_frame
+
     command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
         encoding="utf-8"
     )
@@ -538,62 +542,70 @@ def test_bridge_probable_black_frame_uses_bounded_spatial_samples() -> None:
     helper_end = command.index("private static double NormalizedPixelVariance", helper_start)
     helper = command[helper_start:helper_end]
 
-    assert "const int sampleAxisLimit = 100;" in helper
-    assert "var sampleColumns = Math.Min(bitmap.Width, sampleAxisLimit);" in helper
-    assert "var sampleRows = Math.Min(bitmap.Height, sampleAxisLimit);" in helper
-    assert "var sampleCount = sampleColumns * sampleRows;" in helper
-    assert "for (var sampleY = 0; sampleY < sampleRows; sampleY++)" in helper
-    assert "for (var sampleX = 0; sampleX < sampleColumns; sampleX++)" in helper
-    assert "(long)sampleX * (bitmap.Width - 1)" in helper
-    assert "(long)sampleY * (bitmap.Height - 1)" in helper
+    assert "const int classificationAxisLimit = 100;" in helper
+    assert "var classificationColumns = Math.Min(bitmap.Width, classificationAxisLimit);" in helper
+    assert "var classificationRows = Math.Min(bitmap.Height, classificationAxisLimit);" in helper
+    assert "var classificationPixelCount = classificationColumns * classificationRows;" in helper
+    assert "new Bitmap(" in helper
+    assert "PixelFormat.Format24bppRgb" in helper
+    assert "Graphics.FromImage(classificationBitmap)" in helper
+    assert "graphics.InterpolationMode = InterpolationMode.HighQualityBilinear;" in helper
+    assert "graphics.DrawImage(" in helper
+    assert "var color = classificationBitmap.GetPixel(x, y);" in helper
+    assert "bitmap.GetPixel" not in helper
     assert "for (var y = 0; y < bitmap.Height; y++)" not in helper
     assert "for (var x = 0; x < bitmap.Width; x++)" not in helper
     assert "const double maxMeanLuminance = 8.0;" in helper
     assert "const int darkLuminanceThreshold = 16;" in helper
     assert "const double minimumDarkPixelFraction = 0.995;" in helper
 
-    def classify(width: int, height: int, color_at):
-        sample_columns = min(width, 100)
-        sample_rows = min(height, 100)
-        luminance_sum = 0.0
-        dark_pixel_count = 0
-        sample_points: list[tuple[int, int]] = []
-        for sample_y in range(sample_rows):
-            y = 0 if sample_rows == 1 else sample_y * (height - 1) // (sample_rows - 1)
-            for sample_x in range(sample_columns):
-                x = 0 if sample_columns == 1 else sample_x * (width - 1) // (sample_columns - 1)
-                sample_points.append((x, y))
-                red, green, blue = color_at(x, y)
-                luminance = (0.299 * red) + (0.587 * green) + (0.114 * blue)
-                luminance_sum += luminance
-                if luminance <= 16:
-                    dark_pixel_count += 1
-        sample_count = len(sample_points)
+    def encode_png(image) -> bytes:
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    def is_probably_black(image) -> bool:
+        return analyze_screenshot_frame(encode_png(image))["probable_black"]
+
+    def lattice_classification(image) -> tuple[bool, list[tuple[int, int]]]:
+        sample_columns = min(image.width, 100)
+        sample_rows = min(image.height, 100)
+        sample_points = [
+            (
+                0 if sample_columns == 1 else sample_x * (image.width - 1) // (sample_columns - 1),
+                0 if sample_rows == 1 else sample_y * (image.height - 1) // (sample_rows - 1),
+            )
+            for sample_y in range(sample_rows)
+            for sample_x in range(sample_columns)
+        ]
+        luminances = [image.getpixel(point) for point in sample_points]
         return (
-            luminance_sum / sample_count <= 8.0 and dark_pixel_count / sample_count >= 0.995,
+            sum(luminances) / len(luminances) <= 8.0
+            and sum(luminance <= 16 for luminance in luminances) / len(luminances) >= 0.995,
             sample_points,
         )
 
-    probable_black, sample_points = classify(3840, 2160, lambda _x, _y: (0, 0, 0))
-    assert probable_black
-    assert len(sample_points) == 10_000
-    _, eight_k_sample_points = classify(7680, 4320, lambda _x, _y: (0, 0, 0))
-    assert len(eight_k_sample_points) == 10_000
+    def area_averaged_classification(image) -> bool:
+        downsampled = image.resize((100, 100), Image.Resampling.BOX)
+        try:
+            return is_probably_black(downsampled)
+        finally:
+            downsampled.close()
 
-    small_marker = set(sample_points[:50])
-    probable_black_with_small_marker, _ = classify(
-        3840,
-        2160,
-        lambda x, y: (255, 255, 255) if (x, y) in small_marker else (0, 0, 0),
-    )
-    assert probable_black_with_small_marker
-    nonblack_marker = set(sample_points[:51])
-    probable_black_with_large_marker, _ = classify(
-        3840,
-        2160,
-        lambda x, y: (255, 255, 255) if (x, y) in nonblack_marker else (0, 0, 0),
-    )
-    assert not probable_black_with_large_marker
+    with Image.new("L", (3840, 2160), 0) as sparse_artifact:
+        _, lattice_points = lattice_classification(sparse_artifact)
+        for point in lattice_points[:51]:
+            sparse_artifact.putpixel(point, 255)
+
+        assert is_probably_black(sparse_artifact) is True
+        assert lattice_classification(sparse_artifact)[0] is False
+        assert area_averaged_classification(sparse_artifact) is True
+
+    with Image.new("L", (3840, 2160), 0) as nonblack_marker:
+        nonblack_marker.paste(255, (0, 0, 384, 216))
+
+        assert is_probably_black(nonblack_marker) is False
+        assert area_averaged_classification(nonblack_marker) is False
 
 
 def test_bridge_typed_bitblt_fallback_has_no_legacy_lossless_authority() -> None:
@@ -3313,10 +3325,9 @@ async def test_ui_take_screenshot_strict_black_printwindow_uses_typed_bitblt_fal
     assert len(bundle_calls) == 1
 
 
-@pytest.mark.parametrize("malformed", (False, True), ids=("black", "malformed"))
 @pytest.mark.asyncio
-async def test_ui_take_screenshot_strict_typed_bitblt_rejects_unusable_fallback_before_persistence(
-    tmp_path, malformed: bool
+async def test_ui_take_screenshot_strict_typed_bitblt_rejects_black_fallback_before_persistence(
+    tmp_path,
 ) -> None:
     from PIL import Image
 
@@ -3324,9 +3335,34 @@ async def test_ui_take_screenshot_strict_typed_bitblt_rejects_unusable_fallback_
 
     fallback_png = io.BytesIO()
     Image.new("RGB", (8, 8), (0, 0, 0)).save(fallback_png, format="PNG")
-    bridge_result = _typed_bitblt_bridge_screenshot(fallback_png.getvalue())
-    if malformed:
-        bridge_result["base64"] = "not-a-png"
+    backend = _typed_bitblt_backend(_typed_bitblt_bridge_screenshot(fallback_png.getvalue()))
+    bundle_calls: list[tuple[str, str, str | None, int]] = []
+    session = _stealth_evidence_session(tmp_path, bundle_calls)
+    registry = ToolRegistry()
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+        response = await registry.tools["ui_take_screenshot"](
+            SimpleNamespace(),
+            evidence=True,
+            expected_hwnd=777,
+            expected_physical_width=8,
+            expected_physical_height=8,
+        )
+
+    assert response["classification"] == "PROBABLE_BLACK_FRAME"
+    assert bundle_calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_ui_take_screenshot_evidence_rejects_invalid_base64_raw_png_before_persistence(
+    tmp_path,
+) -> None:
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    bridge_result = _typed_bitblt_bridge_screenshot(b"placeholder")
+    bridge_result["base64"] = "not valid base64!"
     backend = _typed_bitblt_backend(bridge_result)
     bundle_calls: list[tuple[str, str, str | None, int]] = []
     session = _stealth_evidence_session(tmp_path, bundle_calls)
@@ -3342,10 +3378,42 @@ async def test_ui_take_screenshot_strict_typed_bitblt_rejects_unusable_fallback_
             expected_physical_height=8,
         )
 
-    if malformed:
-        assert response["code"] == "PHYSICAL_CAPTURE_PROVENANCE_UNAVAILABLE"
-    else:
-        assert response["classification"] == "PROBABLE_BLACK_FRAME"
+    assert response["error"] == "Bridge screenshot raw PNG is invalid"
+    assert "raw_path" not in response
+    assert "crop_path" not in response
+    assert "hd_path" not in response
+    assert bundle_calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_ui_take_screenshot_evidence_rejects_non_png_raw_png_before_persistence(
+    tmp_path,
+) -> None:
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    non_png_bytes = b"valid base64 payload but not a PNG"
+    bridge_result = _typed_bitblt_bridge_screenshot(non_png_bytes)
+    assert base64.b64decode(bridge_result["base64"], validate=True) == non_png_bytes
+    backend = _typed_bitblt_backend(bridge_result)
+    bundle_calls: list[tuple[str, str, str | None, int]] = []
+    session = _stealth_evidence_session(tmp_path, bundle_calls)
+    registry = ToolRegistry()
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+        response = await registry.tools["ui_take_screenshot"](
+            SimpleNamespace(),
+            evidence=True,
+            expected_hwnd=777,
+            expected_physical_width=8,
+            expected_physical_height=8,
+        )
+
+    assert response["error"] == "Bridge screenshot raw PNG is invalid"
+    assert "raw_path" not in response
+    assert "crop_path" not in response
+    assert "hd_path" not in response
     assert bundle_calls == []
     assert list(tmp_path.iterdir()) == []
 
