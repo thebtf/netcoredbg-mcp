@@ -288,7 +288,8 @@ def register_ui_evidence_tools(
                     state=session.state.state,
                 )
             if canonical_action == "assert_selection":
-                assert selection_range is not None
+                if selection_range is None:
+                    raise RuntimeError("Validated text selection is unavailable.")
                 selection_start, selection_end = selection_range
                 return build_response(
                     data=await assert_text_selection(
@@ -673,7 +674,8 @@ def register_ui_evidence_tools(
                         scroll_settle_ms=scroll_settle_ms,
                     )
                 elif canonical_action == "select_range":
-                    assert range_selection is not None
+                    if range_selection is None:
+                        raise RuntimeError("Validated grid range is unavailable.")
                     start, end = range_selection
                     result = await select_grid_range(backend, selector, start, end)
                     if _passes(result):
@@ -741,7 +743,8 @@ def register_ui_evidence_tools(
                         scroll_settle_ms=scroll_settle_ms,
                     )
                 elif canonical_action == "assert_range":
-                    assert range_selection is not None
+                    if range_selection is None:
+                        raise RuntimeError("Validated grid range is unavailable.")
                     start, end = range_selection
                     result = await assert_grid_range(backend, selector, start, end)
                 else:
