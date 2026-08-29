@@ -209,6 +209,42 @@ class SessionManager:
         if self._stealth_foreground_restore_join_task is task:
             self._stealth_foreground_restore_join_task = None
 
+    async def _await_stealth_foreground_restore_worker(
+        self, worker: asyncio.Task[bool] | None, *, context: str
+    ) -> None:
+        if worker is None:
+            return
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            if not worker.cancelled():
+                raise
+        except Exception as exc:
+            logger.debug("[launch] stealth foreground worker ended during %s: %s", context, exc)
+
+    async def _await_stealth_foreground_restore_task(
+        self, outer: asyncio.Task[None] | None, *, context: str
+    ) -> None:
+        if outer is None:
+            return
+        try:
+            await asyncio.shield(outer)
+        except asyncio.CancelledError:
+            if not outer.cancelled():
+                raise
+        except Exception as exc:
+            logger.debug("[launch] stealth foreground task ended during %s: %s", context, exc)
+
+    def _clear_finished_stealth_foreground_restore(
+        self, outer: asyncio.Task[None] | None, worker: asyncio.Task[bool] | None
+    ) -> None:
+        if self._stealth_foreground_restore_worker is worker and (
+            worker is None or worker.done()
+        ):
+            self._stealth_foreground_restore_worker = None
+        if self._stealth_foreground_restore_task is outer and (outer is None or outer.done()):
+            self._stealth_foreground_restore_task = None
+
     async def _cancel_and_join_stealth_foreground_restore(
         self,
         outer: asyncio.Task[None] | None,
@@ -216,32 +252,32 @@ class SessionManager:
     ) -> None:
         if outer is not None and not outer.done():
             outer.cancel()
-
         try:
-            if worker is not None:
-                try:
-                    await asyncio.shield(worker)
-                except asyncio.CancelledError:
-                    if not worker.cancelled():
-                        raise
-                except Exception as exc:
-                    logger.debug("[launch] stealth foreground worker ended during join: %s", exc)
-
-            if outer is not None:
-                try:
-                    await asyncio.shield(outer)
-                except asyncio.CancelledError:
-                    if not outer.cancelled():
-                        raise
-                except Exception as exc:
-                    logger.debug("[launch] stealth foreground task ended during join: %s", exc)
+            await self._await_stealth_foreground_restore_worker(worker, context="join")
+            await self._await_stealth_foreground_restore_task(outer, context="join")
         finally:
-            if self._stealth_foreground_restore_worker is worker and (
-                worker is None or worker.done()
-            ):
-                self._stealth_foreground_restore_worker = None
-            if self._stealth_foreground_restore_task is outer and (outer is None or outer.done()):
-                self._stealth_foreground_restore_task = None
+            self._clear_finished_stealth_foreground_restore(outer, worker)
+
+    async def _wait_for_stealth_foreground_restore_task(
+        self, outer: asyncio.Task[None], worker: asyncio.Task[bool] | None
+    ) -> bool:
+        try:
+            await self._await_stealth_foreground_restore_task(outer, context="observation")
+        finally:
+            self._clear_finished_stealth_foreground_restore(outer, worker)
+        return True
+
+    async def _wait_for_stealth_foreground_restore_worker(
+        self, worker: asyncio.Task[bool] | None
+    ) -> bool:
+        if worker is None:
+            return False
+        was_pending = not worker.done()
+        try:
+            await self._await_stealth_foreground_restore_worker(worker, context="observation")
+        finally:
+            self._clear_finished_stealth_foreground_restore(None, worker)
+        return was_pending
 
     async def wait_for_pending_stealth_foreground_restore(self) -> bool:
         """Wait for active foreground restore work without canceling future retries."""
@@ -253,39 +289,8 @@ class SessionManager:
         worker = self._stealth_foreground_restore_worker
         outer = self._stealth_foreground_restore_task
         if outer is not None and not outer.done():
-            try:
-                await asyncio.shield(outer)
-            except asyncio.CancelledError:
-                if not outer.cancelled():
-                    raise
-            except Exception as exc:
-                logger.debug("[launch] stealth foreground task ended during observation: %s", exc)
-            finally:
-                if self._stealth_foreground_restore_task is outer and outer.done():
-                    self._stealth_foreground_restore_task = None
-                if (
-                    worker is not None
-                    and self._stealth_foreground_restore_worker is worker
-                    and worker.done()
-                ):
-                    self._stealth_foreground_restore_worker = None
-            return True
-
-        if worker is None:
-            return False
-
-        worker_was_pending = not worker.done()
-        try:
-            await asyncio.shield(worker)
-        except asyncio.CancelledError:
-            if not worker.cancelled():
-                raise
-        except Exception as exc:
-            logger.debug("[launch] stealth foreground worker ended during observation: %s", exc)
-        finally:
-            if self._stealth_foreground_restore_worker is worker and worker.done():
-                self._stealth_foreground_restore_worker = None
-        return worker_was_pending
+            return await self._wait_for_stealth_foreground_restore_task(outer, worker)
+        return await self._wait_for_stealth_foreground_restore_worker(worker)
 
     async def cancel_pending_stealth_foreground_restore(self) -> bool:
         """Join launch-owned foreground work before another foreground mutation."""
