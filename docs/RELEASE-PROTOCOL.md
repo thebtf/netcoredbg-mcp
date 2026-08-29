@@ -36,6 +36,43 @@ A planned PATCH/MINOR release inside a legitimate run is autonomous. A legitimat
 | FlaUI bridge sources | `pyproject.toml` `force-include` bridge paths | Wheel build and installation | Bridge build or compile-only gate passes on Windows when bridge files changed |
 | Public docs and examples | `README.md`, `README.ru.md`, `CHANGELOG.md`, `RELEASE_NOTES.md`, `docs/` | Release-prep PR | Docs tests and production playbook checks pass or block release |
 
+## A1 Preview-Channel Promotion (S4 Only)
+
+This section governs only the opt-in Windows x64 Stateless preview prerelease
+channel after explicit S4 approval. It does not modify the existing Python
+package, PyPI, `vX.Y.Z` tag, or default-selector rules above, and grants no
+authority to Program B or Program C.
+
+The approved preview candidate identity is the one exact tuple of build run ID,
+source commit, preview tag, archive SHA-256, manifest SHA-256, executable
+SHA-256, and prerelease destination. The build workflow source SHA, manifest
+commit, T07 proof receipt, S4 approval, and promotion checkout target MUST be
+byte-identical. Promotion downloads the retained source-run archive and
+manifest only; it MUST NOT rebuild, substitute local bytes, or re-test a
+different payload.
+
+Before the first mutation, classify the remote state using the approved
+identity. An absent preview tag and release admit the initial annotated-tag and
+draft-prerelease creation. A retry after a transport or API failure MUST
+reclassify first and is admitted only when the annotated tag peels to the
+approved commit and the release is the approved matching draft or complete
+prerelease state. A matching empty or partial draft may receive only missing
+approved assets; matching complete states receive no asset overwrite.
+
+Any different tag target, release tag or destination metadata, non-draft
+incomplete release, expected-asset name/size/SHA-256 mismatch, colliding asset
+name, expired source artifact, or different candidate identity is a collision:
+hard-refuse, record the evidence, and use a new preview version/tag for a
+corrected source. Never delete, move, reuse, or overwrite a preview tag or
+asset to recover from a collision.
+
+Before publishing a matching complete draft, and again for a published complete
+prerelease, freshly download each remote archive and manifest and compare its
+size and SHA-256 with the approved manifest/T07 receipt. Remote asset metadata
+or a prior upload acknowledgement is not byte proof. The post-publish receipt
+MUST bind those fresh remote bytes to the approved identity and replay the
+installed preview consumer, EOF, and unchanged Python rollback journeys.
+
 ## Required Gates
 
 Pre-publication gates must pass before annotated tag creation and push. Tag
