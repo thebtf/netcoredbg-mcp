@@ -1883,13 +1883,8 @@ def register_ui_tools(
                             )
                             if (
                                 (method != "PrintWindow" and not typed_bitblt_fallback)
-                                or (
-                                    (strict_target_requested or typed_bitblt_fallback)
-                                    and (
-                                        type(bridge_process_id) is not int
-                                        or bridge_process_id != pid
-                                    )
-                                )
+                                or type(bridge_process_id) is not int
+                                or bridge_process_id != pid
                                 or type(bridge_hwnd) is not int
                                 or bridge_hwnd == 0
                                 or not isinstance(bridge_client_rect, dict)

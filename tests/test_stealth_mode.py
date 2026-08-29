@@ -530,6 +530,72 @@ def test_bridge_evidence_fallback_discards_black_printwindow_for_ordinary_and_st
     )
 
 
+def test_bridge_probable_black_frame_uses_bounded_spatial_samples() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
+        encoding="utf-8"
+    )
+    helper_start = command.index("private static bool IsProbablyBlackFrame")
+    helper_end = command.index("private static double NormalizedPixelVariance", helper_start)
+    helper = command[helper_start:helper_end]
+
+    assert "const int sampleAxisLimit = 100;" in helper
+    assert "var sampleColumns = Math.Min(bitmap.Width, sampleAxisLimit);" in helper
+    assert "var sampleRows = Math.Min(bitmap.Height, sampleAxisLimit);" in helper
+    assert "var sampleCount = sampleColumns * sampleRows;" in helper
+    assert "for (var sampleY = 0; sampleY < sampleRows; sampleY++)" in helper
+    assert "for (var sampleX = 0; sampleX < sampleColumns; sampleX++)" in helper
+    assert "(long)sampleX * (bitmap.Width - 1)" in helper
+    assert "(long)sampleY * (bitmap.Height - 1)" in helper
+    assert "for (var y = 0; y < bitmap.Height; y++)" not in helper
+    assert "for (var x = 0; x < bitmap.Width; x++)" not in helper
+    assert "const double maxMeanLuminance = 8.0;" in helper
+    assert "const int darkLuminanceThreshold = 16;" in helper
+    assert "const double minimumDarkPixelFraction = 0.995;" in helper
+
+    def classify(width: int, height: int, color_at):
+        sample_columns = min(width, 100)
+        sample_rows = min(height, 100)
+        luminance_sum = 0.0
+        dark_pixel_count = 0
+        sample_points: list[tuple[int, int]] = []
+        for sample_y in range(sample_rows):
+            y = 0 if sample_rows == 1 else sample_y * (height - 1) // (sample_rows - 1)
+            for sample_x in range(sample_columns):
+                x = 0 if sample_columns == 1 else sample_x * (width - 1) // (sample_columns - 1)
+                sample_points.append((x, y))
+                red, green, blue = color_at(x, y)
+                luminance = (0.299 * red) + (0.587 * green) + (0.114 * blue)
+                luminance_sum += luminance
+                if luminance <= 16:
+                    dark_pixel_count += 1
+        sample_count = len(sample_points)
+        return (
+            luminance_sum / sample_count <= 8.0 and dark_pixel_count / sample_count >= 0.995,
+            sample_points,
+        )
+
+    probable_black, sample_points = classify(3840, 2160, lambda _x, _y: (0, 0, 0))
+    assert probable_black
+    assert len(sample_points) == 10_000
+    _, eight_k_sample_points = classify(7680, 4320, lambda _x, _y: (0, 0, 0))
+    assert len(eight_k_sample_points) == 10_000
+
+    small_marker = set(sample_points[:50])
+    probable_black_with_small_marker, _ = classify(
+        3840,
+        2160,
+        lambda x, y: (255, 255, 255) if (x, y) in small_marker else (0, 0, 0),
+    )
+    assert probable_black_with_small_marker
+    nonblack_marker = set(sample_points[:51])
+    probable_black_with_large_marker, _ = classify(
+        3840,
+        2160,
+        lambda x, y: (255, 255, 255) if (x, y) in nonblack_marker else (0, 0, 0),
+    )
+    assert not probable_black_with_large_marker
+
+
 def test_bridge_typed_bitblt_fallback_has_no_legacy_lossless_authority() -> None:
     command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
         encoding="utf-8"
@@ -2269,6 +2335,7 @@ async def test_ui_take_screenshot_stealth_evidence_uses_bridge_capture_provenanc
             "height": 8,
             "method": "PrintWindow",
             "hwnd": 777,
+            "process_id": 42,
             "client_rect": {
                 "left": 0,
                 "top": 0,
@@ -3398,6 +3465,43 @@ async def test_ui_take_screenshot_strict_typed_bitblt_rejects_nonfinite_provenan
 
     assert isinstance(response, dict), response
     assert response["code"] == "PHYSICAL_CAPTURE_PROVENANCE_UNAVAILABLE"
+    assert bundle_calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_ui_take_screenshot_ordinary_printwindow_rejects_foreign_process_before_persistence(
+    tmp_path,
+) -> None:
+    from PIL import Image
+
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    png = io.BytesIO()
+    Image.new("RGB", (8, 8), (255, 255, 255)).save(png, format="PNG")
+    backend = _typed_bitblt_backend(
+        _bridge_lossless_screenshot(png.getvalue(), width=8, height=8, process_id=43)
+    )
+    backend._client.is_running = True
+    backend.bring_to_front = AsyncMock(return_value={"activated": True, "hwnd": 777})
+    bundle_calls: list[tuple[str, str, str | None, int]] = []
+    session = _stealth_evidence_session(tmp_path, bundle_calls)
+    session.stealth_mode = False
+    registry = ToolRegistry()
+
+    with (
+        patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend),
+        patch("netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid", return_value=777),
+    ):
+        register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+        activation = await registry.tools["ui_bring_to_front"](SimpleNamespace())
+        assert activation["data"]["activated"] is True, activation
+        response = await registry.tools["ui_take_screenshot"](
+            SimpleNamespace(), evidence=True, format="png"
+        )
+
+    assert isinstance(response, dict), response
+    assert response["error"] == "Evidence capture requires valid bridge screenshot provenance"
     assert bundle_calls == []
     assert list(tmp_path.iterdir()) == []
 
