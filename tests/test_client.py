@@ -5,7 +5,7 @@ import json
 import logging
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1290,3 +1290,53 @@ class TestDAPClientTransportDeath:
         assert unknown.reader_error is not None
         assert "ValueError" in str(unknown.reader_error)
         assert len(str(unknown.reader_error)) < len(reader_message)
+
+    @pytest.mark.asyncio
+    async def test_dap_terminated_then_eof_and_process_exit_publish_once(self):
+        """Protocol termination, EOF, and process exit must share one finalizer."""
+
+        payload = json.dumps(
+            {"seq": 51, "type": "event", "event": "terminated", "body": {}}
+        ).encode("utf-8")
+        stdout = MagicMock()
+        stdout.readline = AsyncMock(
+            side_effect=[
+                f"Content-Length: {len(payload)}\r\n".encode("ascii"),
+                b"\r\n",
+                b"",
+            ]
+        )
+        stdout.readexactly = AsyncMock(return_value=payload)
+        stderr = MagicMock()
+        stderr.read = AsyncMock(return_value=b"")
+        process = MagicMock(pid=41005, stdout=stdout, stderr=stderr, returncode=0)
+        process.wait = AsyncMock(return_value=0)
+
+        records: list[Any] = []
+        client = DAPClient("/path")
+        set_terminal_handler = getattr(client, "set_transport_terminal_handler", None)
+        assert callable(set_terminal_handler), (
+            "DAPClient must expose the manager terminal callback seam"
+        )
+        set_terminal_handler(records.append)
+
+        generation = object()
+        with patch(
+            "netcoredbg_mcp.dap.client.asyncio.create_subprocess_exec",
+            return_value=process,
+        ):
+            returned_generation = await client.start(generation=generation)
+
+        for _ in range(20):
+            if records:
+                break
+            await asyncio.sleep(0)
+
+        assert returned_generation is generation
+        assert len(records) == 1
+        terminal = records[0]
+        assert terminal.generation is generation
+        assert terminal.protocol_terminated is True
+        assert terminal.stdout_eof is True
+        assert terminal.process_exited is True
+        assert terminal.returncode == 0
