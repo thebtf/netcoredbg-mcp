@@ -41,10 +41,18 @@ _SENSITIVE_KEY_RE = re.compile(
     r"(?i)(?:[A-Za-z0-9]+[_-])*(?:authorization|access[_-]?token|token|password|secret|api[_-]?key)"
 )
 
+# Authorization headers are multi-word and diagnostics often quote values with
+# spaces. Consume their entire value before retained terminal text can expose a
+# credential fragment to logs, transport-terminal records, or resource views.
+_AUTHORIZATION_VALUE_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(authorization)(\s*[:=]\s*)"
+    r'(?:(?:"(?:\\.|[^"\\])*")|(?:\'(?:\\.|[^\'\\])*\')|[^\r\n,;]+)'
+)
 _CREDENTIAL_VALUE_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9])"
     r"((?:[A-Za-z0-9]+[_-])*(?:authorization|access[_-]?token|token|password|secret|api[_-]?key))"
-    r"(\s*[:=]\s*)([^\s,;]+)"
+    r"(\s*[:=]\s*)"
+    r'(?:(?:"(?:\\.|[^"\\])*")|(?:\'(?:\\.|[^\'\\])*\')|[^\s,;]+)'
 )
 _JSON_CREDENTIAL_VALUE_RE = re.compile(
     r'(?i)("(?:[A-Za-z0-9]+[_-])*(?:authorization|access[_-]?token|token|password|secret|api[_-]?key)"'
@@ -243,6 +251,9 @@ def _sanitize_terminal_text(value: object) -> str:
     )
     text = _JSON_CREDENTIAL_VALUE_RE.sub(
         lambda match: f"{match.group(1)}<redacted>{match.group(2)}", text
+    )
+    text = _AUTHORIZATION_VALUE_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}<redacted>", text
     )
     text = _CREDENTIAL_VALUE_RE.sub(
         lambda match: f"{match.group(1)}{match.group(2)}<redacted>", text
@@ -848,6 +859,14 @@ class DAPClient:
                         exit_code = message.body.get("exitCode")
                         if type(exit_code) is int:
                             run.debuggee_exit_code = exit_code
+
+                if run is not None and run is not self._run:
+                    # A former reader may finish after `start` installs a newer
+                    # run. Retain its local terminal facts above, but never call
+                    # handlers: manager callbacks have no generation argument,
+                    # so they would otherwise let old transport state mutate the
+                    # current session solely because the client object matches.
+                    return
 
                 handlers = (
                     self._event_handlers.get(message.event, [])

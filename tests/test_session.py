@@ -17,6 +17,27 @@ from netcoredbg_mcp.dap.client import (
 from netcoredbg_mcp.session import DebugState, SessionManager
 
 
+def _natural_exit_terminal(generation: object) -> DapTransportTerminal:
+    """Create the manager-visible terminal fact used by lifecycle regressions."""
+    return DapTransportTerminal(
+        generation=generation,
+        first_trigger=DapTerminalTrigger.STDOUT_EOF,
+        adapter_pid=41011,
+        process_exited=True,
+        returncode=1,
+        protocol_terminated=False,
+        debuggee_exit_code=None,
+        stdout_eof=True,
+        last_dap_event=None,
+        last_dap_event_body_preview=None,
+        stderr_tail=b"",
+        stderr_truncated=False,
+        stderr_drained=True,
+        reader_error=None,
+        cleanup_outcome=DapCleanupOutcome.NATURAL_EXIT,
+    )
+
+
 class TestSessionManagerInit:
     """Tests for SessionManager initialization."""
 
@@ -403,6 +424,94 @@ class TestSessionManagerStart:
         client.stop.assert_awaited_once_with()
         assert generations_seen_during_stop == [1]
         assert manager._active_dap_run is None
+
+
+class TestSessionManagerTransportFences:
+    """Regressions for generation-scoped manager lifecycle decisions."""
+
+    @pytest.mark.asyncio
+    async def test_stop_clears_stopping_generation_when_foreground_join_cancels(self):
+        """A canceled foreground join must not classify a later terminal fact as requested."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+
+        generation = object()
+        manager._active_dap_run = generation
+        manager._cancel_stealth_foreground_restore_task = AsyncMock(
+            side_effect=asyncio.CancelledError
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await manager.stop()
+
+        manager._on_transport_terminal(manager.client, _natural_exit_terminal(generation))
+
+        assert manager._stopping_dap_run is None
+        assert manager.state.state is DebugState.TERMINATED
+
+    def test_old_run_event_cannot_mutate_current_manager_state(self):
+        """Buffered events from an old adapter run cannot revive the current session state."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+
+        client = DAPClient("/path")
+        manager._client = client
+        manager._register_event_handlers()
+
+        client._process = MagicMock()
+        old_run = client._run_for_direct_reader()
+        client._process = MagicMock()
+        current_run = client._run_for_direct_reader()
+        manager._active_dap_run = current_run.generation
+        manager._state.state = DebugState.STOPPED
+
+        client._handle_message(
+            {"seq": 41, "type": "event", "event": "continued", "body": {}}, old_run
+        )
+
+        assert old_run.last_dap_event == (41, "continued")
+        assert manager.state.state is DebugState.STOPPED
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("operation", ("launch", "attach"))
+    async def test_launch_and_attach_reject_a_terminal_current_generation(self, operation: str):
+        """Launch and attach must not restore RUNNING after their adapter terminalizes."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+
+        client = MagicMock()
+        client.is_running = True
+        manager._client = client
+        generation = object()
+        manager._active_dap_run = generation
+        manager._initialized_event.set()
+        manager._enable_hot_reload_if_supported = AsyncMock()
+        manager._sync_all_breakpoints = AsyncMock()
+        manager.check_dbgshim_compatibility = MagicMock(return_value=None)
+        client.set_exception_breakpoints = AsyncMock()
+
+        async def configuration_done() -> DAPResponse:
+            manager._on_transport_terminal(client, _natural_exit_terminal(generation))
+            return DAPResponse(seq=1, request_seq=1, success=True, command="configurationDone")
+
+        client.configuration_done = AsyncMock(side_effect=configuration_done)
+
+        with pytest.raises(RuntimeError, match=f"netcoredbg terminated during {operation}"):
+            if operation == "launch":
+                client.launch = AsyncMock(
+                    return_value=DAPResponse(seq=1, request_seq=1, success=True, command="launch")
+                )
+                with patch(
+                    "netcoredbg_mcp.setup.dbgshim.select_and_swap_dbgshim", return_value=False
+                ):
+                    await manager.launch(program="program.dll")
+            else:
+                client.attach = AsyncMock(
+                    return_value=DAPResponse(seq=1, request_seq=1, success=True, command="attach")
+                )
+                await manager.attach(process_id=1234)
+
+        assert manager.state.state is DebugState.TERMINATED
 
 
 class TestBreakpointOperations:

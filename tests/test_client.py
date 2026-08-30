@@ -1428,6 +1428,20 @@ class TestDAPClientTransportDeath:
             "<path> <path> line\\n\\u001b[31m\\u009b31m"
         )
 
+    def test_terminal_text_sanitizer_redacts_spaced_authorization_and_quoted_credentials(self):
+        """Terminal diagnostics must not leak complete spaced credential values."""
+        unsafe = (
+            "Authorization: Bearer header token with spaces; "
+            'Authorization: "Bearer quoted header token"; '
+            'api_key="quoted API key token"; '
+            "password='quoted password token';"
+        )
+
+        assert sanitize_terminal_text(unsafe) == (
+            "Authorization: <redacted>; Authorization: <redacted>; "
+            "api_key=<redacted>; password=<redacted>;"
+        )
+
     def test_terminal_event_metadata_is_bounded_before_retention(self):
         """Oversized or invalid DAP event metadata must not persist in state."""
 

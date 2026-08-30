@@ -966,6 +966,17 @@ class SessionManager:
         self._set_state(DebugState.TERMINATED)
         self._execution_event.set()
 
+    def _require_live_dap_generation(self, generation: object | None, operation: str) -> None:
+        """Reject a lifecycle handoff after its adapter generation terminalizes."""
+        # DAP request completion is not state authority: finalization can publish
+        # a manager-owned terminal fact while launch or attach awaits a response.
+        # Fence both the terminal record and generation identity immediately
+        # before RUNNING so an old or terminal transport cannot revive the session.
+        if self._state.transport_terminal is not None or (
+            generation is not None and self._active_dap_run != generation
+        ):
+            raise RuntimeError(f"netcoredbg terminated during {operation}")
+
     def _on_initialized(self, event: DAPEvent) -> None:
         """Handle initialized event."""
         InitializedEventBody.from_dict(event.body)
@@ -1720,6 +1731,8 @@ class SessionManager:
             logger.info("[launch] phase 5/9: starting netcoredbg process")
             await self.start()
 
+        dap_generation = self._active_dap_run
+
         logger.info("[launch] phase 6/9: waiting for DAP initialization")
         await report(60, 100, "Initializing debug adapter...")
 
@@ -1756,10 +1769,12 @@ class SessionManager:
 
         if not response.success:
             raise RuntimeError(f"Launch failed: {response.message}")
+        self._require_live_dap_generation(dap_generation, "launch")
 
         # Configuration done
         logger.info("[launch] phase 9/9: configuration done")
         await self._client.configuration_done()
+        self._require_live_dap_generation(dap_generation, "launch")
         self._set_state(DebugState.RUNNING)
 
         if stealth_mode:
@@ -1799,6 +1814,8 @@ class SessionManager:
         if not self._client.is_running:
             await self.start()
 
+        dap_generation = self._active_dap_run
+
         try:
             await asyncio.wait_for(self._initialized_event.wait(), timeout=10.0)
         except asyncio.TimeoutError as e:
@@ -1814,8 +1831,10 @@ class SessionManager:
         response = await self._client.attach(process_id, just_my_code=False)
         if not response.success:
             raise RuntimeError(f"Attach failed: {response.message}")
+        self._require_live_dap_generation(dap_generation, "attach")
 
         await self._client.configuration_done()
+        self._require_live_dap_generation(dap_generation, "attach")
         self._set_state(DebugState.RUNNING)
 
         # Generate session ID for temp dir isolation
@@ -1830,9 +1849,11 @@ class SessionManager:
 
         stopping_generation = self._active_dap_run
         self._stopping_dap_run = stopping_generation
-        await self._cancel_stealth_foreground_restore_task()
-
         try:
+            # The explicit-stop marker suppresses only this generation's terminal
+            # publication. Join foreground work inside the `try` so cancellation
+            # cannot strand that marker and misclassify a delayed finalizer result.
+            await self._cancel_stealth_foreground_restore_task()
             if self._client.is_running:
                 try:
                     await self._client.disconnect(terminate=True)
