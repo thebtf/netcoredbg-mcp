@@ -1,0 +1,298 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "A1 preview Candidate Identity Record",
+  "description": "Immutable identity for one retained A1 preview candidate. The candidate source is admitted only from the canonical merged main ref and its authenticated build-workflow provenance. The embedded preview manifest remains governed by the inherited manifest schema; all retained-file provenance is a closed GitHub repository, run, artifact, safe-relative-path, and hash reference.",
+  "$comment": "Semantic validator obligations: CANONICAL_MAIN_SOURCE_PROVENANCE requires source.repository, build.repository, and destination.repository to be equal; source.ref and build.ref to be refs/heads/main; source.commit, source.origin_main_target, build.commit, source.post_merge_exact_head_receipt.scanned_commit, and source.post_merge_exact_head_receipt.tag_target to be equal; and the build workflow run resolved from GitHub to authenticate repository, workflow path, mode, event, run ID, run attempt, ref, and head SHA. The post-merge exact-head receipt reference must resolve and hash to a passing post-merge receipt whose scanned and tag targets are that same commit. At build admission, the workflow reads origin/main and requires that live ref target to equal source.commit before checkout; a later main advance does not rewrite this sealed source fact. The resolved build workflow run must later conclude successfully before proof or promotion. CANDIDATE_ARTIFACT_REFERENCE_EQUALITY requires both retained-file references to equal the recorded build repository, run_id, and artifact.id. CANDIDATE_MANIFEST_BINDING_EQUALITY requires the manifest reference path and hash to equal file.name and file.sha256, the archive reference path and hash to equal contents.archive.name and contents.archive.sha256, source.commit to equal contents.commit, and destination.tag to equal contents.tag. JSON Schema cannot compare those dynamic values.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "candidate": {
+      "$ref": "#/$defs/candidate_binding"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "github_identifier": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$"
+    },
+    "github_repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+      "maxLength": 200
+    },
+    "safe_relative_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+    },
+    "actions_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "sha256",
+        "retention"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/github_identifier"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "retention": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "configured_days",
+            "expires_at"
+          ],
+          "properties": {
+            "configured_days": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "expires_at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        }
+      }
+    },
+    "github_artifact_file_reference": {
+      "description": "A sealed record or retained file stored in one GitHub Actions artifact. It deliberately has no URI field.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "run_id",
+        "artifact_id",
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "repository": {
+          "$ref": "#/$defs/github_repository"
+        },
+        "run_id": {
+          "$ref": "#/$defs/github_identifier"
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/github_identifier"
+        },
+        "path": {
+          "$ref": "#/$defs/safe_relative_path"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "manifest_file": {
+      "allOf": [
+        {
+          "$ref": "../../005-stateless-preview/contracts/preview-manifest.schema.json#/$defs/hashed_file"
+        },
+        {
+          "properties": {
+            "name": {
+              "pattern": "^netcoredbg-mcp-stateless-preview-win-x64-(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)-preview\\.(?:[1-9][0-9]*)\\.manifest\\.json$"
+            }
+          }
+        }
+      ]
+    },
+    "post_merge_exact_head_receipt": {
+      "description": "A sealed post-merge receipt that proves the exact canonical main target admitted to the build.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_reference",
+        "stage",
+        "record_type",
+        "scanned_commit",
+        "tag_target",
+        "outcome"
+      ],
+      "properties": {
+        "record_reference": {
+          "$ref": "#/$defs/github_artifact_file_reference"
+        },
+        "stage": {
+          "const": "post-merge"
+        },
+        "record_type": {
+          "const": "sonarqube-exact-head"
+        },
+        "scanned_commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "tag_target": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "outcome": {
+          "const": "PASS"
+        }
+      }
+    },
+    "candidate_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "build",
+        "preview_manifest",
+        "destination"
+      ],
+      "properties": {
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repository",
+            "ref",
+            "commit",
+            "origin_main_target",
+            "post_merge_exact_head_receipt"
+          ],
+          "properties": {
+            "repository": {
+              "$ref": "#/$defs/github_repository"
+            },
+            "ref": {
+              "const": "refs/heads/main"
+            },
+            "commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "origin_main_target": {
+              "description": "The immutable build-admission readback of canonical origin/main, not a later mutable branch lookup.",
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "post_merge_exact_head_receipt": {
+              "$ref": "#/$defs/post_merge_exact_head_receipt"
+            }
+          }
+        },
+        "build": {
+          "description": "The trusted workflow-run provenance for the canonical source and retained payload.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repository",
+            "workflow_path",
+            "mode",
+            "event",
+            "run_id",
+            "run_attempt",
+            "ref",
+            "commit",
+            "artifact"
+          ],
+          "properties": {
+            "repository": {
+              "$ref": "#/$defs/github_repository"
+            },
+            "workflow_path": {
+              "const": ".github/workflows/stateless-preview.yml"
+            },
+            "mode": {
+              "const": "build"
+            },
+            "event": {
+              "const": "workflow_dispatch"
+            },
+            "run_id": {
+              "$ref": "#/$defs/github_identifier"
+            },
+            "run_attempt": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "ref": {
+              "const": "refs/heads/main"
+            },
+            "commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "artifact": {
+              "$ref": "#/$defs/actions_artifact"
+            }
+          }
+        },
+        "preview_manifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "file",
+            "manifest_reference",
+            "archive_reference",
+            "contents"
+          ],
+          "properties": {
+            "file": {
+              "$ref": "#/$defs/manifest_file"
+            },
+            "manifest_reference": {
+              "$ref": "#/$defs/github_artifact_file_reference"
+            },
+            "archive_reference": {
+              "$ref": "#/$defs/github_artifact_file_reference"
+            },
+            "contents": {
+              "$ref": "../../005-stateless-preview/contracts/preview-manifest.schema.json"
+            }
+          }
+        },
+        "destination": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "provider",
+            "repository",
+            "tag",
+            "prerelease"
+          ],
+          "properties": {
+            "provider": {
+              "const": "github"
+            },
+            "repository": {
+              "$ref": "#/$defs/github_repository"
+            },
+            "tag": {
+              "$ref": "../../005-stateless-preview/contracts/preview-manifest.schema.json#/$defs/tag"
+            },
+            "prerelease": {
+              "const": true
+            }
+          }
+        }
+      }
+    }
+  }
+}

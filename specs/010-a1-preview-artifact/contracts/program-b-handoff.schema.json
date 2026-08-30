@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "A1 preview Program B Handoff",
+  "description": "Immutable, closed A1 closeout record for one published opt-in preview candidate. It proves only A1 opt-in preview completion and requires separate authorization before Program B or Program C work begins.",
+  "$comment": "Semantic admission resolves every github_artifact_file_reference, verifies raw-byte SHA-256, validates the resolved typed records, and enforces cross-record equality. CANONICAL_MAIN_BINDING requires source_ref, candidate.source.ref, and candidate.build.ref to equal refs/heads/main; source_commit, candidate.source.commit, candidate.source.origin_main_target, and candidate.build.commit to be equal; and the candidate post-merge receipt scanned_commit and tag_target to equal source_commit. PROMOTION_ATTEMPT_BINDING requires promotion_attempt to resolve to promotion-attempt.schema.json; promotion_attempt_id to equal its attempt_id; its candidate, Candidate Identity Record SHA-256, and decision reference and SHA-256 to equal the handoff; authorization.decision_authorization to equal the Decision promotion_attempt template; and the current GitHub actor, workflow run, and permission readback to equal the Decision authorized dispatcher and captured run context. REMOTE_ATTEMPT_BINDING requires the resolved Remote Observation and Remote Classification promotion_attempt_id values, and the resolved Remote Verification promotion_attempt_id and promotion_attempt reference, to equal the handoff lineage. STAGE_SET_EQUALITY requires pre_decision_stage_evidence, pre_publication_stage_evidence, and post_publication_stage_evidence each to resolve to a stage-gate-evidence.schema.json record that binds the same Candidate Identity Record, candidate binding, source ref, source commit, origin-main target, build run, and Release Gate Catalog as the handoff; whose stage equals pre-decision, pre-publication, or post-publication respectively; whose derived catalog descriptor subset matches its evidence field-for-field in order; and whose outcome is PASS. The handoff has no self-hash; an enclosing github_artifact_file_reference stores the raw handoff hash.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "handoff_schema_version",
+    "handoff_id",
+    "producer",
+    "candidate_identity_record",
+    "candidate",
+    "source_ref",
+    "source_commit",
+    "approved_promotion_decision",
+    "promotion_attempt",
+    "promotion_attempt_id",
+    "published_remote_observation",
+    "published_remote_classification",
+    "remote_verification_receipt",
+    "remote_consumer_proof",
+    "release_gate_catalog",
+    "pre_decision_stage_evidence",
+    "pre_publication_stage_evidence",
+    "post_publication_stage_evidence",
+    "completion_scope",
+    "program_b_authorization_required",
+    "program_c_authorization_required",
+    "recorded_at"
+  ],
+  "properties": {
+    "handoff_schema_version": {
+      "const": "1.0"
+    },
+    "handoff_id": {
+      "$ref": "#/$defs/safe_opaque_id"
+    },
+    "producer": {
+      "$ref": "#/$defs/producer"
+    },
+    "candidate_identity_record": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "candidate": {
+      "$ref": "candidate-identity.schema.json#/$defs/candidate_binding"
+    },
+    "source_ref": {
+      "$ref": "#/$defs/source_ref"
+    },
+    "source_commit": {
+      "$ref": "#/$defs/source_commit"
+    },
+    "approved_promotion_decision": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "promotion_attempt": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "promotion_attempt_id": {
+      "$ref": "#/$defs/safe_opaque_id"
+    },
+    "published_remote_observation": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "published_remote_classification": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "remote_verification_receipt": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "remote_consumer_proof": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "release_gate_catalog": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "pre_decision_stage_evidence": {
+      "description": "Passing Stage Gate Evidence for the catalog's pre-decision descriptor subset: retained proof, seven-lens aggregate, distinct independent PR review, and candidate exact-head Sonar.",
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "pre_publication_stage_evidence": {
+      "description": "Passing Stage Gate Evidence for the catalog's pre-publication descriptor subset: post-merge exact-head Sonar whose scanned commit and tag target equal the candidate commit.",
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "post_publication_stage_evidence": {
+      "description": "Passing Stage Gate Evidence for the catalog's post-publication descriptor subset: fresh remote consumer and byte proof after the prerelease is public.",
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "completion_scope": {
+      "const": "A1_OPT_IN_PREVIEW_COMPLETE"
+    },
+    "program_b_authorization_required": {
+      "const": true
+    },
+    "program_c_authorization_required": {
+      "const": true
+    },
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "$ref": "candidate-identity.schema.json#/$defs/sha256"
+    },
+    "github_artifact_file_reference": {
+      "$ref": "candidate-identity.schema.json#/$defs/github_artifact_file_reference"
+    },
+    "safe_opaque_id": {
+      "$ref": "artifact-consumer-proof.schema.json#/$defs/safe_opaque_id"
+    },
+    "source_ref": {
+      "const": "refs/heads/main"
+    },
+    "source_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "helper_path",
+        "operation"
+      ],
+      "properties": {
+        "helper_path": {
+          "const": "scripts/stateless_preview_artifact.py"
+        },
+        "operation": {
+          "const": "seal_program_b_handoff"
+        }
+      }
+    },
+    "candidate_identity_record_document": {
+      "$ref": "candidate-identity.schema.json"
+    },
+    "promotion_decision_document": {
+      "$ref": "promotion-decision.schema.json"
+    },
+    "promotion_attempt_document": {
+      "$ref": "promotion-attempt.schema.json"
+    },
+    "artifact_consumer_proof_document": {
+      "$ref": "artifact-consumer-proof.schema.json"
+    },
+    "s2_s3_review_document": {
+      "$ref": "s2-s3-review.schema.json"
+    },
+    "remote_observation_document": {
+      "$ref": "remote-observation.schema.json"
+    },
+    "remote_classification_document": {
+      "$ref": "remote-classification.schema.json"
+    },
+    "remote_verification_document": {
+      "$ref": "remote-verification.schema.json"
+    },
+    "release_gate_catalog_document": {
+      "$ref": "release-gate-catalog.schema.json"
+    },
+    "stage_gate_evidence_document": {
+      "$ref": "stage-gate-evidence.schema.json"
+    }
+  }
+}

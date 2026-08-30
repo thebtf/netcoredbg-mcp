@@ -1,0 +1,689 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "A1 preview Artifact Consumer Proof Receipt",
+  "description": "Immutable receipt for a retained-artifact or post-publication remote-release consumer proof. It records only downloaded-byte evidence: an extracted executable is disposable verification material, never candidate authority. The consumer harness resolves every structured GitHub reference and rejects a local rebuild, source-tree executable, replacement artifact, or later run.",
+  "$comment": "Semantic sealing rule: before persistence, the consumer harness MUST admit only this closed receipt shape and values accepted by their declared schemas. It MUST reject raw diagnostics and all unsupported values, control characters, absolute paths, URIs, credential-shaped strings, and unredacted diagnostic text. The only path-bearing fields are the explicitly typed GitHub artifact-relative path fields; they are structural locators, not diagnostic evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "receipt_schema_version",
+    "receipt_id",
+    "candidate_identity_record",
+    "candidate",
+    "proof_stage",
+    "download_origin",
+    "input_identity_results",
+    "fixture_identity",
+    "scenario_matrix",
+    "runtime_results",
+    "python_rollback_result",
+    "outcome",
+    "recorded_at",
+    "receipt_provenance"
+  ],
+  "properties": {
+    "receipt_schema_version": {
+      "const": "1.0"
+    },
+    "receipt_id": {
+      "$ref": "#/$defs/safe_opaque_id"
+    },
+    "candidate_identity_record": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "candidate": {
+      "$ref": "candidate-identity.schema.json#/$defs/candidate_binding"
+    },
+    "proof_stage": {
+      "enum": [
+        "retained_artifact",
+        "remote_release"
+      ]
+    },
+    "download_origin": {},
+    "input_identity_results": {
+      "$ref": "#/$defs/input_identity_results"
+    },
+    "fixture_identity": {
+      "$ref": "#/$defs/fixture_identity"
+    },
+    "scenario_matrix": {
+      "$ref": "#/$defs/scenario_matrix"
+    },
+    "runtime_results": {
+      "$ref": "#/$defs/runtime_results"
+    },
+    "python_rollback_result": {
+      "$ref": "#/$defs/python_rollback_result"
+    },
+    "outcome": {
+      "$ref": "#/$defs/receipt_status"
+    },
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "receipt_provenance": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    }
+  },
+  "allOf": [
+    {
+      "oneOf": [
+        {
+          "properties": {
+            "proof_stage": {
+              "const": "retained_artifact"
+            },
+            "download_origin": {
+              "$ref": "#/$defs/retained_artifact_origin"
+            }
+          }
+        },
+        {
+          "properties": {
+            "proof_stage": {
+              "const": "remote_release"
+            },
+            "download_origin": {
+              "$ref": "#/$defs/remote_release_origin"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "PASS"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "input_identity_results": {
+            "properties": {
+              "archive_matches_candidate": {
+                "const": true
+              },
+              "manifest_matches_candidate": {
+                "const": true
+              },
+              "executable_matches_manifest": {
+                "const": true
+              },
+              "inherited_verifier_equations_pass": {
+                "const": true
+              }
+            }
+          },
+          "scenario_matrix": {
+            "properties": {
+              "outcome": {
+                "const": "PASS"
+              },
+              "missing_scenario_ids": {
+                "const": []
+              },
+              "unexpected_scenario_ids": {
+                "const": []
+              },
+              "results": {
+                "items": {
+                  "properties": {
+                    "status": {
+                      "const": "PASS"
+                    },
+                    "no_partial_output": {
+                      "const": true
+                    },
+                    "no_unintended_side_effect": {
+                      "const": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "runtime_results": {
+            "properties": {
+              "explicit_project_argument": {
+                "const": true
+              },
+              "catalog_is_closed": {
+                "const": true
+              },
+              "valid_journey_passed": {
+                "const": true
+              },
+              "stdout_jsonrpc_only": {
+                "const": true
+              },
+              "clean_eof": {
+                "properties": {
+                  "stdin_closed": {
+                    "const": true
+                  },
+                  "exited_cleanly": {
+                    "const": true
+                  },
+                  "cancellation_result_emitted": {
+                    "const": false
+                  },
+                  "state_retained_after_exit": {
+                    "const": false
+                  }
+                }
+              }
+            }
+          },
+          "python_rollback_result": {
+            "properties": {
+              "only_preview_selection_removed": {
+                "const": true
+              },
+              "python_package_reinstalled": {
+                "const": false
+              },
+              "python_package_replaced": {
+                "const": false
+              },
+              "console_entrypoint_changed": {
+                "const": false
+              },
+              "default_selector_changed": {
+                "const": false
+              },
+              "legacy_journey_outcome": {
+                "const": "PRODUCT_WORKS"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "$ref": "candidate-identity.schema.json#/$defs/sha256"
+    },
+    "github_identifier": {
+      "$ref": "candidate-identity.schema.json#/$defs/github_identifier"
+    },
+    "github_repository": {
+      "$ref": "candidate-identity.schema.json#/$defs/github_repository"
+    },
+    "safe_opaque_id": {
+      "$comment": "Opaque durable evidence identifier. This deliberately excludes whitespace, control characters, path separators, URI syntax, and credential-shaped prefixes. Semantic sealing MUST also reject any identifier that is not an approved value for its owning field.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+      "not": {
+        "pattern": "^(?:gh[pousr]_|github_pat_|glpat-|AKIA|ASIA|xox[baprs]-|sk-[A-Za-z0-9]|Bearer[._-])"
+      }
+    },
+    "receipt_status": {
+      "$comment": "Closed durable receipt status. Free-form outcomes, messages, and diagnostics are prohibited.",
+      "enum": [
+        "PASS",
+        "FAIL",
+        "REFUSED"
+      ]
+    },
+    "expected_result_code": {
+      "$comment": "Closed catalog expectation code. Semantic sealing rejects any unsupported result value before persistence.",
+      "enum": [
+        "EXPECT_SUCCESS",
+        "EXPECT_FAILURE",
+        "EXPECT_REFUSAL"
+      ]
+    },
+    "observed_result_code": {
+      "$comment": "Closed observed result code. It communicates no raw diagnostic content.",
+      "enum": [
+        "SUCCESS",
+        "FAILURE",
+        "REFUSAL",
+        "HARNESS_FAILURE",
+        "EVIDENCE_REJECTED"
+      ]
+    },
+    "evidence_path": {
+      "$comment": "Artifact-relative locator only. It is never a local path, URI, command, or diagnostic payload.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$",
+      "not": {
+        "pattern": "(^|/)\\.\\.(/|$)"
+      }
+    },
+    "actions_artifact": {
+      "$ref": "candidate-identity.schema.json#/$defs/actions_artifact"
+    },
+    "github_artifact_file_reference": {
+      "description": "A stored immutable file is located by GitHub repository, Actions run, Actions artifact, and artifact-relative path. A free-form URI is deliberately not accepted as a trust anchor.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "run_id",
+        "artifact",
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "repository": {
+          "$ref": "#/$defs/github_repository"
+        },
+        "run_id": {
+          "$ref": "#/$defs/github_identifier"
+        },
+        "artifact": {
+          "$ref": "#/$defs/actions_artifact"
+        },
+        "path": {
+          "$ref": "#/$defs/evidence_path"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "retained_artifact_origin": {
+      "description": "The only admitted pre-promotion source: the retained Actions artifact emitted by the candidate build run. The harness downloads this artifact and its named archive and manifest; it never accepts source-tree output or a rebuilt archive.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "workflow_path",
+        "run_id",
+        "artifact",
+        "archive_path",
+        "manifest_path"
+      ],
+      "properties": {
+        "repository": {
+          "$ref": "#/$defs/github_repository"
+        },
+        "workflow_path": {
+          "const": ".github/workflows/stateless-preview.yml"
+        },
+        "run_id": {
+          "$ref": "#/$defs/github_identifier"
+        },
+        "artifact": {
+          "$ref": "#/$defs/actions_artifact"
+        },
+        "archive_path": {
+          "$ref": "#/$defs/evidence_path"
+        },
+        "manifest_path": {
+          "$ref": "#/$defs/evidence_path"
+        }
+      }
+    },
+    "release_asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "size_bytes",
+        "sha256"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/github_identifier"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "remote_archive_asset": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/release_asset"
+        },
+        {
+          "properties": {
+            "name": {
+              "pattern": "^netcoredbg-mcp-stateless-preview-win-x64-(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)-preview\\.(?:[1-9][0-9]*)\\.zip$"
+            }
+          }
+        }
+      ]
+    },
+    "remote_manifest_asset": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/release_asset"
+        },
+        {
+          "properties": {
+            "name": {
+              "pattern": "^netcoredbg-mcp-stateless-preview-win-x64-(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)-preview\\.(?:[1-9][0-9]*)\\.manifest\\.json$"
+            }
+          }
+        }
+      ]
+    },
+    "remote_release_origin": {
+      "description": "The only admitted post-publication source: freshly downloaded GitHub prerelease assets. The release, tag, and asset identifiers are recorded rather than trusting an arbitrary download URI.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "release_id",
+        "tag",
+        "prerelease",
+        "archive_asset",
+        "manifest_asset"
+      ],
+      "properties": {
+        "repository": {
+          "$ref": "#/$defs/github_repository"
+        },
+        "release_id": {
+          "$ref": "#/$defs/github_identifier"
+        },
+        "tag": {
+          "$ref": "../../005-stateless-preview/contracts/preview-manifest.schema.json#/$defs/tag"
+        },
+        "prerelease": {
+          "const": true
+        },
+        "archive_asset": {
+          "$ref": "#/$defs/remote_archive_asset"
+        },
+        "manifest_asset": {
+          "$ref": "#/$defs/remote_manifest_asset"
+        }
+      }
+    },
+    "input_identity_results": {
+      "description": "The values are observed from downloaded bytes. On a passing receipt, the consumer harness resolves candidate_identity_record, requires its raw file SHA-256 to equal candidate_identity_record.sha256, then compares the archive, manifest, and executable names, byte sizes, and SHA-256 values with the resolved Candidate Identity Record and inherited manifest. JSON Schema cannot express those variable cross-record equalities.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "archive",
+        "manifest",
+        "executable",
+        "archive_matches_candidate",
+        "manifest_matches_candidate",
+        "executable_matches_manifest",
+        "inherited_verifier_equations_pass"
+      ],
+      "properties": {
+        "archive": {
+          "$ref": "../../005-stateless-preview/contracts/preview-manifest.schema.json#/$defs/archive"
+        },
+        "manifest": {
+          "$ref": "candidate-identity.schema.json#/$defs/manifest_file"
+        },
+        "executable": {
+          "$ref": "../../005-stateless-preview/contracts/preview-manifest.schema.json#/$defs/executable"
+        },
+        "archive_matches_candidate": {
+          "type": "boolean"
+        },
+        "manifest_matches_candidate": {
+          "type": "boolean"
+        },
+        "executable_matches_manifest": {
+          "type": "boolean"
+        },
+        "inherited_verifier_equations_pass": {
+          "type": "boolean"
+        }
+      }
+    },
+    "fixture_identity": {
+      "$comment": "Fixture and catalog identities are opaque bounded IDs. Fixture labels, local paths, commands, and diagnostics are not durable evidence.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fixture_id",
+        "fixture_sha256",
+        "scenario_catalog_id",
+        "scenario_catalog_sha256"
+      ],
+      "properties": {
+        "fixture_id": {
+          "$ref": "#/$defs/safe_opaque_id"
+        },
+        "fixture_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "scenario_catalog_id": {
+          "$ref": "#/$defs/safe_opaque_id"
+        },
+        "scenario_catalog_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "scenario_result": {
+      "$comment": "Semantic sealing rule: no field in this record may carry diagnostics, paths, URIs, commands, secrets, or free text. A PASS status is valid only for EXPECT_SUCCESS/SUCCESS, EXPECT_FAILURE/FAILURE, or EXPECT_REFUSAL/REFUSAL; all other closed code combinations are non-passing evidence.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scenario_id",
+        "surface",
+        "documented_outcome",
+        "observed_outcome",
+        "status",
+        "no_partial_output",
+        "no_unintended_side_effect"
+      ],
+      "properties": {
+        "scenario_id": {
+          "$ref": "#/$defs/safe_opaque_id"
+        },
+        "surface": {
+          "enum": [
+            "launch_cli",
+            "launch_configuration",
+            "contained_fixture",
+            "tool_input",
+            "file_system",
+            "resources",
+            "protocol_catalog",
+            "transport",
+            "valid_journey",
+            "rollback"
+          ]
+        },
+        "documented_outcome": {
+          "$ref": "#/$defs/expected_result_code"
+        },
+        "observed_outcome": {
+          "$ref": "#/$defs/observed_result_code"
+        },
+        "status": {
+          "$ref": "#/$defs/receipt_status"
+        },
+        "no_partial_output": {
+          "type": "boolean"
+        },
+        "no_unintended_side_effect": {
+          "type": "boolean"
+        }
+      }
+    },
+    "scenario_matrix": {
+      "description": "JSON Schema cannot compare dynamically supplied case-ID sets. The consumer harness MUST resolve fixture_identity.scenario_catalog_id and its SHA-256, derive the complete required scenario-ID set from the inherited negative/containment matrix, and require exact set equality among that required set, required_scenario_ids, executed_scenario_ids, and results[].scenario_id. It MUST reject duplicate IDs, missing or unexpected IDs, mismatched declared counts, a result whose surface or documented outcome differs from the resolved catalog, and any required case not executed against this receipt's downloaded artifact. An empty missing_scenario_ids or unexpected_scenario_ids declaration does not replace those comparisons.",
+      "$comment": "Semantic sealing rule: scenario identifiers and outcome codes are opaque bounded/closed evidence only. The harness MUST reject unsupported identifiers, result codes, raw diagnostics, paths, URIs, credentials, control characters, and unredacted diagnostic text before persistence.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required_scenario_ids",
+        "executed_scenario_ids",
+        "required_count",
+        "executed_count",
+        "missing_scenario_ids",
+        "unexpected_scenario_ids",
+        "results",
+        "outcome"
+      ],
+      "properties": {
+        "required_scenario_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/safe_opaque_id"
+          }
+        },
+        "executed_scenario_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/safe_opaque_id"
+          }
+        },
+        "required_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "executed_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "missing_scenario_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/safe_opaque_id"
+          }
+        },
+        "unexpected_scenario_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/safe_opaque_id"
+          }
+        },
+        "results": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/scenario_result"
+          }
+        },
+        "outcome": {
+          "$ref": "#/$defs/receipt_status"
+        }
+      }
+    },
+    "clean_eof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stdin_closed",
+        "exited_cleanly",
+        "cancellation_result_emitted",
+        "state_retained_after_exit"
+      ],
+      "properties": {
+        "stdin_closed": {
+          "type": "boolean"
+        },
+        "exited_cleanly": {
+          "type": "boolean"
+        },
+        "cancellation_result_emitted": {
+          "type": "boolean"
+        },
+        "state_retained_after_exit": {
+          "type": "boolean"
+        }
+      }
+    },
+    "runtime_results": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "explicit_project_argument",
+        "catalog",
+        "catalog_is_closed",
+        "valid_journey_passed",
+        "stdout_jsonrpc_only",
+        "clean_eof"
+      ],
+      "properties": {
+        "explicit_project_argument": {
+          "type": "boolean"
+        },
+        "catalog": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "const": "find_code_symbol"
+          }
+        },
+        "catalog_is_closed": {
+          "type": "boolean"
+        },
+        "valid_journey_passed": {
+          "type": "boolean"
+        },
+        "stdout_jsonrpc_only": {
+          "type": "boolean"
+        },
+        "clean_eof": {
+          "$ref": "#/$defs/clean_eof"
+        }
+      }
+    },
+    "python_rollback_result": {
+      "description": "Rollback removes only preview selection after the preview process exits. It must not reinstall, replace, reconfigure, or rebuild the Python package, public entry point, or default selector.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "only_preview_selection_removed",
+        "python_package_reinstalled",
+        "python_package_replaced",
+        "console_entrypoint_changed",
+        "default_selector_changed",
+        "legacy_journey_outcome"
+      ],
+      "properties": {
+        "only_preview_selection_removed": {
+          "type": "boolean"
+        },
+        "python_package_reinstalled": {
+          "type": "boolean"
+        },
+        "python_package_replaced": {
+          "type": "boolean"
+        },
+        "console_entrypoint_changed": {
+          "type": "boolean"
+        },
+        "default_selector_changed": {
+          "type": "boolean"
+        },
+        "legacy_journey_outcome": {
+          "enum": [
+            "PRODUCT_WORKS",
+            "FAIL",
+            "REFUSED"
+          ]
+        }
+      }
+    }
+  }
+}

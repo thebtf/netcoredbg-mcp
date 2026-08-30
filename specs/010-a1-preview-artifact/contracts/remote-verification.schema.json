@@ -1,0 +1,329 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "A1 preview Remote Verification Receipt",
+  "description": "Immutable verification of the same remote archive, manifest, and extracted executable identities before and after prerelease publication. It stores structural GitHub artifact references, bounded opaque identifiers, byte identities, and closed result codes only.",
+  "$comment": "Semantic admission resolves and raw-byte hashes candidate_identity_record, promotion_decision, promotion_attempt, remote_observation, remote_classification, and remote_consumer_proof through their structural GitHub artifact references. It requires one exact candidate binding, a promotion_attempt_id equal to the resolved promotion attempt, an APPROVE decision, a published_complete classification, the same released tag and assets for both phases, and a passing remote_release consumer proof. JSON Schema cannot compare the repeated dynamic identities.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verification_schema_version",
+    "verification_id",
+    "promotion_attempt_id",
+    "candidate_identity_record",
+    "candidate",
+    "promotion_decision",
+    "promotion_attempt",
+    "remote_observation",
+    "remote_classification",
+    "pre_publication_verification",
+    "post_publication_verification",
+    "remote_consumer_proof",
+    "outcome",
+    "verified_at"
+  ],
+  "properties": {
+    "verification_schema_version": {
+      "const": "1.0"
+    },
+    "verification_id": {
+      "$ref": "#/$defs/safe_opaque_id"
+    },
+    "promotion_attempt_id": {
+      "$ref": "#/$defs/safe_opaque_id"
+    },
+    "candidate_identity_record": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "candidate": {
+      "$ref": "candidate-identity.schema.json#/$defs/candidate_binding"
+    },
+    "promotion_decision": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "promotion_attempt": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "remote_observation": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "remote_classification": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "pre_publication_verification": {
+      "$ref": "#/$defs/pre_publication_verification"
+    },
+    "post_publication_verification": {
+      "$ref": "#/$defs/post_publication_verification"
+    },
+    "remote_consumer_proof": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "outcome": {
+      "$ref": "#/$defs/receipt_status"
+    },
+    "verified_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "outcome"
+        ],
+        "properties": {
+          "outcome": {
+            "const": "PASS"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "pre_publication_verification": {
+            "properties": {
+              "outcome": {
+                "const": "PASS"
+              }
+            }
+          },
+          "post_publication_verification": {
+            "properties": {
+              "outcome": {
+                "const": "PASS"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "safe_opaque_id": {
+      "$ref": "artifact-consumer-proof.schema.json#/$defs/safe_opaque_id"
+    },
+    "receipt_status": {
+      "$ref": "artifact-consumer-proof.schema.json#/$defs/receipt_status"
+    },
+    "expected_result_code": {
+      "$ref": "artifact-consumer-proof.schema.json#/$defs/expected_result_code"
+    },
+    "observed_result_code": {
+      "$ref": "artifact-consumer-proof.schema.json#/$defs/observed_result_code"
+    },
+    "github_identifier": {
+      "$ref": "candidate-identity.schema.json#/$defs/github_identifier"
+    },
+    "github_repository": {
+      "$ref": "candidate-identity.schema.json#/$defs/github_repository"
+    },
+    "github_artifact_file_reference": {
+      "$ref": "candidate-identity.schema.json#/$defs/github_artifact_file_reference"
+    },
+    "sha256": {
+      "$ref": "candidate-identity.schema.json#/$defs/sha256"
+    },
+    "tag": {
+      "$ref": "../../005-stateless-preview/contracts/preview-manifest.schema.json#/$defs/tag"
+    },
+    "archive_asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "size_bytes",
+        "sha256"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/github_identifier"
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^netcoredbg-mcp-stateless-preview-win-x64-(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)-preview\\.(?:[1-9][0-9]*)\\.zip$"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "manifest_asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "size_bytes",
+        "sha256"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/github_identifier"
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^netcoredbg-mcp-stateless-preview-win-x64-(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)-preview\\.(?:[1-9][0-9]*)\\.manifest\\.json$"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "remote_release_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "release_id",
+        "tag",
+        "prerelease",
+        "archive_asset",
+        "manifest_asset"
+      ],
+      "properties": {
+        "repository": {
+          "$ref": "#/$defs/github_repository"
+        },
+        "release_id": {
+          "$ref": "#/$defs/github_identifier"
+        },
+        "tag": {
+          "$ref": "#/$defs/tag"
+        },
+        "prerelease": {
+          "const": true
+        },
+        "archive_asset": {
+          "$ref": "#/$defs/archive_asset"
+        },
+        "manifest_asset": {
+          "$ref": "#/$defs/manifest_asset"
+        }
+      }
+    },
+    "executable": {
+      "$ref": "../../005-stateless-preview/contracts/preview-manifest.schema.json#/$defs/executable"
+    },
+    "remote_identity_verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "expected_result",
+        "observed_result",
+        "outcome",
+        "release",
+        "executable",
+        "archive_matches_candidate",
+        "manifest_matches_candidate",
+        "executable_matches_manifest",
+        "inherited_verifier_equations_pass"
+      ],
+      "properties": {
+        "phase": {
+          "enum": [
+            "PRE_PUBLICATION",
+            "POST_PUBLICATION"
+          ]
+        },
+        "expected_result": {
+          "$ref": "#/$defs/expected_result_code"
+        },
+        "observed_result": {
+          "$ref": "#/$defs/observed_result_code"
+        },
+        "outcome": {
+          "$ref": "#/$defs/receipt_status"
+        },
+        "release": {
+          "$ref": "#/$defs/remote_release_identity"
+        },
+        "executable": {
+          "$ref": "#/$defs/executable"
+        },
+        "archive_matches_candidate": {
+          "type": "boolean"
+        },
+        "manifest_matches_candidate": {
+          "type": "boolean"
+        },
+        "executable_matches_manifest": {
+          "type": "boolean"
+        },
+        "inherited_verifier_equations_pass": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "outcome"
+            ],
+            "properties": {
+              "outcome": {
+                "const": "PASS"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "observed_result": {
+                "const": "SUCCESS"
+              },
+              "archive_matches_candidate": {
+                "const": true
+              },
+              "manifest_matches_candidate": {
+                "const": true
+              },
+              "executable_matches_manifest": {
+                "const": true
+              },
+              "inherited_verifier_equations_pass": {
+                "const": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    "pre_publication_verification": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/remote_identity_verification"
+        },
+        {
+          "properties": {
+            "phase": {
+              "const": "PRE_PUBLICATION"
+            }
+          }
+        }
+      ]
+    },
+    "post_publication_verification": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/remote_identity_verification"
+        },
+        {
+          "properties": {
+            "phase": {
+              "const": "POST_PUBLICATION"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
