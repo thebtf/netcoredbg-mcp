@@ -9,7 +9,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from netcoredbg_mcp.dap.client import DAPClient, sanitize_terminal_text
+from netcoredbg_mcp.dap.client import (
+    DapCleanupOutcome,
+    DAPClient,
+    DapTransportTerminal,
+    sanitize_terminal_text,
+)
 from netcoredbg_mcp.dap.protocol import Commands, DAPEvent, DAPRequest, DAPResponse
 from netcoredbg_mcp.resource_updates import STATE_URI, THREADS_URI
 from netcoredbg_mcp.session import DebugState, SessionManager
@@ -1085,6 +1090,76 @@ class TestDAPClientTransportDeath:
             True,
             "netcoredbg process died — pending request cancelled",
         )
+
+    @pytest.mark.asyncio
+    async def test_kill_disappearance_race_still_publishes_terminal_record(self):
+        """A process disappearing during kill escalation must not abort finalization."""
+
+        class ClosedStdout:
+            async def readline(self) -> bytes:
+                return b""
+
+        class EmptyStderr:
+            async def read(self, _size: int = -1) -> bytes:
+                return b""
+
+            async def readline(self) -> bytes:
+                return b""
+
+        class VanishingProcess:
+            def __init__(self) -> None:
+                self.pid = 41009
+                self.stdout = ClosedStdout()
+                self.stderr = EmptyStderr()
+                self.returncode: int | None = None
+                self.release = asyncio.Event()
+                self.terminate_calls = 0
+                self.kill_calls = 0
+
+            async def wait(self) -> int:
+                await self.release.wait()
+                return 23
+
+            def terminate(self) -> None:
+                self.terminate_calls += 1
+
+            def kill(self) -> None:
+                self.kill_calls += 1
+                raise ProcessLookupError
+
+        process = VanishingProcess()
+        client = DAPClient("/path")
+        records: list[DapTransportTerminal] = []
+        published = asyncio.Event()
+
+        def record(terminal: DapTransportTerminal) -> None:
+            records.append(terminal)
+            published.set()
+
+        client.set_transport_terminal_handler(record)
+
+        try:
+            with (
+                patch(
+                    "netcoredbg_mcp.dap.client.asyncio.create_subprocess_exec",
+                    return_value=process,
+                ),
+                patch("netcoredbg_mcp.dap.client.NATURAL_EXIT_TIMEOUT", 0.01),
+                patch("netcoredbg_mcp.dap.client.TERMINATE_TIMEOUT", 0.01),
+            ):
+                await client.start(generation=1)
+                await asyncio.wait_for(published.wait(), timeout=1.0)
+        finally:
+            process.release.set()
+            run = client._run
+            if run is not None and run.process_task is not None:
+                await run.process_task
+
+        assert len(records) == 1
+        assert records[0].process_exited is True
+        assert records[0].cleanup_outcome is DapCleanupOutcome.NATURAL_EXIT
+        assert process.terminate_calls == 1
+        assert process.kill_calls == 1
 
     @pytest.mark.asyncio
     async def test_terminal_callback_preserves_immutable_known_and_unobserved_exit_facts(

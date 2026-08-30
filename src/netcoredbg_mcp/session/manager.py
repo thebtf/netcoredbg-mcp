@@ -842,6 +842,7 @@ class SessionManager:
 
         if self._client.is_running:
             return
+        self._initialized_event.clear()
         if self._state.state == DebugState.TERMINATED:
             self._begin_debuggee_epoch(lifecycle_state=DebugState.IDLE)
 

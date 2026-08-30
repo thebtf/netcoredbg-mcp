@@ -582,13 +582,20 @@ class DAPClient:
                 run.cleanup_outcome = DapCleanupOutcome.TERMINATED
             except asyncio.TimeoutError:
                 logger.warning("Process %s did not terminate, killing...", process.pid)
-                process.kill()
                 try:
-                    run.returncode = await asyncio.wait_for(process.wait(), timeout=KILL_TIMEOUT)
+                    process.kill()
+                except ProcessLookupError:
                     run.process_exited = True
-                    run.cleanup_outcome = DapCleanupOutcome.KILLED
-                except asyncio.TimeoutError:
-                    logger.error("Failed to observe killed process %s", process.pid)
+                    run.cleanup_outcome = DapCleanupOutcome.NATURAL_EXIT
+                else:
+                    try:
+                        run.returncode = await asyncio.wait_for(
+                            process.wait(), timeout=KILL_TIMEOUT
+                        )
+                        run.process_exited = True
+                        run.cleanup_outcome = DapCleanupOutcome.KILLED
+                    except asyncio.TimeoutError:
+                        logger.error("Failed to observe killed process %s", process.pid)
             except ProcessLookupError:
                 run.process_exited = True
                 run.cleanup_outcome = DapCleanupOutcome.NATURAL_EXIT

@@ -346,6 +346,7 @@ class TestSessionManagerStart:
         manager._client = client
         manager._state.state = DebugState.TERMINATED
         manager._state.exit_code = 23
+        manager._initialized_event.set()
 
         await manager.start()
 
@@ -353,6 +354,7 @@ class TestSessionManagerStart:
         client.initialize.assert_awaited_once_with()
         assert manager.state.state == DebugState.INITIALIZING
         assert manager.state.exit_code is None
+        assert manager._initialized_event.is_set() is False
 
     @pytest.mark.asyncio
     async def test_start_stops_the_current_generation_when_it_terminalizes_immediately(self):
