@@ -2,12 +2,15 @@
 
 import asyncio
 import logging
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from netcoredbg_mcp.dap.client import DAPClient
 from netcoredbg_mcp.dap.protocol import Commands, DAPEvent, DAPRequest, DAPResponse
+from netcoredbg_mcp.resource_updates import STATE_URI, THREADS_URI
+from netcoredbg_mcp.session import DebugState, SessionManager
 
 
 class TestDAPClientInit:
@@ -851,3 +854,62 @@ class TestDAPClientDisconnect:
         await client.disconnect(terminate=False)
 
         assert captured_args["arguments"]["terminateDebuggee"] is False
+
+
+class TestDAPClientTransportDeath:
+    """Regression coverage for adapter transport loss without DAP termination."""
+
+    @pytest.mark.asyncio
+    async def test_stdout_eof_publishes_terminal_manager_state(self):
+        """Raw adapter EOF must invalidate the manager's public live-session state."""
+
+        class ClosedStdout:
+            """Minimal stream whose first read observes a closed adapter pipe."""
+
+            async def readline(self) -> bytes:
+                return b""
+
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+
+        client = DAPClient("/path")
+        manager._client = client
+        manager._register_event_handlers()
+        manager._state.state = DebugState.RUNNING
+        manager._state.process_id = 29736
+
+        state_changes: list[DebugState] = []
+        resource_updates: list[tuple[str, ...]] = []
+        manager.on_state_change(state_changes.append)
+
+        async def record_resource_updates(uris: tuple[str, ...]) -> None:
+            resource_updates.append(uris)
+
+        manager.set_resource_update_callback(record_resource_updates)
+
+        pending = asyncio.get_running_loop().create_future()
+        client._pending[1] = pending
+        client._process = SimpleNamespace(stdout=ClosedStdout(), returncode=1)
+
+        try:
+            await client._read_loop()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            state = manager.state.to_dict()
+            observed = {
+                "state": state["state"],
+                "debuggeeAlive": state["debuggeeAlive"],
+                "stateChanges": state_changes,
+                "resourceUpdates": resource_updates,
+                "pendingError": str(pending.exception()),
+            }
+        finally:
+            await manager.close_resource_update_notifications()
+
+        assert observed == {
+            "state": DebugState.TERMINATED.value,
+            "debuggeeAlive": False,
+            "stateChanges": [DebugState.TERMINATED],
+            "resourceUpdates": [(STATE_URI, THREADS_URI)],
+            "pendingError": "netcoredbg process died — pending request cancelled",
+        }
