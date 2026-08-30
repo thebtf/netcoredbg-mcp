@@ -1,11 +1,14 @@
 """Tests for session manager."""
 
+import asyncio
+import json
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from netcoredbg_mcp.dap import DAPEvent, DAPResponse
+from netcoredbg_mcp.dap.client import DAPClient
 from netcoredbg_mcp.session import DebugState, SessionManager
 
 
@@ -463,7 +466,7 @@ class TestEventHandlers:
             assert manager.state.state == DebugState.RUNNING
 
     def test_on_terminated_event(self):
-        """Test handling terminated event."""
+        """DAP terminated ends debugging without inventing a debuggee exit code."""
         with patch("netcoredbg_mcp.session.manager.DAPClient"):
             manager = SessionManager()
             manager._state.state = DebugState.RUNNING
@@ -472,6 +475,7 @@ class TestEventHandlers:
             manager._on_terminated(event)
 
             assert manager.state.state == DebugState.TERMINATED
+            assert manager.state.exit_code is None
 
     def test_on_exited_event(self):
         """Test handling exited event."""
@@ -482,6 +486,80 @@ class TestEventHandlers:
             manager._on_exited(event)
 
             assert manager.state.exit_code == 0
+
+    @pytest.mark.asyncio
+    async def test_exited_without_terminated_then_transport_eof_terminalizes_current_session(self):
+        """A DAP exited fact followed by raw EOF must yield one terminal manager outcome."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+
+        client = DAPClient("/path/to/netcoredbg")
+        manager._client = client
+        manager._register_event_handlers()
+        manager._state.state = DebugState.RUNNING
+        manager._state.process_id = 29736
+        state_changes: list[DebugState] = []
+        manager.on_state_change(state_changes.append)
+
+        payload = json.dumps(
+            {
+                "seq": 1,
+                "type": "event",
+                "event": "exited",
+                "body": {"exitCode": 23},
+            }
+        ).encode("utf-8")
+        stdout = MagicMock()
+        stdout.readline = AsyncMock(
+            side_effect=[
+                f"Content-Length: {len(payload)}\r\n".encode("ascii"),
+                b"\r\n",
+                b"",
+            ]
+        )
+        stdout.readexactly = AsyncMock(return_value=payload)
+        client._process = MagicMock(stdout=stdout, returncode=0)
+
+        await client._read_loop()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        public_state = manager.state.to_dict()
+        assert manager.state.exit_code == 23
+        assert public_state["state"] == DebugState.TERMINATED.value
+        assert public_state["debuggeeAlive"] is False
+        assert state_changes == [DebugState.TERMINATED]
+        assert manager._execution_event.is_set()
+
+    @pytest.mark.asyncio
+    async def test_prior_client_terminated_event_leaves_newer_session_epoch_unchanged(self):
+        """A prior client's terminated fact must not mutate a newer manager session."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+
+        prior_client = DAPClient("/path/to/prior-netcoredbg")
+        current_client = DAPClient("/path/to/current-netcoredbg")
+        manager._client = prior_client
+        manager._register_event_handlers()
+        prior_epoch = manager.state.activity_epoch
+
+        manager._client = current_client
+        manager._begin_debuggee_epoch()
+        current_epoch = manager.state.activity_epoch
+        manager._state.state = DebugState.RUNNING
+        manager._state.process_id = 41234
+        manager._execution_event.clear()
+
+        prior_client._handle_message({"seq": 2, "type": "event", "event": "terminated", "body": {}})
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert prior_client is not manager._client
+        assert current_epoch is not prior_epoch
+        assert manager.state.activity_epoch is current_epoch
+        assert manager.state.state == DebugState.RUNNING
+        assert manager.state.exit_code is None
+        assert not manager._execution_event.is_set()
 
     def test_on_output_event(self):
         """Test handling output event."""
@@ -665,9 +743,7 @@ class TestExecutionControl:
         with patch("netcoredbg_mcp.session.manager.DAPClient") as mock_client_class:
             mock_client = MagicMock()
             mock_client.continue_execution = AsyncMock(
-                return_value=DAPResponse(
-                    seq=1, request_seq=1, success=True, command="continue"
-                )
+                return_value=DAPResponse(seq=1, request_seq=1, success=True, command="continue")
             )
             mock_client_class.return_value = mock_client
 
@@ -697,9 +773,7 @@ class TestExecutionControl:
         with patch("netcoredbg_mcp.session.manager.DAPClient") as mock_client_class:
             mock_client = MagicMock()
             mock_client.step_over = AsyncMock(
-                return_value=DAPResponse(
-                    seq=1, request_seq=1, success=True, command="next"
-                )
+                return_value=DAPResponse(seq=1, request_seq=1, success=True, command="next")
             )
             mock_client_class.return_value = mock_client
 
@@ -717,9 +791,7 @@ class TestExecutionControl:
         with patch("netcoredbg_mcp.session.manager.DAPClient") as mock_client_class:
             mock_client = MagicMock()
             mock_client.step_in = AsyncMock(
-                return_value=DAPResponse(
-                    seq=1, request_seq=1, success=True, command="stepIn"
-                )
+                return_value=DAPResponse(seq=1, request_seq=1, success=True, command="stepIn")
             )
             mock_client_class.return_value = mock_client
 
@@ -737,9 +809,7 @@ class TestExecutionControl:
         with patch("netcoredbg_mcp.session.manager.DAPClient") as mock_client_class:
             mock_client = MagicMock()
             mock_client.step_out = AsyncMock(
-                return_value=DAPResponse(
-                    seq=1, request_seq=1, success=True, command="stepOut"
-                )
+                return_value=DAPResponse(seq=1, request_seq=1, success=True, command="stepOut")
             )
             mock_client_class.return_value = mock_client
 
@@ -757,9 +827,7 @@ class TestExecutionControl:
         with patch("netcoredbg_mcp.session.manager.DAPClient") as mock_client_class:
             mock_client = MagicMock()
             mock_client.pause = AsyncMock(
-                return_value=DAPResponse(
-                    seq=1, request_seq=1, success=True, command="pause"
-                )
+                return_value=DAPResponse(seq=1, request_seq=1, success=True, command="pause")
             )
             mock_client_class.return_value = mock_client
 
@@ -789,9 +857,7 @@ class FakeLaunchClient:
         self.events.append("set_function_breakpoints")
         return DAPResponse(1, 1, True, "setFunctionBreakpoints")
 
-    async def set_exception_breakpoints(
-        self, filters: list[str] | None = None
-    ) -> DAPResponse:
+    async def set_exception_breakpoints(self, filters: list[str] | None = None) -> DAPResponse:
         self.events.append("set_exception_breakpoints")
         return DAPResponse(1, 1, True, "setExceptionBreakpoints")
 

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from mcp.shared.exceptions import McpError
 
+from netcoredbg_mcp.dap.client import DAPClient
 from netcoredbg_mcp.dap.protocol import DAPEvent
 from netcoredbg_mcp.resource_updates import (
     BREAKPOINTS_URI,
@@ -99,9 +101,7 @@ async def test_session_manager_publishes_async_dap_resource_mutations() -> None:
             body={"category": "stdout", "output": "hello\n"},
         )
     )
-    manager._on_thread(
-        DAPEvent(seq=2, event="thread", body={"reason": "started", "threadId": 7})
-    )
+    manager._on_thread(DAPEvent(seq=2, event="thread", body={"reason": "started", "threadId": 7}))
     manager._on_process(
         DAPEvent(
             seq=3,
@@ -139,6 +139,126 @@ async def test_session_manager_publishes_async_dap_resource_mutations() -> None:
     )
     await asyncio.sleep(0)
     assert len(published) == count
+
+
+@pytest.mark.asyncio
+async def test_exited_then_eof_publishes_one_terminal_resource_path() -> None:
+    """Exited plus EOF must publish one terminal state/thread resource outcome, not two."""
+    with patch("netcoredbg_mcp.session.manager.DAPClient"):
+        from netcoredbg_mcp.session import SessionManager
+
+        manager = SessionManager()
+
+    client = DAPClient("/path/to/netcoredbg")
+    manager._client = client
+    manager._register_event_handlers()
+    manager._state.state = DebugState.RUNNING
+    manager._state.process_id = 29736
+    published: list[tuple[str, ...]] = []
+
+    async def record(uris: tuple[str, ...]) -> None:
+        published.append(uris)
+
+    manager.set_resource_update_callback(record)
+    payload = json.dumps(
+        {
+            "seq": 1,
+            "type": "event",
+            "event": "exited",
+            "body": {"exitCode": 23},
+        }
+    ).encode("utf-8")
+    stdout = MagicMock()
+    stdout.readline = AsyncMock(
+        side_effect=[
+            f"Content-Length: {len(payload)}\r\n".encode("ascii"),
+            b"\r\n",
+            b"",
+        ]
+    )
+    stdout.readexactly = AsyncMock(return_value=payload)
+    client._process = MagicMock(stdout=stdout, returncode=0)
+
+    try:
+        await client._read_loop()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        observed = {
+            "state": manager.state.state,
+            "debuggeeAlive": manager.state.to_dict()["debuggeeAlive"],
+            "stateRevision": manager.resource_update_revision(STATE_URI),
+            "threadsRevision": manager.resource_update_revision(THREADS_URI),
+            "published": list(published),
+        }
+    finally:
+        await manager.close_resource_update_notifications()
+
+    assert observed["state"] == DebugState.TERMINATED
+    assert observed["debuggeeAlive"] is False
+    assert observed["stateRevision"] == 1
+    assert observed["threadsRevision"] == 1
+    assert observed["published"].count((STATE_URI,)) == 1
+    assert observed["published"].count((THREADS_URI,)) == 1
+    assert len(observed["published"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_explicit_stop_defers_terminal_state_thread_publication_to_its_reset_path() -> None:
+    """A terminal event during explicit stop must not publish before the one reset outcome."""
+    with patch("netcoredbg_mcp.session.manager.DAPClient"):
+        from netcoredbg_mcp.session import SessionManager
+
+        manager = SessionManager()
+
+    disconnect_started = asyncio.Event()
+    release_disconnect = asyncio.Event()
+
+    async def disconnect(**_kwargs) -> None:
+        disconnect_started.set()
+        await release_disconnect.wait()
+
+    client = MagicMock()
+    client.is_running = True
+    client.disconnect = disconnect
+    client.stop = AsyncMock()
+    manager._client = client
+    manager._state.state = DebugState.RUNNING
+    state_changes: list[DebugState] = []
+    published: list[tuple[str, ...]] = []
+    manager.on_state_change(state_changes.append)
+
+    async def record(uris: tuple[str, ...]) -> None:
+        published.append(uris)
+
+    manager.set_resource_update_callback(record)
+    stop_task = asyncio.create_task(manager.stop())
+    await disconnect_started.wait()
+
+    try:
+        manager._on_terminated(DAPEvent(seq=2, event="terminated", body={}))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        observed_before_reset = {
+            "stateChanges": list(state_changes),
+            "stateRevision": manager.resource_update_revision(STATE_URI),
+            "threadsRevision": manager.resource_update_revision(THREADS_URI),
+            "published": list(published),
+        }
+    finally:
+        release_disconnect.set()
+        await stop_task
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await manager.close_resource_update_notifications()
+
+    assert observed_before_reset == {
+        "stateChanges": [],
+        "stateRevision": 0,
+        "threadsRevision": 0,
+        "published": [],
+    }
+    assert state_changes == [DebugState.IDLE]
+    assert manager.state.state == DebugState.IDLE
 
 
 @pytest.mark.asyncio
@@ -297,8 +417,9 @@ async def test_line_breakpoint_mutations_publish_one_final_resource_snapshot() -
 
 
 @pytest.mark.asyncio
-async def test_sync_all_publishes_visible_line_changes_but_not_function_or_id_only_changes(
-) -> None:
+async def test_sync_all_publishes_visible_line_changes_but_not_function_or_id_only_changes() -> (
+    None
+):
     with patch("netcoredbg_mcp.session.manager.DAPClient"):
         from netcoredbg_mcp.session import SessionManager
 
@@ -314,11 +435,7 @@ async def test_sync_all_publishes_visible_line_changes_but_not_function_or_id_on
     async def sync_file(_file: str, _breakpoints: list[dict]) -> SimpleNamespace:
         return SimpleNamespace(
             success=True,
-            body={
-                "breakpoints": [
-                    {"id": response_id, "verified": True, "line": 12}
-                ]
-            },
+            body={"breakpoints": [{"id": response_id, "verified": True, "line": 12}]},
         )
 
     async def flush_updates() -> None:
@@ -366,12 +483,8 @@ async def test_session_manager_publishes_every_serialized_state_mutation() -> No
     manager.state.threads = [ThreadInfo(id=7, name="worker")]
     manager.state.current_thread_id = 7
     manager.state.current_frame_id = 9
-    manager._on_thread(
-        DAPEvent(seq=1, event="thread", body={"reason": "exited", "threadId": 7})
-    )
-    manager._on_invalidated(
-        DAPEvent(seq=2, event="invalidated", body={"areas": ["variables"]})
-    )
+    manager._on_thread(DAPEvent(seq=1, event="thread", body={"reason": "exited", "threadId": 7}))
+    manager._on_invalidated(DAPEvent(seq=2, event="invalidated", body={"areas": ["variables"]}))
     manager._on_loaded_source(
         DAPEvent(
             seq=3,
@@ -393,9 +506,7 @@ async def test_session_manager_publishes_every_serialized_state_mutation() -> No
             body={"progressId": "p1", "percentage": 50},
         )
     )
-    manager._on_progress_end(
-        DAPEvent(seq=6, event="progressEnd", body={"progressId": "p1"})
-    )
+    manager._on_progress_end(DAPEvent(seq=6, event="progressEnd", body={"progressId": "p1"}))
     manager._on_memory(
         DAPEvent(
             seq=7,
@@ -421,9 +532,7 @@ async def test_session_manager_publishes_every_serialized_state_mutation() -> No
     assert manager.resource_update_live_task_count() == 0
 
     published.clear()
-    manager.state.output_buffer.append(
-        OutputEntry(text="captured", category="stdout", sequence=1)
-    )
+    manager.state.output_buffer.append(OutputEntry(text="captured", category="stdout", sequence=1))
     manager.state.output_buffer.clear()
     await asyncio.sleep(0)
     assert published == [(OUTPUT_URI,)]
@@ -465,6 +574,7 @@ async def test_terminate_fallback_notifies_state_threads_and_output_once() -> No
     session.stop.assert_awaited_once()
     assert result["data"]["state"] == DebugState.IDLE.value
     assert calls == [STATE_URI, THREADS_URI, OUTPUT_URI]
+
 
 @pytest.mark.asyncio
 async def test_attach_tool_notifies_state_threads_and_output_once() -> None:
