@@ -115,6 +115,7 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="2*"/>
                 <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="190"/>
             </Grid.ColumnDefinitions>
 
             <GroupBox Grid.Column="0" Header="Characters">
@@ -162,6 +163,63 @@
                         AutomationProperties.AutomationId="btnOpenFile"
                         Click="BtnOpenFile_Click"/>
             </StackPanel>
+
+            <GroupBox Grid.Column="2" Header="Guarded child drag" Height="125"
+                      AutomationProperties.Name="Guarded child parent"
+                      AutomationProperties.AutomationId="guardedChildParent">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="64"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <Border x:Name="GuardedGestureSurface" Grid.Row="0" Margin="5" Padding="4"
+                            Background="#FFE8F2E8" BorderBrush="#FF3E7844" BorderThickness="1"
+                            ClipToBounds="True"
+                            AutomationProperties.Name="Guarded gesture surface"
+                            AutomationProperties.AutomationId="guardedGestureSurface"
+                            PreviewMouseLeftButtonDown="GuardedGestureSurface_PreviewMouseLeftButtonDown"
+                            PreviewMouseMove="GuardedGestureSurface_PreviewMouseMove"
+                            PreviewMouseLeftButtonUp="GuardedGestureSurface_PreviewMouseLeftButtonUp">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="42"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Border Grid.Column="0" Padding="1"
+                                    AutomationProperties.Name="Guarded child container"
+                                    AutomationProperties.AutomationId="guardedChildContainer">
+                                <Button x:Name="GuardedChildSource" Content="Drag" Padding="0" FontSize="9"
+                                        Focusable="False"
+                                        AutomationProperties.Name="Guarded child source"
+                                        AutomationProperties.AutomationId="guardedChildSource"/>
+                            </Border>
+                            <TextBlock Grid.Column="1" Margin="6,0,0,0" VerticalAlignment="Center"
+                                       Text="Drop +24" TextWrapping="Wrap" FontSize="10"/>
+                        </Grid>
+                    </Border>
+
+                    <TextBlock Grid.Row="1" Margin="5,0,5,3" FontSize="9" TextWrapping="Wrap"
+                               Text="{Binding GuardedChildStatusText}"
+                               AutomationProperties.Name="{Binding GuardedChildStatusText}"
+                               AutomationProperties.AutomationId="guardedChildStatus"/>
+
+                    <Canvas Grid.Row="0" IsHitTestVisible="False" Opacity="0.01" ClipToBounds="False">
+                        <Button x:Name="GuardedChildDuplicateOne" Width="8" Height="8" Canvas.Left="112" Canvas.Top="48"
+                                Content="Duplicate"
+                                AutomationProperties.Name="Guarded duplicate child"
+                                AutomationProperties.AutomationId="guardedChildDuplicate"/>
+                        <Button x:Name="GuardedChildDuplicateTwo" Width="8" Height="8" Canvas.Left="126" Canvas.Top="48"
+                                Content="Duplicate"
+                                AutomationProperties.Name="Guarded duplicate child"
+                                AutomationProperties.AutomationId="guardedChildDuplicate"/>
+                        <Button x:Name="GuardedChildOutsideClient" Width="8" Height="8" Canvas.Left="-4096" Canvas.Top="0"
+                                Content="Outside"
+                                AutomationProperties.Name="Guarded child outside client"
+                                AutomationProperties.AutomationId="guardedChildOutsideClient"/>
+                    </Canvas>
+                </Grid>
+            </GroupBox>
         </Grid>
 
         <!-- Fixed in-window hover fixture. It overlays the existing layout and never opens a Popup. -->

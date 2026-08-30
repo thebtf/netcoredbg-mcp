@@ -586,6 +586,621 @@ public static class ElementCommands
             $"Element not found. Search: {DescribeSearch(@params)}");
     }
 
+    /// <summary>
+    /// Resolves one descendant under one bound-process parent without issuing input.
+    /// The returned target is admitted only after two matching identity/geometry reads.
+    /// </summary>
+    public static JsonNode ResolveGuardedChild(
+        JsonNode? @params,
+        UIA3Automation automation,
+        AutomationElement? mainWindow)
+    {
+        if (mainWindow is null)
+            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+
+        var request = ReadGuardedChildRequest(@params);
+        var parentSelector = ReadGuardedSelectorCriteria(request.Parent);
+        var predicate = ReadGuardedSelectorCriteria(request.Predicate);
+        var boundProcessId = JsonRpcHandler.ProcessId;
+        if (boundProcessId <= 0)
+            return GuardedChildBlocked("IDENTITY_UNAVAILABLE", 0);
+
+        if (!TryGetBoundTopLevelWindows(
+                mainWindow,
+                automation,
+                boundProcessId,
+                out var topLevelWindows,
+                out var topLevelHandles))
+        {
+            return GuardedChildBlocked("IDENTITY_UNAVAILABLE", 0);
+        }
+
+        var parentResolution = ResolveUniqueGuardedParent(
+            topLevelWindows,
+            parentSelector,
+            boundProcessId,
+            automation);
+        if (parentResolution.Outcome != GuardedChildResolutionOutcome.Unique)
+        {
+            return parentResolution.Outcome switch
+            {
+                GuardedChildResolutionOutcome.Missing or GuardedChildResolutionOutcome.Ambiguous =>
+                    GuardedChildBlocked("PARENT_NOT_UNIQUE", parentResolution.MatchCount),
+                GuardedChildResolutionOutcome.ProcessMismatch =>
+                    GuardedChildBlocked("PROCESS_MISMATCH", parentResolution.MatchCount),
+                _ => GuardedChildBlocked("IDENTITY_UNAVAILABLE", parentResolution.MatchCount),
+            };
+        }
+
+        var childResolution = ResolveUniqueGuardedElement(
+            new[] { parentResolution.Element! },
+            includeRoots: false,
+            predicate,
+            boundProcessId,
+            request.MaximumNodes);
+        if (childResolution.Outcome != GuardedChildResolutionOutcome.Unique)
+        {
+            return childResolution.Outcome switch
+            {
+                GuardedChildResolutionOutcome.Missing =>
+                    GuardedChildBlocked("CHILD_NOT_FOUND", childResolution.MatchCount),
+                GuardedChildResolutionOutcome.Ambiguous =>
+                    GuardedChildBlocked("CHILD_AMBIGUOUS", childResolution.MatchCount),
+                GuardedChildResolutionOutcome.ProcessMismatch =>
+                    GuardedChildBlocked("PROCESS_MISMATCH", childResolution.MatchCount),
+                _ => GuardedChildBlocked("IDENTITY_UNAVAILABLE", childResolution.MatchCount),
+            };
+        }
+
+        var before = ReadGuardedChildSnapshot(
+            childResolution.Element!,
+            topLevelHandles,
+            boundProcessId);
+        if (before.FailureReason is not null)
+            return GuardedChildBlocked(before.FailureReason, childResolution.MatchCount);
+
+        var beforeSnapshot = before.Snapshot!.Value;
+        if (!MatchesGuardedChildSnapshot(beforeSnapshot, predicate))
+            return GuardedChildBlocked("IDENTITY_DRIFT", childResolution.MatchCount);
+
+        var after = ReadGuardedChildSnapshot(
+            childResolution.Element!,
+            topLevelHandles,
+            boundProcessId);
+        if (after.FailureReason is not null)
+            return GuardedChildBlocked(after.FailureReason, childResolution.MatchCount);
+
+        var afterSnapshot = after.Snapshot!.Value;
+        if (JsonRpcHandler.ProcessId != boundProcessId)
+            return GuardedChildBlocked("PROCESS_MISMATCH", childResolution.MatchCount);
+        if (beforeSnapshot.Hwnd != afterSnapshot.Hwnd)
+            return GuardedChildBlocked("HWND_MISMATCH", childResolution.MatchCount);
+        if (beforeSnapshot != afterSnapshot || !MatchesGuardedChildSnapshot(afterSnapshot, predicate))
+            return GuardedChildBlocked("IDENTITY_DRIFT", childResolution.MatchCount);
+
+        return GuardedChildAdmitted(beforeSnapshot);
+    }
+
+    private const int GuardedChildMaximumNodes = 4_096;
+    private const int GuardedChildMaximumAncestorDepth = 128;
+
+    private static GuardedChildRequest ReadGuardedChildRequest(JsonNode? @params)
+    {
+        if (@params is not JsonObject request || request.Count != 3 ||
+            request["parent"] is not JsonObject parent ||
+            request["predicate"] is not JsonObject predicate ||
+            request["maximumNodes"] is not JsonValue maximumNodesValue ||
+            !maximumNodesValue.TryGetValue<int>(out var maximumNodes) ||
+            maximumNodes is < 1 or > GuardedChildMaximumNodes)
+        {
+            throw new InvalidDataException(
+                "resolve_guarded_child requires parent, predicate, and maximumNodes from 1 through 4096.");
+        }
+
+        return new GuardedChildRequest(parent, predicate, maximumNodes);
+    }
+
+    private static GuardedSelectorCriteria ReadGuardedSelectorCriteria(JsonObject selector)
+    {
+        var automationId = ReadGuardedSelectorText(selector, "automationId");
+        var name = ReadGuardedSelectorText(selector, "name");
+        var controlTypeText = ReadGuardedSelectorText(selector, "controlType");
+        if (automationId is null && name is null && controlTypeText is null)
+            throw new InvalidDataException("A guarded selector requires automationId, name, or controlType.");
+
+        return new GuardedSelectorCriteria(
+            automationId,
+            name,
+            controlTypeText is null ? null : ParseControlType(controlTypeText));
+    }
+
+    private static GuardedChildResolution ResolveUniqueGuardedParent(
+        IReadOnlyList<AutomationElement> roots,
+        GuardedSelectorCriteria selector,
+        int boundProcessId,
+        UIA3Automation automation)
+    {
+        var factory = new ConditionFactory(automation.PropertyLibrary);
+        var conditions = new List<ConditionBase>();
+        if (selector.AutomationId is not null)
+            conditions.Add(factory.ByAutomationId(selector.AutomationId));
+        if (selector.Name is not null)
+            conditions.Add(factory.ByName(selector.Name));
+        if (selector.ControlType is not null)
+            conditions.Add(factory.ByControlType(selector.ControlType.Value));
+        var condition = conditions.Count == 1
+            ? conditions[0]
+            : new AndCondition(conditions.ToArray());
+        AutomationElement? match = null;
+        var matchCount = 0;
+        foreach (var root in roots)
+        {
+            var candidates = new List<AutomationElement>();
+            if (TryMatchesGuardedSelector(root, selector, out var rootMatches) && rootMatches)
+                candidates.Add(root);
+            try
+            {
+                candidates.AddRange(root.FindAllDescendants(condition));
+            }
+            catch
+            {
+                return GuardedChildResolution.IdentityUnavailable(matchCount);
+            }
+            foreach (var candidate in candidates)
+            {
+                var processId = TryReadProcessId(candidate);
+                if (processId is null)
+                    continue;
+                if (processId != boundProcessId)
+                    return GuardedChildResolution.ProcessMismatch(matchCount);
+                matchCount++;
+                if (matchCount == 2)
+                    return GuardedChildResolution.Ambiguous(matchCount);
+                match = candidate;
+            }
+        }
+        return matchCount == 1
+            ? GuardedChildResolution.Unique(match!)
+            : GuardedChildResolution.Missing();
+    }
+
+    private static bool TryGetBoundTopLevelWindows(
+        AutomationElement mainWindow,
+        UIA3Automation automation,
+        int boundProcessId,
+        out List<AutomationElement> windows,
+        out HashSet<IntPtr> windowHandles)
+    {
+        windows = new List<AutomationElement>();
+        windowHandles = new HashSet<IntPtr>();
+        AutomationElement[] siblings;
+        try
+        {
+            var desktop = automation.GetDesktop();
+            siblings = desktop.FindAllChildren(
+                new ConditionFactory(automation.PropertyLibrary).ByProcessId(boundProcessId));
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (siblings.Length == 0)
+            return false;
+
+        foreach (var sibling in siblings)
+        {
+            IntPtr hwnd;
+            int processId;
+            try
+            {
+                hwnd = sibling.Properties.NativeWindowHandle.ValueOrDefault;
+                processId = sibling.Properties.ProcessId.ValueOrDefault;
+            }
+            catch
+            {
+                return false;
+            }
+
+            if (hwnd == IntPtr.Zero || processId != boundProcessId)
+                return false;
+            if (windowHandles.Add(hwnd))
+                windows.Add(sibling);
+        }
+
+        try
+        {
+            var mainWindowHandle = mainWindow.Properties.NativeWindowHandle.ValueOrDefault;
+            return mainWindowHandle != IntPtr.Zero && windowHandles.Contains(mainWindowHandle);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static GuardedChildResolution ResolveUniqueGuardedElement(
+        IReadOnlyList<AutomationElement> roots,
+        bool includeRoots,
+        GuardedSelectorCriteria selector,
+        int boundProcessId,
+        int maximumNodes)
+    {
+        var queue = new Queue<AutomationElement>();
+        var discovered = 0;
+        foreach (var root in roots)
+        {
+            if (includeRoots)
+            {
+                if (!TryEnqueueGuardedElement(queue, root, ref discovered, maximumNodes))
+                    return GuardedChildResolution.IdentityUnavailable(0);
+            }
+            else if (!TryEnqueueGuardedChildren(queue, root, ref discovered, maximumNodes))
+            {
+                return GuardedChildResolution.IdentityUnavailable(0);
+            }
+        }
+
+        AutomationElement? match = null;
+        var matchCount = 0;
+        while (queue.Count > 0)
+        {
+            var element = queue.Dequeue();
+            var processId = TryReadProcessId(element);
+            if (processId is not null && processId != boundProcessId)
+                return GuardedChildResolution.ProcessMismatch(matchCount);
+            var isMatch = false;
+            if (processId == boundProcessId &&
+                !TryMatchesGuardedSelector(element, selector, out isMatch))
+            {
+                return GuardedChildResolution.IdentityUnavailable(matchCount);
+            }
+
+            if (isMatch)
+            {
+                matchCount++;
+                if (matchCount == 2)
+                    return GuardedChildResolution.Ambiguous(matchCount);
+                match = element;
+            }
+
+            if (!TryEnqueueGuardedChildren(queue, element, ref discovered, maximumNodes))
+                return GuardedChildResolution.IdentityUnavailable(matchCount);
+        }
+
+        return matchCount switch
+        {
+            0 => GuardedChildResolution.Missing(),
+            1 => GuardedChildResolution.Unique(match!),
+            _ => throw new InvalidOperationException("Unexpected guarded child resolution state."),
+        };
+    }
+
+    private static bool TryEnqueueGuardedElement(
+        Queue<AutomationElement> queue,
+        AutomationElement element,
+        ref int discovered,
+        int maximumNodes)
+    {
+        if (discovered >= maximumNodes)
+            return false;
+
+        queue.Enqueue(element);
+        discovered++;
+        return true;
+    }
+
+    private static bool TryEnqueueGuardedChildren(
+        Queue<AutomationElement> queue,
+        AutomationElement parent,
+        ref int discovered,
+        int maximumNodes)
+    {
+        AutomationElement[] children;
+        try
+        {
+            children = parent.FindAllChildren();
+        }
+        catch
+        {
+            return false;
+        }
+
+        foreach (var child in children)
+        {
+            if (!TryEnqueueGuardedElement(queue, child, ref discovered, maximumNodes))
+                return false;
+        }
+
+        return true;
+    }
+
+    private static bool TryMatchesGuardedSelector(
+        AutomationElement element,
+        GuardedSelectorCriteria selector,
+        out bool isMatch)
+    {
+        try
+        {
+            var automationId = element.AutomationId ?? string.Empty;
+            var name = element.Name ?? string.Empty;
+            var controlType = element.ControlType;
+
+            isMatch =
+                (selector.AutomationId is null || string.Equals(
+                    automationId, selector.AutomationId, StringComparison.Ordinal)) &&
+                (selector.Name is null || string.Equals(name, selector.Name, StringComparison.Ordinal)) &&
+                (selector.ControlType is null || controlType == selector.ControlType);
+            return true;
+        }
+        catch
+        {
+            isMatch = false;
+            return false;
+        }
+    }
+
+    private static GuardedChildSnapshotRead ReadGuardedChildSnapshot(
+        AutomationElement element,
+        HashSet<IntPtr> topLevelHandles,
+        int boundProcessId)
+    {
+        var automationId = SafeString(() => element.AutomationId);
+        var name = SafeString(() => element.Name);
+        var resolvedControlType = SafeControlType(element);
+        if (resolvedControlType is null)
+            return GuardedChildSnapshotRead.Failure("IDENTITY_UNAVAILABLE");
+        var controlType = resolvedControlType.Value.ToString();
+
+        if (string.IsNullOrEmpty(controlType))
+            return GuardedChildSnapshotRead.Failure("IDENTITY_UNAVAILABLE");
+        var processId = TryReadProcessId(element);
+        if (processId is null)
+            return GuardedChildSnapshotRead.Failure("PROCESS_MISMATCH");
+        if (processId != boundProcessId)
+            return GuardedChildSnapshotRead.Failure("PROCESS_MISMATCH");
+
+        if (!TryResolveOwningTopLevelHwnd(element, topLevelHandles, out var hwnd))
+            return GuardedChildSnapshotRead.Failure("HWND_MISMATCH");
+        if (GetWindowThreadProcessId(hwnd, out var hwndProcessId) == 0)
+            return GuardedChildSnapshotRead.Failure("HWND_MISMATCH");
+        if (hwndProcessId != (uint)boundProcessId)
+            return GuardedChildSnapshotRead.Failure("PROCESS_MISMATCH");
+
+        GuardedChildRect rectangle;
+        try
+        {
+            var bounds = element.BoundingRectangle;
+            rectangle = new GuardedChildRect(bounds.Left, bounds.Top, bounds.Right, bounds.Bottom);
+        }
+        catch
+        {
+            return GuardedChildSnapshotRead.Failure("RECTANGLE_INVALID");
+        }
+
+        if (!rectangle.IsPositive)
+            return GuardedChildSnapshotRead.Failure("RECTANGLE_INVALID");
+        if (!TryReadScreenClientRectangle(hwnd, out var clientRectangle))
+            return GuardedChildSnapshotRead.Failure("RECTANGLE_INVALID");
+        if (!IsFullyContained(clientRectangle, rectangle))
+            return GuardedChildSnapshotRead.Failure("CONTAINMENT_FAILURE");
+
+        return GuardedChildSnapshotRead.Success(new GuardedChildSnapshot(
+            automationId,
+            name,
+            controlType,
+            processId.Value,
+            hwnd.ToInt64(),
+            rectangle,
+            clientRectangle));
+    }
+
+    private static bool TryResolveOwningTopLevelHwnd(
+        AutomationElement element,
+        HashSet<IntPtr> topLevelHandles,
+        out IntPtr hwnd)
+    {
+        AutomationElement? current = element;
+        for (var depth = 0; current is not null && depth < GuardedChildMaximumAncestorDepth; depth++)
+        {
+            var candidate = SafeHandle(current);
+
+            if (candidate != IntPtr.Zero && topLevelHandles.Contains(candidate))
+            {
+                hwnd = candidate;
+                return true;
+            }
+
+            try
+            {
+                current = current.Parent;
+            }
+            catch
+            {
+                hwnd = IntPtr.Zero;
+                return false;
+            }
+        }
+
+        hwnd = IntPtr.Zero;
+        return false;
+    }
+
+    private static bool TryReadScreenClientRectangle(IntPtr hwnd, out GuardedChildRect clientRectangle)
+    {
+        clientRectangle = default;
+        if (!GetClientRect(hwnd, out var client) ||
+            client.Right <= client.Left || client.Bottom <= client.Top)
+        {
+            return false;
+        }
+
+        var topLeft = new NativePoint { X = client.Left, Y = client.Top };
+        var bottomRight = new NativePoint { X = client.Right, Y = client.Bottom };
+        if (!ClientToScreen(hwnd, ref topLeft) || !ClientToScreen(hwnd, ref bottomRight))
+            return false;
+
+        clientRectangle = new GuardedChildRect(
+            topLeft.X,
+            topLeft.Y,
+            bottomRight.X,
+            bottomRight.Y);
+        return clientRectangle.IsPositive;
+    }
+
+    private static bool IsFullyContained(GuardedChildRect container, GuardedChildRect child) =>
+        child.Left >= container.Left &&
+        child.Top >= container.Top &&
+        child.Right <= container.Right &&
+        child.Bottom <= container.Bottom;
+
+    private static bool MatchesGuardedChildSnapshot(
+        GuardedChildSnapshot snapshot,
+        GuardedSelectorCriteria selector) =>
+        (selector.AutomationId is null || string.Equals(
+            snapshot.AutomationId, selector.AutomationId, StringComparison.Ordinal)) &&
+        (selector.Name is null || string.Equals(snapshot.Name, selector.Name, StringComparison.Ordinal)) &&
+        (selector.ControlType is null || string.Equals(
+            snapshot.ControlType, selector.ControlType.ToString(), StringComparison.Ordinal));
+
+    private static JsonObject GuardedChildAdmitted(GuardedChildSnapshot snapshot) => new()
+    {
+        ["status"] = "ADMITTED",
+        ["match_count"] = 1,
+        ["target"] = new JsonObject
+        {
+            ["automation_id"] = snapshot.AutomationId,
+            ["name"] = snapshot.Name,
+            ["control_type"] = snapshot.ControlType,
+            ["process_id"] = snapshot.ProcessId,
+            ["hwnd"] = snapshot.Hwnd,
+            ["rectangle"] = GuardedChildRectangleJson(snapshot.Rectangle),
+            ["center"] = new JsonObject
+            {
+                ["x"] = snapshot.Rectangle.Left + ((snapshot.Rectangle.Right - snapshot.Rectangle.Left) / 2),
+                ["y"] = snapshot.Rectangle.Top + ((snapshot.Rectangle.Bottom - snapshot.Rectangle.Top) / 2),
+            },
+        },
+        ["window"] = new JsonObject
+        {
+            ["hwnd"] = snapshot.Hwnd,
+            ["process_id"] = snapshot.ProcessId,
+            ["client_rectangle"] = GuardedChildRectangleJson(snapshot.ClientRectangle),
+        },
+        ["stability"] = new JsonObject
+        {
+            ["reads"] = 2,
+            ["matched"] = true,
+        },
+    };
+
+    private static JsonObject GuardedChildRectangleJson(GuardedChildRect rectangle) => new()
+    {
+        ["left"] = rectangle.Left,
+        ["top"] = rectangle.Top,
+        ["right"] = rectangle.Right,
+        ["bottom"] = rectangle.Bottom,
+        ["unit"] = "physical_px",
+        ["coordinate_space"] = "screen",
+    };
+
+    private static JsonObject GuardedChildBlocked(string reason, int matchCount) => new()
+    {
+        ["status"] = "BLOCKED",
+        ["reason"] = reason,
+        ["match_count"] = matchCount,
+    };
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetClientRect(IntPtr hwnd, out NativeRect rect);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern bool ClientToScreen(IntPtr hwnd, ref NativePoint point);
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct NativePoint
+    {
+        public int X;
+        public int Y;
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct NativeRect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    private sealed record GuardedChildRequest(
+        JsonObject Parent,
+        JsonObject Predicate,
+        int MaximumNodes);
+
+    private sealed record GuardedSelectorCriteria(
+        string? AutomationId,
+        string? Name,
+        ControlType? ControlType);
+
+    private enum GuardedChildResolutionOutcome
+    {
+        Unique,
+        Missing,
+        Ambiguous,
+        IdentityUnavailable,
+        ProcessMismatch,
+    }
+
+    private sealed record GuardedChildResolution(
+        GuardedChildResolutionOutcome Outcome,
+        AutomationElement? Element,
+        int MatchCount)
+    {
+        internal static GuardedChildResolution Unique(AutomationElement element) =>
+            new(GuardedChildResolutionOutcome.Unique, element, 1);
+
+        internal static GuardedChildResolution Missing() =>
+            new(GuardedChildResolutionOutcome.Missing, null, 0);
+
+        internal static GuardedChildResolution Ambiguous(int matchCount) =>
+            new(GuardedChildResolutionOutcome.Ambiguous, null, matchCount);
+
+        internal static GuardedChildResolution IdentityUnavailable(int matchCount) =>
+            new(GuardedChildResolutionOutcome.IdentityUnavailable, null, matchCount);
+
+        internal static GuardedChildResolution ProcessMismatch(int matchCount) =>
+            new(GuardedChildResolutionOutcome.ProcessMismatch, null, matchCount);
+    }
+
+    private readonly record struct GuardedChildRect(int Left, int Top, int Right, int Bottom)
+    {
+        internal bool IsPositive => Right > Left && Bottom > Top;
+    }
+
+    private readonly record struct GuardedChildSnapshot(
+        string AutomationId,
+        string Name,
+        string ControlType,
+        int ProcessId,
+        long Hwnd,
+        GuardedChildRect Rectangle,
+        GuardedChildRect ClientRectangle);
+
+    private sealed record GuardedChildSnapshotRead(
+        GuardedChildSnapshot? Snapshot,
+        string? FailureReason)
+    {
+        internal static GuardedChildSnapshotRead Success(GuardedChildSnapshot snapshot) =>
+            new(snapshot, null);
+
+        internal static GuardedChildSnapshotRead Failure(string reason) =>
+            new(null, reason);
+    }
+
     internal static GuardedSelectorResolution ResolveUniqueBoundElement(
         AutomationElement root,
         JsonObject selector,

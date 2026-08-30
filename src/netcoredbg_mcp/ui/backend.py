@@ -118,6 +118,15 @@ class UIBackend(Protocol):
         """Double-click at screen coordinates."""
         ...
 
+    async def resolve_guarded_child(
+        self,
+        parent: dict[str, Any],
+        predicate: dict[str, Any],
+        maximum_nodes: int,
+    ) -> dict[str, Any]:
+        """Resolve one stable guarded child without issuing pointer input."""
+        ...
+
     async def drag(
         self,
         from_x: int,

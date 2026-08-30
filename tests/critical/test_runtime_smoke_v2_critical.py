@@ -9,7 +9,10 @@ from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner, RuntimeSmok
 from netcoredbg_mcp.session.runtime_smoke_v2.actions.ui_drag import (
     REASON_NO_ROUTE_EVIDENCE,
 )
-from tests.smoke_test_manual import run_wpf_v2_state_oracle_runtime_smoke
+from tests.smoke_test_manual import (
+    run_wpf_v2_guarded_child_drag_runtime_smoke,
+    run_wpf_v2_state_oracle_runtime_smoke,
+)
 
 
 class CriticalV2Session:
@@ -151,9 +154,7 @@ async def test_runtime_smoke_v2_critical_happy_path_has_cleanup_proof() -> None:
 
 @pytest.mark.critical
 @pytest.mark.asyncio
-async def test_runtime_smoke_v2_critical_selector_miss_blocks_with_cleanup_proof() -> (
-    None
-):
+async def test_runtime_smoke_v2_critical_selector_miss_blocks_with_cleanup_proof() -> None:
     result = await _runner(CriticalV2Session(selector_missing=True)).run(_plan())
 
     assert result["status"] == "BLOCKED"
@@ -182,9 +183,7 @@ async def test_runtime_smoke_v2_critical_drag_blocks_without_route_evidence() ->
 
 @pytest.mark.critical
 @pytest.mark.asyncio
-async def test_runtime_smoke_v2_critical_drag_blocks_without_viewport_evidence() -> (
-    None
-):
+async def test_runtime_smoke_v2_critical_drag_blocks_without_viewport_evidence() -> None:
     missing_identity_snapshot = {
         "status": "PASS",
         "snapshot": {
@@ -224,3 +223,23 @@ async def test_runtime_smoke_v2_critical_direct_wpf_mcp_smoke() -> None:
         == "selector result did not match exact automation_id"
     ), evidence
     assert evidence["blocked"]["cleanup"]["process_registry_after"] == 0, evidence
+
+
+@pytest.mark.critical
+@pytest.mark.asyncio
+async def test_runtime_smoke_v2_critical_direct_wpf_guarded_child_drag_smoke() -> None:
+    if sys.platform != "win32":
+        pytest.skip("direct WPF runtime smoke requires Windows UI automation")
+
+    evidence = await run_wpf_v2_guarded_child_drag_runtime_smoke()
+
+    assert evidence["status"] == "PASS", evidence
+    route = evidence["route_evidence"]
+    assert route["admitted_target"]["automation_id"] == "guardedChildSource", evidence
+    assert route["admission_stability"] == {"reads": 2, "matched": True}, evidence
+    assert route["resolved_drop"] == {
+        "x": route["resolved_source"]["x"] + 24,
+        "y": route["resolved_source"]["y"],
+    }, evidence
+    assert route["pointer_invocations"] == 1, evidence
+    assert evidence["cleanup"]["process_registry_after"] == 0, evidence

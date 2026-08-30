@@ -34,6 +34,14 @@ public partial class MainWindow : Window
     private bool _measurementArmed;
     private bool _hoverSurfaceVisible;
     private string _hoverState = "closed";
+    private Point? _guardedChildGestureStart;
+    private Point? _guardedChildGestureLast;
+    private int _guardedChildPointerDownCount;
+    private int _guardedChildPointerMoveCount;
+    private int _guardedChildPointerUpCount;
+    private bool _guardedChildGestureMoved;
+    private double _guardedChildLastDeltaX;
+    private double _guardedChildLastDeltaY;
     private int PreviewMouseLeftButtonDownCount { get; set; }
     private int PreviewMouseLeftButtonUpCount { get; set; }
     private int ClickCount { get; set; }
@@ -100,6 +108,7 @@ public partial class MainWindow : Window
             new RoutedEventHandler(HoverRegion_Click),
             handledEventsToo: true);
         SetHoverState("closed", surfaceVisible: false);
+        UpdateGuardedChildGestureStatus();
         if (_captureCalibrationMode is "marker" or "black")
         {
             ContentRendered += OnCalibrationContentRendered;
@@ -242,6 +251,73 @@ public partial class MainWindow : Window
             clickCount = ClickCount,
             focusChangeCount = FocusChangeCount,
             measurementArmed = _measurementArmed,
+        });
+    }
+    private void GuardedGestureSurface_PreviewMouseLeftButtonDown(
+        object sender,
+        MouseButtonEventArgs e)
+    {
+        _guardedChildGestureStart = e.GetPosition(GuardedGestureSurface);
+        _guardedChildGestureLast = _guardedChildGestureStart;
+        _guardedChildPointerDownCount++;
+        _guardedChildGestureMoved = false;
+        _guardedChildLastDeltaX = 0;
+        _guardedChildLastDeltaY = 0;
+        UpdateGuardedChildGestureStatus();
+    }
+
+    private void GuardedGestureSurface_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (e.LeftButton != MouseButtonState.Pressed || _guardedChildGestureStart is not { } start)
+        {
+            return;
+        }
+
+        var current = e.GetPosition(GuardedGestureSurface);
+        _guardedChildGestureLast = current;
+        _guardedChildPointerMoveCount++;
+        _guardedChildLastDeltaX = Math.Round(current.X - start.X, 1);
+        _guardedChildLastDeltaY = Math.Round(current.Y - start.Y, 1);
+        _guardedChildGestureMoved = _guardedChildGestureMoved ||
+            _guardedChildLastDeltaX != 0 || _guardedChildLastDeltaY != 0;
+        UpdateGuardedChildGestureStatus();
+    }
+
+    private void GuardedGestureSurface_PreviewMouseLeftButtonUp(
+        object sender,
+        MouseButtonEventArgs e)
+    {
+        if (_guardedChildGestureStart is not { } start)
+        {
+            return;
+        }
+
+        var current = e.GetPosition(GuardedGestureSurface);
+        _guardedChildGestureLast = current;
+        _guardedChildPointerUpCount++;
+        _guardedChildLastDeltaX = Math.Round(current.X - start.X, 1);
+        _guardedChildLastDeltaY = Math.Round(current.Y - start.Y, 1);
+        _guardedChildGestureMoved = _guardedChildGestureMoved ||
+            _guardedChildLastDeltaX != 0 || _guardedChildLastDeltaY != 0;
+        _guardedChildGestureStart = null;
+        UpdateGuardedChildGestureStatus();
+    }
+
+    private void UpdateGuardedChildGestureStatus()
+    {
+        var state = _guardedChildPointerDownCount == 0
+            ? "idle"
+            : _guardedChildGestureStart is null ? "completed" : "dragging";
+        _viewModel.GuardedChildStatusText = JsonSerializer.Serialize(new
+        {
+            state,
+            sourceAutomationId = "guardedChildSource",
+            pointerDownCount = _guardedChildPointerDownCount,
+            pointerMoveCount = _guardedChildPointerMoveCount,
+            pointerUpCount = _guardedChildPointerUpCount,
+            moved = _guardedChildGestureMoved,
+            deltaX = _guardedChildLastDeltaX,
+            deltaY = _guardedChildLastDeltaY,
         });
     }
 
@@ -869,6 +945,7 @@ public class MainViewModel : INotifyPropertyChanged
     private string _genderStatusText = "No gender change";
     private string _selectorSafetyStatusText = "Selector side effects: 0";
     private string _hoverStatusText = string.Empty;
+    private string _guardedChildStatusText = string.Empty;
     private bool _isFeatureEnabled;
     private int _invokeCount;
     private int _selectorSafetyCount;
@@ -913,6 +990,11 @@ public class MainViewModel : INotifyPropertyChanged
     {
         get => _hoverStatusText;
         set { _hoverStatusText = value; OnPropertyChanged(); }
+    }
+    public string GuardedChildStatusText
+    {
+        get => _guardedChildStatusText;
+        set { _guardedChildStatusText = value; OnPropertyChanged(); }
     }
 
     public ObservableCollection<string> Items { get; } = new()

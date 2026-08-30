@@ -4505,6 +4505,300 @@ async def test_avalonia_v2_text_probe_missing_selector_runtime_smoke():
     )
 
 
+def _guarded_child_source(predicate: dict[str, str] | None = None) -> dict[str, Any]:
+    return {
+        "guarded_child": {
+            "parent": {
+                "automation_id": "guardedChildParent",
+                "name": "Guarded child parent",
+                "control_type": "Group",
+            },
+            "predicate": predicate
+            or {
+                "automation_id": "guardedChildSource",
+                "name": "Guarded child source",
+                "control_type": "Button",
+            },
+            "maximum_nodes": 256,
+        }
+    }
+
+
+def _wpf_guarded_child_admission_matrix_cases() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "unique_success",
+            "source": _guarded_child_source(),
+            "expect_status": "PASS",
+            "expect_admission": "ADMITTED",
+            "expect_pointer_invocations": 1,
+        },
+        {
+            "id": "child_not_found",
+            "source": _guarded_child_source(
+                {
+                    "automation_id": "guardedChildMissing",
+                    "name": "Guarded child missing",
+                    "control_type": "Button",
+                }
+            ),
+            "expect_status": "BLOCKED",
+            "expect_reason": "CHILD_NOT_FOUND",
+        },
+        {
+            "id": "child_ambiguous",
+            "source": _guarded_child_source(
+                {
+                    "automation_id": "guardedChildDuplicate",
+                    "name": "Guarded duplicate child",
+                    "control_type": "Button",
+                }
+            ),
+            "expect_status": "BLOCKED",
+            "expect_reason": "CHILD_AMBIGUOUS",
+        },
+        {
+            "id": "identity_drift_hook",
+            "source": _guarded_child_source(),
+            "bridge_test_hook": "identity_drift",
+            "expect_status": "BLOCKED",
+            "expect_reason": "IDENTITY_DRIFT",
+        },
+        {
+            "id": "rectangle_drift_hook",
+            "source": _guarded_child_source(),
+            "bridge_test_hook": "rectangle_drift",
+            "expect_status": "BLOCKED",
+            "expect_reason": "IDENTITY_DRIFT",
+        },
+        {
+            "id": "containment_failure_hook",
+            "source": _guarded_child_source(
+                {
+                    "automation_id": "guardedChildOutsideClient",
+                    "name": "Guarded child outside client",
+                    "control_type": "Button",
+                }
+            ),
+            "expect_status": "BLOCKED",
+            "expect_reason": "CONTAINMENT_FAILURE",
+        },
+    ]
+
+
+async def run_wpf_v2_guarded_child_drag_runtime_smoke() -> dict[str, Any]:
+    from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner
+    from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    if sys.platform != "win32":
+        return {
+            "status": "BLOCKED",
+            "reason": "WPF guarded-child drag smoke requires Windows UI automation",
+        }
+
+    m = SessionManager(project_path=BASE)
+    backend_holder: dict[str, object | None] = {"backend": None}
+    backend_holder["backend"] = create_backend(process_registry=m.process_registry)
+    if not isinstance(backend_holder["backend"], FlaUIBackend):
+        return {
+            "status": "BLOCKED",
+            "backend": type(backend_holder["backend"]).__name__,
+            "reason": "FlaUI bridge required for WPF guarded-child drag smoke",
+            "accepted": {"backend": "FlaUI guarded-child admission and drag"},
+            "next_step": "Build the FlaUI bridge and run on a Windows desktop session.",
+        }
+
+    async def ensure_ui_connected():
+        backend = backend_holder["backend"]
+        if backend is None:
+            backend = create_backend(process_registry=m.process_registry)
+            backend_holder["backend"] = backend
+        pid = m.state.process_id
+        if not pid:
+            raise RuntimeError("Process ID not available for WPF guarded-child drag smoke")
+        if getattr(backend, "process_id", None) != pid:
+            await backend.connect(pid)
+        return backend
+
+    plan = _v2_guarded_child_drag_plan(
+        program=WPF_DLL,
+        build_project=os.path.join(
+            BASE,
+            "tests",
+            "fixtures",
+            "WpfSmokeApp",
+            "WpfSmokeApp.csproj",
+        ),
+    )
+    try:
+        result = await RuntimeSmokeRunner(
+            m,
+            service_adapters=ui_operation_adapters(ensure_ui_connected, session=m),
+        ).run(plan)
+        return _v2_guarded_child_drag_summary(result)
+    finally:
+        if backend_holder["backend"] is not None:
+            try:
+                await backend_holder["backend"].disconnect()
+            except Exception as exc:
+                print(f"  [DEBUG] WPF guarded-child drag backend.disconnect() failed: {exc}")
+        await m.stop()
+
+
+def _v2_guarded_child_drag_plan(
+    *,
+    program: str,
+    build_project: str,
+) -> dict[str, Any]:
+    return {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "name": "wpf v2 guarded-child drag admission",
+        "baseline": {
+            "steps": [
+                {
+                    "id": "launch_fixture",
+                    "kind": "isolated_profile.launch",
+                    "launch": {
+                        "program": program,
+                        "cwd": os.path.dirname(program),
+                        "pre_build": True,
+                        "build_project": build_project,
+                        "build_configuration": "Debug",
+                    },
+                }
+            ]
+        },
+        "cases": [
+            {
+                "id": "guarded_child_unique_drag",
+                "transitions": [
+                    {
+                        "id": "drag_admitted_guarded_child",
+                        "action": {
+                            "kind": "ui.drag",
+                            "source": _guarded_child_source(),
+                            "path": [
+                                {"relative_to": "source", "x": 0, "y": 0},
+                            ],
+                            "drop": {"relative_to": "source", "x": 24, "y": 0},
+                            "duration_ms": 250,
+                        },
+                        "settle": {"idle_ms": 250},
+                        "probes": [
+                            {
+                                "kind": "ui.property",
+                                "name": "guarded_child_status",
+                                "selector": {"automation_id": "guardedChildStatus"},
+                                "property": "Text",
+                                "phase": "after",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+        "cleanup": {
+            "steps": [
+                {"kind": "debug.stop"},
+                {"kind": "process.registry.assert_empty"},
+            ]
+        },
+    }
+
+
+def _parse_guarded_child_status(value: Any) -> dict[str, Any]:
+    import json
+
+    try:
+        parsed = json.loads(str(value or ""))
+    except (TypeError, ValueError):
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+def _v2_guarded_child_drag_summary(result: dict[str, Any]) -> dict[str, Any]:
+    transition = _first_v2_transition(result)
+    action = _first_transition_action(transition)
+    route_evidence = dict(action.get("route_evidence") or {}) if action else {}
+    target = dict(route_evidence.get("admitted_target") or {})
+    window = dict(route_evidence.get("admitted_window") or {})
+    stability = dict(route_evidence.get("admission_stability") or {})
+    source = dict(route_evidence.get("resolved_source") or {})
+    drop = dict(route_evidence.get("resolved_drop") or {})
+    fixture_status = _parse_guarded_child_status(
+        _transition_probe_value(
+            transition,
+            "after",
+            "ui.property.guarded_child_status",
+        )
+    )
+    source_center = target.get("center") if isinstance(target.get("center"), dict) else {}
+    expected_source = {"x": source_center.get("x"), "y": source_center.get("y")}
+    expected_drop = {
+        "x": source_center.get("x") + 24 if isinstance(source_center.get("x"), int) else None,
+        "y": source_center.get("y"),
+    }
+    compact = {
+        "status": result.get("status"),
+        "reason": result.get("reason"),
+        "route_evidence": {
+            "admitted_target": target,
+            "admitted_window": window,
+            "admission_stability": stability,
+            "resolved_source": source,
+            "resolved_drop": drop,
+            "pointer_invocations": route_evidence.get("pointer_invocations"),
+        },
+        "fixture_status": fixture_status,
+        "cleanup": result.get("cleanup"),
+        "blocked": result.get("blocked"),
+    }
+    if result.get("status") == "BLOCKED":
+        compact["status"] = "BLOCKED"
+        return compact
+
+    target_matches = (
+        target.get("automation_id") == "guardedChildSource"
+        and target.get("name") == "Guarded child source"
+        and target.get("control_type") == "Button"
+    )
+    source_matches = source == expected_source
+    drop_matches = drop == expected_drop
+    stability_matches = stability == {"reads": 2, "matched": True}
+    gesture_matches = (
+        fixture_status.get("sourceAutomationId") == "guardedChildSource"
+        and fixture_status.get("pointerDownCount") == 1
+        and fixture_status.get("pointerUpCount") == 1
+        and fixture_status.get("moved") is True
+    )
+    compact["status"] = (
+        "PASS"
+        if result.get("status") == "PASS"
+        and target_matches
+        and bool(window.get("client_rectangle"))
+        and stability_matches
+        and source_matches
+        and drop_matches
+        and route_evidence.get("pointer_invocations") == 1
+        and gesture_matches
+        and result.get("cleanup", {}).get("process_registry_after") == 0
+        else "FAIL"
+    )
+    return compact
+
+
+async def test_wpf_v2_guarded_child_drag_runtime_smoke():
+    print("\nWPF V2 GUARDED-CHILD DRAG RUNTIME SMOKE")
+    evidence = await run_wpf_v2_guarded_child_drag_runtime_smoke()
+    check(
+        "WPF guarded-child drag admits one stable child and completes one pointer action",
+        evidence.get("status") == "PASS",
+        str(evidence),
+    )
+
+
 async def run_wpf_v2_visible_row_drag_runtime_smoke() -> dict[str, Any]:
     from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner
     from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
@@ -6832,6 +7126,10 @@ def get_scenarios():
         (
             "WPF V2 Negative Drag Runtime Smoke",
             test_wpf_v2_negative_drag_runtime_smoke,
+        ),
+        (
+            "WPF V2 Guarded-Child Drag Runtime Smoke",
+            test_wpf_v2_guarded_child_drag_runtime_smoke,
         ),
         (
             "Avalonia V2 State Oracle Runtime Smoke",

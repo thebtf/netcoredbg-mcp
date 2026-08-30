@@ -711,6 +711,28 @@ class FlaUIBackend:
         """Double-click via FlaUI bridge."""
         await self._client.call("double_click", {"x": x, "y": y})
 
+    async def resolve_guarded_child(
+        self,
+        parent: dict[str, Any],
+        predicate: dict[str, Any],
+        maximum_nodes: int,
+    ) -> dict[str, Any]:
+        """Resolve a stable guarded child target through the FlaUI bridge."""
+        result = await self._client.call(
+            "resolve_guarded_child",
+            {
+                "parent": self._build_selector_params(parent),
+                "predicate": self._build_selector_params(predicate),
+                "maximumNodes": maximum_nodes,
+            },
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                "resolve_guarded_child: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
     async def drag(
         self,
         from_x: int,
