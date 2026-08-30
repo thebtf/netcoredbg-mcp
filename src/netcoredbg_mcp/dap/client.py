@@ -45,8 +45,8 @@ _JSON_CREDENTIAL_VALUE_RE = re.compile(
     r'\s*:\s*")[^"]*(")'
 )
 _BEARER_VALUE_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+_POSIX_PATH_RE = re.compile(r"(?<![\w:/])/(?!/)[^\s\"']+")
 _WINDOWS_PATH_RE = re.compile(r"(?i)(?:[A-Z]:[\\/]|\\\\)[^\s\"'<>|]+")
-_POSIX_PATH_RE = re.compile(r"(?<![\w:])/(?:[^/\s\"']+/)+[^\s\"']*")
 
 
 def format_request_arguments_for_log(

@@ -1346,12 +1346,12 @@ class TestDAPClientTransportDeath:
 
         unsafe = (
             "token=abc123 CLIENT_SECRET=supersecret DB_PASSWORD=hunter2 "
-            "C:\\Users\\private\\debug.log line\n" + chr(27) + "[31m" + chr(0x9B) + "31m"
+            "C:\\Users\\private\\debug.log /root line\n" + chr(27) + "[31m" + chr(0x9B) + "31m"
         )
 
         assert sanitize_terminal_text(unsafe) == (
             "token=<redacted> CLIENT_SECRET=<redacted> DB_PASSWORD=<redacted> "
-            "<path> line\\n\\u001b[31m\\u009b31m"
+            "<path> <path> line\\n\\u001b[31m\\u009b31m"
         )
 
     def test_terminal_event_metadata_is_bounded_before_retention(self):
@@ -1366,7 +1366,11 @@ class TestDAPClientTransportDeath:
                 "seq": "s" * 10_000,
                 "type": "event",
                 "event": "e" * 10_000,
-                "body": {"token": "abc123", "path": "C:\\Users\\private\\x"},
+                "body": {
+                    "token": "abc123",
+                    "path": "C:\\Users\\private\\x",
+                    "root": "/root",
+                },
             },
             run,
         )
@@ -1377,6 +1381,7 @@ class TestDAPClientTransportDeath:
         assert run.last_dap_event_body_preview is not None
         assert "abc123" not in run.last_dap_event_body_preview
         assert "C:\\Users" not in run.last_dap_event_body_preview
+        assert "/root" not in run.last_dap_event_body_preview
 
         client._handle_message(
             {"seq": 10**1000, "type": "event", "event": "bounded", "body": {}},
