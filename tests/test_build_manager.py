@@ -374,3 +374,60 @@ class TestBuildManagerStatus:
 
         assert "sessions" in d
         assert len(d["sessions"]) == 1
+
+
+class TestOwnerScopedPreBuildRedMatrix:
+    """RED coverage for pre-build's missing call-scoped owner boundary."""
+
+    @pytest.mark.asyncio
+    async def test_o10_prebuild_for_owner_a_cannot_select_owner_b_or_sentinel(
+        self, tmp_path
+    ) -> None:
+        """O10: two owners and a tempting foreign sentinel must stay isolated.
+
+        The real manager/build delegation path is exercised.  The selector is
+        represented by a deterministic test fake because issuing the current
+        global ``taskkill`` against real same-image processes would itself be
+        unsafe.  Its ability to kill every identity demonstrates that the
+        current call carries no retained owner capability.
+        """
+
+        manager = BuildManager()
+        project = tmp_path / "OwnerA.csproj"
+        project.touch()
+        manager.get_session(str(tmp_path))._create_job_object = AsyncMock(return_value=None)
+        liveness = {
+            "owner-a-root": True,
+            "owner-a-descendant": True,
+            "owner-b-root": True,
+            "owner-b-descendant": True,
+            "foreign-sentinel": True,
+        }
+
+        async def global_selector(**_kwargs) -> int:
+            for identity in liveness:
+                liveness[identity] = False
+            return len(liveness)
+
+        async def completed_command(*_args, **_kwargs):
+            process = MagicMock()
+            process.pid = None
+            process.returncode = 0
+            process.stdout.readline = AsyncMock(return_value=b"")
+            process.stderr.readline = AsyncMock(return_value=b"")
+            process.wait = AsyncMock(return_value=0)
+            return process
+
+        with (
+            patch("netcoredbg_mcp.build.session.cleanup_for_build", global_selector),
+            patch("netcoredbg_mcp.build.session.asyncio.create_subprocess_exec", completed_command),
+        ):
+            await manager.pre_launch_build(str(tmp_path), str(project), restore_first=False)
+
+        assert liveness == {
+            "owner-a-root": False,
+            "owner-a-descendant": False,
+            "owner-b-root": True,
+            "owner-b-descendant": True,
+            "foreign-sentinel": True,
+        }, "current pre-build passes no owner and lets a global selector kill foreign trees"

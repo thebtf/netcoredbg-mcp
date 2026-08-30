@@ -15,6 +15,7 @@ from netcoredbg_mcp.dap.client import (
     DapTransportTerminal,
 )
 from netcoredbg_mcp.session import DebugState, SessionManager
+from tests.owner_scope_red import BlockingStream, TreeProcess
 
 
 def _natural_exit_terminal(generation: object) -> DapTransportTerminal:
@@ -1090,3 +1091,145 @@ class FakeLaunchClient:
     async def configuration_done(self) -> DAPResponse:
         self.events.append("configuration_done")
         return DAPResponse(1, 1, True, "configurationDone")
+
+
+class TestOwnerScopedPublicRouteRedMatrix:
+    """RED controls for public Python launch and pre-build route preservation."""
+
+    @pytest.mark.asyncio
+    async def test_c1_direct_python_prebuild_false_still_requires_admitted_adapter(
+        self, tmp_path
+    ) -> None:
+        """C1: preserving ``pre_build=False`` must not preserve raw launch.
+
+        The public direct Python route keeps its name and no-build behavior,
+        while its adapter must still be admitted before it can execute.  The
+        controlled DAP process exercises current launch rather than checking
+        for a planned type name.
+        """
+
+        class DirectRouteClient(DAPClient):
+            def __init__(self, initialized: asyncio.Event) -> None:
+                super().__init__("/path/to/netcoredbg")
+                self._initialized = initialized
+
+            async def initialize(self) -> dict[str, object]:
+                self._initialized.set()
+                return {}
+
+            async def set_exception_breakpoints(
+                self, filters: list[str] | None = None
+            ) -> DAPResponse:
+                return DAPResponse(1, 1, True, "setExceptionBreakpoints")
+
+            async def launch(
+                self,
+                program: str,
+                cwd: str | None = None,
+                args: list[str] | None = None,
+                env: dict[str, str | None] | None = None,
+                stop_at_entry: bool = False,
+                just_my_code: bool = False,
+            ) -> DAPResponse:
+                return DAPResponse(1, 1, True, "launch")
+
+            async def configuration_done(self) -> DAPResponse:
+                return DAPResponse(1, 1, True, "configurationDone")
+
+            async def disconnect(self, terminate: bool = True) -> DAPResponse:
+                return DAPResponse(1, 1, True, "disconnect")
+
+        program = tmp_path / "App.dll"
+        program.write_bytes(b"")
+        process = TreeProcess(
+            pid=45001,
+            stdout=BlockingStream(),
+            stderr=BlockingStream(),
+        )
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+        client = DirectRouteClient(manager._initialized_event)
+        manager._client = client
+        manager.check_dbgshim_compatibility = MagicMock(return_value=None)
+
+        with (
+            patch("netcoredbg_mcp.dap.client.asyncio.create_subprocess_exec", return_value=process),
+            patch(
+                "netcoredbg_mcp.session.manager.detect_enc_support",
+                return_value={"supported": False, "ncdbhook_path": None, "error": None},
+            ),
+        ):
+            await manager.launch(program=str(program), pre_build=False)
+            await manager.stop()
+
+        assert process.child_alive is False, (
+            "direct Python pre_build=False preserves an unadmitted adapter descendant"
+        )
+
+    @pytest.mark.asyncio
+    async def test_c2_start_and_restart_prebuild_capture_an_owner_before_build(
+        self, tmp_path
+    ) -> None:
+        """C2: start/restart keep their route but delegate an explicit owner.
+
+        The owner remains private to the public tool envelope.  Internally,
+        both start-with-prebuild and restart-with-rebuild must capture it before
+        restore/build.  Current delegation invokes ``BuildManager`` without any
+        owner, which cannot distinguish a stale generation from a foreign one.
+        """
+
+        program = tmp_path / "App.dll"
+        project = tmp_path / "App.csproj"
+        program.write_bytes(b"")
+        project.touch()
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+        fake_client = FakeLaunchClient()
+        manager._client = fake_client
+        manager._initialized_event.set()
+        manager.check_dbgshim_compatibility = MagicMock(return_value=None)
+        prebuild = AsyncMock(return_value=MagicMock(success=True))
+        manager._build_manager.pre_launch_build = prebuild
+
+        with patch(
+            "netcoredbg_mcp.session.manager.detect_enc_support",
+            return_value={"supported": False, "ncdbhook_path": None, "error": None},
+        ):
+            await manager.launch(
+                program=str(program),
+                pre_build=True,
+                build_project=str(project),
+            )
+            manager.stop = AsyncMock(return_value={"success": True})
+            await manager.restart(rebuild=True)
+
+        assert all("owner" in call.kwargs for call in prebuild.await_args_list), (
+            "current start/restart reaches pre-build without an explicit owner capability"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_owner_prebuild_does_not_discover_a_process_before_build(
+        self, tmp_path
+    ) -> None:
+        """No-owner is a legal variant, not a license for selector cleanup.
+
+        This is the stale/no-owner control: without a current admitted adapter,
+        SessionManager may ask BuildManager to build only through an explicit
+        no-owner value.  Current code supplies no variant at all, so downstream
+        cleanup cannot reject a stale capture before it starts process work.
+        """
+
+        project = tmp_path / "App.csproj"
+        project.touch()
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+        prebuild = AsyncMock(return_value=MagicMock(success=True))
+        manager._build_manager.pre_launch_build = prebuild
+        manager._active_dap_run = None
+
+        await manager.pre_launch_build(str(project))
+
+        captured = prebuild.await_args
+        assert captured is not None and "owner" in captured.kwargs, (
+            "current no-owner pre-build passes no explicit variant to prevent discovery"
+        )

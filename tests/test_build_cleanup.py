@@ -450,3 +450,32 @@ class TestBuildSessionFileLockDetection:
 
         stdout = "error CS0246: The type or namespace name 'Foo' could not be found"
         assert not session._is_file_lock_error(stdout, "")
+
+
+class TestOwnerScopedCleanupRedMatrix:
+    """RED expectation that default pre-build cannot discover a process."""
+
+    @pytest.mark.asyncio
+    async def test_o11_default_prebuild_never_invokes_a_global_selector(self, tmp_path) -> None:
+        """O11: no-owner pre-build may build, but it may not select a process.
+
+        Image-name, WMI/PID, basename, and directory selection are all equally
+        insufficient for ownership.  This calls the current public cleanup
+        entrypoint with deterministic fakes rather than running its unsafe
+        system-wide commands against the workstation.
+        """
+
+        project = tmp_path / "OwnerA.csproj"
+        project.touch()
+        selector = AsyncMock(return_value=0)
+        directory_selector = AsyncMock(return_value=0)
+
+        with (
+            patch("netcoredbg_mcp.build.cleanup.kill_debugger_processes", selector),
+            patch("netcoredbg_mcp.build.cleanup.kill_processes_in_directory", directory_selector),
+        ):
+            await cleanup_for_build(str(project))
+
+        assert (selector.await_count, directory_selector.await_count) == (0, 0), (
+            "current default pre-build reaches global process selectors"
+        )

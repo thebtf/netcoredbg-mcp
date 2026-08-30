@@ -18,6 +18,7 @@ from netcoredbg_mcp.dap.client import (
 from netcoredbg_mcp.dap.protocol import Commands, DAPEvent, DAPRequest, DAPResponse
 from netcoredbg_mcp.resource_updates import STATE_URI, THREADS_URI
 from netcoredbg_mcp.session import DebugState, SessionManager
+from tests.owner_scope_red import BlockingStream, TreeProcess
 
 
 class TestDAPClientInit:
@@ -1502,3 +1503,104 @@ class TestDAPClientTransportDeath:
 
         with pytest.raises(RuntimeError, match="netcoredbg process died"):
             await client.send_request("threads")
+
+
+class TestOwnerScopedAdapterRedMatrix:
+    """Behavior-first RED coverage for the current DAP adapter lifecycle.
+
+    The existing ``_DapRun`` generation/finalizer remains the exercised path.
+    These tests require it to obtain an admitted tree owner before it exposes a
+    child or publishes terminal state; a process ID is only diagnostic data.
+    """
+
+    @pytest.mark.asyncio
+    async def test_o1_adapter_does_not_execute_before_private_owner_admission(self) -> None:
+        """O1: the direct adapter route must not run before admission completes.
+
+        The probe records real current launch semantics: awaiting
+        ``asyncio.create_subprocess_exec`` means a child is already executing.
+        Future production wiring will drive this same seam through suspended
+        creation, retained-handle admission, I/O setup, and resume-last.
+        """
+
+        events: list[str] = []
+        process = TreeProcess(
+            pid=43001,
+            stdout=BlockingStream(),
+            stderr=BlockingStream(),
+        )
+        client = DAPClient("/path/to/netcoredbg")
+
+        async def spawn(*_args, **_kwargs):
+            events.append("child-executed")
+            return process
+
+        with patch("netcoredbg_mcp.dap.client.asyncio.create_subprocess_exec", spawn):
+            await client.start(generation="o1")
+        await client.stop()
+
+        assert events == [], "current DAPClient exposes an asyncio child before owner admission"
+
+    @pytest.mark.asyncio
+    async def test_o5_graceful_adapter_finalization_waits_for_tree_accounting(self) -> None:
+        """O5: graceful adapter stop may publish only after the owned tree drains.
+
+        The root exits gracefully while a modeled descendant remains alive.
+        Closing/observing the root is not ownership evidence; the terminal
+        callback must wait for a retained Job's ``ActiveProcesses == 0`` fact.
+        """
+
+        process = TreeProcess(
+            pid=43005,
+            stdout=BlockingStream(),
+            stderr=BlockingStream(),
+        )
+        active_counts_at_terminal: list[int] = []
+        client = DAPClient("/path/to/netcoredbg")
+        client.set_transport_terminal_handler(
+            lambda _terminal: active_counts_at_terminal.append(process.active_processes)
+        )
+
+        with patch(
+            "netcoredbg_mcp.dap.client.asyncio.create_subprocess_exec", return_value=process
+        ):
+            await client.start(generation="o5")
+        await client.stop()
+
+        assert active_counts_at_terminal == [0], (
+            "current adapter finalizer publishes after root termination without tree accounting"
+        )
+
+    @pytest.mark.asyncio
+    async def test_o6_grace_deadline_force_drains_only_the_retained_tree(self) -> None:
+        """O6: grace expiry must force the admitted Job and wait for its drain.
+
+        This models a root that ignores graceful termination.  A force against
+        only that root still leaves its descendant alive, proving why an image,
+        PID, or selector replacement cannot meet the owner-only requirement.
+        """
+
+        process = TreeProcess(
+            pid=43006,
+            stdout=BlockingStream(),
+            stderr=BlockingStream(),
+            root_exits_on_terminate=False,
+        )
+        active_counts_at_terminal: list[int] = []
+        client = DAPClient("/path/to/netcoredbg")
+        client.set_transport_terminal_handler(
+            lambda _terminal: active_counts_at_terminal.append(process.active_processes)
+        )
+
+        with (
+            patch("netcoredbg_mcp.dap.client.asyncio.create_subprocess_exec", return_value=process),
+            patch("netcoredbg_mcp.dap.client.NATURAL_EXIT_TIMEOUT", 0.001),
+            patch("netcoredbg_mcp.dap.client.TERMINATE_TIMEOUT", 0.001),
+            patch("netcoredbg_mcp.dap.client.KILL_TIMEOUT", 0.1),
+        ):
+            await client.start(generation="o6")
+            await client.stop()
+
+        assert active_counts_at_terminal == [0], (
+            "current grace escalation kills the root but publishes with a live descendant"
+        )

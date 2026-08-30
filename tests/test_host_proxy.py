@@ -1358,3 +1358,83 @@ async def test_host_forwarded_search_timeout_is_structured_and_session_stays_usa
     assert "timeout" in direct["payloads"]["timeout"]["error"].lower()
     assert host["serialized"] == direct["serialized"]
     _assert_code_search_envelope(direct["payloads"]["follow_up"], error=False)
+
+
+@pytest.mark.asyncio
+async def test_c4_shared_host_backend_prebuild_requires_owner_capability(tmp_path: Path) -> None:
+    """C4: host forwarding must not preserve an unsafe Python pre-build path.
+
+    The compatibility host forwards public ``tools/call`` envelopes unchanged
+    into this registered Python backend (the process-level parity tests above
+    own the wire proof).  This focused shared-backend case drives the public
+    ``start_debug(pre_build=True)`` route and requires its private
+    SessionManager→BuildManager call to carry owner authority.  The public
+    envelope intentionally has no new owner field.
+    """
+
+    from types import SimpleNamespace
+    from typing import Any, cast
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from netcoredbg_mcp.dap.protocol import DAPResponse
+    from netcoredbg_mcp.session import SessionManager
+    from netcoredbg_mcp.tools.debug import register_debug_tools
+
+    class Registry:
+        def __init__(self) -> None:
+            self.tools: dict[str, object] = {}
+
+        def tool(self, **_kwargs):
+            def register(func):
+                self.tools[func.__name__] = func
+                return func
+
+            return register
+
+    program = tmp_path / "App.dll"
+    project = tmp_path / "App.csproj"
+    program.write_bytes(b"")
+    project.touch()
+    with patch("netcoredbg_mcp.session.manager.DAPClient"):
+        manager = SessionManager(project_path=str(tmp_path))
+    client = MagicMock()
+    client.is_running = True
+    client.netcoredbg_path = "netcoredbg.exe"
+    client.capabilities = {}
+    client.set_exception_breakpoints = AsyncMock(
+        return_value=DAPResponse(1, 1, True, "setExceptionBreakpoints")
+    )
+    client.launch = AsyncMock(return_value=DAPResponse(1, 1, True, "launch"))
+    client.configuration_done = AsyncMock(return_value=DAPResponse(1, 1, True, "configurationDone"))
+    manager._client = client
+    manager._initialized_event.set()
+    manager.check_dbgshim_compatibility = MagicMock(return_value=None)
+    prebuild = AsyncMock(return_value=MagicMock(success=True))
+    manager._build_manager.pre_launch_build = prebuild
+    registry = Registry()
+    register_debug_tools(
+        cast(Any, registry),
+        manager,
+        ownership=cast(Any, SimpleNamespace(release=MagicMock())),
+        notify_state_changed=AsyncMock(),
+        check_session_access=lambda _ctx: None,
+        execute_and_wait=AsyncMock(),
+        resolve_project_root=AsyncMock(return_value=str(tmp_path)),
+    )
+    context = SimpleNamespace(report_progress=AsyncMock(), warning=AsyncMock(), info=AsyncMock())
+
+    with patch(
+        "netcoredbg_mcp.session.manager.detect_enc_support",
+        return_value={"supported": False, "ncdbhook_path": None, "error": None},
+    ):
+        response = await cast(Any, registry.tools["start_debug"])(
+            context,
+            program=str(program),
+            pre_build=True,
+            build_project=str(project),
+        )
+
+    assert "error" not in response
+    assert all("owner" in call.kwargs for call in prebuild.await_args_list), (
+        "current shared host/direct backend forwards pre-build without owner authority"
+    )

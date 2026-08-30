@@ -199,3 +199,45 @@ async def test_runtime_smoke_runner_surface_is_release_critical() -> None:
     assert "cleanup" in result
     assert result["cleanup"]["status"] in {"PASS", "FAIL"}
     assert result["compact"]["cleanup"]["status"] == result["cleanup"]["status"]
+
+
+@pytest.mark.critical
+@pytest.mark.asyncio
+async def test_c3_legacy_cli_route_keeps_owner_admission_private_and_safe() -> None:
+    """C3: the legacy CLI stays unchanged while its private launch remains safe.
+
+    The public version command proves that no owner parameter leaks into the
+    consumer surface.  The controlled adapter launch then exercises the same
+    package-private path: consumer compatibility cannot make pre-admission
+    execution or root-only cleanup an accepted implementation detail.
+    """
+
+    from unittest.mock import patch
+
+    from netcoredbg_mcp.dap.client import DAPClient
+    from tests.owner_scope_red import BlockingStream, TreeProcess
+
+    version = subprocess.run(
+        [sys.executable, "-m", "netcoredbg_mcp", "--version"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert version.returncode == 0, version.stderr
+
+    process = TreeProcess(
+        pid=46003,
+        stdout=BlockingStream(),
+        stderr=BlockingStream(),
+    )
+    client = DAPClient("/path/to/netcoredbg")
+
+    with patch("netcoredbg_mcp.dap.client.asyncio.create_subprocess_exec", return_value=process):
+        await client.start()
+    await client.stop()
+
+    assert process.child_alive is False, (
+        "current consumer-compatible route preserves root-only cleanup of an adapter tree"
+    )

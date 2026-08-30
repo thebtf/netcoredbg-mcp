@@ -126,3 +126,29 @@ def test_terminate_pid_windows_treats_false_terminate_as_success_when_dead(
     assert kernel32.TerminateProcess.calls == [(777, 1)]
     assert kernel32.WaitForSingleObject.calls == []
     assert kernel32.CloseHandle.calls == [(777,)]
+
+
+def test_o9_pid_only_registry_cannot_authorize_owner_cleanup(monkeypatch) -> None:
+    """O9: a reused/unproven PID must not terminate a foreign process.
+
+    The entry deliberately has the same numeric PID a former adapter could
+    have held.  Its role, session ID, and liveness observation are still not a
+    retained Job/process capability, so normal pre-build owner cleanup must not
+    call the registry's PID terminator.
+    """
+
+    registry = process_registry.ProcessRegistry()
+    registry.register(pid=44009, role="netcoredbg", session_id="former-owner")
+    terminated: list[int] = []
+    monkeypatch.setattr(process_registry, "_is_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        process_registry,
+        "_terminate_pid",
+        lambda pid, _timeout: terminated.append(pid) or True,
+    )
+
+    registry.cleanup_all()
+
+    assert terminated == [], (
+        "current PID-only registry authorizes termination without an owner handle"
+    )
