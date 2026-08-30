@@ -1,6 +1,6 @@
 # Stateless preview workflow contract
 
-`.github/workflows/stateless-preview.yml` is the future manual workflow for the A1 preview artifact. It has `build` and `promote` modes. It does not run from `push`, tag push, `workflow_run`, a schedule, or a Python release event. This contract plans the workflow. It does not create a tag, release, asset, Python change, or Program B/C change in this session.
+`.github/workflows/stateless-preview.yml` is one executable manual `build` surface for the A1 preview artifact. It runs only through `workflow_dispatch`, never from `push`, tag push, `workflow_run`, a schedule, or a Python release event. It creates no tag, release, asset outside retained Actions artifacts, Python change, or Program B/C change. Promotion remains a future consuming surface; this workflow intentionally contains no `promote` input, job, placeholder, or remote-mutation path.
 
 ## Own one preview channel
 
@@ -10,38 +10,37 @@ All durable records use closed fields only: structural GitHub references, bounde
 
 ## Dispatch and permissions
 
-The workflow accepts string inputs only. It validates every input before it uses the value in a path, API call, or record.
+The workflow accepts exactly three caller inputs, all as strings. It validates every input before using it in a path, API call, artifact name, or record. It derives source, repository, workflow identity, run identity, and every receipt location from trusted Actions and Git facts.
 
-| Mode | Inputs |
+| Executable mode | Inputs |
 | --- | --- |
-| `build` | `preview_version`, `preview_tag`, and `retention_days`. The workflow derives the source from the current canonical `refs/heads/main` ref. It has no arbitrary source-commit input. |
-| `promote` | Structural references and expected hashes for the Candidate Identity Record, Promotion Decision, pre-decision Stage Gate Evidence, pre-publication Stage Gate Evidence, and Release Gate Catalog. Runtime facts are never inputs. |
+| `build` | `preview_version`, `preview_tag`, and `retention_days`. The workflow derives the source from the current canonical `refs/heads/main` ref. It has no source-commit, receipt, artifact-ID, or promotion input. |
 
-Set top-level `permissions: {}`. The build job gets only the read permissions needed to resolve canonical main and upload immutable Actions artifacts. The promote job gets `actions: read` and `contents: write` only after it validates a fresh current-attempt record. Neither job gets Python publication, package registry, cross-repository, or unnecessary token permissions.
+Set top-level `permissions: {}`. The build job gets only `contents: read` for checkout/canonical-main resolution and `actions: read` for current-run artifact discovery. It gets no Python publication, package registry, cross-repository, or unnecessary token permission.
 
-Use one workflow-level concurrency group per preview tag with `queue: max` and `cancel-in-progress: false`. The group excludes mode, actor, run ID, and run attempt. Every queued promotion starts from fresh admission and fresh remote observation.
+The workflow has one concurrency group per preview tag and `cancel-in-progress: false`. GitHub Actions supplies no `queue: max` workflow key, so the executable workflow does not claim one; each admitted run still recomputes every source and artifact fact before sealing its candidate.
 
 ## Build from canonical main
 
 The build job must do the following in order:
 
-1. Resolve the live `origin/main` target. Require `github.ref`, the workflow ref, and the resolved target to be `refs/heads/main` and the same commit.
-2. Require a passing post-merge exact-head receipt whose scanned commit and tag target equal that commit.
+1. Fetch live `origin/main`. Require `github.ref`, the workflow ref, `github.sha`, checkout `HEAD`, and the resolved `origin/main` target to bind one canonical `refs/heads/main` commit.
+2. In a clean detached scanner worktree at that commit, invoke only `scripts/run_sonarqube_exact_head.py --role post-merge`. The repository-owned producer discovers its fixed receipt location, requires repository/main/stage=`post-merge`/`PASS`/scanned-commit/tag-target equality, and seals a path-free post-merge receipt.
 3. Publish only `NetCoreDbg.Mcp.Stateless.Preview` as a self-contained, single-file Windows x64 executable.
-4. Create the archive and manifest. Validate inherited manifest equations and hash archive, manifest, and extracted executable.
-5. Upload the payload in a new immutable Actions artifact with `if-no-files-found: error` and `overwrite: false`.
-6. Create and upload a separate immutable Candidate Identity Record artifact that binds canonical main, trusted build-run provenance, post-merge receipt, payload artifact, and identities.
-7. Resolve and seal the static Release Gate Catalog from tracked policy files at that exact commit.
+4. Create the archive and inherited manifest. Validate its equations and hash archive, manifest, and extracted executable.
+5. Upload the sealed post-merge receipt and the payload as separate new Actions artifacts with `if-no-files-found: error`, bounded retention, and `overwrite: false`.
+6. Discover those current-run artifact IDs and expiry facts through the GitHub Actions API, then seal the Candidate Identity Record and static Release Gate Catalog through `scripts/stateless_preview_artifact.py`.
+7. Upload Candidate Identity and Release Gate Catalog as separate new immutable Actions artifacts with the same bounded retention and `overwrite: false`.
 
-The build job must not build a Python wheel, call `publish.yml`, use PyPI tooling, change the default selector, or let a caller select an arbitrary commit.
+The build job must not build a Python wheel, call `publish.yml`, use PyPI tooling, change the default selector, accept an arbitrary source or receipt, or create a promotion input.
 
-## Admit promotion by stage
+## Future promotion boundary (not implemented)
 
-A Promotion Decision consumes only the passing `pre-decision` Stage Gate Evidence record. It names a decision author and one authorized GitHub dispatcher. It does not name a consuming run and does not require future-stage evidence.
+A later separately authorized consuming surface may admit promotion only after a Promotion Decision consumes a passing `pre-decision` Stage Gate Evidence record. The Decision must name one authorized GitHub dispatcher, but it must not name a historical consuming run or require future-stage evidence.
 
-Before remote mutation, the named dispatcher creates a fresh Promotion Attempt. The attempt verifies the current `github.actor`, run ID, run attempt, canonical main ref/SHA, current permission readback, Decision, and pre-decision Stage Gate Evidence. It also requires the passing `pre-publication` Stage Gate Evidence record. A different dispatcher, old attempt, static-equivalent permission, arbitrary commit, failed stage record, or changed source refuses before mutation.
+Before any later remote mutation, that future surface must create a fresh Promotion Attempt and verify current actor, run ID, run attempt, canonical main ref/SHA, current permission readback, Decision, and pre-decision Stage Gate Evidence. It must also require passing `pre-publication` Stage Gate Evidence. A different dispatcher, old attempt, static-equivalent permission, arbitrary commit, failed stage record, or changed source must refuse before mutation.
 
-The attempt must not require `post-publication` evidence. That evidence can exist only after a prerelease is public.
+The future attempt must not require `post-publication` evidence. That evidence can exist only after a prerelease is public.
 
 ## Recover matching remote state
 

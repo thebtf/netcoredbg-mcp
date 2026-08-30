@@ -37,9 +37,9 @@ description: "Dependency-ordered implementation tasks for the A1 opt-in preview 
 **Critical**: No user-story task may treat a local rebuild, source-tree executable, caller-supplied gate list, or Python publication route as candidate authority.
 
 - [ ] T005 [P] Implement canonical-main Candidate Identity Record assembly, inherited-manifest equality checks, raw-byte hashing, and fixed Release Gate Catalog resolution in `scripts/stateless_preview_artifact.py` so the RED cases in `tests/test_stateless_preview_artifact.py` pass.
-- [ ] T006 Implement manual `build` admission in `.github/workflows/stateless-preview.yml`: require canonical merged `main`, verify trusted source/build provenance, publish the self-contained preview payload, and refuse Python-channel inputs.
+- [x] T006 Implement manual `build` admission in `.github/workflows/stateless-preview.yml`: require canonical merged `main`, verify trusted source/build provenance, publish the self-contained preview payload, and refuse Python-channel inputs.
 - [ ] T007 [P] Extend `host/NetCoreDbg.Mcp.Stateless.Preview.Tests/PreviewMcpProcessDriver.cs` with an explicit extracted-executable launch path while preserving the existing source-output resolver and every current source-run caller.
-- [ ] T008 Wire `.github/workflows/stateless-preview.yml` to invoke `scripts/stateless_preview_artifact.py` and retain one non-overwritable archive, raw manifest, Candidate Identity Record, and Release Gate Catalog that the later proof stages can download by exact reference.
+- [x] T008 Wire `.github/workflows/stateless-preview.yml` to invoke `scripts/stateless_preview_artifact.py` and retain separate non-overwritable post-merge exact-head receipt, archive/raw manifest payload, Candidate Identity Record, and Release Gate Catalog artifacts that later proof stages can download by exact reference.
 
 **Checkpoint**: A canonical-main retained candidate can be formed, identified, and launched through a dedicated artifact path; the existing Python route remains untouched.
 

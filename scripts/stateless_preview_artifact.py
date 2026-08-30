@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from datetime import datetime, timezone
+import argparse
 import hashlib
 import io
 import json
-from os import PathLike
-from pathlib import Path
+import os
 import re
 import subprocess
-from typing import Any
+import sys
 import zipfile
-
+from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime, timezone
+from os import PathLike
+from pathlib import Path
+from typing import Any, NoReturn
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 _CANONICAL_SOURCE_REF = "refs/heads/main"
 _TRUSTED_WORKFLOW_PATH = ".github/workflows/stateless-preview.yml"
@@ -80,7 +84,7 @@ class _FrozenList(list[Any]):
     sort = _immutable
 
 
-def _refuse(message: str) -> None:
+def _refuse(message: str) -> NoReturn:
     raise ValueError(message)
 
 
@@ -569,19 +573,13 @@ def _resolve_repository_root(repository_root: str | PathLike[str]) -> Path:
 
 
 def _resolve_main_commit(repository_root: Path, source_commit: str) -> None:
-    local_main = _git_text(repository_root, "rev-parse", "--verify", "refs/heads/main^{commit}")
     origin_main = _git_text(
         repository_root,
         "rev-parse",
         "--verify",
         "refs/remotes/origin/main^{commit}",
     )
-    if (
-        _COMMIT_PATTERN.fullmatch(local_main) is None
-        or _COMMIT_PATTERN.fullmatch(origin_main) is None
-        or local_main != source_commit
-        or origin_main != source_commit
-    ):
+    if _COMMIT_PATTERN.fullmatch(origin_main) is None or origin_main != source_commit:
         _refuse("candidate is not the exact canonical main target")
 
 
@@ -667,8 +665,662 @@ def resolve_release_gate_catalog(
     )
 
 
+_SONAR_PROJECT_KEY = "thebtf_netcoredbg_mcp"
+_PREVIEW_ARTIFACT_ROOT = Path("artifacts") / "stateless-preview"
+_MAX_ACTIONS_RETENTION_DAYS = 90
+_POST_MERGE_RECEIPT_FILENAME = "post-merge-exact-head.json"
+_CANDIDATE_IDENTITY_FILENAME = "candidate-identity.json"
+_RELEASE_GATE_CATALOG_FILENAME = "release-gate-catalog.json"
+
+
+def _environment_value(environment: Mapping[str, str], name: str) -> str:
+    value = environment.get(name)
+    if not isinstance(value, str) or not value:
+        _refuse(f"{name} is unavailable")
+    return value
+
+
+def _expect_environment_identifier(environment: Mapping[str, str], name: str) -> str:
+    return _expect_pattern(_environment_value(environment, name), name, _GITHUB_IDENTIFIER_PATTERN)
+
+
+def _expect_retention_days(environment: Mapping[str, str]) -> int:
+    text = _expect_environment_identifier(environment, "A1_RETENTION_DAYS")
+    days = int(text)
+    if days > _MAX_ACTIONS_RETENTION_DAYS:
+        _refuse("A1_RETENTION_DAYS exceeds the bounded Actions retention limit")
+    return days
+
+
+def _artifact_names(version: str, run_id: str, run_attempt: int) -> dict[str, str]:
+    suffix = f"{version}-{run_id}-{run_attempt}"
+    return {
+        "payload": f"stateless-preview-payload-{suffix}",
+        "post_merge_receipt": f"stateless-preview-post-merge-receipt-{suffix}",
+        "candidate_identity": f"stateless-preview-candidate-identity-{suffix}",
+        "release_gate_catalog": f"stateless-preview-release-gate-catalog-{suffix}",
+    }
+
+
+def _canonical_build_source(
+    repository_root: Path, environment: Mapping[str, str]
+) -> dict[str, Any]:
+    repository = _expect_repository(
+        _environment_value(environment, "GITHUB_REPOSITORY"), "GITHUB_REPOSITORY"
+    )
+    if _environment_value(environment, "GITHUB_EVENT_NAME") != _TRUSTED_BUILD_EVENT:
+        _refuse("build admission requires workflow_dispatch")
+    if _environment_value(environment, "GITHUB_REF") != _CANONICAL_SOURCE_REF:
+        _refuse("build admission requires canonical main")
+    workflow_ref = _environment_value(environment, "GITHUB_WORKFLOW_REF")
+    expected_workflow_ref = f"{repository}/{_TRUSTED_WORKFLOW_PATH}@{_CANONICAL_SOURCE_REF}"
+    if workflow_ref != expected_workflow_ref:
+        _refuse("build admission requires the trusted canonical-main workflow")
+
+    head = _git_text(repository_root, "rev-parse", "--verify", "HEAD^{commit}")
+    github_sha = _expect_commit(_environment_value(environment, "GITHUB_SHA"), "GITHUB_SHA")
+    if _COMMIT_PATTERN.fullmatch(head) is None or head != github_sha:
+        _refuse("workflow checkout does not match the GitHub source commit")
+    _resolve_main_commit(repository_root, head)
+    return {
+        "repository": repository,
+        "ref": _CANONICAL_SOURCE_REF,
+        "commit": head,
+    }
+
+
+def admit_build(
+    repository_root: str | PathLike[str], environment: Mapping[str, str]
+) -> Mapping[str, Any]:
+    """Derive the only build source and bounded preview inputs from Actions context."""
+
+    root = _resolve_repository_root(repository_root)
+    source = _canonical_build_source(root, environment)
+    version = _expect_pattern(
+        _environment_value(environment, "A1_PREVIEW_VERSION"),
+        "A1_PREVIEW_VERSION",
+        _PREVIEW_VERSION_PATTERN,
+    )
+    tag = _expect_string(_environment_value(environment, "A1_PREVIEW_TAG"), "A1_PREVIEW_TAG")
+    if tag != f"stateless-preview-v{version}":
+        _refuse("A1_PREVIEW_TAG does not match A1_PREVIEW_VERSION")
+    retention_days = _expect_retention_days(environment)
+    run_id = _expect_environment_identifier(environment, "GITHUB_RUN_ID")
+    run_attempt = int(_expect_environment_identifier(environment, "GITHUB_RUN_ATTEMPT"))
+    return _freeze(
+        {
+            "source": source,
+            "preview": {
+                "version": version,
+                "tag": tag,
+                "retention_days": retention_days,
+            },
+            "run": {"id": run_id, "attempt": run_attempt},
+            "artifacts": _artifact_names(version, run_id, run_attempt),
+        }
+    )
+
+
+def _artifact_root(repository_root: Path) -> Path:
+    return repository_root / _PREVIEW_ARTIFACT_ROOT
+
+
+def _write_bytes_once(path: Path, contents: bytes, name: str) -> None:
+    if path.exists() or path.is_symlink():
+        _refuse(f"{name} already exists")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(contents)
+    except OSError:
+        _refuse(f"{name} cannot be written")
+
+
+def _read_regular_bytes(path: Path, name: str) -> bytes:
+    try:
+        if path.is_symlink() or not path.is_file():
+            _refuse(f"{name} is unavailable")
+        return path.read_bytes()
+    except OSError:
+        _refuse(f"{name} is unreadable")
+    raise AssertionError("unreachable")
+
+
+def _canonical_json_bytes(value: Any, name: str) -> bytes:
+    try:
+        return (
+            json.dumps(
+                _thaw(value),
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            + b"\n"
+        )
+    except (TypeError, ValueError):
+        _refuse(f"{name} cannot be serialized")
+    raise AssertionError("unreachable")
+
+
+def _read_exact_preview_archive_member(archive_bytes: bytes, executable_name: str) -> bytes:
+    try:
+        with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+            members = archive.infolist()
+            if len(members) != 1 or members[0].is_dir() or members[0].filename != executable_name:
+                _refuse("archive does not contain one preview executable")
+            return archive.read(members[0])
+    except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile):
+        _refuse("archive is unreadable")
+    raise AssertionError("unreachable")
+
+
+def prepare_preview_payload(
+    repository_root: str | PathLike[str], environment: Mapping[str, str]
+) -> Mapping[str, Any]:
+    """Archive one published preview executable and seal its inherited manifest."""
+
+    root = _resolve_repository_root(repository_root)
+    admission = admit_build(root, environment)
+    source = admission["source"]
+    preview = admission["preview"]
+    publish_directory = _artifact_root(root) / "publish"
+    source_executable = publish_directory / _PREVIEW_EXECUTABLE
+    executable_bytes = _read_regular_bytes(source_executable, "published preview executable")
+    if not executable_bytes:
+        _refuse("published preview executable is empty")
+
+    payload_directory = _artifact_root(root) / "payload"
+    if payload_directory.exists() or payload_directory.is_symlink():
+        _refuse("preview payload directory already exists")
+    try:
+        payload_directory.mkdir(parents=True)
+    except OSError:
+        _refuse("preview payload directory cannot be created")
+
+    version = preview["version"]
+    archive_name = f"netcoredbg-mcp-stateless-preview-win-x64-{version}.zip"
+    manifest_name = f"netcoredbg-mcp-stateless-preview-win-x64-{version}.manifest.json"
+    archive_path = payload_directory / archive_name
+    entry = zipfile.ZipInfo(_PREVIEW_EXECUTABLE, date_time=(1980, 1, 1, 0, 0, 0))
+    entry.compress_type = zipfile.ZIP_STORED
+    try:
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
+            archive.writestr(entry, executable_bytes)
+    except (OSError, RuntimeError):
+        _refuse("preview archive cannot be written")
+    archive_bytes = _read_regular_bytes(archive_path, "preview archive")
+    archive_executable = _read_exact_preview_archive_member(archive_bytes, _PREVIEW_EXECUTABLE)
+    if archive_executable != executable_bytes:
+        _refuse("preview archive executable does not match publish output")
+
+    manifest_contents = {
+        "schema_version": "1.0",
+        "version": version,
+        "tag": preview["tag"],
+        "commit": source["commit"],
+        "rid": "win-x64",
+        "archive": {
+            "name": archive_name,
+            "size_bytes": len(archive_bytes),
+            "sha256": _sha256_bytes(archive_bytes),
+        },
+        "executable": {
+            "name": _PREVIEW_EXECUTABLE,
+            "size_bytes": len(executable_bytes),
+            "sha256": _sha256_bytes(executable_bytes),
+        },
+    }
+    _validate_preview_manifest(manifest_contents, source["commit"])
+    manifest_bytes = _canonical_json_bytes(manifest_contents, "preview manifest")
+    manifest_path = payload_directory / manifest_name
+    _write_bytes_once(manifest_path, manifest_bytes, "preview manifest")
+    manifest_file = {
+        "name": manifest_name,
+        "size_bytes": len(manifest_bytes),
+        "sha256": _sha256_bytes(manifest_bytes),
+    }
+    return _freeze(
+        {
+            "archive": _thaw(manifest_contents["archive"]),
+            "manifest": manifest_file,
+            "executable": _thaw(manifest_contents["executable"]),
+        }
+    )
+
+
+def _coordination_root(repository_root: Path) -> Path:
+    reported_common_dir = _git_text(repository_root, "rev-parse", "--git-common-dir")
+    common_dir = Path(reported_common_dir)
+    if not common_dir.is_absolute():
+        common_dir = repository_root / common_dir
+    try:
+        resolved_common_dir = common_dir.resolve(strict=True)
+        coordination_root = resolved_common_dir.parent
+    except OSError:
+        _refuse("canonical coordination root is unavailable")
+    if not coordination_root.is_dir():
+        _refuse("canonical coordination root is unavailable")
+    return coordination_root
+
+
+def _load_json_object(raw: bytes, name: str) -> dict[str, Any]:
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                _refuse(f"{name} contains a duplicate key")
+            result[key] = value
+        return result
+
+    try:
+        decoded = raw.decode("utf-8")
+        result = json.loads(
+            decoded,
+            object_pairs_hook=reject_duplicates,
+            parse_constant=lambda value: _refuse(
+                f"{name} contains unsupported JSON constant {value}"
+            ),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        _refuse(f"{name} is not valid UTF-8 JSON")
+    if not isinstance(result, dict):
+        _refuse(f"{name} must contain an object")
+    return result
+
+
+def _validate_post_merge_scan_receipt(receipt: Mapping[str, Any], source_commit: str) -> None:
+    quality_gate = receipt.get("quality_gate")
+    worktree = receipt.get("worktree")
+    if (
+        type(receipt.get("schema_version")) is not int
+        or receipt.get("schema_version") != 2
+        or receipt.get("role") != "post-merge"
+        or receipt.get("outcome") != "PASS"
+        or receipt.get("project_key") != _SONAR_PROJECT_KEY
+        or receipt.get("analysis_xml_project_key") != _SONAR_PROJECT_KEY
+        or receipt.get("captured_head") != source_commit
+        or receipt.get("post_scan_head") != source_commit
+        or not isinstance(quality_gate, Mapping)
+        or quality_gate.get("status") != "OK"
+        or not isinstance(worktree, Mapping)
+        or worktree.get("detached") is not True
+        or worktree.get("linked") is not True
+    ):
+        _refuse("post-merge exact-head scan receipt is not trusted")
+
+
+def _post_merge_scan_receipt_path(repository_root: Path, source_commit: str) -> Path:
+    return (
+        _coordination_root(repository_root)
+        / ".agent"
+        / "e"
+        / "sonarqube"
+        / _SONAR_PROJECT_KEY
+        / source_commit
+        / "post-merge.json"
+    )
+
+
+def produce_post_merge_exact_head_receipt(
+    repository_root: str | PathLike[str], environment: Mapping[str, str]
+) -> Mapping[str, Any]:
+    """Seal the sole repository-run post-merge scan result for this build."""
+
+    root = _resolve_repository_root(repository_root)
+    admission = admit_build(root, environment)
+    source = admission["source"]
+    raw_receipt_path = _post_merge_scan_receipt_path(root, source["commit"])
+    raw_receipt = _read_regular_bytes(raw_receipt_path, "post-merge scan receipt")
+    _validate_post_merge_scan_receipt(
+        _load_json_object(raw_receipt, "post-merge scan receipt"), source["commit"]
+    )
+    record = {
+        "receipt_schema_version": "1.0",
+        "record_type": "sonarqube-exact-head",
+        "repository": source["repository"],
+        "source_ref": source["ref"],
+        "stage": "post-merge",
+        "scanned_commit": source["commit"],
+        "tag_target": source["commit"],
+        "outcome": "PASS",
+        "source_runner": {
+            "script": "scripts/run_sonarqube_exact_head.py",
+            "role": "post-merge",
+            "receipt_schema_version": 2,
+            "project_key": _SONAR_PROJECT_KEY,
+            "receipt_sha256": _sha256_bytes(raw_receipt),
+        },
+        "recorded_at": _utc_timestamp(),
+    }
+    receipt_directory = _artifact_root(root) / "post-merge-receipt"
+    if receipt_directory.exists() or receipt_directory.is_symlink():
+        _refuse("post-merge receipt directory already exists")
+    _write_bytes_once(
+        receipt_directory / _POST_MERGE_RECEIPT_FILENAME,
+        _canonical_json_bytes(record, "post-merge receipt"),
+        "post-merge receipt",
+    )
+    return _freeze(record)
+
+
+def _read_github_artifact(repository: str, artifact_id: str, token: str) -> Mapping[str, Any]:
+    if not token:
+        _refuse("GITHUB_TOKEN is unavailable")
+    request = Request(
+        f"https://api.github.com/repos/{repository}/actions/artifacts/{artifact_id}",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            raw = response.read()
+    except (HTTPError, URLError, OSError):
+        _refuse("uploaded artifact metadata is unavailable")
+    return _load_json_object(raw, "uploaded artifact metadata")
+
+
+def _validate_uploaded_artifact(
+    value: Mapping[str, Any],
+    *,
+    artifact_id: str,
+    expected_name: str,
+    current_run_id: str,
+) -> Mapping[str, Any]:
+    numeric_id = value.get("id")
+    workflow_run = value.get("workflow_run")
+    if (
+        type(numeric_id) is not int
+        or str(numeric_id) != artifact_id
+        or value.get("name") != expected_name
+        or value.get("expired") is not False
+        or not isinstance(workflow_run, Mapping)
+        or str(workflow_run.get("id")) != current_run_id
+    ):
+        _refuse("uploaded artifact is not owned by this build run")
+    expires_at = _expect_datetime(value.get("expires_at"), "uploaded artifact expires_at")
+    return {"id": artifact_id, "name": expected_name, "expires_at": expires_at}
+
+
+def _validate_produced_post_merge_record(
+    record: Mapping[str, Any], source: Mapping[str, Any]
+) -> None:
+    source_runner = record.get("source_runner")
+    if (
+        set(record)
+        != {
+            "receipt_schema_version",
+            "record_type",
+            "repository",
+            "source_ref",
+            "stage",
+            "scanned_commit",
+            "tag_target",
+            "outcome",
+            "source_runner",
+            "recorded_at",
+        }
+        or record.get("receipt_schema_version") != "1.0"
+        or record.get("record_type") != "sonarqube-exact-head"
+        or record.get("repository") != source["repository"]
+        or record.get("source_ref") != _CANONICAL_SOURCE_REF
+        or record.get("stage") != "post-merge"
+        or record.get("scanned_commit") != source["commit"]
+        or record.get("tag_target") != source["commit"]
+        or record.get("outcome") != "PASS"
+        or not isinstance(source_runner, Mapping)
+        or set(source_runner)
+        != {"script", "role", "receipt_schema_version", "project_key", "receipt_sha256"}
+        or source_runner.get("script") != "scripts/run_sonarqube_exact_head.py"
+        or source_runner.get("role") != "post-merge"
+        or type(source_runner.get("receipt_schema_version")) is not int
+        or source_runner.get("receipt_schema_version") != 2
+        or source_runner.get("project_key") != _SONAR_PROJECT_KEY
+    ):
+        _refuse("post-merge receipt record is not trusted")
+    _expect_sha256(source_runner["receipt_sha256"], "post-merge receipt source hash")
+    _expect_datetime(record.get("recorded_at"), "post-merge receipt recorded_at")
+
+
+def seal_build_records(
+    repository_root: str | PathLike[str],
+    environment: Mapping[str, str],
+    *,
+    artifact_reader: Callable[[str, str, str], Mapping[str, Any]] | None = None,
+) -> Mapping[str, Any]:
+    """Seal the candidate identity and fixed catalog from current-run artifact metadata."""
+
+    root = _resolve_repository_root(repository_root)
+    admission = admit_build(root, environment)
+    source = admission["source"]
+    preview = admission["preview"]
+    run = admission["run"]
+    names = admission["artifacts"]
+    token = _environment_value(environment, "GITHUB_TOKEN")
+    payload_artifact_id = _expect_environment_identifier(environment, "A1_PAYLOAD_ARTIFACT_ID")
+    receipt_artifact_id = _expect_environment_identifier(
+        environment, "A1_POST_MERGE_RECEIPT_ARTIFACT_ID"
+    )
+    reader = artifact_reader or _read_github_artifact
+    payload_artifact = _validate_uploaded_artifact(
+        reader(source["repository"], payload_artifact_id, token),
+        artifact_id=payload_artifact_id,
+        expected_name=names["payload"],
+        current_run_id=run["id"],
+    )
+    receipt_artifact = _validate_uploaded_artifact(
+        reader(source["repository"], receipt_artifact_id, token),
+        artifact_id=receipt_artifact_id,
+        expected_name=names["post_merge_receipt"],
+        current_run_id=run["id"],
+    )
+
+    payload_directory = _artifact_root(root) / "payload"
+    archive_name = f"netcoredbg-mcp-stateless-preview-win-x64-{preview['version']}.zip"
+    manifest_name = f"netcoredbg-mcp-stateless-preview-win-x64-{preview['version']}.manifest.json"
+    archive_path = payload_directory / archive_name
+    manifest_path = payload_directory / manifest_name
+    archive_bytes = _read_regular_bytes(archive_path, "preview archive")
+    manifest_bytes = _read_regular_bytes(manifest_path, "preview manifest")
+    manifest_contents = _load_manifest(manifest_bytes)
+    _validate_preview_manifest(manifest_contents, source["commit"])
+    if (
+        manifest_contents["version"] != preview["version"]
+        or manifest_contents["tag"] != preview["tag"]
+    ):
+        _refuse("preview manifest does not match admitted preview inputs")
+    if manifest_contents["archive"]["name"] != archive_name:
+        _refuse("preview manifest archive name is not admitted")
+    if (
+        len(archive_bytes) != manifest_contents["archive"]["size_bytes"]
+        or _sha256_bytes(archive_bytes) != manifest_contents["archive"]["sha256"]
+    ):
+        _refuse("preview archive does not match its manifest")
+    executable_bytes = _read_exact_preview_archive_member(archive_bytes, _PREVIEW_EXECUTABLE)
+    if (
+        len(executable_bytes) != manifest_contents["executable"]["size_bytes"]
+        or _sha256_bytes(executable_bytes) != manifest_contents["executable"]["sha256"]
+    ):
+        _refuse("preview executable does not match its manifest")
+    manifest_file = {
+        "name": manifest_name,
+        "size_bytes": len(manifest_bytes),
+        "sha256": _sha256_bytes(manifest_bytes),
+    }
+
+    receipt_path = _artifact_root(root) / "post-merge-receipt" / _POST_MERGE_RECEIPT_FILENAME
+    receipt_bytes = _read_regular_bytes(receipt_path, "post-merge receipt")
+    receipt_record = _load_json_object(receipt_bytes, "post-merge receipt")
+    _validate_produced_post_merge_record(receipt_record, source)
+    raw_scan_receipt = _read_regular_bytes(
+        _post_merge_scan_receipt_path(root, source["commit"]), "post-merge scan receipt"
+    )
+    _validate_post_merge_scan_receipt(
+        _load_json_object(raw_scan_receipt, "post-merge scan receipt"), source["commit"]
+    )
+    if receipt_record["source_runner"]["receipt_sha256"] != _sha256_bytes(raw_scan_receipt):
+        _refuse("post-merge receipt does not bind the repository scan result")
+    receipt_reference = {
+        "repository": source["repository"],
+        "run_id": run["id"],
+        "artifact_id": receipt_artifact["id"],
+        "path": _POST_MERGE_RECEIPT_FILENAME,
+        "sha256": _sha256_bytes(receipt_bytes),
+    }
+    payload_retention = {
+        "configured_days": preview["retention_days"],
+        "expires_at": payload_artifact["expires_at"],
+    }
+    candidate_input = {
+        "schema_version": "1.0",
+        "candidate": {
+            "source": {
+                "repository": source["repository"],
+                "ref": _CANONICAL_SOURCE_REF,
+                "commit": source["commit"],
+                "origin_main_target": source["commit"],
+                "post_merge_exact_head_receipt": {
+                    "record_reference": receipt_reference,
+                    "stage": "post-merge",
+                    "record_type": "sonarqube-exact-head",
+                    "scanned_commit": source["commit"],
+                    "tag_target": source["commit"],
+                    "outcome": "PASS",
+                },
+            },
+            "build": {
+                "repository": source["repository"],
+                "workflow_path": _TRUSTED_WORKFLOW_PATH,
+                "mode": _TRUSTED_BUILD_MODE,
+                "event": _TRUSTED_BUILD_EVENT,
+                "run_id": run["id"],
+                "run_attempt": run["attempt"],
+                "ref": _CANONICAL_SOURCE_REF,
+                "commit": source["commit"],
+                "artifact": {
+                    "id": payload_artifact["id"],
+                    "name": payload_artifact["name"],
+                    "sha256": _sha256_bytes(archive_bytes + manifest_bytes),
+                    "retention": payload_retention,
+                },
+            },
+            "preview_manifest": {
+                "file": manifest_file,
+                "manifest_reference": {
+                    "repository": source["repository"],
+                    "run_id": run["id"],
+                    "artifact_id": payload_artifact["id"],
+                    "path": manifest_name,
+                    "sha256": manifest_file["sha256"],
+                },
+                "archive_reference": {
+                    "repository": source["repository"],
+                    "run_id": run["id"],
+                    "artifact_id": payload_artifact["id"],
+                    "path": archive_name,
+                    "sha256": manifest_contents["archive"]["sha256"],
+                },
+                "contents": manifest_contents,
+            },
+            "destination": {
+                "provider": "github",
+                "repository": source["repository"],
+                "tag": preview["tag"],
+                "prerelease": True,
+            },
+        },
+    }
+    candidate_identity = assemble_candidate_identity(candidate_input)
+    release_gate_catalog = resolve_release_gate_catalog(candidate_identity, root)
+    records_directory = _artifact_root(root) / "records"
+    if records_directory.exists() or records_directory.is_symlink():
+        _refuse("sealed record directory already exists")
+    _write_bytes_once(
+        records_directory / _CANDIDATE_IDENTITY_FILENAME,
+        _canonical_json_bytes(candidate_identity, "candidate identity"),
+        "candidate identity",
+    )
+    _write_bytes_once(
+        records_directory / _RELEASE_GATE_CATALOG_FILENAME,
+        _canonical_json_bytes(release_gate_catalog, "release gate catalog"),
+        "release gate catalog",
+    )
+    return _freeze(
+        {
+            "candidate_identity": _thaw(candidate_identity),
+            "release_gate_catalog": _thaw(release_gate_catalog),
+        }
+    )
+
+
+def _write_admission_outputs(admission: Mapping[str, Any], environment: Mapping[str, str]) -> None:
+    output_path = _environment_value(environment, "GITHUB_OUTPUT")
+    preview = admission["preview"]
+    artifacts = admission["artifacts"]
+    values = {
+        "preview_version": preview["version"],
+        "preview_tag": preview["tag"],
+        "retention_days": str(preview["retention_days"]),
+        "payload_artifact_name": artifacts["payload"],
+        "post_merge_receipt_artifact_name": artifacts["post_merge_receipt"],
+        "candidate_identity_artifact_name": artifacts["candidate_identity"],
+        "release_gate_catalog_artifact_name": artifacts["release_gate_catalog"],
+    }
+    try:
+        with Path(output_path).open("a", encoding="utf-8", newline="\n") as output:
+            for name, value in values.items():
+                output.write(f"{name}={value}\n")
+    except OSError:
+        _refuse("GitHub Actions output file is unavailable")
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    for command in (
+        "admit-build",
+        "prepare-payload",
+        "produce-post-merge-receipt",
+        "seal-build-records",
+    ):
+        commands.add_parser(command)
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    arguments = parse_args(argv)
+    try:
+        if arguments.command == "admit-build":
+            _write_admission_outputs(admit_build(Path.cwd(), os.environ), os.environ)
+        elif arguments.command == "prepare-payload":
+            prepare_preview_payload(Path.cwd(), os.environ)
+        elif arguments.command == "produce-post-merge-receipt":
+            produce_post_merge_exact_head_receipt(Path.cwd(), os.environ)
+        elif arguments.command == "seal-build-records":
+            seal_build_records(Path.cwd(), os.environ)
+        else:
+            raise AssertionError("unreachable")
+    except ValueError:
+        print("STATELESS_PREVIEW_ARTIFACT_REFUSED", file=sys.stderr)
+        return 1
+    print("STATELESS_PREVIEW_ARTIFACT_READY")
+    return 0
+
+
 __all__ = [
+    "admit_build",
     "assemble_candidate_identity",
+    "main",
+    "parse_args",
+    "prepare_preview_payload",
+    "produce_post_merge_exact_head_receipt",
     "resolve_release_gate_catalog",
+    "seal_build_records",
     "verify_retained_artifact",
 ]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
