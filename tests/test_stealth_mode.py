@@ -6,6 +6,8 @@ import contextlib
 import hashlib
 import io
 import json
+import shutil
+import sys
 import threading
 from itertools import chain, repeat
 from pathlib import Path
@@ -16,6 +18,11 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+REQUIRES_WINDOWS_DOTNET = pytest.mark.skipif(
+    sys.platform != "win32" or shutil.which("dotnet") is None,
+    reason="Windows with dotnet is required to run the direct net8.0-windows bridge probe",
+)
 
 
 class ToolRegistry:
@@ -507,6 +514,9 @@ def test_bridge_evidence_fallback_discards_black_printwindow_for_ordinary_and_st
     assert "IsBlankFrame(printWindowBitmap)" not in evidence_capture
     assert "if (!IsProbablyBlackFrame(printWindowBitmap))" in evidence_capture
     assert "EnsureStrictExpectedHandle(expectedTarget);" in evidence_capture
+    assert "var connectedProcessId = RequireConnectedProcessId();" in evidence_capture
+    assert "EnsureStrictCaptureProcess(printWindowBefore, connectedProcessId);" in evidence_capture
+    assert "EnsureStrictCaptureProcess(printWindowAfter, connectedProcessId);" in evidence_capture
     assert (
         "EnsureStrictCaptureProcess(printWindowBefore, strictBefore.ExpectedProcessId);"
         in evidence_capture
@@ -518,7 +528,7 @@ def test_bridge_evidence_fallback_discards_black_printwindow_for_ordinary_and_st
     assert (
         "var fallbackTarget = strictCaptureTarget ?? new StrictCaptureTarget(" in evidence_capture
     )
-    assert "hwnd.ToInt64(), printWindowAfter.ProcessId" in evidence_capture
+    assert "hwnd.ToInt64(), connectedProcessId" in evidence_capture
     assert "CaptureEvidenceWithVerifiedBitBltFallback" in evidence_capture
     assert "var fallbackBefore = ReadCaptureSnapshot(hwnd);" in fallback_capture
     assert "EnsureStableCaptureSnapshot(printWindowAfter, fallbackBefore);" in fallback_capture
@@ -530,6 +540,7 @@ def test_bridge_evidence_fallback_discards_black_printwindow_for_ordinary_and_st
     )
 
 
+@REQUIRES_WINDOWS_DOTNET
 def test_bridge_probable_black_frame_scans_full_frame_with_lockbits(tmp_path) -> None:
     import subprocess
 
@@ -672,6 +683,140 @@ static Bitmap CreateDistributedBrightFrame()
     assert "Marshal.Copy" in helper
     assert "PixelFormat.Format24bppRgb" in helper
     assert "PixelFormat.Format32bppArgb" in helper
+
+
+@REQUIRES_WINDOWS_DOTNET
+def test_bridge_ordinary_evidence_rejects_foreign_snapshot_before_raster_or_activation(
+    tmp_path,
+) -> None:
+    import subprocess
+
+    probe_project = tmp_path / "BridgeForeignEvidenceProbe.csproj"
+    probe_source = tmp_path / "Program.cs"
+    bridge_project = PROJECT_ROOT / "bridge" / "FlaUIBridge.csproj"
+    probe_project.write_text(
+        """<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>TypedBitBltFallbackBridgeHost</AssemblyName>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="__BRIDGE_PROJECT__" AdditionalProperties="BridgeTestHost=true" />
+  </ItemGroup>
+</Project>
+""".replace("__BRIDGE_PROJECT__", bridge_project.as_posix()),
+        encoding="utf-8",
+    )
+    probe_source.write_text(
+        """using System.Drawing;
+using System.Reflection;
+using System.Text.Json;
+using FlaUIBridge;
+using FlaUIBridge.Commands;
+
+var capture = typeof(ScreenshotCommands).GetMethod(
+    "CaptureEvidenceWithPrintWindow",
+    BindingFlags.NonPublic | BindingFlags.Static)
+    ?? throw new InvalidOperationException("Evidence capture method was not found.");
+
+var transport = new ForeignProcessCaptureTransport();
+JsonRpcHandler.ProcessId = 42;
+try
+{
+    using (ScreenshotCommands.PushCaptureTransportForTesting(transport))
+    {
+        var rejected = false;
+        try
+        {
+            _ = capture.Invoke(null, new object?[] { new IntPtr(777), false, null });
+        }
+        catch (TargetInvocationException exception)
+            when (exception.InnerException is InvalidOperationException
+                  {
+                      Message: "Capture target does not belong to the active debuggee process."
+                  })
+        {
+            rejected = true;
+        }
+
+        if (!rejected)
+            throw new InvalidOperationException("Foreign evidence target was not rejected.");
+        if (transport.PrintWindowCalls != 0 || transport.ActivationCalls != 0 || transport.BitBltCalls != 0)
+            throw new InvalidOperationException("Foreign evidence target was rasterized or activated.");
+    }
+}
+finally
+{
+    JsonRpcHandler.ProcessId = 0;
+}
+
+Console.WriteLine(JsonSerializer.Serialize(new
+{
+    printWindowCalls = transport.PrintWindowCalls,
+    activationCalls = transport.ActivationCalls,
+    bitBltCalls = transport.BitBltCalls,
+}));
+
+internal sealed class ForeignProcessCaptureTransport : IScreenshotCaptureTransport
+{
+    public int PrintWindowCalls { get; private set; }
+    public int ActivationCalls { get; private set; }
+    public int BitBltCalls { get; private set; }
+    private IntPtr _foreground;
+
+    public CaptureSnapshot ReadSnapshot(IntPtr hwnd) =>
+        new(0, 0, 8, 8, 0, 0, 8, 8, 96, 43);
+
+    public Bitmap? CapturePrintWindow(IntPtr hwnd, int width, int height)
+    {
+        PrintWindowCalls++;
+        return new Bitmap(width, height);
+    }
+
+    public Bitmap CaptureBitBlt(IntPtr hwnd, int width, int height)
+    {
+        BitBltCalls++;
+        return new Bitmap(width, height);
+    }
+
+    public IntPtr GetForegroundWindow() => _foreground;
+
+    public bool RestoreWindow(IntPtr hwnd) => true;
+
+    public ForegroundTransition ActivateForegroundVerified(
+        IntPtr hwnd,
+        uint expectedProcessId,
+        IntPtr requiredForeground,
+        uint requiredForegroundProcessId)
+    {
+        ActivationCalls++;
+        _foreground = hwnd;
+        return new ForegroundTransition(true, true);
+    }
+
+    public bool SetForegroundWindow(IntPtr hwnd) => true;
+}
+""",
+        encoding="utf-8",
+    )
+    probe = subprocess.run(
+        ["dotnet", "run", "--project", str(probe_project), "-c", "Release", "--nologo"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert probe.returncode == 0, probe.stdout + probe.stderr
+    assert json.loads(probe.stdout.strip().splitlines()[-1]) == {
+        "printWindowCalls": 0,
+        "activationCalls": 0,
+        "bitBltCalls": 0,
+    }
 
 
 def test_bridge_typed_bitblt_fallback_has_no_legacy_lossless_authority() -> None:

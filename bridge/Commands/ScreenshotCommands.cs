@@ -231,10 +231,12 @@ public static class ScreenshotCommands
         bool typedBitBltFallback,
         StrictCaptureTarget? strictCaptureTarget)
     {
+        var connectedProcessId = RequireConnectedProcessId();
         if (typedBitBltFallback && strictCaptureTarget is StrictCaptureTarget expectedTarget)
             EnsureStrictExpectedHandle(expectedTarget);
 
         var printWindowBefore = ReadCaptureSnapshot(hwnd);
+        EnsureStrictCaptureProcess(printWindowBefore, connectedProcessId);
         if (typedBitBltFallback && strictCaptureTarget is StrictCaptureTarget strictBefore)
             EnsureStrictCaptureProcess(printWindowBefore, strictBefore.ExpectedProcessId);
         var printWindowBitmap = CaptureBitmapWithPrintWindow(
@@ -253,6 +255,7 @@ public static class ScreenshotCommands
         {
             printWindowAfter = ReadCaptureSnapshot(hwnd);
             EnsureStableCaptureSnapshot(printWindowBefore, printWindowAfter);
+            EnsureStrictCaptureProcess(printWindowAfter, connectedProcessId);
             if (typedBitBltFallback && strictCaptureTarget is StrictCaptureTarget strictAfter)
                 EnsureStrictCaptureProcess(printWindowAfter, strictAfter.ExpectedProcessId);
             printWindowVariance = NormalizedPixelVariance(printWindowBitmap);
@@ -267,7 +270,7 @@ public static class ScreenshotCommands
         }
 
         var fallbackTarget = strictCaptureTarget ?? new StrictCaptureTarget(
-            hwnd.ToInt64(), printWindowAfter.ProcessId);
+            hwnd.ToInt64(), connectedProcessId);
         return CaptureEvidenceWithVerifiedBitBltFallback(
             hwnd, fallbackTarget, printWindowAfter, printWindowVariance);
     }
@@ -418,6 +421,15 @@ public static class ScreenshotCommands
     {
         var expectedSnapshot = ReadCaptureSnapshot(new IntPtr(strictCaptureTarget.ExpectedHwnd));
         EnsureStrictCaptureProcess(expectedSnapshot, strictCaptureTarget.ExpectedProcessId);
+    }
+
+    private static uint RequireConnectedProcessId()
+    {
+        var processId = JsonRpcHandler.ProcessId;
+        if (processId <= 0)
+            throw new InvalidOperationException("Evidence capture requires a positive connected process ID.");
+
+        return checked((uint)processId);
     }
 
     private static void EnsureStrictCaptureProcess(CaptureSnapshot snapshot, uint expectedProcessId)
