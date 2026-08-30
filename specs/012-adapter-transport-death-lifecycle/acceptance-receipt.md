@@ -7,9 +7,9 @@
 - **Program:** `specs/011-issue450-sonar-release-program/`
 - **Wave contract:** `specs/012-adapter-transport-death-lifecycle/`
 - **Source base:** `e95223ba1bddd7a08e440e4a0eca3db9f3c068b9`
-- **Accepted implementation candidate:** `66f906842f24e3ef2eb58f2473859a89fe4d179b`
+- **Accepted implementation candidate:** `1d61ae866d8a9b825144e9ddf55a6ea068f36e60`
 - **Initial terminal judgment:** `agent://JudgeWave1Final` returned `ACCEPT` with no blocking or nonblocking findings.
-- **Final changed-byte check:** `agent://CheckWave1FinalRaceCorrections` returned `PASS` for the exact accepted successor.
+- **Final changed-byte check:** `agent://CheckWave1LatestReviewRepairs` returned `PASS` for the exact accepted successor.
 
 This receipt closes Wave 1 only. It does not authorize a tag, package publication, prerelease, public release, Sonar waiver, Wave 2 implementation, or v0.23.11 shipment.
 
@@ -71,7 +71,7 @@ uv run --locked --extra dev python -m pytest -q `
   tests/test_stealth_mode.py::test_session_manager_stop_cancels_stealth_foreground_restore_task
 ```
 
-Result: `132 passed`.
+Result: `137 passed`.
 
 The focused proof covers:
 
@@ -145,11 +145,13 @@ The full run is supporting evidence, not a fabricated all-green claim. Wave-1 ac
 - `agent://Wave1ExactNestedRecheck`: PASS for the changed nested-redaction criterion at `099ff2abad5037c82b7f85506f76b5afa8dac578`.
 - PR #288 review then identified restart-state clearing, immediate-startup cleanup, late `exited` resource publication, newest-byte stderr retention, direct test access, and parent-plan consistency corrections. Commit `4bbfa7296d0f4ef90150eab9cb7b6707ff362bb6` fixed the initial 13 findings.
 - `agent://CheckWave1PrCorrection`: exact successor PASS at `4bbfa7296d0f4ef90150eab9cb7b6707ff362bb6`; focused Wave-1 proof was `131 passed`, adjacent lifecycle proof was `116 passed`, and the scoped correction static checks were clean.
-- A subsequent PR pass found two distinct races: the old initialized-event latch could cross adapter generations, and `ProcessLookupError` from kill escalation could escape the sole finalizer before terminal publication. Commit `66f906842f24e3ef2eb58f2473859a89fe4d179b` closes both with deterministic regressions; all 15 review threads are resolved.
-- `agent://CheckWave1FinalRaceCorrections`: exact changed-byte PASS at `66f906842f24e3ef2eb58f2473859a89fe4d179b`; the two new tests pass, the full focused Wave-1 group is `132 passed`, and public shape plus one-terminal semantics remain unchanged.
-- `agent://JudgeWave1Final`: terminal `ACCEPT` for the pre-PR-review candidate, with the exact successor checker chain covering every later changed source field.
+- A subsequent PR pass found two distinct races: the old initialized-event latch could cross adapter generations, and `ProcessLookupError` from kill escalation could escape the sole finalizer before terminal publication. Commit `66f906842f24e3ef2eb58f2473859a89fe4d179b` closed both with deterministic regressions.
+- `agent://CheckWave1FinalRaceCorrections`: exact changed-byte PASS at `66f906842f24e3ef2eb58f2473859a89fe4d179b`; the two new tests passed, the focused Wave-1 group was `132 passed`, and public shape plus one-terminal semantics remained unchanged.
+- The final PR pass found four lifecycle/security mechanisms and three parent receipt-barrier defects: foreground cancellation could strand the explicit-stop marker; old-run events could reach current manager handlers; spaced or quoted credential tails could survive; launch/attach could resurrect `RUNNING`; duplicate blocking keys, a wrong diagnostic role, or a conflicting top-level analysis ID could pass documented barriers. Integrated commit `1d61ae866d8a9b825144e9ddf55a6ea068f36e60` closes all seven.
+- `agent://CheckWave1LatestReviewRepairs`: exact successor PASS at `1d61ae866d8a9b825144e9ddf55a6ea068f36e60`; five new source regressions pass, the full focused Wave-1 group is `137 passed`, all nine PowerShell fences parse, and all 22 review threads are addressed.
+- `agent://JudgeWave1Final`: terminal `ACCEPT` for the pre-PR-review candidate, with the exact successor checker chain covering every later changed source and contract field.
 
-Earlier passes remain historical evidence for their exact predecessor bytes. The final accepted source identity is `66f906842f24e3ef2eb58f2473859a89fe4d179b`; no predecessor verdict is represented as proof for bytes it did not inspect.
+Earlier passes remain historical evidence for their exact predecessor bytes. The final accepted source identity is `1d61ae866d8a9b825144e9ddf55a6ea068f36e60`; no predecessor verdict is represented as proof for bytes it did not inspect.
 
 ## Requirement closure
 
