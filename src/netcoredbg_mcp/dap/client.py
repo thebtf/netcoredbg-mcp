@@ -34,6 +34,12 @@ TERMINATE_TIMEOUT = 5.0
 KILL_TIMEOUT = 2.0
 TERMINAL_EVENT_NAME_LIMIT = 256
 TERMINAL_EVENT_SEQ_MAX = 2_147_483_647
+TERMINAL_CONTAINER_ITEM_LIMIT = 64
+TERMINAL_CONTAINER_DEPTH_LIMIT = 8
+
+_SENSITIVE_KEY_RE = re.compile(
+    r"(?i)(?:[A-Za-z0-9]+[_-])*(?:authorization|access[_-]?token|token|password|secret|api[_-]?key)"
+)
 
 _CREDENTIAL_VALUE_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9])"
@@ -264,6 +270,45 @@ def sanitize_terminal_text(
         return safe
     marker = "... [truncated]"
     return safe[: max(0, limit - len(marker))] + marker
+
+
+def _sanitize_terminal_value(value: object, depth: int = 0) -> object:
+    """Redact nested adapter data before serializing a terminal preview.
+
+    DAP output frequently embeds JSON as a string inside another JSON event.
+    Sanitizing each value before the outer `json.dumps` prevents escaped quotes
+    from hiding credential keys from text-level patterns. Container depth and
+    item counts are capped so diagnostic preparation cannot amplify a frame.
+    """
+
+    if depth >= TERMINAL_CONTAINER_DEPTH_LIMIT:
+        return "<depth-limit>"
+    if isinstance(value, Mapping):
+        sanitized: dict[str, object] = {}
+        for index, (raw_key, item) in enumerate(value.items()):
+            if index >= TERMINAL_CONTAINER_ITEM_LIMIT:
+                sanitized["<truncated>"] = True
+                break
+            key = sanitize_terminal_text(raw_key, 128)
+            sanitized[key] = (
+                "<redacted>"
+                if _SENSITIVE_KEY_RE.fullmatch(str(raw_key))
+                else _sanitize_terminal_value(item, depth + 1)
+            )
+        return sanitized
+    if isinstance(value, (list, tuple)):
+        items = [
+            _sanitize_terminal_value(item, depth + 1)
+            for item in value[:TERMINAL_CONTAINER_ITEM_LIMIT]
+        ]
+        if len(value) > TERMINAL_CONTAINER_ITEM_LIMIT:
+            items.append("<truncated>")
+        return items
+    if isinstance(value, (str, bytes)):
+        return sanitize_terminal_text(value)
+    if value is None or type(value) in {bool, int, float}:
+        return value
+    return sanitize_terminal_text(value)
 
 
 def _bounded_text(value: object, limit: int = TERMINAL_PREVIEW_LIMIT) -> str:
@@ -746,7 +791,11 @@ class DAPClient:
 
             elif isinstance(message, DAPEvent):
                 event_name = sanitize_terminal_text(message.event, TERMINAL_EVENT_NAME_LIMIT)
-                body_json = json.dumps(message.body, default=str, separators=(",", ":"))
+                body_json = json.dumps(
+                    _sanitize_terminal_value(message.body),
+                    default=str,
+                    separators=(",", ":"),
+                )
                 body_preview = _bounded_text(body_json)
                 logger.debug("<<< Event %s: %s", event_name, body_preview)
                 if run is not None:

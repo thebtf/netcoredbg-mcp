@@ -1370,6 +1370,7 @@ class TestDAPClientTransportDeath:
                     "token": "abc123",
                     "path": "C:\\Users\\private\\x",
                     "root": "/root",
+                    "output": '{"client_secret":"s3cr3t"}',
                 },
             },
             run,
@@ -1382,6 +1383,7 @@ class TestDAPClientTransportDeath:
         assert "abc123" not in run.last_dap_event_body_preview
         assert "C:\\Users" not in run.last_dap_event_body_preview
         assert "/root" not in run.last_dap_event_body_preview
+        assert "s3cr3t" not in run.last_dap_event_body_preview
 
         client._handle_message(
             {"seq": 10**1000, "type": "event", "event": "bounded", "body": {}},
