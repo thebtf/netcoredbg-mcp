@@ -4,7 +4,6 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using ModelContextProtocol;
-using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 using Xunit;
 
@@ -14,53 +13,51 @@ public sealed class PreviewArtifactConsumerTests
 {
     private const string ArtifactPrefix = "netcoredbg-mcp-stateless-preview-win-x64-";
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan TransportOpenProbeTimeout = TimeSpan.FromMilliseconds(250);
 
     [Fact]
-    public async Task VerifiedExtractedArtifact_UsesOnlyJsonRpcStdout_AndExitsCleanlyAfterStdinCloses()
+    public async Task VerifiedExtractedArtifact_DiscoverListAndCall_StaysOpenAndExitsCleanlyAfterStdinCloses()
     {
         using var artifact = VerifiedPreviewArtifact.Extract();
 
-        await AssertJsonRpcOnlyStdoutAsync(artifact.ExecutablePath);
+        await AssertMcpConsumerContractAsync(artifact.ExecutablePath);
         await AssertCleanEofAsync(artifact.ExecutablePath);
     }
 
-    private static async Task AssertJsonRpcOnlyStdoutAsync(string executablePath)
+    private static async Task AssertMcpConsumerContractAsync(string executablePath)
     {
-        var transport = new StdioClientTransport(new StdioClientTransportOptions
-        {
-            Command = executablePath,
-            Arguments = ["--project", PreviewRepositoryLayout.FixtureRoot],
-            Name = "netcoredbg-mcp-stateless-preview-artifact-consumer",
-            WorkingDirectory = Path.GetDirectoryName(executablePath)
-                ?? throw new InvalidOperationException("Extracted preview executable has no parent directory."),
-            ShutdownTimeout = TimeSpan.FromSeconds(2),
-        });
-        var connection = await transport.ConnectAsync();
-        try
-        {
-            var requestId = new RequestId("artifact-stdout-purity");
-            using var deadline = new CancellationTokenSource(RequestTimeout);
-            await connection.SendMessageAsync(
-                new JsonRpcRequest
-                {
-                    Id = requestId,
-                    Method = "tools/list",
-                    Params = new JsonObject { ["_meta"] = CurrentMetadata() },
-                },
-                deadline.Token);
+        await using var driver = await PreviewMcpProcessDriver.StartVerifiedExtractedExecutableAsync(
+            executablePath,
+            PreviewRepositoryLayout.FixtureRoot);
 
-            var response = Assert.IsType<JsonRpcResponse>(await ReadResponseAsync(connection, requestId, deadline.Token));
-            var result = Assert.IsType<JsonObject>(response.Result);
-            var tool = Assert.IsType<JsonObject>(Assert.Single(Assert.IsType<JsonArray>(result["tools"])));
-            Assert.Equal("find_code_symbol", Assert.IsAssignableFrom<JsonValue>(tool["name"]).GetValue<string>());
-            Assert.False(
-                connection.MessageReader.Completion.IsCompleted,
-                "The extracted artifact emitted non-JSON-RPC stdout or terminated its stdio transport during a valid consumer exchange.");
-        }
-        finally
-        {
-            await connection.DisposeAsync();
-        }
+        var discovery = RequireResult(await driver.DiscoverAsync(new RequestId("artifact-discover")));
+        Assert.Equal(["tools"], discovery["capabilities"]!.AsObject().Select(static property => property.Key));
+
+        var catalog = RequireResult(await driver.ListToolsAsync(new RequestId("artifact-list")));
+        var tool = Assert.IsType<JsonObject>(Assert.Single(catalog["tools"]!.AsArray()));
+        Assert.Equal("find_code_symbol", tool["name"]!.GetValue<string>());
+
+        var call = RequireResult(await driver.CallToolAsync(
+            "find_code_symbol",
+            new JsonObject
+            {
+                ["name"] = "PreviewMarker",
+                ["kind"] = "class",
+            },
+            new RequestId("artifact-call")));
+        Assert.Equal("complete", call["resultType"]!.GetValue<string>());
+        Assert.False(call["isError"]!.GetValue<bool>());
+        var structured = Assert.IsType<JsonObject>(call["structuredContent"]);
+        Assert.Equal("find_code_symbol_success", structured["kind"]!.GetValue<string>());
+        var match = Assert.IsType<JsonObject>(Assert.Single(structured["results"]!.AsArray()));
+        Assert.Equal("Markers.cs", match["file"]!.GetValue<string>());
+        Assert.Equal(3, match["line"]!.GetValue<int>());
+        Assert.Equal("PreviewMarker", match["name"]!.GetValue<string>());
+        Assert.Equal("class", match["kind"]!.GetValue<string>());
+        Assert.Equal("public sealed class PreviewMarker { }", match["context"]!.GetValue<string>());
+        Assert.False(
+            await driver.WaitForTransportClosureAsync(TransportOpenProbeTimeout),
+            "The extracted artifact emitted non-JSON-RPC stdout or terminated its stdio transport during a valid consumer exchange.");
     }
 
     private static async Task AssertCleanEofAsync(string executablePath)
@@ -104,27 +101,8 @@ public sealed class PreviewArtifactConsumerTests
         return Process.Start(start) ?? throw new InvalidOperationException("Extracted preview artifact did not start.");
     }
 
-    private static JsonObject CurrentMetadata() => new()
-    {
-        [MetaKeys.ProtocolVersion] = "2026-07-28",
-        [MetaKeys.ClientInfo] = new JsonObject { ["name"] = "preview-artifact-consumer-tests", ["version"] = "1.0" },
-        [MetaKeys.ClientCapabilities] = new JsonObject(),
-    };
-
-    private static async Task<JsonRpcMessage> ReadResponseAsync(
-        ITransport connection,
-        RequestId requestId,
-        CancellationToken cancellationToken)
-    {
-        while (true)
-        {
-            var message = await connection.MessageReader.ReadAsync(cancellationToken);
-            if (message is JsonRpcMessageWithId correlated && correlated.Id == requestId)
-            {
-                return message;
-            }
-        }
-    }
+    private static JsonObject RequireResult(JsonRpcMessage message) =>
+        Assert.IsType<JsonObject>(Assert.IsType<JsonRpcResponse>(message).Result);
 
     private static string RequiredString(JsonElement value, string propertyName) =>
         Assert.IsType<string>(value.GetProperty(propertyName).GetString());
