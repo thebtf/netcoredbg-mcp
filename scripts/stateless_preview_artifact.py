@@ -486,6 +486,61 @@ def _verify_archive_member(
         _refuse("archive executable member does not match the verified executable")
 
 
+def _verified_retained_artifact_inputs(
+    identity: Mapping[str, Any],
+    archive_path: str | PathLike[str],
+    manifest_path: str | PathLike[str],
+) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any], Path, bytes]:
+    validated_identity = _validate_candidate_identity(identity)
+    candidate = validated_identity["candidate"]
+    manifest_binding = candidate["preview_manifest"]
+    manifest_contents = manifest_binding["contents"]
+    archive_file, archive_bytes = _read_artifact_bytes(archive_path, "archive")
+    manifest_file, manifest_bytes = _read_artifact_bytes(manifest_path, "manifest")
+
+    _verify_recorded_file(archive_file, archive_bytes, manifest_contents["archive"], "archive")
+    _verify_recorded_file(manifest_file, manifest_bytes, manifest_binding["file"], "manifest")
+    observed_manifest = _load_manifest(manifest_bytes)
+    _validate_preview_manifest(observed_manifest, candidate["source"]["commit"])
+    if observed_manifest != manifest_contents:
+        _refuse("manifest contents do not match the candidate")
+    payload_hash = hashlib.sha256()
+    payload_hash.update(archive_bytes)
+    payload_hash.update(manifest_bytes)
+    if payload_hash.hexdigest() != candidate["build"]["artifact"]["sha256"]:
+        _refuse("retained payload digest does not match the candidate")
+    return candidate, manifest_binding, manifest_contents, archive_file, archive_bytes
+
+
+def _retained_verification_record(
+    candidate: Mapping[str, Any],
+    manifest_binding: Mapping[str, Any],
+    manifest_contents: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    return _freeze(
+        {
+            "source_ref": candidate["source"]["ref"],
+            "source_commit": candidate["source"]["commit"],
+            "archive": _thaw(manifest_contents["archive"]),
+            "manifest": _thaw(manifest_binding["file"]),
+            "executable": _thaw(manifest_contents["executable"]),
+        }
+    )
+
+
+def verify_retained_artifact_inputs(
+    identity: Mapping[str, Any],
+    archive_path: str | PathLike[str],
+    manifest_path: str | PathLike[str],
+) -> Mapping[str, Any]:
+    """Verify downloaded archive and manifest bytes before archive extraction."""
+
+    candidate, manifest_binding, manifest_contents, _, _ = _verified_retained_artifact_inputs(
+        identity, archive_path, manifest_path
+    )
+    return _retained_verification_record(candidate, manifest_binding, manifest_contents)
+
+
 def verify_retained_artifact(
     identity: Mapping[str, Any],
     archive_path: str | PathLike[str],
@@ -494,41 +549,58 @@ def verify_retained_artifact(
 ) -> Mapping[str, Any]:
     """Replay every candidate byte equation before an extracted executable is used."""
 
-    validated_identity = _validate_candidate_identity(identity)
-    candidate = validated_identity["candidate"]
-    manifest_binding = candidate["preview_manifest"]
-    manifest_contents = manifest_binding["contents"]
-
-    archive_file, archive_bytes = _read_artifact_bytes(archive_path, "archive")
-    manifest_file, manifest_bytes = _read_artifact_bytes(manifest_path, "manifest")
+    candidate, manifest_binding, manifest_contents, _, archive_bytes = (
+        _verified_retained_artifact_inputs(identity, archive_path, manifest_path)
+    )
     executable_file, executable_bytes = _read_artifact_bytes(executable_path, "executable")
-
-    _verify_recorded_file(archive_file, archive_bytes, manifest_contents["archive"], "archive")
-    _verify_recorded_file(manifest_file, manifest_bytes, manifest_binding["file"], "manifest")
     _verify_recorded_file(
         executable_file, executable_bytes, manifest_contents["executable"], "executable"
     )
-
-    observed_manifest = _load_manifest(manifest_bytes)
-    _validate_preview_manifest(observed_manifest, candidate["source"]["commit"])
-    if observed_manifest != manifest_contents:
-        _refuse("manifest contents do not match the candidate")
-
-    payload_hash = hashlib.sha256()
-    payload_hash.update(archive_bytes)
-    payload_hash.update(manifest_bytes)
-    if payload_hash.hexdigest() != candidate["build"]["artifact"]["sha256"]:
-        _refuse("retained payload digest does not match the candidate")
-
     _verify_archive_member(archive_bytes, manifest_contents["executable"]["name"], executable_bytes)
+    return _retained_verification_record(candidate, manifest_binding, manifest_contents)
 
+
+def verify_and_extract_retained_artifact(
+    identity: Mapping[str, Any],
+    archive_path: str | PathLike[str],
+    manifest_path: str | PathLike[str],
+    extraction_directory: str | PathLike[str],
+) -> Mapping[str, Any]:
+    """Verify retained inputs, then extract only the verified executable once."""
+
+    candidate, manifest_binding, manifest_contents, _, archive_bytes = (
+        _verified_retained_artifact_inputs(identity, archive_path, manifest_path)
+    )
+    destination = Path(extraction_directory)
+    try:
+        if destination.exists() or destination.is_symlink():
+            _refuse("verified extraction directory already exists")
+        destination.mkdir(parents=True, exist_ok=False)
+    except OSError:
+        _refuse("verified extraction directory is unavailable")
+    executable_name = manifest_contents["executable"]["name"]
+    try:
+        with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+            members = [entry for entry in archive.infolist() if entry.filename == executable_name]
+            if len(members) != 1 or members[0].is_dir():
+                _refuse("archive does not contain exactly one executable member")
+            executable_bytes = archive.read(members[0])
+    except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile):
+        _refuse("archive is unreadable")
+    executable_path = destination / executable_name
+    try:
+        with executable_path.open("xb") as output:
+            output.write(executable_bytes)
+    except OSError:
+        _refuse("verified executable cannot be extracted")
+    _verify_recorded_file(
+        executable_path, executable_bytes, manifest_contents["executable"], "executable"
+    )
+    _verify_archive_member(archive_bytes, executable_name, executable_bytes)
     return _freeze(
         {
-            "source_ref": candidate["source"]["ref"],
-            "source_commit": candidate["source"]["commit"],
-            "archive": _thaw(manifest_contents["archive"]),
-            "manifest": _thaw(manifest_binding["file"]),
-            "executable": _thaw(manifest_contents["executable"]),
+            **_thaw(_retained_verification_record(candidate, manifest_binding, manifest_contents)),
+            "executable_path": executable_path,
         }
     )
 
@@ -1255,6 +1327,456 @@ def seal_build_records(
     )
 
 
+_CONSUMER_PROOF_SCHEMA_VERSION = "1.0"
+_CONSUMER_PROOF_CATALOG_ID = "a1-preview-inherited-matrix-v1"
+_SAFE_OPAQUE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_CREDENTIAL_SHAPED_ID_PATTERN = re.compile(
+    r"^(?:gh[pousr]_|github_pat_|glpat-|AKIA|ASIA|xox[baprs]-|sk-[A-Za-z0-9]|Bearer[._-])",
+    re.IGNORECASE,
+)
+_CONSUMER_PROOF_SCENARIOS: tuple[tuple[str, str, str], ...] = (
+    ("launch-cli-invalid-root", "launch_cli", "EXPECT_REFUSAL"),
+    ("launch-configuration-hostile-roots", "launch_configuration", "EXPECT_SUCCESS"),
+    ("contained-fixture-escape", "contained_fixture", "EXPECT_REFUSAL"),
+    ("tool-input-invalid", "tool_input", "EXPECT_REFUSAL"),
+    ("file-system-unreadable", "file_system", "EXPECT_REFUSAL"),
+    ("resources-ceilings", "resources", "EXPECT_REFUSAL"),
+    ("protocol-catalog-exclusions", "protocol_catalog", "EXPECT_REFUSAL"),
+    ("transport-eof-cancellation", "transport", "EXPECT_SUCCESS"),
+    ("valid-discovery-list-call", "valid_journey", "EXPECT_SUCCESS"),
+    ("rollback-python-default", "rollback", "EXPECT_SUCCESS"),
+)
+_EXPECTED_OBSERVED_OUTCOMES = {
+    "EXPECT_SUCCESS": "SUCCESS",
+    "EXPECT_FAILURE": "FAILURE",
+    "EXPECT_REFUSAL": "REFUSAL",
+}
+
+
+def _expect_list(value: Any, name: str) -> list[Any]:
+    if not isinstance(value, list):
+        _refuse(f"{name} must be an array")
+    return value
+
+
+def _expect_boolean(value: Any, name: str) -> bool:
+    if type(value) is not bool:
+        _refuse(f"{name} must be a boolean")
+    return value
+
+
+def _expect_nonnegative_integer(value: Any, name: str) -> int:
+    if type(value) is not int or value < 0:
+        _refuse(f"{name} must be a non-negative integer")
+    return value
+
+
+def _expect_safe_opaque_id(value: Any, name: str) -> str:
+    identifier = _expect_string(value, name)
+    if _SAFE_OPAQUE_ID_PATTERN.fullmatch(identifier) is None:
+        _refuse(f"{name} must be a bounded opaque identifier")
+    if _CREDENTIAL_SHAPED_ID_PATTERN.match(identifier) is not None:
+        _refuse(f"{name} must not contain a credential-shaped value")
+    return identifier
+
+
+def _consumer_proof_scenarios() -> list[dict[str, str]]:
+    return [
+        {
+            "scenario_id": scenario_id,
+            "surface": surface,
+            "documented_outcome": documented_outcome,
+        }
+        for scenario_id, surface, documented_outcome in _CONSUMER_PROOF_SCENARIOS
+    ]
+
+
+def consumer_proof_scenario_catalog() -> Mapping[str, Any]:
+    """Return the closed inherited denial matrix used by retained-byte proof."""
+
+    scenarios = _consumer_proof_scenarios()
+    return _freeze(
+        {
+            "scenario_catalog_id": _CONSUMER_PROOF_CATALOG_ID,
+            "scenario_catalog_sha256": _sha256_bytes(
+                _canonical_json_bytes(scenarios, "consumer proof scenario catalog")
+            ),
+            "scenarios": scenarios,
+        }
+    )
+
+
+def _validate_consumer_proof_reference(value: Any, name: str) -> Mapping[str, Any]:
+    reference = _expect_mapping(
+        value,
+        name,
+        ("repository", "run_id", "artifact", "path", "sha256"),
+    )
+    _expect_repository(reference["repository"], f"{name} repository")
+    _expect_identifier(reference["run_id"], f"{name} run ID")
+    _validate_actions_artifact(reference["artifact"])
+    _expect_safe_relative_path(reference["path"], f"{name} path")
+    _expect_sha256(reference["sha256"], f"{name} hash")
+    return reference
+
+
+def validate_artifact_consumer_proof_reference(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Validate a closed GitHub artifact file locator used by consumer proof."""
+
+    return _freeze(_thaw(_validate_consumer_proof_reference(value, "consumer proof reference")))
+
+
+def _validate_release_gate_catalog_for_consumer_proof(
+    value: Mapping[str, Any], candidate: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    catalog_record = _expect_mapping(
+        value, "release gate catalog", ("catalog_schema_version", "catalog")
+    )
+    if catalog_record["catalog_schema_version"] != "1.0":
+        _refuse("release gate catalog schema version is invalid")
+    catalog = _expect_mapping(
+        catalog_record["catalog"],
+        "release gate catalog body",
+        (
+            "producer",
+            "source_ref",
+            "source_commit",
+            "policy_authority_snapshots",
+            "gate_descriptors",
+            "resolved_at",
+        ),
+    )
+    producer = _expect_mapping(
+        catalog["producer"],
+        "release gate catalog producer",
+        ("helper_path", "operation"),
+    )
+    if (
+        producer["helper_path"] != "scripts/stateless_preview_artifact.py"
+        or producer["operation"] != "resolve_release_gate_catalog"
+        or catalog["source_ref"] != _CANONICAL_SOURCE_REF
+        or catalog["source_commit"] != candidate["source"]["commit"]
+    ):
+        _refuse("release gate catalog does not bind the candidate")
+    _expect_datetime(catalog["resolved_at"], "release gate catalog resolved_at")
+    snapshots = _expect_list(
+        catalog["policy_authority_snapshots"], "release gate catalog snapshots"
+    )
+    if len(snapshots) != len(_POLICY_AUTHORITY_PATHS):
+        _refuse("release gate catalog snapshot closure is incomplete")
+    for expected_path, snapshot in zip(_POLICY_AUTHORITY_PATHS, snapshots):
+        item = _expect_mapping(
+            snapshot,
+            "release gate catalog snapshot",
+            ("path", "sha256", "source_commit"),
+        )
+        if item["path"] != expected_path or item["source_commit"] != candidate["source"]["commit"]:
+            _refuse("release gate catalog snapshot does not bind the candidate")
+        _expect_sha256(item["sha256"], "release gate catalog snapshot hash")
+    descriptors = _expect_list(catalog["gate_descriptors"], "release gate catalog descriptors")
+    if descriptors != _fixed_gate_descriptors():
+        _refuse("release gate catalog descriptor closure is invalid")
+    return catalog_record
+
+
+def _validate_retained_download_origin(
+    value: Any, candidate: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    origin = _expect_mapping(
+        value,
+        "retained download origin",
+        ("repository", "workflow_path", "run_id", "artifact", "archive_path", "manifest_path"),
+    )
+    build = candidate["build"]
+    manifest = candidate["preview_manifest"]
+    if (
+        origin["repository"] != build["repository"]
+        or origin["workflow_path"] != _TRUSTED_WORKFLOW_PATH
+        or origin["run_id"] != build["run_id"]
+        or _thaw(origin["artifact"]) != _thaw(build["artifact"])
+        or origin["archive_path"] != manifest["archive_reference"]["path"]
+        or origin["manifest_path"] != manifest["manifest_reference"]["path"]
+    ):
+        _refuse("retained download origin does not bind the candidate")
+    _expect_safe_relative_path(origin["archive_path"], "retained download origin archive path")
+    _expect_safe_relative_path(origin["manifest_path"], "retained download origin manifest path")
+    return origin
+
+
+def _validate_input_identity_results(value: Any, candidate: Mapping[str, Any]) -> Mapping[str, Any]:
+    results = _expect_mapping(
+        value,
+        "consumer proof input identity results",
+        (
+            "archive",
+            "manifest",
+            "executable",
+            "archive_matches_candidate",
+            "manifest_matches_candidate",
+            "executable_matches_manifest",
+            "inherited_verifier_equations_pass",
+        ),
+    )
+    manifest = candidate["preview_manifest"]
+    contents = manifest["contents"]
+    _validate_file_descriptor(results["archive"], "consumer proof archive")
+    _validate_file_descriptor(results["manifest"], "consumer proof manifest")
+    _validate_file_descriptor(results["executable"], "consumer proof executable")
+    if (
+        _thaw(results["archive"]) != _thaw(contents["archive"])
+        or _thaw(results["manifest"]) != _thaw(manifest["file"])
+        or _thaw(results["executable"]) != _thaw(contents["executable"])
+    ):
+        _refuse("consumer proof archive, manifest, or executable does not match the candidate")
+    for field in (
+        "archive_matches_candidate",
+        "manifest_matches_candidate",
+        "executable_matches_manifest",
+        "inherited_verifier_equations_pass",
+    ):
+        if not _expect_boolean(results[field], f"consumer proof {field}"):
+            _refuse("consumer proof input identities are not all verified")
+    return results
+
+
+def _validate_fixture_identity(value: Any) -> Mapping[str, Any]:
+    fixture = _expect_mapping(
+        value,
+        "consumer proof fixture identity",
+        ("fixture_id", "fixture_sha256", "scenario_catalog_id", "scenario_catalog_sha256"),
+    )
+    catalog = consumer_proof_scenario_catalog()
+    _expect_safe_opaque_id(fixture["fixture_id"], "consumer proof fixture ID")
+    _expect_sha256(fixture["fixture_sha256"], "consumer proof fixture hash")
+    if (
+        fixture["scenario_catalog_id"] != catalog["scenario_catalog_id"]
+        or fixture["scenario_catalog_sha256"] != catalog["scenario_catalog_sha256"]
+    ):
+        _refuse("consumer proof fixture scenario catalog is not the inherited matrix")
+    return fixture
+
+
+def _validate_scenario_matrix(value: Any) -> Mapping[str, Any]:
+    matrix = _expect_mapping(
+        value,
+        "consumer proof scenario matrix",
+        (
+            "required_scenario_ids",
+            "executed_scenario_ids",
+            "required_count",
+            "executed_count",
+            "missing_scenario_ids",
+            "unexpected_scenario_ids",
+            "results",
+            "outcome",
+        ),
+    )
+    scenarios = _consumer_proof_scenarios()
+    required_ids = [scenario["scenario_id"] for scenario in scenarios]
+    expected_by_id = {scenario["scenario_id"]: scenario for scenario in scenarios}
+    declared_required = _expect_list(
+        matrix["required_scenario_ids"], "consumer proof required scenario IDs"
+    )
+    declared_executed = _expect_list(
+        matrix["executed_scenario_ids"], "consumer proof executed scenario IDs"
+    )
+    missing = _expect_list(matrix["missing_scenario_ids"], "consumer proof missing scenario IDs")
+    unexpected = _expect_list(
+        matrix["unexpected_scenario_ids"], "consumer proof unexpected scenario IDs"
+    )
+    results = _expect_list(matrix["results"], "consumer proof scenario results")
+    if (
+        declared_required != required_ids
+        or declared_executed != required_ids
+        or missing != []
+        or unexpected != []
+        or _expect_positive_integer(matrix["required_count"], "consumer proof required count")
+        != len(required_ids)
+        or _expect_nonnegative_integer(matrix["executed_count"], "consumer proof executed count")
+        != len(required_ids)
+        or len(results) != len(required_ids)
+        or matrix["outcome"] != "PASS"
+    ):
+        _refuse("consumer proof scenario matrix is incomplete")
+    observed_ids: list[str] = []
+    for result in results:
+        item = _expect_mapping(
+            result,
+            "consumer proof scenario result",
+            (
+                "scenario_id",
+                "surface",
+                "documented_outcome",
+                "observed_outcome",
+                "status",
+                "no_partial_output",
+                "no_unintended_side_effect",
+            ),
+        )
+        scenario_id = _expect_safe_opaque_id(item["scenario_id"], "consumer proof scenario ID")
+        expected = expected_by_id.get(scenario_id)
+        if (
+            expected is None
+            or item["surface"] != expected["surface"]
+            or item["documented_outcome"] != expected["documented_outcome"]
+            or item["observed_outcome"]
+            != _EXPECTED_OBSERVED_OUTCOMES[expected["documented_outcome"]]
+            or item["status"] != "PASS"
+            or not _expect_boolean(item["no_partial_output"], "consumer proof no_partial_output")
+            or not _expect_boolean(
+                item["no_unintended_side_effect"], "consumer proof no_unintended_side_effect"
+            )
+        ):
+            _refuse("consumer proof scenario matrix contains an invalid result")
+        observed_ids.append(scenario_id)
+    if observed_ids != required_ids:
+        _refuse("consumer proof scenario matrix has duplicate, missing, or reordered results")
+    return matrix
+
+
+def _validate_runtime_results(value: Any) -> Mapping[str, Any]:
+    runtime = _expect_mapping(
+        value,
+        "consumer proof runtime results",
+        (
+            "explicit_project_argument",
+            "catalog",
+            "catalog_is_closed",
+            "valid_journey_passed",
+            "stdout_jsonrpc_only",
+            "clean_eof",
+        ),
+    )
+    if (
+        not _expect_boolean(runtime["explicit_project_argument"], "consumer proof explicit project")
+        or _expect_list(runtime["catalog"], "consumer proof catalog") != ["find_code_symbol"]
+        or not _expect_boolean(runtime["catalog_is_closed"], "consumer proof closed catalog")
+        or not _expect_boolean(runtime["valid_journey_passed"], "consumer proof valid journey")
+        or not _expect_boolean(runtime["stdout_jsonrpc_only"], "consumer proof stdout purity")
+    ):
+        _refuse("consumer proof runtime results are not a passing one-tool journey")
+    eof = _expect_mapping(
+        runtime["clean_eof"],
+        "consumer proof clean EOF",
+        (
+            "stdin_closed",
+            "exited_cleanly",
+            "cancellation_result_emitted",
+            "state_retained_after_exit",
+        ),
+    )
+    if (
+        not _expect_boolean(eof["stdin_closed"], "consumer proof EOF stdin")
+        or not _expect_boolean(eof["exited_cleanly"], "consumer proof EOF exit")
+        or _expect_boolean(eof["cancellation_result_emitted"], "consumer proof EOF cancellation")
+        or _expect_boolean(eof["state_retained_after_exit"], "consumer proof EOF state")
+    ):
+        _refuse("consumer proof clean EOF is invalid")
+    return runtime
+
+
+def _validate_python_rollback(value: Any) -> Mapping[str, Any]:
+    rollback = _expect_mapping(
+        value,
+        "consumer proof Python rollback",
+        (
+            "only_preview_selection_removed",
+            "python_package_reinstalled",
+            "python_package_replaced",
+            "console_entrypoint_changed",
+            "default_selector_changed",
+            "legacy_journey_outcome",
+        ),
+    )
+    if (
+        not _expect_boolean(
+            rollback["only_preview_selection_removed"], "consumer proof rollback selection"
+        )
+        or _expect_boolean(
+            rollback["python_package_reinstalled"], "consumer proof rollback reinstall"
+        )
+        or _expect_boolean(
+            rollback["python_package_replaced"], "consumer proof rollback replacement"
+        )
+        or _expect_boolean(
+            rollback["console_entrypoint_changed"], "consumer proof rollback entrypoint"
+        )
+        or _expect_boolean(rollback["default_selector_changed"], "consumer proof rollback selector")
+        or rollback["legacy_journey_outcome"] != "PRODUCT_WORKS"
+    ):
+        _refuse("consumer proof Python rollback is invalid")
+    return rollback
+
+
+def seal_artifact_consumer_proof(
+    receipt: Mapping[str, Any],
+    *,
+    candidate_identity: Mapping[str, Any],
+    candidate_identity_bytes: bytes,
+    candidate_identity_reference: Mapping[str, Any],
+    release_gate_catalog: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Validate and freeze a passing retained-artifact Consumer Proof Receipt."""
+
+    value = _thaw(receipt)
+    record = _expect_mapping(
+        value,
+        "consumer proof receipt",
+        (
+            "receipt_schema_version",
+            "receipt_id",
+            "candidate_identity_record",
+            "candidate",
+            "proof_stage",
+            "download_origin",
+            "input_identity_results",
+            "fixture_identity",
+            "scenario_matrix",
+            "runtime_results",
+            "python_rollback_result",
+            "outcome",
+            "recorded_at",
+            "receipt_provenance",
+        ),
+    )
+    if record["receipt_schema_version"] != _CONSUMER_PROOF_SCHEMA_VERSION:
+        _refuse("consumer proof receipt schema version is invalid")
+    _expect_safe_opaque_id(record["receipt_id"], "consumer proof receipt ID")
+    if record["proof_stage"] != "retained_artifact" or record["outcome"] != "PASS":
+        _refuse("consumer proof receipt must be a passing retained artifact proof")
+    _expect_datetime(record["recorded_at"], "consumer proof recorded_at")
+    supplied_identity_reference = _validate_consumer_proof_reference(
+        record["candidate_identity_record"], "consumer proof candidate identity reference"
+    )
+    expected_identity_reference = _validate_consumer_proof_reference(
+        candidate_identity_reference, "candidate identity reference"
+    )
+    if _thaw(supplied_identity_reference) != _thaw(expected_identity_reference):
+        _refuse("consumer proof candidate identity reference does not match downloaded bytes")
+    if not isinstance(candidate_identity_bytes, bytes):
+        _refuse("candidate identity bytes are unavailable")
+    if _sha256_bytes(candidate_identity_bytes) != expected_identity_reference["sha256"]:
+        _refuse("candidate identity bytes do not match the downloaded reference")
+    decoded_identity = _load_json_object(candidate_identity_bytes, "candidate identity")
+    validated_identity = _validate_candidate_identity(decoded_identity)
+    if _thaw(validated_identity) != _thaw(_validate_candidate_identity(candidate_identity)):
+        _refuse("candidate identity bytes do not match the supplied candidate")
+    candidate = validated_identity["candidate"]
+    if _thaw(record["candidate"]) != _thaw(candidate):
+        _refuse("consumer proof candidate does not match the downloaded identity")
+    _validate_release_gate_catalog_for_consumer_proof(release_gate_catalog, candidate)
+    _validate_retained_download_origin(record["download_origin"], candidate)
+    _validate_input_identity_results(record["input_identity_results"], candidate)
+    _validate_fixture_identity(record["fixture_identity"])
+    _validate_scenario_matrix(record["scenario_matrix"])
+    _validate_runtime_results(record["runtime_results"])
+    _validate_python_rollback(record["python_rollback_result"])
+    _validate_consumer_proof_reference(
+        record["receipt_provenance"], "consumer proof receipt provenance"
+    )
+    return _freeze(value)
+
+
 def _write_admission_outputs(admission: Mapping[str, Any], environment: Mapping[str, str]) -> None:
     output_path = _environment_value(environment, "GITHUB_OUTPUT")
     preview = admission["preview"]
@@ -1312,13 +1834,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 __all__ = [
     "admit_build",
     "assemble_candidate_identity",
+    "consumer_proof_scenario_catalog",
     "main",
     "parse_args",
     "prepare_preview_payload",
     "produce_post_merge_exact_head_receipt",
     "resolve_release_gate_catalog",
+    "seal_artifact_consumer_proof",
     "seal_build_records",
+    "validate_artifact_consumer_proof_reference",
+    "verify_and_extract_retained_artifact",
     "verify_retained_artifact",
+    "verify_retained_artifact_inputs",
 ]
 
 

@@ -56,6 +56,25 @@ prepare_preview_payload = artifact_contract.prepare_preview_payload
 produce_post_merge_exact_head_receipt = artifact_contract.produce_post_merge_exact_head_receipt
 seal_build_records = artifact_contract.seal_build_records
 parse_args = artifact_contract.parse_args
+seal_artifact_consumer_proof = artifact_contract.seal_artifact_consumer_proof
+consumer_proof_scenario_catalog = artifact_contract.consumer_proof_scenario_catalog
+
+PREVIEW_ARTIFACT_VALIDATOR_PATH = (
+    PROJECT_ROOT / "tests" / "preview" / "validate_preview_artifact.py"
+)
+
+assert PREVIEW_ARTIFACT_VALIDATOR_PATH.is_file(), (
+    "T011 retained-artifact validator is missing: tests/preview/validate_preview_artifact.py"
+)
+
+_validator_spec = importlib.util.spec_from_file_location(
+    "preview_artifact_validator",
+    PREVIEW_ARTIFACT_VALIDATOR_PATH,
+)
+assert _validator_spec is not None and _validator_spec.loader is not None
+preview_validator = importlib.util.module_from_spec(_validator_spec)
+sys.modules[_validator_spec.name] = preview_validator
+_validator_spec.loader.exec_module(preview_validator)
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -777,3 +796,815 @@ def test_t006_t008_contract_records_only_the_executable_build_foundation() -> No
     assert "- [x] T008" in tasks
     assert "one executable manual `build` surface" in workflow_contract
     assert "Promotion remains a future consuming surface" in workflow_contract
+
+
+def _canonical_json_bytes(value: Any) -> bytes:
+    return (
+        json.dumps(
+            value, allow_nan=False, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
+def _consumer_proof_reference(
+    *,
+    artifact_id: str,
+    artifact_name: str,
+    path: str,
+    sha256: str,
+    run_id: str = "101",
+) -> dict[str, Any]:
+    return {
+        "repository": REPOSITORY,
+        "run_id": run_id,
+        "artifact": {
+            "id": artifact_id,
+            "name": artifact_name,
+            "sha256": _sha256_bytes(f"artifact-{artifact_id}".encode()),
+            "retention": {
+                "configured_days": 7,
+                "expires_at": "2030-01-01T00:00:00Z",
+            },
+        },
+        "path": path,
+        "sha256": sha256,
+    }
+
+
+def _valid_retained_consumer_proof(
+    tmp_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any], bytes, dict[str, Any], dict[str, Any]]:
+    authority_root, source_commit, _ = _create_authority_repository(tmp_path)
+    candidate_input, _, _, _ = _create_candidate_input(tmp_path, source_commit)
+    identity = json.loads(json.dumps(assemble_candidate_identity(candidate_input)))
+    identity_bytes = _canonical_json_bytes(identity)
+    identity_reference = _consumer_proof_reference(
+        artifact_id="601",
+        artifact_name="stateless-preview-candidate-identity",
+        path="candidate-identity.json",
+        sha256=_sha256_bytes(identity_bytes),
+        run_id="601",
+    )
+    catalog = json.loads(json.dumps(resolve_release_gate_catalog(identity, authority_root)))
+    catalog_definition = consumer_proof_scenario_catalog()
+    scenarios = catalog_definition["scenarios"]
+    scenario_ids = [scenario["scenario_id"] for scenario in scenarios]
+    observed_outcomes = {
+        "EXPECT_SUCCESS": "SUCCESS",
+        "EXPECT_FAILURE": "FAILURE",
+        "EXPECT_REFUSAL": "REFUSAL",
+    }
+    receipt = {
+        "receipt_schema_version": "1.0",
+        "receipt_id": "retained-proof-001",
+        "candidate_identity_record": identity_reference,
+        "candidate": identity["candidate"],
+        "proof_stage": "retained_artifact",
+        "download_origin": {
+            "repository": REPOSITORY,
+            "workflow_path": ".github/workflows/stateless-preview.yml",
+            "run_id": "101",
+            "artifact": identity["candidate"]["build"]["artifact"],
+            "archive_path": identity["candidate"]["preview_manifest"]["archive_reference"]["path"],
+            "manifest_path": identity["candidate"]["preview_manifest"]["manifest_reference"][
+                "path"
+            ],
+        },
+        "input_identity_results": {
+            "archive": identity["candidate"]["preview_manifest"]["contents"]["archive"],
+            "manifest": identity["candidate"]["preview_manifest"]["file"],
+            "executable": identity["candidate"]["preview_manifest"]["contents"]["executable"],
+            "archive_matches_candidate": True,
+            "manifest_matches_candidate": True,
+            "executable_matches_manifest": True,
+            "inherited_verifier_equations_pass": True,
+        },
+        "fixture_identity": {
+            "fixture_id": "preview-search-fixture-v1",
+            "fixture_sha256": "f" * 64,
+            "scenario_catalog_id": catalog_definition["scenario_catalog_id"],
+            "scenario_catalog_sha256": catalog_definition["scenario_catalog_sha256"],
+        },
+        "scenario_matrix": {
+            "required_scenario_ids": scenario_ids,
+            "executed_scenario_ids": scenario_ids,
+            "required_count": len(scenario_ids),
+            "executed_count": len(scenario_ids),
+            "missing_scenario_ids": [],
+            "unexpected_scenario_ids": [],
+            "results": [
+                {
+                    "scenario_id": scenario["scenario_id"],
+                    "surface": scenario["surface"],
+                    "documented_outcome": scenario["documented_outcome"],
+                    "observed_outcome": observed_outcomes[scenario["documented_outcome"]],
+                    "status": "PASS",
+                    "no_partial_output": True,
+                    "no_unintended_side_effect": True,
+                }
+                for scenario in scenarios
+            ],
+            "outcome": "PASS",
+        },
+        "runtime_results": {
+            "explicit_project_argument": True,
+            "catalog": ["find_code_symbol"],
+            "catalog_is_closed": True,
+            "valid_journey_passed": True,
+            "stdout_jsonrpc_only": True,
+            "clean_eof": {
+                "stdin_closed": True,
+                "exited_cleanly": True,
+                "cancellation_result_emitted": False,
+                "state_retained_after_exit": False,
+            },
+        },
+        "python_rollback_result": {
+            "only_preview_selection_removed": True,
+            "python_package_reinstalled": False,
+            "python_package_replaced": False,
+            "console_entrypoint_changed": False,
+            "default_selector_changed": False,
+            "legacy_journey_outcome": "PRODUCT_WORKS",
+        },
+        "outcome": "PASS",
+        "recorded_at": "2030-01-01T00:00:00Z",
+        "receipt_provenance": _consumer_proof_reference(
+            artifact_id="602",
+            artifact_name="stateless-preview-retained-proof",
+            path="retained-artifact-proof.json",
+            sha256="e" * 64,
+            run_id="602",
+        ),
+    }
+    return receipt, identity, identity_bytes, identity_reference, catalog
+
+
+def _seal_valid_retained_consumer_proof(tmp_path: Path) -> tuple[dict[str, Any], Any]:
+    receipt, identity, identity_bytes, identity_reference, catalog = _valid_retained_consumer_proof(
+        tmp_path
+    )
+    sealed = seal_artifact_consumer_proof(
+        receipt,
+        candidate_identity=identity,
+        candidate_identity_bytes=identity_bytes,
+        candidate_identity_reference=identity_reference,
+        release_gate_catalog=catalog,
+    )
+    return receipt, sealed
+
+
+def test_seal_retained_consumer_proof_binds_downloaded_candidate_and_full_matrix(
+    tmp_path: Path,
+) -> None:
+    receipt, sealed = _seal_valid_retained_consumer_proof(tmp_path)
+
+    assert sealed["candidate"] == receipt["candidate"]
+    assert sealed["candidate_identity_record"] == receipt["candidate_identity_record"]
+    assert sealed["scenario_matrix"]["required_count"] > 0
+    assert (
+        sealed["scenario_matrix"]["required_count"] == sealed["scenario_matrix"]["executed_count"]
+    )
+    with pytest.raises(TypeError):
+        sealed["outcome"] = "FAIL"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda receipt: receipt["input_identity_results"]["archive"].update(
+                {"sha256": "0" * 64}
+            ),
+            "archive",
+        ),
+        (
+            lambda receipt: receipt["scenario_matrix"]["results"].pop(),
+            "scenario matrix",
+        ),
+        (
+            lambda receipt: receipt["scenario_matrix"].update(
+                {
+                    "required_scenario_ids": [],
+                    "executed_scenario_ids": [],
+                    "required_count": 0,
+                    "executed_count": 0,
+                    "results": [],
+                }
+            ),
+            "scenario matrix",
+        ),
+        (
+            lambda receipt: receipt["fixture_identity"].update(
+                {"fixture_id": "C:\\preview\\secret"}
+            ),
+            "fixture",
+        ),
+        (
+            lambda receipt: receipt.update({"receipt_id": "ghp_disclosed-secret"}),
+            "receipt",
+        ),
+        (
+            lambda receipt: receipt["python_rollback_result"].update(
+                {"python_package_reinstalled": True}
+            ),
+            "rollback",
+        ),
+    ],
+)
+def test_seal_retained_consumer_proof_refuses_mutated_evidence(
+    tmp_path: Path, mutation: Any, message: str
+) -> None:
+    receipt, identity, identity_bytes, identity_reference, catalog = _valid_retained_consumer_proof(
+        tmp_path
+    )
+    changed = json.loads(json.dumps(receipt))
+    mutation(changed)
+
+    with pytest.raises(ValueError, match=message):
+        seal_artifact_consumer_proof(
+            changed,
+            candidate_identity=identity,
+            candidate_identity_bytes=identity_bytes,
+            candidate_identity_reference=identity_reference,
+            release_gate_catalog=catalog,
+        )
+
+
+def test_seal_retained_consumer_proof_refuses_local_rebuild_and_identity_substitution(
+    tmp_path: Path,
+) -> None:
+    receipt, identity, identity_bytes, identity_reference, catalog = _valid_retained_consumer_proof(
+        tmp_path
+    )
+    local_rebuild = json.loads(json.dumps(receipt))
+    local_rebuild["download_origin"]["archive_path"] = "C:/preview/local-build.zip"
+
+    with pytest.raises(ValueError, match="download origin"):
+        seal_artifact_consumer_proof(
+            local_rebuild,
+            candidate_identity=identity,
+            candidate_identity_bytes=identity_bytes,
+            candidate_identity_reference=identity_reference,
+            release_gate_catalog=catalog,
+        )
+
+    with pytest.raises(ValueError, match="candidate identity bytes"):
+        seal_artifact_consumer_proof(
+            receipt,
+            candidate_identity=identity,
+            candidate_identity_bytes=b"{}\n",
+            candidate_identity_reference=identity_reference,
+            release_gate_catalog=catalog,
+        )
+
+
+def test_seal_retained_consumer_proof_refuses_catalog_from_other_candidate(tmp_path: Path) -> None:
+    receipt, identity, identity_bytes, identity_reference, catalog = _valid_retained_consumer_proof(
+        tmp_path
+    )
+    mismatched_catalog = json.loads(json.dumps(catalog))
+    mismatched_catalog["catalog"]["source_commit"] = "a" * 40
+
+    with pytest.raises(ValueError, match="catalog"):
+        seal_artifact_consumer_proof(
+            receipt,
+            candidate_identity=identity,
+            candidate_identity_bytes=identity_bytes,
+            candidate_identity_reference=identity_reference,
+            release_gate_catalog=mismatched_catalog,
+        )
+
+
+def _validator_wire_zip(tmp_path: Path, entries: Mapping[str, bytes]) -> bytes:
+    path = tmp_path / "retained-wire.zip"
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+        for name, contents in entries.items():
+            archive.writestr(name, contents)
+    return path.read_bytes()
+
+
+def _validator_artifact_reference(*, artifact_sha256: str, path: str, sha256: str) -> Any:
+    return preview_validator.ArtifactFileReference(
+        repository=REPOSITORY,
+        run_id="701",
+        artifact_id="701",
+        artifact_name="retained-preview-payload",
+        artifact_sha256=artifact_sha256,
+        retention_days=7,
+        expires_at="2030-01-01T00:00:00Z",
+        path=path,
+        sha256=sha256,
+    )
+
+
+def _receipt_provenance_record(source_commit: str) -> dict[str, str]:
+    return {
+        "record_type": "sonarqube-exact-head",
+        "repository": REPOSITORY,
+        "source_ref": SOURCE_REF,
+        "stage": "post-merge",
+        "scanned_commit": source_commit,
+        "tag_target": source_commit,
+        "outcome": "PASS",
+    }
+
+
+def _receipt_provenance_download_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    receipt: Mapping[str, Any] | None = None,
+    member_path: str = "receipts/post-merge-exact-head.json",
+    archived_member_path: str | None = None,
+    artifact_sha256: str | None = None,
+    file_sha256: str | None = None,
+) -> tuple[Any, Any, dict[str, Any]]:
+    source_commit = "a" * 40
+    receipt_bytes = _canonical_json_bytes(
+        _receipt_provenance_record(source_commit) if receipt is None else receipt
+    )
+    wire_bytes = _validator_wire_zip(
+        tmp_path,
+        {archived_member_path or member_path: receipt_bytes},
+    )
+    reference = _validator_artifact_reference(
+        artifact_sha256=(_sha256_bytes(wire_bytes) if artifact_sha256 is None else artifact_sha256),
+        path=member_path,
+        sha256=_sha256_bytes(receipt_bytes) if file_sha256 is None else file_sha256,
+    )
+    candidate_source = {
+        "repository": REPOSITORY,
+        "ref": SOURCE_REF,
+        "commit": source_commit,
+        "post_merge_exact_head_receipt": {
+            "record_reference": {
+                "repository": reference.repository,
+                "run_id": reference.run_id,
+                "artifact_id": reference.artifact_id,
+                "path": reference.path,
+                "sha256": reference.sha256,
+            },
+            "stage": "post-merge",
+            "record_type": "sonarqube-exact-head",
+            "scanned_commit": source_commit,
+            "tag_target": source_commit,
+            "outcome": "PASS",
+        },
+    }
+    downloader = preview_validator.ArtifactDownloader(tmp_path / "fresh-download")
+    monkeypatch.setattr(downloader, "_metadata", lambda _: None)
+    monkeypatch.setattr(downloader, "_run_gh", lambda *_: wire_bytes)
+    return downloader, reference, candidate_source
+
+
+def test_downloaded_receipt_provenance_binds_candidate_before_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    downloader, reference, candidate_source = _receipt_provenance_download_fixture(
+        tmp_path, monkeypatch
+    )
+
+    validated = preview_validator._download_and_validate_receipt_provenance(
+        downloader,
+        reference,
+        candidate_source,
+    )
+
+    assert validated.as_mapping() == reference.as_mapping()
+
+
+def test_downloaded_receipt_provenance_refuses_nonexistent_artifact_member(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    downloader, reference, candidate_source = _receipt_provenance_download_fixture(
+        tmp_path,
+        monkeypatch,
+        archived_member_path="receipts/not-the-post-merge-receipt.json",
+    )
+
+    with pytest.raises(ValueError, match="file is absent or ambiguous"):
+        preview_validator._download_and_validate_receipt_provenance(
+            downloader,
+            reference,
+            candidate_source,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("repository", "another/repository"),
+        ("run_id", "702"),
+        ("artifact_id", "702"),
+        ("path", "receipts/different-post-merge-receipt.json"),
+        ("sha256", "0" * 64),
+    ],
+)
+def test_downloaded_receipt_provenance_refuses_mismatched_candidate_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: str,
+) -> None:
+    downloader, reference, candidate_source = _receipt_provenance_download_fixture(
+        tmp_path, monkeypatch
+    )
+    candidate_source["post_merge_exact_head_receipt"]["record_reference"][field] = value
+
+    with pytest.raises(ValueError, match="receipt provenance reference"):
+        preview_validator._download_and_validate_receipt_provenance(
+            downloader,
+            reference,
+            candidate_source,
+        )
+
+
+@pytest.mark.parametrize(
+    ("artifact_sha256", "file_sha256", "message"),
+    [
+        ("0" * 64, None, "wire bytes"),
+        (None, "0" * 64, "file bytes"),
+    ],
+)
+def test_downloaded_receipt_provenance_refuses_digest_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact_sha256: str | None,
+    file_sha256: str | None,
+    message: str,
+) -> None:
+    downloader, reference, candidate_source = _receipt_provenance_download_fixture(
+        tmp_path,
+        monkeypatch,
+        artifact_sha256=artifact_sha256,
+        file_sha256=file_sha256,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        preview_validator._download_and_validate_receipt_provenance(
+            downloader,
+            reference,
+            candidate_source,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("record_type", "artifact-consumer-proof"),
+        ("stage", "candidate"),
+        ("scanned_commit", "b" * 40),
+        ("tag_target", "b" * 40),
+        ("outcome", "FAIL"),
+        ("repository", "another/repository"),
+        ("source_ref", "refs/heads/other"),
+    ],
+)
+def test_downloaded_receipt_provenance_refuses_semantic_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: str,
+) -> None:
+    receipt = _receipt_provenance_record("a" * 40)
+    receipt[field] = value
+    downloader, reference, candidate_source = _receipt_provenance_download_fixture(
+        tmp_path,
+        monkeypatch,
+        receipt=receipt,
+    )
+
+    with pytest.raises(ValueError, match="candidate exact-head receipt"):
+        preview_validator._download_and_validate_receipt_provenance(
+            downloader,
+            reference,
+            candidate_source,
+        )
+
+
+def test_artifact_downloader_hashes_wire_bytes_before_exclusive_retention(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "fresh-download"
+    root.mkdir()
+    member = b"retained payload member"
+    wire_bytes = _validator_wire_zip(tmp_path, {"payload.zip": member})
+    reference = _validator_artifact_reference(
+        artifact_sha256=_sha256_bytes(wire_bytes),
+        path="payload.zip",
+        sha256=_sha256_bytes(member),
+    )
+    downloader = preview_validator.ArtifactDownloader(root)
+    archive_path = root / "artifacts" / f"{reference.artifact_id}-{reference.artifact_sha256}.zip"
+    events: list[str] = []
+    original_hash = preview_validator._sha256_bytes
+    original_mkdir = Path.mkdir
+    original_open = Path.open
+
+    def track_hash(value: bytes) -> str:
+        if value == wire_bytes:
+            events.append("wire-hash")
+        return original_hash(value)
+
+    def track_mkdir(
+        path: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        if path == archive_path.parent:
+            events.append("archive-directory")
+        original_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    def track_open(path: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        if path == archive_path and mode == "xb":
+            events.append("exclusive-write")
+        return original_open(path, mode, *args, **kwargs)
+
+    def fetch_wire(arguments: Any, name: str) -> bytes:
+        assert name == "retained artifact"
+        assert arguments == [
+            "api",
+            f"repos/{reference.repository}/actions/artifacts/{reference.artifact_id}/zip",
+        ]
+        assert not archive_path.parent.exists()
+        return wire_bytes
+
+    monkeypatch.setattr(downloader, "_metadata", lambda _: None)
+    monkeypatch.setattr(downloader, "_run_gh", fetch_wire)
+    monkeypatch.setattr(preview_validator, "_sha256_bytes", track_hash)
+    monkeypatch.setattr(Path, "mkdir", track_mkdir)
+    monkeypatch.setattr(Path, "open", track_open)
+
+    retained_path = downloader.download_file(reference)
+
+    assert events == ["wire-hash", "archive-directory", "exclusive-write"]
+    assert archive_path.read_bytes() == wire_bytes
+    assert retained_path.read_bytes() == member
+
+
+def test_artifact_downloader_refuses_preexisting_destination_without_caching(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "fresh-download"
+    root.mkdir()
+    member = b"retained payload member"
+    wire_bytes = _validator_wire_zip(tmp_path, {"payload.zip": member})
+    reference = _validator_artifact_reference(
+        artifact_sha256=_sha256_bytes(wire_bytes),
+        path="payload.zip",
+        sha256=_sha256_bytes(member),
+    )
+    archive_path = root / "artifacts" / f"{reference.artifact_id}-{reference.artifact_sha256}.zip"
+    archive_path.parent.mkdir()
+    archive_path.write_bytes(b"planted archive")
+    downloader = preview_validator.ArtifactDownloader(root)
+
+    monkeypatch.setattr(downloader, "_metadata", lambda _: None)
+    monkeypatch.setattr(downloader, "_run_gh", lambda *_: wire_bytes)
+
+    with pytest.raises(ValueError, match="destination already exists"):
+        downloader.download_file(reference)
+
+    assert archive_path.read_bytes() == b"planted archive"
+    assert downloader._archives == {}
+
+
+def test_artifact_downloader_refuses_racing_destination_without_caching(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "fresh-download"
+    root.mkdir()
+    member = b"retained payload member"
+    wire_bytes = _validator_wire_zip(tmp_path, {"payload.zip": member})
+    reference = _validator_artifact_reference(
+        artifact_sha256=_sha256_bytes(wire_bytes),
+        path="payload.zip",
+        sha256=_sha256_bytes(member),
+    )
+    archive_path = root / "artifacts" / f"{reference.artifact_id}-{reference.artifact_sha256}.zip"
+    downloader = preview_validator.ArtifactDownloader(root)
+    original_open = Path.open
+    race_injected = False
+
+    def race_open(path: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        nonlocal race_injected
+        if path == archive_path and mode == "xb" and not race_injected:
+            race_injected = True
+            with original_open(path, "wb") as planted:
+                planted.write(b"raced archive")
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(downloader, "_metadata", lambda _: None)
+    monkeypatch.setattr(downloader, "_run_gh", lambda *_: wire_bytes)
+    monkeypatch.setattr(Path, "open", race_open)
+
+    with pytest.raises(ValueError, match="destination already exists"):
+        downloader.download_file(reference)
+
+    assert race_injected
+    assert archive_path.read_bytes() == b"raced archive"
+    assert downloader._archives == {}
+
+
+def test_artifact_downloader_refuses_mismatched_wire_digest_before_retention(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "fresh-download"
+    root.mkdir()
+    member = b"retained payload member"
+    wire_bytes = _validator_wire_zip(tmp_path, {"payload.zip": member})
+    reference = _validator_artifact_reference(
+        artifact_sha256="d" * 64,
+        path="payload.zip",
+        sha256=_sha256_bytes(member),
+    )
+    downloader = preview_validator.ArtifactDownloader(root)
+
+    monkeypatch.setattr(downloader, "_metadata", lambda _: None)
+    monkeypatch.setattr(downloader, "_run_gh", lambda *_: wire_bytes)
+
+    with pytest.raises(ValueError, match="wire bytes"):
+        downloader.download_file(reference)
+
+    assert not (root / "artifacts").exists()
+    assert downloader._archives == {}
+
+
+def test_artifact_downloader_refuses_tampered_cached_wire_before_member_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "fresh-download"
+    root.mkdir()
+    archive_member = b"retained preview archive"
+    manifest_member = b"retained preview manifest"
+    wire_bytes = _validator_wire_zip(
+        tmp_path,
+        {"payload.zip": archive_member, "payload.manifest.json": manifest_member},
+    )
+    wire_sha256 = _sha256_bytes(wire_bytes)
+    archive_reference = _validator_artifact_reference(
+        artifact_sha256=wire_sha256,
+        path="payload.zip",
+        sha256=_sha256_bytes(archive_member),
+    )
+    manifest_reference = _validator_artifact_reference(
+        artifact_sha256=wire_sha256,
+        path="payload.manifest.json",
+        sha256=_sha256_bytes(manifest_member),
+    )
+    downloader = preview_validator.ArtifactDownloader(root)
+    requests: list[Any] = []
+
+    def fetch_wire(arguments: Any, _: str) -> bytes:
+        requests.append(arguments)
+        return wire_bytes
+
+    monkeypatch.setattr(downloader, "_metadata", lambda _: None)
+    monkeypatch.setattr(downloader, "_run_gh", fetch_wire)
+
+    downloader.download_file(archive_reference)
+    cached_path = root / "artifacts" / f"{archive_reference.artifact_id}-{wire_sha256}.zip"
+    cached_path.write_bytes(
+        _validator_wire_zip(
+            tmp_path,
+            {"payload.zip": b"substituted archive", "payload.manifest.json": manifest_member},
+        )
+    )
+
+    with pytest.raises(ValueError, match="cached retained artifact"):
+        downloader.download_file(manifest_reference)
+
+    assert len(requests) == 1
+
+
+def test_artifact_downloader_retains_payload_after_distinct_digest_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "fresh-download"
+    root.mkdir()
+    archive_member = b"retained preview archive"
+    manifest_member = b"retained preview manifest"
+    candidate_payload_digest = _sha256_bytes(archive_member + manifest_member)
+    wire_bytes = _validator_wire_zip(
+        tmp_path,
+        {"payload.zip": archive_member, "payload.manifest.json": manifest_member},
+    )
+    wire_sha256 = _sha256_bytes(wire_bytes)
+    archive_reference = _validator_artifact_reference(
+        artifact_sha256=wire_sha256,
+        path="payload.zip",
+        sha256=_sha256_bytes(archive_member),
+    )
+    manifest_reference = _validator_artifact_reference(
+        artifact_sha256=wire_sha256,
+        path="payload.manifest.json",
+        sha256=_sha256_bytes(manifest_member),
+    )
+    downloader = preview_validator.ArtifactDownloader(root)
+
+    monkeypatch.setattr(downloader, "_metadata", lambda _: None)
+    monkeypatch.setattr(downloader, "_run_gh", lambda *_: wire_bytes)
+
+    archive_path, manifest_path = downloader.download_payload(
+        archive_reference,
+        manifest_reference,
+        candidate_payload_digest,
+    )
+
+    assert wire_sha256 != candidate_payload_digest
+    assert archive_path.read_bytes() == archive_member
+    assert manifest_path.read_bytes() == manifest_member
+
+
+def test_artifact_downloader_requires_candidate_payload_digest_after_member_hashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "fresh-download"
+    root.mkdir()
+    archive_member = b"retained preview archive"
+    manifest_member = b"retained preview manifest"
+    declared_payload_digest = "0" * 64
+    wire_bytes = _validator_wire_zip(
+        tmp_path,
+        {"payload.zip": archive_member, "payload.manifest.json": manifest_member},
+    )
+    wire_sha256 = _sha256_bytes(wire_bytes)
+    archive_reference = _validator_artifact_reference(
+        artifact_sha256=wire_sha256,
+        path="payload.zip",
+        sha256=_sha256_bytes(archive_member),
+    )
+    manifest_reference = _validator_artifact_reference(
+        artifact_sha256=wire_sha256,
+        path="payload.manifest.json",
+        sha256=_sha256_bytes(manifest_member),
+    )
+    downloader = preview_validator.ArtifactDownloader(root)
+
+    monkeypatch.setattr(downloader, "_metadata", lambda _: None)
+    monkeypatch.setattr(downloader, "_run_gh", lambda *_: wire_bytes)
+
+    with pytest.raises(ValueError, match="candidate artifact"):
+        downloader.download_payload(
+            archive_reference,
+            manifest_reference,
+            declared_payload_digest,
+        )
+
+    assert not (root / "downloaded").exists()
+
+
+def test_python_rollback_refuses_zero_exit_without_product_works_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_output = b'{"result":"zero exit without rollback marker"}\n'
+
+    monkeypatch.setattr(
+        preview_validator.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=["consumer-python"],
+            returncode=0,
+            stdout=raw_output,
+            stderr=b"",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="did not emit PRODUCT_WORKS") as error:
+        preview_validator._run_python_rollback("consumer-python", ["consumer.py"])
+
+    assert raw_output.decode("utf-8") not in str(error.value)
+
+
+def test_python_rollback_records_product_works_after_observable_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = {
+        "product_works": True,
+        "denominator": "5/5",
+        "tool_count": 135,
+        "stopped_at_entry": True,
+    }
+
+    monkeypatch.setattr(
+        preview_validator.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=["consumer-python"],
+            returncode=0,
+            stdout=json.dumps(marker, sort_keys=True).encode("utf-8") + b"\n",
+            stderr=b"",
+        ),
+    )
+
+    assert preview_validator._run_python_rollback("consumer-python", ["consumer.py"]) == {
+        "only_preview_selection_removed": True,
+        "python_package_reinstalled": False,
+        "python_package_replaced": False,
+        "console_entrypoint_changed": False,
+        "default_selector_changed": False,
+        "legacy_journey_outcome": "PRODUCT_WORKS",
+    }
