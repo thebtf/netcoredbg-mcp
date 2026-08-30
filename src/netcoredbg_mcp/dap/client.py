@@ -50,6 +50,10 @@ _JSON_CREDENTIAL_VALUE_RE = re.compile(
     r'(?i)("(?:[A-Za-z0-9]+[_-])*(?:authorization|access[_-]?token|token|password|secret|api[_-]?key)"'
     r'\s*:\s*")[^"]*(")'
 )
+_ESCAPED_JSON_CREDENTIAL_VALUE_RE = re.compile(
+    r'(?i)((?:\\+)"(?:[A-Za-z0-9]+[_-])*(?:authorization|access[_-]?token|token|password|secret|api[_-]?key)'
+    r'(?:\\+)"\s*:\s*(?:\\+)")([^"\\]*)((?:\\+)")'
+)
 _BEARER_VALUE_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
 _POSIX_PATH_RE = re.compile(r"(?<![\w:/])/(?!/)[^\s\"']+")
 _WINDOWS_PATH_RE = re.compile(r"(?i)(?:[A-Z]:[\\/]|\\\\)[^\s\"'<>|]+")
@@ -244,6 +248,9 @@ def sanitize_terminal_text(
     """
 
     text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
+    text = _ESCAPED_JSON_CREDENTIAL_VALUE_RE.sub(
+        lambda match: f"{match.group(1)}<redacted>{match.group(3)}", text
+    )
     text = _JSON_CREDENTIAL_VALUE_RE.sub(
         lambda match: f"{match.group(1)}<redacted>{match.group(2)}", text
     )
