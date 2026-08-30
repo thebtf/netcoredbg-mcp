@@ -148,9 +148,13 @@ if ($issueInventory.PSObject.Properties.Name -notcontains 'blocking_keys') {
 
 $issueKeys = @($issueInventory.keys)
 $blocking = @($issueInventory.blocking_keys)
+$duplicateBlockingKeys = $blocking |
+  Group-Object |
+  Where-Object Count -ne 1 |
+  Select-Object -ExpandProperty Name
 $assignments = @($manifest.assignments)
 $blockingAssignments = @($assignments | Where-Object { $_.finding_key -in $blocking })
-$duplicateKeys = $blockingAssignments |
+$duplicateAssignmentKeys = $blockingAssignments |
   Group-Object finding_key |
   Where-Object Count -ne 1 |
   Select-Object -ExpandProperty Name
@@ -170,7 +174,7 @@ if (@($issueKeys | Select-Object -Unique).Count -ne $issueKeys.Count -or
     $issueKeys.Count -ne $issueInventory.total) {
   throw 'WAVE_4_BLOCKED: issue_inventory.keys is not the complete unique issue inventory.'
 }
-if ($blockingOutsideInventory -or $duplicateKeys -or $unownedKeys -or $unknownOwners) {
+if ($blockingOutsideInventory -or $duplicateBlockingKeys -or $duplicateAssignmentKeys -or $unownedKeys -or $unknownOwners) {
   throw 'WAVE_4_BLOCKED: blocking finding ownership is incomplete or invalid.'
 }
 
@@ -181,7 +185,7 @@ if ($blockingOutsideInventory -or $duplicateKeys -or $unownedKeys -or $unknownOw
   IssueKeyCount = $issueKeys.Count
   BlockingKeyCount = $blocking.Count
   BlockingAssignmentCount = $blockingAssignments.Count
-  DuplicateBlockingKeys = @($duplicateKeys).Count
+  DuplicateBlockingKeys = @($duplicateBlockingKeys).Count
   UnownedBlockingKeys = @($unownedKeys).Count
   BlockingKeysOutsideInventory = @($blockingOutsideInventory).Count
   InvalidBlockingOwners = @($unknownOwners).Count
@@ -221,6 +225,11 @@ function Resolve-RepositoryPath([string]$Path) {
 }
 
 function Assert-ExactHeadReceipt([object]$Receipt, [string]$ExpectedHead) {
+  # Wave 5 is admitted only by the fresh Wave-4 diagnostic receipt, never by a later release-role receipt.
+  if ($Receipt.role -ne 'diagnostic') {
+    throw 'WAVE_5_BLOCKED: Wave-4 receipt must have role diagnostic.'
+  }
+
   $heads = @(
     $ExpectedHead,
     $Receipt.captured_head,
@@ -236,6 +245,7 @@ function Assert-ExactHeadReceipt([object]$Receipt, [string]$ExpectedHead) {
   }
 
   $analysisIds = @(
+    $Receipt.analysis_id,
     $Receipt.compute_engine.analysis_id,
     $Receipt.quality_gate.analysis_id,
     $Receipt.analysis_current_before_issues.analysis_id,
@@ -323,7 +333,7 @@ if ($scan.quality_gate.status -ne 'OK') {
 [pscustomobject]@{
   Wave5Entry = 'permitted only if no source bytes changed after this audit'
   IntegrationSha = $integrationSha
-  AnalysisId = $scan.compute_engine.analysis_id
+  AnalysisId = $scan.analysis_id
   ProjectKey = $scan.project_key
   Gate = $scan.quality_gate.status
   Coverage = $coverage.actualValue
@@ -382,6 +392,7 @@ function Assert-ExactHeadReceipt(
   }
 
   $analysisIds = @(
+    $Receipt.analysis_id,
     $Receipt.compute_engine.analysis_id,
     $Receipt.quality_gate.analysis_id,
     $Receipt.analysis_current_before_issues.analysis_id,
@@ -423,8 +434,8 @@ Assert-ExactHeadReceipt $postMerge $PostMergeSha 'post-merge'
 [pscustomobject]@{
   CandidateSha = $CandidateSha
   PostMergeSha = $PostMergeSha
-  CandidateAnalysisId = $candidate.compute_engine.analysis_id
-  PostMergeAnalysisId = $postMerge.compute_engine.analysis_id
+  CandidateAnalysisId = $candidate.analysis_id
+  PostMergeAnalysisId = $postMerge.analysis_id
   PostMergeGate = $postMerge.quality_gate.status
   RequiredNextCheck = 'Verify annotated v0.23.11 tag target equals PostMergeSha and run the public installed-consumer canary.'
 }
