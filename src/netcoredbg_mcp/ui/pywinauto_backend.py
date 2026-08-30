@@ -102,10 +102,7 @@ class PywinautoBackend:
         requested_automation_id: str | None,
         actual_automation_id: str | None,
     ) -> bool:
-        return bool(
-            requested_automation_id
-            and actual_automation_id != requested_automation_id
-        )
+        return bool(requested_automation_id and actual_automation_id != requested_automation_id)
 
     @staticmethod
     def _blocked_identity_result(
@@ -463,6 +460,30 @@ class PywinautoBackend:
     async def double_click_at(self, x: int, y: int) -> None:
         """Double-click at coordinates."""
         await self._ui._double_click_at_coords(x, y)
+
+    async def resolve_guarded_child(
+        self,
+        parent: dict[str, Any],
+        predicate: dict[str, Any],
+        maximum_nodes: int,
+    ) -> dict[str, Any]:
+        """Guarded child admission requires bridge-owned UIA evidence."""
+        return {
+            "status": "BLOCKED",
+            "reason": "guarded child resolution requires the FlaUI bridge backend",
+            "backend": "pywinauto",
+            "match_count": 0,
+            "requested": {
+                "parent": parent,
+                "predicate": predicate,
+                "maximum_nodes": maximum_nodes,
+            },
+            "accepted": {
+                "backend": "FlaUI",
+                "capability": "two-read guarded child resolution",
+            },
+            "next_step": "Use the FlaUI bridge backend before attempting guarded child drag.",
+        }
 
     async def drag(
         self,

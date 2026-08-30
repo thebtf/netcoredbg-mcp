@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner, RuntimeSmokeSession
+from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
 from tests import smoke_test_manual
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "WpfSmokeApp"
@@ -471,3 +472,246 @@ def test_wpf_hover_live_evidence_accepts_complete_measured_contract() -> None:
 def test_manual_smoke_lists_wpf_selector_scoped_hover_scenario() -> None:
     scenario_names = {name for name, _fn in smoke_test_manual.get_scenarios()}
     assert "WPF V2 Selector-Scoped Hover Runtime Smoke" in scenario_names
+
+
+def _admitted_guarded_child() -> dict[str, Any]:
+    return {
+        "status": "ADMITTED",
+        "match_count": 1,
+        "target": {
+            "automation_id": "guardedChildSource",
+            "name": "Guarded child source",
+            "control_type": "Button",
+            "process_id": 4242,
+            "hwnd": 88,
+            "rectangle": {
+                "left": 100,
+                "top": 180,
+                "right": 140,
+                "bottom": 220,
+                "unit": "physical_px",
+                "coordinate_space": "screen",
+            },
+            "center": {"x": 120, "y": 200},
+        },
+        "window": {
+            "hwnd": 88,
+            "process_id": 4242,
+            "client_rectangle": {
+                "left": 80,
+                "top": 120,
+                "right": 800,
+                "bottom": 700,
+                "unit": "physical_px",
+                "coordinate_space": "screen",
+            },
+        },
+        "stability": {"reads": 2, "matched": True},
+    }
+
+
+class GuardedChildDragBackend:
+    def __init__(self, admission: dict[str, Any]) -> None:
+        self.admission = admission
+        self.process_id = 4242
+        self.resolve_calls: list[tuple[dict[str, Any], dict[str, Any], int]] = []
+        self.drag_calls: list[tuple[int, int, int, int]] = []
+
+    async def resolve_guarded_child(
+        self,
+        parent: dict[str, Any],
+        predicate: dict[str, Any],
+        maximum_nodes: int,
+    ) -> dict[str, Any]:
+        self.resolve_calls.append((dict(parent), dict(predicate), maximum_nodes))
+        return dict(self.admission)
+
+    async def find_element(self, **selector: Any) -> dict[str, Any]:
+        return {
+            "status": "PASS",
+            "automation_id": str(selector.get("automation_id") or "guardedChildDrop"),
+            "bounds": {"x": 400, "y": 500, "width": 20, "height": 40},
+        }
+
+    async def drag(
+        self,
+        from_x: int,
+        from_y: int,
+        to_x: int,
+        to_y: int,
+        **_: Any,
+    ) -> dict[str, Any]:
+        self.drag_calls.append((from_x, from_y, to_x, to_y))
+        return {
+            "status": "PASS",
+            "path_points": [
+                {"x": from_x, "y": from_y},
+                {"x": to_x, "y": to_y},
+            ],
+            "final_pointer": {"x": to_x, "y": to_y},
+        }
+
+
+class GuardedChildDragSession:
+    def __init__(self) -> None:
+        self.runtime_smoke = RuntimeSmokeSession()
+
+    async def process_registry_count(self) -> dict[str, Any]:
+        return {"status": "PASS", "count": 0}
+
+
+def _guarded_child_runner(
+    backend: GuardedChildDragBackend,
+) -> RuntimeSmokeRunner:
+    session = GuardedChildDragSession()
+
+    async def ensure_ui_connected() -> GuardedChildDragBackend:
+        return backend
+
+    adapters = ui_operation_adapters(ensure_ui_connected)
+    adapters["process.registry.count"] = session.process_registry_count
+    return RuntimeSmokeRunner(session, service_adapters=adapters)
+
+
+def _guarded_child_action_plan(source: dict[str, Any]) -> dict[str, Any]:
+    template = smoke_test_manual._v2_guarded_child_drag_plan(
+        program="WpfSmokeApp.dll",
+        build_project="tests/fixtures/WpfSmokeApp/WpfSmokeApp.csproj",
+    )
+    action = dict(template["cases"][0]["transitions"][0]["action"])
+    action["source"] = source
+    return {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "cases": [
+            {
+                "id": "guarded_child_hosted",
+                "transitions": [{"action": action, "probes": []}],
+            }
+        ],
+        "cleanup": {"steps": [{"kind": "process.registry.assert_empty"}]},
+    }
+
+
+def test_guarded_child_drag_plan_uses_scoped_source_and_relative_drop() -> None:
+    plan = smoke_test_manual._v2_guarded_child_drag_plan(
+        program="WpfSmokeApp.dll",
+        build_project="tests/fixtures/WpfSmokeApp/WpfSmokeApp.csproj",
+    )
+    action = plan["cases"][0]["transitions"][0]["action"]
+    guarded_child = action["source"]["guarded_child"]
+
+    assert guarded_child["parent"] == {
+        "automation_id": "guardedChildParent",
+        "name": "Guarded child parent",
+        "control_type": "Group",
+    }
+    assert guarded_child["predicate"] == {
+        "automation_id": "guardedChildSource",
+        "name": "Guarded child source",
+        "control_type": "Button",
+    }
+    assert guarded_child["maximum_nodes"] == 256
+    assert action["path"] == [{"relative_to": "source", "x": 0, "y": 0}]
+    assert action["drop"] == {"relative_to": "source", "x": 24, "y": 0}
+    assert plan["cleanup"]["steps"] == [
+        {"kind": "debug.stop"},
+        {"kind": "process.registry.assert_empty"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_guarded_child_drag_admits_once_and_uses_one_pointer_action() -> None:
+    admission = _admitted_guarded_child()
+    backend = GuardedChildDragBackend(admission)
+
+    result = await _guarded_child_runner(backend).run(
+        _guarded_child_action_plan(smoke_test_manual._guarded_child_source())
+    )
+
+    transition = result["cases"][0]["transitions"][0]
+    action = transition["actions"][0]
+    route = action["route_evidence"]
+    assert result["status"] == "PASS"
+    assert backend.resolve_calls == [
+        (
+            {
+                "automation_id": "guardedChildParent",
+                "name": "Guarded child parent",
+                "control_type": "Group",
+            },
+            {
+                "automation_id": "guardedChildSource",
+                "name": "Guarded child source",
+                "control_type": "Button",
+            },
+            256,
+        )
+    ]
+    assert backend.drag_calls == [(120, 200, 144, 200)]
+    assert route["admitted_target"] == admission["target"]
+    assert route["admitted_window"] == admission["window"]
+    assert route["admission_stability"] == {"reads": 2, "matched": True}
+    assert route["resolved_source"] == {"x": 120, "y": 200}
+    assert route["resolved_drop"] == {"x": 144, "y": 200}
+    assert route["pointer_invocations"] == 1
+    assert result["cleanup"]["status"] == "PASS"
+    assert result["cleanup"]["process_registry_after"] == 0
+
+
+@pytest.mark.asyncio
+async def test_guarded_child_target_relative_drop_uses_target_bounds() -> None:
+    backend = GuardedChildDragBackend(_admitted_guarded_child())
+    plan = _guarded_child_action_plan(smoke_test_manual._guarded_child_source())
+    action = plan["cases"][0]["transitions"][0]["action"]
+    action["path"] = [
+        {"relative_to": "source", "x": 0, "y": 0},
+        {"relative_to": "target", "x": 0, "y": 0},
+    ]
+    action["drop"] = {"selector": {"automation_id": "guardedChildDrop"}}
+
+    result = await _guarded_child_runner(backend).run(plan)
+
+    assert result["status"] == "PASS"
+    assert backend.drag_calls == [(120, 200, 400, 500)]
+
+
+@pytest.mark.asyncio
+async def test_guarded_child_admission_matrix_blocks_before_pointer_input() -> None:
+    matrix = smoke_test_manual._wpf_guarded_child_admission_matrix_cases()
+    assert [case["id"] for case in matrix] == [
+        "unique_success",
+        "child_not_found",
+        "child_ambiguous",
+        "identity_drift",
+        "rectangle_drift",
+        "containment_failure",
+    ]
+
+    for case in matrix[1:]:
+        reason = case["expect_reason"]
+        backend = GuardedChildDragBackend(
+            {
+                "status": "BLOCKED",
+                "reason": reason,
+                "match_count": 2 if reason == "CHILD_AMBIGUOUS" else 1,
+            }
+        )
+        result = await _guarded_child_runner(backend).run(
+            _guarded_child_action_plan(case["source"])
+        )
+
+        transition = result["cases"][0]["transitions"][0]
+        action = transition["actions"][0]
+        assert result["status"] == "BLOCKED", case
+        assert action["status"] == "BLOCKED", case
+        assert action["reason"] == reason, case
+        assert len(backend.resolve_calls) == 1, case
+        assert backend.drag_calls == [], case
+        assert result["cleanup"]["status"] == "PASS", case
+        assert result["cleanup"]["process_registry_after"] == 0, case
+
+
+def test_manual_smoke_lists_guarded_child_drag_scenario() -> None:
+    scenario_names = {name for name, _fn in smoke_test_manual.get_scenarios()}
+    assert "WPF V2 Guarded-Child Drag Runtime Smoke" in scenario_names
+    assert "WPF V2 Guarded-Child Admission Matrix Runtime Smoke" in scenario_names

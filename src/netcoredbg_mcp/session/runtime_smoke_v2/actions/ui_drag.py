@@ -9,7 +9,9 @@ from ..evidence import attach_blocked_details, compact_evidence
 
 _ACCEPTED_MODIFIERS = frozenset({"alt", "control", "ctrl", "shift", "win", "windows"})
 _INTEGER_TEXT = re.compile(r"-?\d+")
-_SOURCE_KINDS = ("row_index", "row_identity", "cached_element", "point")
+_SOURCE_KINDS = ("row_index", "row_identity", "cached_element", "point", "guarded_child")
+_GUARDED_CHILD_SELECTOR_KEYS = frozenset({"automation_id", "name", "control_type"})
+_GUARDED_CHILD_MAXIMUM_NODES = 4_096
 REASON_NO_ROUTE_EVIDENCE = "real pointer route evidence unavailable"
 
 
@@ -108,9 +110,7 @@ async def handle_ui_drag(
             )
         if not _is_adapter_success(ensure_visible_result):
             result = dict(ensure_visible_result)
-            status = _terminal_failure_status(
-                str(result.get("status", "BLOCKED")).upper()
-            )
+            status = _terminal_failure_status(str(result.get("status", "BLOCKED")).upper())
             result["status"] = status
             result["ensure_visible_result"] = ensure_visible_result
             result["action_skipped"] = True
@@ -172,11 +172,12 @@ def _source_from_action(
             requested={"source": source},
             accepted={
                 "source": [
-                    "selector",
                     "row_index",
                     "row_identity",
                     "cached_element",
                     "point",
+                    "guarded_child",
+                    "selector",
                 ]
             },
             next_step="Provide source as an object with one supported drag source form.",
@@ -197,6 +198,9 @@ def _normalize_source(
         )
     selector_dict = dict(selector) if isinstance(selector, Mapping) else None
 
+    if source.get("guarded_child") is not None:
+        return _normalize_guarded_child_source(source)
+
     present_kinds = [kind for kind in _SOURCE_KINDS if source.get(kind) is not None]
     if not present_kinds and selector_dict is not None:
         return {"kind": "selector", "selector": selector_dict}, None
@@ -210,6 +214,7 @@ def _normalize_source(
                     "row_identity",
                     "cached_element",
                     "point",
+                    "guarded_child",
                     "selector",
                 ]
             },
@@ -267,6 +272,109 @@ def _normalize_source(
             next_step="Provide source.cached_element from earlier UI evidence.",
         )
     return {"kind": kind, "cached_element": cached_element}, None
+
+
+def _normalize_guarded_child_source(
+    source: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    if set(source) != {"guarded_child"}:
+        return {}, _blocked(
+            reason="invalid guarded child source",
+            requested={"source": source},
+            accepted={
+                "source": {
+                    "guarded_child": {
+                        "parent": "exact selector object",
+                        "predicate": "exact selector object",
+                        "maximum_nodes": "integer from 1 through 4096",
+                    }
+                }
+            },
+            next_step="Provide only source.guarded_child with its complete admission request.",
+        )
+
+    guarded_child = source["guarded_child"]
+    if not isinstance(guarded_child, Mapping) or set(guarded_child) != {
+        "parent",
+        "predicate",
+        "maximum_nodes",
+    }:
+        return {}, _blocked(
+            reason="invalid guarded child source",
+            requested={"guarded_child": guarded_child},
+            accepted={
+                "guarded_child": {
+                    "parent": "exact selector object",
+                    "predicate": "exact selector object",
+                    "maximum_nodes": "integer from 1 through 4096",
+                }
+            },
+            next_step=(
+                "Provide parent, predicate, and maximum_nodes only in source.guarded_child."
+            ),
+        )
+
+    parent, blocked = _guarded_child_selector(guarded_child["parent"], role="parent")
+    if blocked is not None:
+        return {}, blocked
+    predicate, blocked = _guarded_child_selector(guarded_child["predicate"], role="predicate")
+    if blocked is not None:
+        return {}, blocked
+
+    maximum_nodes = guarded_child["maximum_nodes"]
+    if (
+        isinstance(maximum_nodes, bool)
+        or not isinstance(maximum_nodes, int)
+        or not 1 <= maximum_nodes <= _GUARDED_CHILD_MAXIMUM_NODES
+    ):
+        return {}, _blocked(
+            reason="invalid guarded child source",
+            requested={"maximum_nodes": maximum_nodes},
+            accepted={"maximum_nodes": "integer from 1 through 4096"},
+            next_step="Provide source.guarded_child.maximum_nodes from 1 through 4096.",
+        )
+
+    return {
+        "kind": "guarded_child",
+        "guarded_child": {
+            "parent": parent,
+            "predicate": predicate,
+            "maximum_nodes": maximum_nodes,
+        },
+    }, None
+
+
+def _guarded_child_selector(
+    value: Any,
+    *,
+    role: str,
+) -> tuple[dict[str, str], dict[str, Any] | None]:
+    if not isinstance(value, Mapping):
+        return {}, _blocked(
+            reason="invalid guarded child source",
+            requested={role: value},
+            accepted={role: "selector object with automation_id, name, or control_type"},
+            next_step=f"Provide source.guarded_child.{role} as an exact selector object.",
+        )
+
+    unexpected = sorted(set(value) - _GUARDED_CHILD_SELECTOR_KEYS)
+    selector = {key: value[key] for key in _GUARDED_CHILD_SELECTOR_KEYS if key in value}
+    if (
+        unexpected
+        or not selector
+        or any(not isinstance(field, str) or not field for field in selector.values())
+    ):
+        return {}, _blocked(
+            reason="invalid guarded child source",
+            requested={role: dict(value), "unexpected": unexpected},
+            accepted={
+                role: "selector using only non-empty automation_id, name, or control_type strings"
+            },
+            next_step=(
+                f"Provide source.guarded_child.{role} with at least one exact selector field."
+            ),
+        )
+    return selector, None
 
 
 def _identity_from_action(
@@ -338,9 +446,7 @@ def _row_index_from_source(source: dict[str, Any]) -> tuple[int, dict[str, Any] 
         )
     if isinstance(raw_row_index, int):
         row_index = raw_row_index
-    elif isinstance(raw_row_index, str) and _INTEGER_TEXT.fullmatch(
-        raw_row_index.strip()
-    ):
+    elif isinstance(raw_row_index, str) and _INTEGER_TEXT.fullmatch(raw_row_index.strip()):
         row_index = int(raw_row_index)
     else:
         return 0, _blocked(
@@ -411,9 +517,7 @@ def _modifiers_from_action(
             next_step="Provide modifiers as a list of accepted key names.",
         )
     modifiers = [str(modifier).lower() for modifier in raw_modifiers]
-    invalid = [
-        modifier for modifier in modifiers if modifier not in _ACCEPTED_MODIFIERS
-    ]
+    invalid = [modifier for modifier in modifiers if modifier not in _ACCEPTED_MODIFIERS]
     if invalid:
         return [], _blocked(
             reason="invalid drag modifier",
@@ -582,9 +686,7 @@ def _action_result(
     if ensure_visible_result is not None:
         output["ensure_visible_result"] = compact_evidence(ensure_visible_result)
     if drop_ensure_visible_result is not None:
-        output["drop_ensure_visible_result"] = compact_evidence(
-            drop_ensure_visible_result
-        )
+        output["drop_ensure_visible_result"] = compact_evidence(drop_ensure_visible_result)
     if action_skipped:
         output["action_skipped"] = True
     if output["route_evidence"]:
@@ -601,9 +703,7 @@ def _action_result(
             output["status"] = "BLOCKED"
             output["reason"] = "selected payload evidence unavailable"
             output["requested"] = {"expect": {"selected_payload_preserved": True}}
-            output["accepted"] = {
-                "selected_payload": "before and after selected row identities"
-            }
+            output["accepted"] = {"selected_payload": "before and after selected row identities"}
             output["next_step"] = (
                 "Use a UI backend or probe adapter that returns selected payload evidence."
             )
@@ -616,9 +716,7 @@ def _action_result(
             output["status"] = "BLOCKED"
             output["reason"] = "no-op evidence unavailable"
             output["requested"] = {"expect": {"no_op": True}}
-            output["accepted"] = {
-                "no_op": "adapter evidence with expected=true and reason"
-            }
+            output["accepted"] = {"no_op": "adapter evidence with expected=true and reason"}
             output["next_step"] = (
                 "Use a UI backend that reports no-op drag evidence for negative gestures."
             )
@@ -646,13 +744,10 @@ def _action_result(
         }
         output["accepted"] = {
             "route_evidence": (
-                "backend-produced pointer route evidence with move_points "
-                "and final_pointer"
+                "backend-produced pointer route evidence with move_points and final_pointer"
             )
         }
-        output["next_step"] = (
-            "Use a UI backend adapter that reports real pointer route evidence."
-        )
+        output["next_step"] = "Use a UI backend adapter that reports real pointer route evidence."
     if _is_passing(output) and output["route_evidence"] and not action_skipped:
         output["runner_input"] = {
             "source": "runner_injected",

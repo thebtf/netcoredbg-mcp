@@ -122,6 +122,35 @@ def test_wpf_fixture_exposes_fixed_in_window_hover_overlay() -> None:
     assert "<ToolTip" not in xaml
 
 
+def test_wpf_fixture_exposes_guarded_child_scope_and_gesture_surface() -> None:
+    xaml = (FIXTURE_ROOT / "MainWindow.xaml").read_text(encoding="utf-8")
+    code = (FIXTURE_ROOT / "MainWindow.xaml.cs").read_text(encoding="utf-8")
+
+    for automation_id in (
+        "guardedChildParent",
+        "guardedChildContainer",
+        "guardedChildSource",
+        "guardedGestureSurface",
+        "guardedChildStatus",
+        "guardedChildOutsideClient",
+    ):
+        assert f'AutomationProperties.AutomationId="{automation_id}"' in xaml
+
+    assert 'AutomationProperties.Name="Guarded child parent"' in xaml
+    assert 'AutomationProperties.Name="Guarded child source"' in xaml
+    assert xaml.count('AutomationProperties.AutomationId="guardedChildDuplicate"') == 2
+    assert 'Canvas.Left="-4096"' in xaml
+    assert 'PreviewMouseLeftButtonDown="GuardedGestureSurface_PreviewMouseLeftButtonDown"' in xaml
+    assert 'PreviewMouseMove="GuardedGestureSurface_PreviewMouseMove"' in xaml
+    assert 'PreviewMouseLeftButtonUp="GuardedGestureSurface_PreviewMouseLeftButtonUp"' in xaml
+    assert "GuardedGestureSurface_PreviewMouseLeftButtonDown" in code
+    assert "GuardedGestureSurface_PreviewMouseMove" in code
+    assert "GuardedGestureSurface_PreviewMouseLeftButtonUp" in code
+    assert "UpdateGuardedChildGestureStatus" in code
+    assert 'sourceAutomationId = "guardedChildSource"' in code
+    assert "GuardedChildStatusText" in code
+
+
 def test_wpf_fixture_hover_status_arms_post_focus_measurement_and_delayed_close() -> None:
     code = (FIXTURE_ROOT / "MainWindow.xaml.cs").read_text(encoding="utf-8")
 

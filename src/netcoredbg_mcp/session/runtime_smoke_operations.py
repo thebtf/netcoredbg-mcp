@@ -1482,23 +1482,42 @@ async def _drag_route(
     )
     if blocked is not None:
         return {}, {}, blocked
+    source_kind = str(source.get("kind") or _endpoint_kind(source) or "")
 
     target_payload = drop or (path[-1] if path else {})
-    fallback_selector = _selector_from_endpoint(source) or _selector_from_endpoint(target_payload)
-    target_point, target_evidence, blocked = await _resolve_drag_endpoint(
-        backend,
-        target_payload,
-        role="target",
-        identity=identity,
-        fallback_selector=fallback_selector,
-    )
-    if blocked is not None:
-        return {}, {}, blocked
+    if source_kind == "guarded_child" and target_payload.get("relative_to") == "source":
+        target_point = _source_offset_point(source_point, target_payload)
+        if target_point is None:
+            return (
+                {},
+                {},
+                _drag_blocked(
+                    reason="drag target source-relative offset is invalid",
+                    requested={"target": target_payload},
+                    accepted={"target": "relative_to source with numeric x and y offsets"},
+                    next_step="Provide numeric source-relative drag endpoint offsets.",
+                ),
+            )
+        target_evidence = {
+            "point": dict(target_payload),
+            "resolution": "guarded_source_offset",
+        }
+    else:
+        fallback_selector = _selector_from_endpoint(source) or _selector_from_endpoint(
+            target_payload
+        )
+        target_point, target_evidence, blocked = await _resolve_drag_endpoint(
+            backend,
+            target_payload,
+            role="target",
+            identity=identity,
+            fallback_selector=fallback_selector,
+        )
+        if blocked is not None:
+            return {}, {}, blocked
 
-    source_kind = str(source.get("kind") or _endpoint_kind(source) or "")
-    if (
-        source_kind in {"row_index", "row_identity"}
-        and isinstance(target_evidence.get("ensure_visible_result"), Mapping)
+    if source_kind in {"row_index", "row_identity"} and isinstance(
+        target_evidence.get("ensure_visible_result"), Mapping
     ):
         refreshed_source_point, refreshed_source_evidence, blocked = await _resolve_drag_endpoint(
             backend,
@@ -1507,16 +1526,20 @@ async def _drag_route(
             identity=identity,
         )
         if blocked is not None:
-            return {}, {}, _drag_blocked(
-                reason="drag source row no longer visible after target ensure-visible",
-                requested={"source": source, "target": target_payload},
-                accepted={
-                    "source": "row-based source that remains visible after target realization",
-                    "target": "row-based drop endpoint with bounded ensure-visible evidence",
-                },
-                next_step=(
-                    "Use a closer row-based drop target, or add backend support that "
-                    "preserves the drag start anchor across target-side scrolling."
+            return (
+                {},
+                {},
+                _drag_blocked(
+                    reason="drag source row no longer visible after target ensure-visible",
+                    requested={"source": source, "target": target_payload},
+                    accepted={
+                        "source": "row-based source that remains visible after target realization",
+                        "target": "row-based drop endpoint with bounded ensure-visible evidence",
+                    },
+                    next_step=(
+                        "Use a closer row-based drop target, or add backend support that "
+                        "preserves the drag start anchor across target-side scrolling."
+                    ),
                 ),
             )
         source_point = refreshed_source_point
@@ -1532,22 +1555,42 @@ async def _drag_route(
         "source_point": source_point,
         "target_point": target_point,
     }
+    if source_kind == "guarded_child":
+        route_evidence.update(
+            {
+                "admitted_target": source_evidence["admitted_target"],
+                "admitted_window": source_evidence["admitted_window"],
+                "admission_stability": source_evidence["admission_stability"],
+                "resolved_source": source_point,
+                "resolved_drop": target_point,
+                "source_resolution": "guarded_child",
+            }
+        )
     if isinstance(target_evidence.get("ensure_visible_result"), Mapping):
         route_evidence["target_ensure_visible_result"] = dict(
             target_evidence["ensure_visible_result"]
         )
-    source_point = _route_point_from_relative_waypoint(
-        route_evidence,
-        prefix="source",
-        waypoint=path[0] if path else {},
-    ) or source_point
-    target_point = _route_point_from_relative_waypoint(
-        route_evidence,
-        prefix="target",
-        waypoint=path[-1] if path else {},
-    ) or target_point
+    source_point = (
+        _route_point_from_relative_waypoint(
+            route_evidence,
+            prefix="source",
+            waypoint=path[0] if path else {},
+        )
+        or source_point
+    )
+    target_point = (
+        _route_point_from_relative_waypoint(
+            route_evidence,
+            prefix="target",
+            waypoint=path[-1] if path else {},
+        )
+        or target_point
+    )
     route_evidence["source_point"] = source_point
     route_evidence["target_point"] = target_point
+    if source_kind == "guarded_child":
+        route_evidence["resolved_source"] = source_point
+        route_evidence["resolved_drop"] = target_point
 
     route = {
         "from_x": source_point["x"],
@@ -1573,6 +1616,19 @@ def _route_point_from_relative_waypoint(
     if point is None:
         return None
     return {"x": point[0], "y": point[1]}
+
+
+def _source_offset_point(
+    source_point: Mapping[str, Any],
+    endpoint: Mapping[str, Any],
+) -> dict[str, int] | None:
+    try:
+        return {
+            "x": round(float(source_point["x"]) + float(endpoint["x"])),
+            "y": round(float(source_point["y"]) + float(endpoint["y"])),
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _requires_path_drag(path: list[dict[str, Any]]) -> bool:
@@ -1699,6 +1755,10 @@ async def _drag_result_with_selected_payload(
         **backend_route,
         "modifiers": modifiers,
     }
+    if merged_route_evidence.get("source_resolution") == "guarded_child":
+        merged_route_evidence["pointer_invocations"] = (
+            1 if _is_backend_success(result) else 0
+        )
     if route is not None:
         merged_route_evidence["start"] = {"x": route["from_x"], "y": route["from_y"]}
         merged_route_evidence["drop"] = {"x": route["to_x"], "y": route["to_y"]}
@@ -1904,6 +1964,9 @@ async def _resolve_drag_endpoint(
             )
         return {"x": point[0], "y": point[1]}, {"point": endpoint.get("point")}, None
 
+    if kind == "guarded_child":
+        return await _resolve_guarded_child_endpoint(backend, endpoint, role=role)
+
     if kind == "selector":
         selector = dict(endpoint.get("selector") or endpoint)
         return await _resolve_selector_endpoint(backend, selector, role=role)
@@ -1980,6 +2043,184 @@ async def _resolve_drag_endpoint(
             f"{role}.kind": "point, selector, row_index, or row_identity with resolvable bounds"
         },
         next_step="Provide a resolvable drag endpoint for ui.drag.",
+    )
+
+
+async def _resolve_guarded_child_endpoint(
+    backend: Any,
+    endpoint: Mapping[str, Any],
+    *,
+    role: str,
+) -> tuple[dict[str, int], dict[str, Any], dict[str, Any] | None]:
+    resolver = getattr(backend, "resolve_guarded_child", None)
+    request = endpoint.get("guarded_child")
+    if not callable(resolver) or not isinstance(request, Mapping):
+        return (
+            {},
+            {},
+            _drag_blocked(
+                reason=f"drag {role} guarded child resolver unavailable",
+                requested={role: dict(endpoint)},
+                accepted={"backend": "resolve_guarded_child-capable UI backend"},
+                next_step="Use the FlaUI guarded-child backend for this drag source.",
+            ),
+        )
+    result = await resolver(
+        dict(request.get("parent") or {}),
+        dict(request.get("predicate") or {}),
+        int(request.get("maximum_nodes") or 0),
+    )
+    if not isinstance(result, Mapping):
+        return (
+            {},
+            {},
+            _guarded_drag_blocked(
+                role, endpoint, "guarded child resolver returned non-object result"
+            ),
+        )
+    status = str(result.get("status") or "").upper()
+    if status == "BLOCKED":
+        return (
+            {},
+            {},
+            _drag_blocked(
+                reason=str(result.get("reason") or "IDENTITY_UNAVAILABLE"),
+                requested={role: dict(endpoint), "match_count": result.get("match_count")},
+                accepted={"status": "ADMITTED with one stable contained child"},
+                next_step=(
+                    "Correct child uniqueness, identity stability, or containment "
+                    "before input."
+                ),
+            ),
+        )
+    if status != "ADMITTED" or set(result) != {
+        "status",
+        "match_count",
+        "target",
+        "window",
+        "stability",
+    }:
+        return (
+            {},
+            {},
+            _guarded_drag_blocked(role, endpoint, "guarded child admission schema is invalid"),
+        )
+    target = result.get("target")
+    window = result.get("window")
+    stability = result.get("stability")
+    if (
+        not isinstance(target, Mapping)
+        or not isinstance(window, Mapping)
+        or not isinstance(stability, Mapping)
+    ):
+        return (
+            {},
+            {},
+            _guarded_drag_blocked(role, endpoint, "guarded child admission schema is invalid"),
+        )
+    active_pid = getattr(backend, "process_id", None)
+    if (
+        result.get("match_count") != 1
+        or stability != {"reads": 2, "matched": True}
+        or not isinstance(active_pid, int)
+        or isinstance(active_pid, bool)
+        or target.get("process_id") != active_pid
+        or window.get("process_id") != active_pid
+        or target.get("hwnd") != window.get("hwnd")
+    ):
+        return (
+            {},
+            {},
+            _guarded_drag_blocked(role, endpoint, "guarded child admission identity mismatch"),
+        )
+    rectangle = _guarded_physical_rectangle(target.get("rectangle"))
+    client_rectangle = _guarded_physical_rectangle(window.get("client_rectangle"))
+    center = target.get("center")
+    if (
+        rectangle is None
+        or client_rectangle is None
+        or not isinstance(center, Mapping)
+        or not _guarded_rectangle_contains(client_rectangle, rectangle)
+    ):
+        return (
+            {},
+            {},
+            _guarded_drag_blocked(role, endpoint, "guarded child admission geometry is invalid"),
+        )
+    try:
+        point = {"x": int(center["x"]), "y": int(center["y"])}
+    except (KeyError, TypeError, ValueError):
+        return (
+            {},
+            {},
+            _guarded_drag_blocked(role, endpoint, "guarded child admission center is invalid"),
+        )
+    if not (
+        rectangle["left"] <= point["x"] < rectangle["right"]
+        and rectangle["top"] <= point["y"] < rectangle["bottom"]
+    ):
+        return (
+            {},
+            {},
+            _guarded_drag_blocked(role, endpoint, "guarded child admission center is invalid"),
+        )
+    bounds = {
+        "x": rectangle["left"],
+        "y": rectangle["top"],
+        "width": rectangle["right"] - rectangle["left"],
+        "height": rectangle["bottom"] - rectangle["top"],
+    }
+    return (
+        point,
+        {
+            "bounds": bounds,
+            "identity": str(
+                target.get("automation_id") or target.get("name") or target.get("control_type")
+            ),
+            "admitted_target": dict(target),
+            "admitted_window": dict(window),
+            "admission_stability": dict(stability),
+        },
+        None,
+    )
+
+
+def _guarded_drag_blocked(
+    role: str,
+    endpoint: Mapping[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    return _drag_blocked(
+        reason=reason,
+        requested={role: dict(endpoint)},
+        accepted={"result": "complete ADMITTED guarded-child schema"},
+        next_step="Refresh guarded-child admission before pointer input.",
+    )
+
+
+def _guarded_physical_rectangle(value: Any) -> dict[str, int] | None:
+    expected = {"left", "top", "right", "bottom", "unit", "coordinate_space"}
+    if not isinstance(value, Mapping) or set(value) != expected:
+        return None
+    if value.get("unit") != "physical_px" or value.get("coordinate_space") != "screen":
+        return None
+    coordinates: dict[str, int] = {}
+    for key in ("left", "top", "right", "bottom"):
+        coordinate = value.get(key)
+        if not isinstance(coordinate, int) or isinstance(coordinate, bool):
+            return None
+        coordinates[key] = coordinate
+    if coordinates["right"] <= coordinates["left"] or coordinates["bottom"] <= coordinates["top"]:
+        return None
+    return coordinates
+
+
+def _guarded_rectangle_contains(container: Mapping[str, int], child: Mapping[str, int]) -> bool:
+    return (
+        child["left"] >= container["left"]
+        and child["top"] >= container["top"]
+        and child["right"] <= container["right"]
+        and child["bottom"] <= container["bottom"]
     )
 
 
@@ -2835,12 +3076,20 @@ def _relative_point_from_evidence(
     prefix: str,
     waypoint: Mapping[str, Any],
 ) -> tuple[int, int] | None:
+    raw_point = route_evidence.get(f"{prefix}_point")
+    if (
+        prefix == "source"
+        and route_evidence.get("source_resolution") == "guarded_child"
+        and isinstance(raw_point, Mapping)
+    ):
+        offset = _source_offset_point(raw_point, waypoint)
+        if offset is not None:
+            return offset["x"], offset["y"]
     bounds = route_evidence.get(f"{prefix}_bounds")
     if isinstance(bounds, Mapping):
         point = _relative_point(bounds, waypoint)
         if point is not None:
             return point
-    raw_point = route_evidence.get(f"{prefix}_point")
     if isinstance(raw_point, Mapping):
         return _screen_point({"x": raw_point.get("x"), "y": raw_point.get("y")})
     return None

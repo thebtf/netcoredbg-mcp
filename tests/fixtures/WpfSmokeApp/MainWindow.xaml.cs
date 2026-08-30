@@ -5,6 +5,8 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Automation;
+using System.Windows.Automation.Peers;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
@@ -34,6 +36,14 @@ public partial class MainWindow : Window
     private bool _measurementArmed;
     private bool _hoverSurfaceVisible;
     private string _hoverState = "closed";
+    private Point? _guardedChildGestureStart;
+    private Point? _guardedChildGestureLast;
+    private int _guardedChildPointerDownCount;
+    private int _guardedChildPointerMoveCount;
+    private int _guardedChildPointerUpCount;
+    private bool _guardedChildGestureMoved;
+    private double _guardedChildLastDeltaX;
+    private double _guardedChildLastDeltaY;
     private int PreviewMouseLeftButtonDownCount { get; set; }
     private int PreviewMouseLeftButtonUpCount { get; set; }
     private int ClickCount { get; set; }
@@ -100,6 +110,7 @@ public partial class MainWindow : Window
             new RoutedEventHandler(HoverRegion_Click),
             handledEventsToo: true);
         SetHoverState("closed", surfaceVisible: false);
+        UpdateGuardedChildGestureStatus();
         if (_captureCalibrationMode is "marker" or "black")
         {
             ContentRendered += OnCalibrationContentRendered;
@@ -242,6 +253,75 @@ public partial class MainWindow : Window
             clickCount = ClickCount,
             focusChangeCount = FocusChangeCount,
             measurementArmed = _measurementArmed,
+        });
+    }
+    private void GuardedGestureSurface_PreviewMouseLeftButtonDown(
+        object sender,
+        MouseButtonEventArgs e)
+    {
+        _guardedChildGestureStart = e.GetPosition(GuardedGestureSurface);
+        _guardedChildGestureLast = _guardedChildGestureStart;
+        _guardedChildPointerDownCount = 1;
+        _guardedChildPointerMoveCount = 0;
+        _guardedChildPointerUpCount = 0;
+        _guardedChildGestureMoved = false;
+        _guardedChildLastDeltaX = 0;
+        _guardedChildLastDeltaY = 0;
+        UpdateGuardedChildGestureStatus();
+    }
+
+    private void GuardedGestureSurface_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (e.LeftButton != MouseButtonState.Pressed || _guardedChildGestureStart is not { } start)
+        {
+            return;
+        }
+
+        var current = e.GetPosition(GuardedGestureSurface);
+        _guardedChildGestureLast = current;
+        _guardedChildPointerMoveCount++;
+        _guardedChildLastDeltaX = Math.Round(current.X - start.X, 1);
+        _guardedChildLastDeltaY = Math.Round(current.Y - start.Y, 1);
+        _guardedChildGestureMoved = _guardedChildGestureMoved ||
+            _guardedChildLastDeltaX != 0 || _guardedChildLastDeltaY != 0;
+        UpdateGuardedChildGestureStatus();
+    }
+
+    private void GuardedGestureSurface_PreviewMouseLeftButtonUp(
+        object sender,
+        MouseButtonEventArgs e)
+    {
+        if (_guardedChildGestureStart is not { } start)
+        {
+            return;
+        }
+
+        var current = e.GetPosition(GuardedGestureSurface);
+        _guardedChildGestureLast = current;
+        _guardedChildPointerUpCount = 1;
+        _guardedChildLastDeltaX = Math.Round(current.X - start.X, 1);
+        _guardedChildLastDeltaY = Math.Round(current.Y - start.Y, 1);
+        _guardedChildGestureMoved = _guardedChildGestureMoved ||
+            _guardedChildLastDeltaX != 0 || _guardedChildLastDeltaY != 0;
+        _guardedChildGestureStart = null;
+        UpdateGuardedChildGestureStatus();
+    }
+
+    private void UpdateGuardedChildGestureStatus()
+    {
+        var state = _guardedChildPointerDownCount == 0
+            ? "idle"
+            : _guardedChildGestureStart is null ? "completed" : "dragging";
+        _viewModel.GuardedChildStatusText = JsonSerializer.Serialize(new
+        {
+            state,
+            sourceAutomationId = "guardedChildSource",
+            pointerDownCount = _guardedChildPointerDownCount,
+            pointerMoveCount = _guardedChildPointerMoveCount,
+            pointerUpCount = _guardedChildPointerUpCount,
+            moved = _guardedChildGestureMoved,
+            deltaX = _guardedChildLastDeltaX,
+            deltaY = _guardedChildLastDeltaY,
         });
     }
 
@@ -863,12 +943,68 @@ public partial class MainWindow : Window
     }
 }
 
+public enum GuardedChildDriftMode
+{
+    None,
+    Identity,
+    Rectangle,
+}
+
+public sealed class GuardedChildDriftButton : Button
+{
+    public static readonly DependencyProperty DriftModeProperty = DependencyProperty.Register(
+        nameof(DriftMode),
+        typeof(GuardedChildDriftMode),
+        typeof(GuardedChildDriftButton),
+        new PropertyMetadata(GuardedChildDriftMode.None));
+
+    private int _boundingRectangleReads;
+
+    public GuardedChildDriftMode DriftMode
+    {
+        get => (GuardedChildDriftMode)GetValue(DriftModeProperty);
+        set => SetValue(DriftModeProperty, value);
+    }
+
+    protected override AutomationPeer OnCreateAutomationPeer() =>
+        new GuardedChildDriftButtonAutomationPeer(this);
+
+    internal Rect ReadAutomationBounds(Rect bounds)
+    {
+        _boundingRectangleReads++;
+        if (_boundingRectangleReads == 1 && DriftMode == GuardedChildDriftMode.Identity)
+        {
+            AutomationProperties.SetAutomationId(this, "guardedChildIdentityDrifted");
+            AutomationProperties.SetName(this, "Guarded child identity drifted");
+        }
+
+        return DriftMode == GuardedChildDriftMode.Rectangle && _boundingRectangleReads > 1
+            ? new Rect(bounds.X + 1, bounds.Y, bounds.Width, bounds.Height)
+            : bounds;
+    }
+
+    private sealed class GuardedChildDriftButtonAutomationPeer : ButtonAutomationPeer
+    {
+        private readonly GuardedChildDriftButton _owner;
+
+        internal GuardedChildDriftButtonAutomationPeer(GuardedChildDriftButton owner)
+            : base(owner)
+        {
+            _owner = owner;
+        }
+
+        protected override Rect GetBoundingRectangleCore() =>
+            _owner.ReadAutomationBounds(base.GetBoundingRectangleCore());
+    }
+}
+
 public class MainViewModel : INotifyPropertyChanged
 {
     private string _statusText = "Ready";
     private string _genderStatusText = "No gender change";
     private string _selectorSafetyStatusText = "Selector side effects: 0";
     private string _hoverStatusText = string.Empty;
+    private string _guardedChildStatusText = string.Empty;
     private bool _isFeatureEnabled;
     private int _invokeCount;
     private int _selectorSafetyCount;
@@ -913,6 +1049,11 @@ public class MainViewModel : INotifyPropertyChanged
     {
         get => _hoverStatusText;
         set { _hoverStatusText = value; OnPropertyChanged(); }
+    }
+    public string GuardedChildStatusText
+    {
+        get => _guardedChildStatusText;
+        set { _guardedChildStatusText = value; OnPropertyChanged(); }
     }
 
     public ObservableCollection<string> Items { get; } = new()
