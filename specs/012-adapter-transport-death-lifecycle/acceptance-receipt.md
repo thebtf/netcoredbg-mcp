@@ -7,8 +7,9 @@
 - **Program:** `specs/011-issue450-sonar-release-program/`
 - **Wave contract:** `specs/012-adapter-transport-death-lifecycle/`
 - **Source base:** `e95223ba1bddd7a08e440e4a0eca3db9f3c068b9`
-- **Accepted implementation candidate:** `099ff2abad5037c82b7f85506f76b5afa8dac578`
-- **Final judgment:** `agent://JudgeWave1Final` returned `ACCEPT` with no blocking or nonblocking findings.
+- **Accepted implementation candidate:** `4bbfa7296d0f4ef90150eab9cb7b6707ff362bb6`
+- **Initial terminal judgment:** `agent://JudgeWave1Final` returned `ACCEPT` with no blocking or nonblocking findings.
+- **Final PR-correction check:** `agent://CheckWave1PrCorrection` returned `PASS` for the exact accepted successor.
 
 This receipt closes Wave 1 only. It does not authorize a tag, package publication, prerelease, public release, Sonar waiver, Wave 2 implementation, or v0.23.11 shipment.
 
@@ -70,7 +71,7 @@ uv run --locked --extra dev python -m pytest -q `
   tests/test_stealth_mode.py::test_session_manager_stop_cancels_stealth_foreground_restore_task
 ```
 
-Result: `127 passed`.
+Result: `131 passed`.
 
 The focused proof covers:
 
@@ -142,9 +143,11 @@ The full run is supporting evidence, not a fabricated all-green claim. Wave-1 ac
 - `agent://Wave1PythonAdversarial`: found the single-segment POSIX path bypass; `/root` and `/tmp` are now covered and redacted.
 - `agent://Wave1NestedRedactionCheck`: found an already-escaped nested JSON credential bypass; structured recursive sanitization and escaped-quote redaction now cover the exact payload.
 - `agent://Wave1ExactNestedRecheck`: PASS for the changed nested-redaction criterion at `099ff2abad5037c82b7f85506f76b5afa8dac578`.
-- `agent://JudgeWave1Final`: terminal `ACCEPT`, with T013 authorized to close and this receipt authorized to be created.
+- PR #288 review then identified restart-state clearing, immediate-startup cleanup, late `exited` resource publication, newest-byte stderr retention, direct test access, and parent-plan consistency corrections. Commit `4bbfa7296d0f4ef90150eab9cb7b6707ff362bb6` fixes those findings and all 13 review threads are resolved.
+- `agent://CheckWave1PrCorrection`: exact successor PASS at `4bbfa7296d0f4ef90150eab9cb7b6707ff362bb6`; focused Wave-1 proof is `131 passed`, adjacent lifecycle proof is `116 passed`, and the scoped correction static checks are clean.
+- `agent://JudgeWave1Final`: terminal `ACCEPT` for the pre-PR-review candidate, with the later exact successor checker providing the required changed-byte recheck.
 
-Earlier passes remain historical evidence for their exact predecessor bytes. The exact successor recheck closes only the source fields changed after those passes, as required by the exact-head evidence-recheck contract.
+Earlier passes remain historical evidence for their exact predecessor bytes. The final accepted source identity is the exact PR-correction successor above; no predecessor verdict is represented as proof for bytes it did not inspect.
 
 ## Requirement closure
 
