@@ -6,7 +6,7 @@ description: "Dependency-ordered program tasks for the one-public-release, five-
 
 **Input**: Design documents from `/specs/011-issue450-sonar-release-program/`  
 **Prerequisites**: [spec.md](spec.md), [plan.md](plan.md), [research.md](research.md), [architecture.md](architecture.md), [data-model.md](data-model.md), and [quickstart.md](quickstart.md).  
-**Status**: Every checkbox is intentionally unchecked. This task list plans future work; it records no completed wave, acceptance receipt, tag, or publication.  
+**Status**: Parent task checkboxes remain intentionally unchecked. Wave 1 is closed only in child 012’s task ledger and acceptance receipt; this list records no completed Wave 2–5, tag, or publication.
 **Scope boundary**: The parent owns contracts, dependencies, evidence rules, and v0.23.11 release intent. Child packets own source changes. The public Python/default route and stateless-preview boundary are immutable comparison surfaces, not parent mutation scope.
 
 ## Format: `[ID] [P?] [Wave] Description`

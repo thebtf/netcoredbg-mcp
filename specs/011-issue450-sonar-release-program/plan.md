@@ -4,7 +4,7 @@
 **Date**: 2026-08-30  
 **Spec**: [spec.md](spec.md)  
 **Design depth**: D3 program contract  
-**Status**: Planning only. No wave is accepted, no source change is represented as complete, and no release is authorized by this document.
+**Status**: Active parent plan. Wave 1 is internally accepted; Waves 2–5 and any release remain unaccepted.
 
 ## Summary
 

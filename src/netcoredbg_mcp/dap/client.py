@@ -234,18 +234,8 @@ class _DapRun:
     terminal: DapTransportTerminal | None = None
 
 
-def sanitize_terminal_text(
-    value: object,
-    limit: int = TERMINAL_PREVIEW_LIMIT,
-) -> str:
-    """Return bounded public diagnostic text with secrets and controls removed.
-
-    Adapter output is untrusted. Before terminal facts cross into public MCP
-    state, this boundary redacts credential-shaped values and absolute paths,
-    and renders control or bidi-format characters as visible escape sequences.
-    The final length bound is applied after normalization so replacement text
-    cannot expand a small input into an unbounded public record.
-    """
+def _sanitize_terminal_text(value: object) -> str:
+    """Normalize terminal diagnostics after redacting secrets, paths, and controls."""
 
     text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
     text = _ESCAPED_JSON_CREDENTIAL_VALUE_RE.sub(
@@ -271,12 +261,44 @@ def sanitize_terminal_text(
             normalized.append(f"\\u{ord(character):04x}")
         else:
             normalized.append(character)
+    return "".join(normalized)
 
-    safe = "".join(normalized)
-    if len(safe) <= limit:
-        return safe
+
+def _truncate_terminal_text(
+    text: str,
+    limit: int,
+    *,
+    keep_tail: bool,
+) -> tuple[str, bool]:
+    """Apply a terminal field's public bound and record whether it truncated text."""
+
+    if len(text) <= limit:
+        return text, False
     marker = "... [truncated]"
-    return safe[: max(0, limit - len(marker))] + marker
+    retained = max(0, limit - len(marker))
+    if keep_tail:
+        return marker + (text[-retained:] if retained else ""), True
+    return text[:retained] + marker, True
+
+
+def sanitize_terminal_text(
+    value: object,
+    limit: int = TERMINAL_PREVIEW_LIMIT,
+) -> str:
+    """Return a bounded public diagnostic preview with secrets and controls removed."""
+
+    text = _sanitize_terminal_text(value)
+    return _truncate_terminal_text(text, limit, keep_tail=False)[0]
+
+
+def sanitize_terminal_tail(
+    value: object,
+    limit: int = TERMINAL_PREVIEW_LIMIT,
+) -> tuple[str, bool]:
+    """Return a bounded public diagnostic tail and whether its public view truncated text."""
+
+    text = _sanitize_terminal_text(value)
+    return _truncate_terminal_text(text, limit, keep_tail=True)
 
 
 def _sanitize_terminal_value(value: object, depth: int = 0) -> object:

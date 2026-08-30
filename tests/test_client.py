@@ -1170,8 +1170,7 @@ class TestDAPClientTransportDeath:
                 "netcoredbg_mcp.dap.client.asyncio.create_subprocess_exec",
                 return_value=process,
             ):
-                start = getattr(client, "start")
-                returned_generation = await start(generation=generation)
+                returned_generation = await client.start(generation=generation)
             await wait_for_record(records)
             return client, returned_generation
 

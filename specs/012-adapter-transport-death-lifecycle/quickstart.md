@@ -1,6 +1,6 @@
 # Quickstart: Verify Adapter Transport-Death Lifecycle
 
-This is an implementation-phase focused verification guide for Wave 1. It does not perform a build, formatter, linter, project-wide suite, commit, review, release, Sonar scan, package publication, or route selection change by itself. Packet authoring has not executed these steps and is not evidence that they pass.
+This implementation-phase focused verification guide does not itself perform a build, formatter, linter, project-wide suite, commit, review, release, Sonar scan, package publication, or route selection change. `acceptance-receipt.md` records the completed Wave 1 candidate and proof; a later run creates fresh verification evidence.
 
 ## Preconditions
 
@@ -127,13 +127,12 @@ docs/RELEASE-PROTOCOL.md
 
 The public Python package, console entrypoint, default selection, and stateless-preview route must remain unchanged. The Wave 2 owner-scoped pre-build cleanup work remains excluded.
 
-## Freeze and accept only after proof
+## Recheck after a source correction
 
-After the focused results are green and the candidate diff is in scope:
+The original Wave 1 candidate is internally accepted. If a source correction changes that candidate:
 
-1. Create one atomic Wave 1 candidate commit.
-2. Give one independent reviewer that exact commit, this packet, the retained TD-001 RED result, and the focused GREEN evidence.
-3. Resolve any blocking finding within this child without broadening into build cleanup, Sonar, coverage, or route work.
-4. Only after the reviewer accepts the exact candidate, create `acceptance-receipt.md` in this packet and bind it to the candidate SHA.
+1. Run the focused proof against the successor source SHA.
+2. Give an independent reviewer that exact source SHA, the changed scope, and the focused proof.
+3. Update `acceptance-receipt.md` only after the focused proof and exact-head review pass.
 
-The acceptance receipt is intentionally absent now. It is an internal Wave 1 closure artifact and is not authorization to tag or release v0.23.11.
+The receipt remains an internal Wave 1 closure artifact. It does not authorize a tag or release v0.23.11.

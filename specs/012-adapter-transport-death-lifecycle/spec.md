@@ -2,7 +2,7 @@
 
 **Feature branch:** `work/issue450-eof-sonar-remediation`  
 **Created:** 2026-08-30  
-**Status:** Draft — planning packet only; no product code or acceptance receipt exists yet.  
+**Status:** Implemented and internally accepted. `acceptance-receipt.md` records the candidate, focused proof, and review. This packet does not authorize a tag or release.
 **Source base:** `e95223ba1bddd7a08e440e4a0eca3db9f3c068b9`  
 **Engram issue:** #450  
 **Parent:** `specs/011-issue450-sonar-release-program/`, Wave 1 of the one-public-release v0.23.11 program.  

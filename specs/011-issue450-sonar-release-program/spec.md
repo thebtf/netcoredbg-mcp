@@ -3,7 +3,7 @@
 **Feature Branch**: `work/issue450-eof-sonar-remediation`  
 **Created**: 2026-08-30  
 **Source baseline**: `e95223ba1bddd7a08e440e4a0eca3db9f3c068b9`  
-**Status**: Planned program contract — this packet asserts no implementation, remediation, acceptance, tag, or publication result.  
+**Status**: Active parent program. Wave 1 has an internal accepted candidate recorded in `specs/012-adapter-transport-death-lifecycle/acceptance-receipt.md`; Waves 2–5, remediation, tag, and publication remain unaccepted.
 **Authority**: Governor decision `agent://Issue450SonarGovernor`; baseline Sonar receipt `.agent/e/sonarqube/thebtf_netcoredbg_mcp/e95223ba1bddd7a08e440e4a0eca3db9f3c068b9/post-merge.json`; Issue #450 investigation `.agent/runs/issue450-adapter-eof-lifecycle/investigation.md`.
 
 ## Program Decision

@@ -8,7 +8,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from netcoredbg_mcp.dap import DAPEvent, DAPResponse
-from netcoredbg_mcp.dap.client import DAPClient
+from netcoredbg_mcp.dap.client import (
+    DapCleanupOutcome,
+    DAPClient,
+    DapTerminalTrigger,
+    DapTransportTerminal,
+)
 from netcoredbg_mcp.session import DebugState, SessionManager
 
 
@@ -324,6 +329,80 @@ class TestSessionManagerState:
             listener.assert_not_called()
 
 
+class TestSessionManagerStart:
+    """Tests for manager-issued adapter generations."""
+
+    @pytest.mark.asyncio
+    async def test_start_clears_prior_terminal_state_before_new_adapter_generation(self):
+        """A retry must not mistake the previous adapter terminal state for the new run."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+
+        client = MagicMock()
+        client.is_running = False
+        client.adapter_pid = None
+        client.start = AsyncMock(side_effect=lambda *, generation: generation)
+        client.initialize = AsyncMock()
+        manager._client = client
+        manager._state.state = DebugState.TERMINATED
+        manager._state.exit_code = 23
+
+        await manager.start()
+
+        client.start.assert_awaited_once_with(generation=1)
+        client.initialize.assert_awaited_once_with()
+        assert manager.state.state == DebugState.INITIALIZING
+        assert manager.state.exit_code is None
+
+    @pytest.mark.asyncio
+    async def test_start_stops_the_current_generation_when_it_terminalizes_immediately(self):
+        """An adapter that dies during startup must be stopped before start reports failure."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+
+        client = MagicMock()
+        client.is_running = False
+        client.adapter_pid = None
+        generations_seen_during_stop: list[int] = []
+
+        async def start(*, generation: int) -> int:
+            manager._on_transport_terminal(
+                client,
+                DapTransportTerminal(
+                    generation=generation,
+                    first_trigger=DapTerminalTrigger.STDOUT_EOF,
+                    adapter_pid=41007,
+                    process_exited=True,
+                    returncode=1,
+                    protocol_terminated=False,
+                    debuggee_exit_code=None,
+                    stdout_eof=True,
+                    last_dap_event=None,
+                    last_dap_event_body_preview=None,
+                    stderr_tail=b"",
+                    stderr_truncated=False,
+                    stderr_drained=True,
+                    reader_error=None,
+                    cleanup_outcome=DapCleanupOutcome.NATURAL_EXIT,
+                ),
+            )
+            return generation
+
+        async def stop() -> None:
+            generations_seen_during_stop.append(manager._active_dap_run)
+
+        client.start = AsyncMock(side_effect=start)
+        client.stop = AsyncMock(side_effect=stop)
+        manager._client = client
+
+        with pytest.raises(RuntimeError, match="netcoredbg terminated during startup"):
+            await manager.start()
+
+        client.stop.assert_awaited_once_with()
+        assert generations_seen_during_stop == [1]
+        assert manager._active_dap_run is None
+
+
 class TestBreakpointOperations:
     """Tests for breakpoint operations."""
 
@@ -486,6 +565,38 @@ class TestEventHandlers:
             manager._on_exited(event)
 
             assert manager.state.exit_code == 0
+
+    def test_transport_terminal_public_stderr_tail_keeps_latest_bytes(self):
+        """The public stderr preview must retain the newest sanitized diagnostic bytes."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+
+        latest = "latest stderr diagnostic marker"
+        manager._on_transport_terminal(
+            manager._client,
+            DapTransportTerminal(
+                generation=1,
+                first_trigger=DapTerminalTrigger.STDOUT_EOF,
+                adapter_pid=41008,
+                process_exited=True,
+                returncode=1,
+                protocol_terminated=False,
+                debuggee_exit_code=None,
+                stdout_eof=True,
+                last_dap_event=None,
+                last_dap_event_body_preview=None,
+                stderr_tail=b"older stderr bytes " * 160 + latest.encode(),
+                stderr_truncated=False,
+                stderr_drained=True,
+                reader_error=None,
+                cleanup_outcome=DapCleanupOutcome.NATURAL_EXIT,
+            ),
+        )
+
+        terminal = manager.state.to_dict()["transportTerminal"]
+        assert terminal["stderrTail"].endswith(latest)
+        assert len(terminal["stderrTail"]) <= 2_048
+        assert terminal["stderrTruncated"] is True
 
     @pytest.mark.asyncio
     async def test_exited_without_terminated_then_transport_eof_terminalizes_current_session(self):

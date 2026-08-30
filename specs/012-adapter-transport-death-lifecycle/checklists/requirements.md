@@ -5,7 +5,7 @@
 **Feature:** [spec.md](../spec.md)  
 **Parent:** `specs/011-issue450-sonar-release-program/` Wave 1.
 
-This checklist evaluates specification completeness only. It does not claim that source code, tests, an atomic candidate commit, independent review, or an acceptance receipt exists.
+This checklist records the pre-implementation specification review. Source, tests, an atomic candidate commit, independent review, and an acceptance receipt now exist and are recorded in `tasks.md` and `acceptance-receipt.md`; this checklist is not that evidence.
 
 ## Content quality
 
@@ -35,7 +35,7 @@ This checklist evaluates specification completeness only. It does not claim that
 - [x] The tasks keep test creation before implementation and retain existing `tests/test_client.py`, `tests/test_session.py`, `tests/test_debuggee_liveness.py`, and `tests/test_resource_updates.py` as focused owners.
 - [x] The quickstart specifies post-implementation focused verification and expected behavioral observations without claiming it ran.
 - [x] The plan names exactly one D1 independent reviewer and scopes review to the exact atomic candidate commit.
-- [x] The packet identifies `specs/012-adapter-transport-death-lifecycle/acceptance-receipt.md` as deliberately absent until after proof and review.
+- [x] At planning time, the packet identified `specs/012-adapter-transport-death-lifecycle/acceptance-receipt.md` as deliberately absent until after proof and review. The retained receipt now records T014.
 
 ## Scope containment
 
@@ -50,7 +50,7 @@ This checklist evaluates specification completeness only. It does not claim that
 - [x] The D1 boundary contract, integration-point list, test plan, challenge-LITE GO verdict, and one-checker commitment are present.
 - [x] The packet does not add an ADR, D2/D3 milestone map, full multi-lens review scheme, or distant-program redesign.
 - [x] The child can enter implementation without an operator clarification.
-- [x] The only intentionally absent artifact is the future acceptance receipt, which the contract correctly prohibits before evidence exists.
+- [x] At planning time, the only intentionally absent artifact was the future acceptance receipt. `acceptance-receipt.md` now records the completed internal closure.
 
 ## Notes
 

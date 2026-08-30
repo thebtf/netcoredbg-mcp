@@ -167,8 +167,41 @@ async def test_session_manager_publishes_async_dap_resource_mutations() -> None:
 
 
 @pytest.mark.asyncio
-async def test_exited_then_eof_publishes_one_terminal_resource_path() -> None:
-    """Exited plus EOF must publish one terminal state/thread resource outcome, not two."""
+async def test_exited_publishes_state_resource_before_transport_terminal() -> None:
+    """A nonterminal DAP exited fact must advance the public state resource."""
+    with patch("netcoredbg_mcp.session.manager.DAPClient"):
+        from netcoredbg_mcp.session import SessionManager
+
+        manager = SessionManager()
+
+    published: list[tuple[str, ...]] = []
+
+    async def record(uris: tuple[str, ...]) -> None:
+        published.append(uris)
+
+    manager.set_resource_update_callback(record)
+    try:
+        manager._on_exited(DAPEvent(seq=1, event="exited", body={"exitCode": 23}))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        observed = {
+            "exitCode": manager.state.to_dict()["exitCode"],
+            "stateRevision": manager.resource_update_revision(STATE_URI),
+            "published": list(published),
+        }
+    finally:
+        await manager.close_resource_update_notifications()
+
+    assert observed == {
+        "exitCode": 23,
+        "stateRevision": 1,
+        "published": [(STATE_URI,)],
+    }
+
+
+@pytest.mark.asyncio
+async def test_exited_then_eof_advances_state_resource_for_both_mutations() -> None:
+    """Exited and terminalization must each advance the serialized state revision."""
     with patch("netcoredbg_mcp.session.manager.DAPClient"):
         from netcoredbg_mcp.session import SessionManager
 
@@ -220,11 +253,10 @@ async def test_exited_then_eof_publishes_one_terminal_resource_path() -> None:
 
     assert observed["state"] == DebugState.TERMINATED
     assert observed["debuggeeAlive"] is False
-    assert observed["stateRevision"] == 1
+    assert observed["stateRevision"] == 2
     assert observed["threadsRevision"] == 1
-    assert observed["published"].count((STATE_URI,)) == 1
-    assert observed["published"].count((THREADS_URI,)) == 1
-    assert len(observed["published"]) == 2
+    assert (STATE_URI,) in observed["published"]
+    assert (THREADS_URI,) in observed["published"]
 
 
 @pytest.mark.asyncio

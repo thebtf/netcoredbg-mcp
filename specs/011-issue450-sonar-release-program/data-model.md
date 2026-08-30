@@ -18,11 +18,11 @@
 |---|---|---|---|
 | **ProgramContract** | `program_id = issue450-sonar-v02311` | `source_baseline_sha`, `release_version`, `public_release_iterations`, `waves`, `anchor_ids`, `route_invariants` | Exactly one program contract for this cut; `public_release_iterations = 1`; anchors are PRG-001…PRG-010. |
 | **WaveContract** | `(program_id, wave_number)` | `child_specs`, `release_intent`, `depends_on`, `entry_predicate`, `closure_predicate`, `non_goals`, `appetite` | Five rows only; Wave numbers 1–5 are unique and ordered. |
-| **ExactHeadRef** | `(repository_project_key, sha, role, scan_run_id)` | `sha`, `captured_head`, `post_scan_head`, `scanner_revision`, `analysis_id`, `current_analysis_revision`, `role` | All supplied SHA-like values must be identical for one valid receipt; roles distinguish diagnostic/candidate/post-merge. |
+| **ExactHeadRef** | `(repository_project_key, sha, role, scan_run_id)` | `sha`, `captured_head`, `post_scan_head`, `scanner_revision`, `analysis_id`, analysis-current IDs/revisions, `role` | All supplied SHA-like values must be identical for one valid receipt; roles distinguish diagnostic/candidate/post-merge. |
 | **TransportTerminalRecord** | `(session_instance_id, finalization_id)` | `first_signal`, `process_exited`, `returncode`, `protocol_terminated`, `dap_exited`, `last_dap_event`, `stderr_tail`, `stderr_truncated`, `reader_error`, `explicit_stop` | Created once by one guarded finalizer; bounded fields cannot grow after publication. |
 | **OwnedProcessCapability** | `(owner_instance_id, launch_identity)` | `owner_id`, `job_handle_identity`, `root_process_handle_identity`, `thread_handle_identity`, `membership_verified`, `admitted_before_resume`, `tree_drain_status` | No raw PID/image/directory may serve as the identity authority. |
 | **CoverageTransaction** | `(ExactHeadRef, transaction_id)` | `dotnet_report_path`, `python_report_path`, `report_hashes`, `generated_after_begin`, `generated_before_end`, `nonzero_denominators`, `import_observation`, `policy_snapshot` | Exactly two required language reports; both paths are deterministic project-root-relative paths selected by Wave 3. |
-| **FindingManifestUnion** | `(ExactHeadRef, manifest_id)` | `project_key`, `analysis_id`, `current_analysis_revision`, `issue_keys`, `hotspot_inventory`, `pagination_complete`, `assignments_hash` | Refreshed from every complete diagnostic scan; never inferred from historical partition counts. |
+| **FindingManifestUnion** | `(ExactHeadRef, manifest_id)` | `project_key`, `analysis_id`, `current_analysis_revision`, `issue_inventory.keys`, `issue_inventory.blocking_keys`, `hotspot_inventory`, `pagination_complete`, `assignments_hash` | Refreshed from every complete diagnostic scan; never inferred from historical partition counts. |
 | **FindingManifestAssignment** | `(manifest_id, finding_key)` | `finding_key`, `component`, `path`, `rule`, `owner_child`, `disposition`, `assignment_revision` | Exactly one assignment for every blocking key; `owner_child ∈ {015,016,017}`. |
 | **WaveClosure** | `(wave_number, exact_sha)` | `exact_sha`, `child_spec_path`, `receipt_path`, `requirements`, `proof_refs`, `policy_snapshot`, `closure_status` | One closure record applies to one child/head only; `closure_status` is an evidence outcome, never copied forward. |
 | **Wave4IntegrationClosure** | `(wave=4, integration_sha)` | `input_closure_hashes`, `diagnostic_receipt_ref`, `manifest_ref`, `integration_sha`, `zero_blocking_result`, `policy_results` | Exists only after all 015–017 closures and one fresh integration receipt agree. |
@@ -87,15 +87,16 @@ ExactHeadRef
 ├── post_scan_head: SHA
 ├── scanner_revision: SHA
 ├── analysis_id: Sonar analysis identity
-├── current_analysis_before: { analysis_id, revision: SHA }
-├── current_analysis_after: { analysis_id, revision: SHA }
+├── analysis_current_before_issues: { analysis_id, revision: SHA }
+├── analysis_current_after_issues: { analysis_id, revision: SHA }
+├── analysis_current_final: { analysis_id, revision: SHA }
 └── pagination_complete: boolean
 ```
 
 ### Exact-head invariants
 
-- `sha == captured_head == post_scan_head == scanner_revision == current_analysis_before.revision == current_analysis_after.revision`.
-- `analysis_id` equals every analysis-bookend ID and belongs to submitted scanner task/project key.
+- `sha == captured_head == post_scan_head == scanner_revision == analysis_current_before_issues.revision == analysis_current_after_issues.revision == analysis_current_final.revision`.
+- `analysis_id` equals all three analysis-binding IDs and belongs to the submitted scanner task and fixed project key.
 - `pagination_complete=true` is mandatory for issues and hotspots. `total=0` is valid only with `result_empty=true`.
 - A `candidate` receipt cannot satisfy a tag predicate; only the matching clean `post-merge` receipt is release-tag evidence.
 - A diagnostic receipt can allocate Wave-4 work but cannot by itself satisfy Wave-5 entry.
@@ -194,7 +195,8 @@ FindingManifestUnion
 │   ├── total: non-negative integer
 │   ├── pagination_complete: boolean
 │   ├── result_empty: boolean
-│   └── keys: set<FindingKey>
+│   ├── keys: set<FindingKey> (every current result)
+│   └── blocking_keys: subset<FindingKey> (only current blocking results)
 ├── new_code_inventory: same completeness fields
 ├── hotspot_inventory: same completeness fields
 ├── assignments: set<FindingManifestAssignment>
@@ -213,7 +215,8 @@ FindingManifestAssignment
 ### Manifest invariants
 
 - A manifest is fresh only when it derives from a complete exact-head diagnostic receipt with matching project/analysis/revision bookends.
-- Every blocking current finding key occurs in exactly one `assignments` row. A key with no source path still requires an owner; its child resolves the path from current evidence before editing.
+- `issue_inventory.keys` retains the full current issue denominator. `issue_inventory.blocking_keys` is its subset whose current dispositions block Wave 4.
+- Every `issue_inventory.blocking_keys` member occurs in exactly one `assignments` row. A key with no source path still requires an owner; its child resolves the path from current evidence before editing.
 - `owner_child=015` owns manifest-routed Python product/test/tool paths, except Wave-3 scanner/coverage ownership; `016` owns `bridge/**`; `017` owns `host/**`.
 - `FALSE_POSITIVE`, `ACCEPTED`, WONTFIX, suppression, `NOSONAR`, exclusion, baseline reset, or a policy/definition change is not a legal `status` transition to fixed.
 - A new key discovered after repair is added to the existing manifest lineage and re-assigned; it cannot be left outside the union because an old count looked complete.
@@ -293,7 +296,8 @@ erDiagram
   WAVE_CLOSURE ||--o{ FINDING_MANIFEST_ASSIGNMENT : repairs-through
   WAVE_CLOSURE ||--|| WAVE4_INTEGRATION_CLOSURE : contributes-to
   WAVE4_INTEGRATION_CLOSURE ||--|| RELEASE_EVIDENCE_BUNDLE : gates
-  EXACT_HEAD_REF ||--|| RELEASE_EVIDENCE_BUNDLE : candidate-or-postmerge
+  EXACT_HEAD_REF ||--o{ RELEASE_EVIDENCE_BUNDLE : candidate_exact_head
+  EXACT_HEAD_REF ||--o{ RELEASE_EVIDENCE_BUNDLE : post_merge_exact_head
 ```
 
 ## Requirement-to-Model Traceability

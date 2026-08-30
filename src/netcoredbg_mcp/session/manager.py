@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..build import BuildManager, BuildResult
 from ..dap import DAPClient, DAPEvent, DAPResponse
-from ..dap.client import DapTransportTerminal, sanitize_terminal_text
+from ..dap.client import DapTransportTerminal, sanitize_terminal_tail
 from ..dap.events import (
     BreakpointEventBody,
     CapabilitiesEventBody,
@@ -344,10 +344,14 @@ class SessionManager:
             trace_entries=tracepoints.append_generation if tracepoints is not None else 0,
         )
 
-    def _begin_debuggee_epoch(self) -> None:
-        """Replace per-debuggee state before a new launch or attach request."""
-        lifecycle_state = self._state.state
-        self._state = self._create_session_state(lifecycle_state)
+    def _begin_debuggee_epoch(
+        self,
+        *,
+        lifecycle_state: DebugState | None = None,
+    ) -> None:
+        """Replace per-debuggee state before a new adapter or debuggee generation."""
+        next_lifecycle_state = self._state.state if lifecycle_state is None else lifecycle_state
+        self._state = self._create_session_state(next_lifecycle_state)
         self._output_bytes = 0
         self._execution_event.clear()
         self._publish_resource_updates(STATE_URI, THREADS_URI, OUTPUT_URI)
@@ -838,6 +842,8 @@ class SessionManager:
 
         if self._client.is_running:
             return
+        if self._state.state == DebugState.TERMINATED:
+            self._begin_debuggee_epoch(lifecycle_state=DebugState.IDLE)
 
         self._register_event_handlers()
         self._dap_generation_counter += 1
@@ -858,6 +864,11 @@ class SessionManager:
             self._active_dap_run = None
             raise RuntimeError("DAP client returned a mismatched adapter generation")
         if self._state.state == DebugState.TERMINATED:
+            try:
+                await self._client.stop()
+            finally:
+                if self._active_dap_run == generation:
+                    self._active_dap_run = None
             raise RuntimeError("netcoredbg terminated during startup")
 
         adapter_pid = self._client.adapter_pid
@@ -927,6 +938,8 @@ class SessionManager:
         if terminal.last_dap_event is not None:
             last_event_seq, last_event_name = terminal.last_dap_event
 
+        stderr_tail, stderr_tail_truncated = sanitize_terminal_tail(terminal.stderr_tail)
+
         self._state.transport_terminal = TransportTerminalSummary(
             first_observed_signal=terminal.first_trigger.value,
             adapter_pid=terminal.adapter_pid,
@@ -938,8 +951,8 @@ class SessionManager:
             last_dap_event_seq=last_event_seq,
             last_dap_event_name=last_event_name,
             last_dap_event_body_preview=terminal.last_dap_event_body_preview,
-            stderr_tail=sanitize_terminal_text(terminal.stderr_tail),
-            stderr_truncated=terminal.stderr_truncated,
+            stderr_tail=stderr_tail,
+            stderr_truncated=terminal.stderr_truncated or stderr_tail_truncated,
             stderr_drained=terminal.stderr_drained,
             reader_error=terminal.reader_error,
             cleanup_outcome=terminal.cleanup_outcome.value,
@@ -1143,6 +1156,7 @@ class SessionManager:
 
         body = ExitedEventBody.from_dict(event.body)
         self._state.exit_code = body.exit_code
+        self._publish_resource_updates(STATE_URI)
         self._execution_event.set()
         logger.info("Debuggee exited with code %s", self._state.exit_code)
 

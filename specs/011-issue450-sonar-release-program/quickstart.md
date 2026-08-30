@@ -140,26 +140,51 @@ param(
 )
 
 $manifest = Get-Content -Raw $ManifestPath | ConvertFrom-Json
+$issueInventory = $manifest.issue_inventory
+$hotspotInventory = $manifest.hotspot_inventory
+if ($issueInventory.PSObject.Properties.Name -notcontains 'blocking_keys') {
+  throw 'WAVE_4_BLOCKED: manifest omits issue_inventory.blocking_keys.'
+}
 
-$blocking = @($manifest.issue_inventory.keys)
+$issueKeys = @($issueInventory.keys)
+$blocking = @($issueInventory.blocking_keys)
 $assignments = @($manifest.assignments)
-$duplicateKeys = $assignments |
+$blockingAssignments = @($assignments | Where-Object { $_.finding_key -in $blocking })
+$duplicateKeys = $blockingAssignments |
   Group-Object finding_key |
   Where-Object Count -ne 1 |
   Select-Object -ExpandProperty Name
-$unownedKeys = $blocking | Where-Object { $_ -notin $assignments.finding_key }
-$unknownOwners = $assignments |
+$unownedKeys = $blocking | Where-Object { $_ -notin $blockingAssignments.finding_key }
+$blockingOutsideInventory = $blocking | Where-Object { $_ -notin $issueKeys }
+$unknownOwners = $blockingAssignments |
   Where-Object { $_.owner_child -notin @('015', '016', '017') }
+
+if (-not $issueInventory.pagination_complete -or -not $hotspotInventory.pagination_complete) {
+  throw 'WAVE_4_BLOCKED: manifest inventory pagination is incomplete.'
+}
+if (($issueInventory.total -eq 0 -and $issueInventory.result_empty -ne $true) -or
+    ($hotspotInventory.total -eq 0 -and $hotspotInventory.result_empty -ne $true)) {
+  throw 'WAVE_4_BLOCKED: a zero-result manifest inventory lacks result_empty=true.'
+}
+if (@($issueKeys | Select-Object -Unique).Count -ne $issueKeys.Count -or
+    $issueKeys.Count -ne $issueInventory.total) {
+  throw 'WAVE_4_BLOCKED: issue_inventory.keys is not the complete unique issue inventory.'
+}
+if ($blockingOutsideInventory -or $duplicateKeys -or $unownedKeys -or $unknownOwners) {
+  throw 'WAVE_4_BLOCKED: blocking finding ownership is incomplete or invalid.'
+}
 
 [pscustomobject]@{
   Head = $manifest.exact_head_ref.sha
-  IssuePagesComplete = $manifest.issue_inventory.pagination_complete
-  HotspotPagesComplete = $manifest.hotspot_inventory.pagination_complete
+  IssuePagesComplete = $issueInventory.pagination_complete
+  HotspotPagesComplete = $hotspotInventory.pagination_complete
+  IssueKeyCount = $issueKeys.Count
   BlockingKeyCount = $blocking.Count
-  AssignmentCount = $assignments.Count
-  DuplicateOrMissingAssignmentKeys = @($duplicateKeys).Count
+  BlockingAssignmentCount = $blockingAssignments.Count
+  DuplicateBlockingKeys = @($duplicateKeys).Count
   UnownedBlockingKeys = @($unownedKeys).Count
-  InvalidOwners = @($unknownOwners).Count
+  BlockingKeysOutsideInventory = @($blockingOutsideInventory).Count
+  InvalidBlockingOwners = @($unknownOwners).Count
   AssignmentHash = $manifest.assignments_hash
 }
 ```
@@ -178,14 +203,76 @@ Do this before any Wave-5 release task, tag, or publication action. The followin
 ```powershell
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
   [string]$Wave4ClosurePath,
   [Parameter(Mandatory = $true)]
-  [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
   [string]$Wave4DiagnosticPath
 )
 
-$closureText = Get-Content -Raw $Wave4ClosurePath
+if (-not (Test-Path -LiteralPath $CoordinationRoot -PathType Container)) {
+  throw 'WAVE_5_BLOCKED: CoordinationRoot must name the repository root.'
+}
+$coordinationRoot = [System.IO.Path]::GetFullPath($CoordinationRoot)
+
+function Resolve-RepositoryPath([string]$Path) {
+  if ([System.IO.Path]::IsPathRooted($Path)) {
+    return [System.IO.Path]::GetFullPath($Path)
+  }
+  return [System.IO.Path]::GetFullPath((Join-Path $coordinationRoot $Path))
+}
+
+function Assert-ExactHeadReceipt([object]$Receipt, [string]$ExpectedHead) {
+  $heads = @(
+    $ExpectedHead,
+    $Receipt.captured_head,
+    $Receipt.post_scan_head,
+    $Receipt.scanner_metadata.sonar_scm_revision,
+    $Receipt.analysis_current_before_issues.revision,
+    $Receipt.analysis_current_after_issues.revision,
+    $Receipt.analysis_current_final.revision
+  )
+  $invalidHeads = @($heads | Where-Object { $_ -notmatch '^[0-9a-f]{40}$' })
+  if ($invalidHeads.Count -ne 0 -or @($heads | Select-Object -Unique).Count -ne 1) {
+    throw 'WAVE_5_BLOCKED: Wave-4 evidence identifies more than one source head.'
+  }
+
+  $analysisIds = @(
+    $Receipt.compute_engine.analysis_id,
+    $Receipt.quality_gate.analysis_id,
+    $Receipt.analysis_current_before_issues.analysis_id,
+    $Receipt.analysis_current_after_issues.analysis_id,
+    $Receipt.analysis_current_final.analysis_id
+  )
+  $missingAnalysisIds = @($analysisIds | Where-Object {
+    [string]::IsNullOrWhiteSpace([string]$_)
+  })
+  if ($missingAnalysisIds.Count -ne 0 -or @($analysisIds | Select-Object -Unique).Count -ne 1) {
+    throw 'WAVE_5_BLOCKED: Wave-4 evidence lacks one analysis identity.'
+  }
+
+  $projectKeys = @(
+    $ProjectKey,
+    $Receipt.project_key,
+    $Receipt.analysis_xml_project_key,
+    $Receipt.scanner_metadata.project_key,
+    $Receipt.task_report.project_key,
+    $Receipt.compute_engine.component_key
+  )
+  $missingProjectKeys = @($projectKeys | Where-Object {
+    [string]::IsNullOrWhiteSpace([string]$_)
+  })
+  if ($missingProjectKeys.Count -ne 0 -or @($projectKeys | Select-Object -Unique).Count -ne 1) {
+    throw 'WAVE_5_BLOCKED: Wave-4 evidence does not bind the fixed Sonar project.'
+  }
+}
+
+$closurePath = Resolve-RepositoryPath $Wave4ClosurePath
+$diagnosticPath = Resolve-RepositoryPath $Wave4DiagnosticPath
+if (-not (Test-Path -LiteralPath $closurePath -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $diagnosticPath -PathType Leaf)) {
+  throw 'WAVE_5_BLOCKED: the Wave-4 closure or diagnostic receipt does not exist.'
+}
+
+$closureText = Get-Content -Raw -LiteralPath $closurePath
 $integrationShaMatch = [regex]::Match(
   $closureText,
   '(?m)^\*\*Integration SHA\*\*:\s*`(?<sha>[0-9a-f]{40})`\s*$'
@@ -197,12 +284,28 @@ $diagnosticPathMatch = [regex]::Match(
 if (-not $integrationShaMatch.Success -or -not $diagnosticPathMatch.Success) {
   throw 'WAVE_5_BLOCKED: spec-018 closure is missing required machine-readable identity fields.'
 }
-if ($diagnosticPathMatch.Groups['path'].Value -ne $Wave4DiagnosticPath) {
+
+$expectedDiagnosticPath = Resolve-RepositoryPath $diagnosticPathMatch.Groups['path'].Value
+if ($expectedDiagnosticPath -ne $diagnosticPath) {
   throw 'WAVE_5_BLOCKED: supplied diagnostic receipt is not the receipt named by Wave-4 closure.'
 }
 
 $integrationSha = $integrationShaMatch.Groups['sha'].Value
-$scan = Get-Content -Raw $Wave4DiagnosticPath | ConvertFrom-Json
+$scan = Get-Content -Raw -LiteralPath $diagnosticPath | ConvertFrom-Json
+Assert-ExactHeadReceipt $scan $integrationSha
+
+$issueInventory = $scan.post_scan_issues
+$hotspotInventory = $scan.hotspots
+if (-not $issueInventory.pagination_complete -or -not $hotspotInventory.pagination_complete) {
+  throw 'WAVE_5_BLOCKED: Wave-4 diagnostic pagination is incomplete.'
+}
+if (($issueInventory.total -eq 0 -and $issueInventory.result_empty -ne $true) -or
+    ($hotspotInventory.total -eq 0 -and $hotspotInventory.result_empty -ne $true)) {
+  throw 'WAVE_5_BLOCKED: a zero-result diagnostic inventory lacks result_empty=true.'
+}
+if ($scan.issue_dispositions.blocking_count -ne 0 -or $scan.hotspot_dispositions.blocking_count -ne 0) {
+  throw 'WAVE_5_BLOCKED: Wave-4 still has a blocking current issue or hotspot.'
+}
 
 $coverage = $scan.quality_gate.conditions |
   Where-Object metricKey -eq 'new_coverage' |
@@ -210,24 +313,6 @@ $coverage = $scan.quality_gate.conditions |
 $newViolations = $scan.quality_gate.conditions |
   Where-Object metricKey -eq 'new_violations' |
   Select-Object -First 1
-
-$identities = @(
-  $integrationSha,
-  $scan.captured_head,
-  $scan.post_scan_head,
-  $scan.scanner_metadata.sonar_scm_revision,
-  $scan.analysis_current_final.revision
-)
-
-if (($identities | Select-Object -Unique).Count -ne 1) {
-  throw 'WAVE_5_BLOCKED: Wave-4 evidence identifies more than one source head.'
-}
-if (-not $scan.post_scan_issues.pagination_complete -or -not $scan.hotspots.pagination_complete) {
-  throw 'WAVE_5_BLOCKED: Wave-4 diagnostic pagination is incomplete.'
-}
-if ($scan.issue_dispositions.blocking_count -ne 0 -or $scan.hotspot_dispositions.blocking_count -ne 0) {
-  throw 'WAVE_5_BLOCKED: Wave-4 still has a blocking current issue or hotspot.'
-}
 if ($newViolations.actualValue -ne '0' -or $coverage.errorThreshold -ne '80' -or $coverage.status -ne 'OK') {
   throw 'WAVE_5_BLOCKED: new-code violations or unchanged coverage condition is not clean.'
 }
@@ -238,6 +323,8 @@ if ($scan.quality_gate.status -ne 'OK') {
 [pscustomobject]@{
   Wave5Entry = 'permitted only if no source bytes changed after this audit'
   IntegrationSha = $integrationSha
+  AnalysisId = $scan.compute_engine.analysis_id
+  ProjectKey = $scan.project_key
   Gate = $scan.quality_gate.status
   Coverage = $coverage.actualValue
   CoverageThreshold = $coverage.errorThreshold
@@ -268,8 +355,61 @@ if (-not (Test-Path -LiteralPath $CandidateReceiptPath -PathType Leaf) -or
   throw 'RELEASE_BLOCKED: one or both exact-head receipt paths do not exist.'
 }
 
-$candidate = Get-Content -Raw $CandidateReceiptPath | ConvertFrom-Json
-$postMerge = Get-Content -Raw $PostMergeReceiptPath | ConvertFrom-Json
+$candidate = Get-Content -Raw -LiteralPath $CandidateReceiptPath | ConvertFrom-Json
+$postMerge = Get-Content -Raw -LiteralPath $PostMergeReceiptPath | ConvertFrom-Json
+
+function Assert-ExactHeadReceipt(
+  [object]$Receipt,
+  [string]$ExpectedHead,
+  [string]$ExpectedRole
+) {
+  if ($Receipt.role -ne $ExpectedRole) {
+    throw "RELEASE_BLOCKED: expected a $ExpectedRole receipt."
+  }
+
+  $heads = @(
+    $ExpectedHead,
+    $Receipt.captured_head,
+    $Receipt.post_scan_head,
+    $Receipt.scanner_metadata.sonar_scm_revision,
+    $Receipt.analysis_current_before_issues.revision,
+    $Receipt.analysis_current_after_issues.revision,
+    $Receipt.analysis_current_final.revision
+  )
+  $invalidHeads = @($heads | Where-Object { $_ -notmatch '^[0-9a-f]{40}$' })
+  if ($invalidHeads.Count -ne 0 -or @($heads | Select-Object -Unique).Count -ne 1) {
+    throw "RELEASE_BLOCKED: $ExpectedRole receipt exact-head identity does not agree."
+  }
+
+  $analysisIds = @(
+    $Receipt.compute_engine.analysis_id,
+    $Receipt.quality_gate.analysis_id,
+    $Receipt.analysis_current_before_issues.analysis_id,
+    $Receipt.analysis_current_after_issues.analysis_id,
+    $Receipt.analysis_current_final.analysis_id
+  )
+  $missingAnalysisIds = @($analysisIds | Where-Object {
+    [string]::IsNullOrWhiteSpace([string]$_)
+  })
+  if ($missingAnalysisIds.Count -ne 0 -or @($analysisIds | Select-Object -Unique).Count -ne 1) {
+    throw "RELEASE_BLOCKED: $ExpectedRole receipt analysis identity does not agree."
+  }
+
+  $projectKeys = @(
+    $ProjectKey,
+    $Receipt.project_key,
+    $Receipt.analysis_xml_project_key,
+    $Receipt.scanner_metadata.project_key,
+    $Receipt.task_report.project_key,
+    $Receipt.compute_engine.component_key
+  )
+  $missingProjectKeys = @($projectKeys | Where-Object {
+    [string]::IsNullOrWhiteSpace([string]$_)
+  })
+  if ($missingProjectKeys.Count -ne 0 -or @($projectKeys | Select-Object -Unique).Count -ne 1) {
+    throw "RELEASE_BLOCKED: $ExpectedRole receipt does not bind the fixed Sonar project."
+  }
+}
 
 if ($candidate.quality_gate.status -ne 'OK') {
   throw 'RELEASE_BLOCKED: candidate analysis-bound gate is not OK.'
@@ -277,15 +417,14 @@ if ($candidate.quality_gate.status -ne 'OK') {
 if ($postMerge.quality_gate.status -ne 'OK') {
   throw 'RELEASE_BLOCKED: post-merge analysis-bound gate is not OK.'
 }
-if ($postMerge.captured_head -ne $postMerge.post_scan_head -or
-    $postMerge.captured_head -ne $postMerge.scanner_metadata.sonar_scm_revision -or
-    $postMerge.captured_head -ne $postMerge.analysis_current_final.revision) {
-  throw 'RELEASE_BLOCKED: post-merge exact-head identity does not agree.'
-}
+Assert-ExactHeadReceipt $candidate $CandidateSha 'candidate'
+Assert-ExactHeadReceipt $postMerge $PostMergeSha 'post-merge'
 
 [pscustomobject]@{
-  CandidateSha = $candidate.captured_head
-  PostMergeSha = $postMerge.captured_head
+  CandidateSha = $CandidateSha
+  PostMergeSha = $PostMergeSha
+  CandidateAnalysisId = $candidate.compute_engine.analysis_id
+  PostMergeAnalysisId = $postMerge.compute_engine.analysis_id
   PostMergeGate = $postMerge.quality_gate.status
   RequiredNextCheck = 'Verify annotated v0.23.11 tag target equals PostMergeSha and run the public installed-consumer canary.'
 }
