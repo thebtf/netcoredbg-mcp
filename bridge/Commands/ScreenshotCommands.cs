@@ -1,5 +1,5 @@
 using System.Drawing;
-using System.Drawing.Drawing2D;
+using System.Buffers;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -531,43 +531,99 @@ public static class ScreenshotCommands
 
     private static bool IsProbablyBlackFrame(Bitmap bitmap)
     {
-        const int classificationAxisLimit = 100;
         const double maxMeanLuminance = 8.0;
         const int darkLuminanceThreshold = 16;
         const double minimumDarkPixelFraction = 0.995;
-        var classificationColumns = Math.Min(bitmap.Width, classificationAxisLimit);
-        var classificationRows = Math.Min(bitmap.Height, classificationAxisLimit);
-        var classificationPixelCount = classificationColumns * classificationRows;
-        using var classificationBitmap = new Bitmap(
-            classificationColumns, classificationRows, PixelFormat.Format24bppRgb);
-        using (var graphics = Graphics.FromImage(classificationBitmap))
+
+        if (SupportsDirectPixelScanning(bitmap.PixelFormat))
         {
-            graphics.CompositingMode = CompositingMode.SourceCopy;
-            graphics.InterpolationMode = InterpolationMode.HighQualityBilinear;
-            graphics.PixelOffsetMode = PixelOffsetMode.Half;
-            graphics.DrawImage(
+            return ClassifyFullFrame(
                 bitmap,
-                new Rectangle(0, 0, classificationColumns, classificationRows),
-                new Rectangle(0, 0, bitmap.Width, bitmap.Height),
-                GraphicsUnit.Pixel);
+                maxMeanLuminance,
+                darkLuminanceThreshold,
+                minimumDarkPixelFraction);
         }
 
-        double luminanceSum = 0;
-        var darkPixelCount = 0;
-        for (var y = 0; y < classificationRows; y++)
+        using var classificationBitmap = ConvertToClassificationBitmap(bitmap);
+        return ClassifyFullFrame(
+            classificationBitmap,
+            maxMeanLuminance,
+            darkLuminanceThreshold,
+            minimumDarkPixelFraction);
+    }
+
+    private static bool SupportsDirectPixelScanning(PixelFormat pixelFormat) =>
+        pixelFormat is PixelFormat.Format24bppRgb
+            or PixelFormat.Format32bppRgb
+            or PixelFormat.Format32bppArgb
+            or PixelFormat.Format32bppPArgb;
+
+    private static Bitmap ConvertToClassificationBitmap(Bitmap bitmap)
+    {
+        var converted = new Bitmap(bitmap.Width, bitmap.Height, PixelFormat.Format32bppArgb);
+        try
         {
-            for (var x = 0; x < classificationColumns; x++)
+            using var graphics = Graphics.FromImage(converted);
+            graphics.DrawImageUnscaled(bitmap, 0, 0);
+            return converted;
+        }
+        catch
+        {
+            converted.Dispose();
+            throw;
+        }
+    }
+
+    private static bool ClassifyFullFrame(
+        Bitmap bitmap,
+        double maxMeanLuminance,
+        int darkLuminanceThreshold,
+        double minimumDarkPixelFraction)
+    {
+        var pixelFormat = bitmap.PixelFormat;
+        var bytesPerPixel = Image.GetPixelFormatSize(pixelFormat) / 8;
+        var pixelCount = checked((long)bitmap.Width * bitmap.Height);
+        var darkLuminanceThresholdMilli = darkLuminanceThreshold * 1_000;
+        var bitmapData = bitmap.LockBits(
+            new Rectangle(0, 0, bitmap.Width, bitmap.Height),
+            ImageLockMode.ReadOnly,
+            pixelFormat);
+        try
+        {
+            var stride = Math.Abs(bitmapData.Stride);
+            var row = ArrayPool<byte>.Shared.Rent(stride);
+            try
             {
-                var color = classificationBitmap.GetPixel(x, y);
-                var luminance = (0.299 * color.R) + (0.587 * color.G) + (0.114 * color.B);
-                luminanceSum += luminance;
-                if (luminance <= darkLuminanceThreshold)
-                    darkPixelCount++;
+                long luminanceSumMilli = 0;
+                long darkPixelCount = 0;
+                for (var y = 0; y < bitmap.Height; y++)
+                {
+                    var rowStart = IntPtr.Add(bitmapData.Scan0, checked(y * bitmapData.Stride));
+                    Marshal.Copy(rowStart, row, 0, stride);
+                    for (var x = 0; x < bitmap.Width; x++)
+                    {
+                        var pixelOffset = x * bytesPerPixel;
+                        var luminanceMilli = (299 * row[pixelOffset + 2])
+                            + (587 * row[pixelOffset + 1])
+                            + (114 * row[pixelOffset]);
+                        luminanceSumMilli += luminanceMilli;
+                        if (luminanceMilli <= darkLuminanceThresholdMilli)
+                            darkPixelCount++;
+                    }
+                }
+
+                return (double)luminanceSumMilli / (pixelCount * 1_000) <= maxMeanLuminance
+                    && (double)darkPixelCount / pixelCount >= minimumDarkPixelFraction;
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(row);
             }
         }
-
-        return luminanceSum / classificationPixelCount <= maxMeanLuminance
-            && (double)darkPixelCount / classificationPixelCount >= minimumDarkPixelFraction;
+        finally
+        {
+            bitmap.UnlockBits(bitmapData);
+        }
     }
 
     private static double NormalizedPixelVariance(Bitmap bitmap)

@@ -530,10 +530,8 @@ def test_bridge_evidence_fallback_discards_black_printwindow_for_ordinary_and_st
     )
 
 
-def test_bridge_probable_black_frame_uses_bounded_area_averages() -> None:
-    from PIL import Image
-
-    from netcoredbg_mcp.ui.screenshot import analyze_screenshot_frame
+def test_bridge_probable_black_frame_scans_full_frame_with_lockbits(tmp_path) -> None:
+    import subprocess
 
     command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
         encoding="utf-8"
@@ -542,70 +540,138 @@ def test_bridge_probable_black_frame_uses_bounded_area_averages() -> None:
     helper_end = command.index("private static double NormalizedPixelVariance", helper_start)
     helper = command[helper_start:helper_end]
 
-    assert "const int classificationAxisLimit = 100;" in helper
-    assert "var classificationColumns = Math.Min(bitmap.Width, classificationAxisLimit);" in helper
-    assert "var classificationRows = Math.Min(bitmap.Height, classificationAxisLimit);" in helper
-    assert "var classificationPixelCount = classificationColumns * classificationRows;" in helper
-    assert "new Bitmap(" in helper
+    probe_project = tmp_path / "BridgeBlackFrameClassifierProbe.csproj"
+    probe_source = tmp_path / "Program.cs"
+    bridge_project = PROJECT_ROOT / "bridge" / "FlaUIBridge.csproj"
+    probe_project.write_text(
+        """<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="__BRIDGE_PROJECT__" AdditionalProperties="BridgeTestHost=true" />
+  </ItemGroup>
+</Project>
+""".replace("__BRIDGE_PROJECT__", bridge_project.as_posix()),
+        encoding="utf-8",
+    )
+    probe_source.write_text(
+        """using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text.Json;
+using FlaUIBridge.Commands;
+
+var classifier = typeof(ScreenshotCommands).GetMethod(
+    "IsProbablyBlackFrame",
+    BindingFlags.NonPublic | BindingFlags.Static)
+    ?? throw new InvalidOperationException("Black-frame classifier was not found.");
+
+using var solid24 = CreateSolidFrame(64, 64, Color.Black, PixelFormat.Format24bppRgb);
+using var nearBlack = CreateSolidFrame(64, 64, Color.FromArgb(3, 3, 3), PixelFormat.Format32bppArgb);
+using var sparseArtifact = CreateSolidFrame(1_000, 1_000, Color.Black, PixelFormat.Format32bppArgb);
+for (var index = 0; index < 51; index++)
+    sparseArtifact.SetPixel(index * 19, index * 19, Color.White);
+
+using var distributedBrightPixels = CreateDistributedBrightFrame();
+using var fourKBlack = CreateSolidFrame(3_840, 2_160, Color.Black, PixelFormat.Format32bppArgb);
+var warmup = Classify(classifier, fourKBlack);
+var stopwatch = Stopwatch.StartNew();
+var fourKResult = Classify(classifier, fourKBlack);
+stopwatch.Stop();
+
+Console.WriteLine(JsonSerializer.Serialize(new
+{
+    solid24 = Classify(classifier, solid24),
+    nearBlack = Classify(classifier, nearBlack),
+    sparseArtifact = Classify(classifier, sparseArtifact),
+    distributedBrightPixels = Classify(classifier, distributedBrightPixels),
+    fourKResult,
+    warmup,
+    elapsedMilliseconds = stopwatch.Elapsed.TotalMilliseconds,
+}));
+
+static bool Classify(MethodInfo classifier, Bitmap bitmap) =>
+    classifier.Invoke(null, new object?[] { bitmap }) is true;
+
+static Bitmap CreateSolidFrame(int width, int height, Color color, PixelFormat pixelFormat)
+{
+    var bitmap = new Bitmap(width, height, pixelFormat);
+    using var graphics = Graphics.FromImage(bitmap);
+    graphics.Clear(color);
+    return bitmap;
+}
+
+static Bitmap CreateDistributedBrightFrame()
+{
+    const int width = 1_000;
+    const int height = 1_000;
+    const int spacing = 10;
+    var bitmap = CreateSolidFrame(width, height, Color.Black, PixelFormat.Format32bppArgb);
+    var data = bitmap.LockBits(
+        new Rectangle(0, 0, width, height),
+        ImageLockMode.ReadWrite,
+        PixelFormat.Format32bppArgb);
+    try
+    {
+        var pixels = new byte[checked(data.Stride * height)];
+        for (var y = 0; y < height; y += spacing)
+        {
+            for (var x = 0; x < width; x += spacing)
+            {
+                var pixelOffset = checked((y * data.Stride) + (x * 4));
+                pixels[pixelOffset] = 255;
+                pixels[pixelOffset + 1] = 255;
+                pixels[pixelOffset + 2] = 255;
+                pixels[pixelOffset + 3] = 255;
+            }
+        }
+
+        Marshal.Copy(pixels, 0, data.Scan0, pixels.Length);
+    }
+    finally
+    {
+        bitmap.UnlockBits(data);
+    }
+
+    return bitmap;
+}
+""",
+        encoding="utf-8",
+    )
+    probe = subprocess.run(
+        ["dotnet", "run", "--project", str(probe_project), "-c", "Release", "--nologo"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert probe.returncode == 0, probe.stdout + probe.stderr
+    result = json.loads(probe.stdout.strip().splitlines()[-1])
+
+    assert result["solid24"] is True
+    assert result["nearBlack"] is True
+    assert result["sparseArtifact"] is True
+    assert result["distributedBrightPixels"] is False
+    assert result["warmup"] is True
+    assert result["fourKResult"] is True
+    assert result["elapsedMilliseconds"] < 2_000
+
+    assert "classificationAxisLimit" not in helper
+    assert ".GetPixel(" not in helper
+    assert "LockBits(" in helper
+    assert "ImageLockMode.ReadOnly" in helper
+    assert "UnlockBits(" in helper
+    assert "Marshal.Copy" in helper
     assert "PixelFormat.Format24bppRgb" in helper
-    assert "Graphics.FromImage(classificationBitmap)" in helper
-    assert "graphics.InterpolationMode = InterpolationMode.HighQualityBilinear;" in helper
-    assert "graphics.DrawImage(" in helper
-    assert "var color = classificationBitmap.GetPixel(x, y);" in helper
-    assert "bitmap.GetPixel" not in helper
-    assert "for (var y = 0; y < bitmap.Height; y++)" not in helper
-    assert "for (var x = 0; x < bitmap.Width; x++)" not in helper
-    assert "const double maxMeanLuminance = 8.0;" in helper
-    assert "const int darkLuminanceThreshold = 16;" in helper
-    assert "const double minimumDarkPixelFraction = 0.995;" in helper
-
-    def encode_png(image) -> bytes:
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG")
-        return buffer.getvalue()
-
-    def is_probably_black(image) -> bool:
-        return analyze_screenshot_frame(encode_png(image))["probable_black"]
-
-    def lattice_classification(image) -> tuple[bool, list[tuple[int, int]]]:
-        sample_columns = min(image.width, 100)
-        sample_rows = min(image.height, 100)
-        sample_points = [
-            (
-                0 if sample_columns == 1 else sample_x * (image.width - 1) // (sample_columns - 1),
-                0 if sample_rows == 1 else sample_y * (image.height - 1) // (sample_rows - 1),
-            )
-            for sample_y in range(sample_rows)
-            for sample_x in range(sample_columns)
-        ]
-        luminances = [image.getpixel(point) for point in sample_points]
-        return (
-            sum(luminances) / len(luminances) <= 8.0
-            and sum(luminance <= 16 for luminance in luminances) / len(luminances) >= 0.995,
-            sample_points,
-        )
-
-    def area_averaged_classification(image) -> bool:
-        downsampled = image.resize((100, 100), Image.Resampling.BOX)
-        try:
-            return is_probably_black(downsampled)
-        finally:
-            downsampled.close()
-
-    with Image.new("L", (3840, 2160), 0) as sparse_artifact:
-        _, lattice_points = lattice_classification(sparse_artifact)
-        for point in lattice_points[:51]:
-            sparse_artifact.putpixel(point, 255)
-
-        assert is_probably_black(sparse_artifact) is True
-        assert lattice_classification(sparse_artifact)[0] is False
-        assert area_averaged_classification(sparse_artifact) is True
-
-    with Image.new("L", (3840, 2160), 0) as nonblack_marker:
-        nonblack_marker.paste(255, (0, 0, 384, 216))
-
-        assert is_probably_black(nonblack_marker) is False
-        assert area_averaged_classification(nonblack_marker) is False
+    assert "PixelFormat.Format32bppArgb" in helper
 
 
 def test_bridge_typed_bitblt_fallback_has_no_legacy_lossless_authority() -> None:
