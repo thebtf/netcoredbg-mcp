@@ -1,0 +1,523 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "release-gate-catalog.schema.json",
+  "title": "A1 preview Release Gate Catalog",
+  "description": "Immutable, closed exact-head catalog for one A1 preview Candidate Identity Record. It contains only the tracked policy-authority snapshots and the six fixed gate descriptors. It contains no evidence-record reference, gate outcome, future-stage proof, mutable remote observation, or release authorization.",
+  "$comment": "Semantic validation resolves candidate_identity_record by repository, run_id, artifact_id, path, and raw-byte SHA-256; validates the Candidate Identity Record; and requires canonical refs/heads/main equality among source_ref, candidate.source.ref, and candidate.build.ref; commit equality among source_commit, candidate.source.commit, candidate.source.origin_main_target, and candidate.build.commit; trusted build-workflow provenance; and a passing post-merge exact-head receipt whose scanned_commit and tag_target equal source_commit. POLICY_SNAPSHOT_CLOSURE re-hashes exactly the five allowed authority paths at source_commit. FIXED_DESCRIPTOR_CLOSURE derives the exact ordered six descriptors and rejects any changed stage, gate ID, record type, authority rule, or evidence requirement. Stage-specific record references and outcomes belong only to stage-gate-evidence.schema.json.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "catalog_schema_version",
+    "catalog"
+  ],
+  "properties": {
+    "catalog_schema_version": {
+      "const": "1.0"
+    },
+    "catalog": {
+      "$ref": "#/$defs/catalog_body"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "$ref": "candidate-identity.schema.json#/$defs/sha256"
+    },
+    "github_artifact_file_reference": {
+      "$ref": "candidate-identity.schema.json#/$defs/github_artifact_file_reference"
+    },
+    "safe_opaque_id": {
+      "$ref": "artifact-consumer-proof.schema.json#/$defs/safe_opaque_id"
+    },
+    "policy_relative_path": {
+      "enum": [
+        "AGENTS.md",
+        "CONTRIBUTING.md",
+        "docs/RELEASE-PROTOCOL.md",
+        "docs/adr/ADR-004-stateless-preview.md",
+        "specs/010-a1-preview-artifact/spec.md"
+      ]
+    },
+    "source_ref": {
+      "const": "refs/heads/main"
+    },
+    "source_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "helper_path",
+        "operation"
+      ],
+      "properties": {
+        "helper_path": {
+          "const": "scripts/stateless_preview_artifact.py"
+        },
+        "operation": {
+          "const": "resolve_release_gate_catalog"
+        }
+      }
+    },
+    "policy_authority_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "source_commit"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/policy_relative_path"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_commit": {
+          "$ref": "#/$defs/source_commit"
+        }
+      }
+    },
+    "agents_policy_snapshot": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/policy_authority_snapshot"
+        },
+        {
+          "properties": {
+            "path": {
+              "const": "AGENTS.md"
+            }
+          }
+        }
+      ]
+    },
+    "contributing_policy_snapshot": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/policy_authority_snapshot"
+        },
+        {
+          "properties": {
+            "path": {
+              "const": "CONTRIBUTING.md"
+            }
+          }
+        }
+      ]
+    },
+    "release_protocol_snapshot": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/policy_authority_snapshot"
+        },
+        {
+          "properties": {
+            "path": {
+              "const": "docs/RELEASE-PROTOCOL.md"
+            }
+          }
+        }
+      ]
+    },
+    "adr_snapshot": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/policy_authority_snapshot"
+        },
+        {
+          "properties": {
+            "path": {
+              "const": "docs/adr/ADR-004-stateless-preview.md"
+            }
+          }
+        }
+      ]
+    },
+    "a1_spec_snapshot": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/policy_authority_snapshot"
+        },
+        {
+          "properties": {
+            "path": {
+              "const": "specs/010-a1-preview-artifact/spec.md"
+            }
+          }
+        }
+      ]
+    },
+    "policy_authority_snapshots": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/agents_policy_snapshot"
+        },
+        {
+          "$ref": "#/$defs/contributing_policy_snapshot"
+        },
+        {
+          "$ref": "#/$defs/release_protocol_snapshot"
+        },
+        {
+          "$ref": "#/$defs/adr_snapshot"
+        },
+        {
+          "$ref": "#/$defs/a1_spec_snapshot"
+        }
+      ],
+      "items": false
+    },
+    "gate_stage": {
+      "enum": [
+        "pre-decision",
+        "pre-publication",
+        "post-publication"
+      ]
+    },
+    "release_gate_id": {
+      "enum": [
+        "retained-downloaded-consumer-proof",
+        "s2-s3-seven-lens-evidence",
+        "independent-review",
+        "candidate-exact-head-sonar",
+        "post-merge-exact-head-sonar",
+        "remote-downloaded-consumer-proof"
+      ]
+    },
+    "gate_record_type": {
+      "enum": [
+        "artifact-consumer-proof",
+        "s2-s3-seven-lens-aggregate",
+        "independent-pr-review",
+        "sonarqube-exact-head"
+      ]
+    },
+    "authority_rule_code": {
+      "enum": [
+        "AGENTS_POLICY",
+        "CONTRIBUTING_POLICY",
+        "RELEASE_PROTOCOL",
+        "ADR_004_STATELESS_PREVIEW",
+        "A1_PREVIEW_ARTIFACT_SPEC"
+      ]
+    },
+    "all_authority_rules": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "prefixItems": [
+        {
+          "const": "AGENTS_POLICY"
+        },
+        {
+          "const": "CONTRIBUTING_POLICY"
+        },
+        {
+          "const": "RELEASE_PROTOCOL"
+        },
+        {
+          "const": "ADR_004_STATELESS_PREVIEW"
+        },
+        {
+          "const": "A1_PREVIEW_ARTIFACT_SPEC"
+        }
+      ],
+      "items": false
+    },
+    "evidence_requirement_code": {
+      "enum": [
+        "CANDIDATE_IDENTITY_MATCH",
+        "CANONICAL_MAIN_PROVENANCE",
+        "PASSING_OUTCOME",
+        "RETAINED_ARTIFACT_PROOF",
+        "S2_S3_SEVEN_LENS_AGGREGATE",
+        "INDEPENDENT_PR_REVIEW",
+        "CANDIDATE_EXACT_HEAD_SONAR",
+        "POST_MERGE_MAIN_TARGET_SONAR",
+        "REMOTE_CONSUMER_PROOF"
+      ]
+    },
+    "gate_descriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "gate_id",
+        "record_type",
+        "authority_rules",
+        "evidence_requirements"
+      ],
+      "properties": {
+        "stage": {
+          "$ref": "#/$defs/gate_stage"
+        },
+        "gate_id": {
+          "$ref": "#/$defs/release_gate_id"
+        },
+        "record_type": {
+          "$ref": "#/$defs/gate_record_type"
+        },
+        "authority_rules": {
+          "$ref": "#/$defs/all_authority_rules"
+        },
+        "evidence_requirements": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/evidence_requirement_code"
+          }
+        }
+      }
+    },
+    "retained_downloaded_consumer_proof_descriptor": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/gate_descriptor"
+        },
+        {
+          "properties": {
+            "stage": {
+              "const": "pre-decision"
+            },
+            "gate_id": {
+              "const": "retained-downloaded-consumer-proof"
+            },
+            "record_type": {
+              "const": "artifact-consumer-proof"
+            },
+            "evidence_requirements": {
+              "const": [
+                "CANDIDATE_IDENTITY_MATCH",
+                "CANONICAL_MAIN_PROVENANCE",
+                "PASSING_OUTCOME",
+                "RETAINED_ARTIFACT_PROOF"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "s2_s3_seven_lens_aggregate_descriptor": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/gate_descriptor"
+        },
+        {
+          "properties": {
+            "stage": {
+              "const": "pre-decision"
+            },
+            "gate_id": {
+              "const": "s2-s3-seven-lens-evidence"
+            },
+            "record_type": {
+              "const": "s2-s3-seven-lens-aggregate"
+            },
+            "evidence_requirements": {
+              "const": [
+                "CANDIDATE_IDENTITY_MATCH",
+                "CANONICAL_MAIN_PROVENANCE",
+                "PASSING_OUTCOME",
+                "S2_S3_SEVEN_LENS_AGGREGATE"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "independent_pr_review_descriptor": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/gate_descriptor"
+        },
+        {
+          "properties": {
+            "stage": {
+              "const": "pre-decision"
+            },
+            "gate_id": {
+              "const": "independent-review"
+            },
+            "record_type": {
+              "const": "independent-pr-review"
+            },
+            "evidence_requirements": {
+              "const": [
+                "CANDIDATE_IDENTITY_MATCH",
+                "CANONICAL_MAIN_PROVENANCE",
+                "PASSING_OUTCOME",
+                "INDEPENDENT_PR_REVIEW"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "candidate_exact_head_sonar_descriptor": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/gate_descriptor"
+        },
+        {
+          "properties": {
+            "stage": {
+              "const": "pre-decision"
+            },
+            "gate_id": {
+              "const": "candidate-exact-head-sonar"
+            },
+            "record_type": {
+              "const": "sonarqube-exact-head"
+            },
+            "evidence_requirements": {
+              "const": [
+                "CANDIDATE_IDENTITY_MATCH",
+                "CANONICAL_MAIN_PROVENANCE",
+                "PASSING_OUTCOME",
+                "CANDIDATE_EXACT_HEAD_SONAR"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "post_merge_exact_head_sonar_descriptor": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/gate_descriptor"
+        },
+        {
+          "properties": {
+            "stage": {
+              "const": "pre-publication"
+            },
+            "gate_id": {
+              "const": "post-merge-exact-head-sonar"
+            },
+            "record_type": {
+              "const": "sonarqube-exact-head"
+            },
+            "evidence_requirements": {
+              "const": [
+                "CANDIDATE_IDENTITY_MATCH",
+                "CANONICAL_MAIN_PROVENANCE",
+                "PASSING_OUTCOME",
+                "POST_MERGE_MAIN_TARGET_SONAR"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "remote_downloaded_consumer_proof_descriptor": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/gate_descriptor"
+        },
+        {
+          "properties": {
+            "stage": {
+              "const": "post-publication"
+            },
+            "gate_id": {
+              "const": "remote-downloaded-consumer-proof"
+            },
+            "record_type": {
+              "const": "artifact-consumer-proof"
+            },
+            "evidence_requirements": {
+              "const": [
+                "CANDIDATE_IDENTITY_MATCH",
+                "CANONICAL_MAIN_PROVENANCE",
+                "PASSING_OUTCOME",
+                "REMOTE_CONSUMER_PROOF"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "six_gate_descriptors": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/retained_downloaded_consumer_proof_descriptor"
+        },
+        {
+          "$ref": "#/$defs/s2_s3_seven_lens_aggregate_descriptor"
+        },
+        {
+          "$ref": "#/$defs/independent_pr_review_descriptor"
+        },
+        {
+          "$ref": "#/$defs/candidate_exact_head_sonar_descriptor"
+        },
+        {
+          "$ref": "#/$defs/post_merge_exact_head_sonar_descriptor"
+        },
+        {
+          "$ref": "#/$defs/remote_downloaded_consumer_proof_descriptor"
+        }
+      ],
+      "items": false
+    },
+    "catalog_body": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "producer",
+        "candidate_identity_record",
+        "source_ref",
+        "source_commit",
+        "policy_authority_snapshots",
+        "gate_descriptors",
+        "resolved_at"
+      ],
+      "properties": {
+        "producer": {
+          "$ref": "#/$defs/producer"
+        },
+        "candidate_identity_record": {
+          "$ref": "#/$defs/github_artifact_file_reference"
+        },
+        "source_ref": {
+          "$ref": "#/$defs/source_ref"
+        },
+        "source_commit": {
+          "$ref": "#/$defs/source_commit"
+        },
+        "policy_authority_snapshots": {
+          "$ref": "#/$defs/policy_authority_snapshots"
+        },
+        "gate_descriptors": {
+          "$ref": "#/$defs/six_gate_descriptors"
+        },
+        "resolved_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "candidate_identity_record_document": {
+      "$ref": "candidate-identity.schema.json"
+    },
+    "artifact_consumer_proof_document": {
+      "$ref": "artifact-consumer-proof.schema.json"
+    },
+    "s2_s3_review_aggregate_document": {
+      "$ref": "s2-s3-review.schema.json"
+    },
+    "independent_pr_review_document": {
+      "$ref": "independent-pr-review.schema.json"
+    }
+  }
+}

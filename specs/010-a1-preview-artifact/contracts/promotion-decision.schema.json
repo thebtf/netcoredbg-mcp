@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "promotion-decision.schema.json",
+  "title": "A1 preview Promotion Decision",
+  "description": "Immutable candidate decision for one exact Candidate Identity Record. An APPROVE decision admits only one passing pre-decision Stage Gate Evidence set. It does not pre-bind a promotion run, permission readback, mutable remote state, pre-publication evidence, or post-publication proof; each later remote mutation requires a fresh Promotion Attempt.",
+  "$comment": "Semantic admission resolves candidate_identity_record and evidence.pre_decision_stage_evidence by raw references and SHA-256. DECISION_CANDIDATE_RECORD_EQUALITY requires the embedded candidate to equal the resolved Candidate Identity Record. DECISION_PRE_DECISION_STAGE_EQUALITY requires the stage record to resolve to stage-gate-evidence.schema.json; bind the same candidate record, candidate hash, candidate object, source ref, source commit, and Release Gate Catalog; have stage=pre-decision and outcome=PASS; and contain exactly the four catalog descriptors. Its retained proof, S2/S3 seven-lens aggregate, independent PR review, and candidate exact-head Sonar records must each validate and pass. The aggregate must independently recompute exactly seven required and completed lenses with zero unresolved high severity. A Decision never admits pre-publication or post-publication stage evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_identity_record",
+    "candidate",
+    "evidence",
+    "decision",
+    "promotion_attempt",
+    "decided_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "candidate_identity_record": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "candidate": {
+      "$ref": "candidate-identity.schema.json#/$defs/candidate_binding"
+    },
+    "evidence": {
+      "$ref": "#/$defs/evidence_bundle"
+    },
+    "decision": {
+      "enum": [
+        "APPROVE",
+        "DECLINE"
+      ]
+    },
+    "promotion_attempt": {
+      "description": "Static authorization template only. It names neither a historical promote run nor a remote proof.",
+      "$ref": "promotion-attempt.schema.json#/$defs/decision_authorization"
+    },
+    "decided_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "APPROVE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "evidence": {
+            "properties": {
+              "pre_decision_stage_evidence": {
+                "properties": {
+                  "outcome": {
+                    "const": "PASS"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "$ref": "candidate-identity.schema.json#/$defs/sha256"
+    },
+    "github_artifact_file_reference": {
+      "$ref": "candidate-identity.schema.json#/$defs/github_artifact_file_reference"
+    },
+    "source_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "stage_evidence_status": {
+      "$ref": "stage-gate-evidence.schema.json#/$defs/stage_evidence_status"
+    },
+    "stage_evidence_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_reference",
+        "candidate_identity_record_sha256",
+        "source_ref",
+        "source_commit",
+        "stage",
+        "outcome"
+      ],
+      "properties": {
+        "record_reference": {
+          "$ref": "#/$defs/github_artifact_file_reference"
+        },
+        "candidate_identity_record_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_ref": {
+          "const": "refs/heads/main"
+        },
+        "source_commit": {
+          "$ref": "#/$defs/source_commit"
+        },
+        "stage": {
+          "$ref": "release-gate-catalog.schema.json#/$defs/gate_stage"
+        },
+        "outcome": {
+          "$ref": "#/$defs/stage_evidence_status"
+        }
+      }
+    },
+    "pre_decision_stage_evidence_receipt": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/stage_evidence_receipt"
+        },
+        {
+          "properties": {
+            "stage": {
+              "const": "pre-decision"
+            }
+          }
+        }
+      ]
+    },
+    "evidence_bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pre_decision_stage_evidence"
+      ],
+      "properties": {
+        "pre_decision_stage_evidence": {
+          "description": "Sealed exact-candidate pre-decision stage evidence. Its raw record validates against stage-gate-evidence.schema.json.",
+          "$ref": "#/$defs/pre_decision_stage_evidence_receipt"
+        }
+      }
+    },
+    "candidate_identity_record_document": {
+      "$ref": "candidate-identity.schema.json"
+    },
+    "stage_gate_evidence_document": {
+      "$ref": "stage-gate-evidence.schema.json"
+    },
+    "s2_s3_review_aggregate_document": {
+      "$ref": "s2-s3-review.schema.json"
+    },
+    "independent_pr_review_document": {
+      "$ref": "independent-pr-review.schema.json"
+    }
+  }
+}

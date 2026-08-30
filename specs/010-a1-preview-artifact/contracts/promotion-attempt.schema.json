@@ -1,0 +1,296 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "promotion-attempt.schema.json",
+  "title": "A1 preview Promotion Attempt",
+  "description": "Immutable admission record for one current promotion run. Before its first remote mutation it revalidates the Decision's passing pre-decision evidence and binds a passing pre-publication evidence set, then records the current dispatcher, run, permission readback, observation, and classification. It neither requires nor accepts post-publication proof.",
+  "$comment": "Semantic admission resolves candidate, decision, and both stage evidence records by their structural references and raw-byte SHA-256. ATTEMPT_CANDIDATE_DECISION_EQUALITY requires all candidate bindings and decision hashes to agree. ATTEMPT_PRE_MUTATION_STAGE_ADMISSION requires pre_decision_stage_evidence to be the exact same resolved record named by the approved Decision, revalidates its stage=pre-decision PASS result and the seven-lens aggregate, and requires pre_publication_stage_evidence to resolve to a PASS pre-publication set for the same candidate, source commit, and catalog before any Remote Observation, Remote Classification, tag, release, or asset mutation. POST_PUBLICATION_PROOF_ABSENCE is deliberate: this closed record has no post-publication field and cannot require remote proof before publication. ATTEMPT_DECISION_AUTHORIZATION, ATTEMPT_WORKFLOW_CONTEXT_EQUALITY, and ATTEMPT_PERMISSION_READBACK_EQUALITY retain current dispatcher, current workflow run/attempt, and current permission binding requirements.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "attempt_id",
+    "candidate_identity_record",
+    "candidate_identity_record_sha256",
+    "candidate",
+    "promotion_decision",
+    "promotion_decision_sha256",
+    "pre_decision_stage_evidence",
+    "pre_publication_stage_evidence",
+    "authorization",
+    "workflow_run",
+    "remote_observation",
+    "remote_classification",
+    "admission_status",
+    "recorded_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "attempt_id": {
+      "$ref": "artifact-consumer-proof.schema.json#/$defs/safe_opaque_id"
+    },
+    "candidate_identity_record": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "candidate_identity_record_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "candidate": {
+      "$ref": "candidate-identity.schema.json#/$defs/candidate_binding"
+    },
+    "promotion_decision": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "promotion_decision_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "pre_decision_stage_evidence": {
+      "$ref": "#/$defs/passing_pre_decision_stage_evidence"
+    },
+    "pre_publication_stage_evidence": {
+      "$ref": "#/$defs/passing_pre_publication_stage_evidence"
+    },
+    "authorization": {
+      "$ref": "#/$defs/current_attempt_authorization"
+    },
+    "workflow_run": {
+      "$ref": "#/$defs/current_promote_workflow_run"
+    },
+    "remote_observation": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "remote_classification": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "admission_status": {
+      "const": "PASS"
+    },
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "$ref": "candidate-identity.schema.json#/$defs/sha256"
+    },
+    "github_identifier": {
+      "$ref": "candidate-identity.schema.json#/$defs/github_identifier"
+    },
+    "github_repository": {
+      "$ref": "candidate-identity.schema.json#/$defs/github_repository"
+    },
+    "github_artifact_file_reference": {
+      "$ref": "candidate-identity.schema.json#/$defs/github_artifact_file_reference"
+    },
+    "source_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "stage_evidence_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_reference",
+        "candidate_identity_record_sha256",
+        "source_ref",
+        "source_commit",
+        "stage",
+        "outcome"
+      ],
+      "properties": {
+        "record_reference": {
+          "$ref": "#/$defs/github_artifact_file_reference"
+        },
+        "candidate_identity_record_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_ref": {
+          "const": "refs/heads/main"
+        },
+        "source_commit": {
+          "$ref": "#/$defs/source_commit"
+        },
+        "stage": {
+          "$ref": "release-gate-catalog.schema.json#/$defs/gate_stage"
+        },
+        "outcome": {
+          "const": "PASS"
+        }
+      }
+    },
+    "passing_pre_decision_stage_evidence": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/stage_evidence_receipt"
+        },
+        {
+          "properties": {
+            "stage": {
+              "const": "pre-decision"
+            }
+          }
+        }
+      ]
+    },
+    "passing_pre_publication_stage_evidence": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/stage_evidence_receipt"
+        },
+        {
+          "properties": {
+            "stage": {
+              "const": "pre-publication"
+            }
+          }
+        }
+      ]
+    },
+    "github_actor_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "login"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/github_identifier"
+        },
+        "login": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*(?:\\[bot\\])?$"
+        }
+      }
+    },
+    "decision_authorization": {
+      "description": "The immutable authorization template that a Promotion Decision names before any promotion run exists.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_author",
+        "authorized_dispatcher"
+      ],
+      "properties": {
+        "decision_author": {
+          "$ref": "#/$defs/github_actor_identity"
+        },
+        "authorized_dispatcher": {
+          "$ref": "#/$defs/github_actor_identity"
+        }
+      }
+    },
+    "promotion_permission_readback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reference",
+        "run_attempt",
+        "authenticated_actor",
+        "permissions"
+      ],
+      "properties": {
+        "reference": {
+          "$ref": "#/$defs/github_artifact_file_reference"
+        },
+        "run_attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "authenticated_actor": {
+          "$ref": "#/$defs/github_actor_identity"
+        },
+        "permissions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "actions",
+            "contents"
+          ],
+          "properties": {
+            "actions": {
+              "const": "read"
+            },
+            "contents": {
+              "const": "write"
+            }
+          }
+        }
+      }
+    },
+    "current_attempt_authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_authorization",
+        "current_github_actor",
+        "permission_readback"
+      ],
+      "properties": {
+        "decision_authorization": {
+          "$ref": "#/$defs/decision_authorization"
+        },
+        "current_github_actor": {
+          "$ref": "#/$defs/github_actor_identity"
+        },
+        "permission_readback": {
+          "$ref": "#/$defs/promotion_permission_readback"
+        }
+      }
+    },
+    "current_promote_workflow_run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "workflow_path",
+        "mode",
+        "event",
+        "run_id",
+        "run_attempt",
+        "ref",
+        "commit"
+      ],
+      "properties": {
+        "repository": {
+          "$ref": "#/$defs/github_repository"
+        },
+        "workflow_path": {
+          "const": ".github/workflows/stateless-preview.yml"
+        },
+        "mode": {
+          "const": "promote"
+        },
+        "event": {
+          "const": "workflow_dispatch"
+        },
+        "run_id": {
+          "$ref": "#/$defs/github_identifier"
+        },
+        "run_attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "ref": {
+          "const": "refs/heads/main"
+        },
+        "commit": {
+          "$ref": "#/$defs/source_commit"
+        }
+      }
+    },
+    "promotion_attempt_reference": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "promotion_decision_document": {
+      "$ref": "promotion-decision.schema.json"
+    },
+    "stage_gate_evidence_document": {
+      "$ref": "stage-gate-evidence.schema.json"
+    }
+  }
+}

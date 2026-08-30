@@ -1,0 +1,373 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "A1 preview Remote Recovery Classification",
+  "description": "Immutable classification of one sealed remote observation for one exact Candidate Identity Record. It permits one closed action or refusal and stores only opaque identifiers and closed result or reason codes.",
+  "$comment": "Semantic admission resolves candidate_identity_record and remote_observed_state_reference by structural GitHub artifact reference and raw-byte SHA-256, validates both documents, and requires their candidate bindings and promotion_attempt_id to be equal. It derives state, result, and reason_codes from the sealed observation. This schema never authorizes overwrite, deletion, tag movement, tag reuse, release replacement, or a rebuild.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "classification_schema_version",
+    "classification_id",
+    "promotion_attempt_id",
+    "candidate_identity_record",
+    "candidate",
+    "remote_observed_state_reference",
+    "state",
+    "admission",
+    "allowed_action",
+    "reason_codes",
+    "classification_result",
+    "classified_at"
+  ],
+  "properties": {
+    "classification_schema_version": {
+      "const": "1.0"
+    },
+    "classification_id": {
+      "$ref": "#/$defs/safe_opaque_id"
+    },
+    "promotion_attempt_id": {
+      "$ref": "#/$defs/safe_opaque_id"
+    },
+    "candidate_identity_record": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "candidate": {
+      "$ref": "candidate-identity.schema.json#/$defs/candidate_binding"
+    },
+    "remote_observed_state_reference": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "state": {
+      "enum": [
+        "unstarted",
+        "tag_only",
+        "draft_empty",
+        "draft_partial",
+        "draft_complete",
+        "published_complete",
+        "collision"
+      ]
+    },
+    "admission": {
+      "enum": [
+        "ADMITTED",
+        "REFUSED"
+      ]
+    },
+    "allowed_action": {
+      "enum": [
+        "CREATE_ANNOTATED_TAG_AND_DRAFT_RELEASE",
+        "CREATE_DRAFT_PRERELEASE",
+        "UPLOAD_MISSING_APPROVED_ASSETS",
+        "VERIFY_REMOTE_ASSETS_AND_PUBLISH_PRERELEASE",
+        "RUN_REMOTE_CONSUMER_PROOF",
+        "REFUSE"
+      ]
+    },
+    "reason_codes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/classification_reason_code"
+      }
+    },
+    "classification_result": {
+      "$ref": "#/$defs/classification_result"
+    },
+    "classified_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "const": "unstarted"
+          }
+        }
+      },
+      "then": {
+        "$ref": "#/$defs/admitted_create_tag_and_draft"
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "const": "tag_only"
+          }
+        }
+      },
+      "then": {
+        "$ref": "#/$defs/admitted_create_draft"
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "const": "draft_empty"
+          }
+        }
+      },
+      "then": {
+        "$ref": "#/$defs/admitted_upload_missing_assets"
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "const": "draft_partial"
+          }
+        }
+      },
+      "then": {
+        "$ref": "#/$defs/admitted_upload_missing_assets"
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "const": "draft_complete"
+          }
+        }
+      },
+      "then": {
+        "$ref": "#/$defs/admitted_publish"
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "const": "published_complete"
+          }
+        }
+      },
+      "then": {
+        "$ref": "#/$defs/admitted_remote_proof"
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "const": "collision"
+          }
+        }
+      },
+      "then": {
+        "$ref": "#/$defs/refused_collision"
+      }
+    }
+  ],
+  "$defs": {
+    "safe_opaque_id": {
+      "$ref": "artifact-consumer-proof.schema.json#/$defs/safe_opaque_id"
+    },
+    "receipt_status": {
+      "$ref": "artifact-consumer-proof.schema.json#/$defs/receipt_status"
+    },
+    "expected_result_code": {
+      "$ref": "artifact-consumer-proof.schema.json#/$defs/expected_result_code"
+    },
+    "observed_result_code": {
+      "$ref": "artifact-consumer-proof.schema.json#/$defs/observed_result_code"
+    },
+    "github_artifact_file_reference": {
+      "$ref": "candidate-identity.schema.json#/$defs/github_artifact_file_reference"
+    },
+    "classification_reason_code": {
+      "enum": [
+        "RETAINED_ARTIFACT_AVAILABLE",
+        "RETAINED_ARTIFACT_UNAVAILABLE",
+        "RETAINED_ARTIFACT_EXPIRED",
+        "RETAINED_ARTIFACT_IDENTITY_MISMATCH",
+        "TAG_ABSENT",
+        "TAG_MATCHING_ANNOTATED",
+        "TAG_NON_ANNOTATED",
+        "TAG_TARGET_MISMATCH",
+        "RELEASE_ABSENT",
+        "RELEASE_MATCHING_DRAFT",
+        "RELEASE_MATCHING_PRERELEASE",
+        "RELEASE_METADATA_MISMATCH",
+        "RELEASE_STATE_MISMATCH",
+        "EXPECTED_ASSETS_ABSENT",
+        "EXPECTED_ASSETS_PARTIAL_MATCH",
+        "EXPECTED_ASSETS_COMPLETE_MATCH",
+        "ASSET_IDENTITY_MISMATCH",
+        "UNEXPECTED_ASSET_PRESENT",
+        "REMOTE_READBACK_UNREADABLE",
+        "REMOTE_READBACK_INCOMPLETE"
+      ]
+    },
+    "classification_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected",
+        "observed",
+        "status"
+      ],
+      "properties": {
+        "expected": {
+          "$ref": "#/$defs/expected_result_code"
+        },
+        "observed": {
+          "$ref": "#/$defs/observed_result_code"
+        },
+        "status": {
+          "$ref": "#/$defs/receipt_status"
+        }
+      }
+    },
+    "admitted_create_tag_and_draft": {
+      "properties": {
+        "admission": {
+          "const": "ADMITTED"
+        },
+        "allowed_action": {
+          "const": "CREATE_ANNOTATED_TAG_AND_DRAFT_RELEASE"
+        },
+        "classification_result": {
+          "properties": {
+            "observed": {
+              "const": "SUCCESS"
+            },
+            "status": {
+              "const": "PASS"
+            }
+          }
+        }
+      }
+    },
+    "admitted_create_draft": {
+      "properties": {
+        "admission": {
+          "const": "ADMITTED"
+        },
+        "allowed_action": {
+          "const": "CREATE_DRAFT_PRERELEASE"
+        },
+        "classification_result": {
+          "properties": {
+            "observed": {
+              "const": "SUCCESS"
+            },
+            "status": {
+              "const": "PASS"
+            }
+          }
+        }
+      }
+    },
+    "admitted_upload_missing_assets": {
+      "properties": {
+        "admission": {
+          "const": "ADMITTED"
+        },
+        "allowed_action": {
+          "const": "UPLOAD_MISSING_APPROVED_ASSETS"
+        },
+        "classification_result": {
+          "properties": {
+            "observed": {
+              "const": "SUCCESS"
+            },
+            "status": {
+              "const": "PASS"
+            }
+          }
+        }
+      }
+    },
+    "admitted_publish": {
+      "properties": {
+        "admission": {
+          "const": "ADMITTED"
+        },
+        "allowed_action": {
+          "const": "VERIFY_REMOTE_ASSETS_AND_PUBLISH_PRERELEASE"
+        },
+        "classification_result": {
+          "properties": {
+            "observed": {
+              "const": "SUCCESS"
+            },
+            "status": {
+              "const": "PASS"
+            }
+          }
+        }
+      }
+    },
+    "admitted_remote_proof": {
+      "properties": {
+        "admission": {
+          "const": "ADMITTED"
+        },
+        "allowed_action": {
+          "const": "RUN_REMOTE_CONSUMER_PROOF"
+        },
+        "classification_result": {
+          "properties": {
+            "observed": {
+              "const": "SUCCESS"
+            },
+            "status": {
+              "const": "PASS"
+            }
+          }
+        }
+      }
+    },
+    "refused_collision": {
+      "properties": {
+        "admission": {
+          "const": "REFUSED"
+        },
+        "allowed_action": {
+          "const": "REFUSE"
+        },
+        "classification_result": {
+          "properties": {
+            "observed": {
+              "const": "REFUSAL"
+            },
+            "status": {
+              "const": "REFUSED"
+            }
+          }
+        }
+      }
+    }
+  }
+}

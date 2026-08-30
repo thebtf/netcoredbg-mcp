@@ -1,0 +1,567 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "s2-s3-review.schema.json",
+  "title": "A1 preview S2/S3 Seven-Lens Review Aggregate",
+  "description": "Immutable, sealed aggregate for the one exact candidate reviewed by the required seven ordered S2/S3 lenses. Every lens carries its own candidate binding, reviewer and producer provenance, nonzero denominator, closed findings, result codes, and status. The aggregate stores no raw diagnostic, command, secret, URI, or free-form path.",
+  "$comment": "Semantic admission resolves aggregate candidate_identity_record by repository, run_id, artifact_id, path, and raw-byte SHA-256; validates the Candidate Identity Record; and requires the aggregate and every lens candidate reference, candidate SHA-256, and candidate object to equal it exactly. LENS_REVIEWER_PRODUCER_INDEPENDENCE requires each lens reviewer_provenance.reviewer_principal_id to differ from its producer_provenance.producer_principal_id. AGGREGATE_COVERAGE_RECOMPUTATION derives the fixed ordered lens set, required_lens_count=7, completed_lens_count, and unresolved_high_severity_count from the seven sealed lens results and findings; a passing aggregate requires exactly 7 required, 7 completed, and 0 unresolved high-severity findings. The aggregate is distinct from independent-pr-review.schema.json, which alone satisfies the independent PR-review gate.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "aggregate_schema_version",
+    "aggregate_id",
+    "aggregate_producer",
+    "candidate_identity_record",
+    "candidate_identity_record_sha256",
+    "candidate",
+    "lens_results",
+    "coverage_summary",
+    "outcome",
+    "sealed_at"
+  ],
+  "properties": {
+    "aggregate_schema_version": {
+      "const": "1.0"
+    },
+    "aggregate_id": {
+      "$ref": "#/$defs/safe_opaque_id"
+    },
+    "aggregate_producer": {
+      "$ref": "#/$defs/aggregate_producer"
+    },
+    "candidate_identity_record": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "candidate_identity_record_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "candidate": {
+      "$ref": "candidate-identity.schema.json#/$defs/candidate_binding"
+    },
+    "lens_results": {
+      "$ref": "#/$defs/ordered_lens_results"
+    },
+    "coverage_summary": {
+      "$ref": "#/$defs/coverage_summary"
+    },
+    "outcome": {
+      "$ref": "#/$defs/review_status"
+    },
+    "sealed_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "PASS"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "coverage_summary": {
+            "properties": {
+              "completed_lens_count": {
+                "const": 7
+              },
+              "unresolved_high_severity_count": {
+                "const": 0
+              }
+            }
+          },
+          "lens_results": {
+            "items": {
+              "properties": {
+                "outcome": {
+                  "const": "PASS"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "$ref": "candidate-identity.schema.json#/$defs/sha256"
+    },
+    "github_artifact_file_reference": {
+      "$ref": "candidate-identity.schema.json#/$defs/github_artifact_file_reference"
+    },
+    "safe_opaque_id": {
+      "$ref": "artifact-consumer-proof.schema.json#/$defs/safe_opaque_id"
+    },
+    "expected_result_code": {
+      "$ref": "artifact-consumer-proof.schema.json#/$defs/expected_result_code"
+    },
+    "observed_result_code": {
+      "$ref": "artifact-consumer-proof.schema.json#/$defs/observed_result_code"
+    },
+    "review_status": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "REFUSED",
+        "INCOMPLETE"
+      ]
+    },
+    "aggregate_producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "helper_path",
+        "operation"
+      ],
+      "properties": {
+        "helper_path": {
+          "const": "scripts/stateless_preview_artifact.py"
+        },
+        "operation": {
+          "const": "seal_s2_s3_review_aggregate"
+        }
+      }
+    },
+    "reviewer_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reviewer_principal_id",
+        "reviewer_role",
+        "independence_basis"
+      ],
+      "properties": {
+        "reviewer_principal_id": {
+          "$ref": "#/$defs/safe_opaque_id"
+        },
+        "reviewer_role": {
+          "enum": [
+            "SECURITY_REVIEWER",
+            "CODE_WORKFLOW_REVIEWER"
+          ]
+        },
+        "independence_basis": {
+          "const": "DISTINCT_REVIEWER_AND_PRODUCER"
+        }
+      }
+    },
+    "producer_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "producer_principal_id",
+        "operation"
+      ],
+      "properties": {
+        "producer_principal_id": {
+          "$ref": "#/$defs/safe_opaque_id"
+        },
+        "operation": {
+          "const": "seal_s2_s3_lens_result"
+        }
+      }
+    },
+    "denominator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required_evidence_count",
+        "completed_evidence_count"
+      ],
+      "properties": {
+        "required_evidence_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
+        },
+        "completed_evidence_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        }
+      }
+    },
+    "review_result_codes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected",
+        "observed"
+      ],
+      "properties": {
+        "expected": {
+          "$ref": "#/$defs/expected_result_code"
+        },
+        "observed": {
+          "$ref": "#/$defs/observed_result_code"
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "finding_id",
+        "severity",
+        "disposition",
+        "observed_result"
+      ],
+      "properties": {
+        "finding_id": {
+          "$ref": "#/$defs/safe_opaque_id"
+        },
+        "severity": {
+          "enum": [
+            "CRITICAL",
+            "HIGH",
+            "MEDIUM",
+            "LOW",
+            "INFO"
+          ]
+        },
+        "disposition": {
+          "enum": [
+            "UNRESOLVED",
+            "RESOLVED",
+            "NOT_APPLICABLE"
+          ]
+        },
+        "observed_result": {
+          "$ref": "#/$defs/observed_result_code"
+        }
+      }
+    },
+    "unresolved_high_finding": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/finding"
+        },
+        {
+          "properties": {
+            "severity": {
+              "enum": [
+                "CRITICAL",
+                "HIGH"
+              ]
+            },
+            "disposition": {
+              "const": "UNRESOLVED"
+            }
+          }
+        }
+      ]
+    },
+    "findings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "records",
+        "unresolved_high_severity_count"
+      ],
+      "properties": {
+        "records": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/finding"
+          }
+        },
+        "unresolved_high_severity_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        }
+      }
+    },
+    "lens_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lens",
+        "lens_order",
+        "candidate_identity_record",
+        "candidate_identity_record_sha256",
+        "candidate",
+        "reviewer_provenance",
+        "producer_provenance",
+        "denominator",
+        "findings",
+        "result",
+        "outcome",
+        "recorded_at"
+      ],
+      "properties": {
+        "lens": {
+          "$ref": "#/$defs/lens_id"
+        },
+        "lens_order": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 7
+        },
+        "candidate_identity_record": {
+          "$ref": "#/$defs/github_artifact_file_reference"
+        },
+        "candidate_identity_record_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "candidate": {
+          "$ref": "candidate-identity.schema.json#/$defs/candidate_binding"
+        },
+        "reviewer_provenance": {
+          "$ref": "#/$defs/reviewer_provenance"
+        },
+        "producer_provenance": {
+          "$ref": "#/$defs/producer_provenance"
+        },
+        "denominator": {
+          "$ref": "#/$defs/denominator"
+        },
+        "findings": {
+          "$ref": "#/$defs/findings"
+        },
+        "result": {
+          "$ref": "#/$defs/review_result_codes"
+        },
+        "outcome": {
+          "$ref": "#/$defs/review_status"
+        },
+        "recorded_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "PASS"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "denominator": {
+                "properties": {
+                  "completed_evidence_count": {
+                    "minimum": 1
+                  }
+                }
+              },
+              "findings": {
+                "properties": {
+                  "unresolved_high_severity_count": {
+                    "const": 0
+                  },
+                  "records": {
+                    "not": {
+                      "contains": {
+                        "$ref": "#/$defs/unresolved_high_finding"
+                      }
+                    }
+                  }
+                }
+              },
+              "result": {
+                "properties": {
+                  "observed": {
+                    "const": "SUCCESS"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "lens_id": {
+      "enum": [
+        "dependency-cve",
+        "dotnet-unsafe-pattern",
+        "owasp-input-output-path",
+        "attack-surface",
+        "secret-asset-manifest",
+        "path-process-fail-closed",
+        "exploitability"
+      ]
+    },
+    "dependency_cve_lens": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/lens_result"
+        },
+        {
+          "properties": {
+            "lens": {
+              "const": "dependency-cve"
+            },
+            "lens_order": {
+              "const": 1
+            }
+          }
+        }
+      ]
+    },
+    "dotnet_unsafe_pattern_lens": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/lens_result"
+        },
+        {
+          "properties": {
+            "lens": {
+              "const": "dotnet-unsafe-pattern"
+            },
+            "lens_order": {
+              "const": 2
+            }
+          }
+        }
+      ]
+    },
+    "owasp_input_output_path_lens": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/lens_result"
+        },
+        {
+          "properties": {
+            "lens": {
+              "const": "owasp-input-output-path"
+            },
+            "lens_order": {
+              "const": 3
+            }
+          }
+        }
+      ]
+    },
+    "attack_surface_lens": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/lens_result"
+        },
+        {
+          "properties": {
+            "lens": {
+              "const": "attack-surface"
+            },
+            "lens_order": {
+              "const": 4
+            }
+          }
+        }
+      ]
+    },
+    "secret_asset_manifest_lens": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/lens_result"
+        },
+        {
+          "properties": {
+            "lens": {
+              "const": "secret-asset-manifest"
+            },
+            "lens_order": {
+              "const": 5
+            }
+          }
+        }
+      ]
+    },
+    "path_process_fail_closed_lens": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/lens_result"
+        },
+        {
+          "properties": {
+            "lens": {
+              "const": "path-process-fail-closed"
+            },
+            "lens_order": {
+              "const": 6
+            }
+          }
+        }
+      ]
+    },
+    "exploitability_lens": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/lens_result"
+        },
+        {
+          "properties": {
+            "lens": {
+              "const": "exploitability"
+            },
+            "lens_order": {
+              "const": 7
+            }
+          }
+        }
+      ]
+    },
+    "ordered_lens_results": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/dependency_cve_lens"
+        },
+        {
+          "$ref": "#/$defs/dotnet_unsafe_pattern_lens"
+        },
+        {
+          "$ref": "#/$defs/owasp_input_output_path_lens"
+        },
+        {
+          "$ref": "#/$defs/attack_surface_lens"
+        },
+        {
+          "$ref": "#/$defs/secret_asset_manifest_lens"
+        },
+        {
+          "$ref": "#/$defs/path_process_fail_closed_lens"
+        },
+        {
+          "$ref": "#/$defs/exploitability_lens"
+        }
+      ],
+      "items": false
+    },
+    "coverage_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required_lens_count",
+        "completed_lens_count",
+        "unresolved_high_severity_count"
+      ],
+      "properties": {
+        "required_lens_count": {
+          "const": 7
+        },
+        "completed_lens_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        },
+        "unresolved_high_severity_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 896
+        }
+      }
+    }
+  }
+}

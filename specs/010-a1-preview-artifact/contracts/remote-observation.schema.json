@@ -1,0 +1,579 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "A1 preview Remote Observation Receipt",
+  "description": "Immutable point-in-time observation of the candidate prerelease destination. It preserves structural GitHub identifiers, byte identities, and closed readback codes without storing a URL, local path, command, secret, or diagnostic text.",
+  "$comment": "Semantic admission resolves candidate_identity_record by its repository, run_id, artifact_id, path, and raw-byte SHA-256; validates that record; requires candidate to equal its candidate binding; and requires promotion_attempt_id to equal the fresh promotion attempt that owns this observation. It compares tag, release, and asset facts with that resolved candidate. An unreadable or mismatched readback is an observed fact and must never be reinterpreted as absence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "observation_schema_version",
+    "observation_id",
+    "promotion_attempt_id",
+    "candidate_identity_record",
+    "candidate",
+    "retained_artifact_availability",
+    "tag_observation",
+    "release_observation",
+    "asset_observations",
+    "readback_status",
+    "observed_at"
+  ],
+  "properties": {
+    "observation_schema_version": {
+      "const": "1.0"
+    },
+    "observation_id": {
+      "$ref": "#/$defs/safe_opaque_id"
+    },
+    "promotion_attempt_id": {
+      "$ref": "#/$defs/safe_opaque_id"
+    },
+    "candidate_identity_record": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "candidate": {
+      "$ref": "candidate-identity.schema.json#/$defs/candidate_binding"
+    },
+    "retained_artifact_availability": {
+      "$ref": "#/$defs/retained_artifact_availability"
+    },
+    "tag_observation": {
+      "$ref": "#/$defs/tag_observation"
+    },
+    "release_observation": {
+      "$ref": "#/$defs/release_observation"
+    },
+    "asset_observations": {
+      "$ref": "#/$defs/asset_observations"
+    },
+    "readback_status": {
+      "$ref": "#/$defs/readback_status"
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "safe_opaque_id": {
+      "$ref": "artifact-consumer-proof.schema.json#/$defs/safe_opaque_id"
+    },
+    "expected_result_code": {
+      "$ref": "artifact-consumer-proof.schema.json#/$defs/expected_result_code"
+    },
+    "observed_result_code": {
+      "$ref": "artifact-consumer-proof.schema.json#/$defs/observed_result_code"
+    },
+    "github_identifier": {
+      "$ref": "candidate-identity.schema.json#/$defs/github_identifier"
+    },
+    "github_artifact_file_reference": {
+      "$ref": "candidate-identity.schema.json#/$defs/github_artifact_file_reference"
+    },
+    "sha256": {
+      "$ref": "candidate-identity.schema.json#/$defs/sha256"
+    },
+    "tag": {
+      "$ref": "../../005-stateless-preview/contracts/preview-manifest.schema.json#/$defs/tag"
+    },
+    "archive": {
+      "$ref": "../../005-stateless-preview/contracts/preview-manifest.schema.json#/$defs/archive"
+    },
+    "manifest": {
+      "$ref": "candidate-identity.schema.json#/$defs/manifest_file"
+    },
+    "retained_artifact_availability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "observed_result"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "AVAILABLE_AND_VERIFIED",
+            "UNAVAILABLE",
+            "EXPIRED",
+            "IDENTITY_MISMATCH",
+            "UNREADABLE"
+          ]
+        },
+        "observed_result": {
+          "$ref": "#/$defs/observed_result_code"
+        }
+      }
+    },
+    "readback_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_result",
+        "observed_result",
+        "reason_code"
+      ],
+      "properties": {
+        "expected_result": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/expected_result_code"
+            },
+            {
+              "const": "EXPECT_SUCCESS"
+            }
+          ]
+        },
+        "observed_result": {
+          "$ref": "#/$defs/observed_result_code"
+        },
+        "reason_code": {
+          "enum": [
+            "READBACK_COMPLETE",
+            "READBACK_UNAVAILABLE",
+            "READBACK_UNAUTHORIZED",
+            "READBACK_INCOMPLETE",
+            "READBACK_EVIDENCE_REJECTED"
+          ]
+        }
+      }
+    },
+    "tag_absent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "const": "ABSENT"
+        }
+      }
+    },
+    "tag_present": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "tag",
+        "tag_type",
+        "object_id",
+        "peeled_commit"
+      ],
+      "properties": {
+        "status": {
+          "const": "PRESENT"
+        },
+        "tag": {
+          "$ref": "#/$defs/tag"
+        },
+        "tag_type": {
+          "enum": [
+            "ANNOTATED",
+            "LIGHTWEIGHT"
+          ]
+        },
+        "object_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "peeled_commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      }
+    },
+    "tag_unreadable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "reason_code"
+      ],
+      "properties": {
+        "status": {
+          "const": "UNREADABLE"
+        },
+        "reason_code": {
+          "enum": [
+            "TAG_READBACK_UNAVAILABLE",
+            "TAG_READBACK_UNAUTHORIZED",
+            "TAG_READBACK_INCOMPLETE"
+          ]
+        }
+      }
+    },
+    "tag_observation": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/tag_absent"
+        },
+        {
+          "$ref": "#/$defs/tag_present"
+        },
+        {
+          "$ref": "#/$defs/tag_unreadable"
+        }
+      ]
+    },
+    "release_absent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "const": "ABSENT"
+        }
+      }
+    },
+    "release_present": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "release_id",
+        "tag",
+        "is_draft",
+        "is_prerelease",
+        "destination_metadata_status"
+      ],
+      "properties": {
+        "status": {
+          "const": "PRESENT"
+        },
+        "release_id": {
+          "$ref": "#/$defs/github_identifier"
+        },
+        "tag": {
+          "$ref": "#/$defs/tag"
+        },
+        "is_draft": {
+          "type": "boolean"
+        },
+        "is_prerelease": {
+          "type": "boolean"
+        },
+        "destination_metadata_status": {
+          "enum": [
+            "MATCHING",
+            "MISMATCHED"
+          ]
+        }
+      }
+    },
+    "release_unreadable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "reason_code"
+      ],
+      "properties": {
+        "status": {
+          "const": "UNREADABLE"
+        },
+        "reason_code": {
+          "enum": [
+            "RELEASE_READBACK_UNAVAILABLE",
+            "RELEASE_READBACK_UNAUTHORIZED",
+            "RELEASE_READBACK_INCOMPLETE"
+          ]
+        }
+      }
+    },
+    "release_observation": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/release_absent"
+        },
+        {
+          "$ref": "#/$defs/release_present"
+        },
+        {
+          "$ref": "#/$defs/release_unreadable"
+        }
+      ]
+    },
+    "archive_asset_metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "size_bytes"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/github_identifier"
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^netcoredbg-mcp-stateless-preview-win-x64-(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)-preview\\.(?:[1-9][0-9]*)\\.zip$"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "manifest_asset_metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "size_bytes"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/github_identifier"
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^netcoredbg-mcp-stateless-preview-win-x64-(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)-preview\\.(?:[1-9][0-9]*)\\.manifest\\.json$"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "archive_asset_absent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "const": "ABSENT"
+        }
+      }
+    },
+    "archive_asset_present": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "metadata",
+        "downloaded_identity",
+        "observed_result",
+        "identity_status"
+      ],
+      "properties": {
+        "status": {
+          "const": "PRESENT"
+        },
+        "metadata": {
+          "$ref": "#/$defs/archive_asset_metadata"
+        },
+        "downloaded_identity": {
+          "$ref": "#/$defs/archive"
+        },
+        "observed_result": {
+          "$ref": "#/$defs/observed_result_code"
+        },
+        "identity_status": {
+          "enum": [
+            "MATCHES_CANDIDATE",
+            "METADATA_SIZE_MISMATCH",
+            "DOWNLOADED_SIZE_MISMATCH",
+            "DOWNLOADED_SHA256_MISMATCH"
+          ]
+        }
+      }
+    },
+    "archive_asset_present_unreadable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "metadata",
+        "reason_code"
+      ],
+      "properties": {
+        "status": {
+          "const": "PRESENT_UNREADABLE"
+        },
+        "metadata": {
+          "$ref": "#/$defs/archive_asset_metadata"
+        },
+        "reason_code": {
+          "enum": [
+            "ARCHIVE_DOWNLOAD_UNAVAILABLE",
+            "ARCHIVE_DOWNLOAD_UNAUTHORIZED",
+            "ARCHIVE_DOWNLOAD_INCOMPLETE"
+          ]
+        }
+      }
+    },
+    "archive_asset_unreadable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "reason_code"
+      ],
+      "properties": {
+        "status": {
+          "const": "UNREADABLE"
+        },
+        "reason_code": {
+          "enum": [
+            "ARCHIVE_READBACK_UNAVAILABLE",
+            "ARCHIVE_READBACK_UNAUTHORIZED",
+            "ARCHIVE_READBACK_INCOMPLETE"
+          ]
+        }
+      }
+    },
+    "archive_asset_observation": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/archive_asset_absent"
+        },
+        {
+          "$ref": "#/$defs/archive_asset_present"
+        },
+        {
+          "$ref": "#/$defs/archive_asset_present_unreadable"
+        },
+        {
+          "$ref": "#/$defs/archive_asset_unreadable"
+        }
+      ]
+    },
+    "manifest_asset_absent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "const": "ABSENT"
+        }
+      }
+    },
+    "manifest_asset_present": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "metadata",
+        "downloaded_identity",
+        "observed_result",
+        "identity_status"
+      ],
+      "properties": {
+        "status": {
+          "const": "PRESENT"
+        },
+        "metadata": {
+          "$ref": "#/$defs/manifest_asset_metadata"
+        },
+        "downloaded_identity": {
+          "$ref": "#/$defs/manifest"
+        },
+        "observed_result": {
+          "$ref": "#/$defs/observed_result_code"
+        },
+        "identity_status": {
+          "enum": [
+            "MATCHES_CANDIDATE",
+            "METADATA_SIZE_MISMATCH",
+            "DOWNLOADED_SIZE_MISMATCH",
+            "DOWNLOADED_SHA256_MISMATCH"
+          ]
+        }
+      }
+    },
+    "manifest_asset_present_unreadable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "metadata",
+        "reason_code"
+      ],
+      "properties": {
+        "status": {
+          "const": "PRESENT_UNREADABLE"
+        },
+        "metadata": {
+          "$ref": "#/$defs/manifest_asset_metadata"
+        },
+        "reason_code": {
+          "enum": [
+            "MANIFEST_DOWNLOAD_UNAVAILABLE",
+            "MANIFEST_DOWNLOAD_UNAUTHORIZED",
+            "MANIFEST_DOWNLOAD_INCOMPLETE"
+          ]
+        }
+      }
+    },
+    "manifest_asset_unreadable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "reason_code"
+      ],
+      "properties": {
+        "status": {
+          "const": "UNREADABLE"
+        },
+        "reason_code": {
+          "enum": [
+            "MANIFEST_READBACK_UNAVAILABLE",
+            "MANIFEST_READBACK_UNAUTHORIZED",
+            "MANIFEST_READBACK_INCOMPLETE"
+          ]
+        }
+      }
+    },
+    "manifest_asset_observation": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/manifest_asset_absent"
+        },
+        {
+          "$ref": "#/$defs/manifest_asset_present"
+        },
+        {
+          "$ref": "#/$defs/manifest_asset_present_unreadable"
+        },
+        {
+          "$ref": "#/$defs/manifest_asset_unreadable"
+        }
+      ]
+    },
+    "asset_observations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "archive",
+        "manifest",
+        "unexpected_asset_ids"
+      ],
+      "properties": {
+        "archive": {
+          "$ref": "#/$defs/archive_asset_observation"
+        },
+        "manifest": {
+          "$ref": "#/$defs/manifest_asset_observation"
+        },
+        "unexpected_asset_ids": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/safe_opaque_id"
+          }
+        }
+      }
+    }
+  }
+}

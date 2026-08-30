@@ -1,0 +1,315 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "independent-pr-review.schema.json",
+  "title": "A1 preview Independent PR Review Receipt",
+  "description": "Immutable, closed evidence for the project release obligation of an independent pull-request review. It is distinct from the S2/S3 seven-lens aggregate: it records independent review of the reviewed pull request and cannot stand in for any security or code-review lens.",
+  "$comment": "Semantic admission resolves candidate_identity_record by repository, run_id, artifact_id, path, and raw-byte SHA-256; validates the resolved Candidate Identity Record; requires candidate and candidate_identity_record_sha256 to equal it; and requires review_target.repository and review_target.reviewed_commit to equal the candidate repository and canonical source commit. INDEPENDENT_PR_REVIEWER_SEPARATION requires reviewer_provenance.reviewer_principal_id to differ from reviewer_provenance.reviewed_author_principal_id and producer_provenance.producer_principal_id. It recomputes the completed denominator and unresolved high-severity count from the sealed finding records. No S2/S3 aggregate lens may satisfy this distinct release obligation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "receipt_schema_version",
+    "receipt_id",
+    "candidate_identity_record",
+    "candidate_identity_record_sha256",
+    "candidate",
+    "review_target",
+    "reviewer_provenance",
+    "producer_provenance",
+    "denominator",
+    "findings",
+    "result",
+    "outcome",
+    "recorded_at"
+  ],
+  "properties": {
+    "receipt_schema_version": {
+      "const": "1.0"
+    },
+    "receipt_id": {
+      "$ref": "#/$defs/safe_opaque_id"
+    },
+    "candidate_identity_record": {
+      "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "candidate_identity_record_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "candidate": {
+      "$ref": "candidate-identity.schema.json#/$defs/candidate_binding"
+    },
+    "review_target": {
+      "$ref": "#/$defs/review_target"
+    },
+    "reviewer_provenance": {
+      "$ref": "#/$defs/reviewer_provenance"
+    },
+    "producer_provenance": {
+      "$ref": "#/$defs/producer_provenance"
+    },
+    "denominator": {
+      "$ref": "#/$defs/denominator"
+    },
+    "findings": {
+      "$ref": "#/$defs/findings"
+    },
+    "result": {
+      "$ref": "#/$defs/review_result_codes"
+    },
+    "outcome": {
+      "$ref": "#/$defs/review_status"
+    },
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "PASS"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "denominator": {
+            "properties": {
+              "completed_evidence_count": {
+                "minimum": 1
+              }
+            }
+          },
+          "findings": {
+            "properties": {
+              "unresolved_high_severity_count": {
+                "const": 0
+              },
+              "records": {
+                "not": {
+                  "contains": {
+                    "$ref": "#/$defs/unresolved_high_finding"
+                  }
+                }
+              }
+            }
+          },
+          "result": {
+            "properties": {
+              "observed": {
+                "const": "SUCCESS"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "$ref": "candidate-identity.schema.json#/$defs/sha256"
+    },
+    "github_identifier": {
+      "$ref": "candidate-identity.schema.json#/$defs/github_identifier"
+    },
+    "github_repository": {
+      "$ref": "candidate-identity.schema.json#/$defs/github_repository"
+    },
+    "github_artifact_file_reference": {
+      "$ref": "candidate-identity.schema.json#/$defs/github_artifact_file_reference"
+    },
+    "safe_opaque_id": {
+      "$ref": "artifact-consumer-proof.schema.json#/$defs/safe_opaque_id"
+    },
+    "expected_result_code": {
+      "$ref": "artifact-consumer-proof.schema.json#/$defs/expected_result_code"
+    },
+    "observed_result_code": {
+      "$ref": "artifact-consumer-proof.schema.json#/$defs/observed_result_code"
+    },
+    "review_status": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "REFUSED",
+        "INCOMPLETE"
+      ]
+    },
+    "review_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "pull_request_id",
+        "reviewed_commit",
+        "base_ref"
+      ],
+      "properties": {
+        "repository": {
+          "$ref": "#/$defs/github_repository"
+        },
+        "pull_request_id": {
+          "$ref": "#/$defs/github_identifier"
+        },
+        "reviewed_commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "base_ref": {
+          "const": "refs/heads/main"
+        }
+      }
+    },
+    "reviewer_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reviewer_principal_id",
+        "reviewed_author_principal_id",
+        "independence_basis"
+      ],
+      "properties": {
+        "reviewer_principal_id": {
+          "$ref": "#/$defs/safe_opaque_id"
+        },
+        "reviewed_author_principal_id": {
+          "$ref": "#/$defs/safe_opaque_id"
+        },
+        "independence_basis": {
+          "const": "DISTINCT_REVIEWER_AND_AUTHOR"
+        }
+      }
+    },
+    "producer_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "producer_principal_id",
+        "operation"
+      ],
+      "properties": {
+        "producer_principal_id": {
+          "$ref": "#/$defs/safe_opaque_id"
+        },
+        "operation": {
+          "const": "seal_independent_pr_review"
+        }
+      }
+    },
+    "denominator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required_evidence_count",
+        "completed_evidence_count"
+      ],
+      "properties": {
+        "required_evidence_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
+        },
+        "completed_evidence_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        }
+      }
+    },
+    "review_result_codes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected",
+        "observed"
+      ],
+      "properties": {
+        "expected": {
+          "$ref": "#/$defs/expected_result_code"
+        },
+        "observed": {
+          "$ref": "#/$defs/observed_result_code"
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "finding_id",
+        "severity",
+        "disposition",
+        "observed_result"
+      ],
+      "properties": {
+        "finding_id": {
+          "$ref": "#/$defs/safe_opaque_id"
+        },
+        "severity": {
+          "enum": [
+            "CRITICAL",
+            "HIGH",
+            "MEDIUM",
+            "LOW",
+            "INFO"
+          ]
+        },
+        "disposition": {
+          "enum": [
+            "UNRESOLVED",
+            "RESOLVED",
+            "NOT_APPLICABLE"
+          ]
+        },
+        "observed_result": {
+          "$ref": "#/$defs/observed_result_code"
+        }
+      }
+    },
+    "unresolved_high_finding": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/finding"
+        },
+        {
+          "properties": {
+            "severity": {
+              "enum": [
+                "CRITICAL",
+                "HIGH"
+              ]
+            },
+            "disposition": {
+              "const": "UNRESOLVED"
+            }
+          }
+        }
+      ]
+    },
+    "findings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "records",
+        "unresolved_high_severity_count"
+      ],
+      "properties": {
+        "records": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/finding"
+          }
+        },
+        "unresolved_high_severity_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,164 @@
+name: Stateless Preview Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      preview_version:
+        description: Preview version in x.y.z-preview.n form
+        required: true
+        type: string
+      preview_tag:
+        description: Preview tag matching stateless-preview-v<preview_version>
+        required: true
+        type: string
+      retention_days:
+        description: Retention period from 1 through 90 days
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: stateless-preview-build-${{ inputs.preview_tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build canonical-main preview candidate
+    runs-on: windows-latest
+    permissions:
+      actions: read
+      contents: read
+    env:
+      A1_PREVIEW_VERSION: ${{ inputs.preview_version }}
+      A1_PREVIEW_TAG: ${{ inputs.preview_tag }}
+      A1_RETENTION_DAYS: ${{ inputs.retention_days }}
+    steps:
+      - name: Check out the dispatched revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Fetch live canonical main
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to fetch canonical main."
+          }
+
+      - name: Admit the only build source and inputs
+        id: admit
+        shell: pwsh
+        run: python scripts/stateless_preview_artifact.py admit-build
+
+      - name: Set up the preview runtime
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install the repository-required SonarScanner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          dotnet tool install --global dotnet-sonarscanner
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to install the required SonarScanner."
+          }
+
+      - name: Produce the repository post-merge exact-head receipt
+        shell: pwsh
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_READ_TOKEN: ${{ secrets.SONAR_READ_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $scanWorktree = Join-Path $env:RUNNER_TEMP "stateless-preview-post-merge-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          git -C $env:GITHUB_WORKSPACE worktree add --detach $scanWorktree $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to create the exact-head scanner worktree."
+          }
+          $entered = $false
+          try {
+            Push-Location $scanWorktree
+            $entered = $true
+            python scripts/run_sonarqube_exact_head.py --role post-merge
+            if ($LASTEXITCODE -ne 0) {
+              throw "Post-merge exact-head receipt production failed."
+            }
+          }
+          finally {
+            if ($entered) {
+              Pop-Location
+            }
+            git -C $env:GITHUB_WORKSPACE worktree remove --force $scanWorktree
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to remove the exact-head scanner worktree."
+            }
+          }
+
+      - name: Seal the post-merge receipt for this build
+        shell: pwsh
+        run: python scripts/stateless_preview_artifact.py produce-post-merge-receipt
+
+      - name: Publish the self-contained win-x64 preview
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          dotnet publish host/NetCoreDbg.Mcp.Stateless.Preview/NetCoreDbg.Mcp.Stateless.Preview.csproj --configuration Release --runtime win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishTrimmed=false -p:AssemblyName=netcoredbg-mcp-stateless-preview --output artifacts/stateless-preview/publish
+          if ($LASTEXITCODE -ne 0) {
+            throw "Preview publish failed."
+          }
+
+      - name: Archive and manifest the preview payload
+        shell: pwsh
+        run: python scripts/stateless_preview_artifact.py prepare-payload
+
+      - name: Retain the immutable post-merge receipt
+        id: upload_post_merge_receipt
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.admit.outputs.post_merge_receipt_artifact_name }}
+          path: artifacts/stateless-preview/post-merge-receipt/
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+      - name: Retain the immutable preview payload
+        id: upload_payload
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.admit.outputs.payload_artifact_name }}
+          path: artifacts/stateless-preview/payload/
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+      - name: Seal candidate identity and release-gate catalog
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          A1_PAYLOAD_ARTIFACT_ID: ${{ steps.upload_payload.outputs.artifact-id }}
+          A1_POST_MERGE_RECEIPT_ARTIFACT_ID: ${{ steps.upload_post_merge_receipt.outputs.artifact-id }}
+        run: python scripts/stateless_preview_artifact.py seal-build-records
+
+      - name: Retain the immutable Candidate Identity Record
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.admit.outputs.candidate_identity_artifact_name }}
+          path: artifacts/stateless-preview/records/candidate-identity.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+      - name: Retain the immutable Release Gate Catalog
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.admit.outputs.release_gate_catalog_artifact_name }}
+          path: artifacts/stateless-preview/records/release-gate-catalog.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
