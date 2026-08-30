@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from netcoredbg_mcp.dap.client import DAPClient
+from netcoredbg_mcp.dap.client import DAPClient, sanitize_terminal_text
 from netcoredbg_mcp.dap.protocol import Commands, DAPEvent, DAPRequest, DAPResponse
 from netcoredbg_mcp.resource_updates import STATE_URI, THREADS_URI
 from netcoredbg_mcp.session import DebugState, SessionManager
@@ -1340,3 +1340,34 @@ class TestDAPClientTransportDeath:
         assert terminal.stdout_eof is True
         assert terminal.process_exited is True
         assert terminal.returncode == 0
+
+    def test_terminal_text_sanitizer_redacts_private_values_and_controls(self):
+        """Public diagnostics must not preserve secrets, paths, or control bytes."""
+
+        unsafe = "token=abc123 C:\\Users\\private\\debug.log line\n" + chr(27) + "[31m"
+
+        assert sanitize_terminal_text(unsafe) == ("token=<redacted> <path> line\\n\\u001b[31m")
+
+    def test_terminal_event_metadata_is_bounded_before_retention(self):
+        """Oversized or invalid DAP event metadata must not persist in state."""
+
+        client = DAPClient("/path")
+        client._process = SimpleNamespace(pid=41006, stdout=MagicMock(), returncode=0)
+        run = client._run_for_direct_reader()
+
+        client._handle_message(
+            {
+                "seq": "s" * 10_000,
+                "type": "event",
+                "event": "e" * 10_000,
+                "body": {"token": "abc123", "path": "C:\\Users\\private\\x"},
+            },
+            run,
+        )
+
+        assert run.last_dap_event is not None
+        assert run.last_dap_event[0] is None
+        assert len(run.last_dap_event[1]) < 300
+        assert run.last_dap_event_body_preview is not None
+        assert "abc123" not in run.last_dap_event_body_preview
+        assert "C:\\Users" not in run.last_dap_event_body_preview

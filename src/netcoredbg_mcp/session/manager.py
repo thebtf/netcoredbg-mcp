@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..build import BuildManager, BuildResult
 from ..dap import DAPClient, DAPEvent, DAPResponse
-from ..dap.client import DapTransportTerminal
+from ..dap.client import DapTransportTerminal, sanitize_terminal_text
 from ..dap.events import (
     BreakpointEventBody,
     CapabilitiesEventBody,
@@ -938,7 +938,7 @@ class SessionManager:
             last_dap_event_seq=last_event_seq,
             last_dap_event_name=last_event_name,
             last_dap_event_body_preview=terminal.last_dap_event_body_preview,
-            stderr_tail=terminal.stderr_tail.decode("utf-8", errors="replace"),
+            stderr_tail=sanitize_terminal_text(terminal.stderr_tail),
             stderr_truncated=terminal.stderr_truncated,
             stderr_drained=terminal.stderr_drained,
             reader_error=terminal.reader_error,

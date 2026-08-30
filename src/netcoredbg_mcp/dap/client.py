@@ -6,6 +6,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -30,6 +32,19 @@ NATURAL_EXIT_TIMEOUT = 0.25
 STREAM_DRAIN_TIMEOUT = 0.25
 TERMINATE_TIMEOUT = 5.0
 KILL_TIMEOUT = 2.0
+TERMINAL_EVENT_NAME_LIMIT = 256
+
+_CREDENTIAL_VALUE_RE = re.compile(
+    r"(?i)\b(authorization|access[_-]?token|token|password|secret|api[_-]?key)\b"
+    r"(\s*[:=]\s*)([^\s,;]+)"
+)
+_JSON_CREDENTIAL_VALUE_RE = re.compile(
+    r'(?i)("(?:authorization|access[_-]?token|token|password|secret|api[_-]?key)"'
+    r'\s*:\s*")[^"]*(")'
+)
+_BEARER_VALUE_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+_WINDOWS_PATH_RE = re.compile(r"(?i)(?:[A-Z]:[\\/]|\\\\)[^\s\"'<>|]+")
+_POSIX_PATH_RE = re.compile(r"(?<![\w:])/(?:[^/\s\"']+/)+[^\s\"']*")
 
 
 def format_request_arguments_for_log(
@@ -162,7 +177,7 @@ class DapTransportTerminal:
     protocol_terminated: bool
     debuggee_exit_code: int | None
     stdout_eof: bool
-    last_dap_event: tuple[int, str] | None
+    last_dap_event: tuple[int | None, str] | None
     last_dap_event_body_preview: str | None
     stderr_tail: bytes
     stderr_truncated: bool
@@ -191,7 +206,7 @@ class _DapRun:
     protocol_terminated: bool = False
     debuggee_exit_code: int | None = None
     stdout_eof: bool = False
-    last_dap_event: tuple[int, str] | None = None
+    last_dap_event: tuple[int | None, str] | None = None
     last_dap_event_body_preview: str | None = None
     reader_error: str | None = None
     stderr_tail: bytearray = field(default_factory=bytearray)
@@ -207,13 +222,51 @@ class _DapRun:
     terminal: DapTransportTerminal | None = None
 
 
-def _bounded_text(value: object, limit: int = TERMINAL_PREVIEW_LIMIT) -> str:
-    """Return a control-safe bounded diagnostic string."""
+def sanitize_terminal_text(
+    value: object,
+    limit: int = TERMINAL_PREVIEW_LIMIT,
+) -> str:
+    """Return bounded public diagnostic text with secrets and controls removed.
 
-    text = str(value).replace("\x00", "\\0")
-    if len(text) <= limit:
-        return text
-    return text[:limit] + "... [truncated]"
+    Adapter output is untrusted. Before terminal facts cross into public MCP
+    state, this boundary redacts credential-shaped values and absolute paths,
+    and renders control or bidi-format characters as visible escape sequences.
+    The final length bound is applied after normalization so replacement text
+    cannot expand a small input into an unbounded public record.
+    """
+
+    text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
+    text = _JSON_CREDENTIAL_VALUE_RE.sub(
+        lambda match: f"{match.group(1)}<redacted>{match.group(2)}", text
+    )
+    text = _CREDENTIAL_VALUE_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}<redacted>", text
+    )
+    text = _BEARER_VALUE_RE.sub("Bearer <redacted>", text)
+    text = _WINDOWS_PATH_RE.sub("<path>", text)
+    text = _POSIX_PATH_RE.sub("<path>", text)
+
+    normalized: list[str] = []
+    named_controls = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+    for character in text:
+        category = unicodedata.category(character)
+        if character in named_controls:
+            normalized.append(named_controls[character])
+        elif ord(character) < 32 or ord(character) == 127 or category in {"Cf", "Cs"}:
+            normalized.append(f"\\u{ord(character):04x}")
+        else:
+            normalized.append(character)
+
+    safe = "".join(normalized)
+    if len(safe) <= limit:
+        return safe
+    return safe[:limit] + "... [truncated]"
+
+
+def _bounded_text(value: object, limit: int = TERMINAL_PREVIEW_LIMIT) -> str:
+    """Normalize one internal diagnostic field for terminal retention."""
+
+    return sanitize_terminal_text(value, limit)
 
 
 def _append_stderr(run: _DapRun, chunk: bytes) -> None:
@@ -680,12 +733,16 @@ class DAPClient:
                     future.set_result(message)
 
             elif isinstance(message, DAPEvent):
-                logger.debug("<<< Event %s: %s", message.event, message.body)
+                event_name = sanitize_terminal_text(message.event, TERMINAL_EVENT_NAME_LIMIT)
+                body_json = json.dumps(message.body, default=str, separators=(",", ":"))
+                body_preview = _bounded_text(body_json)
+                logger.debug("<<< Event %s: %s", event_name, body_preview)
                 if run is not None:
-                    run.last_dap_event = (message.seq, message.event)
-                    run.last_dap_event_body_preview = _bounded_text(
-                        json.dumps(message.body, default=str, separators=(",", ":"))
+                    event_seq = (
+                        message.seq if type(message.seq) is int and message.seq >= 0 else None
                     )
+                    run.last_dap_event = (event_seq, event_name)
+                    run.last_dap_event_body_preview = body_preview
                     if message.event == "terminated":
                         run.protocol_terminated = True
                     elif message.event == "exited":
@@ -693,14 +750,17 @@ class DAPClient:
                         if type(exit_code) is int:
                             run.debuggee_exit_code = exit_code
 
-                handlers = self._event_handlers.get(message.event, [])
+                handlers = (
+                    self._event_handlers.get(message.event, [])
+                    if isinstance(message.event, str)
+                    else []
+                )
                 if not handlers:
-                    body_json = json.dumps(message.body, default=str)
                     logger.warning(
                         "Unhandled DAP event '%s' dropped: body_size=%d body_preview=%s",
-                        message.event,
+                        event_name,
                         len(body_json.encode("utf-8")),
-                        body_json[:200],
+                        body_preview,
                     )
                 for handler in handlers:
                     try:
