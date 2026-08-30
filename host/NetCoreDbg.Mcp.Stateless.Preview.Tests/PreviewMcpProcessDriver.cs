@@ -20,19 +20,56 @@ internal sealed class PreviewMcpProcessDriver : IAsyncDisposable
         _transport = transport;
     }
 
-    internal static async Task<PreviewMcpProcessDriver> StartRawAsync(
+    internal static Task<PreviewMcpProcessDriver> StartRawAsync(
+        string projectRoot,
+        string? workingDirectory = null,
+        IReadOnlyDictionary<string, string?>? environment = null,
+        CancellationToken cancellationToken = default) =>
+        StartAsync(
+            PreviewOutputPathResolver.ResolveProcess(),
+            projectRoot,
+            workingDirectory ?? PreviewRepositoryLayout.Root,
+            environment,
+            cancellationToken);
+
+    internal static Task<PreviewMcpProcessDriver> StartVerifiedExtractedExecutableAsync(
+        string verifiedExecutablePath,
         string projectRoot,
         string? workingDirectory = null,
         IReadOnlyDictionary<string, string?>? environment = null,
         CancellationToken cancellationToken = default)
     {
-        var candidate = PreviewOutputPathResolver.ResolveProcess();
+        ArgumentException.ThrowIfNullOrWhiteSpace(verifiedExecutablePath);
+        if (!Path.IsPathFullyQualified(verifiedExecutablePath))
+        {
+            throw new ArgumentException("The verified extracted preview executable path must be fully qualified.", nameof(verifiedExecutablePath));
+        }
+
+        var executablePath = Path.GetFullPath(verifiedExecutablePath);
+        Assert.True(File.Exists(executablePath), $"Verified extracted preview executable is absent: '{executablePath}'.");
+        var executableDirectory = Path.GetDirectoryName(executablePath)
+            ?? throw new InvalidOperationException($"Verified extracted preview executable has no parent directory: '{executablePath}'.");
+        return StartAsync(
+            new PreviewOutputProcess(executablePath, []),
+            projectRoot,
+            workingDirectory ?? executableDirectory,
+            environment,
+            cancellationToken);
+    }
+
+    private static async Task<PreviewMcpProcessDriver> StartAsync(
+        PreviewOutputProcess candidate,
+        string projectRoot,
+        string workingDirectory,
+        IReadOnlyDictionary<string, string?>? environment,
+        CancellationToken cancellationToken)
+    {
         var transport = new StdioClientTransport(new StdioClientTransportOptions
         {
             Command = candidate.Command,
             Arguments = [.. candidate.Arguments, "--project", projectRoot],
             Name = "netcoredbg-mcp-stateless-preview-contract",
-            WorkingDirectory = workingDirectory ?? PreviewRepositoryLayout.Root,
+            WorkingDirectory = workingDirectory,
             EnvironmentVariables = environment is null ? null : new Dictionary<string, string?>(environment),
             ShutdownTimeout = TimeSpan.FromSeconds(2),
         });
