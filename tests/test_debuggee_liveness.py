@@ -7,7 +7,12 @@ import pytest
 
 import netcoredbg_mcp.session.state as state_module
 from netcoredbg_mcp.dap import DAPEvent
-from netcoredbg_mcp.dap.client import DAPClient
+from netcoredbg_mcp.dap.client import (
+    DapCleanupOutcome,
+    DAPClient,
+    DapTerminalTrigger,
+    DapTransportTerminal,
+)
 from netcoredbg_mcp.dap.events import StopReason
 from netcoredbg_mcp.session import DebugState, SessionManager
 from netcoredbg_mcp.session.state import SessionState, ThreadInfo
@@ -142,6 +147,26 @@ def test_debuggee_liveness_fields_follow_process_and_state_transitions() -> None
     assert stopped["execState"] == "stopped-at-exception"
 
     manager._on_terminated(DAPEvent(seq=4, event="terminated", body={}))
+    manager._on_transport_terminal(
+        manager._client,
+        DapTransportTerminal(
+            generation=1,
+            first_trigger=DapTerminalTrigger.DAP_TERMINATED,
+            adapter_pid=1001,
+            process_exited=True,
+            returncode=0,
+            protocol_terminated=True,
+            debuggee_exit_code=None,
+            stdout_eof=True,
+            last_dap_event=(4, "terminated"),
+            last_dap_event_body_preview="{}",
+            stderr_tail=b"",
+            stderr_truncated=False,
+            stderr_drained=True,
+            reader_error=None,
+            cleanup_outcome=DapCleanupOutcome.NATURAL_EXIT,
+        ),
+    )
 
     terminated = manager.state.to_dict()
     assert terminated["debuggeeAlive"] is False

@@ -7,6 +7,8 @@ import json
 import logging
 import os
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 from .protocol import (
@@ -22,6 +24,12 @@ logger = logging.getLogger(__name__)
 # Limits for security
 MAX_CONTENT_LENGTH = 10_000_000  # 10MB max DAP message size
 REDACTED_ENV_VALUE = "<redacted>"
+TERMINAL_STDERR_LIMIT = 16 * 1024
+TERMINAL_PREVIEW_LIMIT = 2 * 1024
+NATURAL_EXIT_TIMEOUT = 0.25
+STREAM_DRAIN_TIMEOUT = 0.25
+TERMINATE_TIMEOUT = 5.0
+KILL_TIMEOUT = 2.0
 
 
 def format_request_arguments_for_log(
@@ -110,19 +118,138 @@ def first_env_value(env: Mapping[str, str | None], *names: str) -> str | None:
     return None
 
 
+class DapTerminalTrigger(str, Enum):
+    """The first observed fact that made one adapter run terminal."""
+
+    DAP_TERMINATED = "dap_terminated"
+    STDOUT_EOF = "stdout_eof"
+    READER_FAILURE = "reader_failure"
+    PROCESS_EXIT = "process_exit"
+    EXPLICIT_STOP = "explicit_stop"
+
+
+class DapCleanupOutcome(str, Enum):
+    """How the elected finalizer completed adapter cleanup."""
+
+    NATURAL_EXIT = "natural_exit"
+    TERMINATED = "terminated"
+    KILLED = "killed"
+    EXIT_UNOBSERVED = "exit_unobserved"
+
+
+class _RunPhase(str, Enum):
+    """Private lifecycle state for one adapter subprocess generation."""
+
+    ACTIVE = "active"
+    FINALIZING = "finalizing"
+    FINALIZED = "finalized"
+
+
+@dataclass(frozen=True, slots=True)
+class DapTransportTerminal:
+    """Immutable, bounded facts from one completed adapter transport run.
+
+    The record separates DAP protocol facts from adapter-process and stream
+    observations. Missing return codes or incomplete drains remain explicit
+    unknowns; they are never converted into a guessed crash or debuggee exit.
+    """
+
+    generation: object
+    first_trigger: DapTerminalTrigger
+    adapter_pid: int
+    process_exited: bool
+    returncode: int | None
+    protocol_terminated: bool
+    debuggee_exit_code: int | None
+    stdout_eof: bool
+    last_dap_event: tuple[int, str] | None
+    last_dap_event_body_preview: str | None
+    stderr_tail: bytes
+    stderr_truncated: bool
+    stderr_drained: bool
+    reader_error: str | None
+    cleanup_outcome: DapCleanupOutcome
+
+
+TransportTerminalHandler = Callable[[DapTransportTerminal], None]
+
+
+@dataclass(slots=True)
+class _DapRun:
+    """Mutable facts and task ownership for exactly one adapter generation.
+
+    All observers capture this object instead of reading client-global process
+    state. That fence prevents a late task from an older run from settling
+    requests, cleaning up, or publishing terminal facts for a newer adapter.
+    """
+
+    generation: object
+    process: asyncio.subprocess.Process
+    pending: dict[int, asyncio.Future[DAPResponse]]
+    phase: _RunPhase = _RunPhase.ACTIVE
+    first_trigger: DapTerminalTrigger | None = None
+    protocol_terminated: bool = False
+    debuggee_exit_code: int | None = None
+    stdout_eof: bool = False
+    last_dap_event: tuple[int, str] | None = None
+    last_dap_event_body_preview: str | None = None
+    reader_error: str | None = None
+    stderr_tail: bytearray = field(default_factory=bytearray)
+    stderr_truncated: bool = False
+    stderr_drained: bool = False
+    process_exited: bool = False
+    returncode: int | None = None
+    cleanup_outcome: DapCleanupOutcome = DapCleanupOutcome.EXIT_UNOBSERVED
+    stdout_task: asyncio.Task[None] | None = None
+    stderr_task: asyncio.Task[None] | None = None
+    process_task: asyncio.Task[None] | None = None
+    finalizer_task: asyncio.Task[DapTransportTerminal] | None = None
+    terminal: DapTransportTerminal | None = None
+
+
+def _bounded_text(value: object, limit: int = TERMINAL_PREVIEW_LIMIT) -> str:
+    """Return a control-safe bounded diagnostic string."""
+
+    text = str(value).replace("\x00", "\\0")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "... [truncated]"
+
+
+def _append_stderr(run: _DapRun, chunk: bytes) -> None:
+    """Append bytes to the fixed-capacity stderr tail for one run."""
+
+    if not chunk:
+        return
+    combined = bytes(run.stderr_tail) + chunk
+    if len(combined) > TERMINAL_STDERR_LIMIT:
+        run.stderr_truncated = True
+        combined = combined[-TERMINAL_STDERR_LIMIT:]
+    run.stderr_tail[:] = combined
+
+
 class DAPClient:
     """Async DAP client for netcoredbg communication."""
 
     def __init__(self, netcoredbg_path: str | None = None):
+        """Create a client with no active adapter generation.
+
+        Process, observer, request, and terminal facts are rebound for every
+        adapter start. The legacy private fields remain the current-run views
+        used by focused tests; `_DapRun` is the lifecycle authority.
+        """
+
         self.netcoredbg_path = netcoredbg_path or self._find_netcoredbg()
         self._seq = 0
-        self._request_lock = asyncio.Lock()  # Protect sequence number
+        self._request_lock = asyncio.Lock()
         self._pending: dict[int, asyncio.Future[DAPResponse]] = {}
         self._event_handlers: dict[str, list[Callable[[DAPEvent], None]]] = {}
         self._process: asyncio.subprocess.Process | None = None
-        self._read_task: asyncio.Task | None = None
-        self._buffer = b""
+        self._read_task: asyncio.Task[None] | None = None
         self._capabilities: dict[str, Any] = {}
+        self._run: _DapRun | None = None
+        self._generation_counter = 0
+        self._transport_terminal_handler: TransportTerminalHandler | None = None
 
     @property
     def capabilities(self) -> dict[str, Any]:
@@ -162,59 +289,276 @@ class DAPClient:
         """Check if DAP client is connected."""
         return self._process is not None and self._process.returncode is None
 
-    async def start(self) -> None:
-        """Start netcoredbg process."""
-        if self.is_running:
-            return
+    @property
+    def adapter_pid(self) -> int | None:
+        """Return the PID of the current adapter process, when one exists."""
 
-        logger.info(f"Starting netcoredbg: {self.netcoredbg_path}")
-        self._process = await asyncio.create_subprocess_exec(
+        return self._process.pid if self._process is not None else None
+
+    def set_transport_terminal_handler(self, handler: TransportTerminalHandler | None) -> None:
+        """Install the sole synchronous sink for immutable terminal facts.
+
+        `SessionManager` installs this sink before process startup. The client
+        never awaits manager policy, and the sink must not perform blocking or
+        asynchronous work.
+        """
+
+        self._transport_terminal_handler = handler
+
+    async def start(self, *, generation: object | None = None) -> object:
+        """Start one netcoredbg generation and its three lifecycle observers.
+
+        Args:
+            generation: Manager-issued identity used to reject terminal facts
+                from an older adapter run. Direct client callers may omit it;
+                the client then creates a process-local monotonic identity.
+
+        Returns:
+            The exact identity bound to the new adapter run.
+        """
+
+        if self.is_running and self._run is not None:
+            return self._run.generation
+
+        if generation is None:
+            self._generation_counter += 1
+            generation = self._generation_counter
+
+        logger.info("Starting netcoredbg: %s", self.netcoredbg_path)
+        process = await asyncio.create_subprocess_exec(
             self.netcoredbg_path,
             "--interpreter=vscode",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        self._read_task = asyncio.create_task(self._read_loop())
-        logger.info(f"netcoredbg started with PID {self._process.pid}")
+        pending: dict[int, asyncio.Future[DAPResponse]] = {}
+        run = _DapRun(generation=generation, process=process, pending=pending)
+        self._run = run
+        self._process = process
+        self._pending = pending
+
+        # Task creation has no intervening await. The manager binds the issued
+        # generation before calling start, so even eager observers cannot make
+        # an older run authoritative for the session.
+        run.stderr_task = asyncio.create_task(self._drain_stderr(run))
+        run.process_task = asyncio.create_task(self._wait_process(run))
+        run.stdout_task = asyncio.create_task(self._read_loop(run))
+        self._read_task = run.stdout_task
+        logger.info("netcoredbg started with PID %s", process.pid)
+        return generation
 
     async def stop(self) -> None:
-        """Stop netcoredbg process."""
-        if self._read_task:
-            self._read_task.cancel()
+        """Join the current generation's guarded finalizer.
+
+        The manager records explicit-stop policy before awaiting this method.
+        The client records only transport facts and performs the one bounded
+        cleanup sequence shared with EOF, reader failure, and process exit.
+        """
+
+        run = self._run
+        if run is None:
+            self._settle_pending(self._pending, cancel=True)
+            logger.info("netcoredbg stopped")
+            return
+
+        finalizer, _ = self._request_finalization(run, DapTerminalTrigger.EXPLICIT_STOP)
+        await asyncio.shield(finalizer)
+        logger.info("netcoredbg stopped")
+
+    def _run_for_direct_reader(self) -> _DapRun:
+        """Bind legacy direct-reader tests to a real run-scoped authority."""
+
+        if self._process is None:
+            raise RuntimeError("Process not running")
+        if self._run is not None and self._run.process is self._process:
+            return self._run
+        self._generation_counter += 1
+        run = _DapRun(
+            generation=self._generation_counter,
+            process=self._process,
+            pending=self._pending,
+        )
+        self._run = run
+        return run
+
+    async def _drain_stderr(self, run: _DapRun) -> None:
+        """Drain stderr chunks into a fixed-capacity run-local tail."""
+
+        stream = run.process.stderr
+        if stream is None:
+            run.stderr_drained = True
+            return
+        try:
+            while True:
+                chunk = await stream.read(4096)
+                if not chunk:
+                    run.stderr_drained = True
+                    return
+                _append_stderr(run, chunk)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.debug("Adapter stderr drain failed: %s", error)
+
+    async def _wait_process(self, run: _DapRun) -> None:
+        """Observe adapter completion without publishing a second outcome."""
+
+        try:
+            run.returncode = await run.process.wait()
+            run.process_exited = True
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.debug("Adapter process wait failed: %s", error)
+        self._request_finalization(run, DapTerminalTrigger.PROCESS_EXIT)
+
+    def _request_finalization(
+        self,
+        run: _DapRun,
+        trigger: DapTerminalTrigger,
+    ) -> tuple[asyncio.Task[DapTransportTerminal], bool]:
+        """Elect one finalizer without awaiting or acquiring another lock."""
+
+        if run.finalizer_task is not None:
+            return run.finalizer_task, False
+        run.phase = _RunPhase.FINALIZING
+        run.first_trigger = trigger
+        run.finalizer_task = asyncio.create_task(self._finalize_run(run))
+        return run.finalizer_task, True
+
+    async def _finalize_run(self, run: _DapRun) -> DapTransportTerminal:
+        """Settle work, join bounded observations, clean up, and publish once."""
+
+        self._settle_pending(run.pending)
+        process = run.process
+        current = asyncio.current_task()
+
+        if not run.process_exited and process.returncode is None:
+            process_wait = run.process_task
+            if process_wait is not None and process_wait is not current:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(process_wait), timeout=NATURAL_EXIT_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    pass
+
+        if not run.process_exited and process.returncode is None:
             try:
-                await self._read_task
-            except asyncio.CancelledError:
-                pass
+                process.terminate()
+                run.returncode = await asyncio.wait_for(process.wait(), timeout=TERMINATE_TIMEOUT)
+                run.process_exited = True
+                run.cleanup_outcome = DapCleanupOutcome.TERMINATED
+            except asyncio.TimeoutError:
+                logger.warning("Process %s did not terminate, killing...", process.pid)
+                process.kill()
+                try:
+                    run.returncode = await asyncio.wait_for(process.wait(), timeout=KILL_TIMEOUT)
+                    run.process_exited = True
+                    run.cleanup_outcome = DapCleanupOutcome.KILLED
+                except asyncio.TimeoutError:
+                    logger.error("Failed to observe killed process %s", process.pid)
+            except ProcessLookupError:
+                run.process_exited = True
+                run.cleanup_outcome = DapCleanupOutcome.NATURAL_EXIT
+        else:
+            run.cleanup_outcome = DapCleanupOutcome.NATURAL_EXIT
+
+        if process.returncode is not None:
+            run.process_exited = True
+            run.returncode = process.returncode
+
+        # A process exit or DAP termination can precede buffered stdout EOF.
+        # Let the reader contribute those facts within a fixed bound. Raw EOF
+        # and reader-failure finalizers never await their own observer.
+        if run.first_trigger in {
+            DapTerminalTrigger.PROCESS_EXIT,
+            DapTerminalTrigger.DAP_TERMINATED,
+        }:
+            await self._join_observer(run.stdout_task, STREAM_DRAIN_TIMEOUT)
+        await self._join_observer(run.stderr_task, STREAM_DRAIN_TIMEOUT)
+
+        if run.stderr_task is not None and not run.stderr_task.done():
+            run.stderr_task.cancel()
+        if (
+            run.first_trigger
+            in {
+                DapTerminalTrigger.PROCESS_EXIT,
+                DapTerminalTrigger.DAP_TERMINATED,
+                DapTerminalTrigger.EXPLICIT_STOP,
+            }
+            and run.stdout_task is not None
+            and not run.stdout_task.done()
+        ):
+            run.stdout_task.cancel()
+
+        terminal = DapTransportTerminal(
+            generation=run.generation,
+            first_trigger=run.first_trigger or DapTerminalTrigger.PROCESS_EXIT,
+            adapter_pid=process.pid,
+            process_exited=run.process_exited,
+            returncode=run.returncode,
+            protocol_terminated=run.protocol_terminated,
+            debuggee_exit_code=run.debuggee_exit_code,
+            stdout_eof=run.stdout_eof,
+            last_dap_event=run.last_dap_event,
+            last_dap_event_body_preview=run.last_dap_event_body_preview,
+            stderr_tail=bytes(run.stderr_tail),
+            stderr_truncated=run.stderr_truncated,
+            stderr_drained=run.stderr_drained,
+            reader_error=run.reader_error,
+            cleanup_outcome=run.cleanup_outcome,
+        )
+        run.terminal = terminal
+        run.phase = _RunPhase.FINALIZED
+
+        if self._run is run:
+            self._process = None
             self._read_task = None
 
-        if self._process:
-            pid = self._process.pid
+        handler = self._transport_terminal_handler
+        if handler is not None:
             try:
-                self._process.terminate()
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning(f"Process {pid} did not terminate, killing...")
-                self._process.kill()
-                try:
-                    await asyncio.wait_for(self._process.wait(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    logger.exception(f"Failed to kill process {pid}")
-                    # Cancel pending requests even on timeout
-                    for future in self._pending.values():
-                        if not future.done():
-                            future.cancel()
-                    self._pending.clear()
-                    return
-            self._process = None
+                handler(terminal)
+            except Exception:
+                logger.exception("Transport terminal handler failed")
+        return terminal
 
-        # Cancel pending requests
-        for future in self._pending.values():
-            if not future.done():
+    @staticmethod
+    async def _join_observer(
+        task: asyncio.Task[None] | None,
+        timeout: float,
+    ) -> None:
+        """Join a different observer within a fixed lifecycle bound."""
+
+        if task is None or task.done() or task is asyncio.current_task():
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        except asyncio.TimeoutError:
+            return
+        except asyncio.CancelledError:
+            return
+
+    @staticmethod
+    def _settle_pending(
+        pending: dict[int, asyncio.Future[DAPResponse]],
+        *,
+        cancel: bool = False,
+    ) -> None:
+        """Complete every pending request exactly once, then clear the map."""
+
+        for future in pending.values():
+            if future.done():
+                continue
+            if cancel:
                 future.cancel()
-        self._pending.clear()
-
-        logger.info("netcoredbg stopped")
+            else:
+                future.set_exception(
+                    RuntimeError("netcoredbg process died — pending request cancelled")
+                )
+        pending.clear()
 
     def on_event(self, event_name: str, handler: Callable[[DAPEvent], None]) -> None:
         """Register event handler."""
@@ -233,17 +577,21 @@ class DAPClient:
     async def send_request(
         self, command: str, arguments: dict[str, Any] | None = None, timeout: float = 30.0
     ) -> DAPResponse:
-        """Send DAP request and wait for response."""
-        if not self.is_running:
+        """Send one request only while the current adapter run accepts work."""
+        run = self._run
+        if not self.is_running or run is None or run.phase is not _RunPhase.ACTIVE:
             raise RuntimeError("DAP client not running")
 
-        # Atomically increment seq and register future
+        # Admission and registration share the request lock. If finalization
+        # wins first, no future can be registered after the one settlement pass.
         async with self._request_lock:
+            if self._run is not run or run.phase is not _RunPhase.ACTIVE:
+                raise RuntimeError("DAP client not running")
             self._seq += 1
             seq = self._seq
-            future: asyncio.Future[DAPResponse] = asyncio.Future()
-            self._pending[seq] = future
-
+            future: asyncio.Future[DAPResponse] = asyncio.get_running_loop().create_future()
+            run.pending[seq] = future
+            self._pending = run.pending
         request = DAPRequest(seq=seq, command=command, arguments=arguments or {})
         await self._send(request)
 
@@ -267,75 +615,84 @@ class DAPClient:
         self._process.stdin.write(data)
         await self._process.stdin.drain()
 
-    async def _read_loop(self) -> None:
-        """Read messages from netcoredbg."""
-        assert self._process and self._process.stdout
+    async def _read_loop(self, run: _DapRun | None = None) -> None:
+        """Parse DAP stdout and request one bounded terminal finalization."""
 
-        try:
-            while True:
-                try:
-                    # Read header
-                    header_line = await self._process.stdout.readline()
-                    if not header_line:
-                        logger.warning("netcoredbg stdout closed")
-                        break
+        run = run or self._run_for_direct_reader()
+        stream = run.process.stdout
+        assert stream is not None
 
-                    header = header_line.decode("utf-8").strip()
-                    if not header.startswith("Content-Length:"):
-                        continue
-
-                    content_length = int(header.split(":")[1].strip())
-
-                    # Validate Content-Length (security: prevent DoS)
-                    if content_length < 0 or content_length > MAX_CONTENT_LENGTH:
-                        logger.error(f"Invalid Content-Length: {content_length}")
-                        raise ValueError(f"Invalid Content-Length: {content_length}")
-
-                    # Read empty line
-                    await self._process.stdout.readline()
-
-                    # Read content
-                    content = await self._process.stdout.readexactly(content_length)
-                    data = json.loads(content.decode("utf-8"))
-
-                    self._handle_message(data)
-
-                except asyncio.CancelledError:
-                    break
-                except Exception:
-                    logger.exception("Error reading DAP message")
-                    break
-        finally:
-            # Cancel all pending request futures immediately so callers don't
-            # hang for 30s waiting for a response from a dead process.
-            for future in self._pending.values():
-                if not future.done():
-                    future.set_exception(
-                        RuntimeError("netcoredbg process died — pending request cancelled")
+        while True:
+            try:
+                header_line = await stream.readline()
+                if not header_line:
+                    logger.warning("netcoredbg stdout closed")
+                    run.stdout_eof = True
+                    finalizer, created = self._request_finalization(
+                        run, DapTerminalTrigger.STDOUT_EOF
                     )
-            self._pending.clear()
+                    if created:
+                        await asyncio.shield(finalizer)
+                    return
 
-            # Cleanup on read loop exit (handles zombie process)
-            if self._process and self._process.returncode is None:
-                logger.warning("Read loop exited, cleaning up process...")
-                try:
-                    self._process.terminate()
-                except Exception:
-                    logger.debug("Failed to terminate process during cleanup")
+                header = header_line.decode("utf-8").strip()
+                if not header.startswith("Content-Length:"):
+                    continue
 
-    def _handle_message(self, data: dict[str, Any]) -> None:
-        """Handle incoming DAP message."""
+                content_length = int(header.split(":")[1].strip())
+                if content_length < 0 or content_length > MAX_CONTENT_LENGTH:
+                    logger.error("Invalid Content-Length: %s", content_length)
+                    raise ValueError(f"Invalid Content-Length: {content_length}")
+
+                await stream.readline()
+                content = await stream.readexactly(content_length)
+                data = json.loads(content.decode("utf-8"))
+                self._handle_message(data, run)
+
+                if run.protocol_terminated:
+                    self._request_finalization(run, DapTerminalTrigger.DAP_TERMINATED)
+                    # Continue draining stdout. The elected finalizer owns the
+                    # bounded join and will cancel this observer if EOF stalls.
+                    continue
+            except asyncio.CancelledError:
+                return
+            except Exception as error:
+                run.reader_error = _bounded_text(f"{error.__class__.__name__}: {error}")
+                logger.exception("Error reading DAP message")
+                finalizer, created = self._request_finalization(
+                    run, DapTerminalTrigger.READER_FAILURE
+                )
+                if created:
+                    await asyncio.shield(finalizer)
+                return
+
+    def _handle_message(self, data: dict[str, Any], run: _DapRun | None = None) -> None:
+        """Handle one DAP message and retain bounded protocol facts."""
+
         try:
             message = parse_message(data)
 
             if isinstance(message, DAPResponse):
-                logger.debug(f"<<< Response {message.command}: success={message.success}")
-                future = self._pending.pop(message.request_seq, None)
+                logger.debug("<<< Response %s: success=%s", message.command, message.success)
+                pending = run.pending if run is not None else self._pending
+                future = pending.pop(message.request_seq, None)
                 if future and not future.done():
                     future.set_result(message)
 
             elif isinstance(message, DAPEvent):
-                logger.debug(f"<<< Event {message.event}: {message.body}")
+                logger.debug("<<< Event %s: %s", message.event, message.body)
+                if run is not None:
+                    run.last_dap_event = (message.seq, message.event)
+                    run.last_dap_event_body_preview = _bounded_text(
+                        json.dumps(message.body, default=str, separators=(",", ":"))
+                    )
+                    if message.event == "terminated":
+                        run.protocol_terminated = True
+                    elif message.event == "exited":
+                        exit_code = message.body.get("exitCode")
+                        if type(exit_code) is int:
+                            run.debuggee_exit_code = exit_code
+
                 handlers = self._event_handlers.get(message.event, [])
                 if not handlers:
                     body_json = json.dumps(message.body, default=str)
@@ -352,7 +709,7 @@ class DAPClient:
                         logger.exception("Event handler error")
 
         except Exception:
-            logger.exception(f"Error handling message, data: {data}")
+            logger.exception("Error handling message, data: %s", data)
 
     # High-level DAP commands
 

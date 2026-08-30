@@ -466,7 +466,7 @@ class TestEventHandlers:
             assert manager.state.state == DebugState.RUNNING
 
     def test_on_terminated_event(self):
-        """DAP terminated ends debugging without inventing a debuggee exit code."""
+        """DAP termination remains a protocol fact until transport finalization."""
         with patch("netcoredbg_mcp.session.manager.DAPClient"):
             manager = SessionManager()
             manager._state.state = DebugState.RUNNING
@@ -474,7 +474,7 @@ class TestEventHandlers:
             event = DAPEvent(seq=1, event="terminated", body={})
             manager._on_terminated(event)
 
-            assert manager.state.state == DebugState.TERMINATED
+            assert manager.state.state == DebugState.RUNNING
             assert manager.state.exit_code is None
 
     def test_on_exited_event(self):

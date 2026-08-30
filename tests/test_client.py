@@ -891,7 +891,7 @@ class TestDAPClientTransportDeath:
 
         pending = asyncio.get_running_loop().create_future()
         client._pending[1] = pending
-        client._process = SimpleNamespace(stdout=ClosedStdout(), returncode=1)
+        client._process = SimpleNamespace(pid=41000, stdout=ClosedStdout(), returncode=1)
 
         try:
             await client._read_loop()
@@ -912,7 +912,7 @@ class TestDAPClientTransportDeath:
             "state": DebugState.TERMINATED.value,
             "debuggeeAlive": False,
             "stateChanges": [DebugState.TERMINATED],
-            "resourceUpdates": [(STATE_URI, THREADS_URI)],
+            "resourceUpdates": [(STATE_URI,), (THREADS_URI,)],
             "pendingError": "netcoredbg process died — pending request cancelled",
         }
 
@@ -1193,7 +1193,7 @@ class TestDAPClientTransportDeath:
             41003,
             ScriptedStdout(
                 [
-                    f"Content-Length: {len(event_content)}\r\n".encode("utf-8"),
+                    f"Content-Length: {len(event_content)}\r\n".encode(),
                     b"\r\n",
                     b"",
                 ],

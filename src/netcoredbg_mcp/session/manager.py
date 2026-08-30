@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..build import BuildManager, BuildResult
 from ..dap import DAPClient, DAPEvent, DAPResponse
+from ..dap.client import DapTransportTerminal
 from ..dap.events import (
     BreakpointEventBody,
     CapabilitiesEventBody,
@@ -62,6 +63,7 @@ from .state import (
     StackFrame,
     StoppedSnapshot,
     ThreadInfo,
+    TransportTerminalSummary,
     Variable,
     derive_exec_state,
 )
@@ -136,6 +138,9 @@ class SessionManager:
             OUTPUT_URI: 0,
             THREADS_URI: 0,
         }
+        self._dap_generation_counter = 0
+        self._active_dap_run: object | None = None
+        self._stopping_dap_run: object | None = None
 
     def _create_session_state(self, state: DebugState = DebugState.IDLE) -> SessionState:
         session_state = SessionState(state=state)
@@ -296,9 +301,8 @@ class SessionManager:
             worker = self._stealth_foreground_restore_worker
             if outer is None and worker is None:
                 return False
-            restore_was_pending = (
-                (outer is not None and not outer.done())
-                or (worker is not None and not worker.done())
+            restore_was_pending = (outer is not None and not outer.done()) or (
+                worker is not None and not worker.done()
             )
             join_task = asyncio.create_task(
                 self._cancel_and_join_stealth_foreground_restore(outer, worker)
@@ -824,28 +828,55 @@ class SessionManager:
             self._set_state(previous_state)
 
     async def start(self) -> None:
-        """Start DAP client and initialize session."""
+        """Start one manager-issued adapter generation and initialize DAP.
+
+        The manager binds the generation and terminal sink before awaiting
+        process startup. That ordering closes the early-EOF window: even an
+        eagerly scheduled observer can only publish facts for the already
+        active manager generation.
+        """
+
         if self._client.is_running:
             return
 
-        await self._client.start()
-
-        # Track netcoredbg process
-        if self._client._process and self._client._process.pid:
-            self._process_registry.register(
-                pid=self._client._process.pid,
-                role="netcoredbg",
-            )
-
         self._register_event_handlers()
-        self._set_state(DebugState.INITIALIZING)
+        self._dap_generation_counter += 1
+        generation = self._dap_generation_counter
+        self._active_dap_run = generation
+        self._stopping_dap_run = None
+        self._state.transport_terminal = None
 
-        # Initialize DAP
+        try:
+            returned_generation = await self._client.start(generation=generation)
+        except Exception:
+            if self._active_dap_run == generation:
+                self._active_dap_run = None
+            raise
+
+        if returned_generation != generation:
+            await self._client.stop()
+            self._active_dap_run = None
+            raise RuntimeError("DAP client returned a mismatched adapter generation")
+        if self._state.state == DebugState.TERMINATED:
+            raise RuntimeError("netcoredbg terminated during startup")
+
+        adapter_pid = self._client.adapter_pid
+        if adapter_pid is not None:
+            self._process_registry.register(pid=adapter_pid, role="netcoredbg")
+
+        self._set_state(DebugState.INITIALIZING)
         await self._client.initialize()
         logger.info("DAP initialized, waiting for initialized event...")
 
     def _register_event_handlers(self) -> None:
-        """Register DAP event handlers once for this manager-owned client."""
+        """Register DAP events and bind one terminal sink to this client."""
+
+        bound_client = self._client
+        set_terminal_handler = getattr(bound_client, "set_transport_terminal_handler", None)
+        if callable(set_terminal_handler):
+            set_terminal_handler(
+                lambda terminal, client=bound_client: self._on_transport_terminal(client, terminal)
+            )
         if self._event_handlers_registered:
             return
 
@@ -867,6 +898,59 @@ class SessionManager:
         self._client.on_event(Events.PROGRESS_END, self._on_progress_end)
         self._client.on_event(Events.MEMORY, self._on_memory)
         self._event_handlers_registered = True
+
+    def _on_transport_terminal(
+        self,
+        source_client: DAPClient,
+        terminal: DapTransportTerminal,
+    ) -> None:
+        """Apply one current-generation terminal fact to public session state.
+
+        Four dispositions are possible: apply an unrequested terminal outcome,
+        record facts during an explicit stop, ignore a stale client/generation,
+        or ignore a duplicate publication. Process and stream cleanup stay in
+        `DAPClient`; this method owns only session policy and resource state.
+        """
+
+        if source_client is not self._client:
+            return
+        active_generation = self._active_dap_run
+        if active_generation is not None and terminal.generation != active_generation:
+            return
+        if self._state.transport_terminal is not None:
+            return
+        if active_generation is None:
+            self._active_dap_run = terminal.generation
+
+        last_event_seq: int | None = None
+        last_event_name: str | None = None
+        if terminal.last_dap_event is not None:
+            last_event_seq, last_event_name = terminal.last_dap_event
+
+        self._state.transport_terminal = TransportTerminalSummary(
+            first_observed_signal=terminal.first_trigger.value,
+            adapter_pid=terminal.adapter_pid,
+            process_exited=terminal.process_exited,
+            adapter_return_code=terminal.returncode,
+            protocol_terminated=terminal.protocol_terminated,
+            debuggee_exit_code=terminal.debuggee_exit_code,
+            stdout_eof=terminal.stdout_eof,
+            last_dap_event_seq=last_event_seq,
+            last_dap_event_name=last_event_name,
+            last_dap_event_body_preview=terminal.last_dap_event_body_preview,
+            stderr_tail=terminal.stderr_tail.decode("utf-8", errors="replace"),
+            stderr_truncated=terminal.stderr_truncated,
+            stderr_drained=terminal.stderr_drained,
+            reader_error=terminal.reader_error,
+            cleanup_outcome=terminal.cleanup_outcome.value,
+        )
+        if terminal.debuggee_exit_code is not None and self._state.exit_code is None:
+            self._state.exit_code = terminal.debuggee_exit_code
+
+        if self._stopping_dap_run == terminal.generation:
+            return
+        self._set_state(DebugState.TERMINATED)
+        self._execution_event.set()
 
     def _on_initialized(self, event: DAPEvent) -> None:
         """Handle initialized event."""
@@ -1041,22 +1125,26 @@ class SessionManager:
             self._publish_resource_updates(STATE_URI, THREADS_URI)
 
     def _on_terminated(self, event: DAPEvent) -> None:
-        """Handle terminated event."""
+        """Record DAP termination without bypassing transport finalization.
+
+        `DAPClient` stores the protocol fact and requests the sole finalizer.
+        The resulting immutable callback owns the one unrequested state change,
+        so this handler cannot race EOF or process exit into a second outcome.
+        """
+
         body = TerminatedEventBody.from_dict(event.body)
-        self._set_state(DebugState.TERMINATED)
-        self._execution_event.set()
         if body.restart is not None:
-            logger.info("Debug session terminated with restart data")
+            logger.info("Debug session reported termination with restart data")
         else:
-            logger.info("Debug session terminated")
+            logger.info("Debug session reported protocol termination")
 
     def _on_exited(self, event: DAPEvent) -> None:
-        """Handle exited event."""
+        """Retain the DAP debuggee exit code as a distinct protocol fact."""
+
         body = ExitedEventBody.from_dict(event.body)
         self._state.exit_code = body.exit_code
         self._execution_event.set()
-        self._publish_resource_updates(STATE_URI, THREADS_URI)
-        logger.info(f"Process exited with code {self._state.exit_code}")
+        logger.info("Debuggee exited with code %s", self._state.exit_code)
 
     def _on_output(self, event: DAPEvent) -> None:
         """Handle output event."""
@@ -1723,39 +1811,45 @@ class SessionManager:
         return {"success": True, "processId": process_id}
 
     async def stop(self) -> dict[str, Any]:
-        """Stop debug session."""
+        """Stop the current session through one generation-scoped reset path."""
+
+        stopping_generation = self._active_dap_run
+        self._stopping_dap_run = stopping_generation
         await self._cancel_stealth_foreground_restore_task()
 
-        if self._client.is_running:
-            try:
-                await self._client.disconnect(terminate=True)
-            except Exception as e:
-                logger.warning(f"Error during disconnect: {e}")
+        try:
+            if self._client.is_running:
+                try:
+                    await self._client.disconnect(terminate=True)
+                except Exception as error:
+                    logger.warning("Error during disconnect: %s", error)
             await self._client.stop()
 
-        # Cleanup tracked processes
-        self._process_registry.cleanup_all()
+            self._process_registry.cleanup_all()
 
-        # Cleanup session temp directory
-        if self._session_id:
-            self._temp_manager.cleanup_session(self._session_id)
-            self._session_id = None
+            if self._session_id:
+                self._temp_manager.cleanup_session(self._session_id)
+                self._session_id = None
 
-        self._set_state(DebugState.IDLE)
-        self._initialized_event.clear()
-        self._execution_event.clear()
-        lifecycle_runs = getattr(self._runtime_smoke, "lifecycle_runs", None)
-        stop_lifecycle_runs = getattr(lifecycle_runs, "stop_all", None)
-        if stop_lifecycle_runs is not None:
-            lifecycle_stop_result = stop_lifecycle_runs(reason="debug session stopped")
-            if isinstance(lifecycle_stop_result, Awaitable):
-                await lifecycle_stop_result
-        self._runtime_smoke.reset()
-        self._state = self._create_session_state()
-        self._output_bytes = 0  # Reset output tracking for next session
-        self._publish_resource_updates(STATE_URI, THREADS_URI, OUTPUT_URI)
-
-        return {"success": True}
+            self._set_state(DebugState.IDLE)
+            self._initialized_event.clear()
+            self._execution_event.clear()
+            lifecycle_runs = getattr(self._runtime_smoke, "lifecycle_runs", None)
+            stop_lifecycle_runs = getattr(lifecycle_runs, "stop_all", None)
+            if stop_lifecycle_runs is not None:
+                lifecycle_stop_result = stop_lifecycle_runs(reason="debug session stopped")
+                if isinstance(lifecycle_stop_result, Awaitable):
+                    await lifecycle_stop_result
+            self._runtime_smoke.reset()
+            self._state = self._create_session_state()
+            self._output_bytes = 0
+            self._publish_resource_updates(STATE_URI, THREADS_URI, OUTPUT_URI)
+            return {"success": True}
+        finally:
+            if self._active_dap_run == stopping_generation:
+                self._active_dap_run = None
+            if self._stopping_dap_run == stopping_generation:
+                self._stopping_dap_run = None
 
     async def restart(self, rebuild: bool = True) -> dict[str, Any]:
         """Restart debug session with same configuration.
