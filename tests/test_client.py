@@ -1,13 +1,23 @@
 """Tests for DAP client."""
 
 import asyncio
+import json
 import logging
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from netcoredbg_mcp.dap.client import DAPClient
+from netcoredbg_mcp.dap.client import (
+    DapCleanupOutcome,
+    DAPClient,
+    DapTransportTerminal,
+    sanitize_terminal_text,
+)
 from netcoredbg_mcp.dap.protocol import Commands, DAPEvent, DAPRequest, DAPResponse
+from netcoredbg_mcp.resource_updates import STATE_URI, THREADS_URI
+from netcoredbg_mcp.session import DebugState, SessionManager
 
 
 class TestDAPClientInit:
@@ -851,3 +861,644 @@ class TestDAPClientDisconnect:
         await client.disconnect(terminate=False)
 
         assert captured_args["arguments"]["terminateDebuggee"] is False
+
+
+class TestDAPClientTransportDeath:
+    """Regression coverage for adapter transport loss without DAP termination."""
+
+    @pytest.mark.asyncio
+    async def test_stdout_eof_publishes_terminal_manager_state(self):
+        """Raw adapter EOF must invalidate the manager's public live-session state."""
+
+        class ClosedStdout:
+            """Minimal stream whose first read observes a closed adapter pipe."""
+
+            async def readline(self) -> bytes:
+                return b""
+
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+
+        client = DAPClient("/path")
+        manager._client = client
+        manager._register_event_handlers()
+        manager._state.state = DebugState.RUNNING
+        manager._state.process_id = 29736
+
+        state_changes: list[DebugState] = []
+        resource_updates: list[tuple[str, ...]] = []
+        manager.on_state_change(state_changes.append)
+
+        async def record_resource_updates(uris: tuple[str, ...]) -> None:
+            resource_updates.append(uris)
+
+        manager.set_resource_update_callback(record_resource_updates)
+
+        pending = asyncio.get_running_loop().create_future()
+        client._pending[1] = pending
+        client._process = SimpleNamespace(pid=41000, stdout=ClosedStdout(), returncode=1)
+
+        try:
+            await client._read_loop()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            state = manager.state.to_dict()
+            observed = {
+                "state": state["state"],
+                "debuggeeAlive": state["debuggeeAlive"],
+                "stateChanges": state_changes,
+                "resourceUpdates": resource_updates,
+                "pendingError": str(pending.exception()),
+            }
+        finally:
+            await manager.close_resource_update_notifications()
+
+        assert observed == {
+            "state": DebugState.TERMINATED.value,
+            "debuggeeAlive": False,
+            "stateChanges": [DebugState.TERMINATED],
+            "resourceUpdates": [(STATE_URI,), (THREADS_URI,)],
+            "pendingError": "netcoredbg process died — pending request cancelled",
+        }
+
+    @pytest.mark.asyncio
+    async def test_start_owns_stdout_stderr_and_process_observers(self):
+        """Client launch must independently begin stdout, stderr, and process observation."""
+
+        class BlockingStream:
+            def __init__(self) -> None:
+                self.read_started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def readline(self) -> bytes:
+                self.read_started.set()
+                await self.release.wait()
+                return b""
+
+            async def read(self, _size: int = -1) -> bytes:
+                self.read_started.set()
+                await self.release.wait()
+                return b""
+
+        class BlockingProcess:
+            def __init__(
+                self,
+                stdout: BlockingStream,
+                stderr: BlockingStream,
+            ) -> None:
+                self.pid = 41001
+                self.stdout = stdout
+                self.stderr = stderr
+                self.returncode: int | None = None
+                self.wait_started = asyncio.Event()
+                self.wait_release = asyncio.Event()
+
+            async def wait(self) -> int:
+                self.wait_started.set()
+                await self.wait_release.wait()
+                if self.returncode is None:
+                    self.returncode = 0
+                return self.returncode
+
+            def terminate(self) -> None:
+                self.returncode = 0
+                self.wait_release.set()
+
+            def kill(self) -> None:
+                self.returncode = -9
+                self.wait_release.set()
+
+        stdout = BlockingStream()
+        stderr = BlockingStream()
+        process = BlockingProcess(stdout, stderr)
+        client = DAPClient("/path")
+
+        try:
+            with patch(
+                "netcoredbg_mcp.dap.client.asyncio.create_subprocess_exec",
+                return_value=process,
+            ):
+                await client.start()
+
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            observed = (
+                stdout.read_started.is_set(),
+                stderr.read_started.is_set(),
+                process.wait_started.is_set(),
+            )
+        finally:
+            stdout.release.set()
+            stderr.release.set()
+            process.wait_release.set()
+            if client._read_task:
+                await client._read_task
+
+        assert observed == (True, True, True)
+
+    @pytest.mark.asyncio
+    async def test_eof_drains_exited_adapter_without_second_terminate_and_settles_pending(
+        self,
+    ):
+        """EOF must drain stderr, join an exited adapter, and settle pending work."""
+
+        class GatedEofStdout:
+            def __init__(self) -> None:
+                self.read_started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def readline(self) -> bytes:
+                self.read_started.set()
+                await self.release.wait()
+                return b""
+
+        class EmptyStderr:
+            def __init__(self) -> None:
+                self.read_calls = 0
+
+            async def read(self, _size: int = -1) -> bytes:
+                self.read_calls += 1
+                return b""
+
+            async def readline(self) -> bytes:
+                return await self.read()
+
+        class AlreadyExitedProcess:
+            def __init__(
+                self,
+                stdout: GatedEofStdout,
+                stderr: EmptyStderr,
+            ) -> None:
+                self.pid = 41002
+                self.stdout = stdout
+                self.stderr = stderr
+                self.returncode = 23
+                self.wait_calls = 0
+                self.wait_release = asyncio.Event()
+                self.terminate_calls = 0
+
+            async def wait(self) -> int:
+                self.wait_calls += 1
+                await self.wait_release.wait()
+                return self.returncode
+
+            def terminate(self) -> None:
+                self.terminate_calls += 1
+
+            def kill(self) -> None:
+                self.terminate_calls += 1
+
+        stdout = GatedEofStdout()
+        stderr = EmptyStderr()
+        process = AlreadyExitedProcess(stdout, stderr)
+        client = DAPClient("/path")
+
+        try:
+            with patch(
+                "netcoredbg_mcp.dap.client.asyncio.create_subprocess_exec",
+                return_value=process,
+            ):
+                await client.start()
+
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            pending = asyncio.get_running_loop().create_future()
+            client._pending[1] = pending
+            stdout.release.set()
+            process.wait_release.set()
+            assert client._read_task is not None
+            await client._read_task
+
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            observed = (
+                stderr.read_calls > 0,
+                process.wait_calls > 0,
+                process.terminate_calls == 0,
+                str(pending.exception()),
+            )
+        finally:
+            stdout.release.set()
+            process.wait_release.set()
+
+        assert observed == (
+            True,
+            True,
+            True,
+            "netcoredbg process died — pending request cancelled",
+        )
+
+    @pytest.mark.asyncio
+    async def test_kill_disappearance_race_still_publishes_terminal_record(self):
+        """A process disappearing during kill escalation must not abort finalization."""
+
+        class ClosedStdout:
+            async def readline(self) -> bytes:
+                return b""
+
+        class EmptyStderr:
+            async def read(self, _size: int = -1) -> bytes:
+                return b""
+
+            async def readline(self) -> bytes:
+                return b""
+
+        class VanishingProcess:
+            def __init__(self) -> None:
+                self.pid = 41009
+                self.stdout = ClosedStdout()
+                self.stderr = EmptyStderr()
+                self.returncode: int | None = None
+                self.release = asyncio.Event()
+                self.terminate_calls = 0
+                self.kill_calls = 0
+
+            async def wait(self) -> int:
+                await self.release.wait()
+                return 23
+
+            def terminate(self) -> None:
+                self.terminate_calls += 1
+
+            def kill(self) -> None:
+                self.kill_calls += 1
+                raise ProcessLookupError
+
+        process = VanishingProcess()
+        client = DAPClient("/path")
+        records: list[DapTransportTerminal] = []
+        published = asyncio.Event()
+
+        def record(terminal: DapTransportTerminal) -> None:
+            records.append(terminal)
+            published.set()
+
+        client.set_transport_terminal_handler(record)
+
+        try:
+            with (
+                patch(
+                    "netcoredbg_mcp.dap.client.asyncio.create_subprocess_exec",
+                    return_value=process,
+                ),
+                patch("netcoredbg_mcp.dap.client.NATURAL_EXIT_TIMEOUT", 0.01),
+                patch("netcoredbg_mcp.dap.client.TERMINATE_TIMEOUT", 0.01),
+            ):
+                await client.start(generation=1)
+                await asyncio.wait_for(published.wait(), timeout=1.0)
+        finally:
+            process.release.set()
+            run = client._run
+            if run is not None and run.process_task is not None:
+                await run.process_task
+
+        assert len(records) == 1
+        assert records[0].process_exited is True
+        assert records[0].cleanup_outcome is DapCleanupOutcome.NATURAL_EXIT
+        assert process.terminate_calls == 1
+        assert process.kill_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_terminal_callback_preserves_immutable_known_and_unobserved_exit_facts(
+        self,
+    ):
+        """One callback must preserve bounded facts without conflating DAP and process exit."""
+
+        class ScriptedStdout:
+            def __init__(
+                self,
+                lines: list[bytes] | None = None,
+                content: bytes = b"",
+                failure: Exception | None = None,
+            ) -> None:
+                self._lines = list(lines or [])
+                self._content = content
+                self._failure = failure
+
+            async def readline(self) -> bytes:
+                if self._failure is not None:
+                    failure = self._failure
+                    self._failure = None
+                    raise failure
+                return self._lines.pop(0) if self._lines else b""
+
+            async def readexactly(self, size: int) -> bytes:
+                assert size == len(self._content)
+                return self._content
+
+        class ScriptedStderr:
+            def __init__(self, chunks: list[bytes]) -> None:
+                self._chunks = list(chunks)
+
+            async def read(self, _size: int = -1) -> bytes:
+                return self._chunks.pop(0) if self._chunks else b""
+
+            async def readline(self) -> bytes:
+                return await self.read()
+
+        class CompletedProcess:
+            def __init__(
+                self,
+                pid: int,
+                stdout: ScriptedStdout,
+                stderr: ScriptedStderr,
+                returncode: int | None,
+                wait_result: int | None,
+            ) -> None:
+                self.pid = pid
+                self.stdout = stdout
+                self.stderr = stderr
+                self.returncode = returncode
+                self._wait_result = wait_result
+
+            async def wait(self) -> int | None:
+                return self._wait_result
+
+            def terminate(self) -> None:
+                pass
+
+            def kill(self) -> None:
+                pass
+
+        async def wait_for_record(records: list[Any]) -> None:
+            for _ in range(20):
+                if records:
+                    return
+                await asyncio.sleep(0)
+            pytest.fail("transport terminal callback did not publish a record")
+
+        async def start_with_recorder(
+            process: CompletedProcess,
+            generation: object,
+            records: list[Any],
+        ) -> tuple[DAPClient, Any]:
+            client = DAPClient("/path")
+            set_terminal_handler = getattr(client, "set_transport_terminal_handler", None)
+            assert callable(set_terminal_handler), (
+                "DAPClient must expose the manager terminal callback seam"
+            )
+            set_terminal_handler(records.append)
+            with patch(
+                "netcoredbg_mcp.dap.client.asyncio.create_subprocess_exec",
+                return_value=process,
+            ):
+                returned_generation = await client.start(generation=generation)
+            await wait_for_record(records)
+            return client, returned_generation
+
+        event_body = {"output": "event-marker-" + "e" * 8192}
+        event_content = json.dumps(
+            {
+                "seq": 41,
+                "type": "event",
+                "event": "output",
+                "body": event_body,
+            },
+            separators=(",", ":"),
+        ).encode()
+        stderr_tail_marker = b"stderr-tail-marker"
+        stderr_payload = b"discarded-stderr-" * 2048 + stderr_tail_marker
+        known_records: list[Any] = []
+        known_generation = object()
+        known_process = CompletedProcess(
+            41003,
+            ScriptedStdout(
+                [
+                    f"Content-Length: {len(event_content)}\r\n".encode(),
+                    b"\r\n",
+                    b"",
+                ],
+                event_content,
+            ),
+            ScriptedStderr([stderr_payload, b""]),
+            returncode=23,
+            wait_result=23,
+        )
+        known_client, returned_generation = await start_with_recorder(
+            known_process,
+            known_generation,
+            known_records,
+        )
+
+        assert returned_generation is known_generation
+        assert len(known_records) == 1
+        known = known_records[0]
+        assert known.generation is known_generation
+        assert known.adapter_pid == 41003
+        assert known.process_exited is True
+        assert known.returncode == 23
+        assert known.stdout_eof is True
+        assert known.last_dap_event == (41, "output")
+        assert "event-marker" in str(known.last_dap_event_body_preview)
+        assert len(str(known.last_dap_event_body_preview)) < len(event_body["output"])
+        stderr_tail = known.stderr_tail
+        assert (
+            stderr_tail_marker in stderr_tail
+            if isinstance(stderr_tail, bytes)
+            else stderr_tail_marker.decode() in stderr_tail
+        )
+        assert len(stderr_tail) < len(stderr_payload)
+        assert known.stderr_truncated is True
+        assert known.reader_error is None
+
+        known_projection = (
+            known.generation,
+            known.adapter_pid,
+            known.process_exited,
+            known.returncode,
+            known.last_dap_event,
+            known.last_dap_event_body_preview,
+            known.stderr_tail,
+            known.stderr_truncated,
+            known.reader_error,
+        )
+        known_client._handle_message(
+            {
+                "seq": 42,
+                "type": "event",
+                "event": "output",
+                "body": {"output": "late-event-must-not-mutate-terminal-record"},
+            }
+        )
+        await asyncio.sleep(0)
+        assert known_records == [known]
+        assert (
+            known.generation,
+            known.adapter_pid,
+            known.process_exited,
+            known.returncode,
+            known.last_dap_event,
+            known.last_dap_event_body_preview,
+            known.stderr_tail,
+            known.stderr_truncated,
+            known.reader_error,
+        ) == known_projection
+
+        reader_message = "reader-marker-" + "r" * 8192
+        unknown_records: list[Any] = []
+        unknown_generation = object()
+        _, unknown_returned_generation = await start_with_recorder(
+            CompletedProcess(
+                41004,
+                ScriptedStdout(failure=ValueError(reader_message)),
+                ScriptedStderr([b""]),
+                returncode=None,
+                wait_result=None,
+            ),
+            unknown_generation,
+            unknown_records,
+        )
+
+        assert unknown_returned_generation is unknown_generation
+        assert len(unknown_records) == 1
+        unknown = unknown_records[0]
+        assert unknown.generation is unknown_generation
+        assert unknown.adapter_pid == 41004
+        assert unknown.process_exited is True
+        assert unknown.returncode is None
+        assert unknown.stdout_eof is False
+        assert unknown.last_dap_event is None
+        assert unknown.reader_error is not None
+        assert "ValueError" in str(unknown.reader_error)
+        assert len(str(unknown.reader_error)) < len(reader_message)
+
+    @pytest.mark.asyncio
+    async def test_dap_terminated_then_eof_and_process_exit_publish_once(self):
+        """Protocol termination, EOF, and process exit must share one finalizer."""
+
+        payload = json.dumps(
+            {"seq": 51, "type": "event", "event": "terminated", "body": {}}
+        ).encode("utf-8")
+        stdout = MagicMock()
+        stdout.readline = AsyncMock(
+            side_effect=[
+                f"Content-Length: {len(payload)}\r\n".encode("ascii"),
+                b"\r\n",
+                b"",
+            ]
+        )
+        stdout.readexactly = AsyncMock(return_value=payload)
+        stderr = MagicMock()
+        stderr.read = AsyncMock(return_value=b"")
+        process = MagicMock(pid=41005, stdout=stdout, stderr=stderr, returncode=0)
+        process.wait = AsyncMock(return_value=0)
+
+        records: list[Any] = []
+        client = DAPClient("/path")
+        set_terminal_handler = getattr(client, "set_transport_terminal_handler", None)
+        assert callable(set_terminal_handler), (
+            "DAPClient must expose the manager terminal callback seam"
+        )
+        set_terminal_handler(records.append)
+
+        generation = object()
+        with patch(
+            "netcoredbg_mcp.dap.client.asyncio.create_subprocess_exec",
+            return_value=process,
+        ):
+            returned_generation = await client.start(generation=generation)
+
+        for _ in range(20):
+            if records:
+                break
+            await asyncio.sleep(0)
+
+        assert returned_generation is generation
+        assert len(records) == 1
+        terminal = records[0]
+        assert terminal.generation is generation
+        assert terminal.protocol_terminated is True
+        assert terminal.stdout_eof is True
+        assert terminal.process_exited is True
+        assert terminal.returncode == 0
+
+    def test_terminal_text_sanitizer_redacts_private_values_and_controls(self):
+        """Public diagnostics must not preserve secrets, paths, or control bytes."""
+
+        unsafe = (
+            "token=abc123 CLIENT_SECRET=supersecret DB_PASSWORD=hunter2 "
+            "C:\\Users\\private\\debug.log /root line\n" + chr(27) + "[31m" + chr(0x9B) + "31m"
+        )
+
+        assert sanitize_terminal_text(unsafe) == (
+            "token=<redacted> CLIENT_SECRET=<redacted> DB_PASSWORD=<redacted> "
+            "<path> <path> line\\n\\u001b[31m\\u009b31m"
+        )
+
+    def test_terminal_text_sanitizer_redacts_spaced_authorization_and_quoted_credentials(self):
+        """Terminal diagnostics must not leak complete spaced credential values."""
+        unsafe = (
+            "Authorization: Bearer header token with spaces; "
+            'Authorization: "Bearer quoted header token"; '
+            'api_key="quoted API key token"; '
+            "password='quoted password token';"
+        )
+
+        assert sanitize_terminal_text(unsafe) == (
+            "Authorization: <redacted>; Authorization: <redacted>; "
+            "api_key=<redacted>; password=<redacted>;"
+        )
+
+    def test_terminal_event_metadata_is_bounded_before_retention(self):
+        """Oversized or invalid DAP event metadata must not persist in state."""
+
+        client = DAPClient("/path")
+        client._process = SimpleNamespace(pid=41006, stdout=MagicMock(), returncode=0)
+        run = client._run_for_direct_reader()
+
+        client._handle_message(
+            {
+                "seq": "s" * 10_000,
+                "type": "event",
+                "event": "e" * 10_000,
+                "body": {
+                    "token": "abc123",
+                    "path": "C:\\Users\\private\\x",
+                    "root": "/root",
+                    "output": '{"client_secret":"s3cr3t"}',
+                    "escaped": r"{\"client_secret\":\"escaped-secret\"}",
+                },
+            },
+            run,
+        )
+
+        assert run.last_dap_event is not None
+        assert run.last_dap_event[0] is None
+        assert len(run.last_dap_event[1]) <= 256
+        assert run.last_dap_event_body_preview is not None
+        assert "abc123" not in run.last_dap_event_body_preview
+        assert "C:\\Users" not in run.last_dap_event_body_preview
+        assert "/root" not in run.last_dap_event_body_preview
+        assert "s3cr3t" not in run.last_dap_event_body_preview
+        assert "escaped-secret" not in run.last_dap_event_body_preview
+
+        client._handle_message(
+            {"seq": 10**1000, "type": "event", "event": "bounded", "body": {}},
+            run,
+        )
+        assert run.last_dap_event == (None, "bounded")
+
+    @pytest.mark.asyncio
+    async def test_send_pipe_failure_uses_terminal_request_error(self):
+        """A send racing finalization must not leak a raw pipe exception."""
+
+        client = DAPClient("/path")
+        client._process = SimpleNamespace(
+            pid=41007,
+            stdin=MagicMock(),
+            stdout=MagicMock(),
+            returncode=None,
+        )
+        run = client._run_for_direct_reader()
+
+        async def fail_after_terminalization(_request: DAPRequest) -> None:
+            client._settle_pending(run.pending)
+            raise BrokenPipeError("adapter stdin closed")
+
+        client._send = fail_after_terminalization
+
+        with pytest.raises(RuntimeError, match="netcoredbg process died"):
+            await client.send_request("threads")

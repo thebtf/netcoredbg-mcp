@@ -1613,7 +1613,7 @@ async def test_session_manager_stop_cancels_stealth_foreground_restore_task() ->
         manager = SessionManager()
     task = asyncio.create_task(sleepy_restore())
     manager._stealth_foreground_restore_task = task
-    manager._client = SimpleNamespace(is_running=False)
+    manager._client = SimpleNamespace(is_running=False, stop=AsyncMock())
     manager._process_registry = SimpleNamespace(cleanup_all=MagicMock())
     manager._session_id = None
     manager._state.state = DebugState.RUNNING

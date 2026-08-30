@@ -1,11 +1,18 @@
 """Tests for CR-110 debuggee liveness telemetry."""
 
-from unittest.mock import patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import netcoredbg_mcp.session.state as state_module
 from netcoredbg_mcp.dap import DAPEvent
+from netcoredbg_mcp.dap.client import (
+    DapCleanupOutcome,
+    DAPClient,
+    DapTerminalTrigger,
+    DapTransportTerminal,
+)
 from netcoredbg_mcp.dap.events import StopReason
 from netcoredbg_mcp.session import DebugState, SessionManager
 from netcoredbg_mcp.session.state import SessionState, ThreadInfo
@@ -140,8 +147,55 @@ def test_debuggee_liveness_fields_follow_process_and_state_transitions() -> None
     assert stopped["execState"] == "stopped-at-exception"
 
     manager._on_terminated(DAPEvent(seq=4, event="terminated", body={}))
+    manager._on_transport_terminal(
+        manager._client,
+        DapTransportTerminal(
+            generation=1,
+            first_trigger=DapTerminalTrigger.DAP_TERMINATED,
+            adapter_pid=1001,
+            process_exited=True,
+            returncode=0,
+            protocol_terminated=True,
+            debuggee_exit_code=None,
+            stdout_eof=True,
+            last_dap_event=(4, "terminated"),
+            last_dap_event_body_preview="{}",
+            stderr_tail=b"",
+            stderr_truncated=False,
+            stderr_drained=True,
+            reader_error=None,
+            cleanup_outcome=DapCleanupOutcome.NATURAL_EXIT,
+        ),
+    )
 
     terminated = manager.state.to_dict()
     assert terminated["debuggeeAlive"] is False
     assert terminated["debuggeePid"] == 4242
     assert terminated["execState"] == "terminated"
+
+
+@pytest.mark.asyncio
+async def test_transport_eof_after_client_death_makes_retained_debuggee_pid_historical() -> None:
+    """Raw EOF from a dead adapter must leave its retained debuggee PID non-live."""
+    with patch("netcoredbg_mcp.session.manager.DAPClient"):
+        manager = SessionManager()
+
+    client = DAPClient("/path/to/netcoredbg")
+    manager._client = client
+    manager._register_event_handlers()
+    manager._state.state = DebugState.RUNNING
+    manager._state.process_id = 4242
+
+    stdout = MagicMock()
+    stdout.readline = AsyncMock(return_value=b"")
+    client._process = MagicMock(stdout=stdout, returncode=0)
+
+    await client._read_loop()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    public_state = manager.state.to_dict()
+    assert client.is_running is False
+    assert public_state["state"] == DebugState.TERMINATED.value
+    assert public_state["debuggeePid"] == 4242
+    assert public_state["debuggeeAlive"] is False

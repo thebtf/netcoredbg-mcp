@@ -118,9 +118,7 @@ class Breakpoint:
     log_message: str | None = None
     verified: bool = False
     id: int | None = None
-    dap_line: int | None = (
-        None  # Adjusted line from DAP if different from requested `line`
-    )
+    dap_line: int | None = None  # Adjusted line from DAP if different from requested `line`
 
     def to_dap(self) -> dict[str, Any]:
         """Convert to DAP breakpoint format."""
@@ -260,9 +258,7 @@ class BreakpointRegistry:
     def remove_function_breakpoint(self, name: str) -> bool:
         """Remove a function breakpoint by name. Returns True if found."""
         original_count = len(self._function_breakpoints)
-        self._function_breakpoints = [
-            bp for bp in self._function_breakpoints if bp.name != name
-        ]
+        self._function_breakpoints = [bp for bp in self._function_breakpoints if bp.name != name]
         return len(self._function_breakpoints) < original_count
 
     def get_function_breakpoints(self) -> list[FunctionBreakpoint]:
@@ -341,9 +337,7 @@ class Tracepoint:
     breakpoint_id: int | None = None  # DAP breakpoint ID
     hit_count: int = 0
     active: bool = True
-    dap_line: int | None = (
-        None  # Adjusted line propagated from the underlying DAP breakpoint
-    )
+    dap_line: int | None = None  # Adjusted line propagated from the underlying DAP breakpoint
 
 
 @dataclass
@@ -492,6 +486,54 @@ class DebuggeeActivitySnapshot:
     trace_entries: int
 
 
+@dataclass(frozen=True, slots=True)
+class TransportTerminalSummary:
+    """Bounded adapter-transport facts safe for public state serialization.
+
+    This projection intentionally omits the internal run generation and raw
+    process/task objects. Adapter return codes, DAP debuggee exit codes, and
+    protocol termination stay separate so downstream tools cannot infer one
+    lifecycle fact from another.
+    """
+
+    first_observed_signal: str
+    adapter_pid: int
+    process_exited: bool
+    adapter_return_code: int | None
+    protocol_terminated: bool
+    debuggee_exit_code: int | None
+    stdout_eof: bool
+    last_dap_event_seq: int | None
+    last_dap_event_name: str | None
+    last_dap_event_body_preview: str | None
+    stderr_tail: str
+    stderr_truncated: bool
+    stderr_drained: bool
+    reader_error: str | None
+    cleanup_outcome: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the stable additive `get_debug_state` representation."""
+
+        return {
+            "firstObservedSignal": self.first_observed_signal,
+            "adapterPid": self.adapter_pid,
+            "processExited": self.process_exited,
+            "adapterReturnCode": self.adapter_return_code,
+            "protocolTerminated": self.protocol_terminated,
+            "debuggeeExitCode": self.debuggee_exit_code,
+            "stdoutEof": self.stdout_eof,
+            "lastDapEventSeq": self.last_dap_event_seq,
+            "lastDapEventName": self.last_dap_event_name,
+            "lastDapEventBodyPreview": self.last_dap_event_body_preview,
+            "stderrTail": self.stderr_tail,
+            "stderrTruncated": self.stderr_truncated,
+            "stderrDrained": self.stderr_drained,
+            "readerError": self.reader_error,
+            "cleanupOutcome": self.cleanup_outcome,
+        }
+
+
 @dataclass
 class SessionState:
     """Complete debug session state."""
@@ -518,6 +560,7 @@ class SessionState:
     stop_text: str | None = None
     last_invalidation: InvalidatedEventBody | None = None
     last_memory_event: MemoryEventBody | None = None
+    transport_terminal: TransportTerminalSummary | None = None
     activity_epoch: object = field(
         default_factory=object,
         init=False,
@@ -532,13 +575,19 @@ class SessionState:
     module_removed_events: int = 0
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
+        """Convert state to the stable JSON-facing dictionary.
+
+        A retained debuggee PID becomes historical as soon as the session is
+        terminal. The terminal projection is added only after transport death,
+        preserving the legacy response shape for active and idle sessions.
+        """
+
         debuggee_pid = self.process_id
         debuggee_alive = debuggee_pid is not None and self.state not in {
             DebugState.IDLE,
             DebugState.TERMINATED,
         }
-        return {
+        payload = {
             "state": self.state.value,
             "execState": derive_exec_state(self.state, self.stop_reason),
             "currentThreadId": self.current_thread_id,
@@ -555,12 +604,8 @@ class SessionState:
             "lastResumeAt": self.last_resume_at,
             "lastStopAt": self.last_stop_at,
             "modules": [m.to_dict() for m in self.modules],
-            "loadedSources": {
-                key: value.to_dict() for key, value in self.loaded_sources.items()
-            },
-            "activeProgress": {
-                key: value.to_dict() for key, value in self.active_progress.items()
-            },
+            "loadedSources": {key: value.to_dict() for key, value in self.loaded_sources.items()},
+            "activeProgress": {key: value.to_dict() for key, value in self.active_progress.items()},
             "stopDescription": self.stop_description,
             "stopText": self.stop_text,
             "lastInvalidation": (
@@ -570,3 +615,6 @@ class SessionState:
                 self.last_memory_event.to_dict() if self.last_memory_event else None
             ),
         }
+        if self.transport_terminal is not None:
+            payload["transportTerminal"] = self.transport_terminal.to_dict()
+        return payload
