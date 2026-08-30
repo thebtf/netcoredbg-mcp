@@ -2,7 +2,7 @@
 
 This is an implementation-phase focused verification guide for Wave 2. Packet authoring did not run these commands. This guide does not by itself build a release, run a formatter or linter, publish a package, create a tag, alter a route, or create an acceptance receipt.
 
-**Source base:** `b4259ff9bde52755c1cecccbf4ce980f2292a5ac`
+**Source base:** `3ffaefee7d8dbd9680537804c83b96a8f836e8fe`
 **Release intent:** `none`
 
 ## Preconditions

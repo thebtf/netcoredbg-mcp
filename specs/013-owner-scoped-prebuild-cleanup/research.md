@@ -1,7 +1,7 @@
 # Research: Owner-Scoped Pre-Build Cleanup
 
 **Scope:** Wave 2 Windows ownership and pre-build cleanup only.
-**Source base:** `b4259ff9bde52755c1cecccbf4ce980f2292a5ac`
+**Source base:** `3ffaefee7d8dbd9680537804c83b96a8f836e8fe`
 **Status:** Planning research. It records no implemented boundary, passing Windows proof, accepted candidate, or release.
 **Primary-source synthesis:** `agent://GitHubProcessOwnership`, investigated 2026-08-30.
 **Current source/test evidence:** `agent://Wave2OwnershipSource` and `agent://Wave2OwnershipTests`.

@@ -7,7 +7,7 @@
 
 ## Content quality
 
-- [x] The packet names `b4259ff9bde52755c1cecccbf4ce980f2292a5ac`, PRG-003, PRG-007, PRG-008, PRG-010, Wave 1's accepted lifecycle contract, and `release_intent: none`.
+- [x] The packet names `3ffaefee7d8dbd9680537804c83b96a8f836e8fe`, PRG-003, PRG-007, PRG-008, PRG-010, Wave 1's accepted lifecycle contract, and `release_intent: none`.
 - [x] The packet states the foreign-owner risk without claiming that global cleanup caused either historical issue #450 incident.
 - [x] The packet sets D2 depth for this child and does not create a D3 program or release plan.
 - [x] The packet identifies the selected private `WindowsOwnedProcess` boundary in `src/netcoredbg_mcp/windows_process_owner.py`.

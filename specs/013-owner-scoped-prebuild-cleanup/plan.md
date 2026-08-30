@@ -3,7 +3,7 @@
 **Branch:** `work/issue450-owner-scoped-cleanup`
 **Date:** 2026-08-31
 **Spec:** [spec.md](spec.md)
-**Source base:** `b4259ff9bde52755c1cecccbf4ce980f2292a5ac`
+**Source base:** `3ffaefee7d8dbd9680537804c83b96a8f836e8fe`
 **Parent:** `specs/011-issue450-sonar-release-program/`, Wave 2 internal verification only.
 **Release intent:** `none`
 

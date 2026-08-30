@@ -1,7 +1,7 @@
 # Architecture: Owner-Scoped Pre-Build Cleanup
 
 **Status:** Planned D2 architecture. This document describes a future private boundary and records no implementation or acceptance result.
-**Source base:** `b4259ff9bde52755c1cecccbf4ce980f2292a5ac`
+**Source base:** `3ffaefee7d8dbd9680537804c83b96a8f836e8fe`
 **Authority:** `agent://ArchitectWave2Ownership`
 **Release intent:** `none`
 
