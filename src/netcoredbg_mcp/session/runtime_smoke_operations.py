@@ -3077,8 +3077,10 @@ def _relative_point_from_evidence(
     waypoint: Mapping[str, Any],
 ) -> tuple[int, int] | None:
     raw_point = route_evidence.get(f"{prefix}_point")
-    if route_evidence.get("source_resolution") == "guarded_child" and isinstance(
-        raw_point, Mapping
+    if (
+        prefix == "source"
+        and route_evidence.get("source_resolution") == "guarded_child"
+        and isinstance(raw_point, Mapping)
     ):
         offset = _source_offset_point(raw_point, waypoint)
         if offset is not None:

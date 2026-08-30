@@ -526,6 +526,13 @@ class GuardedChildDragBackend:
         self.resolve_calls.append((dict(parent), dict(predicate), maximum_nodes))
         return dict(self.admission)
 
+    async def find_element(self, **selector: Any) -> dict[str, Any]:
+        return {
+            "status": "PASS",
+            "automation_id": str(selector.get("automation_id") or "guardedChildDrop"),
+            "bounds": {"x": 400, "y": 500, "width": 20, "height": 40},
+        }
+
     async def drag(
         self,
         from_x: int,
@@ -652,15 +659,32 @@ async def test_guarded_child_drag_admits_once_and_uses_one_pointer_action() -> N
 
 
 @pytest.mark.asyncio
+async def test_guarded_child_target_relative_drop_uses_target_bounds() -> None:
+    backend = GuardedChildDragBackend(_admitted_guarded_child())
+    plan = _guarded_child_action_plan(smoke_test_manual._guarded_child_source())
+    action = plan["cases"][0]["transitions"][0]["action"]
+    action["path"] = [
+        {"relative_to": "source", "x": 0, "y": 0},
+        {"relative_to": "target", "x": 0, "y": 0},
+    ]
+    action["drop"] = {"selector": {"automation_id": "guardedChildDrop"}}
+
+    result = await _guarded_child_runner(backend).run(plan)
+
+    assert result["status"] == "PASS"
+    assert backend.drag_calls == [(120, 200, 400, 500)]
+
+
+@pytest.mark.asyncio
 async def test_guarded_child_admission_matrix_blocks_before_pointer_input() -> None:
     matrix = smoke_test_manual._wpf_guarded_child_admission_matrix_cases()
     assert [case["id"] for case in matrix] == [
         "unique_success",
         "child_not_found",
         "child_ambiguous",
-        "identity_drift_hook",
-        "rectangle_drift_hook",
-        "containment_failure_hook",
+        "identity_drift",
+        "rectangle_drift",
+        "containment_failure",
     ]
 
     for case in matrix[1:]:
@@ -690,3 +714,4 @@ async def test_guarded_child_admission_matrix_blocks_before_pointer_input() -> N
 def test_manual_smoke_lists_guarded_child_drag_scenario() -> None:
     scenario_names = {name for name, _fn in smoke_test_manual.get_scenarios()}
     assert "WPF V2 Guarded-Child Drag Runtime Smoke" in scenario_names
+    assert "WPF V2 Guarded-Child Admission Matrix Runtime Smoke" in scenario_names

@@ -750,7 +750,7 @@ public static class ElementCommands
             {
                 var processId = TryReadProcessId(candidate);
                 if (processId is null)
-                    continue;
+                    return GuardedChildResolution.IdentityUnavailable(matchCount);
                 if (processId != boundProcessId)
                     return GuardedChildResolution.ProcessMismatch(matchCount);
                 matchCount++;
@@ -847,14 +847,13 @@ public static class ElementCommands
         {
             var element = queue.Dequeue();
             var processId = TryReadProcessId(element);
-            if (processId is not null && processId != boundProcessId)
+            if (processId is null)
+                return GuardedChildResolution.IdentityUnavailable(matchCount);
+            if (processId != boundProcessId)
                 return GuardedChildResolution.ProcessMismatch(matchCount);
             var isMatch = false;
-            if (processId == boundProcessId &&
-                !TryMatchesGuardedSelector(element, selector, out isMatch))
-            {
+            if (!TryMatchesGuardedSelector(element, selector, out isMatch))
                 return GuardedChildResolution.IdentityUnavailable(matchCount);
-            }
 
             if (isMatch)
             {
@@ -956,7 +955,7 @@ public static class ElementCommands
             return GuardedChildSnapshotRead.Failure("IDENTITY_UNAVAILABLE");
         var processId = TryReadProcessId(element);
         if (processId is null)
-            return GuardedChildSnapshotRead.Failure("PROCESS_MISMATCH");
+            return GuardedChildSnapshotRead.Failure("IDENTITY_UNAVAILABLE");
         if (processId != boundProcessId)
             return GuardedChildSnapshotRead.Failure("PROCESS_MISMATCH");
 

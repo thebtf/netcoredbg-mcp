@@ -1,6 +1,7 @@
 <Window x:Class="WpfSmokeApp.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:WpfSmokeApp"
         Title="WPF Smoke Test" Height="760" Width="760"
         AutomationProperties.AutomationId="mainWindow">
 
@@ -217,6 +218,14 @@
                                 Content="Outside"
                                 AutomationProperties.Name="Guarded child outside client"
                                 AutomationProperties.AutomationId="guardedChildOutsideClient"/>
+                        <local:GuardedChildDriftButton Width="8" Height="8" Canvas.Left="84" Canvas.Top="32"
+                                                       Content="Identity drift" DriftMode="Identity"
+                                                       AutomationProperties.Name="Guarded child identity drift"
+                                                       AutomationProperties.AutomationId="guardedChildIdentityDrift"/>
+                        <local:GuardedChildDriftButton Width="8" Height="8" Canvas.Left="98" Canvas.Top="32"
+                                                       Content="Rectangle drift" DriftMode="Rectangle"
+                                                       AutomationProperties.Name="Guarded child rectangle drift"
+                                                       AutomationProperties.AutomationId="guardedChildRectangleDrift"/>
                     </Canvas>
                 </Grid>
             </GroupBox>

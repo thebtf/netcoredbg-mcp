@@ -5,6 +5,8 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Automation;
+using System.Windows.Automation.Peers;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
@@ -259,7 +261,9 @@ public partial class MainWindow : Window
     {
         _guardedChildGestureStart = e.GetPosition(GuardedGestureSurface);
         _guardedChildGestureLast = _guardedChildGestureStart;
-        _guardedChildPointerDownCount++;
+        _guardedChildPointerDownCount = 1;
+        _guardedChildPointerMoveCount = 0;
+        _guardedChildPointerUpCount = 0;
         _guardedChildGestureMoved = false;
         _guardedChildLastDeltaX = 0;
         _guardedChildLastDeltaY = 0;
@@ -294,7 +298,7 @@ public partial class MainWindow : Window
 
         var current = e.GetPosition(GuardedGestureSurface);
         _guardedChildGestureLast = current;
-        _guardedChildPointerUpCount++;
+        _guardedChildPointerUpCount = 1;
         _guardedChildLastDeltaX = Math.Round(current.X - start.X, 1);
         _guardedChildLastDeltaY = Math.Round(current.Y - start.Y, 1);
         _guardedChildGestureMoved = _guardedChildGestureMoved ||
@@ -936,6 +940,61 @@ public partial class MainWindow : Window
         {
             _suppressSelectionSync = false;
         }
+    }
+}
+
+public enum GuardedChildDriftMode
+{
+    None,
+    Identity,
+    Rectangle,
+}
+
+public sealed class GuardedChildDriftButton : Button
+{
+    public static readonly DependencyProperty DriftModeProperty = DependencyProperty.Register(
+        nameof(DriftMode),
+        typeof(GuardedChildDriftMode),
+        typeof(GuardedChildDriftButton),
+        new PropertyMetadata(GuardedChildDriftMode.None));
+
+    private int _boundingRectangleReads;
+
+    public GuardedChildDriftMode DriftMode
+    {
+        get => (GuardedChildDriftMode)GetValue(DriftModeProperty);
+        set => SetValue(DriftModeProperty, value);
+    }
+
+    protected override AutomationPeer OnCreateAutomationPeer() =>
+        new GuardedChildDriftButtonAutomationPeer(this);
+
+    internal Rect ReadAutomationBounds(Rect bounds)
+    {
+        _boundingRectangleReads++;
+        if (_boundingRectangleReads == 1 && DriftMode == GuardedChildDriftMode.Identity)
+        {
+            AutomationProperties.SetAutomationId(this, "guardedChildIdentityDrifted");
+            AutomationProperties.SetName(this, "Guarded child identity drifted");
+        }
+
+        return DriftMode == GuardedChildDriftMode.Rectangle && _boundingRectangleReads > 1
+            ? new Rect(bounds.X + 1, bounds.Y, bounds.Width, bounds.Height)
+            : bounds;
+    }
+
+    private sealed class GuardedChildDriftButtonAutomationPeer : ButtonAutomationPeer
+    {
+        private readonly GuardedChildDriftButton _owner;
+
+        internal GuardedChildDriftButtonAutomationPeer(GuardedChildDriftButton owner)
+            : base(owner)
+        {
+            _owner = owner;
+        }
+
+        protected override Rect GetBoundingRectangleCore() =>
+            _owner.ReadAutomationBounds(base.GetBoundingRectangleCore());
     }
 }
 
