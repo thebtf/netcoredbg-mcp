@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.11] - 2026-08-30
+
+### Fixed
+- `ui_take_screenshot` reuses its live FlaUI connection after a foreground transition. A black PrintWindow capture is discarded for exactly one verified BitBlt alternate. Accepted evidence carries HWND, PID, physical geometry, DPI, stability, and foreground provenance. A final black capture persists no artifact and returns diagnostics.
+
+### Compatibility
+- No breaking changes to the published Python API or CLI.
+
 ## [0.23.10] - 2026-08-25
 
 ### Fixed

@@ -32,6 +32,28 @@ def _environment(name: str) -> str:
     return value
 
 
+def _select_cases(
+    cases: tuple[tuple[Any, ...], ...],
+) -> tuple[tuple[Any, ...], ...]:
+    selection = os.environ.get("NETCOREDBG_TYPED_BITBLT_CASES")
+    if selection is None:
+        return cases
+
+    requested = tuple(name.strip() for name in selection.split(","))
+    assert requested and all(requested), (
+        "NETCOREDBG_TYPED_BITBLT_CASES must select at least one named case"
+    )
+    assert len(set(requested)) == len(requested), (
+        "NETCOREDBG_TYPED_BITBLT_CASES must not select a case more than once"
+    )
+    known = {case[0] for case in cases}
+    unknown = set(requested) - known
+    assert not unknown, (
+        f"NETCOREDBG_TYPED_BITBLT_CASES contains unknown case names: {', '.join(sorted(unknown))}"
+    )
+    return tuple(case for case in cases if case[0] in requested)
+
+
 def _payload(result: CallToolResult) -> dict[str, Any]:
     assert result.isError is False, f"tools/call isError must be explicit false: {result}"
     assert result.structuredContent is None, (
@@ -354,8 +376,12 @@ async def _run_case(
                     if fixture_env.get("NETCOREDBG_TEST_CAPTURE_CALIBRATION")
                     else None,
                 )
+                if expected in {"ordinary_fallback", "ordinary_final_black"}:
+                    activation = _data(await _call(session, "ui_bring_to_front", {}))
+                    assert activation.get("activated") is True, activation
+                    assert activation.get("stealth_mode") is False, activation
                 foreground_before = _foreground_hwnd()
-                expected_hwnd = hwnd
+                expected_hwnd: int | None = hwnd
                 if expected == "target_mismatch":
                     expected_hwnd, _, _ = _physical_window_for_process(
                         process_id, "WPF Smoke Test", visible=False
@@ -363,19 +389,21 @@ async def _run_case(
                     assert expected_hwnd != hwnd, (expected_hwnd, hwnd)
                 expected_width = width - 1 if expected == "dimension_mismatch" else width
                 expected_height = height
-                response = await _call(
-                    session,
-                    "ui_take_screenshot",
-                    {
-                        "evidence": True,
-                        "format": "png",
-                        "expected_hwnd": expected_hwnd,
-                        "expected_physical_width": expected_width,
-                        "expected_physical_height": expected_height,
-                    },
-                )
+                screenshot_arguments: dict[str, Any] = {
+                    "evidence": True,
+                    "format": "png",
+                }
+                if expected not in {"ordinary_fallback", "ordinary_final_black"}:
+                    screenshot_arguments.update(
+                        {
+                            "expected_hwnd": expected_hwnd,
+                            "expected_physical_width": expected_width,
+                            "expected_physical_height": expected_height,
+                        }
+                    )
+                response = await _call(session, "ui_take_screenshot", screenshot_arguments)
 
-                if expected in {"control", "fallback"}:
+                if expected in {"control", "fallback", "ordinary_fallback"}:
                     _assert_bridge_artifact_identity(
                         response.get("bridge_assembly"),
                         bridge_identity_path,
@@ -390,13 +418,23 @@ async def _run_case(
                     raw_path = Path(str(metadata["raw_path"]))
                     with Image.open(raw_path) as image:
                         assert CALIBRATION_RGB in set(image.convert("RGB").getdata()), metadata
-                elif expected == "fallback":
+                elif expected in {"fallback", "ordinary_fallback"}:
                     metadata = response
                     assert metadata.get("evidence_grade") == "typed_bitblt_fallback", metadata
                     assert metadata.get("method") == "BitBlt", metadata
                     assert metadata.get("fallback_reason") == "probable_black_printwindow", metadata
                     assert metadata.get("alternate_attempts") == 1, metadata
+                    assert metadata.get("hwnd") == hwnd, metadata
                     assert metadata.get("process_id") == process_id, metadata
+                    assert type(metadata.get("dpi")) is int and metadata["dpi"] > 0, metadata
+                    assert metadata.get("client_rect", {}).get("right") > metadata.get(
+                        "client_rect", {}
+                    ).get("left", 0), metadata
+                    assert (
+                        metadata.get("window_bounds", {}).get("right")
+                        - metadata.get("window_bounds", {}).get("left", 0)
+                        == width
+                    ), metadata
                     assert metadata.get("capture_stability", {}).get("before") == metadata.get(
                         "capture_stability", {}
                     ).get("after"), metadata
@@ -409,6 +447,14 @@ async def _run_case(
                         == foreground_before
                     )
                     assert _foreground_hwnd() == foreground_before, foreground
+                    if expected == "ordinary_fallback":
+                        assert metadata.get("target_comparability") == {"status": "UNASSERTED"}, (
+                            metadata
+                        )
+                    else:
+                        assert (
+                            metadata.get("target_comparability", {}).get("status") == "MATCHED"
+                        ), metadata
                     raw_path = Path(str(metadata["raw_path"]))
                     raw = raw_path.read_bytes()
                     assert hashlib.sha256(raw).hexdigest() == metadata.get("raw_sha256"), metadata
@@ -429,9 +475,28 @@ async def _run_case(
                     ), response
                     assert response.get("physical_target", {}).get("status") == "mismatch", response
                     _assert_no_persistence(case_root, response)
-                elif expected == "final_black":
+                elif expected in {"final_black", "ordinary_final_black"}:
                     assert response.get("classification") == "PROBABLE_BLACK_FRAME", response
                     _assert_no_persistence(case_root, response)
+                    if expected == "ordinary_final_black":
+                        diagnostics = response.get("data", {}).get("capture_diagnostics", {})
+                        assert diagnostics.get("producer") == "flaui_bridge", response
+                        assert diagnostics.get("capture_method") == "BitBlt", response
+                        assert diagnostics.get("hwnd") == hwnd, response
+                        assert diagnostics.get("process_id") == process_id, response
+                        assert type(diagnostics.get("dpi")) is int and diagnostics["dpi"] > 0, (
+                            response
+                        )
+                        assert diagnostics.get("primary_analysis", {}).get("classification") == (
+                            "PROBABLE_BLACK_FRAME"
+                        ), response
+                        assert (
+                            diagnostics.get("fallback_analysis", {}).get("probable_black") is True
+                        ), response
+                        assert (
+                            diagnostics.get("foreground", {}).get("restoration", {}).get("verified")
+                            is True
+                        ), response
                 else:
                     assert response.get("code") == "PHYSICAL_CAPTURE_PROVENANCE_UNAVAILABLE", (
                         response
@@ -531,16 +596,6 @@ async def main() -> None:
             root / "fallback.trace",
         ),
         (
-            "final_black",
-            test_bridge,
-            test_hash,
-            host_bridge_library,
-            host_bridge_library_hash,
-            {"NETCOREDBG_TEST_CAPTURE_CALIBRATION": "black"},
-            "final_black",
-            root / "final-black.trace",
-        ),
-        (
             "primary_malformed",
             test_bridge,
             test_hash,
@@ -586,7 +641,38 @@ async def main() -> None:
             "foreign_reject",
             root / "foreign-target.trace",
         ),
+        (
+            "final_black",
+            test_bridge,
+            test_hash,
+            host_bridge_library,
+            host_bridge_library_hash,
+            {"NETCOREDBG_TEST_CAPTURE_CALIBRATION": "black"},
+            "final_black",
+            root / "final-black.trace",
+        ),
+        (
+            "ordinary_fallback",
+            test_bridge,
+            test_hash,
+            host_bridge_library,
+            host_bridge_library_hash,
+            {"NETCOREDBG_TEST_CAPTURE_CALIBRATION": "marker"},
+            "ordinary_fallback",
+            root / "ordinary-fallback.trace",
+        ),
+        (
+            "ordinary_final_black",
+            test_bridge,
+            test_hash,
+            host_bridge_library,
+            host_bridge_library_hash,
+            {"NETCOREDBG_TEST_CAPTURE_CALIBRATION": "black"},
+            "ordinary_final_black",
+            root / "ordinary-final-black.trace",
+        ),
     )
+    cases = _select_cases(cases)
     evidence = []
     try:
         for (
@@ -619,7 +705,14 @@ async def main() -> None:
             )
             if trace_path is None:
                 assert "trace" not in result, result
-            elif expected in {"fallback", "final_black", "target_mismatch", "dimension_mismatch"}:
+            elif expected in {
+                "fallback",
+                "ordinary_fallback",
+                "final_black",
+                "ordinary_final_black",
+                "target_mismatch",
+                "dimension_mismatch",
+            }:
                 assert result["trace"] == ["primary", "alternate"], result
             elif expected == "reject":
                 assert result["trace"] == ["primary"], result

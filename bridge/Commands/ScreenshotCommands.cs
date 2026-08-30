@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Buffers;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -230,10 +231,12 @@ public static class ScreenshotCommands
         bool typedBitBltFallback,
         StrictCaptureTarget? strictCaptureTarget)
     {
+        var connectedProcessId = RequireConnectedProcessId();
         if (typedBitBltFallback && strictCaptureTarget is StrictCaptureTarget expectedTarget)
             EnsureStrictExpectedHandle(expectedTarget);
 
         var printWindowBefore = ReadCaptureSnapshot(hwnd);
+        EnsureStrictCaptureProcess(printWindowBefore, connectedProcessId);
         if (typedBitBltFallback && strictCaptureTarget is StrictCaptureTarget strictBefore)
             EnsureStrictCaptureProcess(printWindowBefore, strictBefore.ExpectedProcessId);
         var printWindowBitmap = CaptureBitmapWithPrintWindow(
@@ -252,10 +255,11 @@ public static class ScreenshotCommands
         {
             printWindowAfter = ReadCaptureSnapshot(hwnd);
             EnsureStableCaptureSnapshot(printWindowBefore, printWindowAfter);
+            EnsureStrictCaptureProcess(printWindowAfter, connectedProcessId);
             if (typedBitBltFallback && strictCaptureTarget is StrictCaptureTarget strictAfter)
                 EnsureStrictCaptureProcess(printWindowAfter, strictAfter.ExpectedProcessId);
             printWindowVariance = NormalizedPixelVariance(printWindowBitmap);
-            if (!typedBitBltFallback || !IsProbablyBlackFrame(printWindowBitmap))
+            if (!IsProbablyBlackFrame(printWindowBitmap))
             {
                 var printWindowResult = EncodeBitmap(printWindowBitmap);
                 printWindowResult["method"] = "PrintWindow";
@@ -265,10 +269,10 @@ public static class ScreenshotCommands
             }
         }
 
-        if (strictCaptureTarget is not StrictCaptureTarget target)
-            throw new InvalidOperationException("Typed BitBlt fallback target is unavailable.");
+        var fallbackTarget = strictCaptureTarget ?? new StrictCaptureTarget(
+            hwnd.ToInt64(), connectedProcessId);
         return CaptureEvidenceWithVerifiedBitBltFallback(
-            hwnd, target, printWindowAfter, printWindowVariance);
+            hwnd, fallbackTarget, printWindowAfter, printWindowVariance);
     }
 
     private static JsonObject CaptureEvidenceWithVerifiedBitBltFallback(
@@ -419,6 +423,15 @@ public static class ScreenshotCommands
         EnsureStrictCaptureProcess(expectedSnapshot, strictCaptureTarget.ExpectedProcessId);
     }
 
+    private static uint RequireConnectedProcessId()
+    {
+        var processId = JsonRpcHandler.ProcessId;
+        if (processId <= 0)
+            throw new InvalidOperationException("Evidence capture requires a positive connected process ID.");
+
+        return checked((uint)processId);
+    }
+
     private static void EnsureStrictCaptureProcess(CaptureSnapshot snapshot, uint expectedProcessId)
     {
         if (snapshot.ProcessId != expectedProcessId)
@@ -533,24 +546,96 @@ public static class ScreenshotCommands
         const double maxMeanLuminance = 8.0;
         const int darkLuminanceThreshold = 16;
         const double minimumDarkPixelFraction = 0.995;
-        var pixelCount = (long)bitmap.Width * bitmap.Height;
-        double luminanceSum = 0;
-        long darkPixelCount = 0;
 
-        for (var y = 0; y < bitmap.Height; y++)
+        if (SupportsDirectPixelScanning(bitmap.PixelFormat))
         {
-            for (var x = 0; x < bitmap.Width; x++)
-            {
-                var color = bitmap.GetPixel(x, y);
-                var luminance = (0.299 * color.R) + (0.587 * color.G) + (0.114 * color.B);
-                luminanceSum += luminance;
-                if (luminance <= darkLuminanceThreshold)
-                    darkPixelCount++;
-            }
+            return ClassifyFullFrame(
+                bitmap,
+                maxMeanLuminance,
+                darkLuminanceThreshold,
+                minimumDarkPixelFraction);
         }
 
-        return luminanceSum / pixelCount <= maxMeanLuminance
-            && (double)darkPixelCount / pixelCount >= minimumDarkPixelFraction;
+        using var classificationBitmap = ConvertToClassificationBitmap(bitmap);
+        return ClassifyFullFrame(
+            classificationBitmap,
+            maxMeanLuminance,
+            darkLuminanceThreshold,
+            minimumDarkPixelFraction);
+    }
+
+    private static bool SupportsDirectPixelScanning(PixelFormat pixelFormat) =>
+        pixelFormat is PixelFormat.Format24bppRgb
+            or PixelFormat.Format32bppRgb
+            or PixelFormat.Format32bppArgb
+            or PixelFormat.Format32bppPArgb;
+
+    private static Bitmap ConvertToClassificationBitmap(Bitmap bitmap)
+    {
+        var converted = new Bitmap(bitmap.Width, bitmap.Height, PixelFormat.Format32bppArgb);
+        try
+        {
+            using var graphics = Graphics.FromImage(converted);
+            graphics.DrawImageUnscaled(bitmap, 0, 0);
+            return converted;
+        }
+        catch
+        {
+            converted.Dispose();
+            throw;
+        }
+    }
+
+    private static bool ClassifyFullFrame(
+        Bitmap bitmap,
+        double maxMeanLuminance,
+        int darkLuminanceThreshold,
+        double minimumDarkPixelFraction)
+    {
+        var pixelFormat = bitmap.PixelFormat;
+        var bytesPerPixel = Image.GetPixelFormatSize(pixelFormat) / 8;
+        var pixelCount = checked((long)bitmap.Width * bitmap.Height);
+        var darkLuminanceThresholdMilli = darkLuminanceThreshold * 1_000;
+        var bitmapData = bitmap.LockBits(
+            new Rectangle(0, 0, bitmap.Width, bitmap.Height),
+            ImageLockMode.ReadOnly,
+            pixelFormat);
+        try
+        {
+            var stride = Math.Abs(bitmapData.Stride);
+            var row = ArrayPool<byte>.Shared.Rent(stride);
+            try
+            {
+                long luminanceSumMilli = 0;
+                long darkPixelCount = 0;
+                for (var y = 0; y < bitmap.Height; y++)
+                {
+                    var rowStart = IntPtr.Add(bitmapData.Scan0, checked(y * bitmapData.Stride));
+                    Marshal.Copy(rowStart, row, 0, stride);
+                    for (var x = 0; x < bitmap.Width; x++)
+                    {
+                        var pixelOffset = x * bytesPerPixel;
+                        var luminanceMilli = (299 * row[pixelOffset + 2])
+                            + (587 * row[pixelOffset + 1])
+                            + (114 * row[pixelOffset]);
+                        luminanceSumMilli += luminanceMilli;
+                        if (luminanceMilli <= darkLuminanceThresholdMilli)
+                            darkPixelCount++;
+                    }
+                }
+
+                return (double)luminanceSumMilli / (pixelCount * 1_000) <= maxMeanLuminance
+                    && (double)darkPixelCount / pixelCount >= minimumDarkPixelFraction;
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(row);
+            }
+        }
+        finally
+        {
+            bitmap.UnlockBits(bitmapData);
+        }
     }
 
     private static double NormalizedPixelVariance(Bitmap bitmap)
