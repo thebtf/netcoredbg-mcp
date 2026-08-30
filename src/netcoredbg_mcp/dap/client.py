@@ -33,13 +33,15 @@ STREAM_DRAIN_TIMEOUT = 0.25
 TERMINATE_TIMEOUT = 5.0
 KILL_TIMEOUT = 2.0
 TERMINAL_EVENT_NAME_LIMIT = 256
+TERMINAL_EVENT_SEQ_MAX = 2_147_483_647
 
 _CREDENTIAL_VALUE_RE = re.compile(
-    r"(?i)\b(authorization|access[_-]?token|token|password|secret|api[_-]?key)\b"
+    r"(?i)(?<![A-Za-z0-9])"
+    r"((?:[A-Za-z0-9]+[_-])*(?:authorization|access[_-]?token|token|password|secret|api[_-]?key))"
     r"(\s*[:=]\s*)([^\s,;]+)"
 )
 _JSON_CREDENTIAL_VALUE_RE = re.compile(
-    r'(?i)("(?:authorization|access[_-]?token|token|password|secret|api[_-]?key)"'
+    r'(?i)("(?:[A-Za-z0-9]+[_-])*(?:authorization|access[_-]?token|token|password|secret|api[_-]?key)"'
     r'\s*:\s*")[^"]*(")'
 )
 _BEARER_VALUE_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
@@ -252,7 +254,7 @@ def sanitize_terminal_text(
         category = unicodedata.category(character)
         if character in named_controls:
             normalized.append(named_controls[character])
-        elif ord(character) < 32 or ord(character) == 127 or category in {"Cf", "Cs"}:
+        elif category.startswith("C"):
             normalized.append(f"\\u{ord(character):04x}")
         else:
             normalized.append(character)
@@ -260,7 +262,8 @@ def sanitize_terminal_text(
     safe = "".join(normalized)
     if len(safe) <= limit:
         return safe
-    return safe[:limit] + "... [truncated]"
+    marker = "... [truncated]"
+    return safe[: max(0, limit - len(marker))] + marker
 
 
 def _bounded_text(value: object, limit: int = TERMINAL_PREVIEW_LIMIT) -> str:
@@ -646,7 +649,16 @@ class DAPClient:
             run.pending[seq] = future
             self._pending = run.pending
         request = DAPRequest(seq=seq, command=command, arguments=arguments or {})
-        await self._send(request)
+        try:
+            await self._send(request)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            if not future.done():
+                future.set_exception(
+                    RuntimeError("netcoredbg process died — pending request cancelled")
+                )
+            # Consume the generation's terminal request outcome instead of
+            # leaking a platform-specific pipe exception to the caller.
+            return await future
 
         try:
             return await asyncio.wait_for(future, timeout=timeout)
@@ -739,7 +751,9 @@ class DAPClient:
                 logger.debug("<<< Event %s: %s", event_name, body_preview)
                 if run is not None:
                     event_seq = (
-                        message.seq if type(message.seq) is int and message.seq >= 0 else None
+                        message.seq
+                        if type(message.seq) is int and 0 <= message.seq <= TERMINAL_EVENT_SEQ_MAX
+                        else None
                     )
                     run.last_dap_event = (event_seq, event_name)
                     run.last_dap_event_body_preview = body_preview

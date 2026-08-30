@@ -1344,9 +1344,15 @@ class TestDAPClientTransportDeath:
     def test_terminal_text_sanitizer_redacts_private_values_and_controls(self):
         """Public diagnostics must not preserve secrets, paths, or control bytes."""
 
-        unsafe = "token=abc123 C:\\Users\\private\\debug.log line\n" + chr(27) + "[31m"
+        unsafe = (
+            "token=abc123 CLIENT_SECRET=supersecret DB_PASSWORD=hunter2 "
+            "C:\\Users\\private\\debug.log line\n" + chr(27) + "[31m" + chr(0x9B) + "31m"
+        )
 
-        assert sanitize_terminal_text(unsafe) == ("token=<redacted> <path> line\\n\\u001b[31m")
+        assert sanitize_terminal_text(unsafe) == (
+            "token=<redacted> CLIENT_SECRET=<redacted> DB_PASSWORD=<redacted> "
+            "<path> line\\n\\u001b[31m\\u009b31m"
+        )
 
     def test_terminal_event_metadata_is_bounded_before_retention(self):
         """Oversized or invalid DAP event metadata must not persist in state."""
@@ -1367,7 +1373,35 @@ class TestDAPClientTransportDeath:
 
         assert run.last_dap_event is not None
         assert run.last_dap_event[0] is None
-        assert len(run.last_dap_event[1]) < 300
+        assert len(run.last_dap_event[1]) <= 256
         assert run.last_dap_event_body_preview is not None
         assert "abc123" not in run.last_dap_event_body_preview
         assert "C:\\Users" not in run.last_dap_event_body_preview
+
+        client._handle_message(
+            {"seq": 10**1000, "type": "event", "event": "bounded", "body": {}},
+            run,
+        )
+        assert run.last_dap_event == (None, "bounded")
+
+    @pytest.mark.asyncio
+    async def test_send_pipe_failure_uses_terminal_request_error(self):
+        """A send racing finalization must not leak a raw pipe exception."""
+
+        client = DAPClient("/path")
+        client._process = SimpleNamespace(
+            pid=41007,
+            stdin=MagicMock(),
+            stdout=MagicMock(),
+            returncode=None,
+        )
+        run = client._run_for_direct_reader()
+
+        async def fail_after_terminalization(_request: DAPRequest) -> None:
+            client._settle_pending(run.pending)
+            raise BrokenPipeError("adapter stdin closed")
+
+        client._send = fail_after_terminalization
+
+        with pytest.raises(RuntimeError, match="netcoredbg process died"):
+            await client.send_request("threads")
