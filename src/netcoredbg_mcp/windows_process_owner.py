@@ -54,7 +54,11 @@ class OwnedProcessRef:
 
 
 class DrainStatus(str, Enum):
-    """Truthful result of one owner-only Job accounting drain."""
+    """Truthful result of one owner-only drain attempt.
+
+    ``STALE`` rejects a mismatched capability fence without an effect. The
+    other variants report retained-Job accounting.
+    """
 
     DRAINED = "drained"
     TIMED_OUT = "timed_out"
@@ -129,7 +133,7 @@ class _WindowsApi(Protocol):
 
 
 class _Kernel32:
-    """Explicitly typed kernel32 calls.  It is constructed only on Windows."""
+    """Explicitly typed kernel32 calls created only by the Windows-gated owner."""
 
     def __init__(self) -> None:
         import ctypes

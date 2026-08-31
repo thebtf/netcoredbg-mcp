@@ -1,7 +1,8 @@
 """Explicit owner gate for pre-build work.
 
-This module deliberately carries capability values and their validation only.
-It never reconstructs authority from a process observation.
+This module carries capability values and their validation only. It never
+reconstructs authority from a process observation. The former enumeration-based
+cleanup helpers were deleted in this cutover and must not be reintroduced.
 """
 
 from __future__ import annotations

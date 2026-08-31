@@ -192,7 +192,8 @@ class BuildSession:
                 self._current_owner = owner
                 self._last_owner_drain_receipt = None
             else:
-                # Preserve the established asyncio command path outside Windows.
+                # This Windows-only owner is unavailable here. Keep shell=False
+                # for command integrity; DEVNULL prevents an IPC stdin from hanging.
                 process = await asyncio.create_subprocess_exec(
                     *command,
                     stdin=asyncio.subprocess.DEVNULL,
@@ -219,10 +220,12 @@ class BuildSession:
                         if not line:
                             break
                         decoded = line.decode("utf-8", errors="replace")
+                        # Bound one runaway line before retaining it.
                         if len(decoded) > MAX_OUTPUT_LINE:
                             decoded = decoded[:MAX_OUTPUT_LINE] + "...[truncated]\n"
                         lines.append(decoded)
                         byte_counter[0] += len(decoded)
+                        # Evict oldest lines until the total buffer is bounded.
                         while byte_counter[0] > MAX_OUTPUT_BYTES and lines:
                             removed = lines.pop(0)
                             byte_counter[0] -= len(removed)

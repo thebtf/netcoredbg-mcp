@@ -244,3 +244,99 @@ async def test_c3_legacy_cli_route_keeps_owner_admission_private_and_safe() -> N
     assert process.child_alive is False, (
         "current consumer-compatible route preserves root-only cleanup of an adapter tree"
     )
+
+
+@pytest.mark.critical
+def test_c3_installed_wheel_keeps_owner_contract_private_and_required(tmp_path: Path) -> None:
+    """C3: installed CLI is unchanged and the owner gate stays package-private."""
+
+    wheel_dir = tmp_path / "wheel"
+    build = subprocess.run(
+        ["uv", "build", "--wheel", "--out-dir", str(wheel_dir)],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert build.returncode == 0, build.stdout + build.stderr
+    wheels = sorted(wheel_dir.glob("netcoredbg_mcp-*.whl"))
+    assert len(wheels) == 1, f"expected one wheel, found {wheels}"
+
+    consumer = tmp_path / "consumer"
+    create = subprocess.run(
+        ["uv", "venv", "--python", sys.executable, str(consumer)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert create.returncode == 0, create.stdout + create.stderr
+    consumer_python = consumer / "Scripts" / "python.exe"
+    consumer_cli = consumer / "Scripts" / "netcoredbg-mcp.exe"
+    install = subprocess.run(
+        ["uv", "pip", "install", "--python", str(consumer_python), str(wheels[0])],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert install.returncode == 0, install.stdout + install.stderr
+    assert consumer_cli.is_file()
+
+    environment = dict(os.environ)
+    environment.pop("PYTHONPATH", None)
+    version = subprocess.run(
+        [str(consumer_cli), "--version"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert version.returncode == 0, version.stderr
+    assert __version__ in version.stdout
+
+    contract_script = """
+import inspect
+import json
+import netcoredbg_mcp
+import netcoredbg_mcp.build as build_surface
+from netcoredbg_mcp.build.manager import BuildManager
+from netcoredbg_mcp.dap.client import DAPClient
+
+owner = inspect.signature(BuildManager.pre_launch_build).parameters["owner"]
+client = inspect.signature(DAPClient).parameters
+print(json.dumps({
+    "owner_required": owner.default is inspect.Parameter.empty,
+    "owner_keyword_only": owner.kind is inspect.Parameter.KEYWORD_ONLY,
+    "client_parameters": list(client),
+    "root_owner_exported": hasattr(netcoredbg_mcp, "WindowsOwnedProcess"),
+    "selector_exports": sorted(name for name in (
+        "cleanup_for_build",
+        "kill_debugger_processes",
+        "kill_processes_in_directory",
+    ) if hasattr(build_surface, name)),
+}))
+"""
+    contract = subprocess.run(
+        [str(consumer_python), "-c", contract_script],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert contract.returncode == 0, contract.stderr
+    import json
+
+    observed = json.loads(contract.stdout)
+    assert observed == {
+        "owner_required": True,
+        "owner_keyword_only": True,
+        "client_parameters": ["netcoredbg_path"],
+        "root_owner_exported": False,
+        "selector_exports": [],
+    }

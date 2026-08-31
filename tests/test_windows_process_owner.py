@@ -11,11 +11,14 @@ import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import psutil
 import pytest
 
+from netcoredbg_mcp.build.manager import BuildManager
 from netcoredbg_mcp.dap.client import DAPClient, DapTransportTerminal
+from netcoredbg_mcp.session import SessionManager
 from netcoredbg_mcp.windows_process_owner import (
     AdmissionStage,
     DrainStatus,
@@ -325,3 +328,93 @@ async def test_production_dap_path_inherits_descendant_and_drains_job(
             await client.stop()
         if child_pid is not None and psutil.pid_exists(child_pid):
             psutil.Process(child_pid).kill()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object proof")
+@pytest.mark.skipif(shutil.which("dotnet") is None, reason="dotnet CLI is required")
+@pytest.mark.asyncio
+async def test_real_prebuild_drains_only_captured_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """O10: production capture drains A while B and same-image sentinel survive."""
+
+    build = subprocess.run(
+        ["dotnet", "build", str(FIXTURE_PROJECT), "-c", "Debug", "-v", "quiet"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert build.returncode == 0, build.stdout + build.stderr
+
+    async def start_client(name: str) -> tuple[DAPClient, int]:
+        root_marker = tmp_path / f"{name}-root.json"
+        child_marker = tmp_path / f"{name}-child.json"
+        monkeypatch.setenv("OWNER_SCOPE_ROOT_MARKER", str(root_marker))
+        monkeypatch.setenv("OWNER_SCOPE_CHILD_MARKER", str(child_marker))
+        client = DAPClient(str(FIXTURE_EXE))
+        await client.start(generation=name)
+        await _wait_for_path(root_marker)
+        await _wait_for_path(child_marker)
+        child_pid = int(json.loads(child_marker.read_text(encoding="utf-8"))["pid"])
+        return client, child_pid
+
+    client_a, child_a = await start_client("owner-a")
+    client_b, child_b = await start_client("owner-b")
+
+    sentinel_root_marker = tmp_path / "sentinel-root.json"
+    sentinel_child_marker = tmp_path / "sentinel-child.json"
+    sentinel_env = dict(os.environ)
+    sentinel_env["OWNER_SCOPE_ROOT_MARKER"] = str(sentinel_root_marker)
+    sentinel_env["OWNER_SCOPE_CHILD_MARKER"] = str(sentinel_child_marker)
+    sentinel = subprocess.Popen(
+        [str(FIXTURE_EXE), "--foreign-sentinel"],
+        env=sentinel_env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    sentinel_child: int | None = None
+    try:
+        await _wait_for_path(sentinel_child_marker)
+        sentinel_child = int(json.loads(sentinel_child_marker.read_text(encoding="utf-8"))["pid"])
+
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager_a = SessionManager()
+        manager_a._client = client_a
+        manager_a._active_dap_run = "owner-a"
+        captured = manager_a.capture_prebuild_owner()
+
+        build_manager = BuildManager()
+        project = tmp_path / "OwnerA.csproj"
+        project.touch()
+        build_session = build_manager.get_session(str(tmp_path))
+        build_session.build = AsyncMock(return_value=MagicMock(success=True))
+
+        result = await build_manager.pre_launch_build(
+            str(tmp_path),
+            str(project),
+            owner=captured,
+            restore_first=False,
+        )
+
+        assert result.success is True
+        await _wait_for_pid_exit(child_a)
+        assert client_b.is_running is True
+        assert psutil.pid_exists(child_b) is True
+        assert sentinel.poll() is None
+        assert sentinel_child is not None and psutil.pid_exists(sentinel_child) is True
+        build_session.build.assert_awaited_once()
+    finally:
+        if client_a.is_running:
+            await client_a.stop()
+        if client_b.is_running:
+            await client_b.stop()
+        sentinel.terminate()
+        try:
+            sentinel.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            sentinel.kill()
+            sentinel.wait(timeout=5)
+        for pid in (sentinel_child, child_b):
+            if pid is not None and psutil.pid_exists(pid):
+                psutil.Process(pid).kill()

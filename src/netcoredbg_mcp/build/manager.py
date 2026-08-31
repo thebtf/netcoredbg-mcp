@@ -157,7 +157,8 @@ class BuildManager:
                     exit_code=restore_result.exit_code,
                 )
 
-        # Run build with its per-command ownership and retry policy.
+        # BuildSession owns each command capability and the lock-retry policy;
+        # this orchestration layer only forwards the verified request.
         result = await session.build(
             project_path,
             BuildCommand.BUILD,

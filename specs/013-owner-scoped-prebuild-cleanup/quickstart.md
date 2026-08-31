@@ -116,14 +116,12 @@ Run the focused tests selected for C1 through C4. They include direct Python beh
 
 ```powershell
 uv run --locked --extra dev python -m pytest -q `
-  tests/test_host_proxy.py `
-  tests/test_host_mux_ownership.py `
-  tests/critical/test_release_critical.py `
-  tests/critical/test_typed_bitblt_fallback_public.py `
-  tests/critical/test_resources_relay_critical.py
+  tests/test_host_proxy.py::test_c4_shared_host_backend_prebuild_requires_owner_capability `
+  tests/critical/test_release_critical.py::test_c3_legacy_cli_route_keeps_owner_admission_private_and_safe `
+  tests/critical/test_release_critical.py::test_c3_installed_wheel_keeps_owner_contract_private_and_required
 ```
 
-Expected result: the public Python/default route and stateless preview remain unchanged, and the candidate does not add a direct `pywin32` dependency. Scope the command to exact test nodes if unrelated existing cases are not part of the child contract. Do not substitute a release, package publication, or broad suite for these controls.
+Expected result: direct Python/default behavior, the required public start/restart owner handoff, installed CLI/version behavior, the required package-private owner argument, and direct-versus-host parity remain intact. The broad typed BitBlt UI journey is not this gate: it launches with `pre_build=False` and its foreground-sensitive UI discovery does not exercise the owner handoff. Do not substitute a release, package publication, or unrelated UI suite for these controls.
 
 ## Freeze and accept only after proof
 
