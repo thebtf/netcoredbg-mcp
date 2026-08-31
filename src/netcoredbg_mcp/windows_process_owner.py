@@ -106,7 +106,7 @@ class ProcessAdmissionError(RuntimeError):
 
 
 class AdmissionCleanupError(RuntimeError):
-    """Admission cleanup could not prove root exit, so controlling handles stay open."""
+    """Admission cleanup failed while a private reaper retains the controlling handles."""
 
     def __init__(
         self,
@@ -116,13 +116,15 @@ class AdmissionCleanupError(RuntimeError):
         admission_winerror: int | None,
         cleanup_stage: AdmissionStage,
         cleanup_winerror: int | None,
+        reaper: _FailedAdmissionReaper,
     ) -> None:
         self.owner_id = owner_id
         self.admission_stage = admission_stage
         self.admission_winerror = admission_winerror
         self.cleanup_stage = cleanup_stage
         self.cleanup_winerror = cleanup_winerror
-        self.controlling_handles_retained = True
+        self._reaper = reaper
+        self.controlling_handles_retained = not reaper.closed
         detail = "Windows process admission cleanup did not confirm root exit"
         if admission_stage is not None:
             detail = f"{detail} after {admission_stage.value}"
@@ -130,6 +132,10 @@ class AdmissionCleanupError(RuntimeError):
         if cleanup_winerror is not None:
             detail = f"{detail} (winerror {cleanup_winerror})"
         super().__init__(detail)
+
+    async def wait_for_cleanup(self, timeout: float) -> bool:
+        """Return whether the retained-owner reaper closes within ``timeout`` seconds."""
+        return await self._reaper.wait_for_completion(timeout)
 
 
 class _Win32CallError(RuntimeError):
@@ -502,6 +508,131 @@ class _PipeEnds:
             for owned_transport in transports:
                 owned_transport.close()
             raise
+
+
+class _FailedAdmissionReaper:
+    """Retain failed-admission handles until a root-exit observation permits closure."""
+
+    def __init__(
+        self,
+        *,
+        api: _WindowsApi,
+        job_handle: int | None,
+        process_handle: int | None,
+        thread_handle: int | None,
+        pipe_ends: _PipeEnds | None,
+        transports: tuple[asyncio.BaseTransport, ...],
+        admitted: bool,
+    ) -> None:
+        self._api = api
+        self._job_handle = job_handle
+        self._process_handle = process_handle
+        self._thread_handle = thread_handle
+        self._pipe_ends = pipe_ends
+        self._transports = transports
+        self._admitted = admitted
+        self._closed = False
+        self._io_closed = False
+        self._completed = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
+
+    @property
+    def closed(self) -> bool:
+        """Whether a retained root exit has allowed every controlling handle to close."""
+        return self._closed
+
+    def schedule(self) -> None:
+        """Begin the private retry loop once the initial bounded attempt failed."""
+        if self._closed or self._task is not None:
+            return
+        self._task = asyncio.create_task(self._retry_until_root_exit())
+
+    async def wait_for_completion(self, timeout: float) -> bool:
+        """Await only a bounded completion fact; never expose retained handle values."""
+        if self._closed:
+            return True
+        try:
+            await asyncio.wait_for(self._completed.wait(), timeout=max(timeout, 0.0))
+        except asyncio.TimeoutError:
+            return False
+        return self._closed
+
+    async def _retry_until_root_exit(self) -> None:
+        while not self._closed:
+            await asyncio.sleep(_ACCOUNTING_POLL_SECONDS)
+            try:
+                await self._attempt_cleanup()
+            except Exception:
+                # A private retry owner must not abandon its handles because a
+                # transient boundary adapter error escaped one attempt.
+                continue
+
+    async def _attempt_cleanup(self) -> _Win32CallError | None:
+        self._close_io()
+        process_handle = self._process_handle
+        if process_handle is None:
+            self._close_after_root_exit()
+            return None
+
+        process_failure: _Win32CallError | None = None
+        try:
+            self._api.terminate_process(process_handle)
+        except _Win32CallError as error:
+            process_failure = error
+        if process_failure is not None and not self._admitted:
+            return process_failure
+
+        job_failure: _Win32CallError | None = None
+        if self._admitted:
+            job_handle = self._job_handle
+            if job_handle is None:
+                job_failure = _Win32CallError(AdmissionStage.DRAIN, None)
+            else:
+                try:
+                    self._api.terminate_job(job_handle)
+                except _Win32CallError as error:
+                    job_failure = error
+        if job_failure is not None:
+            return job_failure
+
+        try:
+            root_exited = await asyncio.to_thread(
+                self._api.wait_for_process,
+                process_handle,
+                int(_ADMISSION_CLEANUP_TIMEOUT * 1000),
+            )
+        except _Win32CallError as error:
+            return error
+        if root_exited:
+            self._close_after_root_exit()
+            return None
+        return job_failure or process_failure or _Win32CallError(AdmissionStage.DRAIN, None)
+
+    def _close_io(self) -> None:
+        if self._io_closed:
+            return
+        self._io_closed = True
+        for transport in self._transports:
+            transport.close()
+        self._transports = ()
+        if self._pipe_ends is not None:
+            self._pipe_ends.close_unwired(self._api)
+            self._pipe_ends = None
+
+    def _close_after_root_exit(self) -> None:
+        if self._closed:
+            return
+        if self._thread_handle is not None:
+            _close_ignoring_errors(self._api, self._thread_handle)
+            self._thread_handle = None
+        if self._process_handle is not None:
+            _close_ignoring_errors(self._api, self._process_handle)
+            self._process_handle = None
+        if self._job_handle is not None:
+            _close_ignoring_errors(self._api, self._job_handle)
+            self._job_handle = None
+        self._closed = True
+        self._completed.set()
 
 
 def _close_ignoring_errors(api: _WindowsApi, handle: int) -> None:
@@ -999,52 +1130,29 @@ async def _cleanup_failed_admission(
     transports: tuple[asyncio.BaseTransport, ...],
     admitted: bool,
 ) -> None:
-    """Release admission resources only after the retained root exit is confirmed."""
-
-    def cleanup_failure(error: _Win32CallError | None = None) -> AdmissionCleanupError:
-        return AdmissionCleanupError(
-            owner_id=owner_id,
-            admission_stage=admission_stage,
-            admission_winerror=admission_winerror,
-            cleanup_stage=AdmissionStage.DRAIN if error is None else error.stage,
-            cleanup_winerror=None if error is None else error.winerror,
-        )
-
-    for transport in transports:
-        transport.close()
-    if pipe_ends is not None:
-        pipe_ends.close_unwired(api)
-    if process_handle is None:
-        if thread_handle is not None:
-            _close_ignoring_errors(api, thread_handle)
-        if job_handle is not None:
-            _close_ignoring_errors(api, job_handle)
+    """Transfer failed admission to one private retry owner before this frame unwinds."""
+    reaper = _FailedAdmissionReaper(
+        api=api,
+        job_handle=job_handle,
+        process_handle=process_handle,
+        thread_handle=thread_handle,
+        pipe_ends=pipe_ends,
+        transports=transports,
+        admitted=admitted,
+    )
+    try:
+        failure = await reaper._attempt_cleanup()
+    except BaseException:
+        reaper.schedule()
+        raise
+    if failure is None:
         return
-
-    try:
-        api.terminate_process(process_handle)
-    except _Win32CallError as error:
-        if not admitted or job_handle is None:
-            raise cleanup_failure(error)
-    if admitted:
-        if job_handle is None:
-            raise cleanup_failure()
-        try:
-            api.terminate_job(job_handle)
-        except _Win32CallError as error:
-            raise cleanup_failure(error)
-    try:
-        root_exited = await asyncio.to_thread(
-            api.wait_for_process,
-            process_handle,
-            int(_ADMISSION_CLEANUP_TIMEOUT * 1000),
-        )
-    except _Win32CallError as error:
-        raise cleanup_failure(error)
-    if not root_exited:
-        raise cleanup_failure()
-    if thread_handle is not None:
-        _close_ignoring_errors(api, thread_handle)
-    _close_ignoring_errors(api, process_handle)
-    if job_handle is not None:
-        _close_ignoring_errors(api, job_handle)
+    reaper.schedule()
+    raise AdmissionCleanupError(
+        owner_id=owner_id,
+        admission_stage=admission_stage,
+        admission_winerror=admission_winerror,
+        cleanup_stage=failure.stage,
+        cleanup_winerror=failure.winerror,
+        reaper=reaper,
+    )

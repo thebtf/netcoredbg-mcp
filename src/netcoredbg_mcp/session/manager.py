@@ -1677,12 +1677,25 @@ class SessionManager:
                 active_processes=None,
             )
 
-        try:
-            await source_client.disconnect(terminate=True)
-        except Exception as error:
-            logger.warning("Expected adapter disconnect failed: %s", error)
-        stop_task = asyncio.create_task(source_client.stop(expected_owner=expected))
+        disconnect_task = asyncio.create_task(source_client.disconnect(terminate=True))
         cancelled = False
+        while True:
+            try:
+                await asyncio.shield(disconnect_task)
+                break
+            except asyncio.CancelledError:
+                if disconnect_task.cancelled():
+                    logger.warning("Expected adapter disconnect was cancelled before finalization")
+                    break
+                # The caller may cancel pre-build, but this captured owner has
+                # not reached its finalizer yet. Keep the lifecycle gate until
+                # the matching finalizer produces a receipt.
+                cancelled = True
+            except Exception as error:
+                logger.warning("Expected adapter disconnect failed: %s", error)
+                break
+
+        stop_task = asyncio.create_task(source_client.stop(expected_owner=expected))
         while True:
             try:
                 receipt = await asyncio.shield(stop_task)

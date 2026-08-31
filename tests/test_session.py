@@ -595,6 +595,90 @@ class TestSessionManagerTransportFences:
         build_session.restore.assert_not_awaited()
         build_session.build.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_cancelled_owner_disconnect_joins_finalizer_before_releasing_gate(
+        self, tmp_path
+    ) -> None:
+        """A canceled pre-build disconnect cannot let a new admission pass its finalizer."""
+        project = tmp_path / "App.csproj"
+        project.touch()
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+
+        generation = "cancelled-owner-disconnect"
+        owner = OwnedProcessRef("cancelled-disconnect-owner", generation, 41016)
+        disconnect_started = asyncio.Event()
+        release_disconnect = asyncio.Event()
+        stop_started = asyncio.Event()
+        release_stop = asyncio.Event()
+        finalizer_completed = asyncio.Event()
+        client = MagicMock()
+        client.is_running = True
+        client.adapter_owner = owner
+        client.adapter_pid = owner.root_pid
+
+        async def disconnect(*, terminate: bool) -> None:
+            assert terminate is True
+            disconnect_started.set()
+            await release_disconnect.wait()
+
+        async def stop(*, expected_owner: OwnedProcessRef | None = None) -> OwnerDrainReceipt:
+            assert expected_owner == owner
+            stop_started.set()
+            await release_stop.wait()
+            finalizer_completed.set()
+            return OwnerDrainReceipt(
+                owner=owner,
+                status=DrainStatus.DRAINED,
+                forced=False,
+                root_returncode=0,
+                active_processes=0,
+            )
+
+        client.disconnect = AsyncMock(side_effect=disconnect)
+        client.stop = AsyncMock(side_effect=stop)
+        manager._client = client
+        manager._active_dap_run = generation
+        manager._state.state = DebugState.RUNNING
+        build_session = manager._build_manager.get_session(str(tmp_path))
+        build_session.restore = AsyncMock()
+        build_session.build = AsyncMock()
+
+        prebuild_task = asyncio.create_task(manager.pre_launch_build(str(project)))
+        start_task: asyncio.Task[None] | None = None
+        try:
+            await asyncio.wait_for(disconnect_started.wait(), timeout=1.0)
+            prebuild_task.cancel()
+            start_task = asyncio.create_task(manager.start())
+            await asyncio.sleep(0)
+            assert start_task.done() is False
+
+            release_disconnect.set()
+            await asyncio.wait_for(stop_started.wait(), timeout=1.0)
+            await asyncio.sleep(0)
+            assert start_task.done() is False
+
+            release_stop.set()
+            with pytest.raises(asyncio.CancelledError):
+                await prebuild_task
+            assert finalizer_completed.is_set()
+            client.stop.assert_awaited_once_with(expected_owner=owner)
+            await asyncio.wait_for(start_task, timeout=1.0)
+        finally:
+            release_disconnect.set()
+            release_stop.set()
+            if not prebuild_task.done():
+                prebuild_task.cancel()
+            try:
+                await prebuild_task
+            except asyncio.CancelledError:
+                pass
+            if start_task is not None:
+                await asyncio.wait_for(start_task, timeout=1.0)
+
+        build_session.restore.assert_not_awaited()
+        build_session.build.assert_not_awaited()
+
     def test_old_run_event_cannot_mutate_current_manager_state(self):
         """Buffered events from an old adapter run cannot revive the current session state."""
         with patch("netcoredbg_mcp.session.manager.DAPClient"):

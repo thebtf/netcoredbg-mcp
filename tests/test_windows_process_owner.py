@@ -364,12 +364,18 @@ async def test_pre_admission_terminate_failure_retains_controlling_handles(
     """A failed root termination cannot release the only suspended-root handles."""
 
     class RootTerminateFailureApi(_FakeApi):
+        def __init__(self, events: list[str]) -> None:
+            super().__init__(events, assign_ok=False)
+            self.terminate_attempts = 0
+
         def terminate_process(self, _process: int) -> None:
             self.events.append("terminate-process")
-            raise _Win32CallError(AdmissionStage.DRAIN, 55)
+            self.terminate_attempts += 1
+            if self.terminate_attempts == 1:
+                raise _Win32CallError(AdmissionStage.DRAIN, 55)
 
     events: list[str] = []
-    api = RootTerminateFailureApi(events, assign_ok=False)
+    api = RootTerminateFailureApi(events)
 
     with pytest.raises(AdmissionCleanupError) as raised:
         await _launch(monkeypatch, api, events)
@@ -380,6 +386,8 @@ async def test_pre_admission_terminate_failure_retains_controlling_handles(
     assert failure.cleanup_winerror == 55
     assert "wait-process" not in events
     assert {"close:11", "close:21", "close:31"}.isdisjoint(events)
+    assert await failure.wait_for_cleanup(timeout=1.0) is True
+    assert {"close:11", "close:21", "close:31"}.issubset(events)
 
 
 @pytest.mark.asyncio
@@ -389,12 +397,17 @@ async def test_pre_admission_wait_timeout_retains_controlling_handles(
     """A bounded wait timeout is not evidence that the suspended root exited."""
 
     class WaitTimeoutApi(_FakeApi):
+        def __init__(self, events: list[str]) -> None:
+            super().__init__(events, assign_ok=False)
+            self.wait_attempts = 0
+
         def wait_for_process(self, _process: int, _timeout_ms: int) -> bool:
             self.events.append("wait-process")
-            return False
+            self.wait_attempts += 1
+            return self.wait_attempts >= 2
 
     events: list[str] = []
-    api = WaitTimeoutApi(events, assign_ok=False)
+    api = WaitTimeoutApi(events)
 
     with pytest.raises(AdmissionCleanupError) as raised:
         await _launch(monkeypatch, api, events)
@@ -405,6 +418,46 @@ async def test_pre_admission_wait_timeout_retains_controlling_handles(
     assert failure.cleanup_winerror is None
     assert events.index("terminate-process") < events.index("wait-process")
     assert {"close:11", "close:21", "close:31"}.isdisjoint(events)
+    assert await failure.wait_for_cleanup(timeout=1.0) is True
+    assert {"close:11", "close:21", "close:31"}.issubset(events)
+
+
+@pytest.mark.asyncio
+async def test_failed_admission_reaper_retries_until_root_exit_then_closes_handles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed first cleanup retains one retry owner until its root exits."""
+
+    class RetryCleanupApi(_FakeApi):
+        def __init__(self, events: list[str]) -> None:
+            super().__init__(events, assign_ok=False)
+            self.terminate_attempts = 0
+            self.wait_attempts = 0
+
+        def terminate_process(self, _process: int) -> None:
+            self.events.append("terminate-process")
+            self.terminate_attempts += 1
+            if self.terminate_attempts == 1:
+                raise _Win32CallError(AdmissionStage.DRAIN, 55)
+
+        def wait_for_process(self, _process: int, _timeout_ms: int) -> bool:
+            self.events.append("wait-process")
+            self.wait_attempts += 1
+            return self.wait_attempts >= 2
+
+    events: list[str] = []
+    api = RetryCleanupApi(events)
+
+    with pytest.raises(AdmissionCleanupError) as raised:
+        await _launch(monkeypatch, api, events)
+
+    failure = raised.value
+    assert failure.controlling_handles_retained is True
+    assert await failure.wait_for_cleanup(timeout=1.0) is True
+    assert api.terminate_attempts >= 2
+    assert api.wait_attempts >= 2
+    assert {"close:11", "close:21", "close:31"}.issubset(events)
+    assert len(events) - 1 - events[::-1].index("wait-process") < events.index("close:31")
 
 
 @pytest.mark.asyncio
