@@ -367,12 +367,18 @@ async def test_pre_admission_terminate_failure_retains_controlling_handles(
         def __init__(self, events: list[str]) -> None:
             super().__init__(events, assign_ok=False)
             self.terminate_attempts = 0
+            self.wait_attempts = 0
 
         def terminate_process(self, _process: int) -> None:
             self.events.append("terminate-process")
             self.terminate_attempts += 1
             if self.terminate_attempts == 1:
                 raise _Win32CallError(AdmissionStage.DRAIN, 55)
+
+        def wait_for_process(self, _process: int, _timeout_ms: int) -> bool:
+            self.events.append("wait-process")
+            self.wait_attempts += 1
+            return self.wait_attempts >= 2
 
     events: list[str] = []
     api = RootTerminateFailureApi(events)
@@ -384,9 +390,36 @@ async def test_pre_admission_terminate_failure_retains_controlling_handles(
     assert failure.admission_stage is AdmissionStage.ASSIGN
     assert failure.cleanup_stage is AdmissionStage.DRAIN
     assert failure.cleanup_winerror == 55
-    assert "wait-process" not in events
+    assert "wait-process" in events
     assert {"close:11", "close:21", "close:31"}.isdisjoint(events)
     assert await failure.wait_for_cleanup(timeout=1.0) is True
+    assert {"close:11", "close:21", "close:31"}.issubset(events)
+
+
+@pytest.mark.asyncio
+async def test_pre_admission_terminate_access_denied_closes_already_exited_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ERROR_ACCESS_DENIED still probes the retained handle for prior exit."""
+
+    class AlreadyExitedApi(_FakeApi):
+        def terminate_process(self, _process: int) -> None:
+            self.events.append("terminate-process")
+            raise _Win32CallError(AdmissionStage.DRAIN, 5)
+
+        def wait_for_process(self, _process: int, _timeout_ms: int) -> bool:
+            self.events.append("wait-process")
+            return True
+
+    events: list[str] = []
+    api = AlreadyExitedApi(events, assign_ok=False)
+
+    with pytest.raises(ProcessAdmissionError) as raised:
+        await _launch(monkeypatch, api, events)
+
+    assert raised.value.stage is AdmissionStage.ASSIGN
+    assert events.index("terminate-process") < events.index("wait-process")
+    assert events.index("wait-process") < events.index("close:31")
     assert {"close:11", "close:21", "close:31"}.issubset(events)
 
 

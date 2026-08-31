@@ -579,8 +579,6 @@ class _FailedAdmissionReaper:
             self._api.terminate_process(process_handle)
         except _Win32CallError as error:
             process_failure = error
-        if process_failure is not None and not self._admitted:
-            return process_failure
 
         job_failure: _Win32CallError | None = None
         if self._admitted:
@@ -592,8 +590,6 @@ class _FailedAdmissionReaper:
                     self._api.terminate_job(job_handle)
                 except _Win32CallError as error:
                     job_failure = error
-        if job_failure is not None:
-            return job_failure
 
         try:
             root_exited = await asyncio.to_thread(
