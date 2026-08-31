@@ -791,7 +791,7 @@ async def test_production_dap_path_inherits_descendant_and_drains_job(
         await asyncio.wait_for(output_seen.wait(), timeout=10.0)
         await _wait_for_path(root_marker)
         await _wait_for_path(child_marker)
-        child_pid = int(json.loads(child_marker.read_text(encoding="utf-8"))["pid"])
+        child_pid = await _read_marker_pid(child_marker)
 
         run = client._run
         assert run is not None and run.owner is not None
@@ -917,7 +917,7 @@ async def test_real_prebuild_drains_only_captured_owner(
         await client.start(generation=name)
         await _wait_for_path(root_marker)
         await _wait_for_path(child_marker)
-        child_pid = int(json.loads(child_marker.read_text(encoding="utf-8"))["pid"])
+        child_pid = await _read_marker_pid(child_marker)
         return client, child_pid
 
     client_a, child_a = await start_client("owner-a")
@@ -937,7 +937,7 @@ async def test_real_prebuild_drains_only_captured_owner(
     sentinel_child: int | None = None
     try:
         await _wait_for_path(sentinel_child_marker)
-        sentinel_child = int(json.loads(sentinel_child_marker.read_text(encoding="utf-8"))["pid"])
+        sentinel_child = await _read_marker_pid(sentinel_child_marker)
 
         with patch("netcoredbg_mcp.session.manager.DAPClient"):
             manager_a = SessionManager()

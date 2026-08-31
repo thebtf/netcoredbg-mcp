@@ -42,10 +42,7 @@ async def run_cleanup(
                     "debug.tracepoint.remove",
                     **remove_args,
                 )
-                if (
-                    str(result.get("status", "PASS")) == "PASS"
-                    and result.get("removed") is True
-                ):
+                if str(result.get("status", "PASS")) == "PASS" and result.get("removed") is True:
                     tracepoints_removed += 1
             elif kind == "debug.trace_log.clear":
                 attempted.append("debug.trace_log.clear")
@@ -59,6 +56,9 @@ async def run_cleanup(
                 )
                 if str(result.get("status", "PASS")) == "PASS":
                     isolated_profiles_torn_down += 1
+            elif kind == "ui.disconnect":
+                attempted.append("ui.disconnect")
+                result = await context.call_adapter("ui.disconnect")
             elif kind == "debug.stop":
                 mode = str(step.get("mode") or "graceful")
                 attempted.append(f"debug.stop:{mode}")
@@ -133,9 +133,7 @@ def _cleanup_adapter_exception_result(exc: Exception) -> dict[str, Any]:
         "exception": {
             "type": type(exc).__name__,
             "message": str(exc),
-            "traceback": "".join(
-                traceback.format_exception(type(exc), exc, exc.__traceback__)
-            ),
+            "traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
         },
     }
 
@@ -143,16 +141,12 @@ def _cleanup_adapter_exception_result(exc: Exception) -> dict[str, Any]:
 def _cleanup_execution_order(cleanup_steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ordered = list(reversed([dict(item) for item in cleanup_steps]))
     registry_asserts = [
-        step
-        for step in ordered
-        if str(step.get("kind") or "") == "process.registry.assert_empty"
+        step for step in ordered if str(step.get("kind") or "") == "process.registry.assert_empty"
     ]
     if not registry_asserts:
         return ordered
     non_registry_steps = [
-        step
-        for step in ordered
-        if str(step.get("kind") or "") != "process.registry.assert_empty"
+        step for step in ordered if str(step.get("kind") or "") != "process.registry.assert_empty"
     ]
     return [*non_registry_steps, *registry_asserts]
 

@@ -705,6 +705,30 @@ async def test_ui_invoke_preserves_non_selector_backend_exception() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ui_operation_adapters_disconnects_owned_backend() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.disconnected = False
+
+        async def disconnect(self) -> None:
+            self.disconnected = True
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.disconnect"]()
+
+    assert result == {
+        "status": "PASS",
+        "reason": "ui backend disconnected",
+        "backend": "FakeBackend",
+    }
+    assert backend.disconnected is True
+
+
+@pytest.mark.asyncio
 async def test_ui_operation_adapters_click_uses_invoke_element_with_bounded_evidence() -> None:
     class FakeBackend:
         def __init__(self) -> None:
@@ -1953,9 +1977,7 @@ async def test_ui_text_assert_selector_miss_returns_actionable_blocked() -> None
 
     assert result["status"] == "BLOCKED"
     assert result["blocked"]["reason"] == "selector not found"
-    assert result["blocked"]["requested"] == {
-        "selector": {"automation_id": "missingTxtOutput"}
-    }
+    assert result["blocked"]["requested"] == {"selector": {"automation_id": "missingTxtOutput"}}
     assert result["blocked"]["accepted"]["selector_keys"]
     assert result["blocked"]["next_step"]
     assert result["blocked"]["backend_result"] == {
@@ -2450,7 +2472,7 @@ async def test_ui_operation_adapters_drag_blocks_when_drop_ensure_visible_fails(
         ],
         drop={
             "selector": selector,
-                "row_identity": "Cue target eight",
+            "row_identity": "Cue target eight",
             "ensure_visible": True,
         },
         identity={"column": "Phrase"},
@@ -2706,8 +2728,9 @@ async def test_ui_drag_blocks_when_target_ensure_visible_hides_shorthand_source(
 
 
 @pytest.mark.asyncio
-async def test_ui_operation_adapters_drag_uses_grid_row_to_row_backend_for_offscreen_target(
-) -> None:
+async def test_ui_operation_adapters_drag_uses_grid_row_to_row_backend_for_offscreen_target() -> (
+    None
+):
     class FakeBackend:
         def __init__(self) -> None:
             self.drag_calls: list[tuple[int, int, int, int, int, list[str]]] = []
@@ -3405,9 +3428,7 @@ async def test_ui_operation_adapters_route_held_edge_drag_through_drag_path() ->
         {"x": 70, "y": 212, "hold_ms": 900},
         {"x": 70, "y": 200},
     ]
-    assert result["route_evidence"]["hold_points"] == [
-        {"x": 70, "y": 212, "hold_ms": 900}
-    ]
+    assert result["route_evidence"]["hold_points"] == [{"x": 70, "y": 212, "hold_ms": 900}]
     assert result["route_evidence"]["final_pointer"] == {"x": 70, "y": 200}
 
 
@@ -3748,8 +3769,7 @@ async def test_grid_select_indices_uses_grid_select_range_for_contiguous_indices
                 "status": "PASS",
                 "selected_range": {"start": start_index, "end": end_index},
                 "selected_rows": [
-                    {"row_index": index}
-                    for index in range(start_index, end_index + 1)
+                    {"row_index": index} for index in range(start_index, end_index + 1)
                 ],
             }
 
@@ -4359,9 +4379,7 @@ async def test_ui_operation_adapters_build_grid_viewport_snapshot_with_derived_i
         {"index": 0, "identity": "Cue 001", "derived": False},
         {"index": 1, "identity": "row:1", "derived": True},
     ]
-    assert snapshot["selected_rows"] == [
-        {"index": 0, "identity": "Cue 001", "derived": False}
-    ]
+    assert snapshot["selected_rows"] == [{"index": 0, "identity": "Cue 001", "derived": False}]
     assert snapshot["identity_strategy"] == {
         "kind": "configured_column",
         "column": "PhraseId",
@@ -4417,9 +4435,7 @@ async def test_ui_operation_adapters_prefers_backend_row_index_for_viewport_snap
         {"index": 18, "identity": "Cue 018", "derived": False},
         {"index": 19, "identity": "Cue 019", "derived": False},
     ]
-    assert snapshot["selected_rows"] == [
-        {"index": 19, "identity": "Cue 019", "derived": False}
-    ]
+    assert snapshot["selected_rows"] == [{"index": 19, "identity": "Cue 019", "derived": False}]
 
 
 @pytest.mark.asyncio
@@ -4449,9 +4465,7 @@ async def test_ui_operation_adapters_grid_get_state_combines_visible_and_selecte
         ) -> dict[str, Any]:
             return {
                 "status": "PASS",
-                "selected_rows": [
-                    {"index": 1, "row_index": 19, "cells": {"PhraseId": "Cue 019"}}
-                ],
+                "selected_rows": [{"index": 1, "row_index": 19, "cells": {"PhraseId": "Cue 019"}}],
                 "columns": list(columns or []),
             }
 
@@ -4512,9 +4526,7 @@ async def test_ui_operation_adapters_grid_select_row_resolves_visible_identity()
         ) -> dict[str, Any]:
             return {
                 "status": "PASS",
-                "selected_rows": [
-                    {"index": 1, "row_index": 19, "cells": {"PhraseId": "Cue 019"}}
-                ],
+                "selected_rows": [{"index": 1, "row_index": 19, "cells": {"PhraseId": "Cue 019"}}],
             }
 
     async def backend_provider() -> FakeBackend:
@@ -4559,9 +4571,7 @@ async def test_ui_operation_adapters_grid_select_row_can_opt_in_to_ensure_visibl
                 }
             return {
                 "status": "PASS",
-                "visible_rows": [
-                    {"index": 0, "row_index": 42, "cells": {"PhraseId": "Cue 042"}}
-                ],
+                "visible_rows": [{"index": 0, "row_index": 42, "cells": {"PhraseId": "Cue 042"}}],
             }
 
         async def grid_ensure_visible(
@@ -4590,9 +4600,7 @@ async def test_ui_operation_adapters_grid_select_row_can_opt_in_to_ensure_visibl
         ) -> dict[str, Any]:
             return {
                 "status": "PASS",
-                "selected_rows": [
-                    {"index": 0, "row_index": 42, "cells": {"PhraseId": "Cue 042"}}
-                ],
+                "selected_rows": [{"index": 0, "row_index": 42, "cells": {"PhraseId": "Cue 042"}}],
             }
 
     backend = FakeBackend()
@@ -4829,9 +4837,7 @@ async def test_grid_select_identities_matches_only_stable_identity_column() -> N
     assert result["status"] == "PASS"
     assert backend.start_index == 2
     assert backend.end_index == 2
-    assert result["resolved_rows"] == [
-        {"index": 2, "identity": "Cue 016", "row_index": 2}
-    ]
+    assert result["resolved_rows"] == [{"index": 2, "identity": "Cue 016", "row_index": 2}]
 
 
 @pytest.mark.asyncio
@@ -4921,9 +4927,7 @@ async def test_ui_operation_adapters_grid_click_row_can_opt_in_to_ensure_visible
                 }
             return {
                 "status": "PASS",
-                "visible_rows": [
-                    {"index": 0, "row_index": 42, "cells": {"PhraseId": "Cue 042"}}
-                ],
+                "visible_rows": [{"index": 0, "row_index": 42, "cells": {"PhraseId": "Cue 042"}}],
             }
 
         async def grid_ensure_visible(
@@ -5068,8 +5072,9 @@ async def test_ui_operation_adapters_grid_click_row_requires_backend_click_primi
 
 
 @pytest.mark.asyncio
-async def test_ui_operation_adapters_grid_right_click_row_requires_backend_click_primitive(
-) -> None:
+async def test_ui_operation_adapters_grid_right_click_row_requires_backend_click_primitive() -> (
+    None
+):
     class FakeBackend:
         async def grid_snapshot(
             self,
@@ -5101,8 +5106,9 @@ async def test_ui_operation_adapters_grid_right_click_row_requires_backend_click
 
 
 @pytest.mark.asyncio
-async def test_ui_operation_adapters_grid_double_click_row_requires_backend_click_primitive(
-) -> None:
+async def test_ui_operation_adapters_grid_double_click_row_requires_backend_click_primitive() -> (
+    None
+):
     class FakeBackend:
         async def grid_snapshot(
             self,
