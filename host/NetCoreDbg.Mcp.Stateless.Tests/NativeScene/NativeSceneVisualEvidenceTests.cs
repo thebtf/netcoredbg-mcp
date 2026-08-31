@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
@@ -15,6 +16,9 @@ public sealed class NativeSceneVisualEvidenceTests
     private const string ActiveProtocolVersion = "native-scene-probe/1";
     private const string ActiveSchemaVersion = "native-scene-probe.schema/1";
     private const int ArtifactReadMaxBytes = 65_536;
+    private static readonly ImmutableArray<string> CandidateIdentityFailureCodes = ImmutableArray.Create(
+        "CANDIDATE_MISMATCH",
+        "OBSERVER_UNAVAILABLE");
 
     [Fact]
     public async Task BoundControlledSession_CapturesCompactLosslessVisualEvidenceAndReconstructsArtifact()
@@ -123,7 +127,7 @@ public sealed class NativeSceneVisualEvidenceTests
         AssertSchemaValid("capture_visual_evidence", error);
         Assert.Equal("tool_error", Text(error["kind"]));
         Assert.Equal("capture_visual_evidence", Text(error["tool"]));
-        Assert.Contains(Text(error["code"]), new[] { "CANDIDATE_MISMATCH", "OBSERVER_UNAVAILABLE" });
+        Assert.Contains(Text(error["code"]), CandidateIdentityFailureCodes);
         Assert.DoesNotContain(
             EnumeratePropertyNames(error),
             name => name is "artifactId" or "artifacts" or "captureId" or "rasterCaptureId" or "byteLength" or "sha256" or "dataBase64" or "path" or "root");

@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Collections.Immutable;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 using System.Text;
@@ -21,6 +22,11 @@ public sealed class NetCoreDbgSessionTests
     private static readonly TimeSpan InitializeTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan StopTimeout = TimeSpan.FromMilliseconds(300);
+    private static readonly ImmutableArray<string?> ExpectedLifecycleEvents = ImmutableArray.Create<string?>(
+        "stopped",
+        "continued",
+        "exited",
+        "terminated");
 
     [Fact]
     public void UnixProcessGroupOwnership_UsesLiveGuardianTerminationControl() =>
@@ -259,7 +265,7 @@ public sealed class NetCoreDbgSessionTests
             await Task.Delay(TimeSpan.FromMilliseconds(15));
         }
 
-        Assert.Equal(new string?[] { "stopped", "continued", "exited", "terminated" }, lifecycleEvents);
+        Assert.Equal(ExpectedLifecycleEvents, lifecycleEvents);
         Assert.Equal(new DapSessionSnapshot("terminated", stopReason, exitCode), emitting.State);
     }
     [Fact]

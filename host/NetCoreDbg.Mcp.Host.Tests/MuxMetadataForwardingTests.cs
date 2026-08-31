@@ -76,7 +76,10 @@ public sealed class MuxMetadataForwardingTests
             Meta = sentMeta,
         });
 
-        Assert.False(result.IsError == true);
+        if (result.IsError == true)
+        {
+            Assert.Fail();
+        }
 
         Assert.NotNull(typedMetaSeen);
         Assert.Equal("agent-A", (string?)typedMetaSeen!["muxSessionId"]);
@@ -150,7 +153,10 @@ public sealed class MuxMetadataForwardingTests
         // The cancelled, mux-tagged call must not corrupt the shared relay/session: a
         // second, unrelated call on the same downstream connection still round-trips.
         var secondResult = await downstreamClient.CallToolAsync(new CallToolRequestParams { Name = "anything-else" });
-        Assert.False(secondResult.IsError == true);
+        if (secondResult.IsError == true)
+        {
+            Assert.Fail();
+        }
         Assert.Equal(1, secondCallCount);
 
         await downstreamClient.DisposeAsync();

@@ -276,7 +276,10 @@ public sealed class RootsRelayTests
 
         var result = await downstreamClient.CallToolAsync(new CallToolRequestParams { Name = "anything" });
 
-        Assert.False(result.IsError == true);
+        if (result.IsError == true)
+        {
+            Assert.Fail();
+        }
         var text = Assert.IsType<TextContentBlock>(result.Content[0]);
         Assert.Equal("0", text.Text);
 
@@ -332,7 +335,10 @@ public sealed class RootsRelayTests
 
         var result = await downstreamClient.CallToolAsync(new CallToolRequestParams { Name = "anything" });
 
-        Assert.False(result.IsError == true);
+        if (result.IsError == true)
+        {
+            Assert.Fail();
+        }
         Assert.NotNull(observedAtPython);
         Assert.Equal(2, observedAtPython!.Roots.Count);
         Assert.Equal("file:///workspace/one", observedAtPython.Roots[0].Uri);

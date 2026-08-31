@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -34,6 +35,7 @@ public sealed class RootsRelayRealPythonTests
 
     private static readonly string RepoRoot = LocateRepoRoot();
     private static readonly string PythonExecutable = Path.Combine(RepoRoot, ".venv", "Scripts", "python.exe");
+    private static readonly ImmutableArray<string> ProjectFromCurrentDirectoryArguments = ImmutableArray.Create("--project-from-cwd");
 
     private static string LocateRepoRoot()
     {
@@ -101,7 +103,10 @@ public sealed class RootsRelayRealPythonTests
             ToolName,
             new Dictionary<string, object?> { ["name"] = MarkerSymbol, ["kind"] = "class" });
 
-        Assert.False(result.IsError == true, DescribeResult(result));
+        if (result.IsError == true)
+        {
+            Assert.Fail(DescribeResult(result));
+        }
         var text = Assert.IsType<TextContentBlock>(result.Content[0]);
         return JsonDocument.Parse(text.Text);
     }
@@ -244,7 +249,7 @@ public sealed class RootsRelayRealPythonTests
         Environment.CurrentDirectory = projectRoot;
         try
         {
-            started = StartRelayedRealPython(new[] { "--project-from-cwd" });
+            started = StartRelayedRealPython(ProjectFromCurrentDirectoryArguments);
         }
         finally
         {

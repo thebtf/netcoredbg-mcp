@@ -521,7 +521,10 @@ public sealed class ProgressLoggingRelayTests
         var result = await downstreamClient.CallToolAsync(ProbeCall("token-x"));
         await Task.Delay(TimeSpan.FromMilliseconds(50));
 
-        Assert.False(result.IsError == true);
+        if (result.IsError == true)
+        {
+            Assert.Fail();
+        }
         var responseSequence = log.Events.Single(e => e.Label == "response|token-x").Sequence;
         var progressSequences = log.Events
             .Where(e => e.Label.StartsWith("progress|token-x|", StringComparison.Ordinal))
@@ -669,7 +672,10 @@ public sealed class ProgressLoggingRelayTests
         await using var downstreamClient = await McpClient.CreateAsync(downstreamChannel.CreateClientTransport());
 
         var result = await downstreamClient.CallToolAsync(ProbeCall("token-z")).AsTask().WaitAsync(TimeSpan.FromSeconds(10));
-        Assert.False(result.IsError == true);
+        if (result.IsError == true)
+        {
+            Assert.Fail();
+        }
 
         await downstreamClient.DisposeAsync();
         await host.StopAsync();
@@ -723,7 +729,10 @@ public sealed class ProgressLoggingRelayTests
         Assert.True(
             consumedThroughResponse,
             "The upstream reader stopped behind downstream notification I/O instead of draining Python output.");
-        Assert.False(result.IsError == true);
+        if (result.IsError == true)
+        {
+            Assert.Fail();
+        }
     }
 
     [Fact]
@@ -832,7 +841,10 @@ public sealed class ProgressLoggingRelayTests
         gatedOutput.Release();
         var followUp = await downstreamClient.CallToolAsync(
             FastProbeCall("token-after-queued-cancel")).AsTask().WaitAsync(TimeSpan.FromSeconds(10));
-        Assert.False(followUp.IsError == true);
+        if (followUp.IsError == true)
+        {
+            Assert.Fail();
+        }
         Assert.Single(
             log.Events,
             e => e.Label.StartsWith("progress|token-cancel-backlog|", StringComparison.Ordinal));
@@ -878,7 +890,10 @@ public sealed class ProgressLoggingRelayTests
         // The relay's upstream pump and the underlying connection must both remain healthy: an
         // unrelated, independent (always-fast) call still completes normally afterward.
         var followUp = await downstreamClient.CallToolAsync(FastProbeCall("token-after-cancel")).AsTask().WaitAsync(TimeSpan.FromSeconds(10));
-        Assert.False(followUp.IsError == true);
+        if (followUp.IsError == true)
+        {
+            Assert.Fail();
+        }
 
         await downstreamClient.DisposeAsync();
         await host.StopAsync();
@@ -1312,7 +1327,10 @@ public sealed class ProgressLoggingRelayTests
 
         Assert.All(results, result =>
         {
-            Assert.False(result.IsError == true);
+            if (result.IsError == true)
+            {
+                Assert.Fail();
+            }
             var text = Assert.IsType<TextContentBlock>(Assert.Single(result.Content));
             using var structured = JsonDocument.Parse(text.Text);
             Assert.Equal(4, structured.RootElement.GetProperty("logs_emitted").GetInt32());
@@ -1484,7 +1502,10 @@ public sealed class ProgressLoggingRelayTests
         var followUp = await downstreamClient.CallToolAsync(
             RealProbeCall(new ProgressToken("real-after-cancel"), 2, 0, "real-after-cancel"))
             .AsTask().WaitAsync(TimeSpan.FromSeconds(10));
-        Assert.False(followUp.IsError == true);
+        if (followUp.IsError == true)
+        {
+            Assert.Fail();
+        }
 
         await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
         host.Dispose();

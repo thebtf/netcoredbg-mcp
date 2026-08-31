@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Collections.Immutable;
 using System.IO.Pipes;
 using System.Reflection;
 using System.Runtime.Loader;
@@ -29,6 +30,14 @@ public sealed class NativeSceneAtomicityTests
     private const string ObservedFactsEvidenceGrade = "observed_facts";
     private const int ArtifactReadMaxBytes = 65_536;
     private const int MaximumProbeResponseBytes = 16 * 1024 * 1024;
+    private static readonly ImmutableArray<string> IncompleteCaptureStatuses = ImmutableArray.Create(
+        "PARTIAL",
+        "UNOBSERVABLE");
+    private static readonly ImmutableArray<string> AtomicityPropertyNames = ImmutableArray.Create("authority");
+    private static readonly ImmutableArray<string> AdapterEvidenceAuthorities = ImmutableArray.Create(
+        "in_process_framework_probe",
+        "uia_guarded",
+        "adapter_reported");
 
     [Fact]
     public async Task StableFixture_UniqueElementCapture_ReturnsACompleteOneNodeObservedFactsArtifact()
@@ -187,7 +196,7 @@ public sealed class NativeSceneAtomicityTests
         AssertSchemaValid("capture_native_scene", manifest);
         AssertNativeSceneManifest(manifest, session, request, expectedStatus: null);
         Assert.NotEqual("COMPLETE", Text(manifest["status"]));
-        Assert.Contains(Text(manifest["status"]), new[] { "PARTIAL", "UNOBSERVABLE" });
+        Assert.Contains(Text(manifest["status"]), IncompleteCaptureStatuses);
         foreach (var descriptor in ObservedFactsDescriptors(manifest))
         {
             var artifact = await ReadArtifactJsonAsync(driver, session.DebugSessionId, descriptor);
@@ -733,7 +742,7 @@ public sealed class NativeSceneAtomicityTests
         Assert.True(JsonNode.DeepEquals(element, manifest["element"]));
         AssertCandidateBinding(session.Candidate, Object(manifest["candidate"]));
         AssertFreshRevalidation(manifest);
-        Assert.Equal(new[] { "authority" }, Object(manifest["atomicity"]).Select(property => property.Key));
+        Assert.Equal(AtomicityPropertyNames, Object(manifest["atomicity"]).Select(property => property.Key));
         Assert.Equal("not_applicable", Text(Object(manifest["atomicity"])["authority"]));
     }
 
@@ -879,7 +888,7 @@ public sealed class NativeSceneAtomicityTests
             Assert.NotNull(node["geometry"]);
             Assert.All(Array(node["adapterEvidence"]).Select(Object), evidence =>
             {
-                Assert.Contains(Text(evidence["authority"]), new[] { "in_process_framework_probe", "uia_guarded", "adapter_reported" });
+                Assert.Contains(Text(evidence["authority"]), AdapterEvidenceAuthorities);
                 Assert.NotNull(evidence["payload"]);
             });
         });

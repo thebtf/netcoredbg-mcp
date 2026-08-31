@@ -276,7 +276,10 @@ public sealed class CapabilityLifecycleContractTests
         string requestId)
     {
         var result = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync(tool, arguments, Meta(), new RequestId(requestId)));
-        Assert.True(result["isError"]?.GetValue<bool>() == true);
+        if (result["isError"]?.GetValue<bool>() != true)
+        {
+            Assert.Fail();
+        }
         var content = Assert.IsType<JsonObject>(result["structuredContent"]);
         Assert.Equal("invalid_tool_arguments", Kind(content));
         Assert.Equal("INVALID_TOOL_ARGUMENTS", content["error"]?.GetValue<string>());
