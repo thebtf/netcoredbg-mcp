@@ -4,8 +4,7 @@ State machine:
 IDLE → BUILDING → READY | FAILED | CANCELLED
      ↑__________________|
 
-Uses Windows Job Objects for reliable process tree cleanup.
-Includes process cleanup before build to release file locks.
+Uses one private WindowsOwnedProcess capability per Windows command.
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ import os
 import time
 from collections.abc import Awaitable, Callable
 
-from .cleanup import cleanup_for_build
+from ..windows_process_owner import DrainStatus, OwnerDrainReceipt, WindowsOwnedProcess
 from .policy import BuildCommand, BuildPolicy
 from .state import BuildError, BuildResult, BuildState
 
@@ -29,6 +28,23 @@ MAX_OUTPUT_LINE: int = 10_000  # 10KB per line
 # Retry settings for file lock issues
 MAX_BUILD_RETRIES: int = 3
 RETRY_DELAY_SECONDS: float = 1.0
+
+# A completed command gives descendants a short natural-exit window; cancellation
+# skips that window and uses the same bounded retained-Job force operation.
+COMMAND_OWNER_GRACE_TIMEOUT: float = 0.25
+COMMAND_OWNER_FORCE_TIMEOUT: float = 7.0
+_IS_WINDOWS = os.name == "nt"
+
+
+class OwnerDrainError(RuntimeError):
+    """A command outcome cannot be reported while its retained tree is unproven."""
+
+    def __init__(self, receipt: OwnerDrainReceipt) -> None:
+        self.receipt = receipt
+        super().__init__(
+            "Windows build command owner did not drain "
+            f"(status={receipt.status.value}, active={receipt.active_processes})"
+        )
 
 
 class BuildSession:
@@ -52,11 +68,13 @@ class BuildSession:
         self._policy = policy or BuildPolicy(workspace_root=self._workspace_root)
         self._state = BuildState.IDLE
         self._lock = asyncio.Lock()
-        self._current_process: asyncio.subprocess.Process | None = None
+        self._current_process: asyncio.subprocess.Process | WindowsOwnedProcess | None = None
+        self._current_owner: WindowsOwnedProcess | None = None
+        self._last_owner_drain_receipt: OwnerDrainReceipt | None = None
+        self._command_generation = 0
         self._cancel_requested = False
         self._last_result: BuildResult | None = None
         self._state_listeners: list[Callable[[BuildState], None]] = []
-        self._job_handle: int | None = None  # Windows Job Object handle
 
     @property
     def state(self) -> BuildState:
@@ -94,121 +112,66 @@ class BuildSession:
                 except Exception:
                     logger.exception("State listener error")
 
-    async def _create_job_object(self) -> int | None:
-        """Create Windows Job Object for process tree management.
+    def _next_command_generation(self) -> int:
+        """Return a session-local identity for one Windows command capability."""
+        self._command_generation += 1
+        return self._command_generation
 
-        Returns:
-            Job handle or None if not on Windows
-        """
-        if os.name != "nt":
-            return None
-
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            kernel32 = ctypes.windll.kernel32
-
-            # CreateJobObjectW
-            job = kernel32.CreateJobObjectW(None, None)
-            if not job:
-                logger.warning("Failed to create job object")
-                return None
-
-            # Set JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-            class JobObjectBasicLimitInformation(ctypes.Structure):
-                _fields_ = [
-                    ("PerProcessUserTimeLimit", ctypes.c_int64),
-                    ("PerJobUserTimeLimit", ctypes.c_int64),
-                    ("LimitFlags", wintypes.DWORD),
-                    ("MinimumWorkingSetSize", ctypes.c_size_t),
-                    ("MaximumWorkingSetSize", ctypes.c_size_t),
-                    ("ActiveProcessLimit", wintypes.DWORD),
-                    ("Affinity", ctypes.POINTER(ctypes.c_ulong)),
-                    ("PriorityClass", wintypes.DWORD),
-                    ("SchedulingClass", wintypes.DWORD),
-                ]
-
-            class IoCounters(ctypes.Structure):
-                _fields_ = [
-                    ("ReadOperationCount", ctypes.c_uint64),
-                    ("WriteOperationCount", ctypes.c_uint64),
-                    ("OtherOperationCount", ctypes.c_uint64),
-                    ("ReadTransferCount", ctypes.c_uint64),
-                    ("WriteTransferCount", ctypes.c_uint64),
-                    ("OtherTransferCount", ctypes.c_uint64),
-                ]
-
-            class JobObjectExtendedLimitInformation(ctypes.Structure):
-                _fields_ = [
-                    ("BasicLimitInformation", JobObjectBasicLimitInformation),
-                    ("IoInfo", IoCounters),
-                    ("ProcessMemoryLimit", ctypes.c_size_t),
-                    ("JobMemoryLimit", ctypes.c_size_t),
-                    ("PeakProcessMemoryUsed", ctypes.c_size_t),
-                    ("PeakJobMemoryUsed", ctypes.c_size_t),
-                ]
-
-            job_object_limit_kill_on_job_close = 0x2000
-            job_object_extended_limit_information = 9
-
-            info = JobObjectExtendedLimitInformation()
-            info.BasicLimitInformation.LimitFlags = job_object_limit_kill_on_job_close
-
-            success = kernel32.SetInformationJobObject(
-                job,
-                job_object_extended_limit_information,
-                ctypes.byref(info),
-                ctypes.sizeof(info),
+    async def _drain_windows_owner(
+        self,
+        owner: WindowsOwnedProcess,
+        *,
+        force: bool,
+    ) -> OwnerDrainReceipt:
+        """Capture one retained-owner receipt without abandoning cleanup on cancellation."""
+        operation = (
+            owner.force_and_drain(timeout=COMMAND_OWNER_FORCE_TIMEOUT)
+            if force
+            else owner.drain_after_grace(
+                grace_timeout=COMMAND_OWNER_GRACE_TIMEOUT,
+                force_timeout=COMMAND_OWNER_FORCE_TIMEOUT,
             )
-            if not success:
-                logger.warning("Failed to set job object limits")
-                kernel32.CloseHandle(job)
-                return None
+        )
+        drain_task = asyncio.create_task(operation)
+        cancellation: asyncio.CancelledError | None = None
+        while True:
+            try:
+                receipt = await asyncio.shield(drain_task)
+                break
+            except asyncio.CancelledError as error:
+                if drain_task.cancelled():
+                    receipt = OwnerDrainReceipt(
+                        owner=owner.owner,
+                        status=DrainStatus.FAILED,
+                        forced=force,
+                        root_returncode=owner.returncode,
+                        active_processes=None,
+                    )
+                    self._last_owner_drain_receipt = receipt
+                    raise OwnerDrainError(receipt) from error
+                # Shielding keeps the retained Job drain alive through a second
+                # cancellation. We must wait for its accounting receipt before
+                # restoring the original cancellation outcome to the caller.
+                cancellation = error
 
-            return job
-        except Exception as e:
-            logger.warning(f"Job object creation failed: {e}")
-            return None
+        self._last_owner_drain_receipt = receipt
+        if cancellation is not None:
+            try:
+                self._require_drained_owner_receipt(receipt)
+            except OwnerDrainError as error:
+                raise error from cancellation
+            raise cancellation
+        return receipt
 
-    async def _assign_to_job(self, process: asyncio.subprocess.Process) -> None:
-        """Assign process to job object for tree management."""
-        if self._job_handle is None or os.name != "nt":
+    @staticmethod
+    def _require_drained_owner_receipt(receipt: OwnerDrainReceipt) -> None:
+        """Reject completion unless private-Job accounting reached literal zero."""
+        if receipt.status is DrainStatus.DRAINED and receipt.active_processes == 0:
             return
-
-        # Get PID safely (may be None for mocks or failed processes)
-        pid = getattr(process, "pid", None)
-        if pid is None:
-            return
-
-        try:
-            import ctypes
-
-            kernel32 = ctypes.windll.kernel32
-
-            # Get process handle from PID
-            process_set_quota = 0x0100
-            process_terminate = 0x0001
-            proc_handle = kernel32.OpenProcess(process_set_quota | process_terminate, False, pid)
-            if proc_handle:
-                kernel32.AssignProcessToJobObject(self._job_handle, proc_handle)
-                kernel32.CloseHandle(proc_handle)
-        except Exception as e:
-            logger.warning(f"Failed to assign process to job: {e}")
-
-    async def _close_job_object(self) -> None:
-        """Close job object (kills all assigned processes)."""
-        if self._job_handle is None or os.name != "nt":
-            return
-
-        try:
-            import ctypes
-
-            kernel32 = ctypes.windll.kernel32
-            kernel32.CloseHandle(self._job_handle)
-            self._job_handle = None
-        except Exception as e:
-            logger.warning(f"Failed to close job object: {e}")
+        # A root exit, root kill, or numeric PID says nothing about descendants.
+        # Only zero accounting from this retained private Job proves this command
+        # tree is drained, so timeout and cancellation must fail closed as well.
+        raise OwnerDrainError(receipt)
 
     async def _run_command(
         self,
@@ -231,25 +194,35 @@ class BuildSession:
             asyncio.CancelledError: If cancelled
             asyncio.TimeoutError: If timeout exceeded
         """
-        # Create job object for this build
-        self._job_handle = await self._create_job_object()
-
+        owner: WindowsOwnedProcess | None = None
         try:
-            # Never use shell=True (security)
-            # stdin=DEVNULL prevents hang when parent stdin is non-standard
-            # (e.g. running inside mux daemon where stdin is IPC socket)
-            self._current_process = await asyncio.create_subprocess_exec(
-                *command,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-            )
+            if _IS_WINDOWS:
+                # Windows must not launch an executing asyncio child and then
+                # reopen its PID. This capability returns only after suspended
+                # creation, private-Job admission, accounting, I/O wiring, and
+                # the final resume have all succeeded.
+                owner = await WindowsOwnedProcess.launch(
+                    generation=self._next_command_generation(),
+                    argv=tuple(command),
+                    cwd=cwd,
+                    env=None,
+                    stdin_mode="devnull",
+                )
+                process: asyncio.subprocess.Process | WindowsOwnedProcess = owner
+                self._current_owner = owner
+                self._last_owner_drain_receipt = None
+            else:
+                # This Windows-only owner is unavailable here. Keep shell=False
+                # for command integrity; DEVNULL prevents an IPC stdin from hanging.
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                )
 
-            # Assign to job object
-            await self._assign_to_job(self._current_process)
-
-            # Read output with limits
+            self._current_process = process
             stdout_lines: list[str] = []
             stderr_lines: list[str] = []
 
@@ -267,12 +240,12 @@ class BuildSession:
                         if not line:
                             break
                         decoded = line.decode("utf-8", errors="replace")
-                        # Truncate long lines
+                        # Bound one runaway line before retaining it.
                         if len(decoded) > MAX_OUTPUT_LINE:
                             decoded = decoded[:MAX_OUTPUT_LINE] + "...[truncated]\n"
                         lines.append(decoded)
                         byte_counter[0] += len(decoded)
-                        # Drop old lines if buffer too large
+                        # Evict oldest lines until the total buffer is bounded.
                         while byte_counter[0] > MAX_OUTPUT_BYTES and lines:
                             removed = lines.pop(0)
                             byte_counter[0] -= len(removed)
@@ -294,28 +267,52 @@ class BuildSession:
             try:
                 await asyncio.wait_for(
                     asyncio.gather(
-                        read_stream(
-                            self._current_process.stdout, stdout_lines, stdout_counter, "stdout"
-                        ),
-                        read_stream(
-                            self._current_process.stderr, stderr_lines, stderr_counter, "stderr"
-                        ),
+                        read_stream(process.stdout, stdout_lines, stdout_counter, "stdout"),
+                        read_stream(process.stderr, stderr_lines, stderr_counter, "stderr"),
                     ),
                     timeout=timeout,
                 )
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as timeout_error:
                 logger.warning(f"Build timeout after {timeout}s")
-                self._current_process.kill()
+                if owner is not None:
+                    # Preserve the timeout only after the exact owner has
+                    # recorded its drain receipt. Returning first could report
+                    # a timed-out build while a retained Job still has children.
+                    receipt = await self._drain_windows_owner(owner, force=True)
+                    try:
+                        self._require_drained_owner_receipt(receipt)
+                    except OwnerDrainError as error:
+                        raise error from timeout_error
+                else:
+                    assert not isinstance(process, WindowsOwnedProcess)
+                    process.kill()
                 raise
 
-            await self._current_process.wait()
-            exit_code = self._current_process.returncode or 0
-
+            exit_code = await process.wait()
+            if owner is not None:
+                receipt = await self._drain_windows_owner(owner, force=False)
+                self._require_drained_owner_receipt(receipt)
             return exit_code, "".join(stdout_lines), "".join(stderr_lines)
 
+        except asyncio.CancelledError as cancellation:
+            if owner is not None:
+                # Outer cancellation and BuildSession.cancel() share this owner
+                # operation. Only a zero-accounting receipt permits restoration
+                # of the original cancellation outcome.
+                receipt = await self._drain_windows_owner(owner, force=True)
+                try:
+                    self._require_drained_owner_receipt(receipt)
+                except OwnerDrainError as error:
+                    raise error from cancellation
+            raise
         finally:
             self._current_process = None
-            await self._close_job_object()
+            if owner is not None:
+                try:
+                    await owner.aclose()
+                finally:
+                    if self._current_owner is owner:
+                        self._current_owner = None
 
     def _is_file_lock_error(self, stdout: str, stderr: str) -> bool:
         """Check if build failed due to file lock errors.
@@ -341,8 +338,6 @@ class BuildSession:
     async def _run_build_with_retry(
         self,
         cmd: list[str],
-        project_path: str,
-        configuration: str,
         timeout: float,
         retry_on_lock: bool,
         output_callback: Callable[[str, str], Awaitable[None]] | None = None,
@@ -351,8 +346,6 @@ class BuildSession:
 
         Args:
             cmd: Build command
-            project_path: Project path
-            configuration: Build configuration
             timeout: Timeout in seconds
             retry_on_lock: Whether to retry on lock errors
 
@@ -383,11 +376,9 @@ class BuildSession:
                         f"Build failed due to file locks "
                         f"(attempt {attempt + 1}/{MAX_BUILD_RETRIES}), retrying..."
                     )
-                    # Run cleanup and retry
-                    await cleanup_for_build(
-                        project_path=project_path,
-                        configurations=[configuration],
-                    )
+                    # The failed command already drained its own capability.
+                    # A retry starts a fresh command capability without deriving
+                    # process authority from an observation.
                     await asyncio.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
                     continue
 
@@ -403,7 +394,6 @@ class BuildSession:
         configuration: str = "Debug",
         extra_args: list[str] | None = None,
         timeout: float = 300.0,
-        cleanup_before_build: bool = False,
         retry_on_lock: bool = True,
         output_callback: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> BuildResult:
@@ -415,7 +405,6 @@ class BuildSession:
             configuration: Build configuration
             extra_args: Additional arguments
             timeout: Timeout in seconds
-            cleanup_before_build: Kill processes in output directories first
             retry_on_lock: Retry build if file lock errors detected
 
         Returns:
@@ -432,15 +421,6 @@ class BuildSession:
             try:
                 # Validate project path
                 validated_path = self._policy.validate_project_path(project_path)
-
-                # Cleanup processes before build if requested
-                if cleanup_before_build:
-                    killed = await cleanup_for_build(
-                        project_path=validated_path,
-                        configurations=[configuration],
-                    )
-                    if killed > 0:
-                        logger.info(f"Pre-build cleanup: {killed} processes killed")
 
                 # For rebuild, run clean first
                 if command == BuildCommand.REBUILD:
@@ -479,8 +459,6 @@ class BuildSession:
 
                 exit_code, stdout, stderr = await self._run_build_with_retry(
                     cmd=cmd,
-                    project_path=validated_path,
-                    configuration=configuration,
                     timeout=timeout,
                     retry_on_lock=retry_on_lock,
                     output_callback=output_callback,
@@ -554,7 +532,11 @@ class BuildSession:
 
         self._cancel_requested = True
 
-        if self._current_process is not None:
+        if self._current_owner is not None:
+            receipt = await self._drain_windows_owner(self._current_owner, force=True)
+            self._require_drained_owner_receipt(receipt)
+        elif not _IS_WINDOWS and self._current_process is not None:
+            assert not isinstance(self._current_process, WindowsOwnedProcess)
             try:
                 self._current_process.kill()
             except Exception:

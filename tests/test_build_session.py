@@ -1,12 +1,30 @@
 """Tests for build session - per-workspace state machine."""
 
 import asyncio
+import os
+import shutil
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from netcoredbg_mcp.build.session import BuildSession
 from netcoredbg_mcp.build.state import BuildError, BuildState
+from netcoredbg_mcp.windows_process_owner import AdmissionStage, DrainStatus, ProcessAdmissionError
+from tests.owner_scope_red import (
+    BlockingStream,
+    OwnedCommandProcess,
+    PollingTimeoutStream,
+    TreeProcess,
+)
+
+
+@pytest.fixture(autouse=True)
+def _use_asyncio_compatibility_path(monkeypatch, request) -> None:
+    """Keep existing cross-platform command tests on their established path."""
+    if request.cls is not None and request.cls.__name__ == "TestOwnerScopedBuildMatrix":
+        monkeypatch.setattr("netcoredbg_mcp.build.session._IS_WINDOWS", True)
+        return
+    monkeypatch.setattr("netcoredbg_mcp.build.session._IS_WINDOWS", False)
 
 
 class TestBuildSessionInit:
@@ -370,3 +388,297 @@ class TestBuildSessionConcurrency:
 
         # Builds should be serialized: start-end-start-end not start-start-end-end
         assert build_order == ["start", "end", "start", "end"]
+
+
+class TestOwnerScopedBuildMatrix:
+    """GREEN coverage for one retained Windows owner per build command."""
+
+    @pytest.mark.asyncio
+    async def test_o1_build_command_uses_one_admitted_owner_and_zero_accounting(
+        self, tmp_path
+    ) -> None:
+        """O1: BuildSession consumes one admitted capability, never a reopened PID."""
+
+        process = TreeProcess(pid=42001, initially_exited=True)
+        owners: list[OwnedCommandProcess] = []
+        launches: list[dict[str, object]] = []
+
+        async def launch(**kwargs):
+            launches.append(kwargs)
+            owner = OwnedCommandProcess(process, kwargs["generation"])
+            owners.append(owner)
+            return owner
+
+        session = BuildSession(workspace_root=str(tmp_path))
+        with patch(
+            "netcoredbg_mcp.build.session.WindowsOwnedProcess.launch",
+            side_effect=launch,
+        ):
+            result = await session._run_command(["dotnet", "build"], timeout=0.1)
+
+        assert result == (0, "", "")
+        assert len(launches) == 1
+        assert launches[0]["argv"] == ("dotnet", "build")
+        assert launches[0]["stdin_mode"] == "devnull"
+        assert owners[0].drain_calls == ["grace"]
+        assert owners[0].receipt is not None
+        assert owners[0].receipt.active_processes == 0
+        assert owners[0].aclose_calls == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "stage",
+        [AdmissionStage.ASSIGN, AdmissionStage.VERIFY, AdmissionStage.RESUME],
+        ids=["o2-assignment", "o3-verification", "o4-resume"],
+    )
+    async def test_o2_o3_o4_admission_failure_never_installs_a_command_owner(
+        self,
+        tmp_path,
+        stage: AdmissionStage,
+    ) -> None:
+        """O2-O4: fail-closed admission errors escape without command execution."""
+
+        session = BuildSession(workspace_root=str(tmp_path))
+        error = ProcessAdmissionError(stage, "rejected-owner", 5)
+        with (
+            patch(
+                "netcoredbg_mcp.build.session.WindowsOwnedProcess.launch",
+                side_effect=error,
+            ),
+            pytest.raises(ProcessAdmissionError) as raised,
+        ):
+            await session._run_command(["dotnet", "build"], timeout=0.1)
+
+        assert raised.value.stage is stage
+        assert session._current_owner is None
+        assert session._current_process is None
+        assert session._last_owner_drain_receipt is None
+
+    @pytest.mark.asyncio
+    async def test_o7_timeout_drains_the_command_descendant_before_reporting_timeout(
+        self, tmp_path
+    ) -> None:
+        """O7 timeout: preserve TimeoutError only after exact owner drain."""
+
+        stdout = BlockingStream()
+        stderr = BlockingStream()
+        process = TreeProcess(pid=42007, stdout=stdout, stderr=stderr)
+        owner = OwnedCommandProcess(process, "timeout")
+        session = BuildSession(workspace_root=str(tmp_path))
+        try:
+            with (
+                patch(
+                    "netcoredbg_mcp.build.session.WindowsOwnedProcess.launch",
+                    return_value=owner,
+                ),
+                pytest.raises(asyncio.TimeoutError),
+            ):
+                await session._run_command(["dotnet", "build"], timeout=0.01)
+        finally:
+            stdout.release.set()
+            stderr.release.set()
+
+        assert process.child_alive is False
+        assert owner.drain_calls == ["force"]
+        assert owner.drain_operation_count == 1
+        assert owner.aclose_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_timeout_reports_unproven_owner_drain_instead_of_timeout(self, tmp_path) -> None:
+        """A timed-out command must expose a failed owner drain as the real outcome."""
+
+        stdout = BlockingStream()
+        stderr = BlockingStream()
+        process = TreeProcess(pid=42010, stdout=stdout, stderr=stderr)
+        owner = OwnedCommandProcess(process, "timeout-failed", force_status=DrainStatus.FAILED)
+        session = BuildSession(workspace_root=str(tmp_path))
+        try:
+            with (
+                patch(
+                    "netcoredbg_mcp.build.session.WindowsOwnedProcess.launch",
+                    return_value=owner,
+                ),
+                pytest.raises(RuntimeError, match="owner did not drain") as raised,
+            ):
+                await session._run_command(["dotnet", "build"], timeout=0.01)
+        finally:
+            stdout.release.set()
+            stderr.release.set()
+
+        assert getattr(raised.value, "receipt").status is DrainStatus.FAILED
+        assert isinstance(raised.value.__cause__, asyncio.TimeoutError)
+
+    @pytest.mark.asyncio
+    async def test_o7_session_cancel_drains_the_command_descendant_before_completion(
+        self, tmp_path
+    ) -> None:
+        """O7 session cancel: concurrent cleanup joins one retained owner drain."""
+
+        stdout = PollingTimeoutStream()
+        process = TreeProcess(pid=42008, stdout=stdout, stderr=PollingTimeoutStream())
+        owner = OwnedCommandProcess(process, "session-cancel")
+        session = BuildSession(workspace_root=str(tmp_path))
+        session._state = BuildState.BUILDING
+        with patch(
+            "netcoredbg_mcp.build.session.WindowsOwnedProcess.launch",
+            return_value=owner,
+        ):
+            task = asyncio.create_task(session._run_command(["dotnet", "build"], timeout=1.0))
+            await asyncio.wait_for(stdout.read_started.wait(), timeout=1.0)
+            await session.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=1.0)
+
+        assert process.child_alive is False
+        assert owner.drain_operation_count == 1
+        assert owner.aclose_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_session_cancel_reports_unproven_owner_drain_instead_of_cancellation(
+        self, tmp_path
+    ) -> None:
+        """Cancellation cannot hide a retained tree whose accounting still fails."""
+
+        stdout = PollingTimeoutStream()
+        process = TreeProcess(pid=42011, stdout=stdout, stderr=PollingTimeoutStream())
+        owner = OwnedCommandProcess(process, "cancel-failed", force_status=DrainStatus.FAILED)
+        session = BuildSession(workspace_root=str(tmp_path))
+        session._state = BuildState.BUILDING
+        with patch(
+            "netcoredbg_mcp.build.session.WindowsOwnedProcess.launch",
+            return_value=owner,
+        ):
+            task = asyncio.create_task(session._run_command(["dotnet", "build"], timeout=1.0))
+            try:
+                await asyncio.wait_for(stdout.read_started.wait(), timeout=1.0)
+                with pytest.raises(RuntimeError, match="owner did not drain") as cancel_error:
+                    await session.cancel()
+                assert getattr(cancel_error.value, "receipt").status is DrainStatus.FAILED
+
+                with pytest.raises(RuntimeError, match="owner did not drain") as command_error:
+                    await task
+                assert isinstance(command_error.value.__cause__, asyncio.CancelledError)
+            finally:
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_o7_outer_cancellation_does_not_orphan_a_real_command_descendant(
+        self, tmp_path
+    ) -> None:
+        """O7 outer cancellation drains a real inherited command descendant."""
+
+        import json
+        import sys
+        from pathlib import Path
+
+        import psutil
+
+        fixture = Path(__file__).parent / "fixtures" / "owner_scope_process_tree.py"
+        root_marker = tmp_path / "root.json"
+        child_marker = tmp_path / "child.json"
+        release = tmp_path / "release"
+        session = BuildSession(workspace_root=str(tmp_path))
+        task = asyncio.create_task(
+            session._run_command(
+                [
+                    sys.executable,
+                    str(fixture),
+                    "root",
+                    str(root_marker),
+                    str(child_marker),
+                    str(release),
+                ],
+                timeout=30.0,
+            )
+        )
+        child_pid: int | None = None
+        try:
+            for _ in range(300):
+                if child_marker.exists():
+                    child_pid = int(json.loads(child_marker.read_text(encoding="utf-8"))["pid"])
+                    break
+                await asyncio.sleep(0.01)
+            assert child_pid is not None, "controlled descendant did not start"
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            for _ in range(300):
+                if not psutil.pid_exists(child_pid):
+                    break
+                await asyncio.sleep(0.01)
+            assert psutil.pid_exists(child_pid) is False
+            receipt = session._last_owner_drain_receipt
+            assert receipt is not None
+            assert receipt.status is DrainStatus.DRAINED
+            assert receipt.active_processes == 0
+        finally:
+            release.touch()
+            if child_pid is not None and psutil.pid_exists(child_pid):
+                psutil.Process(child_pid).kill()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_o8_accounting_failure_cannot_claim_command_completion(self, tmp_path) -> None:
+        """O8: a non-drained owner receipt fails normal command completion."""
+
+        process = TreeProcess(pid=42009, initially_exited=True)
+        owner = OwnedCommandProcess(
+            process,
+            "accounting-failure",
+            normal_status=DrainStatus.FAILED,
+        )
+        session = BuildSession(workspace_root=str(tmp_path))
+        with (
+            patch(
+                "netcoredbg_mcp.build.session.WindowsOwnedProcess.launch",
+                return_value=owner,
+            ),
+            pytest.raises(RuntimeError, match="owner did not drain"),
+        ):
+            await session._run_command(["dotnet", "build"], timeout=0.1)
+
+        assert owner.receipt is not None
+        assert owner.receipt.status is DrainStatus.FAILED
+        assert owner.aclose_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_o11_lock_retry_relaunches_only_the_build_command(self, tmp_path) -> None:
+        """O11: each lock retry relies on its new command capability."""
+        session = BuildSession(workspace_root=str(tmp_path))
+        session._run_command = AsyncMock(return_value=(1, "MSB3021 file in use", ""))
+        delay = AsyncMock()
+
+        with patch("netcoredbg_mcp.build.session.asyncio.sleep", delay):
+            await session._run_build_with_retry(
+                ["dotnet", "build"],
+                timeout=0.1,
+                retry_on_lock=True,
+            )
+
+        assert session._run_command.await_count == 3
+        assert delay.await_count == 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows private-Job smoke")
+@pytest.mark.skipif(shutil.which("dotnet") is None, reason="dotnet CLI is required")
+@pytest.mark.asyncio
+async def test_windows_build_command_resolves_bare_dotnet_from_path(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real Windows owner path resolves BuildPolicy's bare dotnet command."""
+
+    monkeypatch.setattr("netcoredbg_mcp.build.session._IS_WINDOWS", True)
+    session = BuildSession(workspace_root=str(tmp_path))
+
+    exit_code, stdout, stderr = await session._run_command(["dotnet", "--version"], timeout=30.0)
+
+    assert exit_code == 0, stdout + stderr
+    receipt = session._last_owner_drain_receipt
+    assert receipt is not None
+    assert receipt.status is DrainStatus.DRAINED
+    assert receipt.active_processes == 0

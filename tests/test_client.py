@@ -18,6 +18,82 @@ from netcoredbg_mcp.dap.client import (
 from netcoredbg_mcp.dap.protocol import Commands, DAPEvent, DAPRequest, DAPResponse
 from netcoredbg_mcp.resource_updates import STATE_URI, THREADS_URI
 from netcoredbg_mcp.session import DebugState, SessionManager
+from netcoredbg_mcp.windows_process_owner import DrainStatus, OwnedProcessRef, OwnerDrainReceipt
+from tests.owner_scope_red import BlockingStream, TreeProcess
+
+
+class OwnedTestProcess:
+    """A test double for the private Windows owner capability."""
+
+    def __init__(self, process: Any, generation: object = "test") -> None:
+        self._process = process
+        self.owner = OwnedProcessRef("test-owner", generation, process.pid)
+
+    @property
+    def pid(self) -> int:
+        return self._process.pid
+
+    @property
+    def stdin(self) -> Any:
+        return getattr(self._process, "stdin", None)
+
+    @property
+    def stdout(self) -> Any:
+        return self._process.stdout
+
+    @property
+    def stderr(self) -> Any:
+        return self._process.stderr
+
+    @property
+    def returncode(self) -> int | None:
+        return self._process.returncode
+
+    async def wait(self) -> int | None:
+        return await self._process.wait()
+
+    async def drain_after_grace(
+        self,
+        *,
+        grace_timeout: float,
+        force_timeout: float,
+    ) -> OwnerDrainReceipt:
+        forced = False
+        if self._process.returncode is None:
+            try:
+                await asyncio.wait_for(self._process.wait(), grace_timeout)
+            except asyncio.TimeoutError:
+                self._process.terminate()
+                try:
+                    await asyncio.wait_for(self._process.wait(), force_timeout)
+                except asyncio.TimeoutError:
+                    forced = True
+                    try:
+                        self._process.kill()
+                    except ProcessLookupError:
+                        # The root disappeared between the grace deadline and
+                        # the force attempt. A real owner observes zero Job
+                        # accounting before TerminateJobObject and therefore
+                        # records this as a natural drain, not a forced kill.
+                        forced = False
+                    else:
+                        try:
+                            await asyncio.wait_for(self._process.wait(), force_timeout)
+                        except asyncio.TimeoutError:
+                            pass
+        if hasattr(self._process, "child_alive"):
+            self._process.child_alive = False
+        return OwnerDrainReceipt(
+            owner=self.owner,
+            status=DrainStatus.DRAINED,
+            forced=forced,
+            root_returncode=self._process.returncode,
+            active_processes=0,
+            root_was_forced=forced,
+        )
+
+    async def aclose(self) -> None:
+        return None
 
 
 class TestDAPClientInit:
@@ -975,8 +1051,8 @@ class TestDAPClientTransportDeath:
 
         try:
             with patch(
-                "netcoredbg_mcp.dap.client.asyncio.create_subprocess_exec",
-                return_value=process,
+                "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch",
+                return_value=OwnedTestProcess(process),
             ):
                 await client.start()
 
@@ -1056,8 +1132,8 @@ class TestDAPClientTransportDeath:
 
         try:
             with patch(
-                "netcoredbg_mcp.dap.client.asyncio.create_subprocess_exec",
-                return_value=process,
+                "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch",
+                return_value=OwnedTestProcess(process),
             ):
                 await client.start()
 
@@ -1141,11 +1217,12 @@ class TestDAPClientTransportDeath:
         try:
             with (
                 patch(
-                    "netcoredbg_mcp.dap.client.asyncio.create_subprocess_exec",
-                    return_value=process,
+                    "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch",
+                    return_value=OwnedTestProcess(process),
                 ),
                 patch("netcoredbg_mcp.dap.client.NATURAL_EXIT_TIMEOUT", 0.01),
                 patch("netcoredbg_mcp.dap.client.TERMINATE_TIMEOUT", 0.01),
+                patch("netcoredbg_mcp.dap.client.KILL_TIMEOUT", 0.01),
             ):
                 await client.start(generation=1)
                 await asyncio.wait_for(published.wait(), timeout=1.0)
@@ -1242,8 +1319,8 @@ class TestDAPClientTransportDeath:
             )
             set_terminal_handler(records.append)
             with patch(
-                "netcoredbg_mcp.dap.client.asyncio.create_subprocess_exec",
-                return_value=process,
+                "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch",
+                return_value=OwnedTestProcess(process, generation),
             ):
                 returned_generation = await client.start(generation=generation)
             await wait_for_record(records)
@@ -1396,8 +1473,8 @@ class TestDAPClientTransportDeath:
 
         generation = object()
         with patch(
-            "netcoredbg_mcp.dap.client.asyncio.create_subprocess_exec",
-            return_value=process,
+            "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch",
+            return_value=OwnedTestProcess(process, generation),
         ):
             returned_generation = await client.start(generation=generation)
 
@@ -1502,3 +1579,238 @@ class TestDAPClientTransportDeath:
 
         with pytest.raises(RuntimeError, match="netcoredbg process died"):
             await client.send_request("threads")
+
+
+class TestOwnerScopedAdapterRedMatrix:
+    """Behavior-first RED coverage for the current DAP adapter lifecycle.
+
+    The existing ``_DapRun`` generation/finalizer remains the exercised path.
+    These tests require it to obtain an admitted tree owner before it exposes a
+    child or publishes terminal state; a process ID is only diagnostic data.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _use_windows_owner_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("netcoredbg_mcp.dap.client.os.name", "nt")
+
+    @pytest.mark.asyncio
+    async def test_o1_adapter_does_not_execute_before_private_owner_admission(self) -> None:
+        """O1: the direct adapter route must not run before admission completes.
+
+        The probe records real current launch semantics: awaiting
+        ``asyncio.create_subprocess_exec`` means a child is already executing.
+        Future production wiring will drive this same seam through suspended
+        creation, retained-handle admission, I/O setup, and resume-last.
+        """
+
+        events: list[str] = []
+        process = TreeProcess(
+            pid=43001,
+            stdout=BlockingStream(),
+            stderr=BlockingStream(),
+        )
+        client = DAPClient("/path/to/netcoredbg")
+
+        async def launch(**_kwargs: Any) -> OwnedTestProcess:
+            events.append("admitted")
+            return OwnedTestProcess(process, "o1")
+
+        with patch("netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch", launch):
+            await client.start(generation="o1")
+        await client.stop()
+
+        assert events == ["admitted"], "adapter launch bypassed private owner admission"
+
+    @pytest.mark.asyncio
+    async def test_o5_graceful_adapter_finalization_waits_for_tree_accounting(self) -> None:
+        """O5: graceful adapter stop may publish only after the owned tree drains.
+
+        The root exits gracefully while a modeled descendant remains alive.
+        Closing/observing the root is not ownership evidence; the terminal
+        callback must wait for a retained Job's ``ActiveProcesses == 0`` fact.
+        """
+
+        process = TreeProcess(
+            pid=43005,
+            stdout=BlockingStream(),
+            stderr=BlockingStream(),
+        )
+        active_counts_at_terminal: list[int] = []
+        client = DAPClient("/path/to/netcoredbg")
+        client.set_transport_terminal_handler(
+            lambda _terminal: active_counts_at_terminal.append(process.active_processes)
+        )
+
+        with patch(
+            "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch",
+            return_value=OwnedTestProcess(process, "o5"),
+        ):
+            await client.start(generation="o5")
+        await client.stop()
+
+        assert active_counts_at_terminal == [0], (
+            "current adapter finalizer publishes after root termination without tree accounting"
+        )
+
+    @pytest.mark.asyncio
+    async def test_o6_grace_deadline_force_drains_only_the_retained_tree(self) -> None:
+        """O6: grace expiry must force the admitted Job and wait for its drain.
+
+        This models a root that ignores graceful termination.  A force against
+        only that root still leaves its descendant alive, proving why an image,
+        PID, or selector replacement cannot meet the owner-only requirement.
+        """
+
+        process = TreeProcess(
+            pid=43006,
+            stdout=BlockingStream(),
+            stderr=BlockingStream(),
+            root_exits_on_terminate=False,
+        )
+        active_counts_at_terminal: list[int] = []
+        client = DAPClient("/path/to/netcoredbg")
+        client.set_transport_terminal_handler(
+            lambda _terminal: active_counts_at_terminal.append(process.active_processes)
+        )
+
+        with (
+            patch(
+                "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch",
+                return_value=OwnedTestProcess(process, "o6"),
+            ),
+            patch("netcoredbg_mcp.dap.client.NATURAL_EXIT_TIMEOUT", 0.001),
+            patch("netcoredbg_mcp.dap.client.TERMINATE_TIMEOUT", 0.001),
+            patch("netcoredbg_mcp.dap.client.KILL_TIMEOUT", 0.1),
+        ):
+            await client.start(generation="o6")
+            await client.stop()
+
+        assert active_counts_at_terminal == [0], (
+            "current grace escalation kills the root but publishes with a live descendant"
+        )
+
+    @pytest.mark.asyncio
+    async def test_forced_descendant_drain_preserves_natural_root_outcome(self) -> None:
+        """Forced Job cleanup of a descendant must not relabel an exited root."""
+
+        class NaturalRootForcedDescendantOwner(OwnedTestProcess):
+            async def drain_after_grace(
+                self,
+                *,
+                grace_timeout: float,
+                force_timeout: float,
+            ) -> OwnerDrainReceipt:
+                del grace_timeout, force_timeout
+                self._process.returncode = 0
+                self._process._root_exit.set()
+                self._process.child_alive = False
+                return OwnerDrainReceipt(
+                    owner=self.owner,
+                    status=DrainStatus.DRAINED,
+                    forced=True,
+                    root_returncode=0,
+                    active_processes=0,
+                    root_was_forced=False,
+                )
+
+        process = TreeProcess(
+            pid=43011,
+            stdout=BlockingStream(),
+            stderr=BlockingStream(),
+        )
+        owner = NaturalRootForcedDescendantOwner(process, "natural-root")
+        client = DAPClient("/path/to/netcoredbg")
+
+        with patch(
+            "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch",
+            return_value=owner,
+        ):
+            await client.start(generation="natural-root")
+            receipt = await client.stop(expected_owner=owner.owner)
+
+        run = client._run
+        assert receipt is not None
+        assert receipt.root_was_forced is False
+        assert run is not None and run.terminal is not None
+        assert run.terminal.cleanup_outcome is DapCleanupOutcome.NATURAL_EXIT
+
+    @pytest.mark.asyncio
+    async def test_expected_owner_mismatch_is_stale_and_match_joins_finalizer(self) -> None:
+        """Expected-owner drain refuses stale input and reuses the elected finalizer."""
+        process = TreeProcess(
+            pid=43010,
+            stdout=BlockingStream(),
+            stderr=BlockingStream(),
+        )
+        owner = OwnedTestProcess(process, "generation-a")
+        foreign = OwnedProcessRef("foreign", "generation-b", 43011)
+        client = DAPClient("/path/to/netcoredbg")
+
+        with (
+            patch(
+                "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch",
+                return_value=owner,
+            ),
+            patch("netcoredbg_mcp.dap.client.NATURAL_EXIT_TIMEOUT", 0.001),
+            patch("netcoredbg_mcp.dap.client.TERMINATE_TIMEOUT", 0.001),
+            patch("netcoredbg_mcp.dap.client.KILL_TIMEOUT", 0.1),
+        ):
+            await client.start(generation="generation-a")
+            stale = await client.stop(expected_owner=foreign)
+            receipt = await client.stop(expected_owner=owner.owner)
+
+        assert stale is not None and stale.status is DrainStatus.STALE
+        assert process.child_alive is False
+        assert receipt is not None
+        assert receipt.status is DrainStatus.DRAINED
+        assert receipt.owner == owner.owner
+
+    @pytest.mark.asyncio
+    async def test_ordinary_stop_returns_final_close_retry_receipt(self) -> None:
+        """Ordinary stop returns the final owner receipt after close retries."""
+
+        class RetryingCloseOwner(OwnedTestProcess):
+            async def drain_after_grace(
+                self,
+                *,
+                grace_timeout: float,
+                force_timeout: float,
+            ) -> OwnerDrainReceipt:
+                del grace_timeout, force_timeout
+                return OwnerDrainReceipt(
+                    owner=self.owner,
+                    status=DrainStatus.TIMED_OUT,
+                    forced=True,
+                    root_returncode=None,
+                    active_processes=1,
+                )
+
+            async def aclose(self) -> OwnerDrainReceipt:
+                self._process.kill()
+                self._process.child_alive = False
+                return OwnerDrainReceipt(
+                    owner=self.owner,
+                    status=DrainStatus.DRAINED,
+                    forced=True,
+                    root_returncode=self._process.returncode,
+                    active_processes=0,
+                )
+
+        process = TreeProcess(
+            pid=43012,
+            stdout=BlockingStream(),
+            stderr=BlockingStream(),
+        )
+        owner = RetryingCloseOwner(process, "close-retry")
+        client = DAPClient("/path/to/netcoredbg")
+
+        with patch(
+            "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch",
+            return_value=owner,
+        ):
+            await client.start(generation="close-retry")
+            receipt = await client.stop()
+
+        assert receipt is not None
+        assert receipt.status is DrainStatus.DRAINED
+        assert receipt.active_processes == 0
