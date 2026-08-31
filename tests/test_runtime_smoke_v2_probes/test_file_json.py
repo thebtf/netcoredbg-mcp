@@ -210,17 +210,15 @@ async def test_file_json_probe_propagates_unexpected_jsonpath_errors(
 
     monkeypatch.setattr(jsonpath_ng, "parse", fail_parse)
 
+    probe = {
+        "kind": "file.json",
+        "name": "unexpected_jsonpath_error",
+        "path": str(path),
+        "jsonpath": "$.value",
+    }
+    context = SimpleNamespace(session=session)
     with pytest.raises(RuntimeError, match="internal jsonpath adapter bug"):
-        await handle_file_json(
-            {
-                "kind": "file.json",
-                "name": "unexpected_jsonpath_error",
-                "path": str(path),
-                "jsonpath": "$.value",
-            },
-            SimpleNamespace(session=session),
-            phase="after",
-        )
+        await handle_file_json(probe, context, phase="after")
 
 
 @pytest.mark.asyncio

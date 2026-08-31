@@ -889,19 +889,18 @@ class TestSessionManagerTransportFences:
 
         client.configuration_done = AsyncMock(side_effect=configuration_done)
 
-        with pytest.raises(RuntimeError, match=f"netcoredbg terminated during {operation}"):
-            if operation == "launch":
-                client.launch = AsyncMock(
-                    return_value=DAPResponse(seq=1, request_seq=1, success=True, command="launch")
-                )
-                with patch(
-                    "netcoredbg_mcp.setup.dbgshim.select_and_swap_dbgshim", return_value=False
-                ):
+        if operation == "launch":
+            client.launch = AsyncMock(
+                return_value=DAPResponse(seq=1, request_seq=1, success=True, command="launch")
+            )
+            with patch("netcoredbg_mcp.setup.dbgshim.select_and_swap_dbgshim", return_value=False):
+                with pytest.raises(RuntimeError, match=f"netcoredbg terminated during {operation}"):
                     await manager.launch(program="program.dll")
-            else:
-                client.attach = AsyncMock(
-                    return_value=DAPResponse(seq=1, request_seq=1, success=True, command="attach")
-                )
+        else:
+            client.attach = AsyncMock(
+                return_value=DAPResponse(seq=1, request_seq=1, success=True, command="attach")
+            )
+            with pytest.raises(RuntimeError, match=f"netcoredbg terminated during {operation}"):
                 await manager.attach(process_id=1234)
 
         assert manager.state.state is DebugState.TERMINATED

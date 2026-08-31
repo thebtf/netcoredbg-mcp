@@ -518,8 +518,10 @@ async def test_debuggee_activity_cancellation_reraises_without_t1_snapshot(
 
     monkeypatch.setattr("netcoredbg_mcp.tools.debug.asyncio.sleep", cancel)
 
+    debuggee_activity = registry.tools["debuggee_activity"]
+    context = SimpleNamespace()
     with pytest.raises(asyncio.CancelledError):
-        await registry.tools["debuggee_activity"](SimpleNamespace(), window_ms=1)
+        await debuggee_activity(context, window_ms=1)
 
     assert entered_sleep is True
     assert manager.activity_snapshot.call_count == 1  # type: ignore[attr-defined]

@@ -922,8 +922,9 @@ def test_capture_window_rejects_incomplete_gdi_raster(
             ),
         )
 
+    capture = getattr(screenshot, capture_name)
     with pytest.raises(RuntimeError, match=error):
-        getattr(screenshot, capture_name)(123)
+        capture(123)
 
     assert fake_gdi32.bitblt_calls == int(not printwindow_success)
     assert fake_gdi32.getdibits_calls == int(expect_getdibits)
@@ -966,10 +967,11 @@ def test_crop_png_preserves_selected_pixels_and_dimensions() -> None:
 def test_crop_png_rejects_invalid_rectangles(rectangle: tuple[int, int, int, int]) -> None:
     from netcoredbg_mcp.ui.screenshot import crop_png
 
+    png = _png((255, 0, 0), (2, 2))
     with pytest.raises(
         ValueError, match=r"^Crop rectangle must be positive and within image bounds$"
     ):
-        crop_png(_png((255, 0, 0), (2, 2)), *rectangle)
+        crop_png(png, *rectangle)
 
 
 @pytest.mark.asyncio

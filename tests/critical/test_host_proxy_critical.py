@@ -109,6 +109,8 @@ def _path_without_dotnet() -> str:
             continue
         kept.append(entry)
     return os.pathsep.join(kept)
+
+
 # Stable, read-only tool used by the original Q0 critical smoke and reused here.
 PARITY_TOOL_NAME = "runtime_smoke_validate_plan"
 EXPECTED_PROMPT_NAMES = [
@@ -189,9 +191,7 @@ def _combined_message_handler(
                 resource_updates.put_nowait(str(message.root.params.uri))
             if isinstance(message.root, types.LoggingMessageNotification):
                 data = message.root.params.data
-                logging_messages.append(
-                    data if isinstance(data, str) else json.dumps(data)
-                )
+                logging_messages.append(data if isinstance(data, str) else json.dumps(data))
 
     return handle
 
@@ -292,9 +292,10 @@ def test_section10_progress_prerequisites_fail_closed(monkeypatch: pytest.Monkey
             netcoredbg_path=str(REPO_ROOT / "does-not-exist-netcoredbg.exe")
         )
 
+    existing_path = str(Path(__file__).resolve())
     with pytest.raises(AssertionError, match="dotnet CLI is required"):
         require_section10_progress_prerequisites(
-            netcoredbg_path=str(Path(__file__).resolve()),
+            netcoredbg_path=existing_path,
             which=lambda _name: None,
         )
 
@@ -374,18 +375,15 @@ def test_section10_front_door_fails_closed_when_dotnet_absent_from_path() -> Non
         f"from PATH; got returncode={result.returncode}\n{combined}"
     )
     assert "dotnet CLI is required" in combined, (
-        "expected fail-closed prerequisite assertion about missing dotnet CLI, got:\n"
-        f"{combined}"
+        f"expected fail-closed prerequisite assertion about missing dotnet CLI, got:\n{combined}"
     )
     # Soft-skips report as "1 skipped" and often exit 0; a reintroduced module-wide
     # skipif must not be mistaken for a failing gate.
     assert "1 skipped" not in combined, (
-        "missing-dotnet must not soft-skip the mandatory front-door gate:\n"
-        f"{combined}"
+        f"missing-dotnet must not soft-skip the mandatory front-door gate:\n{combined}"
     )
     assert "1 failed" in combined or "FAILED" in combined, (
-        "expected a hard pytest failure for missing dotnet, got:\n"
-        f"{combined}"
+        f"expected a hard pytest failure for missing dotnet, got:\n{combined}"
     )
 
 
@@ -428,9 +426,7 @@ async def test_host_proxy_critical_front_door_surfaces(
     logging_messages: list[str] = []
     progress_events: list[tuple[float, float | None, str | None]] = []
 
-    async def progress_callback(
-        progress: float, total: float | None, message: str | None
-    ) -> None:
+    async def progress_callback(progress: float, total: float | None, message: str | None) -> None:
         progress_events.append((progress, total, message))
 
     # Canonical expected names from the same direct-Python catalog source used by
@@ -545,8 +541,9 @@ async def test_host_proxy_critical_front_door_surfaces(
                     meta={"muxSessionId": "critical-agent-A"},
                 )
                 assert not removed.isError, removed
+                resource_update = resource_updates.get()
                 with pytest.raises(asyncio.TimeoutError):
-                    await asyncio.wait_for(resource_updates.get(), timeout=0.3)
+                    await asyncio.wait_for(resource_update, timeout=0.3)
 
                 cancel_task = asyncio.create_task(
                     session.call_tool(PARITY_TOOL_NAME, {"plan": MINIMAL_PLAN})
@@ -555,9 +552,7 @@ async def test_host_proxy_critical_front_door_surfaces(
                 cancel_task.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await cancel_task
-                after_cancel = await session.call_tool(
-                    PARITY_TOOL_NAME, {"plan": MINIMAL_PLAN}
-                )
+                after_cancel = await session.call_tool(PARITY_TOOL_NAME, {"plan": MINIMAL_PLAN})
                 assert _tool_payload(after_cancel)["data"]["status"] == "PASS"
 
     stderr_text = host_errlog_path.read_text(encoding="utf-8")
@@ -596,9 +591,7 @@ async def test_host_proxy_critical_front_door_surfaces(
     )
     progress_errlog = tmp_path / "host-stderr-progress.log"
     with open(progress_errlog, "w+", encoding="utf-8") as errlog:
-        async with stdio_client(
-            progress_params, errlog=errlog
-        ) as (read_stream, write_stream):
+        async with stdio_client(progress_params, errlog=errlog) as (read_stream, write_stream):
             async with ClientSession(
                 read_stream,
                 write_stream,

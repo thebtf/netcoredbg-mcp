@@ -384,13 +384,16 @@ async def test_gui_smoke_gallery_owner_closes_once_after_failure() -> None:
     session = _GallerySession()
     backend = _GalleryBackend()
 
-    with pytest.raises(RuntimeError, match="gallery failure"):
+    async def exercise_gallery_failure() -> None:
         async with smoke_test_manual._GuiSmokeGallery(
             program="fixture.dll",
             session_factory=lambda: session,
             backend_factory=lambda actual_session: backend,
         ):
             raise RuntimeError("gallery failure")
+
+    with pytest.raises(RuntimeError, match="gallery failure"):
+        await exercise_gallery_failure()
 
     assert len(session.launches) == 1
     assert backend.connect_pids == [7001]
@@ -419,13 +422,16 @@ async def test_gui_smoke_gallery_owner_cleans_partial_context_entry(
             raise RuntimeError("backend factory failure")
         return backend
 
-    with pytest.raises(RuntimeError, match="failure"):
+    async def enter_gallery() -> None:
         async with smoke_test_manual._GuiSmokeGallery(
             program="fixture.dll",
             session_factory=lambda: session,
             backend_factory=backend_factory,
         ):
             pytest.fail("context entry should not complete")
+
+    with pytest.raises(RuntimeError, match="failure"):
+        await enter_gallery()
 
     assert session.stop_calls == 1
     assert backend.disconnect_calls == expected_disconnects
