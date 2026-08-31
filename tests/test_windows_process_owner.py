@@ -350,8 +350,9 @@ async def test_resume_failure_terminates_admitted_job_and_closes_handles(
 ) -> None:
     events: list[str] = []
 
+    api = _FakeApi(events, resume_ok=False)
     with pytest.raises(ProcessAdmissionError) as raised:
-        await _launch(monkeypatch, _FakeApi(events, resume_ok=False), events)
+        await _launch(monkeypatch, api, events)
 
     assert raised.value.stage is AdmissionStage.RESUME
     assert events.count("resume-thread") == 1
@@ -634,12 +635,13 @@ def test_unresolvable_bare_executable_fails_before_create_process(
     created = _prepare_fake_create_process(monkeypatch)
     monkeypatch.setattr(shutil, "which", MagicMock(return_value=None))
 
+    pipe_ends = _fake_pipe_ends()
     with pytest.raises(_Win32CallError) as raised:
         _create_suspended_process(
             argv=("dotnet", "build"),
             cwd=str(tmp_path),
             env={"Path": str(tmp_path / "toolchain")},
-            pipe_ends=_fake_pipe_ends(),
+            pipe_ends=pipe_ends,
         )
 
     assert raised.value.stage is AdmissionStage.CREATE_PROCESS

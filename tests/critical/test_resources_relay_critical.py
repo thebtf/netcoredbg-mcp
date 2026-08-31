@@ -248,8 +248,9 @@ async def test_resource_subscriptions_are_idempotent_and_stop_after_unsubscribe(
             assert initialized.capabilities.resources.subscribe is True
             assert initialized.capabilities.resources.listChanged is False
 
+            unknown_resource = AnyUrl("debug://unknown")
             with pytest.raises(McpError, match="Unknown resource") as unknown:
-                await session.subscribe_resource(AnyUrl("debug://unknown"))
+                await session.subscribe_resource(unknown_resource)
             assert unknown.value.error.code == -32602
 
             await session.subscribe_resource(AnyUrl("debug://breakpoints"))
@@ -260,8 +261,9 @@ async def test_resource_subscriptions_are_idempotent_and_stop_after_unsubscribe(
             )
             assert not added.isError, added
             assert await asyncio.wait_for(updates.get(), timeout=5) == "debug://breakpoints"
+            update = updates.get()
             with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(updates.get(), timeout=0.3)
+                await asyncio.wait_for(update, timeout=0.3)
 
             await session.unsubscribe_resource(AnyUrl("debug://breakpoints"))
             removed = await session.call_tool(
@@ -269,8 +271,9 @@ async def test_resource_subscriptions_are_idempotent_and_stop_after_unsubscribe(
                 {"file": str(source), "line": 1},
             )
             assert not removed.isError, removed
+            update = updates.get()
             with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(updates.get(), timeout=0.3)
+                await asyncio.wait_for(update, timeout=0.3)
 
 
 @pytest.mark.critical

@@ -198,8 +198,11 @@ class TestBuildManagerPreLaunchBuild:
         )
         session.build = AsyncMock()
 
+        workspace_path = str(tmp_path)
+        project_path = str(project)
+        owner = NoOwnedAdapter()
         with pytest.raises(BuildError, match="Restore failed"):
-            await manager.pre_launch_build(str(tmp_path), str(project), owner=NoOwnedAdapter())
+            await manager.pre_launch_build(workspace_path, project_path, owner=owner)
 
         session.build.assert_not_awaited()
 
@@ -215,8 +218,11 @@ class TestBuildManagerPreLaunchBuild:
             return_value=MagicMock(success=False, error_count=1, diagnostics=[], exit_code=1)
         )
 
+        workspace_path = str(tmp_path)
+        project_path = str(project)
+        owner = NoOwnedAdapter()
         with pytest.raises(BuildError, match="Build failed"):
-            await manager.pre_launch_build(str(tmp_path), str(project), owner=NoOwnedAdapter())
+            await manager.pre_launch_build(workspace_path, project_path, owner=owner)
 
     def test_pre_launch_build_requires_owner(self):
         """The internal cutover leaves no optional owner route."""
@@ -429,11 +435,14 @@ class TestOwnerScopedPreBuild:
         async def drain(_expected: OwnedProcessRef) -> OwnerDrainReceipt:
             return receipt
 
+        workspace_path = str(tmp_path)
+        project_path = str(project)
+        cleanup_adapter = OwnedAdapterCleanup(owner, drain)
         with pytest.raises(PreBuildOwnerError) as error:
             await manager.pre_launch_build(
-                str(tmp_path),
-                str(project),
-                owner=OwnedAdapterCleanup(owner, drain),
+                workspace_path,
+                project_path,
+                owner=cleanup_adapter,
             )
 
         assert error.value.outcome.receipt is receipt

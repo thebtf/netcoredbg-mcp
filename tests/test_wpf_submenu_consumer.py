@@ -128,9 +128,10 @@ async def test_poll_discovery_preserves_timeout_event_when_sleep_reaches_deadlin
         ),
     )
 
+    session = _ConsumerSession({})  # type: ignore[arg-type]
     with pytest.raises(AssertionError, match="discovery deadline") as raised:
         await _poll_discovery(
-            _ConsumerSession({}),  # type: ignore[arg-type]
+            session,
             name="ui_find_element",
             arguments={},
             matches=lambda _: False,

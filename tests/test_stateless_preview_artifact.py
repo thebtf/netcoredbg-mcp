@@ -351,8 +351,9 @@ def test_assemble_candidate_identity_refuses_noncanonical_provenance(
     else:
         candidate["source"]["post_merge_exact_head_receipt"]["tag_target"] = "c" * 40
 
+    frozen_candidate_input = _freeze(candidate_input)
     with pytest.raises(ValueError):
-        assemble_candidate_identity(_freeze(candidate_input))
+        assemble_candidate_identity(frozen_candidate_input)
 
 
 def test_verify_retained_artifact_replays_all_recorded_hash_equations(tmp_path: Path) -> None:
@@ -442,8 +443,9 @@ def test_assemble_candidate_identity_refuses_a_caller_supplied_gate_catalog(
     candidate_input, _, _, _ = _create_candidate_input(tmp_path, source_commit)
     candidate_input["release_gate_catalog"] = {"gate_descriptors": []}
 
+    frozen_candidate_input = _freeze(candidate_input)
     with pytest.raises(ValueError):
-        assemble_candidate_identity(_freeze(candidate_input))
+        assemble_candidate_identity(frozen_candidate_input)
 
 
 def _build_environment(source_commit: str) -> dict[str, str]:
@@ -699,8 +701,9 @@ def test_post_merge_receipt_producer_refuses_untrusted_scan_result(
         _, validator = _v3_receipt_validator()
         validator(json.loads(raw_receipt.read_text(encoding="utf-8")))
 
+    environment = _build_environment(source_commit)
     with pytest.raises(ValueError, match="post-merge exact-head scan receipt is not trusted"):
-        produce_post_merge_exact_head_receipt(authority_root, _build_environment(source_commit))
+        produce_post_merge_exact_head_receipt(authority_root, environment)
 
 
 def test_post_merge_receipt_producer_refuses_a_non_post_merge_runner(tmp_path: Path) -> None:
@@ -710,8 +713,9 @@ def test_post_merge_receipt_producer_refuses_a_non_post_merge_runner(tmp_path: P
     contents["role"] = "candidate"
     raw_receipt.write_text(json.dumps(contents, sort_keys=True) + "\n", encoding="utf-8")
 
+    environment = _build_environment(source_commit)
     with pytest.raises(ValueError):
-        produce_post_merge_exact_head_receipt(authority_root, _build_environment(source_commit))
+        produce_post_merge_exact_head_receipt(authority_root, environment)
 
 
 def test_seal_build_records_discovers_uploaded_receipt_and_payload_metadata(
@@ -1753,15 +1757,14 @@ def test_unified_v3_receipt_refuses_illegal_role_outcome_combinations(
 ) -> None:
     runner, validator = _v3_receipt_validator()
 
+    receipt = _complete_v3_exact_head_receipt(
+        "a" * 40,
+        role=role,
+        outcome=outcome,
+        release_intent=release_intent,
+    )
     with pytest.raises(runner.RunnerError):
-        validator(
-            _complete_v3_exact_head_receipt(
-                "a" * 40,
-                role=role,
-                outcome=outcome,
-                release_intent=release_intent,
-            )
-        )
+        validator(receipt)
 
 
 @pytest.mark.parametrize(
@@ -1842,11 +1845,9 @@ def test_post_merge_artifact_consumer_refuses_v2_receipt(tmp_path: Path) -> None
     authority_root, source_commit, _ = _create_authority_repository(tmp_path)
     _write_post_merge_scan_receipt_v2(authority_root, source_commit)
 
+    environment = _build_environment(source_commit)
     with pytest.raises(ValueError):
-        produce_post_merge_exact_head_receipt(
-            authority_root,
-            _build_environment(source_commit),
-        )
+        produce_post_merge_exact_head_receipt(authority_root, environment)
 
 
 def test_downloaded_post_merge_consumer_accepts_workflow_produced_wrapper(
