@@ -6,6 +6,7 @@ namespace FlaUIBridge.Commands;
 
 public static class TransformCommands
 {
+
     public static JsonNode MoveWindow(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         var x = @params?["x"]?.GetValue<int>()
@@ -26,7 +27,7 @@ public static class TransformCommands
             {
                 ["moved"] = false,
                 ["reason"] = "window is not movable",
-                ["window_title"] = title
+                [WindowTitleKey] = title
             };
         }
 
@@ -41,7 +42,7 @@ public static class TransformCommands
             ["moved"] = true,
             ["x"] = x,
             ["y"] = y,
-            ["window_title"] = title
+            [WindowTitleKey] = title
         };
     }
 
@@ -65,7 +66,7 @@ public static class TransformCommands
             {
                 ["resized"] = false,
                 ["reason"] = "window is not resizable",
-                ["window_title"] = title
+                [WindowTitleKey] = title
             };
         }
 
@@ -80,13 +81,13 @@ public static class TransformCommands
             ["resized"] = true,
             ["width"] = width,
             ["height"] = height,
-            ["window_title"] = title,
+            [WindowTitleKey] = title,
             ["request"] = new JsonObject
             {
                 ["width"] = width,
                 ["height"] = height,
-                ["unit"] = "uia_pattern_units",
-                ["coordinate_space"] = "UIA.TransformPattern.Resize",
+                ["unit"] = UiaPatternUnits,
+                [CoordinateSpaceKey] = UiaTransformPatternResizeCoordinateSpace,
             }
         };
 
@@ -116,8 +117,8 @@ public static class TransformCommands
                 {
                     ["width"] = width,
                     ["height"] = height,
-                    ["unit"] = "uia_pattern_units",
-                    ["coordinate_space"] = "UIA.TransformPattern.Resize",
+                    ["unit"] = UiaPatternUnits,
+                    [CoordinateSpaceKey] = UiaTransformPatternResizeCoordinateSpace,
                 },
                 ["actual"] = new JsonObject
                 {
@@ -125,23 +126,23 @@ public static class TransformCommands
                     {
                         ["width"] = uiaWidth,
                         ["height"] = uiaHeight,
-                        ["unit"] = "physical_px",
-                        ["coordinate_space"] = "screen",
-                        ["source_api"] = "UIA.BoundingRectangle",
+                        ["unit"] = PhysicalPixelsKey,
+                        [CoordinateSpaceKey] = ScreenCoordinateSpace,
+                        [SourceApiKey] = "UIA.BoundingRectangle",
                     },
                     ["window_bounds"] = new JsonObject
                     {
                         ["width"] = windowWidth,
                         ["height"] = windowHeight,
-                        ["unit"] = "physical_px",
-                        ["coordinate_space"] = "screen",
-                        ["source_api"] = "GetWindowRect",
+                        ["unit"] = PhysicalPixelsKey,
+                        [CoordinateSpaceKey] = ScreenCoordinateSpace,
+                        [SourceApiKey] = "GetWindowRect",
                     },
                 },
                 ["mismatch_fields"] = mismatchFields,
             };
             var uiaBounds = Bounds(
-                uia.Left, uia.Top, uia.Right, uia.Bottom, dpiScale, "screen", "UIA.BoundingRectangle");
+                uia.Left, uia.Top, uia.Right, uia.Bottom, dpiScale, ScreenCoordinateSpace, "UIA.BoundingRectangle");
             uiaBounds["source_coordinate_space"] = "uia_element_bounds";
             result["geometry"] = new JsonObject
             {
@@ -150,7 +151,7 @@ public static class TransformCommands
                 ["uia_bounds"] = uiaBounds,
                 ["window_bounds"] = Bounds(
                     native.WindowLeft, native.WindowTop, native.WindowRight, native.WindowBottom,
-                    dpiScale, "screen", "GetWindowRect"),
+                    dpiScale, ScreenCoordinateSpace, "GetWindowRect"),
                 ["client_bounds"] = Bounds(
                     native.ClientLeft, native.ClientTop, native.ClientRight, native.ClientBottom,
                     dpiScale, "client", "GetClientRect"),
@@ -158,7 +159,7 @@ public static class TransformCommands
                 {
                     ["value"] = native.Dpi,
                     ["unit"] = "dpi",
-                    ["source_api"] = "GetDpiForWindow",
+                    [SourceApiKey] = "GetDpiForWindow",
                 },
                 ["dpi_scale"] = new JsonObject
                 {
@@ -182,8 +183,8 @@ public static class TransformCommands
                 {
                     ["width"] = width,
                     ["height"] = height,
-                    ["unit"] = "uia_pattern_units",
-                    ["coordinate_space"] = "UIA.TransformPattern.Resize",
+                    ["unit"] = UiaPatternUnits,
+                    [CoordinateSpaceKey] = UiaTransformPatternResizeCoordinateSpace,
                 },
                 ["mismatch_fields"] = new JsonArray(),
                 ["code"] = "POST_RESIZE_GEOMETRY_UNAVAILABLE",
@@ -204,7 +205,7 @@ public static class TransformCommands
     {
         return new JsonObject
         {
-            ["physical_px"] = new JsonObject
+            [PhysicalPixelsKey] = new JsonObject
             {
                 ["left"] = left,
                 ["top"] = top,
@@ -218,8 +219,17 @@ public static class TransformCommands
                 ["right"] = right / dpiScale,
                 ["bottom"] = bottom / dpiScale,
             },
-            ["coordinate_space"] = coordinateSpace,
-            ["source_api"] = sourceApi,
+            [CoordinateSpaceKey] = coordinateSpace,
+            [SourceApiKey] = sourceApi,
         };
     }
+
+    private const string WindowTitleKey = "window_title";
+    private const string UiaPatternUnits = "uia_pattern_units";
+    private const string CoordinateSpaceKey = "coordinate_space";
+    private const string UiaTransformPatternResizeCoordinateSpace = "UIA.TransformPattern.Resize";
+    private const string PhysicalPixelsKey = "physical_px";
+    private const string ScreenCoordinateSpace = "screen";
+    private const string SourceApiKey = "source_api";
+
 }
