@@ -858,6 +858,7 @@ class SessionManager:
 
         if self._client.is_running:
             return
+        await self._reconcile_retained_owner_before_admission_locked()
         self._initialized_event.clear()
         if self._state.state == DebugState.TERMINATED:
             self._begin_debuggee_epoch(lifecycle_state=DebugState.IDLE)
@@ -882,13 +883,23 @@ class SessionManager:
                 self._windows_adapter_admission_generation = None
 
         if returned_generation != generation:
-            receipt = await self._client.stop()
-            if self._owner_receipt_releases_generation(receipt):
+            owner = self._client.adapter_owner
+            expected_owner = owner if isinstance(owner, OwnedProcessRef) else None
+            if expected_owner is not None:
+                receipt = await self._client.stop(expected_owner=expected_owner)
+            else:
+                receipt = await self._client.stop()
+            if self._owner_receipt_releases_generation(receipt, expected_owner=expected_owner):
                 self._active_dap_run = None
             raise RuntimeError("DAP client returned a mismatched adapter generation")
         if self._state.state == DebugState.TERMINATED:
-            receipt = await self._client.stop()
-            if self._owner_receipt_releases_generation(receipt):
+            owner = self._client.adapter_owner
+            expected_owner = owner if isinstance(owner, OwnedProcessRef) else None
+            if expected_owner is not None:
+                receipt = await self._client.stop(expected_owner=expected_owner)
+            else:
+                receipt = await self._client.stop()
+            if self._owner_receipt_releases_generation(receipt, expected_owner=expected_owner):
                 if self._active_dap_run == generation:
                     self._active_dap_run = None
             raise RuntimeError("netcoredbg terminated during startup")
@@ -1648,52 +1659,96 @@ class SessionManager:
     @staticmethod
     def _owner_receipt_releases_generation(
         receipt: OwnerDrainReceipt | None,
+        *,
+        expected_owner: OwnedProcessRef | None = None,
     ) -> bool:
         """Whether finalization proved that no retained owner remains."""
 
-        return receipt is None or (
-            receipt.status is DrainStatus.DRAINED and receipt.active_processes == 0
+        if expected_owner is None:
+            return receipt is None or (
+                receipt.status is DrainStatus.DRAINED and receipt.active_processes == 0
+            )
+        return (
+            receipt is not None
+            and receipt.owner == expected_owner
+            and receipt.status is DrainStatus.DRAINED
+            and receipt.active_processes == 0
         )
 
-    async def _stop_owned_adapter(
+    async def _reconcile_retained_owner_before_admission_locked(self) -> None:
+        """Join a retained terminal owner before a new generation can replace it."""
+        retained_generation = self._active_dap_run
+        if retained_generation is None:
+            return
+        owner = self._client.adapter_owner
+        if not isinstance(owner, OwnedProcessRef):
+            return
+        if owner.generation != retained_generation:
+            raise RuntimeError("Retained adapter owner generation does not match session state")
+
+        try:
+            receipt = await self._client.stop(expected_owner=owner)
+        except Exception as error:
+            logger.warning("Retained adapter owner finalization failed before admission: %s", error)
+            raise RuntimeError(
+                "Retained adapter owner finalization failed before admission"
+            ) from error
+
+        if not self._owner_receipt_releases_generation(receipt, expected_owner=owner):
+            status = "missing" if receipt is None else receipt.status.value
+            active_processes = None if receipt is None else receipt.active_processes
+            raise RuntimeError(
+                "Retained adapter owner did not drain before admission "
+                f"(status={status}, active={active_processes})"
+            )
+        if self._active_dap_run == owner.generation:
+            self._active_dap_run = None
+
+    async def _join_owned_adapter_finalizer(
         self,
         source_client: DAPClient,
         generation: object,
         expected: OwnedProcessRef,
-    ) -> OwnerDrainReceipt:
-        """Request graceful DAP shutdown, then join the matching owner finalizer."""
-        # Revalidate without awaiting first. An older capture must not disconnect,
-        # terminate, or mutate a newer generation when any captured fact differs.
+        *,
+        request_disconnect: bool,
+        propagate_disconnect_cancellation: bool,
+    ) -> tuple[OwnerDrainReceipt, bool]:
+        """Fence one owner, finish its elected finalizer, and preserve caller cancellation."""
         if (
             self._client is not source_client
             or self._active_dap_run != generation
             or source_client.adapter_owner != expected
         ):
-            return OwnerDrainReceipt(
-                owner=expected,
-                status=DrainStatus.STALE,
-                forced=False,
-                root_returncode=None,
-                active_processes=None,
+            return (
+                OwnerDrainReceipt(
+                    owner=expected,
+                    status=DrainStatus.STALE,
+                    forced=False,
+                    root_returncode=None,
+                    active_processes=None,
+                ),
+                False,
             )
 
-        disconnect_task = asyncio.create_task(source_client.disconnect(terminate=True))
         cancelled = False
-        while True:
-            try:
-                await asyncio.shield(disconnect_task)
-                break
-            except asyncio.CancelledError:
-                if disconnect_task.cancelled():
-                    logger.warning("Expected adapter disconnect was cancelled before finalization")
+        if request_disconnect:
+            disconnect_task = asyncio.create_task(source_client.disconnect(terminate=True))
+            while True:
+                try:
+                    await asyncio.shield(disconnect_task)
                     break
-                # The caller may cancel pre-build, but this captured owner has
-                # not reached its finalizer yet. Keep the lifecycle gate until
-                # the matching finalizer produces a receipt.
-                cancelled = True
-            except Exception as error:
-                logger.warning("Expected adapter disconnect failed: %s", error)
-                break
+                except asyncio.CancelledError:
+                    if disconnect_task.cancelled():
+                        if propagate_disconnect_cancellation:
+                            raise
+                        logger.warning(
+                            "Expected adapter disconnect was cancelled before finalization"
+                        )
+                        break
+                    cancelled = True
+                except Exception as error:
+                    logger.warning("Expected adapter disconnect failed: %s", error)
+                    break
 
         stop_task = asyncio.create_task(source_client.stop(expected_owner=expected))
         while True:
@@ -1703,29 +1758,50 @@ class SessionManager:
             except asyncio.CancelledError:
                 if stop_task.cancelled():
                     raise
-                # Keep the lifecycle gate until the already-elected finalizer
-                # publishes its receipt, then restore caller cancellation.
                 cancelled = True
             except Exception as error:
                 logger.warning("Expected adapter owner drain failed: %s", error)
-                return OwnerDrainReceipt(
-                    owner=expected,
-                    status=DrainStatus.FAILED,
-                    forced=False,
-                    root_returncode=None,
-                    active_processes=None,
+                return (
+                    OwnerDrainReceipt(
+                        owner=expected,
+                        status=DrainStatus.FAILED,
+                        forced=False,
+                        root_returncode=None,
+                        active_processes=None,
+                    ),
+                    cancelled,
                 )
+
+        if receipt is None:
+            receipt = OwnerDrainReceipt(
+                owner=expected,
+                status=DrainStatus.FAILED,
+                forced=False,
+                root_returncode=None,
+                active_processes=None,
+            )
+        return receipt, cancelled
+
+    async def _stop_owned_adapter(
+        self,
+        source_client: DAPClient,
+        generation: object,
+        expected: OwnedProcessRef,
+    ) -> OwnerDrainReceipt:
+        """Request graceful DAP shutdown, then join the matching owner finalizer."""
+        receipt, cancelled = await self._join_owned_adapter_finalizer(
+            source_client,
+            generation,
+            expected,
+            request_disconnect=True,
+            propagate_disconnect_cancellation=False,
+        )
+        if self._owner_receipt_releases_generation(receipt, expected_owner=expected):
+            if self._active_dap_run == generation:
+                self._active_dap_run = None
         if cancelled:
             raise asyncio.CancelledError
-        if receipt is not None:
-            return receipt
-        return OwnerDrainReceipt(
-            owner=expected,
-            status=DrainStatus.FAILED,
-            forced=False,
-            root_returncode=None,
-            active_processes=None,
-        )
+        return receipt
 
     async def pre_launch_build(
         self,
@@ -2087,8 +2163,8 @@ class SessionManager:
         """Stop one session without erasing an owner that did not drain."""
         stopping_generation = self._active_dap_run
         owner = self._client.adapter_owner
-        requires_owner_receipt = isinstance(owner, OwnedProcessRef)
         joined_and_drained = False
+        cancelled = False
         self._stopping_dap_run = stopping_generation
         observed_pids = tuple(
             pid
@@ -2100,25 +2176,37 @@ class SessionManager:
             # publication. Join foreground work inside the `try` so cancellation
             # cannot strand that marker and misclassify a delayed finalizer result.
             await self._cancel_stealth_foreground_restore_task()
-            if self._client.is_running:
-                try:
-                    await self._client.disconnect(terminate=True)
-                except Exception as error:
-                    logger.warning("Error during disconnect: %s", error)
-            receipt = await self._client.stop()
-            effective_receipt = receipt or validated_owner_receipt
-            if requires_owner_receipt and (
-                effective_receipt is None
-                or effective_receipt.status is not DrainStatus.DRAINED
-                or effective_receipt.active_processes != 0
-            ):
-                status = "missing" if effective_receipt is None else effective_receipt.status.value
-                active_processes = (
-                    None if effective_receipt is None else effective_receipt.active_processes
-                )
-                raise RuntimeError(
-                    f"Adapter owner did not drain (status={status}, active={active_processes})"
-                )
+            if isinstance(owner, OwnedProcessRef):
+                if validated_owner_receipt is None:
+                    effective_receipt, cancelled = await self._join_owned_adapter_finalizer(
+                        self._client,
+                        stopping_generation,
+                        owner,
+                        request_disconnect=self._client.is_running,
+                        propagate_disconnect_cancellation=True,
+                    )
+                else:
+                    effective_receipt = validated_owner_receipt
+                if not self._owner_receipt_releases_generation(
+                    effective_receipt,
+                    expected_owner=owner,
+                ):
+                    status = (
+                        "missing" if effective_receipt is None else effective_receipt.status.value
+                    )
+                    active_processes = (
+                        None if effective_receipt is None else effective_receipt.active_processes
+                    )
+                    raise RuntimeError(
+                        f"Adapter owner did not drain (status={status}, active={active_processes})"
+                    )
+            else:
+                if self._client.is_running:
+                    try:
+                        await self._client.disconnect(terminate=True)
+                    except Exception as error:
+                        logger.warning("Error during disconnect: %s", error)
+                await self._client.stop()
 
             # A no-owner platform path remains compatible. An admitted owner
             # reaches here only after the finalizer's literal zero accounting.
@@ -2147,6 +2235,8 @@ class SessionManager:
             self._state = self._create_session_state()
             self._output_bytes = 0
             self._publish_resource_updates(STATE_URI, THREADS_URI, OUTPUT_URI)
+            if cancelled:
+                raise asyncio.CancelledError
             return {"success": True}
         finally:
             # Cancellation before joining the finalizer, and a nonzero receipt,

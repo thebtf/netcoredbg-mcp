@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -18,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import psutil
 import pytest
 
+import netcoredbg_mcp.windows_process_owner as windows_process_owner
 from netcoredbg_mcp.build.manager import BuildManager
 from netcoredbg_mcp.dap.client import DAPClient, DapTransportTerminal
 from netcoredbg_mcp.session import SessionManager
@@ -28,6 +30,7 @@ from netcoredbg_mcp.windows_process_owner import (
     ProcessAdmissionError,
     WindowsOwnedProcess,
     _create_suspended_process,
+    _FailedAdmissionReaper,
     _Kernel32,
     _Win32CallError,
 )
@@ -491,6 +494,65 @@ async def test_failed_admission_reaper_retries_until_root_exit_then_closes_handl
     assert api.wait_attempts >= 2
     assert {"close:11", "close:21", "close:31"}.issubset(events)
     assert len(events) - 1 - events[::-1].index("wait-process") < events.index("close:31")
+
+
+@pytest.mark.asyncio
+async def test_failed_admission_reaper_backs_off_and_logs_failures(
+    monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """Retained cleanup slows repeated errors without hiding their cause."""
+
+    class RetryApi(_FakeApi):
+        def __init__(self, events: list[str]) -> None:
+            super().__init__(events, assign_ok=False)
+            self.wait_attempts = 0
+
+        def wait_for_process(self, _process: int, _timeout_ms: int) -> bool:
+            self.events.append("wait-process")
+            self.wait_attempts += 1
+            if self.wait_attempts == 1:
+                raise RuntimeError("wait observation failed")
+            return self.wait_attempts >= 5
+
+    delays: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(
+        windows_process_owner,
+        "_FAILED_ADMISSION_REAPER_INITIAL_BACKOFF_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        windows_process_owner,
+        "_FAILED_ADMISSION_REAPER_MAX_BACKOFF_SECONDS",
+        0.04,
+    )
+    monkeypatch.setattr(windows_process_owner.asyncio, "sleep", record_sleep)
+    events: list[str] = []
+    reaper = _FailedAdmissionReaper(
+        api=RetryApi(events),
+        job_handle=11,
+        process_handle=21,
+        thread_handle=31,
+        pipe_ends=None,
+        transports=(),
+        admitted=False,
+    )
+
+    with caplog.at_level(logging.WARNING, logger=windows_process_owner.__name__):
+        reaper.schedule()
+        assert await reaper.wait_for_completion(timeout=1.0) is True
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert delays == pytest.approx([0.01, 0.02, 0.04, 0.04, 0.04])
+    assert "Failed-admission reaper cleanup retry raised" in messages
+    assert (
+        messages.count("Failed-admission reaper cleanup retry failed: stage=drain winerror=None")
+        == 3
+    )
+    assert {"close:11", "close:21", "close:31"}.issubset(events)
 
 
 @pytest.mark.asyncio

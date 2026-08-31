@@ -8,6 +8,7 @@ an observation carried in ``OwnedProcessRef``.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import subprocess
@@ -20,6 +21,8 @@ from typing import Any, Literal, Protocol
 
 _ADMISSION_CLEANUP_TIMEOUT = 5.0
 _ACCOUNTING_POLL_SECONDS = 0.01
+_FAILED_ADMISSION_REAPER_INITIAL_BACKOFF_SECONDS = 0.05
+_FAILED_ADMISSION_REAPER_MAX_BACKOFF_SECONDS = 1.0
 _INFINITE = 0xFFFFFFFF
 _WAIT_FAILED = 0xFFFFFFFF
 _WAIT_TIMEOUT = 258
@@ -29,6 +32,9 @@ _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _CREATE_SUSPENDED = 0x00000004
 _CREATE_UNICODE_ENVIRONMENT = 0x00000400
 _RESUME_FAILED = 0xFFFFFFFF
+
+
+logger = logging.getLogger(__name__)
 
 
 class AdmissionStage(str, Enum):
@@ -558,14 +564,24 @@ class _FailedAdmissionReaper:
         return self._closed
 
     async def _retry_until_root_exit(self) -> None:
+        delay = _FAILED_ADMISSION_REAPER_INITIAL_BACKOFF_SECONDS
         while not self._closed:
-            await asyncio.sleep(_ACCOUNTING_POLL_SECONDS)
+            await asyncio.sleep(delay)
             try:
-                await self._attempt_cleanup()
+                failure = await self._attempt_cleanup()
             except Exception:
                 # A private retry owner must not abandon its handles because a
                 # transient boundary adapter error escaped one attempt.
-                continue
+                logger.exception("Failed-admission reaper cleanup retry raised")
+            else:
+                if failure is not None:
+                    logger.warning(
+                        "Failed-admission reaper cleanup retry failed: stage=%s winerror=%s",
+                        failure.stage.value,
+                        failure.winerror,
+                    )
+            if not self._closed:
+                delay = min(delay * 2, _FAILED_ADMISSION_REAPER_MAX_BACKOFF_SECONDS)
 
     async def _attempt_cleanup(self) -> _Win32CallError | None:
         self._close_io()
