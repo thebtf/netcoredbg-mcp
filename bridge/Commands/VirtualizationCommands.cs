@@ -101,10 +101,10 @@ public static class VirtualizationCommands
             var rect = foundItem.BoundingRectangle;
             boundingRectNode = new JsonObject
             {
-                ["x"] = (int)rect.X,
-                ["y"] = (int)rect.Y,
-                ["width"] = (int)rect.Width,
-                ["height"] = (int)rect.Height
+                ["x"] = rect.X,
+                ["y"] = rect.Y,
+                ["width"] = rect.Width,
+                ["height"] = rect.Height
             };
         }
         catch (Exception ex)

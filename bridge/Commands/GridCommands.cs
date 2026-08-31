@@ -1001,8 +1001,8 @@ public static partial class GridCommands
 
             return (
                 new Point(
-                    (int)(rect.X + rect.Width / 2),
-                    (int)(rect.Y + rect.Height / 2)),
+                    rect.X + rect.Width / 2,
+                    rect.Y + rect.Height / 2),
                 null);
         }
         catch

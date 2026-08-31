@@ -224,9 +224,7 @@ public static partial class GridCommands
                 };
             }
 
-            if (blockedResult is null && targetMatch is not null)
-            {
-                if (!targetWasAlreadyVisible)
+            if (blockedResult is null && targetMatch is not null && !targetWasAlreadyVisible)
                 {
                     var stabilizedTarget = StabilizeHeldDragTarget(
                         grid,
@@ -269,7 +267,6 @@ public static partial class GridCommands
                         };
                     }
                 }
-            }
 
             if (blockedResult is null && targetMatch is not null)
             {

@@ -229,14 +229,12 @@ internal sealed class NativeScreenshotCaptureTransport : IScreenshotCaptureTrans
         }
 
         uint foregroundThread = 0;
-        if (foreground != IntPtr.Zero)
+        if (foreground != IntPtr.Zero &&
+            (!TryGetWindowIdentity(foreground, out foregroundThread, out var foregroundProcessId) ||
+             (requiredForeground != IntPtr.Zero && foregroundProcessId != requiredForegroundProcessId) ||
+             !SharesDesktop(currentThread, foregroundThread)))
         {
-            if (!TryGetWindowIdentity(foreground, out foregroundThread, out var foregroundProcessId) ||
-                (requiredForeground != IntPtr.Zero && foregroundProcessId != requiredForegroundProcessId) ||
-                !SharesDesktop(currentThread, foregroundThread))
-            {
-                return default;
-            }
+            return default;
         }
 
         var foregroundAttached = false;
