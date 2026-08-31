@@ -4111,12 +4111,16 @@ def _component_coverage_summary(
         lines = int(values.get("lines_to_cover", 0))
         uncovered = int(values.get("uncovered_lines", lines))
         conditions = int(values.get("conditions_to_cover", 0))
-        if lines <= 0 or uncovered < 0 or uncovered >= lines:
-            _coverage_failure("COVERAGE_IMPORT_UNPROVEN", "mapped component lacks covered lines")
+        if lines < 0 or uncovered < 0 or uncovered > lines:
+            _coverage_failure("COVERAGE_IMPORT_UNPROVEN", "mapped component measures are invalid")
         lines_to_cover += lines
         covered_lines += lines - uncovered
         if conditions > 0:
             branch_measure_paths += 1
+    if lines_to_cover <= 0 or covered_lines <= 0:
+        _coverage_failure(
+            "COVERAGE_IMPORT_UNPROVEN", "mapped language source set has no covered lines"
+        )
     if branch_measure_paths <= 0:
         _coverage_failure("COVERAGE_IMPORT_UNPROVEN", "mapped components lack branch measures")
     path_hash = _sha256_json(normalized_paths)
