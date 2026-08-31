@@ -100,7 +100,10 @@ public sealed class ReverseRouteAndLifecycleTests
             });
 
         var result = await downstreamClient.CallToolAsync(new CallToolRequestParams { Name = "anything" });
-        Assert.False(result.IsError == true);
+        if (result.IsError == true)
+        {
+            Assert.Fail();
+        }
         var text = Assert.IsType<TextContentBlock>(result.Content[0]);
         Assert.Equal("1", text.Text);
 

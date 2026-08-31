@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Collections.Immutable;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
@@ -26,6 +27,15 @@ public sealed class ProductionCompositionTests
     private const string StateUri = "debug://state";
     private const string BreakpointsUri = "debug://breakpoints";
     private const string ProbeToolName = "probe";
+    private static readonly ImmutableArray<string> NativePromptNames = ImmutableArray.Create(
+        "debug",
+        "debug-gui",
+        "debug-exception",
+        "debug-visual",
+        "debug-mistakes",
+        "investigate",
+        "debug-scenario",
+        "dap-escape-hatch");
 
     private sealed class EventLog
     {
@@ -427,13 +437,7 @@ public sealed class ProductionCompositionTests
         Assert.False(promptsCapability!.ListChanged);
 
         var prompts = await fixture.DownstreamClient.ListPromptsAsync(new ListPromptsRequestParams());
-        Assert.Equal(
-            new[]
-            {
-                "debug", "debug-gui", "debug-exception", "debug-visual", "debug-mistakes",
-                "investigate", "debug-scenario", "dap-escape-hatch",
-            },
-            prompts.Prompts.Select(prompt => prompt.Name));
+        Assert.Equal(NativePromptNames, prompts.Prompts.Select(prompt => prompt.Name));
 
         var rendered = await fixture.DownstreamClient.GetPromptAsync("debug");
         Assert.False(string.IsNullOrWhiteSpace(rendered.Description));

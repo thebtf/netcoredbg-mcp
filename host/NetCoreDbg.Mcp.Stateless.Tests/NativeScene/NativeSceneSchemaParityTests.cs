@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
@@ -22,6 +23,34 @@ public sealed class NativeSceneSchemaParityTests
         new("native-scene-artifact.schema.json", "07c257c9b5f75c01aa4f4141968c789b045d7c831575343df429075c732f7668"),
         new("parity-corpus.json", "90c24f8f9706c207ca3ecf8dee93d1937c16a6be45feac65d812e48853bc4621"),
     ];
+    private static readonly ImmutableArray<string> ContractRootDefinitions = ImmutableArray.Create(
+        "getUiProbeCapabilitiesArguments",
+        "captureVisualEvidenceArguments",
+        "readCaptureArtifactArguments",
+        "waitForUiStableArguments",
+        "captureElementSnapshotArguments",
+        "captureNativeSceneArguments",
+        "probeCapabilities",
+        "uiProbeCapabilities",
+        "captureArtifactChunk",
+        "toolErrorBase",
+        "captureManifestBase");
+    private static readonly ImmutableArray<string> M0GateValidationNames = ImmutableArray.Create(
+        "exact-byte Draft-7 schema loading",
+        "request/result validator parity for concrete fixtures present",
+        "internal reference resolution",
+        "corpus syntax and integrity",
+        "expected classification vocabulary",
+        "negative structural and version cases");
+    private static readonly ImmutableArray<string> RequiredSceneRequestProperties = ImmutableArray.Create(
+        "animationPolicy", "appearance", "contractSetHash", "contrast", "currentState", "density", "expectedCandidateIdentity",
+        "expectedDpiPolicy", "fixtureId", "focusTarget", "sceneId", "scope", "scrollOffsets", "selectedState", "settlePolicy",
+        "storyId", "theme", "viewport");
+    private static readonly ImmutableArray<string> RequiredWindowEvidenceScopeProperties = ImmutableArray.Create("kind");
+    private static readonly ImmutableArray<string> RequiredElementEvidenceScopeProperties = ImmutableArray.Create("element", "kind");
+    private static readonly ImmutableArray<string> NativeAtomicityBranchReferences = ImmutableArray.Create(
+        "#/definitions/inProcessAtomicity",
+        "#/definitions/uiaGuardedAtomicity");
 
     [Fact]
     public void ApprovedArtifactsHaveExactHashesAndCatalogReturnsIdenticalBytes()
@@ -94,20 +123,7 @@ public sealed class NativeSceneSchemaParityTests
         var artifact = ParseArtifact("native-scene-artifact.schema.json");
 
         Assert.All(
-            new[]
-            {
-                "getUiProbeCapabilitiesArguments",
-                "captureVisualEvidenceArguments",
-                "readCaptureArtifactArguments",
-                "waitForUiStableArguments",
-                "captureElementSnapshotArguments",
-                "captureNativeSceneArguments",
-                "probeCapabilities",
-                "uiProbeCapabilities",
-                "captureArtifactChunk",
-                "toolErrorBase",
-                "captureManifestBase",
-            },
+            ContractRootDefinitions,
             definition => AssertClosed(Definition(probe, definition)));
         AssertClosed(Definition(artifact, "sceneArtifact"));
     }
@@ -158,15 +174,7 @@ public sealed class NativeSceneSchemaParityTests
         var gate = Object(Object(corpus["gateStages"])["M0-G0"]);
         Assert.Equal("T007", Text(gate["task"]));
         Assert.Equal(
-            new[]
-            {
-                "exact-byte Draft-7 schema loading",
-                "request/result validator parity for concrete fixtures present",
-                "internal reference resolution",
-                "corpus syntax and integrity",
-                "expected classification vocabulary",
-                "negative structural and version cases",
-            },
+            M0GateValidationNames,
             Array(gate["validates"]).Select(Text));
     }
 
@@ -223,16 +231,11 @@ public sealed class NativeSceneSchemaParityTests
 
         AssertClosed(sceneRequest);
         Assert.Equal(
-            new[]
-            {
-                "animationPolicy", "appearance", "contractSetHash", "contrast", "currentState", "density", "expectedCandidateIdentity",
-                "expectedDpiPolicy", "fixtureId", "focusTarget", "sceneId", "scope", "scrollOffsets", "selectedState", "settlePolicy",
-                "storyId", "theme", "viewport",
-            },
+            RequiredSceneRequestProperties,
             Array(sceneRequest["required"]).Select(Text).Order());
-        Assert.Equal(new[] { "kind" }, Array(evidenceBranches[0]["required"]).Select(Text));
+        Assert.Equal(RequiredWindowEvidenceScopeProperties, Array(evidenceBranches[0]["required"]).Select(Text));
         Assert.Equal("window", EnumValue(Object(Object(evidenceBranches[0]["properties"])["kind"])));
-        Assert.Equal(new[] { "element", "kind" }, Array(evidenceBranches[1]["required"]).Select(Text).Order());
+        Assert.Equal(RequiredElementEvidenceScopeProperties, Array(evidenceBranches[1]["required"]).Select(Text).Order());
         Assert.Equal("element", EnumValue(Object(Object(evidenceBranches[1]["properties"])["kind"])));
 
         var visualProperties = Object(Object(Array(visualCapture["allOf"])[1])["properties"]);
@@ -259,7 +262,7 @@ public sealed class NativeSceneSchemaParityTests
         var uiaIssue = Object(Object(Object(uiaPartialThen["properties"])["issues"])["contains"]);
 
         Assert.Equal("PARTIAL", EnumValue(Object(Object(partialNative["properties"])["status"])));
-        Assert.Equal(new[] { "#/definitions/inProcessAtomicity", "#/definitions/uiaGuardedAtomicity" }, atomicityBranches);
+        Assert.Equal(NativeAtomicityBranchReferences, atomicityBranches);
         Assert.Equal("unchanged", EnumValue(Object(Object(Object(guardStates["window"])["properties"])["state"])));
         Assert.Equal("unchanged", EnumValue(Object(Object(Object(guardStates["client"])["properties"])["state"])));
         Assert.Equal("unchanged", EnumValue(Object(Object(Object(guardStates["dpi"])["properties"])["state"])));

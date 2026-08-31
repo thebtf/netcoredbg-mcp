@@ -216,7 +216,10 @@ public sealed class ToolsCatalogContractTests
         // The relay/session must remain fully usable after a cancelled forward call -
         // FD-000 only proved this for the reverse direction.
         var followUp = await downstreamClient.CallToolAsync(new CallToolRequestParams { Name = "fast" });
-        Assert.False(followUp.IsError == true);
+        if (followUp.IsError == true)
+        {
+            Assert.Fail();
+        }
         var text = Assert.IsType<TextContentBlock>(followUp.Content[0]);
         Assert.Equal("fast-ok", text.Text);
 

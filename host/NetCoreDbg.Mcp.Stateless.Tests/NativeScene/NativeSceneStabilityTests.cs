@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Reflection;
 using System.Runtime.Loader;
 using System.Text.Json;
@@ -21,6 +22,25 @@ public sealed class NativeSceneStabilityTests
 {
     private static readonly DateTimeOffset Start = new(2026, 8, 19, 12, 0, 0, TimeSpan.Zero);
     private static readonly TimeSpan HarnessTimeout = TimeSpan.FromSeconds(1);
+    private static readonly ImmutableArray<string> CandidateIdentityFailureCodes = ImmutableArray.Create(
+        "CANDIDATE_MISMATCH",
+        "OBSERVER_UNAVAILABLE");
+    private static readonly ImmutableArray<string> StabilityStatuses = ImmutableArray.Create(
+        "STABLE",
+        "PARTIAL",
+        "UNOBSERVABLE");
+    private static readonly ImmutableArray<string> ConditionStates = ImmutableArray.Create(
+        "met",
+        "not_met",
+        "unsupported",
+        "unobservable");
+    private static readonly ImmutableArray<string> ConditionNames = ImmutableArray.Create(
+        "animationState",
+        "asyncLoadSettled",
+        "contextMaterialization",
+        "dispatcherIdle",
+        "stableLayout",
+        "windowGeometry");
 
 
     [Theory]
@@ -346,7 +366,7 @@ public sealed class NativeSceneStabilityTests
 
         AssertSchemaValid("capture_visual_evidence", capture.StructuredContent);
         Assert.Equal("tool_error", Text(capture.StructuredContent["kind"]));
-        Assert.Contains(Text(capture.StructuredContent["code"]), new[] { "CANDIDATE_MISMATCH", "OBSERVER_UNAVAILABLE" });
+        Assert.Contains(Text(capture.StructuredContent["code"]), CandidateIdentityFailureCodes);
         Assert.DoesNotContain(
             EnumeratePropertyNames(capture.StructuredContent),
             name => name is "artifactId" or "artifacts" or "captureId" or "rasterCaptureId" or "dataBase64" or "path" or "root");
@@ -486,11 +506,11 @@ public sealed class NativeSceneStabilityTests
 
     private static void AssertConditionEvidence(JsonObject stability)
     {
-        Assert.Contains(Text(stability["status"]), new[] { "STABLE", "PARTIAL", "UNOBSERVABLE" });
+        Assert.Contains(Text(stability["status"]), StabilityStatuses);
         Assert.Equal(6, Conditions(stability).Count);
         Assert.All(
             Conditions(stability),
-            condition => Assert.Contains(Text(condition.Value!.AsObject()["state"]), new[] { "met", "not_met", "unsupported", "unobservable" }));
+            condition => Assert.Contains(Text(condition.Value!.AsObject()["state"]), ConditionStates));
     }
 
     private static IEnumerable<string> EnumeratePropertyNames(JsonNode? node)
@@ -598,15 +618,7 @@ public sealed class NativeSceneStabilityTests
     {
         var conditions = Conditions(stability);
         Assert.Equal(
-            new[]
-            {
-                "animationState",
-                "asyncLoadSettled",
-                "contextMaterialization",
-                "dispatcherIdle",
-                "stableLayout",
-                "windowGeometry",
-            },
+            ConditionNames,
             conditions.Select(static condition => condition.Key).OrderBy(static name => name, StringComparer.Ordinal));
         Assert.All(conditions, condition => Assert.Equal(expectedState, Text(condition.Value!.AsObject()["state"])));
     }
@@ -658,7 +670,7 @@ public sealed class NativeSceneStabilityTests
         public void SetCondition(string name, string state, long sceneEpoch)
         {
             Assert.Contains(name, _conditions.Keys);
-            Assert.Contains(state, new[] { "met", "not_met", "unsupported", "unobservable" });
+            Assert.Contains(state, ConditionStates);
             _conditions[name] = state;
             _sceneEpoch = sceneEpoch;
         }

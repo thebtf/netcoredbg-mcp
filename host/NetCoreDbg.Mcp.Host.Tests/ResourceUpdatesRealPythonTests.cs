@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -36,6 +37,7 @@ public sealed class ResourceUpdatesRealPythonTests
         "Debug",
         "net8.0-windows",
         "SmokeTestApp.dll");
+    private static readonly ImmutableArray<string> TerminalStates = ImmutableArray.Create("idle", "terminated");
 
     private static PythonBackendProcess StartRealPython()
     {
@@ -225,7 +227,10 @@ public sealed class ResourceUpdatesRealPythonTests
                     client,
                     "add_breakpoint",
                     new JsonObject { ["file"] = source, ["line"] = 1 });
-                Assert.False(added.IsError == true);
+                if (added.IsError == true)
+                {
+                    Assert.Fail();
+                }
                 await WaitUntilAsync(
                     () => updates.Count(uri => uri == BreakpointsUri) == 1,
                     signal,
@@ -240,7 +245,10 @@ public sealed class ResourceUpdatesRealPythonTests
                     client,
                     "remove_breakpoint",
                     new JsonObject { ["file"] = source, ["line"] = 1 });
-                Assert.False(removed.IsError == true);
+                if (removed.IsError == true)
+                {
+                    Assert.Fail();
+                }
                 await Task.Delay(200);
                 Assert.Equal(1, updates.Count(uri => uri == BreakpointsUri));
 
@@ -261,7 +269,10 @@ public sealed class ResourceUpdatesRealPythonTests
                         ["pre_build"] = false,
                         ["stop_at_entry"] = false,
                     });
-                Assert.False(started.IsError == true);
+                if (started.IsError == true)
+                {
+                    Assert.Fail();
+                }
                 await WaitUntilAsync(
                     () =>
                         updates.Contains(StateUri)
@@ -294,7 +305,10 @@ public sealed class ResourceUpdatesRealPythonTests
                     client,
                     "get_output",
                     new JsonObject { ["clear"] = true });
-                Assert.False(cleared.IsError == true);
+                if (cleared.IsError == true)
+                {
+                    Assert.Fail();
+                }
                 await WaitUntilAsync(
                     () => updates.Contains(OutputUri),
                     signal,
@@ -303,7 +317,10 @@ public sealed class ResourceUpdatesRealPythonTests
                 Assert.Equal("", Assert.IsType<TextResourceContents>(output.Contents[0]).Text);
 
                 var stopped = await CallToolAsync(client, "stop_debug", new JsonObject());
-                Assert.False(stopped.IsError == true);
+                if (stopped.IsError == true)
+                {
+                    Assert.Fail();
+                }
 
                 using var target = Process.Start(new ProcessStartInfo
                 {
@@ -326,7 +343,10 @@ public sealed class ResourceUpdatesRealPythonTests
                         client,
                         "attach_debug",
                         new JsonObject { ["process_id"] = target.Id });
-                    Assert.False(attached.IsError == true);
+                    if (attached.IsError == true)
+                    {
+                        Assert.Fail();
+                    }
                     await WaitUntilAsync(
                         () =>
                             updates.Contains(StateUri)
@@ -340,14 +360,17 @@ public sealed class ResourceUpdatesRealPythonTests
                         client,
                         "terminate_debug",
                         new JsonObject());
-                    Assert.False(terminated.IsError == true);
+                    if (terminated.IsError == true)
+                    {
+                        Assert.Fail();
+                    }
                     var finalState = await WaitForExecStateUpdateAsync(
                         client,
                         updates,
                         signal,
                         new HashSet<string>(StringComparer.Ordinal) { "idle", "terminated" },
                         TimeSpan.FromSeconds(10));
-                    Assert.Contains(finalState, new[] { "idle", "terminated" });
+                    Assert.Contains(finalState, TerminalStates);
                 }
                 finally
                 {
