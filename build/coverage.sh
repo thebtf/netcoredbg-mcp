@@ -83,7 +83,7 @@ done
 cd "$shell_repo_root"
 mkdir -p "$(dirname "$shell_python_data")" "$(dirname "$shell_python_report")"
 python_cache_directory="$(dirname "$shell_python_data")/.pytest_cache"
-coverage run --data-file="$shell_python_data" -m pytest --cache-clear -o "cache_dir=$python_cache_directory"
+coverage run --source=src/netcoredbg_mcp --data-file="$shell_python_data" -m pytest --cache-clear -o "cache_dir=$python_cache_directory"
 coverage xml --data-file="$shell_python_data" --output="$shell_python_report"
 
 coverage_root="$(dirname "$(dirname "$shell_python_data")")"
