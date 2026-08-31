@@ -326,7 +326,7 @@ public static class HoverCommands
                     requestedPoint,
                     actualPointer);
             }
-            hitRelation = HitRelation(target!, hitElement, automation);
+            hitRelation = HitRelation(target, hitElement, automation);
         }
         catch (Exception ex)
         {
@@ -452,7 +452,7 @@ public static class HoverCommands
             ["status"] = "PASS",
             ["phase"] = "complete",
             ["resolvedSelector"] = resolvedSelector,
-            ["target"] = ElementCommands.BuildElementInfo(target!, includePatterns: false),
+            ["target"] = ElementCommands.BuildElementInfo(target, includePatterns: false),
             ["matchCount"] = 1,
             ["targetRootHwnd"] = targetRootHwnd.ToInt64(),
             ["targetProcessId"] = targetProcessId,
@@ -663,7 +663,7 @@ public static class HoverCommands
         var name = ParamString(@params, "name");
         var controlType = ParamString(@params, "controlType");
         JsonObject? lastSelector = null;
-        var targetMatches = new List<AutomationElement>();
+        List<AutomationElement> targetMatches;
 
         if (!string.IsNullOrWhiteSpace(automationId))
         {

@@ -313,9 +313,10 @@ class TestPywinautoUnsupported:
     def test_send_system_event_completes_without_yielding(self):
         backend = PywinautoBackend()
         operation = backend.send_system_event("theme_change", mode="toggle")
+        iterator = operation.__await__()
 
         with pytest.raises(StopIteration) as completed:
-            next(operation.__await__())
+            next(iterator)
 
         assert completed.value.value["unsupported"] is True
 

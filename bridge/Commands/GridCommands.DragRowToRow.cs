@@ -224,50 +224,47 @@ public static partial class GridCommands
                 };
             }
 
-            if (blockedResult is null && targetMatch is not null)
+            if (blockedResult is null && targetMatch is not null && !targetWasAlreadyVisible)
             {
-                if (!targetWasAlreadyVisible)
+                var stabilizedTarget = StabilizeHeldDragTarget(
+                    grid,
+                    gridBounds,
+                    automation,
+                    columns,
+                    headers,
+                    targetRowIndex,
+                    targetRowKey,
+                    resolvedTargetDirection,
+                    Math.Max(settleMs, RowDragFinalDropSettleMs));
+                stabilizationAttempts = stabilizedTarget.Attempts.DeepClone() as JsonArray ?? new JsonArray();
+                if (stabilizedTarget.Blocked is not null)
                 {
-                    var stabilizedTarget = StabilizeHeldDragTarget(
-                        grid,
-                        gridBounds,
-                        automation,
-                        columns,
-                        headers,
-                        targetRowIndex,
-                        targetRowKey,
-                        resolvedTargetDirection,
-                        Math.Max(settleMs, RowDragFinalDropSettleMs));
-                    stabilizationAttempts = stabilizedTarget.Attempts.DeepClone() as JsonArray ?? new JsonArray();
-                    if (stabilizedTarget.Blocked is not null)
+                    blockedResult = stabilizedTarget.Blocked;
+                }
+                else if (stabilizedTarget.Match is null)
+                {
+                    blockedResult = new JsonObject
                     {
-                        blockedResult = stabilizedTarget.Blocked;
-                    }
-                    else if (stabilizedTarget.Match is null)
+                        ["status"] = "BLOCKED",
+                        ["reason"] = "target row could not be stabilized before mouse-up",
+                        ["requested"] = RequestedRow(targetRowIndex, targetRowKey),
+                        ["attempts"] = stabilizationAttempts.DeepClone(),
+                        ["next_step"] = "Capture stabilization attempts and adjust the final drop strategy."
+                    };
+                }
+                else
+                {
+                    targetMatch = stabilizedTarget.Match;
+                    dropPointStrategy = "stabilized-neutral-band";
+                    targetEnsureVisibleResult = new JsonObject
                     {
-                        blockedResult = new JsonObject
-                        {
-                            ["status"] = "BLOCKED",
-                            ["reason"] = "target row could not be stabilized before mouse-up",
-                            ["requested"] = RequestedRow(targetRowIndex, targetRowKey),
-                            ["attempts"] = stabilizationAttempts.DeepClone(),
-                            ["next_step"] = "Capture stabilization attempts and adjust the final drop strategy."
-                        };
-                    }
-                    else
-                    {
-                        targetMatch = stabilizedTarget.Match;
-                        dropPointStrategy = "stabilized-neutral-band";
-                        targetEnsureVisibleResult = new JsonObject
-                        {
-                            ["status"] = "PASS",
-                            ["already_visible"] = false,
-                            ["resolved_row"] = CompactRow(targetMatch.Row),
-                            ["row"] = targetMatch.Row.DeepClone(),
-                            ["attempts"] = edgeScanAttempts.DeepClone(),
-                            ["stabilization_attempts"] = stabilizationAttempts.DeepClone()
-                        };
-                    }
+                        ["status"] = "PASS",
+                        ["already_visible"] = false,
+                        ["resolved_row"] = CompactRow(targetMatch.Row),
+                        ["row"] = targetMatch.Row.DeepClone(),
+                        ["attempts"] = edgeScanAttempts.DeepClone(),
+                        ["stabilization_attempts"] = stabilizationAttempts.DeepClone()
+                    };
                 }
             }
 
