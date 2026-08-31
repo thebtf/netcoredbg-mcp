@@ -19,7 +19,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import xml.etree.ElementTree as ElementTree
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -44,7 +44,7 @@ SOLUTION_PROJECT_RE = re.compile(
 )
 ISSUE_STATUSES = "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED,FIXED,IN_SANDBOX"
 GENERATED_DIRECTORY_NAMES = {"bin", "obj"}
-GENERATED_ROOT_NAMES = {".sonarqube", ".scannerwork"}
+GENERATED_ROOT_NAMES = {".sonarqube", ".scannerwork", ".venv"}
 
 WAVE2_ENTRY_RELATIVE_PATH = "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json"
 WAVE2_RECEIPT_RELATIVE_PATH = "specs/013-owner-scoped-prebuild-cleanup/acceptance-receipt.md"
@@ -929,6 +929,21 @@ def clear_generated_artifacts(context: GitContext, environment: Mapping[str, str
             ) from None
         removed.append(relative_path)
     return removed
+
+
+def prepare_worktree_python_environment(
+    context: GitContext,
+    environment: Mapping[str, str],
+    secrets: Iterable[str],
+) -> None:
+    """Create the locked worktree venv required by real-Python Host tests."""
+    run_process(
+        ["uv", "sync", "--locked", "--extra", "dev"],
+        cwd=context.repository_root,
+        environment=scrub_sonar_environment(environment),
+        secrets=secrets,
+        label="Worktree Python environment",
+    )
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
@@ -4388,6 +4403,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
             stage = "SCANNER_BEGUN"
             claim = claim_coverage_run(context, plan, resolved_wave2)
             stage = "RUN_CLAIMED"
+            prepare_worktree_python_environment(context, inherited_environment, secrets)
             solution, projects, standalone_projects = project_inventory(context.repository_root)
             run_process(
                 ["dotnet", "build", str(solution), "-nr:false"],

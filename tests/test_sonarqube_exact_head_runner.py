@@ -11,6 +11,7 @@ from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from typing import Any
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -2162,6 +2163,13 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 patch.object(runner, "claim_coverage_run", side_effect=step("claim", claim))
             )
             patches.enter_context(
+                patch.object(
+                    runner,
+                    "prepare_worktree_python_environment",
+                    side_effect=step("python-env"),
+                )
+            )
+            patches.enter_context(
                 patch.object(runner, "run_coverage_producer", side_effect=step("produce"))
             )
             patches.enter_context(
@@ -2355,6 +2363,41 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         self.assertIn(Path(command[11]).name.casefold(), {"bash", "bash.exe"})
         self.assertEqual(command.count("--dotnet-project"), 5)
         self.assertEqual(kwargs["environment"], {"SAFE_VALUE": "kept"})
+
+    def test_r03b_worktree_python_environment_is_locked_secret_free_and_cleanup_owned(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            captured: dict[str, Any] = {}
+
+            def capture(command, **kwargs):
+                captured["command"] = command
+                captured.update(kwargs)
+
+            with patch.object(runner, "run_process", side_effect=capture):
+                runner.prepare_worktree_python_environment(
+                    context,
+                    {
+                        "SAFE_VALUE": "kept",
+                        "SONAR_HOST_URL": "https://sonar.example.test",
+                        "SONAR_TOKEN": "secret",
+                    },
+                    {"secret"},
+                )
+
+            self.assertEqual(captured["command"], ["uv", "sync", "--locked", "--extra", "dev"])
+            self.assertEqual(captured["cwd"], root)
+            self.assertEqual(captured["environment"], {"SAFE_VALUE": "kept"})
+            self.assertEqual(captured["label"], "Worktree Python environment")
+
+            venv = root / ".venv"
+            venv.mkdir()
+            (venv / "owned.txt").write_text("generated", encoding="utf-8")
+            with patch.object(runner, "is_tracked", return_value=False):
+                removed = runner.clear_generated_artifacts(context, {})
+
+            self.assertIn(".venv", removed)
+            self.assertFalse(venv.exists())
 
     def test_r04_python_cobertura_requires_root_and_positive_line_and_branch_denominators(self):
         with TemporaryDirectory() as temporary_directory:
@@ -2856,6 +2899,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 "preflight",
                 "begin",
                 "claim",
+                "python-env",
                 "build",
                 "produce",
                 "normalize",
@@ -2870,6 +2914,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             "preflight",
             "begin",
             "claim",
+            "python-env",
             "build",
             "produce",
             "normalize",
