@@ -90,6 +90,13 @@ ACCEPTED_TOP_LEVEL_KEYS_V2 = ACCEPTED_TOP_LEVEL_KEYS + V2_ONLY_TOP_LEVEL_KEYS
 V1_EXECUTION_KEYS = ("steps", "actions", "assertions", "evidence")
 INPUT_POLICY_KEYS = ("no_global_input",)
 RUN_CONFIDENCE_KEYS = ("no_operator",)
+SCHEMA_FIELD_SELECTOR = "selector"
+SCHEMA_FIELD_ROW = "row"
+SCHEMA_FIELD_START_INDEX = "start_index"
+SCHEMA_FIELD_END_INDEX = "end_index"
+SCHEMA_FIELD_ITEM = "item"
+SCHEMA_FIELD_CHILD = "child"
+SCHEMA_FIELD_TEXT = "text"
 
 
 @dataclass(frozen=True)
@@ -115,87 +122,87 @@ OPERATION_SCHEMAS: dict[str, OperationSchema] = {
     ),
     "ui.key_sequence": OperationSchema(
         "ui_key_sequence",
-        ("selector", "keys"),
+        (SCHEMA_FIELD_SELECTOR, "keys"),
     ),
     "ui.grid.snapshot": OperationSchema(
         "ui.grid.snapshot",
-        ("selector",),
+        (SCHEMA_FIELD_SELECTOR,),
     ),
     "ui.grid.get_state": OperationSchema(
         "ui.grid.get_state",
-        ("selector",),
+        (SCHEMA_FIELD_SELECTOR,),
     ),
     "ui.grid.ensure_visible": OperationSchema(
         "ui.grid.ensure_visible",
-        ("selector", "row"),
+        (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ROW),
     ),
     "ui.grid.select_range": OperationSchema(
         "ui.grid.select_range",
-        ("selector", "start_index", "end_index"),
+        (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_START_INDEX, SCHEMA_FIELD_END_INDEX),
     ),
     "ui.grid.assert_range": OperationSchema(
         "ui.grid.assert_range",
-        ("selector", "start_index", "end_index"),
+        (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_START_INDEX, SCHEMA_FIELD_END_INDEX),
     ),
     "ui.grid.select_row": OperationSchema(
         "ui.grid.select_row",
-        ("selector", "row"),
+        (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ROW),
     ),
     "ui.grid.click_row": OperationSchema(
         "ui.grid.click_row",
-        ("selector", "row"),
+        (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ROW),
     ),
     "ui.grid.right_click_row": OperationSchema(
         "ui.grid.right_click_row",
-        ("selector", "row"),
+        (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ROW),
     ),
     "ui.grid.double_click_row": OperationSchema(
         "ui.grid.double_click_row",
-        ("selector", "row"),
+        (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ROW),
     ),
     "ui.grid.assert_rows": OperationSchema(
         "ui.grid.assert_rows",
-        ("selector", "rows"),
+        (SCHEMA_FIELD_SELECTOR, "rows"),
     ),
     "ui.list.invoke_item": OperationSchema(
         "ui.list.invoke_item",
-        ("selector", "item"),
+        (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ITEM),
     ),
     "ui.list.toggle_item_child": OperationSchema(
         "ui.list.toggle_item_child",
-        ("selector", "item", "child"),
+        (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ITEM, SCHEMA_FIELD_CHILD),
     ),
     "ui.focus.assert": OperationSchema(
         "ui.focus.assert",
-        ("selector",),
+        (SCHEMA_FIELD_SELECTOR,),
     ),
     "ui.text.assert": OperationSchema(
         "ui.text.assert",
-        ("selector",),
+        (SCHEMA_FIELD_SELECTOR,),
     ),
     "ui.text.read": OperationSchema(
         "ui.text.read",
-        ("selector",),
+        (SCHEMA_FIELD_SELECTOR,),
     ),
     "ui.text.get_state": OperationSchema(
         "ui.text.get_state",
-        ("selector",),
+        (SCHEMA_FIELD_SELECTOR,),
     ),
     "ui.text.set_text": OperationSchema(
         "ui.text.set_text",
-        ("selector", "text"),
+        (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_TEXT),
     ),
     "ui.text.assert_selection": OperationSchema(
         "ui.text.assert_selection",
-        ("selector",),
+        (SCHEMA_FIELD_SELECTOR,),
     ),
     "ui.get_property": OperationSchema(
         "ui.get_property",
-        ("selector",),
+        (SCHEMA_FIELD_SELECTOR,),
     ),
     "ui.invoke": OperationSchema(
         "ui.invoke",
-        ("selector",),
+        (SCHEMA_FIELD_SELECTOR,),
     ),
     "fixture.restore": OperationSchema(
         "fixture.restore",
@@ -231,9 +238,7 @@ def diagnostic_schema_contract() -> dict[str, Any]:
         "schema": DIAGNOSTIC_SCHEMA_VERSION,
         "status_values": list(DIAGNOSTIC_STATUS_VALUES),
         "evidence_limits": _diagnostic_evidence_limits(),
-        "redaction": {
-            key: list(value) for key, value in DIAGNOSTIC_REDACTION.items()
-        },
+        "redaction": {key: list(value) for key, value in DIAGNOSTIC_REDACTION.items()},
         "oracle_pack": {
             "required_fields": list(DIAGNOSTIC_REQUIRED_FIELDS["oracle_pack"]),
             "optional_fields": [
@@ -455,9 +460,7 @@ def _normalize_diagnostic_path(value: str) -> str:
         raw = raw[3:]
     is_absolute = raw.startswith("/")
     safe_parts = [
-        _diagnostic_path_part(part)
-        for part in raw.split("/")
-        if part and part not in {".", ".."}
+        _diagnostic_path_part(part) for part in raw.split("/") if part and part not in {".", ".."}
     ]
     normalized = "/".join(part for part in safe_parts if part)
     if is_absolute and normalized:
@@ -467,8 +470,7 @@ def _normalize_diagnostic_path(value: str) -> str:
 
 def _diagnostic_path_part(value: str) -> str:
     safe = "".join(
-        char if char.isalnum() or char in {"-", "_", "."} else "-"
-        for char in str(value or "")
+        char if char.isalnum() or char in {"-", "_", "."} else "-" for char in str(value or "")
     ).strip("-")
     return "" if safe in {"", ".", ".."} else safe
 
@@ -754,9 +756,7 @@ def _validate_wait_json_schema(
         if not isinstance(pattern, str) or not pattern:
             errors.append(f"app_diagnostics.{field_name}.pattern must be a string")
         elif "/" in pattern or "\\" in pattern:
-            errors.append(
-                f"app_diagnostics.{field_name}.pattern must be a file-name pattern"
-            )
+            errors.append(f"app_diagnostics.{field_name}.pattern must be a file-name pattern")
     _validate_wait_json_since_schema(wait_json, errors, field_name=field_name)
     _validate_wait_json_condition_schema(wait_json, errors, field_name=field_name)
     for numeric_field in ("timeout_ms", "poll_interval_ms"):
@@ -764,9 +764,7 @@ def _validate_wait_json_schema(
             continue
         value = wait_json[numeric_field]
         if isinstance(value, bool) or not isinstance(value, int):
-            errors.append(
-                f"app_diagnostics.{field_name}.{numeric_field} must be an integer"
-            )
+            errors.append(f"app_diagnostics.{field_name}.{numeric_field} must be an integer")
         elif value < 0:
             errors.append(f"app_diagnostics.{field_name}.{numeric_field} must be >= 0")
 
@@ -1249,9 +1247,7 @@ def _validate_op_args(
             ):
                 errors.append(f"{prefix}.{field_name} must be a string for op {op_name}")
             elif isinstance(args.get(field_name), str) and not args[field_name].strip():
-                errors.append(
-                    f"{prefix}.{field_name} must be a non-empty string for op {op_name}"
-                )
+                errors.append(f"{prefix}.{field_name} must be a non-empty string for op {op_name}")
 
 
 def _is_int(value: Any) -> TypeGuard[int]:
