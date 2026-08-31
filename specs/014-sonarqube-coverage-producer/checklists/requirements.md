@@ -7,8 +7,8 @@
 - [ ] The packet names the parent Wave-3 two-report Cobertura contract and does not amend the parent.
 - [ ] The packet uses `specs/014-sonarqube-coverage-producer/` and documents the older parent pointer without editing it.
 - [ ] The packet names `scripts/run_sonarqube_exact_head.py` as the only scanner, normalization, analysis, and receipt authority.
-- [ ] The packet says Wave-2 PR #289 is open and that Wave-3 implementation and diagnostic execution are BLOCKED until the tracked candidate/PR entry artifact and runtime observed-main proof validate.
-- [ ] `wave2-closure-entry-v1.schema.json` requires the tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`, `release_intent: none`, accepted candidate, PR head-ref/SHA, closure receipt hash, and PR #289. It contains no future main SHA. The runner derives observed main and artifact commit at runtime; no branch-derived or ambient `.agent` entry exists.
+- [ ] The packet says Wave-2 PR #289 is open and that Wave-3 implementation and diagnostic execution are BLOCKED until the tracked PR-head artifact and runtime observed-main proof validate.
+- [ ] `wave2-closure-entry-v1.schema.json` requires the tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`, source `pull_request_head`, `release_intent: none`, accepted candidate, PR head-ref/SHA, closure receipt hash, and PR #289. It contains no current merge or future main claim. The runner proves merge and derives observed main/artifact commit at runtime; no branch-derived runtime or ambient `.agent` entry exists.
 - [ ] The hosted post-merge workflow validates the tracked entry source from a clean checkout before scanning and artifact sealing. It provisions no `.agent` state.
 
 ## Plan, preflight, and report layout

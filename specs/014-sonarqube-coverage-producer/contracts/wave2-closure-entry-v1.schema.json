@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://thebtf.github.io/netcoredbg-mcp/schemas/wave2-closure-entry-v1.json",
-  "title": "Tracked Wave-2 exact-closure entry evidence for Wave 3",
+  "title": "Tracked Wave-2 PR-head closure evidence for Wave 3",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -62,7 +62,7 @@
       ],
       "properties": {
         "kind": {
-          "const": "merged_pull_request"
+          "const": "pull_request_head"
         },
         "pull_request": {
           "const": 289

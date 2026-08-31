@@ -20,8 +20,8 @@ The implementation changes the runner, focused runner tests, `.coveragerc`, `bui
 | Concern | Constraint |
 | --- | --- |
 | Parent report contract | Exactly two deterministic project-root-relative Cobertura reports: Python and one merged .NET report. |
-| Wave-2 entry source | External tracked artifact `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`, produced by Wave-2 T014/PR #289 and available in every clone after merge. It carries no future main SHA. |
-| Entry validation | Schema, `release_intent: none`, receipt hash, accepted candidate, and PR head identity validate before preflight. Runtime derives `artifact_commit_sha` and `observed_main_sha`, then proves merged PR and candidate/artifact ancestry. A resolved copy is written only under the claimed Wave-3 root. |
+| Wave-2 entry source | External tracked `pull_request_head` artifact `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`, produced by Wave-2 T014 on PR #289 and available in every clone after that PR merges. It carries no current merge or future main SHA. |
+| Entry validation | Source schema, `release_intent: none`, receipt hash, accepted candidate, and PR-head identity validate before preflight. Runtime separately proves #289 merged, derives `artifact_commit_sha` and `observed_main_sha`, then proves candidate/artifact ancestry. A resolved copy is written only under the claimed Wave-3 root. |
 | .NET producer inventory | Five closed `net8.0` VSTest projects are private inputs in fixed order. They are not Sonar report identities. |
 | Pre-begin gate | `uv`, `bash`, `dotnet`, Coverlet `10.0.1`, Test SDK `17.12.0`, and VSTest must validate before begin and claim. MTP is refused. |
 | Scanner handoff | Runtime begin arguments name the two final Cobertura paths. `SonarQube.Analysis.xml` remains unchanged. |
@@ -31,7 +31,7 @@ The implementation changes the runner, focused runner tests, `.coveragerc`, `bui
 
 ## External entry prerequisite
 
-Wave 2, not this packet, must place the tracked `wave-closure-v1.json` beside its closure receipt in the merged PR #289 result. The file is the only Wave-3 entry source. Wave-3 never provisions or reads an ambient `.agent` entry file. A clean clone or hosted checkout must contain this tracked file before Wave-3 can begin.
+Wave 2, not this packet, must place the tracked `pull_request_head` `wave-closure-v1.json` beside its closure receipt on PR #289 before merge. The file is the only Wave-3 entry source, but it is not merge authority. Wave 3 verifies the later merge at runtime. Wave-3 never provisions or reads an ambient `.agent` entry file. A clean clone or hosted checkout must contain this tracked file before Wave-3 can begin.
 
 ## Scope and rollback
 

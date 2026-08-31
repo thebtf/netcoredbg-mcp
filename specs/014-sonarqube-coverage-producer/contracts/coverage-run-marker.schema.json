@@ -35,15 +35,20 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "source_kind",
         "tracked_relative_path",
         "source_sha256",
         "accepted_candidate_sha",
+        "pull_request_head_ref",
         "pull_request_head_sha",
         "artifact_commit_sha",
         "observed_main_sha",
         "resolved_relative_path"
       ],
       "properties": {
+        "source_kind": {
+          "const": "pull_request_head"
+        },
         "tracked_relative_path": {
           "const": "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json"
         },
@@ -52,6 +57,10 @@
         },
         "accepted_candidate_sha": {
           "$ref": "#/$defs/sha40"
+        },
+        "pull_request_head_ref": {
+          "type": "string",
+          "minLength": 1
         },
         "pull_request_head_sha": {
           "$ref": "#/$defs/sha40"

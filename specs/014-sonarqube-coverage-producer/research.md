@@ -68,15 +68,15 @@
 
 ### Preserve callers through a tracked Wave-2 closure artifact and migrate the actual v3 consumer
 
-**SELECTED**: `GitContext` resolves only the tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` artifact. Wave-2 T014/PR #289 must create it with `release_intent: none`, accepted implementation candidate, PR head-ref/SHA, and closure receipt hash, but no future main SHA. At Wave-3 runtime, the verifier derives observed main and artifact commit identities, proves PR merge, and checks candidate/artifact ancestry. The hosted post-merge workflow performs the same clean-checkout proof before scanning. The same cutover migrates `scripts/stateless_preview_artifact.py` from schema v2 to the unified v3 post-merge receipt.
+**SELECTED**: `GitContext` resolves only the tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` artifact. Wave-2 T014 produces it on PR #289 with `integration.kind: pull_request_head`, `release_intent: none`, accepted implementation candidate, PR head-ref/SHA, and closure receipt hash, but no current merge or future main SHA. At Wave-3 runtime, the verifier proves PR merge, derives observed main and artifact commit identities, and checks candidate/artifact ancestry. The hosted post-merge workflow performs the same clean-checkout proof before scanning. The same cutover migrates `scripts/stateless_preview_artifact.py` from schema v2 to the unified v3 post-merge receipt.
 
-**Reason**: A tracked PR artifact cannot know the future merge SHA that will contain it. Runtime observation makes main provenance real while the source artifact remains clone-reproducible and role CLI shapes stay stable.
+**Reason**: A PR-head artifact must not assert that its PR is already merged. Runtime observation supplies post-merge authority while the source artifact remains clone-reproducible and role CLI shapes stay stable.
 
 ## Rejected designs
 
 | Design | Disposition | Reason |
 | --- | --- | --- |
-| A branch head or precomputed main SHA as Wave-2 authority | Rejected | The source artifact carries candidate and PR-head identity only; Wave 3 derives and verifies observed main after merge. |
+| A branch head, a source record claiming merge, or a precomputed main SHA as Wave-2 authority | Rejected | The source records premerge candidate/PR-head facts only; Wave 3 proves merge and derives observed main after merge. |
 | Static XML report paths or report globs | Rejected | They can admit stale or extra artifacts. |
 | Generic merger or report discovery | Rejected | The normalizer must consume the fixed input list and emit one fixed output. |
 | Automatic MTP fallback | Rejected | It masks the Coverlet compatibility boundary rather than proving VSTest compatibility. |

@@ -17,7 +17,7 @@
 
 | Entity | Identity | Lifetime | Contract |
 | --- | --- | --- | --- |
-| `Wave2ClosureEntryV1` | Accepted Wave-2 candidate, PR head identity, and closure receipt hash | Before all Wave-3 execution | [wave2-closure-entry-v1.schema.json](contracts/wave2-closure-entry-v1.schema.json) |
+| `Wave2ClosureEntryV1` | Accepted Wave-2 candidate, PR-head identity, and closure receipt hash | Before all Wave-3 execution | [wave2-closure-entry-v1.schema.json](contracts/wave2-closure-entry-v1.schema.json) |
 | `CoveragePlan` | Run ID, captured head, and deterministic paths | In memory before scanner begin | [architecture.md](architecture.md#caller-first-contract) |
 | `ToolchainPreflight` | Plan and five evaluated project tuples | Before scanner begin | COV-004 |
 | `CoverageRunClaim` | Plan plus marker bytes/hash | From exclusive claim through cleanup | [coverage-run-marker.schema.json](contracts/coverage-run-marker.schema.json) |
@@ -37,7 +37,7 @@ Wave2ClosureEntryV1 {
   tracked_relative_path: "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json"
   accepted_candidate_sha: Sha40
   closure_receipt: { relative_path, sha256 }
-  integration: { kind: merged_pull_request, pull_request: 289, head_ref: string, head_sha: Sha40 }
+  integration: { kind: pull_request_head, pull_request: 289, head_ref: string, head_sha: Sha40 }
 }
 
 ToolchainPreflight {
@@ -57,9 +57,9 @@ ProjectCompatibility {
 }
 ```
 
-`verify_wave2_entry` checks the tracked record schema, `release_intent`, immutable Wave-2 receipt hash and content, and PR #289 head identity. At runtime it derives `observed_main_sha` from `origin/main` and `artifact_commit_sha` from the artifact path's repository history. It requires GitHub/workflow merged-PR evidence or first-parent merge proof, then verifies accepted candidate and artifact commit ancestry to observed main. It rejects a missing or untracked artifact, PR head mismatch, feature branch, missing receipt, non-`none` intent, absent merge proof, or ancestry mismatch as `WAVE2_CLOSURE_UNVERIFIED`.
+`verify_wave2_entry` first requires the tracked source schema to state `integration.kind: pull_request_head`, `release_intent: none`, immutable receipt hash and content, and PR #289 head identity. At runtime it separately proves PR #289 merged through GitHub/workflow evidence or first-parent merge proof. It then derives `observed_main_sha` from `origin/main` and `artifact_commit_sha` from the artifact path's repository history, and verifies accepted candidate and artifact commit ancestry to observed main. It rejects a missing or untracked artifact, source kind mismatch, PR head mismatch, absent merge proof, feature branch as runtime authority, missing receipt, non-`none` intent, or ancestry mismatch as `WAVE2_CLOSURE_UNVERIFIED`.
 
-`resolve_wave2_entry` reads only `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` from the checked-out repository. Wave-2 T014/PR #289 creates this external prerequisite after the current open PR closes. The source has no main SHA. Existing role callers do not pass an entry-file argument. After `RUN_CLAIMED`, the runner writes a hash-bound resolved copy with `observed_main_sha` beneath the run root; that copy is provenance, not authority.
+`resolve_wave2_entry` reads only `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` from the checked-out repository. Wave-2 T014/PR #289 creates the premerge source after the current open PR does its closure work. Existing role callers do not pass an entry-file argument. The source never claims merged state. After `RUN_CLAIMED`, the runner writes a hash-bound resolved copy with `observed_main_sha` beneath the run root; that copy is provenance, not authority.
 
 `preflight_coverage_toolchain` runs before scanner begin. It requires executable `uv`, `bash`, and `dotnet`, evaluates every fixed project, and rejects active MTP. It never injects a property to switch the test platform. `COVERAGE_TOOL_UNAVAILABLE`, `COVERAGE_VSTEST_INCOMPATIBLE`, and `COVERAGE_MTP_INCOMPATIBLE` stop at `PLANNED` before root claim.
 
