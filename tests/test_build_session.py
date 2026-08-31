@@ -7,13 +7,21 @@ import pytest
 
 from netcoredbg_mcp.build.session import BuildSession
 from netcoredbg_mcp.build.state import BuildError, BuildState
+from netcoredbg_mcp.windows_process_owner import AdmissionStage, DrainStatus, ProcessAdmissionError
 from tests.owner_scope_red import (
     BlockingStream,
+    OwnedCommandProcess,
     PollingTimeoutStream,
-    RecordingKernel32,
     TreeProcess,
-    install_recording_kernel32,
 )
+
+
+@pytest.fixture(autouse=True)
+def _use_asyncio_compatibility_path(monkeypatch, request) -> None:
+    """Keep existing cross-platform command tests on their established path."""
+    if request.cls is not None and request.cls.__name__ == "TestOwnerScopedBuildMatrix":
+        return
+    monkeypatch.setattr("netcoredbg_mcp.build.session._IS_WINDOWS", False)
 
 
 class TestBuildSessionInit:
@@ -379,201 +387,129 @@ class TestBuildSessionConcurrency:
         assert build_order == ["start", "end", "start", "end"]
 
 
-class TestOwnerScopedBuildRedMatrix:
-    """Behavior-first RED cases for current build-command ownership.
-
-    Each case drives the existing ``BuildSession`` launch/cancellation path.
-    The fake Win32 seam records direct-handle admission facts because a PID,
-    selector, or registry record cannot establish authority over a tree.
-    """
+class TestOwnerScopedBuildMatrix:
+    """GREEN coverage for one retained Windows owner per build command."""
 
     @pytest.mark.asyncio
-    async def test_o1_build_command_starts_before_assignment_is_verified(
-        self, tmp_path, monkeypatch
+    async def test_o1_build_command_uses_one_admitted_owner_and_zero_accounting(
+        self, tmp_path
     ) -> None:
-        """O1: child execution must wait for private-Job admission and I/O setup.
+        """O1: BuildSession consumes one admitted capability, never a reopened PID."""
 
-        The desired order is Job creation/configuration, suspended child
-        creation, assignment, membership/accounting verification, I/O wiring,
-        then resume.  Current code instead launches through asyncio and only
-        afterward reopens the PID for assignment.
-        """
-
-        events: list[str] = []
-        kernel32 = RecordingKernel32(events)
-        install_recording_kernel32(monkeypatch, kernel32)
         process = TreeProcess(pid=42001, initially_exited=True)
+        owners: list[OwnedCommandProcess] = []
+        launches: list[dict[str, object]] = []
 
-        async def spawn(*_args, **_kwargs):
-            events.append("child-executed")
-            return process
+        async def launch(**kwargs):
+            launches.append(kwargs)
+            owner = OwnedCommandProcess(process, kwargs["generation"])
+            owners.append(owner)
+            return owner
 
         session = BuildSession(workspace_root=str(tmp_path))
-        with patch("netcoredbg_mcp.build.session.asyncio.create_subprocess_exec", spawn):
-            await session._run_command(["dotnet", "build"], timeout=0.1)
+        with patch(
+            "netcoredbg_mcp.build.session.WindowsOwnedProcess.launch",
+            side_effect=launch,
+        ):
+            result = await session._run_command(["dotnet", "build"], timeout=0.1)
 
-        assert events.index("assign") < events.index("child-executed"), (
-            "current BuildSession executes the child before its Job assignment can be checked"
-        )
+        assert result == (0, "", "")
+        assert len(launches) == 1
+        assert launches[0]["argv"] == ("dotnet", "build")
+        assert launches[0]["stdin_mode"] == "devnull"
+        assert owners[0].drain_calls == ["grace"]
+        assert owners[0].receipt is not None
+        assert owners[0].receipt.active_processes == 0
+        assert owners[0].aclose_calls == 1
 
     @pytest.mark.asyncio
-    async def test_o2_assignment_refusal_never_allows_the_child_to_execute(
-        self, tmp_path, monkeypatch
+    @pytest.mark.parametrize(
+        "stage",
+        [AdmissionStage.ASSIGN, AdmissionStage.VERIFY, AdmissionStage.RESUME],
+        ids=["o2-assignment", "o3-verification", "o4-resume"],
+    )
+    async def test_o2_o3_o4_admission_failure_never_installs_a_command_owner(
+        self,
+        tmp_path,
+        stage: AdmissionStage,
     ) -> None:
-        """O2: assignment refusal must terminate retained resources before resume.
-
-        ``ResumeThread`` remains zero for this injected refusal.  The current
-        asyncio path has already executed the child when its post-spawn
-        ``AssignProcessToJobObject`` result is ignored.
-        """
-
-        events: list[str] = []
-        kernel32 = RecordingKernel32(events, assign_result=False)
-        install_recording_kernel32(monkeypatch, kernel32)
-        process = TreeProcess(pid=42002, initially_exited=True)
-
-        async def spawn(*_args, **_kwargs):
-            events.append("child-executed")
-            return process
+        """O2-O4: fail-closed admission errors escape without command execution."""
 
         session = BuildSession(workspace_root=str(tmp_path))
-        with patch("netcoredbg_mcp.build.session.asyncio.create_subprocess_exec", spawn):
+        error = ProcessAdmissionError(stage, "rejected-owner", 5)
+        with (
+            patch(
+                "netcoredbg_mcp.build.session.WindowsOwnedProcess.launch",
+                side_effect=error,
+            ),
+            pytest.raises(ProcessAdmissionError) as raised,
+        ):
             await session._run_command(["dotnet", "build"], timeout=0.1)
 
-        assert (kernel32.resume_calls, "child-executed" in events) == (0, False), (
-            "assignment refusal did not stop the current post-spawn child"
-        )
-
-    @pytest.mark.asyncio
-    async def test_o3_membership_refusal_never_allows_the_child_to_execute(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        """O3: unverified membership/accounting is a fail-closed admission error.
-
-        A selector or a reopened PID cannot repair this condition: only the
-        retained Job/process handles can terminate the suspended root.  Current
-        code never queries membership, so the child has already run.
-        """
-
-        events: list[str] = []
-        kernel32 = RecordingKernel32(events, membership_result=False)
-        install_recording_kernel32(monkeypatch, kernel32)
-        process = TreeProcess(pid=42003, initially_exited=True)
-
-        async def spawn(*_args, **_kwargs):
-            events.append("child-executed")
-            return process
-
-        session = BuildSession(workspace_root=str(tmp_path))
-        with patch("netcoredbg_mcp.build.session.asyncio.create_subprocess_exec", spawn):
-            await session._run_command(["dotnet", "build"], timeout=0.1)
-
-        assert (kernel32.resume_calls, "child-executed" in events) == (0, False), (
-            "missing membership verification allowed a child to run"
-        )
-
-    @pytest.mark.asyncio
-    async def test_o4_resume_failure_never_exposes_an_unadmitted_child(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        """O4: a failed final resume must drain the admitted Job, not run a child.
-
-        The seam injects a ``ResumeThread`` failure.  Current source has no
-        retained primary-thread boundary and has already created a running
-        asyncio child, so there is no safe failure point to exercise.
-        """
-
-        events: list[str] = []
-        kernel32 = RecordingKernel32(events, resume_result=0xFFFFFFFF)
-        install_recording_kernel32(monkeypatch, kernel32)
-        process = TreeProcess(pid=42004, initially_exited=True)
-
-        async def spawn(*_args, **_kwargs):
-            events.append("child-executed")
-            return process
-
-        session = BuildSession(workspace_root=str(tmp_path))
-        with patch("netcoredbg_mcp.build.session.asyncio.create_subprocess_exec", spawn):
-            await session._run_command(["dotnet", "build"], timeout=0.1)
-
-        assert (kernel32.resume_calls, "child-executed" in events) == (0, False), (
-            "current launch has no pre-resume failure boundary before child execution"
-        )
+        assert raised.value.stage is stage
+        assert session._current_owner is None
+        assert session._current_process is None
+        assert session._last_owner_drain_receipt is None
 
     @pytest.mark.asyncio
     async def test_o7_timeout_drains_the_command_descendant_before_reporting_timeout(
         self, tmp_path
     ) -> None:
-        """O7 timeout: root ``kill`` is insufficient while a descendant survives.
-
-        The command is intentionally made to block on output.  A future owner
-        must force only its retained Job and wait for accounting to reach zero
-        before preserving the original timeout.
-        """
+        """O7 timeout: preserve TimeoutError only after exact owner drain."""
 
         stdout = BlockingStream()
         stderr = BlockingStream()
         process = TreeProcess(pid=42007, stdout=stdout, stderr=stderr)
-
-        async def spawn(*_args, **_kwargs):
-            return process
-
+        owner = OwnedCommandProcess(process, "timeout")
         session = BuildSession(workspace_root=str(tmp_path))
-        session._create_job_object = AsyncMock(return_value=None)
         try:
-            with patch("netcoredbg_mcp.build.session.asyncio.create_subprocess_exec", spawn):
-                with pytest.raises(asyncio.TimeoutError):
-                    await session._run_command(["dotnet", "build"], timeout=0.01)
+            with (
+                patch(
+                    "netcoredbg_mcp.build.session.WindowsOwnedProcess.launch",
+                    return_value=owner,
+                ),
+                pytest.raises(asyncio.TimeoutError),
+            ):
+                await session._run_command(["dotnet", "build"], timeout=0.01)
         finally:
             stdout.release.set()
             stderr.release.set()
 
-        assert process.child_alive is False, (
-            "timeout killed only the root and left the command descendant unproven"
-        )
+        assert process.child_alive is False
+        assert owner.drain_calls == ["force"]
+        assert owner.drain_operation_count == 1
+        assert owner.aclose_calls == 1
 
     @pytest.mark.asyncio
     async def test_o7_session_cancel_drains_the_command_descendant_before_completion(
         self, tmp_path
     ) -> None:
-        """O7 cancellation: ``BuildSession.cancel`` must retain one tree owner.
-
-        Output polling makes the current cancellation path deterministic.  The
-        desired result preserves cancellation only after the selected command
-        tree has drained; no image, directory, or PID selector may substitute.
-        """
+        """O7 session cancel: concurrent cleanup joins one retained owner drain."""
 
         stdout = PollingTimeoutStream()
         process = TreeProcess(pid=42008, stdout=stdout, stderr=PollingTimeoutStream())
-
-        async def spawn(*_args, **_kwargs):
-            return process
-
+        owner = OwnedCommandProcess(process, "session-cancel")
         session = BuildSession(workspace_root=str(tmp_path))
-        session._create_job_object = AsyncMock(return_value=None)
         session._state = BuildState.BUILDING
-        with patch("netcoredbg_mcp.build.session.asyncio.create_subprocess_exec", spawn):
+        with patch(
+            "netcoredbg_mcp.build.session.WindowsOwnedProcess.launch",
+            return_value=owner,
+        ):
             task = asyncio.create_task(session._run_command(["dotnet", "build"], timeout=1.0))
             await asyncio.wait_for(stdout.read_started.wait(), timeout=1.0)
             await session.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(task, timeout=1.0)
 
-        assert process.child_alive is False, (
-            "session cancellation cleared the root process without draining its descendant"
-        )
+        assert process.child_alive is False
+        assert owner.drain_operation_count == 1
+        assert owner.aclose_calls == 1
 
     @pytest.mark.asyncio
     async def test_o7_outer_cancellation_does_not_orphan_a_real_command_descendant(
         self, tmp_path
     ) -> None:
-        """O7 outer cancellation uses a controlled real root/descendant fixture.
-
-        The test forces the optional legacy Job path unavailable, cancels the
-        real command task, and observes the exact freshly-created child only to
-        clean up the test.  That observed PID is not production authority; the
-        missing retained owner is the behavior under test.
-        """
+        """O7 outer cancellation drains a real inherited command descendant."""
 
         import json
         import sys
@@ -586,7 +522,6 @@ class TestOwnerScopedBuildRedMatrix:
         child_marker = tmp_path / "child.json"
         release = tmp_path / "release"
         session = BuildSession(workspace_root=str(tmp_path))
-        session._create_job_object = AsyncMock(return_value=None)
         task = asyncio.create_task(
             session._run_command(
                 [
@@ -602,7 +537,7 @@ class TestOwnerScopedBuildRedMatrix:
         )
         child_pid: int | None = None
         try:
-            for _ in range(200):
+            for _ in range(300):
                 if child_marker.exists():
                     child_pid = int(json.loads(child_marker.read_text(encoding="utf-8"))["pid"])
                     break
@@ -611,16 +546,17 @@ class TestOwnerScopedBuildRedMatrix:
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
-
-            assert psutil.pid_exists(child_pid) is False, (
-                "outer cancellation cleared BuildSession state while a real descendant survived"
-            )
-        finally:
-            release.touch()
-            for _ in range(200):
-                if child_pid is None or not psutil.pid_exists(child_pid):
+            for _ in range(300):
+                if not psutil.pid_exists(child_pid):
                     break
                 await asyncio.sleep(0.01)
+            assert psutil.pid_exists(child_pid) is False
+            receipt = session._last_owner_drain_receipt
+            assert receipt is not None
+            assert receipt.status is DrainStatus.DRAINED
+            assert receipt.active_processes == 0
+        finally:
+            release.touch()
             if child_pid is not None and psutil.pid_exists(child_pid):
                 psutil.Process(child_pid).kill()
             if not task.done():
@@ -628,40 +564,32 @@ class TestOwnerScopedBuildRedMatrix:
                 await asyncio.gather(task, return_exceptions=True)
 
     @pytest.mark.asyncio
-    async def test_o8_accounting_query_failure_cannot_claim_command_completion(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        """O8: success requires a zero ``ActiveProcesses`` accounting observation.
+    async def test_o8_accounting_failure_cannot_claim_command_completion(self, tmp_path) -> None:
+        """O8: a non-drained owner receipt fails normal command completion."""
 
-        The fake reports that accounting is unavailable.  Current code exits on
-        its root process and closes the optional Job without querying the Job,
-        leaving a descendant alive while reporting successful completion.
-        """
-
-        events: list[str] = []
-        kernel32 = RecordingKernel32(events, accounting_result=False)
-        install_recording_kernel32(monkeypatch, kernel32)
         process = TreeProcess(pid=42009, initially_exited=True)
-
-        async def spawn(*_args, **_kwargs):
-            return process
-
+        owner = OwnedCommandProcess(
+            process,
+            "accounting-failure",
+            normal_status=DrainStatus.FAILED,
+        )
         session = BuildSession(workspace_root=str(tmp_path))
-        with patch("netcoredbg_mcp.build.session.asyncio.create_subprocess_exec", spawn):
+        with (
+            patch(
+                "netcoredbg_mcp.build.session.WindowsOwnedProcess.launch",
+                return_value=owner,
+            ),
+            pytest.raises(RuntimeError, match="owner did not drain"),
+        ):
             await session._run_command(["dotnet", "build"], timeout=0.1)
 
-        assert process.active_processes == 0, (
-            "current command completion has no accounting barrier for a live descendant"
-        )
+        assert owner.receipt is not None
+        assert owner.receipt.status is DrainStatus.FAILED
+        assert owner.aclose_calls == 1
 
     @pytest.mark.asyncio
     async def test_o11_lock_retry_never_falls_back_to_a_selector(self, tmp_path) -> None:
-        """O11 retry: a lock does not license image, path, or PID discovery.
-
-        The current retry route is exercised with a deterministic lock result.
-        It must wait for an explicit owner receipt instead of using the legacy
-        cleanup function to search for an unrelated process.
-        """
+        """O11 remains RED until T008 deletes selector cleanup from retries."""
 
         session = BuildSession(workspace_root=str(tmp_path))
         session._run_command = AsyncMock(return_value=(1, "MSB3021 file in use", ""))
