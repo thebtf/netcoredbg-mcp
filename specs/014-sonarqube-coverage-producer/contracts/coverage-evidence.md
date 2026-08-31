@@ -7,7 +7,7 @@ This contract defines the evidence the future exact-head runner must accept befo
 Before the runner starts a scanner transaction, it must:
 
 1. Resolve `Wave2ClosureEntryV1` only from the tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` source and validate it against [wave2-closure-entry-v1.schema.json](wave2-closure-entry-v1.schema.json).
-2. Verify `release_intent: none`, the accepted candidate, candidate-to-main ancestry, accepted-main ancestry in `origin/main`, closure receipt hash, and PR #289 merged identity.
+2. Verify `release_intent: none`, the accepted candidate, closure receipt hash, and PR #289 head identity. At runtime, derive `observed_main_sha` and `artifact_commit_sha`, prove the PR merged through GitHub/workflow evidence or first-parent history, and require candidate/artifact ancestry to observed main.
 3. Resolve and version-check `uv`, `bash`, and `dotnet`.
 4. Evaluate each fixed project for `net8.0`, direct private `coverlet.msbuild` `10.0.1`, `Microsoft.NET.Test.Sdk` `17.12.0`, and VSTest selection.
 5. Refuse MTP, including `TestingPlatformDotnetTestSupport` activation and Microsoft Testing Platform references.

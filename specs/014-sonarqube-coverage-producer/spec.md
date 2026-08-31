@@ -21,9 +21,9 @@ The parent packet has an earlier Wave-3 directory pointer named `specs/014-sonar
 
 ## Entry condition
 
-Wave 3 requires a schema-valid tracked [Wave-2 closure artifact](contracts/wave2-closure-entry-v1.schema.json) at `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`. Wave-2 T014 and PR #289 must produce and merge that artifact with the Wave-2 closure. It must name `release_intent: none`, the accepted Wave-2 candidate SHA, an accepted-main SHA, the immutable closure receipt hash, and merged PR #289. The runner verifies schema, receipt hash, candidate-to-main ancestry, and accepted-main ancestry in the checked-out `origin/main` graph before preflight.
+Wave 3 requires a schema-valid tracked [Wave-2 closure artifact](contracts/wave2-closure-entry-v1.schema.json) at `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`. Wave-2 T014 and PR #289 must produce and merge that artifact with the Wave-2 closure. It carries `release_intent: none`, the accepted Wave-2 implementation candidate SHA, immutable closure receipt hash, and PR #289 head-ref/SHA identity. It must not contain a future main SHA.
 
-The tracked artifact is the external Wave-3 entry prerequisite. This packet does not create or edit it. After scanner begin and run-root claim, the runner writes a hash-bound resolved copy at `.tmp/sonarqube-coverage/<run-id>/wave2-entry.json` for run provenance. That copy never authorizes entry. A missing tracked artifact, `release_intent` other than `none`, unmerged candidate, unmerged main SHA, feature branch, copied receipt, or stale identity is `WAVE2_CLOSURE_UNVERIFIED` and blocks implementation and diagnostic execution before preflight, scanner begin, and run-root claim.
+At Wave-3 runtime, the runner derives `observed_main_sha` from the checked-out `origin/main` and `artifact_commit_sha` from the tracked artifact's history. It verifies PR #289 merged identity through GitHub/workflow evidence or first-parent merge proof, then verifies accepted candidate and artifact commit ancestry to `observed_main_sha`. Only after scanner begin and run-root claim does it write the observed main SHA into the hash-bound resolved entry and marker. A missing tracked artifact, non-`none` intent, invalid PR head identity, unmerged candidate/artifact ancestry, copied receipt, or stale observed-main proof is `WAVE2_CLOSURE_UNVERIFIED` and blocks implementation and diagnostic execution before preflight, scanner begin, and run-root claim.
 
 ## User scenarios and testing
 
@@ -79,7 +79,7 @@ A release owner needs candidate and post-merge PASS validation to consume the sa
 | ID | Requirement | Observable future acceptance |
 | --- | --- | --- |
 | **COV-001** | `scripts/run_sonarqube_exact_head.py` remains the only scanner, analysis-binding, normalization, and receipt authority. | The producer has no scanner, API, discovery, acceptance, or receipt behavior. |
-| **COV-002** | Wave-3 implementation and diagnostic execution require the tracked Wave-2 closure artifact at `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`. | Schema, receipt hash, `release_intent: none`, accepted candidate, and merged-main ancestry validate before preflight, begin, and claim. |
+| **COV-002** | Wave-3 implementation and diagnostic execution require the tracked Wave-2 closure artifact at `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`. | Before preflight, schema, receipt hash, `release_intent: none`, accepted candidate, PR #289 head identity, runtime merged-PR proof, and ancestry to runtime-derived `observed_main_sha` must validate. |
 | **COV-003** | The runner derives a pure head-bound `CoveragePlan` before scanner begin without writing files. | A focused test observes deterministic final and private-input paths without filesystem writes. |
 | **COV-004** | The runner preflights `uv`, `bash`, and `dotnet`, plus the exact Coverlet VSTest tuple, before scanner begin and run-root claim. | Missing tools, `coverlet.msbuild != 10.0.1`, `Microsoft.NET.Test.Sdk != 17.12.0`, or active MTP fail at `PLANNED` with zero begin and claim calls. |
 | **COV-005** | After scanner begin, the runner claims only a previously absent UUID root and canonical marker. | A pre-seeded root, altered marker, or path escape blocks without scanner end. |
@@ -103,7 +103,7 @@ A release owner needs candidate and post-merge PASS validation to consume the sa
 | **COV-023** | The implementation satisfies the 15 behavior-first RED/GREEN rows in [tasks.md](tasks.md#binding-redgreen-matrix). | Every row has a caller-level RED reason, a nonzero GREEN oracle, an owner task, and a dependency. |
 | **COV-024** | A Wave-3 acceptance receipt is delayed until exact-head review, independent acceptance judgment, verified Wave-2 entry evidence, and a complete diagnostic transaction succeed. | No real receipt exists before the final task. |
 | **COV-025** | Every existing exact-head receipt consumer must migrate to the unified v3 contract in the same cutover. | `scripts/stateless_preview_artifact.py` rejects v2 and validates a v3 post-merge receipt without changing public artifact behavior. |
-| **COV-026** | The hosted post-merge workflow must prove a clean checkout can resolve and validate the tracked Wave-2 entry without `.agent` provisioning. | The workflow runs the entry verification before post-merge scan and artifact sealing; absent, untracked, or ancestry-invalid input fails. |
+| **COV-026** | The hosted post-merge workflow must prove a clean checkout can resolve and validate the tracked Wave-2 entry without `.agent` provisioning. | The workflow derives `observed_main_sha`, validates PR/head and ancestry evidence before post-merge scan and artifact sealing, and fails absent, untracked, or invalid input. |
 
 ## Success criteria
 

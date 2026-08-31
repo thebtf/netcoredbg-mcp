@@ -7,7 +7,7 @@
 **Parent**: `specs/011-issue450-sonar-release-program/`, Wave 3
 **Source base**: `1b8b2d548a45b17dde690b4cb8e4fc7153d326bc`
 **Release intent**: `none`
-**Execution status**: BLOCKED. Wave-2 PR #289 is open. No Wave-3 implementation or diagnostic task may start until a valid `Wave2ClosureEntryV1` names a verified accepted-main closure identity.
+**Execution status**: BLOCKED. Wave-2 PR #289 is open. No Wave-3 implementation or diagnostic task may start until a valid tracked `Wave2ClosureEntryV1` and runtime-derived observed-main proof validate.
 
 ## Summary
 
@@ -20,8 +20,8 @@ The implementation changes the runner, focused runner tests, `.coveragerc`, `bui
 | Concern | Constraint |
 | --- | --- |
 | Parent report contract | Exactly two deterministic project-root-relative Cobertura reports: Python and one merged .NET report. |
-| Wave-2 entry source | External tracked artifact `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`, produced by Wave-2 T014/PR #289 and available in every clone after merge. |
-| Entry validation | Schema, `release_intent: none`, receipt hash, accepted candidate, and candidate/main ancestry must validate before preflight. A resolved copy is written only under the claimed Wave-3 root. |
+| Wave-2 entry source | External tracked artifact `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`, produced by Wave-2 T014/PR #289 and available in every clone after merge. It carries no future main SHA. |
+| Entry validation | Schema, `release_intent: none`, receipt hash, accepted candidate, and PR head identity validate before preflight. Runtime derives `artifact_commit_sha` and `observed_main_sha`, then proves merged PR and candidate/artifact ancestry. A resolved copy is written only under the claimed Wave-3 root. |
 | .NET producer inventory | Five closed `net8.0` VSTest projects are private inputs in fixed order. They are not Sonar report identities. |
 | Pre-begin gate | `uv`, `bash`, `dotnet`, Coverlet `10.0.1`, Test SDK `17.12.0`, and VSTest must validate before begin and claim. MTP is refused. |
 | Scanner handoff | Runtime begin arguments name the two final Cobertura paths. `SonarQube.Analysis.xml` remains unchanged. |
@@ -85,7 +85,7 @@ flowchart LR
 ## Verification plan
 
 | Layer | Command or proof | What it proves |
-| Entry and preflight | Focused command/event spy plus hosted-workflow fixture | Missing tracked artifact, invalid schema/receipt/release intent, invalid candidate/main ancestry, missing tools, invalid tuple, and MTP leave begin and claim unreachable. |
+| Entry and preflight | Focused command/event spy plus hosted-workflow fixture | Missing tracked artifact, invalid schema/receipt/release intent, PR head mismatch, absent merged-PR proof, invalid runtime candidate/artifact ancestry, missing tools, invalid tuple, and MTP leave begin and claim unreachable. |
 | RED/GREEN contract | `uv run --locked --extra dev pytest tests/test_sonarqube_exact_head_runner.py -q` | All 15 rows exercise the runner boundary. |
 | Local producer | Runner-owned producer invocation | Five private inputs normalize into one final .NET Cobertura report and one Python report. |
 | Diagnostic transaction | `python scripts/run_sonarqube_exact_head.py --role diagnostic` | Tracked Wave-2 entry discovery, run-root resolved-copy provenance, two-report import, canonical identity, complete inventory, and unchanged coverage condition. |

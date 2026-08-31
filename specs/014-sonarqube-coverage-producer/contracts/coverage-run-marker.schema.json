@@ -38,7 +38,9 @@
         "tracked_relative_path",
         "source_sha256",
         "accepted_candidate_sha",
-        "accepted_main_sha",
+        "pull_request_head_sha",
+        "artifact_commit_sha",
+        "observed_main_sha",
         "resolved_relative_path"
       ],
       "properties": {
@@ -51,7 +53,13 @@
         "accepted_candidate_sha": {
           "$ref": "#/$defs/sha40"
         },
-        "accepted_main_sha": {
+        "pull_request_head_sha": {
+          "$ref": "#/$defs/sha40"
+        },
+        "artifact_commit_sha": {
+          "$ref": "#/$defs/sha40"
+        },
+        "observed_main_sha": {
           "$ref": "#/$defs/sha40"
         },
         "resolved_relative_path": {

@@ -14,7 +14,7 @@ Keep `scripts/run_sonarqube_exact_head.py` as the sole scanner, analysis-binding
 
 | Fact | Owner | Must not be owned by |
 | --- | --- | --- |
-| Exact Wave-2 closure and accepted-main identity | `Wave2ClosureEntryV1` validator | A PR head or feature branch |
+| Exact Wave-2 closure and observed-main identity | `Wave2ClosureEntryV1` plus runtime verifier | A PR head, feature branch, or precomputed future merge SHA |
 | Captured head, run ID, paths, and input order | `CoveragePlan` in the runner | A report glob or shell discovery |
 | Tool availability and VSTest/MTP compatibility | `preflight_coverage_toolchain` in the runner | Scanner begin or the producer |
 | Python policy | `.coveragerc` | An untracked user configuration |
@@ -82,7 +82,7 @@ stateDiagram-v2
 ### State invariants
 
 1. `CoveragePlan` is pure. It does not create a root, marker, report, resolved entry, or temporary directory.
-2. Before preflight, the runner validates the tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` artifact. Schema, `release_intent: none`, receipt hash, accepted candidate, candidate-to-main ancestry, and accepted-main ancestry must agree. A missing or invalid artifact makes scanner begin and run-root claim unreachable.
+2. Before preflight, the runner validates the tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` artifact. It derives `observed_main_sha` and `artifact_commit_sha` at runtime, then verifies `release_intent: none`, receipt hash, accepted candidate, PR head identity, merged-PR evidence, and candidate/artifact ancestry to observed main. A missing or invalid artifact makes scanner begin and run-root claim unreachable.
 3. `RUN_CLAIMED` occurs only after scanner begin succeeds and only for a previously absent UUID root. It writes the marker and a hash-bound resolved Wave-2 entry copy under that root.
 4. `REPORTS_VALIDATED` requires the marker, tracked-entry binding, two final reports, all five private .NET inputs, normalizer evidence, positive final denominators, valid source sets, a matching post-producer head, and Stateless restoration.
 5. `SCANNER_ENDED` has no legal predecessor other than `REPORTS_VALIDATED`.
@@ -126,7 +126,6 @@ The runner must not substitute its broader build `project_inventory()` for this 
 
 ## Caller-first contract
 
-```text
 Wave2ClosureEntryV1 {
   schema_version: 1
   wave: 2
@@ -134,9 +133,16 @@ Wave2ClosureEntryV1 {
   release_intent: none
   tracked_relative_path: "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json"
   accepted_candidate_sha: Sha40
-  accepted_main_sha: Sha40
   closure_receipt: { relative_path, sha256 }
-  integration: { kind: merged_pull_request, pull_request: 289, accepted_ref: origin/main }
+  integration: { kind: merged_pull_request, pull_request: 289, head_ref: string, head_sha: Sha40 }
+}
+
+ResolvedWave2Entry {
+  source_sha256: Sha256
+  accepted_candidate_sha: Sha40
+  pull_request_head_sha: Sha40
+  artifact_commit_sha: Sha40
+  observed_main_sha: Sha40
 }
 
 CoveragePlan {
@@ -189,7 +195,7 @@ write_diagnostic_inventory(identity: ReceiptIdentity) -> InventoryReference
 validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None
 ```
 
-The runner resolves the entry source only at `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` in the checked-out repository. Wave-2 T014/PR #289 must add it before merge; this packet does not create it. Existing `candidate`, `post-merge`, and `diagnostic` CLI role shapes stay unchanged. There is no ambient `.agent` source, default, branch-derived, or v2 compatibility path.
+The runner resolves the entry source only at `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` in the checked-out repository. Wave-2 T014/PR #289 must add it before merge; this packet does not create it. The source artifact contains no future main SHA. The runner derives `observed_main_sha` only at runtime and records it only in the resolved run-root entry and marker. Existing `candidate`, `post-merge`, and `diagnostic` CLI role shapes stay unchanged. There is no ambient `.agent` source, default, branch-derived, or v2 compatibility path.
 
 ## Producer commands
 

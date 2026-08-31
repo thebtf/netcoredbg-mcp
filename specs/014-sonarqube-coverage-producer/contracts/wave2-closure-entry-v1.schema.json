@@ -11,7 +11,6 @@
     "release_intent",
     "tracked_relative_path",
     "accepted_candidate_sha",
-    "accepted_main_sha",
     "closure_receipt",
     "integration"
   ],
@@ -32,10 +31,6 @@
       "const": "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json"
     },
     "accepted_candidate_sha": {
-      "type": "string",
-      "pattern": "^[0-9a-f]{40}$"
-    },
-    "accepted_main_sha": {
       "type": "string",
       "pattern": "^[0-9a-f]{40}$"
     },
@@ -62,7 +57,8 @@
       "required": [
         "kind",
         "pull_request",
-        "accepted_ref"
+        "head_ref",
+        "head_sha"
       ],
       "properties": {
         "kind": {
@@ -71,8 +67,13 @@
         "pull_request": {
           "const": 289
         },
-        "accepted_ref": {
-          "const": "origin/main"
+        "head_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "head_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
         }
       }
     }

@@ -17,7 +17,7 @@
 
 | Entity | Identity | Lifetime | Contract |
 | --- | --- | --- | --- |
-| `Wave2ClosureEntryV1` | Accepted Wave-2 main SHA and closure receipt hash | Before all Wave-3 execution | [wave2-closure-entry-v1.schema.json](contracts/wave2-closure-entry-v1.schema.json) |
+| `Wave2ClosureEntryV1` | Accepted Wave-2 candidate, PR head identity, and closure receipt hash | Before all Wave-3 execution | [wave2-closure-entry-v1.schema.json](contracts/wave2-closure-entry-v1.schema.json) |
 | `CoveragePlan` | Run ID, captured head, and deterministic paths | In memory before scanner begin | [architecture.md](architecture.md#caller-first-contract) |
 | `ToolchainPreflight` | Plan and five evaluated project tuples | Before scanner begin | COV-004 |
 | `CoverageRunClaim` | Plan plus marker bytes/hash | From exclusive claim through cleanup | [coverage-run-marker.schema.json](contracts/coverage-run-marker.schema.json) |
@@ -36,9 +36,8 @@ Wave2ClosureEntryV1 {
   release_intent: none
   tracked_relative_path: "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json"
   accepted_candidate_sha: Sha40
-  accepted_main_sha: Sha40
   closure_receipt: { relative_path, sha256 }
-  integration: { kind: merged_pull_request, pull_request: 289, accepted_ref: origin/main }
+  integration: { kind: merged_pull_request, pull_request: 289, head_ref: string, head_sha: Sha40 }
 }
 
 ToolchainPreflight {
@@ -58,9 +57,9 @@ ProjectCompatibility {
 }
 ```
 
-`verify_wave2_entry` checks the tracked record schema, `release_intent`, immutable Wave-2 receipt hash and content, accepted candidate-to-main ancestry, accepted-main ancestry in `origin/main`, and PR #289 merged identity. It rejects a missing or untracked artifact, PR head, feature branch, missing receipt, non-main SHA, non-`none` intent, or mismatch as `WAVE2_CLOSURE_UNVERIFIED`.
+`verify_wave2_entry` checks the tracked record schema, `release_intent`, immutable Wave-2 receipt hash and content, and PR #289 head identity. At runtime it derives `observed_main_sha` from `origin/main` and `artifact_commit_sha` from the artifact path's repository history. It requires GitHub/workflow merged-PR evidence or first-parent merge proof, then verifies accepted candidate and artifact commit ancestry to observed main. It rejects a missing or untracked artifact, PR head mismatch, feature branch, missing receipt, non-`none` intent, absent merge proof, or ancestry mismatch as `WAVE2_CLOSURE_UNVERIFIED`.
 
-`resolve_wave2_entry` reads only `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` from the checked-out repository. Wave-2 T014/PR #289 creates this external prerequisite after the current open PR closes. Existing role callers do not pass an entry-file argument. The resolver validates the tracked source before preflight. After `RUN_CLAIMED`, it writes a hash-bound copy beneath the run root; that copy is provenance, not authority.
+`resolve_wave2_entry` reads only `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` from the checked-out repository. Wave-2 T014/PR #289 creates this external prerequisite after the current open PR closes. The source has no main SHA. Existing role callers do not pass an entry-file argument. After `RUN_CLAIMED`, the runner writes a hash-bound resolved copy with `observed_main_sha` beneath the run root; that copy is provenance, not authority.
 
 `preflight_coverage_toolchain` runs before scanner begin. It requires executable `uv`, `bash`, and `dotnet`, evaluates every fixed project, and rejects active MTP. It never injects a property to switch the test platform. `COVERAGE_TOOL_UNAVAILABLE`, `COVERAGE_VSTEST_INCOMPATIBLE`, and `COVERAGE_MTP_INCOMPATIBLE` stop at `PLANNED` before root claim.
 
@@ -89,7 +88,7 @@ CoverageProjectSpec {
 }
 ```
 
-`derive_coverage_plan` is pure. It writes no file. After scanner begin succeeds, `claim_coverage_run` creates the UUID root exclusively, writes canonical sorted compact JSON, and writes the hash-bound resolved Wave-2 entry below that root. The marker binds the tracked source path, source hash, candidate SHA, main SHA, and resolved-copy path.
+`derive_coverage_plan` is pure. It writes no file. After scanner begin succeeds, `claim_coverage_run` creates the UUID root exclusively, writes canonical sorted compact JSON, and writes the hash-bound resolved Wave-2 entry below that root. The marker binds the tracked source path/hash, candidate SHA, PR head SHA, runtime artifact commit SHA, runtime observed main SHA, and resolved-copy path.
 
 | Kind | ID | Format | Relative path |
 | --- | --- | --- |

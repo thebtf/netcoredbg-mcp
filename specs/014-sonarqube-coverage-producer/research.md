@@ -20,7 +20,7 @@
 | OBSERVED | The five selected test projects target `net8.0` and directly reference `Microsoft.NET.Test.Sdk` `17.12.0`. | Current five project files | Preflight fixes the VSTest tuple rather than assuming it. |
 | OBSERVED | The broader build inventory is not the closed coverage producer inventory. | `agent://Wave3CoverageSource`; `agent://Wave3CoverageTests` | The five projects remain a fixed ordered input set. |
 | OBSERVED | Stateless coverage needs the exact `IncludeDirectory` and binary restoration check. | `agent://Wave3CoverageSource` | Preserve the Stateless-only branch. |
-| OBSERVED | Wave-2 PR #289 is open. | Operator instruction | Wave-3 execution is BLOCKED pending typed accepted-main closure evidence. |
+| OBSERVED | Wave-2 PR #289 is open. | Operator instruction | Wave-3 execution is BLOCKED pending a tracked closure artifact; the observed main identity can exist only at later Wave-3 runtime. |
 | OBSERVED | `scripts/stateless_preview_artifact.py` requires receipt schema version 2 for post-merge artifact sealing. | Verifier recheck of `08a4231` | Wave 3 must migrate this receipt consumer and its focused proof to unified v3. |
 | OBSERVED | The current checkout contains no `specs/013-owner-scoped-prebuild-cleanup/` directory or tracked Wave-2 closure artifact. | Verifier recheck of `587d735` | This absence is current blocker evidence. Wave-2 T014/PR #289 must create and merge the tracked artifact before Wave 3 can execute. |
 
@@ -68,16 +68,15 @@
 
 ### Preserve callers through a tracked Wave-2 closure artifact and migrate the actual v3 consumer
 
-**SELECTED**: `GitContext` resolves only the tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` artifact. Wave-2 T014/PR #289 must create it with `release_intent: none`, accepted candidate/main identities, and closure receipt hash. The hosted post-merge workflow verifies it in a clean checkout before scanning. The same cutover migrates `scripts/stateless_preview_artifact.py` from schema v2 to the unified v3 post-merge receipt.
+**SELECTED**: `GitContext` resolves only the tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` artifact. Wave-2 T014/PR #289 must create it with `release_intent: none`, accepted implementation candidate, PR head-ref/SHA, and closure receipt hash, but no future main SHA. At Wave-3 runtime, the verifier derives observed main and artifact commit identities, proves PR merge, and checks candidate/artifact ancestry. The hosted post-merge workflow performs the same clean-checkout proof before scanning. The same cutover migrates `scripts/stateless_preview_artifact.py` from schema v2 to the unified v3 post-merge receipt.
 
-**Reason**: The current repository has no Wave-2 artifact and hosted workspaces do not share local `.agent` state. A tracked merge artifact makes the prerequisite clone-reproducible while role CLI shapes remain stable.
+**Reason**: A tracked PR artifact cannot know the future merge SHA that will contain it. Runtime observation makes main provenance real while the source artifact remains clone-reproducible and role CLI shapes stay stable.
 
 ## Rejected designs
 
 | Design | Disposition | Reason |
 | --- | --- | --- |
-| Five .NET scanner report paths | Rejected | It conflicts with the parent two-report contract. |
-| A branch head as Wave-2 authority | Rejected | Only a verified accepted-main identity and closure receipt satisfy the dependency. |
+| A branch head or precomputed main SHA as Wave-2 authority | Rejected | The source artifact carries candidate and PR-head identity only; Wave 3 derives and verifies observed main after merge. |
 | Static XML report paths or report globs | Rejected | They can admit stale or extra artifacts. |
 | Generic merger or report discovery | Rejected | The normalizer must consume the fixed input list and emit one fixed output. |
 | Automatic MTP fallback | Rejected | It masks the Coverlet compatibility boundary rather than proving VSTest compatibility. |
@@ -91,7 +90,7 @@
 | Live Sonar component and inventory paging | The exact diagnostic run proves complete pages and both language intersections. |
 | Project evaluation on the implementation head | Preflight proves the exact five tuples and refuses MTP. |
 | .NET normalization behavior | Focused fixtures prove union, deterministic output, source safety, and positive denominators. |
-| Wave-2 merge identity and tracked artifact | Wave-2 T014/PR #289 must create and merge `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`; T000 validates it only after merge. |
+| Wave-2 merge identity and tracked artifact | Wave-2 T014/PR #289 must create and merge `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`; T000 derives observed main and validates it only after merge. |
 
 ## Research conclusion
 
