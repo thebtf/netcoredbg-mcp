@@ -310,6 +310,15 @@ class TestPywinautoUnsupported:
         assert result["switched"] is False
         assert "FlaUI bridge" in result["reason"]
 
+    def test_send_system_event_completes_without_yielding(self):
+        backend = PywinautoBackend()
+        operation = backend.send_system_event("theme_change", mode="toggle")
+
+        with pytest.raises(StopIteration) as completed:
+            next(operation.__await__())
+
+        assert completed.value.value["unsupported"] is True
+
     @pytest.mark.asyncio
     async def test_hold_modifiers_returns_unsupported(self):
         backend = PywinautoBackend()
@@ -347,9 +356,7 @@ class TestPywinautoDrag:
             "netcoredbg_mcp.ui.automation._send_drag",
             send_drag_mock,
         ):
-            result = await backend.drag(
-                10, 20, 100, 200, speed_ms=300, hold_modifiers=["ctrl"]
-            )
+            result = await backend.drag(10, 20, 100, 200, speed_ms=300, hold_modifiers=["ctrl"])
         send_drag_mock.assert_called_once()
         kwargs = send_drag_mock.call_args.kwargs
         args = send_drag_mock.call_args.args
@@ -417,9 +424,7 @@ class TestDragInputValidation:
             _send_drag(0, 0, 100, 100, speed_ms=200, hold_modifiers=["super"])
 
     def test_bridge_registers_drag_path_command(self):
-        handler = (PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs").read_text(
-            encoding="utf-8"
-        )
+        handler = (PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs").read_text(encoding="utf-8")
 
         assert '["drag_path"] = ClickCommands.DragPath' in handler
 
@@ -436,14 +441,10 @@ class TestDragInputValidation:
         assert "hold_ms must be non-negative" in command
         assert "private const int DragPathHoldPulseMs" in command
         assert "PulseHeldDragPoint(point, point.HoldMs);" in command
-        assert (
-            'TryReadInt(paramObject, "speed_ms", out var requestedSpeedMs)' in command
-        )
+        assert 'TryReadInt(paramObject, "speed_ms", out var requestedSpeedMs)' in command
         assert 'TryReadDragPathCancelKey(@params?["cancel_key"]' in command
         assert "VirtualKeyShort.ESCAPE" in command
-        drag_path_body = _csharp_method_body(
-            command, "public static JsonNode DragPath("
-        )
+        drag_path_body = _csharp_method_body(command, "public static JsonNode DragPath(")
         assert "Thread.Sleep(PointerMoveSettleMs);" in drag_path_body
         assert "Thread.Sleep(Math.Max(FinalDropSettleMs, delayMs));" in drag_path_body
         assert "SendDragPathCancel(cancelKey.Value);" in drag_path_body
@@ -470,17 +471,12 @@ class TestDragInputValidation:
         command = (PROJECT_ROOT / "bridge" / "Commands" / "ClickCommands.cs").read_text(
             encoding="utf-8"
         )
-        drag_path_body = _csharp_method_body(
-            command, "public static JsonNode DragPath("
-        )
+        drag_path_body = _csharp_method_body(command, "public static JsonNode DragPath(")
 
         assert "mouseButtonDown" in drag_path_body
         assert "mouse_event(MOUSEEVENTF_LEFTDOWN" in drag_path_body
         assert "mouse_event(MOUSEEVENTF_LEFTUP" in drag_path_body
-        assert (
-            "KeySequenceCommands.SendSignedKeyUp(pressedTemporaryModifiers[i])"
-            in drag_path_body
-        )
+        assert "KeySequenceCommands.SendSignedKeyUp(pressedTemporaryModifiers[i])" in drag_path_body
         assert "finally" in drag_path_body
 
 
@@ -489,27 +485,17 @@ class TestInputProvenanceSignature:
         from netcoredbg_mcp.ui.input_signature import RUNNER_INPUT_SIGNATURE
 
         assert RUNNER_INPUT_SIGNATURE == 0x4E434442
-        automation = (
-            PROJECT_ROOT / "src" / "netcoredbg_mcp" / "ui" / "automation.py"
-        ).read_text(encoding="utf-8")
+        automation = (PROJECT_ROOT / "src" / "netcoredbg_mcp" / "ui" / "automation.py").read_text(
+            encoding="utf-8"
+        )
 
         assert "RUNNER_INPUT_SIGNATURE" in automation
         assert "_runner_input_extra_info()" in automation
         assert "inp._input.ki.dwExtraInfo = _runner_input_extra_info()" in automation
-        assert (
-            "inputs[0]._input.mi.dwExtraInfo = _runner_input_extra_info()" in automation
-        )
-        assert (
-            "inputs[1]._input.mi.dwExtraInfo = _runner_input_extra_info()" in automation
-        )
-        assert (
-            "mouse_event(mouseeventf_leftdown, 0, 0, 0, RUNNER_INPUT_SIGNATURE)"
-            in automation
-        )
-        assert (
-            "mouse_event(mouseeventf_leftup, 0, 0, 0, RUNNER_INPUT_SIGNATURE)"
-            in automation
-        )
+        assert "inputs[0]._input.mi.dwExtraInfo = _runner_input_extra_info()" in automation
+        assert "inputs[1]._input.mi.dwExtraInfo = _runner_input_extra_info()" in automation
+        assert "mouse_event(mouseeventf_leftdown, 0, 0, 0, RUNNER_INPUT_SIGNATURE)" in automation
+        assert "mouse_event(mouseeventf_leftup, 0, 0, 0, RUNNER_INPUT_SIGNATURE)" in automation
 
     def test_python_sendinput_producers_emit_signature_value(self, monkeypatch):
         from ctypes import wintypes
@@ -578,12 +564,12 @@ class TestInputProvenanceSignature:
         assert {value for _kind, value in captured} == {RUNNER_INPUT_SIGNATURE}
 
     def test_bridge_input_producers_stamp_runner_signature(self):
-        signature = (
-            PROJECT_ROOT / "bridge" / "Commands" / "InputSignature.cs"
-        ).read_text(encoding="utf-8")
-        click_commands = (
-            PROJECT_ROOT / "bridge" / "Commands" / "ClickCommands.cs"
-        ).read_text(encoding="utf-8")
+        signature = (PROJECT_ROOT / "bridge" / "Commands" / "InputSignature.cs").read_text(
+            encoding="utf-8"
+        )
+        click_commands = (PROJECT_ROOT / "bridge" / "Commands" / "ClickCommands.cs").read_text(
+            encoding="utf-8"
+        )
         grid_commands = (
             PROJECT_ROOT / "bridge" / "Commands" / "GridCommands.DragRowToRow.cs"
         ).read_text(encoding="utf-8")
@@ -599,16 +585,12 @@ class TestInputProvenanceSignature:
             _csharp_method_body(click_commands, "public static JsonNode Drag("),
             _csharp_method_body(click_commands, "public static JsonNode DragPath("),
             _csharp_method_body(click_commands, "internal static void MoveCursor("),
-            _csharp_method_body(
-                click_commands, "private static void SignedMouseClick("
-            ),
+            _csharp_method_body(click_commands, "private static void SignedMouseClick("),
             _csharp_method_body(grid_commands, "public static JsonNode DragRowToRow("),
         ):
             assert "InputSignature.RunnerInputSignature" in body
             assert "UIntPtr.Zero" not in body
-        key_body = _csharp_method_body(
-            key_sequence_commands, "private static void SendKey("
-        )
+        key_body = _csharp_method_body(key_sequence_commands, "private static void SendKey(")
         assert "InputSignature.RunnerInputSignatureIntPtr" in key_body
         assert "IntPtr.Zero" not in key_body
         assert "internal static void SendSignedKeyDown" in key_sequence_commands
@@ -616,9 +598,7 @@ class TestInputProvenanceSignature:
         for body in (
             _csharp_method_body(click_commands, "public static JsonNode Drag("),
             _csharp_method_body(click_commands, "public static JsonNode DragPath("),
-            _csharp_method_body(
-                click_commands, "private static void SendDragPathCancel("
-            ),
+            _csharp_method_body(click_commands, "private static void SendDragPathCancel("),
             _csharp_method_body(grid_commands, "public static JsonNode DragRowToRow("),
         ):
             assert "KeySequenceCommands.SendSignedKeyDown" in body
@@ -626,13 +606,9 @@ class TestInputProvenanceSignature:
             assert "Keyboard.Press" not in body
             assert "Keyboard.Release" not in body
         assert (
-            "KeySequenceCommands.SendSignedKeyDown(VirtualKeyShort.CONTROL);"
-            in selection_commands
+            "KeySequenceCommands.SendSignedKeyDown(VirtualKeyShort.CONTROL);" in selection_commands
         )
-        assert (
-            "KeySequenceCommands.SendSignedKeyUp(VirtualKeyShort.CONTROL);"
-            in selection_commands
-        )
+        assert "KeySequenceCommands.SendSignedKeyUp(VirtualKeyShort.CONTROL);" in selection_commands
         for command_file in (PROJECT_ROOT / "bridge" / "Commands").glob("*.cs"):
             command_text = command_file.read_text(encoding="utf-8")
             assert "Keyboard.Press" not in command_text
@@ -644,21 +620,19 @@ class TestInputProvenanceSignature:
         assert "ClickCommands.SignedLeftClick(center);" in selection_commands
 
     def test_bridge_input_commands_sign_literal_text_paths(self):
-        input_commands = (
-            PROJECT_ROOT / "bridge" / "Commands" / "InputCommands.cs"
-        ).read_text(encoding="utf-8")
+        input_commands = (PROJECT_ROOT / "bridge" / "Commands" / "InputCommands.cs").read_text(
+            encoding="utf-8"
+        )
 
         assert "Keyboard.Type(" not in input_commands
         assert "KeySequenceCommands.SendSignedText(" in input_commands
 
     def test_bridge_input_commands_preserve_modifier_shortcuts_with_signed_keys(self):
-        input_commands = (
-            PROJECT_ROOT / "bridge" / "Commands" / "InputCommands.cs"
-        ).read_text(encoding="utf-8")
+        input_commands = (PROJECT_ROOT / "bridge" / "Commands" / "InputCommands.cs").read_text(
+            encoding="utf-8"
+        )
 
         assert "TypeToken(ctrlTarget, preserveModifierShortcut: true)" in input_commands
         assert "TypeToken(altTarget, preserveModifierShortcut: true)" in input_commands
-        assert (
-            "TypeToken(shiftTarget, preserveModifierShortcut: true)" in input_commands
-        )
+        assert "TypeToken(shiftTarget, preserveModifierShortcut: true)" in input_commands
         assert "TryParseLiteralVirtualKey" in input_commands
