@@ -5,8 +5,13 @@ from __future__ import annotations
 import ctypes
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from netcoredbg_mcp import process_registry
+from netcoredbg_mcp.build.cleanup import NoOwnedAdapter
+from netcoredbg_mcp.session import SessionManager
 
 
 class FakeKernelCall:
@@ -126,3 +131,24 @@ def test_terminate_pid_windows_treats_false_terminate_as_success_when_dead(
     assert kernel32.TerminateProcess.calls == [(777, 1)]
     assert kernel32.WaitForSingleObject.calls == []
     assert kernel32.CloseHandle.calls == [(777,)]
+
+
+@pytest.mark.asyncio
+async def test_o9_pid_only_registry_cannot_create_owner_capability() -> None:
+    """O9: a reused PID remains an observation, not a pre-build capability."""
+    registry = process_registry.ProcessRegistry()
+    registry.register(pid=44009, role="netcoredbg", session_id="former-owner")
+
+    with patch("netcoredbg_mcp.session.manager.DAPClient"):
+        manager = SessionManager()
+    client = MagicMock()
+    client.adapter_owner = None
+    manager._client = client
+    manager._active_dap_run = "current-generation"
+    manager._process_registry = registry
+
+    owner = manager.capture_prebuild_owner()
+
+    assert isinstance(owner, NoOwnedAdapter)
+    assert registry.get_all()[0].pid == 44009
+    client.stop.assert_not_called()

@@ -13,6 +13,7 @@ import os
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from .cleanup import PreBuildOwner, consume_prebuild_owner, require_prebuild_owner
 from .policy import BuildCommand
 from .session import BuildSession
 from .state import BuildError, BuildResult, BuildState
@@ -109,23 +110,24 @@ class BuildManager:
         self,
         workspace_root: str,
         project_path: str,
+        *,
+        owner: PreBuildOwner,
         configuration: str = "Debug",
         restore_first: bool = True,
-        cleanup_before_build: bool = True,
         timeout: float = 300.0,
         output_callback: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> BuildResult:
         """Execute pre-launch build sequence (restore + build).
 
         This is the equivalent of VSCode's preLaunchTask for debugging.
-        Automatically cleans up processes holding file locks before building.
+        Requires an explicit adapter-owner outcome before restore or build.
 
         Args:
             workspace_root: Root directory of workspace
             project_path: Path to project file
+            owner: Captured adapter-owner variant required before build work
             configuration: Build configuration
             restore_first: Whether to run restore before build
-            cleanup_before_build: Kill processes in output dirs (default True)
             timeout: Total timeout for all operations
 
         Returns:
@@ -134,6 +136,9 @@ class BuildManager:
         Raises:
             BuildError: If build fails
         """
+        owner_outcome = await consume_prebuild_owner(owner)
+        require_prebuild_owner(owner_outcome)
+
         session = self.get_session(workspace_root)
 
         # Make project path absolute if relative
@@ -152,13 +157,13 @@ class BuildManager:
                     exit_code=restore_result.exit_code,
                 )
 
-        # Run build with cleanup and retry
+        # BuildSession owns each command capability and the lock-retry policy;
+        # this orchestration layer only forwards the verified request.
         result = await session.build(
             project_path,
             BuildCommand.BUILD,
             configuration,
             timeout=timeout if not restore_first else timeout / 2,
-            cleanup_before_build=cleanup_before_build,
             retry_on_lock=True,
             output_callback=output_callback,
         )

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from netcoredbg_mcp.build.cleanup import NoOwnedAdapter, OwnedAdapterCleanup, PreBuildOwnerError
 from netcoredbg_mcp.dap import DAPEvent, DAPResponse
 from netcoredbg_mcp.dap.client import (
     DapCleanupOutcome,
@@ -15,6 +16,8 @@ from netcoredbg_mcp.dap.client import (
     DapTransportTerminal,
 )
 from netcoredbg_mcp.session import DebugState, SessionManager
+from netcoredbg_mcp.windows_process_owner import DrainStatus, OwnedProcessRef, OwnerDrainReceipt
+from tests.owner_scope_red import BlockingStream, OwnedCommandProcess, TreeProcess
 
 
 def _natural_exit_terminal(generation: object) -> DapTransportTerminal:
@@ -425,6 +428,150 @@ class TestSessionManagerStart:
         assert generations_seen_during_stop == [1]
         assert manager._active_dap_run is None
 
+    @pytest.mark.asyncio
+    async def test_startup_terminal_failed_receipt_retains_owner_for_prebuild(self):
+        """A failed startup drain must not degrade to the no-owner build path."""
+
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+
+        client = MagicMock()
+        client.is_running = False
+        client.adapter_pid = None
+        generation = 1
+        owner = OwnedProcessRef("startup-failed-owner", generation, 41014)
+        client.adapter_owner = None
+        failed = OwnerDrainReceipt(
+            owner=owner,
+            status=DrainStatus.FAILED,
+            forced=True,
+            root_returncode=None,
+            active_processes=None,
+        )
+
+        async def start(*, generation: int) -> int:
+            client.adapter_owner = owner
+            manager._on_transport_terminal(
+                client,
+                DapTransportTerminal(
+                    generation=generation,
+                    first_trigger=DapTerminalTrigger.STDOUT_EOF,
+                    adapter_pid=owner.root_pid,
+                    process_exited=False,
+                    returncode=None,
+                    protocol_terminated=False,
+                    debuggee_exit_code=None,
+                    stdout_eof=True,
+                    last_dap_event=None,
+                    last_dap_event_body_preview=None,
+                    stderr_tail=b"",
+                    stderr_truncated=False,
+                    stderr_drained=True,
+                    reader_error=None,
+                    cleanup_outcome=DapCleanupOutcome.EXIT_UNOBSERVED,
+                ),
+            )
+            return generation
+
+        client.start = AsyncMock(side_effect=start)
+        client.stop = AsyncMock(return_value=failed)
+        manager._client = client
+
+        with pytest.raises(RuntimeError, match="netcoredbg terminated during startup"):
+            await manager.start()
+
+        captured = manager.capture_prebuild_owner()
+        assert manager._active_dap_run == generation
+        assert isinstance(captured, OwnedAdapterCleanup)
+        assert captured.owner == owner
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "active_processes"),
+        [
+            (DrainStatus.FAILED, None),
+            (DrainStatus.DRAINED, 1),
+            (None, None),
+        ],
+    )
+    async def test_start_rejects_retained_owner_without_zero_drain_receipt(
+        self,
+        status: DrainStatus | None,
+        active_processes: int | None,
+    ) -> None:
+        """A terminal owner blocks every new admission unless its drain is literal zero."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+
+        generation = "retained-terminal-generation"
+        owner = OwnedProcessRef("retained-terminal-owner", generation, 41017)
+        receipt = (
+            None
+            if status is None
+            else OwnerDrainReceipt(
+                owner=owner,
+                status=status,
+                forced=True,
+                root_returncode=None,
+                active_processes=active_processes,
+            )
+        )
+        client = MagicMock()
+        client.is_running = False
+        client.adapter_owner = owner
+        client.adapter_pid = None
+        client.stop = AsyncMock(return_value=receipt)
+        client.start = AsyncMock()
+        manager._client = client
+        manager._active_dap_run = generation
+        manager._state.state = DebugState.TERMINATED
+
+        with pytest.raises(RuntimeError, match="Retained adapter owner did not drain"):
+            await manager.start()
+
+        client.stop.assert_awaited_once_with(expected_owner=owner)
+        client.start.assert_not_awaited()
+        assert manager._active_dap_run == generation
+
+    @pytest.mark.asyncio
+    async def test_start_releases_zero_drained_retained_owner_before_new_admission(self) -> None:
+        """Only a matching zero-accounting receipt can release a terminal generation."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+
+        retained_generation = "zero-drained-terminal"
+        owner = OwnedProcessRef("zero-drained-owner", retained_generation, 41018)
+        receipt = OwnerDrainReceipt(
+            owner=owner,
+            status=DrainStatus.DRAINED,
+            forced=False,
+            root_returncode=0,
+            active_processes=0,
+        )
+        started_generations: list[object] = []
+
+        async def start(*, generation: object) -> object:
+            started_generations.append(generation)
+            return generation
+
+        client = MagicMock()
+        client.is_running = False
+        client.adapter_owner = owner
+        client.adapter_pid = None
+        client.stop = AsyncMock(return_value=receipt)
+        client.start = AsyncMock(side_effect=start)
+        client.initialize = AsyncMock()
+        manager._client = client
+        manager._active_dap_run = retained_generation
+        manager._state.state = DebugState.TERMINATED
+
+        await manager.start()
+
+        client.stop.assert_awaited_once_with(expected_owner=owner)
+        assert started_generations == [1]
+        assert manager._active_dap_run == 1
+        assert manager.state.state is DebugState.INITIALIZING
+
 
 class TestSessionManagerTransportFences:
     """Regressions for generation-scoped manager lifecycle decisions."""
@@ -444,10 +591,256 @@ class TestSessionManagerTransportFences:
         with pytest.raises(asyncio.CancelledError):
             await manager.stop()
 
+        assert manager._active_dap_run is generation
+
         manager._on_transport_terminal(manager.client, _natural_exit_terminal(generation))
 
         assert manager._stopping_dap_run is None
         assert manager.state.state is DebugState.TERMINATED
+
+    @pytest.mark.asyncio
+    async def test_cancelled_disconnect_retains_owner_for_prebuild_capture(self):
+        """Cancellation before finalizer join must preserve the captured owner."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+
+        generation = "cancelled-disconnect"
+        owner = OwnedProcessRef("cancelled-owner", generation, 41013)
+        client = MagicMock()
+        client.is_running = True
+        client.adapter_owner = owner
+        client.adapter_pid = 41013
+        client.disconnect = AsyncMock(side_effect=asyncio.CancelledError)
+        client.stop = AsyncMock()
+        manager._client = client
+        manager._active_dap_run = generation
+        manager._state.state = DebugState.RUNNING
+
+        with pytest.raises(asyncio.CancelledError):
+            await manager.stop()
+
+        captured = manager.capture_prebuild_owner()
+
+        assert manager._active_dap_run == generation
+        assert manager._stopping_dap_run is None
+        assert isinstance(captured, OwnedAdapterCleanup)
+        assert captured.owner == owner
+        client.stop.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_owner_drain_joins_finalizer_before_releasing_gate(self, tmp_path):
+        """Cancellation is restored only after the elected owner finalizer completes."""
+
+        project = tmp_path / "App.csproj"
+        project.touch()
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+
+        generation = "cancelled-owner-finalizer"
+        owner = OwnedProcessRef("cancelled-finalizer-owner", generation, 41015)
+        stop_started = asyncio.Event()
+        release_stop = asyncio.Event()
+        stop_completed = asyncio.Event()
+        client = MagicMock()
+        client.is_running = True
+        client.adapter_owner = owner
+        client.adapter_pid = owner.root_pid
+        client.disconnect = AsyncMock()
+
+        async def stop(*, expected_owner: OwnedProcessRef | None = None):
+            assert expected_owner == owner
+            stop_started.set()
+            await release_stop.wait()
+            stop_completed.set()
+            return OwnerDrainReceipt(
+                owner=owner,
+                status=DrainStatus.DRAINED,
+                forced=False,
+                root_returncode=0,
+                active_processes=0,
+            )
+
+        client.stop = AsyncMock(side_effect=stop)
+        manager._client = client
+        manager._active_dap_run = generation
+        manager._state.state = DebugState.RUNNING
+        build_session = manager._build_manager.get_session(str(tmp_path))
+        build_session.restore = AsyncMock()
+        build_session.build = AsyncMock()
+
+        prebuild_task = asyncio.create_task(manager.pre_launch_build(str(project)))
+        await asyncio.wait_for(stop_started.wait(), timeout=1.0)
+        prebuild_task.cancel()
+        start_task = asyncio.create_task(manager.start())
+        await asyncio.sleep(0)
+        assert start_task.done() is False
+
+        release_stop.set()
+        with pytest.raises(asyncio.CancelledError):
+            await prebuild_task
+        assert stop_completed.is_set()
+        await asyncio.wait_for(start_task, timeout=1.0)
+        build_session.restore.assert_not_awaited()
+        build_session.build.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_owner_disconnect_joins_finalizer_before_releasing_gate(
+        self, tmp_path
+    ) -> None:
+        """A canceled pre-build disconnect cannot let a new admission pass its finalizer."""
+        project = tmp_path / "App.csproj"
+        project.touch()
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+
+        generation = "cancelled-owner-disconnect"
+        owner = OwnedProcessRef("cancelled-disconnect-owner", generation, 41016)
+        disconnect_started = asyncio.Event()
+        release_disconnect = asyncio.Event()
+        stop_started = asyncio.Event()
+        release_stop = asyncio.Event()
+        finalizer_completed = asyncio.Event()
+        client = MagicMock()
+        client.is_running = True
+        client.adapter_owner = owner
+        client.adapter_pid = owner.root_pid
+
+        async def disconnect(*, terminate: bool) -> None:
+            assert terminate is True
+            disconnect_started.set()
+            await release_disconnect.wait()
+
+        async def stop(*, expected_owner: OwnedProcessRef | None = None) -> OwnerDrainReceipt:
+            assert expected_owner == owner
+            stop_started.set()
+            await release_stop.wait()
+            finalizer_completed.set()
+            return OwnerDrainReceipt(
+                owner=owner,
+                status=DrainStatus.DRAINED,
+                forced=False,
+                root_returncode=0,
+                active_processes=0,
+            )
+
+        client.disconnect = AsyncMock(side_effect=disconnect)
+        client.stop = AsyncMock(side_effect=stop)
+        manager._client = client
+        manager._active_dap_run = generation
+        manager._state.state = DebugState.RUNNING
+        build_session = manager._build_manager.get_session(str(tmp_path))
+        build_session.restore = AsyncMock()
+        build_session.build = AsyncMock()
+
+        prebuild_task = asyncio.create_task(manager.pre_launch_build(str(project)))
+        start_task: asyncio.Task[None] | None = None
+        try:
+            await asyncio.wait_for(disconnect_started.wait(), timeout=1.0)
+            prebuild_task.cancel()
+            start_task = asyncio.create_task(manager.start())
+            await asyncio.sleep(0)
+            assert start_task.done() is False
+
+            release_disconnect.set()
+            await asyncio.wait_for(stop_started.wait(), timeout=1.0)
+            await asyncio.sleep(0)
+            assert start_task.done() is False
+
+            release_stop.set()
+            with pytest.raises(asyncio.CancelledError):
+                await prebuild_task
+            assert finalizer_completed.is_set()
+            client.stop.assert_awaited_once_with(expected_owner=owner)
+            await asyncio.wait_for(start_task, timeout=1.0)
+        finally:
+            release_disconnect.set()
+            release_stop.set()
+            if not prebuild_task.done():
+                prebuild_task.cancel()
+            try:
+                await prebuild_task
+            except asyncio.CancelledError:
+                pass
+            if start_task is not None:
+                await asyncio.wait_for(start_task, timeout=1.0)
+
+        build_session.restore.assert_not_awaited()
+        build_session.build.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_ordinary_stop_joins_owner_before_state_cleanup(self) -> None:
+        """Caller cancellation waits for the selected owner finalizer and then restores it."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+
+        generation = "cancelled-ordinary-stop"
+        owner = OwnedProcessRef("cancelled-ordinary-owner", generation, 41019)
+        disconnect_started = asyncio.Event()
+        release_disconnect = asyncio.Event()
+        events: list[str] = []
+        client = MagicMock()
+        client.is_running = True
+        client.adapter_owner = owner
+        client.adapter_pid = owner.root_pid
+
+        async def disconnect(*, terminate: bool) -> None:
+            assert terminate is True
+            events.append("disconnect-start")
+            disconnect_started.set()
+            await release_disconnect.wait()
+            events.append("disconnect-finished")
+
+        async def stop(*, expected_owner: OwnedProcessRef | None = None) -> OwnerDrainReceipt:
+            assert expected_owner == owner
+            events.append("owner-finalizer")
+            client.is_running = False
+            return OwnerDrainReceipt(
+                owner=owner,
+                status=DrainStatus.DRAINED,
+                forced=False,
+                root_returncode=0,
+                active_processes=0,
+            )
+
+        client.disconnect = AsyncMock(side_effect=disconnect)
+        client.stop = AsyncMock(side_effect=stop)
+        manager._client = client
+        manager._active_dap_run = generation
+        manager._state.state = DebugState.RUNNING
+        manager._state.process_id = 41020
+        manager._session_id = "cancelled-stop-session"
+        manager._initialized_event.set()
+        manager._execution_event.set()
+        manager._process_registry.unregister = MagicMock()
+        manager._temp_manager.cleanup_session = MagicMock()
+        manager._runtime_smoke.reset = MagicMock()
+
+        stop_task = asyncio.create_task(manager.stop())
+        await asyncio.wait_for(disconnect_started.wait(), timeout=1.0)
+        stop_task.cancel()
+        await asyncio.sleep(0)
+
+        assert stop_task.done() is False
+        client.stop.assert_not_awaited()
+
+        release_disconnect.set()
+        with pytest.raises(asyncio.CancelledError):
+            await stop_task
+
+        client.stop.assert_awaited_once_with(expected_owner=owner)
+        assert events == ["disconnect-start", "disconnect-finished", "owner-finalizer"]
+        assert manager._active_dap_run is None
+        assert manager._stopping_dap_run is None
+        assert manager.state.state is DebugState.IDLE
+        assert manager._initialized_event.is_set() is False
+        assert manager._execution_event.is_set() is False
+        assert manager._session_id is None
+        manager._temp_manager.cleanup_session.assert_called_once_with("cancelled-stop-session")
+        manager._runtime_smoke.reset.assert_called_once_with()
+        assert {call.args[0] for call in manager._process_registry.unregister.call_args_list} == {
+            owner.root_pid,
+            41020,
+        }
 
     def test_old_run_event_cannot_mutate_current_manager_state(self):
         """Buffered events from an old adapter run cannot revive the current session state."""
@@ -512,6 +905,65 @@ class TestSessionManagerTransportFences:
                 await manager.attach(process_id=1234)
 
         assert manager.state.state is DebugState.TERMINATED
+
+    @pytest.mark.asyncio
+    async def test_attach_serializes_start_and_completion_against_prebuild(self, tmp_path):
+        """Pre-build cannot interleave after attach starts its adapter generation."""
+        project = tmp_path / "App.csproj"
+        project.touch()
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+
+        sync_started = asyncio.Event()
+        release_sync = asyncio.Event()
+        client = MagicMock()
+        client.is_running = False
+        client.adapter_owner = None
+        client.adapter_pid = None
+
+        async def start(*, generation: object) -> object:
+            client.is_running = True
+            return generation
+
+        async def initialize() -> None:
+            manager._initialized_event.set()
+
+        async def sync_breakpoints() -> None:
+            sync_started.set()
+            await release_sync.wait()
+
+        client.start = AsyncMock(side_effect=start)
+        client.initialize = AsyncMock(side_effect=initialize)
+        client.set_exception_breakpoints = AsyncMock()
+        client.attach = AsyncMock(
+            return_value=DAPResponse(seq=1, request_seq=1, success=True, command="attach")
+        )
+        client.configuration_done = AsyncMock(
+            return_value=DAPResponse(
+                seq=2, request_seq=2, success=True, command="configurationDone"
+            )
+        )
+        manager._client = client
+        manager._sync_all_breakpoints = sync_breakpoints
+        prebuild = AsyncMock(return_value=MagicMock(success=True))
+        manager._build_manager.pre_launch_build = prebuild
+
+        attach_task = asyncio.create_task(manager.attach(process_id=1234))
+        prebuild_task: asyncio.Task[object] | None = None
+        try:
+            await asyncio.wait_for(sync_started.wait(), timeout=1.0)
+            prebuild_task = asyncio.create_task(manager.pre_launch_build(str(project)))
+            await asyncio.sleep(0)
+
+            prebuild.assert_not_awaited()
+        finally:
+            release_sync.set()
+            await asyncio.wait_for(attach_task, timeout=1.0)
+            if prebuild_task is not None:
+                await asyncio.wait_for(prebuild_task, timeout=1.0)
+
+        client.start.assert_awaited_once_with(generation=1)
+        client.attach.assert_awaited_once_with(1234, just_my_code=False)
 
 
 class TestBreakpointOperations:
@@ -1069,6 +1521,13 @@ class FakeLaunchClient:
         self.capabilities: dict[str, object] = {}
         self.events: list[str] = []
         self.hot_reload_enabled: bool | None = None
+        self.adapter_owner: OwnedProcessRef | None = None
+
+    def set_transport_terminal_handler(self, _handler) -> None:
+        pass
+
+    def on_event(self, _event, _handler) -> None:
+        pass
 
     async def set_hot_reload(self, enable: bool) -> DAPResponse:
         self.events.append("set_hot_reload")
@@ -1090,3 +1549,635 @@ class FakeLaunchClient:
     async def configuration_done(self) -> DAPResponse:
         self.events.append("configuration_done")
         return DAPResponse(1, 1, True, "configurationDone")
+
+
+class TestOwnerScopedPublicRouteRedMatrix:
+    """RED controls for public Python launch and pre-build route preservation."""
+
+    @pytest.mark.asyncio
+    async def test_c1_direct_python_prebuild_false_still_requires_admitted_adapter(
+        self, tmp_path
+    ) -> None:
+        """C1: preserving ``pre_build=False`` must not preserve raw launch.
+
+        The public direct Python route keeps its name and no-build behavior,
+        while its adapter must still be admitted before it can execute.  The
+        controlled DAP process exercises current launch rather than checking
+        for a planned type name.
+        """
+
+        class DirectRouteClient(DAPClient):
+            def __init__(self, initialized: asyncio.Event) -> None:
+                super().__init__("/path/to/netcoredbg")
+                self._initialized = initialized
+
+            async def initialize(self) -> dict[str, object]:
+                self._initialized.set()
+                return {}
+
+            async def set_exception_breakpoints(
+                self, filters: list[str] | None = None
+            ) -> DAPResponse:
+                return DAPResponse(1, 1, True, "setExceptionBreakpoints")
+
+            async def launch(
+                self,
+                program: str,
+                cwd: str | None = None,
+                args: list[str] | None = None,
+                env: dict[str, str | None] | None = None,
+                stop_at_entry: bool = False,
+                just_my_code: bool = False,
+            ) -> DAPResponse:
+                return DAPResponse(1, 1, True, "launch")
+
+            async def configuration_done(self) -> DAPResponse:
+                return DAPResponse(1, 1, True, "configurationDone")
+
+            async def disconnect(self, terminate: bool = True) -> DAPResponse:
+                return DAPResponse(1, 1, True, "disconnect")
+
+        program = tmp_path / "App.dll"
+        program.write_bytes(b"")
+        process = TreeProcess(
+            pid=45001,
+            stdout=BlockingStream(),
+            stderr=BlockingStream(),
+        )
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+        client = DirectRouteClient(manager._initialized_event)
+        manager._client = client
+        manager.check_dbgshim_compatibility = MagicMock(return_value=None)
+
+        with (
+            patch(
+                "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch",
+                return_value=OwnedCommandProcess(process, "c1"),
+            ),
+            patch(
+                "netcoredbg_mcp.session.manager.detect_enc_support",
+                return_value={"supported": False, "ncdbhook_path": None, "error": None},
+            ),
+        ):
+            await manager.launch(program=str(program), pre_build=False)
+            await manager.stop()
+
+        assert process.child_alive is False, (
+            "direct Python pre_build=False preserves an unadmitted adapter descendant"
+        )
+
+    @pytest.mark.asyncio
+    async def test_c2_start_and_restart_prebuild_capture_an_owner_before_build(
+        self, tmp_path
+    ) -> None:
+        """C2: start/restart keep their route but delegate an explicit owner.
+
+        The owner remains private to the public tool envelope.  Internally,
+        both start-with-prebuild and restart-with-rebuild must capture it before
+        restore/build.  Current delegation invokes ``BuildManager`` without any
+        owner, which cannot distinguish a stale generation from a foreign one.
+        """
+
+        program = tmp_path / "App.dll"
+        project = tmp_path / "App.csproj"
+        program.write_bytes(b"")
+        project.touch()
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+        fake_client = FakeLaunchClient()
+        manager._client = fake_client
+        generation = "c2"
+        owner = OwnedProcessRef("owner-c2", generation, 45002)
+        fake_client.adapter_owner = owner
+        fake_client.adapter_pid = None
+        fake_client.disconnect = AsyncMock()
+
+        async def stop_client(**kwargs):
+            fake_client.is_running = False
+            expected_owner = kwargs.get("expected_owner")
+            return OwnerDrainReceipt(
+                owner=expected_owner or owner,
+                status=DrainStatus.DRAINED,
+                forced=False,
+                root_returncode=0,
+                active_processes=0,
+            )
+
+        async def start_client(*, generation):
+            fake_client.is_running = True
+            fake_client.adapter_owner = OwnedProcessRef("owner-c2-restart", generation, 45003)
+            return generation
+
+        async def initialize_client():
+            manager._initialized_event.set()
+
+        fake_client.stop = AsyncMock(side_effect=stop_client)
+        fake_client.start = AsyncMock(side_effect=start_client)
+        fake_client.initialize = AsyncMock(side_effect=initialize_client)
+        manager._active_dap_run = generation
+        manager._initialized_event.set()
+        manager.check_dbgshim_compatibility = MagicMock(return_value=None)
+        prebuild = AsyncMock(return_value=MagicMock(success=True))
+        manager._build_manager.pre_launch_build = prebuild
+
+        with patch(
+            "netcoredbg_mcp.session.manager.detect_enc_support",
+            return_value={"supported": False, "ncdbhook_path": None, "error": None},
+        ):
+            await manager.launch(
+                program=str(program),
+                pre_build=True,
+                build_project=str(project),
+            )
+            await manager.restart(rebuild=True)
+
+        owners = [call.kwargs["owner"] for call in prebuild.await_args_list]
+        assert len(owners) == 2
+        assert all(isinstance(value, OwnedAdapterCleanup) for value in owners)
+        assert owners[0].owner == owner
+        assert owners[1].owner.owner_id == "owner-c2-restart"
+        assert owners[1].owner.generation == 1
+
+    @pytest.mark.asyncio
+    async def test_c2_failed_active_owner_drain_blocks_prebuild(self, tmp_path) -> None:
+        """A failed active-owner drain must not be erased before the build gate."""
+
+        program = tmp_path / "App.dll"
+        project = tmp_path / "App.csproj"
+        program.write_bytes(b"")
+        project.touch()
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+        generation = "failed-owner"
+        owner = OwnedProcessRef("owner-failed", generation, 45006)
+        receipt = OwnerDrainReceipt(
+            owner=owner,
+            status=DrainStatus.FAILED,
+            forced=True,
+            root_returncode=None,
+            active_processes=None,
+        )
+        client = FakeLaunchClient()
+        client.adapter_owner = owner
+        client.adapter_pid = None
+        lifecycle: list[str] = []
+
+        async def disconnect(*, terminate: bool) -> None:
+            assert terminate is True
+            lifecycle.append("disconnect")
+
+        async def stop(
+            *,
+            expected_owner: OwnedProcessRef | None = None,
+        ) -> OwnerDrainReceipt | None:
+            if expected_owner is None:
+                lifecycle.append("general-stop")
+                return None
+            assert expected_owner == owner
+            lifecycle.append("owner-finalizer")
+            return receipt
+
+        client.disconnect = AsyncMock(side_effect=disconnect)
+        client.stop = AsyncMock(side_effect=stop)
+        manager._client = client
+        manager._active_dap_run = generation
+        manager._state.state = DebugState.RUNNING
+        build_session = manager._build_manager.get_session(str(tmp_path))
+        build_session.restore = AsyncMock(return_value=MagicMock(success=True))
+        build_session.build = AsyncMock(side_effect=AssertionError("build invoked"))
+
+        with pytest.raises(PreBuildOwnerError, match="did not drain"):
+            await manager.launch(
+                program=str(program),
+                pre_build=True,
+                build_project=str(project),
+            )
+
+        build_session.restore.assert_not_awaited()
+        build_session.build.assert_not_awaited()
+        assert client.stop.await_args_list[0].kwargs == {"expected_owner": owner}
+        assert lifecycle[:2] == ["disconnect", "owner-finalizer"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("lifecycle_state", [DebugState.RUNNING, DebugState.TERMINATED])
+    async def test_restart_rebuild_preserves_failed_owner_receipt_for_build_gate(
+        self, tmp_path, lifecycle_state: DebugState
+    ) -> None:
+        """Restart retains a failed owner receipt from running or terminal state."""
+
+        program = tmp_path / "App.dll"
+        project = tmp_path / "App.csproj"
+        program.write_bytes(b"")
+        project.touch()
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+        generation = "restart-failed-owner"
+        owner = OwnedProcessRef("owner-restart-failed", generation, 45007)
+        receipt = OwnerDrainReceipt(
+            owner=owner,
+            status=DrainStatus.FAILED,
+            forced=True,
+            root_returncode=None,
+            active_processes=None,
+        )
+        lifecycle: list[str] = []
+
+        async def disconnect(*, terminate: bool) -> None:
+            assert terminate is True
+            lifecycle.append("disconnect")
+
+        async def stop(
+            *,
+            expected_owner: OwnedProcessRef | None = None,
+        ) -> OwnerDrainReceipt | None:
+            if expected_owner is None:
+                lifecycle.append("general-stop")
+                return None
+            assert expected_owner == owner
+            lifecycle.append("owner-finalizer")
+            return receipt
+
+        client = FakeLaunchClient()
+        client.is_running = False
+        client.adapter_owner = owner
+        client.adapter_pid = None
+        client.disconnect = AsyncMock(side_effect=disconnect)
+        client.stop = AsyncMock(side_effect=stop)
+        manager._client = client
+        manager._active_dap_run = generation
+        manager._state.state = lifecycle_state
+        manager._last_launch_config = {
+            "program": str(program),
+            "cwd": None,
+            "args": None,
+            "env": None,
+            "stop_at_entry": False,
+            "pre_build": True,
+            "build_project": str(project),
+            "build_configuration": "Debug",
+            "stealth_mode": False,
+        }
+        build_session = manager._build_manager.get_session(str(tmp_path))
+        build_session.restore = AsyncMock(return_value=MagicMock(success=True))
+        build_session.build = AsyncMock(side_effect=AssertionError("build invoked"))
+
+        with pytest.raises(PreBuildOwnerError, match="did not drain"):
+            await manager.restart(rebuild=True)
+
+        build_session.restore.assert_not_awaited()
+        build_session.build.assert_not_awaited()
+        assert lifecycle == ["disconnect", "owner-finalizer"]
+        client.stop.assert_awaited_once_with(expected_owner=owner)
+
+    @pytest.mark.asyncio
+    async def test_owner_gate_serializes_adapter_start_through_restore_and_build(
+        self, tmp_path
+    ) -> None:
+        """A new adapter may not enter admission until the owner-gated build is complete."""
+
+        project = tmp_path / "App.csproj"
+        project.touch()
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+        generation = "prebuild-owner"
+        owner = OwnedProcessRef("owner-prebuild", generation, 45008)
+        receipt = OwnerDrainReceipt(
+            owner=owner,
+            status=DrainStatus.DRAINED,
+            forced=False,
+            root_returncode=0,
+            active_processes=0,
+        )
+        events: list[str] = []
+        build_started = asyncio.Event()
+        release_build = asyncio.Event()
+        adapter_start = asyncio.Event()
+
+        async def disconnect(*, terminate: bool) -> None:
+            assert terminate is True
+            events.append("disconnect")
+
+        async def stop(*, expected_owner: OwnedProcessRef | None = None) -> OwnerDrainReceipt:
+            assert expected_owner == owner
+            events.append("owner-finalizer")
+            return receipt
+
+        async def restore(*_args, **_kwargs):
+            events.append("restore")
+            return MagicMock(success=True)
+
+        async def build(*_args, **_kwargs):
+            events.append("build")
+            build_started.set()
+            await release_build.wait()
+            return MagicMock(success=True)
+
+        async def start(*, generation: object) -> object:
+            events.append("adapter-start")
+            adapter_start.set()
+            return generation
+
+        client = MagicMock()
+        client.is_running = False
+        client.adapter_owner = owner
+        client.adapter_pid = None
+        client.disconnect = AsyncMock(side_effect=disconnect)
+        client.stop = AsyncMock(side_effect=stop)
+        client.start = start
+        client.initialize = AsyncMock()
+        manager._client = client
+        manager._active_dap_run = generation
+        build_session = manager._build_manager.get_session(str(tmp_path))
+        build_session.restore = restore
+        build_session.build = build
+
+        prebuild_task = asyncio.create_task(manager.pre_launch_build(str(project)))
+        start_task: asyncio.Task[None] | None = None
+        try:
+            await asyncio.wait_for(build_started.wait(), timeout=1.0)
+            start_task = asyncio.create_task(manager.start())
+            await asyncio.sleep(0)
+
+            assert adapter_start.is_set() is False
+        finally:
+            release_build.set()
+            await asyncio.wait_for(prebuild_task, timeout=1.0)
+            if start_task is not None:
+                await asyncio.wait_for(start_task, timeout=1.0)
+
+        assert events == ["disconnect", "owner-finalizer", "restore", "build", "adapter-start"]
+
+    @pytest.mark.asyncio
+    async def test_no_owner_prebuild_passes_explicit_variant(self, tmp_path) -> None:
+        """A manager without an admitted adapter delegates NoOwnedAdapter."""
+        project = tmp_path / "App.csproj"
+        project.touch()
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+        prebuild = AsyncMock(return_value=MagicMock(success=True))
+        manager._build_manager.pre_launch_build = prebuild
+        manager._active_dap_run = None
+
+        await manager.pre_launch_build(str(project))
+
+        captured = prebuild.await_args
+        assert captured is not None
+        assert isinstance(captured.kwargs["owner"], NoOwnedAdapter)
+
+    @pytest.mark.asyncio
+    async def test_active_adapter_admission_serializes_prebuild_before_build(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A pre-build waits for suspended adapter admission before it can start a command."""
+
+        project = tmp_path / "App.csproj"
+        project.touch()
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+        admitted = asyncio.Event()
+        release = asyncio.Event()
+
+        async def start(*, generation: object) -> object:
+            admitted.set()
+            await release.wait()
+            return generation
+
+        client = MagicMock()
+        client.is_running = False
+        client.adapter_owner = None
+        client.adapter_pid = None
+        client.start = start
+        client.initialize = AsyncMock()
+        manager._client = client
+        prebuild = AsyncMock(return_value=MagicMock(success=True))
+        manager._build_manager.pre_launch_build = prebuild
+        monkeypatch.setattr("netcoredbg_mcp.session.manager.os.name", "nt")
+        start_task = asyncio.create_task(manager.start())
+        prebuild_task = None
+        try:
+            await asyncio.wait_for(admitted.wait(), timeout=1.0)
+            prebuild_task = asyncio.create_task(manager.pre_launch_build(str(project)))
+            await asyncio.sleep(0)
+
+            assert prebuild_task.done() is False
+            prebuild.assert_not_awaited()
+        finally:
+            release.set()
+            await asyncio.wait_for(start_task, timeout=1.0)
+            if prebuild_task is not None and prebuild_task.done():
+                prebuild_task.exception()
+
+        assert prebuild_task is not None
+        await asyncio.wait_for(prebuild_task, timeout=1.0)
+        prebuild.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_overlapping_starts_serialize_admission_and_prebuild(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A second start and a pre-build wait for the current lifecycle transition."""
+
+        project = tmp_path / "App.csproj"
+        project.touch()
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+        first_started = asyncio.Event()
+        first_release = asyncio.Event()
+        second_started = asyncio.Event()
+        second_release = asyncio.Event()
+
+        async def start(*, generation: object) -> object:
+            if generation == 1:
+                first_started.set()
+                await first_release.wait()
+            elif generation == 2:
+                second_started.set()
+                await second_release.wait()
+            else:
+                raise AssertionError(f"unexpected generation: {generation!r}")
+            return generation
+
+        client = MagicMock()
+        client.is_running = False
+        client.adapter_owner = None
+        client.adapter_pid = None
+        client.start = start
+        client.initialize = AsyncMock()
+        manager._client = client
+        prebuild = AsyncMock(return_value=MagicMock(success=True))
+        manager._build_manager.pre_launch_build = prebuild
+        monkeypatch.setattr("netcoredbg_mcp.session.manager.os.name", "nt")
+        first_start = asyncio.create_task(manager.start())
+        second_start = None
+        prebuild_task = None
+        try:
+            await asyncio.wait_for(first_started.wait(), timeout=1.0)
+            second_start = asyncio.create_task(manager.start())
+            await asyncio.sleep(0)
+            assert second_started.is_set() is False
+
+            first_release.set()
+            await asyncio.wait_for(first_start, timeout=1.0)
+            await asyncio.wait_for(second_started.wait(), timeout=1.0)
+
+            prebuild_task = asyncio.create_task(manager.pre_launch_build(str(project)))
+            await asyncio.sleep(0)
+            assert prebuild_task.done() is False
+            prebuild.assert_not_awaited()
+        finally:
+            first_release.set()
+            second_release.set()
+            await asyncio.wait_for(first_start, timeout=1.0)
+            if second_start is not None:
+                await asyncio.wait_for(second_start, timeout=1.0)
+            if prebuild_task is not None and prebuild_task.done():
+                prebuild_task.exception()
+
+        assert prebuild_task is not None
+        await asyncio.wait_for(prebuild_task, timeout=1.0)
+        prebuild.assert_awaited_once()
+
+    def test_non_windows_active_adapter_has_no_owner_variant(self) -> None:
+        """A current generation without an active Windows admission stays no-owner."""
+
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+        manager._client = MagicMock(adapter_owner=None)
+        manager._active_dap_run = "posix-generation"
+
+        assert isinstance(manager.capture_prebuild_owner(), NoOwnedAdapter)
+
+    @pytest.mark.asyncio
+    async def test_stale_capture_cannot_touch_a_newer_adapter(self) -> None:
+        """A stale handoff has no disconnect, stop, or state-changing effect."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+        generation = "generation-a"
+        owner = OwnedProcessRef("owner-a", generation, 45003)
+        source = MagicMock()
+        source.adapter_owner = owner
+        source.disconnect = AsyncMock()
+        source.stop = AsyncMock()
+        manager._client = source
+        manager._active_dap_run = generation
+
+        captured = manager.capture_prebuild_owner()
+        assert isinstance(captured, OwnedAdapterCleanup)
+
+        manager._client = MagicMock()
+        manager._active_dap_run = "generation-b"
+        receipt = await captured.drain()
+
+        assert receipt.status is DrainStatus.STALE
+        source.disconnect.assert_not_awaited()
+        source.stop.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_failed_ordinary_stop_retains_owner_for_prebuild_and_retry(self, tmp_path):
+        """A non-drained ordinary stop must leave its owner visible to later callers."""
+        project = tmp_path / "App.csproj"
+        project.touch()
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+
+        generation = "failed-ordinary-stop"
+        owner = OwnedProcessRef("failed-owner", generation, 45009)
+        receipt = OwnerDrainReceipt(
+            owner=owner,
+            status=DrainStatus.FAILED,
+            forced=True,
+            root_returncode=None,
+            active_processes=None,
+        )
+        client = MagicMock()
+        client.is_running = False
+        client.adapter_owner = owner
+        client.adapter_pid = 45009
+        client.disconnect = AsyncMock()
+        client.stop = AsyncMock(return_value=receipt)
+        manager._client = client
+        manager._active_dap_run = generation
+        manager._state.state = DebugState.RUNNING
+        manager._process_registry.unregister = MagicMock()
+        build_session = manager._build_manager.get_session(str(tmp_path))
+        build_session.restore = AsyncMock(
+            side_effect=AssertionError("restore invoked after failed owner drain")
+        )
+        build_session.build = AsyncMock(
+            side_effect=AssertionError("build invoked after failed owner drain")
+        )
+
+        with pytest.raises(RuntimeError, match="owner did not drain"):
+            await manager.stop()
+
+        assert manager._active_dap_run == generation
+        assert manager._stopping_dap_run is None
+        assert manager.state.state is DebugState.RUNNING
+        manager._process_registry.unregister.assert_not_called()
+
+        with pytest.raises(PreBuildOwnerError, match="did not drain"):
+            await manager.pre_launch_build(str(project))
+        build_session.restore.assert_not_awaited()
+        build_session.build.assert_not_awaited()
+
+        with pytest.raises(RuntimeError, match="owner did not drain"):
+            await manager.stop()
+
+        assert [call.kwargs for call in client.stop.await_args_list] == [
+            {"expected_owner": owner},
+            {"expected_owner": owner},
+            {"expected_owner": owner},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_stop_unregisters_observations_without_registry_termination(self) -> None:
+        """Normal stop leaves retained-owner cleanup to the DAP finalizer."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+        client = MagicMock()
+        client.adapter_pid = 45004
+        client.is_running = False
+        client.adapter_owner = None
+
+        client.stop = AsyncMock()
+        manager._client = client
+        manager._state.process_id = 45005
+        manager._process_registry.cleanup_all = MagicMock()
+        manager._process_registry.unregister = MagicMock()
+
+        result = await manager.stop()
+
+        assert result == {"success": True}
+
+        manager._process_registry.cleanup_all.assert_not_called()
+        assert {call.args[0] for call in manager._process_registry.unregister.call_args_list} == {
+            45004,
+            45005,
+        }
+
+    def test_terminal_adapter_pid_is_unregistered_without_explicit_stop(self) -> None:
+        """Terminal publication clears the exact adapter observation after a crash."""
+
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+        generation = "crashed-adapter"
+        client = MagicMock()
+        manager._client = client
+        manager._active_dap_run = generation
+        manager._state.process_id = 41012
+
+        manager._process_registry.unregister = MagicMock()
+        manager._process_registry.cleanup_all = MagicMock()
+
+        manager._on_transport_terminal(client, _natural_exit_terminal(generation))
+
+        manager._process_registry.cleanup_all.assert_not_called()
+        assert {call.args[0] for call in manager._process_registry.unregister.call_args_list} == {
+            41011,
+            41012,
+        }

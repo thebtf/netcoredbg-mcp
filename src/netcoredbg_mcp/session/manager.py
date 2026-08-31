@@ -13,6 +13,13 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from ..build import BuildManager, BuildResult
+from ..build.cleanup import (
+    NoOwnedAdapter,
+    OwnedAdapterCleanup,
+    PreBuildOwner,
+    PreBuildOwnerError,
+    PreBuildOwnerOutcome,
+)
 from ..dap import DAPClient, DAPEvent, DAPResponse
 from ..dap.client import DapTransportTerminal, sanitize_terminal_tail
 from ..dap.events import (
@@ -45,6 +52,7 @@ from ..ui.foreground import (
 )
 from ..ui.temp_manager import SessionTempManager
 from ..utils.version import check_version_compatibility
+from ..windows_process_owner import DrainStatus, OwnedProcessRef, OwnerDrainReceipt
 from .hygiene import RuntimeHygieneService
 from .instrumentation import InstrumentationGroupService
 from .output_assertions import OutputAssertionService
@@ -117,6 +125,7 @@ class SessionManager:
         self._last_version_warning: str | None = None  # dbgshim version mismatch warning
         self._session_id: str | None = None
         self._stealth_mode = False
+        self._lifecycle_lock = asyncio.Lock()
         self._quick_eval_lock = asyncio.Lock()
         self._runtime_smoke = RuntimeSmokeSession()
         self._worktree_cache_map: dict[str, list[str]] = {}
@@ -141,6 +150,7 @@ class SessionManager:
         self._dap_generation_counter = 0
         self._active_dap_run: object | None = None
         self._stopping_dap_run: object | None = None
+        self._windows_adapter_admission_generation: object | None = None
 
     def _create_session_state(self, state: DebugState = DebugState.IDLE) -> SessionState:
         session_state = SessionState(state=state)
@@ -832,7 +842,13 @@ class SessionManager:
             self._set_state(previous_state)
 
     async def start(self) -> None:
-        """Start one manager-issued adapter generation and initialize DAP.
+        """Start one manager-issued adapter generation and initialize DAP."""
+
+        async with self._lifecycle_lock:
+            await self._start_locked()
+
+    async def _start_locked(self) -> None:
+        """Start one adapter generation while the lifecycle gate excludes pre-build work.
 
         The manager binds the generation and terminal sink before awaiting
         process startup. That ordering closes the early-EOF window: even an
@@ -842,6 +858,7 @@ class SessionManager:
 
         if self._client.is_running:
             return
+        await self._reconcile_retained_owner_before_admission_locked()
         self._initialized_event.clear()
         if self._state.state == DebugState.TERMINATED:
             self._begin_debuggee_epoch(lifecycle_state=DebugState.IDLE)
@@ -853,21 +870,36 @@ class SessionManager:
         self._stopping_dap_run = None
         self._state.transport_terminal = None
 
+        if os.name == "nt":
+            self._windows_adapter_admission_generation = generation
         try:
             returned_generation = await self._client.start(generation=generation)
         except Exception:
             if self._active_dap_run == generation:
                 self._active_dap_run = None
             raise
+        finally:
+            if self._windows_adapter_admission_generation == generation:
+                self._windows_adapter_admission_generation = None
 
         if returned_generation != generation:
-            await self._client.stop()
-            self._active_dap_run = None
+            owner = self._client.adapter_owner
+            expected_owner = owner if isinstance(owner, OwnedProcessRef) else None
+            if expected_owner is not None:
+                receipt = await self._client.stop(expected_owner=expected_owner)
+            else:
+                receipt = await self._client.stop()
+            if self._owner_receipt_releases_generation(receipt, expected_owner=expected_owner):
+                self._active_dap_run = None
             raise RuntimeError("DAP client returned a mismatched adapter generation")
         if self._state.state == DebugState.TERMINATED:
-            try:
-                await self._client.stop()
-            finally:
+            owner = self._client.adapter_owner
+            expected_owner = owner if isinstance(owner, OwnedProcessRef) else None
+            if expected_owner is not None:
+                receipt = await self._client.stop(expected_owner=expected_owner)
+            else:
+                receipt = await self._client.stop()
+            if self._owner_receipt_releases_generation(receipt, expected_owner=expected_owner):
                 if self._active_dap_run == generation:
                     self._active_dap_run = None
             raise RuntimeError("netcoredbg terminated during startup")
@@ -934,6 +966,15 @@ class SessionManager:
         if active_generation is None:
             self._active_dap_run = terminal.generation
 
+        observed_pids = dict.fromkeys(
+            pid
+            for pid in (terminal.adapter_pid, self._state.process_id)
+            if isinstance(pid, int) and pid > 0
+        )
+        for pid in observed_pids:
+            # Terminal facts identify registry observations only. Unregistering
+            # never reopens a PID or grants termination authority.
+            self._process_registry.unregister(pid)
         last_event_seq: int | None = None
         last_event_name: str | None = None
         if terminal.last_dap_event is not None:
@@ -1594,6 +1635,174 @@ class SessionManager:
 
             return result
 
+    def capture_prebuild_owner(self) -> PreBuildOwner:
+        """Capture one generation-bound adapter capability for a pre-build call."""
+        source_client = self._client
+        generation = self._active_dap_run
+        if generation is None:
+            return NoOwnedAdapter()
+
+        owner = source_client.adapter_owner
+        if owner is None or owner.generation != generation:
+            if self._windows_adapter_admission_generation == generation:
+                raise RuntimeError("adapter admission is in progress")
+            return NoOwnedAdapter()
+
+        # Capture all three fencing facts in this synchronous turn. They are not
+        # authority by themselves. The callback rechecks them before asking the
+        # DAP client to join its retained-owner finalizer.
+        async def drain(expected: OwnedProcessRef) -> OwnerDrainReceipt:
+            return await self._stop_owned_adapter(source_client, generation, expected)
+
+        return OwnedAdapterCleanup(owner=owner, _drain=drain)
+
+    @staticmethod
+    def _owner_receipt_releases_generation(
+        receipt: OwnerDrainReceipt | None,
+        *,
+        expected_owner: OwnedProcessRef | None = None,
+    ) -> bool:
+        """Whether finalization proved that no retained owner remains."""
+
+        if expected_owner is None:
+            return receipt is None or (
+                receipt.status is DrainStatus.DRAINED and receipt.active_processes == 0
+            )
+        return (
+            receipt is not None
+            and receipt.owner == expected_owner
+            and receipt.status is DrainStatus.DRAINED
+            and receipt.active_processes == 0
+        )
+
+    async def _reconcile_retained_owner_before_admission_locked(self) -> None:
+        """Join a retained terminal owner before a new generation can replace it."""
+        retained_generation = self._active_dap_run
+        if retained_generation is None:
+            return
+        owner = self._client.adapter_owner
+        if not isinstance(owner, OwnedProcessRef):
+            return
+        if owner.generation != retained_generation:
+            raise RuntimeError("Retained adapter owner generation does not match session state")
+
+        try:
+            receipt = await self._client.stop(expected_owner=owner)
+        except Exception as error:
+            logger.warning("Retained adapter owner finalization failed before admission: %s", error)
+            raise RuntimeError(
+                "Retained adapter owner finalization failed before admission"
+            ) from error
+
+        if not self._owner_receipt_releases_generation(receipt, expected_owner=owner):
+            status = "missing" if receipt is None else receipt.status.value
+            active_processes = None if receipt is None else receipt.active_processes
+            raise RuntimeError(
+                "Retained adapter owner did not drain before admission "
+                f"(status={status}, active={active_processes})"
+            )
+        if self._active_dap_run == owner.generation:
+            self._active_dap_run = None
+
+    async def _join_owned_adapter_finalizer(
+        self,
+        source_client: DAPClient,
+        generation: object,
+        expected: OwnedProcessRef,
+        *,
+        request_disconnect: bool,
+        propagate_disconnect_cancellation: bool,
+    ) -> tuple[OwnerDrainReceipt, bool]:
+        """Fence one owner, finish its elected finalizer, and preserve caller cancellation."""
+        if (
+            self._client is not source_client
+            or self._active_dap_run != generation
+            or source_client.adapter_owner != expected
+        ):
+            return (
+                OwnerDrainReceipt(
+                    owner=expected,
+                    status=DrainStatus.STALE,
+                    forced=False,
+                    root_returncode=None,
+                    active_processes=None,
+                ),
+                False,
+            )
+
+        cancelled = False
+        if request_disconnect:
+            disconnect_task = asyncio.create_task(source_client.disconnect(terminate=True))
+            while True:
+                try:
+                    await asyncio.shield(disconnect_task)
+                    break
+                except asyncio.CancelledError:
+                    if disconnect_task.cancelled():
+                        if propagate_disconnect_cancellation:
+                            raise
+                        logger.warning(
+                            "Expected adapter disconnect was cancelled before finalization"
+                        )
+                        break
+                    cancelled = True
+                except Exception as error:
+                    logger.warning("Expected adapter disconnect failed: %s", error)
+                    break
+
+        stop_task = asyncio.create_task(source_client.stop(expected_owner=expected))
+        while True:
+            try:
+                receipt = await asyncio.shield(stop_task)
+                break
+            except asyncio.CancelledError:
+                if stop_task.cancelled():
+                    raise
+                cancelled = True
+            except Exception as error:
+                logger.warning("Expected adapter owner drain failed: %s", error)
+                return (
+                    OwnerDrainReceipt(
+                        owner=expected,
+                        status=DrainStatus.FAILED,
+                        forced=False,
+                        root_returncode=None,
+                        active_processes=None,
+                    ),
+                    cancelled,
+                )
+
+        if receipt is None:
+            receipt = OwnerDrainReceipt(
+                owner=expected,
+                status=DrainStatus.FAILED,
+                forced=False,
+                root_returncode=None,
+                active_processes=None,
+            )
+        return receipt, cancelled
+
+    async def _stop_owned_adapter(
+        self,
+        source_client: DAPClient,
+        generation: object,
+        expected: OwnedProcessRef,
+    ) -> OwnerDrainReceipt:
+        """Request graceful DAP shutdown, then join the matching owner finalizer."""
+        receipt, cancelled = await self._join_owned_adapter_finalizer(
+            source_client,
+            generation,
+            expected,
+            request_disconnect=True,
+            propagate_disconnect_cancellation=False,
+        )
+        if self._owner_receipt_releases_generation(receipt, expected_owner=expected):
+            if self._active_dap_run == generation:
+                self._active_dap_run = None
+        if cancelled:
+            raise asyncio.CancelledError
+        return receipt
+
     async def pre_launch_build(
         self,
         project_file: str,
@@ -1619,16 +1828,38 @@ class SessionManager:
             BuildError: If build fails
             ValueError: If project path is invalid or outside scope
         """
+
+        async with self._lifecycle_lock:
+            owner = self.capture_prebuild_owner()
+            return await self._pre_launch_build_with_owner_locked(
+                project_file=project_file,
+                owner=owner,
+                configuration=configuration,
+                restore_first=restore_first,
+                timeout=timeout,
+                output_callback=output_callback,
+            )
+
+    async def _pre_launch_build_with_owner_locked(
+        self,
+        *,
+        project_file: str,
+        owner: PreBuildOwner,
+        configuration: str,
+        restore_first: bool,
+        timeout: float,
+        output_callback: Callable[[str, str], Awaitable[None]] | None,
+    ) -> BuildResult:
+        """Run pre-build with an owner captured before any session state reset."""
+
         if not self._project_path:
             raise ValueError("Project path not set for pre-launch build")
 
-        # Validate project file path
         validated_project = self.validate_path(project_file, must_exist=True)
-
-        # Run pre-launch build
         result = await self._build_manager.pre_launch_build(
             workspace_root=self._project_path,
             project_path=validated_project,
+            owner=owner,
             configuration=configuration,
             restore_first=restore_first,
             timeout=timeout,
@@ -1636,6 +1867,55 @@ class SessionManager:
         )
         self._last_build_result = result
         return result
+
+    async def _prebuild_for_launch_locked(
+        self,
+        *,
+        program: str,
+        build_project: str,
+        build_configuration: str,
+        output_callback: Callable[[str, str], Awaitable[None]] | None,
+        stop_current_session: bool,
+    ) -> str:
+        """Drain the captured owner and finish restore/build before another admission."""
+
+        prebuild_owner = self.capture_prebuild_owner()
+        was_active = self.is_active
+        validated_owner_receipt: OwnerDrainReceipt | None = None
+        if was_active:
+            logger.info("[launch] stopping existing session before build")
+        # A terminalized DAP run can still retain its owner and final receipt.
+        # Drain/rebind every captured capability before generic stop clears the
+        # generation, not only sessions whose public state is currently active.
+        if isinstance(prebuild_owner, OwnedAdapterCleanup):
+            receipt = await prebuild_owner.drain()
+            prebuild_owner = prebuild_owner.with_receipt(receipt)
+            validated_owner_receipt = receipt
+            if receipt.status is not DrainStatus.DRAINED or receipt.active_processes != 0:
+                # Preserve the captured failed receipt as the build-gate error.
+                # Generic stop must not replace it with a missing/stale result.
+                raise PreBuildOwnerError(
+                    PreBuildOwnerOutcome(owner=prebuild_owner, receipt=receipt)
+                )
+
+        if was_active or stop_current_session:
+            await self._stop_locked(validated_owner_receipt=validated_owner_receipt)
+
+        logger.info("[launch] phase 2/9: dotnet build")
+        await self._pre_launch_build_with_owner_locked(
+            project_file=build_project,
+            owner=prebuild_owner,
+            configuration=build_configuration,
+            restore_first=True,
+            timeout=300.0,
+            output_callback=output_callback,
+        )
+
+        # Re-validate program path after build (now file should exist)
+        # Also apply smart .exe → .dll resolution for .NET 6+
+        program = self.validate_program(program, must_exist=True)
+        logger.info(f"[launch] post-build program path: {program}")
+        return program
 
     async def launch(
         self,
@@ -1650,6 +1930,38 @@ class SessionManager:
         stealth_mode: bool = False,
         progress_callback: Callable[[float, float, str], Awaitable[None]] | None = None,
         output_callback: Callable[[str, str], Awaitable[None]] | None = None,
+    ) -> dict[str, Any]:
+        """Launch program for debugging."""
+
+        async with self._lifecycle_lock:
+            return await self._launch_locked(
+                program=program,
+                cwd=cwd,
+                args=args,
+                env=env,
+                stop_at_entry=stop_at_entry,
+                pre_build=pre_build,
+                build_project=build_project,
+                build_configuration=build_configuration,
+                stealth_mode=stealth_mode,
+                progress_callback=progress_callback,
+                output_callback=output_callback,
+            )
+
+    async def _launch_locked(
+        self,
+        program: str,
+        cwd: str | None = None,
+        args: list[str] | None = None,
+        env: dict[str, str | None] | None = None,
+        stop_at_entry: bool = False,
+        pre_build: bool = False,
+        build_project: str | None = None,
+        build_configuration: str = "Debug",
+        stealth_mode: bool = False,
+        progress_callback: Callable[[float, float, str], Awaitable[None]] | None = None,
+        output_callback: Callable[[str, str], Awaitable[None]] | None = None,
+        _prebuilt_program: str | None = None,
     ) -> dict[str, Any]:
         """Launch program for debugging.
 
@@ -1686,30 +1998,20 @@ class SessionManager:
             if not build_project:
                 raise ValueError("build_project required when pre_build=True")
 
-            logger.info("[launch] phase 1/9: pre-build")
-            await report(0, 100, "Building project...")
-
-            # Stop existing session first to release file locks
-            if self.is_active:
-                logger.info("[launch] stopping existing session before build")
-                await self.stop()
-                # Give processes time to release file handles
-                await asyncio.sleep(0.5)
-
-            logger.info("[launch] phase 2/9: dotnet build")
-            await self.pre_launch_build(
-                project_file=build_project,
-                configuration=build_configuration,
-                output_callback=output_callback,
-            )
-
-            logger.info("[launch] phase 3/9: build complete")
-            await report(50, 100, "Build complete, starting debugger...")
-
-            # Re-validate program path after build (now file should exist)
-            # Also apply smart .exe → .dll resolution for .NET 6+
-            program = self.validate_program(program, must_exist=True)
-            logger.info(f"[launch] post-build program path: {program}")
+            if _prebuilt_program is None:
+                logger.info("[launch] phase 1/9: pre-build")
+                await report(0, 100, "Building project...")
+                program = await self._prebuild_for_launch_locked(
+                    program=program,
+                    build_project=build_project,
+                    build_configuration=build_configuration,
+                    output_callback=output_callback,
+                    stop_current_session=False,
+                )
+                logger.info("[launch] phase 3/9: build complete")
+                await report(50, 100, "Build complete, starting debugger...")
+            else:
+                program = _prebuilt_program
         else:
             await report(0, 100, "Starting debugger...")
 
@@ -1729,7 +2031,7 @@ class SessionManager:
 
         if not self._client.is_running:
             logger.info("[launch] phase 5/9: starting netcoredbg process")
-            await self.start()
+            await self._start_locked()
 
         dap_generation = self._active_dap_run
 
@@ -1810,9 +2112,14 @@ class SessionManager:
         return result
 
     async def attach(self, process_id: int) -> dict[str, Any]:
-        """Attach to running process."""
+        """Attach to a running process under the lifecycle serialization gate."""
+        async with self._lifecycle_lock:
+            return await self._attach_locked(process_id)
+
+    async def _attach_locked(self, process_id: int) -> dict[str, Any]:
+        """Complete attach while the caller holds the lifecycle serialization gate."""
         if not self._client.is_running:
-            await self.start()
+            await self._start_locked()
 
         dap_generation = self._active_dap_run
 
@@ -1847,21 +2154,69 @@ class SessionManager:
     async def stop(self) -> dict[str, Any]:
         """Stop the current session through one generation-scoped reset path."""
 
+        async with self._lifecycle_lock:
+            return await self._stop_locked()
+
+    async def _stop_locked(
+        self, validated_owner_receipt: OwnerDrainReceipt | None = None
+    ) -> dict[str, Any]:
+        """Stop one session without erasing an owner that did not drain."""
         stopping_generation = self._active_dap_run
+        owner = self._client.adapter_owner
+        joined_and_drained = False
+        cancelled = False
         self._stopping_dap_run = stopping_generation
+        observed_pids = tuple(
+            pid
+            for pid in (self._client.adapter_pid, self._state.process_id)
+            if isinstance(pid, int) and pid > 0
+        )
         try:
             # The explicit-stop marker suppresses only this generation's terminal
             # publication. Join foreground work inside the `try` so cancellation
             # cannot strand that marker and misclassify a delayed finalizer result.
             await self._cancel_stealth_foreground_restore_task()
-            if self._client.is_running:
-                try:
-                    await self._client.disconnect(terminate=True)
-                except Exception as error:
-                    logger.warning("Error during disconnect: %s", error)
-            await self._client.stop()
+            if isinstance(owner, OwnedProcessRef):
+                if validated_owner_receipt is None:
+                    effective_receipt, cancelled = await self._join_owned_adapter_finalizer(
+                        self._client,
+                        stopping_generation,
+                        owner,
+                        request_disconnect=self._client.is_running,
+                        propagate_disconnect_cancellation=True,
+                    )
+                else:
+                    effective_receipt = validated_owner_receipt
+                if not self._owner_receipt_releases_generation(
+                    effective_receipt,
+                    expected_owner=owner,
+                ):
+                    status = (
+                        "missing" if effective_receipt is None else effective_receipt.status.value
+                    )
+                    active_processes = (
+                        None if effective_receipt is None else effective_receipt.active_processes
+                    )
+                    raise RuntimeError(
+                        f"Adapter owner did not drain (status={status}, active={active_processes})"
+                    )
+            else:
+                if self._client.is_running:
+                    try:
+                        await self._client.disconnect(terminate=True)
+                    except Exception as error:
+                        logger.warning("Error during disconnect: %s", error)
+                await self._client.stop()
 
-            self._process_registry.cleanup_all()
+            # A no-owner platform path remains compatible. An admitted owner
+            # reaches here only after the finalizer's literal zero accounting.
+            joined_and_drained = True
+
+            # Registry records are observations only. Once the retained owner
+            # finalizer has completed, remove these exact status records without
+            # reopening a PID as termination authority.
+            for pid in observed_pids:
+                self._process_registry.unregister(pid)
 
             if self._session_id:
                 self._temp_manager.cleanup_session(self._session_id)
@@ -1880,9 +2235,14 @@ class SessionManager:
             self._state = self._create_session_state()
             self._output_bytes = 0
             self._publish_resource_updates(STATE_URI, THREADS_URI, OUTPUT_URI)
+            if cancelled:
+                raise asyncio.CancelledError
             return {"success": True}
         finally:
-            if self._active_dap_run == stopping_generation:
+            # Cancellation before joining the finalizer, and a nonzero receipt,
+            # both retain this generation's capability for a later retry or
+            # pre-build gate. Only a joined successful drain releases it.
+            if joined_and_drained and self._active_dap_run == stopping_generation:
                 self._active_dap_run = None
             if self._stopping_dap_run == stopping_generation:
                 self._stopping_dap_run = None
@@ -1903,24 +2263,32 @@ class SessionManager:
                          or if rebuild requested but no build_project configured
             BuildError: If rebuild fails
         """
-        if not self._last_launch_config:
-            raise RuntimeError("No previous launch configuration for restart")
+        async with self._lifecycle_lock:
+            if not self._last_launch_config:
+                raise RuntimeError("No previous launch configuration for restart")
 
-        config = self._last_launch_config.copy()
+            config = self._last_launch_config.copy()
+            build_project = config.get("build_project")
+            if rebuild and not build_project:
+                raise RuntimeError(
+                    "Cannot rebuild on restart: no build_project in saved configuration"
+                )
 
-        # Validate rebuild request - cannot rebuild without build_project
-        if rebuild and not config.get("build_project"):
-            raise RuntimeError("Cannot rebuild on restart: no build_project in saved configuration")
+            if rebuild:
+                config["pre_build"] = True
+                prebuilt_program = await self._prebuild_for_launch_locked(
+                    program=config["program"],
+                    build_project=str(build_project),
+                    build_configuration=config["build_configuration"],
+                    output_callback=None,
+                    stop_current_session=True,
+                )
+                return await self._launch_locked(**config, _prebuilt_program=prebuilt_program)
 
-        # Always stop existing session first to ensure clean state
-        # This is needed even when pre_build=False to avoid relaunch issues
-        await self.stop()
-
-        # Force pre_build if rebuild requested and we have build info
-        if rebuild and config.get("build_project"):
-            config["pre_build"] = True
-
-        return await self.launch(**config)
+            # Preserve the existing no-rebuild restart route, including an
+            # originally configured pre-build, while using the same lock.
+            await self._stop_locked()
+            return await self._launch_locked(**config)
 
     async def _enable_hot_reload_if_supported(self) -> None:
         enc_support = detect_enc_support(self.netcoredbg_path)
