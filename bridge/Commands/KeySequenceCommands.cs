@@ -141,8 +141,8 @@ public static class KeySequenceCommands
             .ToList();
         var parsedKeys = keys.Select(ParseKey).ToList();
         var focusResult = FocusTarget(selector, automation, mainWindow);
-        JsonNode releaseResult = new JsonObject { ["released"] = false };
-        JsonNode finalHeld = new JsonArray();
+        JsonNode releaseResult;
+        JsonNode finalHeld;
         var sent = new JsonArray();
         var scopedHeld = new List<(string Name, VirtualKeyShort Key)>();
         var focusVerified = focusResult["focused"]?.GetValue<bool>() == true;

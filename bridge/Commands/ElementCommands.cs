@@ -66,7 +66,7 @@ public static class ElementCommands
             if (rect.Width <= 0 || rect.Height <= 0)
                 return int.MinValue;
 
-            var score = Math.Min((int)(rect.Width * rect.Height / 10_000), 1_000);
+            var score = Math.Min(rect.Width * rect.Height / 10_000, 1_000);
             if (!string.IsNullOrWhiteSpace(SafeString(() => window.Name)))
                 score += 1_000;
             if (!string.IsNullOrWhiteSpace(SafeString(() => window.AutomationId)))
