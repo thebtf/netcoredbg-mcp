@@ -19,7 +19,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import xml.etree.ElementTree as ElementTree
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -43,8 +43,8 @@ SOLUTION_PROJECT_RE = re.compile(
     r'^Project\("[^"]+"\) = "([^"]+)", "([^"]+\.csproj)"', re.MULTILINE
 )
 ISSUE_STATUSES = "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED,FIXED,IN_SANDBOX"
-GENERATED_DIRECTORY_NAMES = {"bin", "obj"}
-GENERATED_ROOT_NAMES = {".sonarqube", ".scannerwork"}
+GENERATED_DIRECTORY_NAMES = {"__pycache__", "bin", "obj"}
+GENERATED_ROOT_NAMES = {".sonarqube", ".scannerwork", ".venv"}
 
 WAVE2_ENTRY_RELATIVE_PATH = "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json"
 WAVE2_RECEIPT_RELATIVE_PATH = "specs/013-owner-scoped-prebuild-cleanup/acceptance-receipt.md"
@@ -284,15 +284,23 @@ def _scanner_tree_metadata(path: Path) -> Any:
     return metadata
 
 
-def iter_scanner_tree(root: Path, pattern: str) -> Iterator[Path]:
+def iter_scanner_tree(
+    root: Path,
+    pattern: str,
+    *,
+    excluded_directory_names: Collection[str] = (),
+) -> Iterator[Path]:
     root_metadata = _scanner_tree_metadata(root)
     if not stat.S_ISDIR(getattr(root_metadata, "st_mode", 0)):
         return
+    excluded = {name.casefold() for name in excluded_directory_names}
     pending = [root]
     while pending:
         directory = pending.pop()
         try:
             for path in directory.iterdir():
+                if path.name.casefold() in excluded:
+                    continue
                 metadata = _scanner_tree_metadata(path)
                 if path.match(pattern):
                     yield path
@@ -895,7 +903,11 @@ def normalized_repository_relative_path(context: GitContext, path: Path) -> str:
 def clear_generated_artifacts(context: GitContext, environment: Mapping[str, str]) -> list[str]:
     """Delete only known ignored scanner/build output from the disposable worktree."""
     candidates = [context.repository_root / name for name in GENERATED_ROOT_NAMES]
-    for directory in iter_scanner_tree(context.repository_root, "*"):
+    for directory in iter_scanner_tree(
+        context.repository_root,
+        "*",
+        excluded_directory_names=GENERATED_ROOT_NAMES,
+    ):
         if directory.name in GENERATED_DIRECTORY_NAMES and directory.is_dir():
             candidates.append(directory)
     candidate_paths = [
@@ -929,6 +941,23 @@ def clear_generated_artifacts(context: GitContext, environment: Mapping[str, str
             ) from None
         removed.append(relative_path)
     return removed
+
+
+def prepare_worktree_python_environment(
+    context: GitContext,
+    environment: Mapping[str, str],
+    secrets: Iterable[str],
+) -> None:
+    child_environment = scrub_sonar_environment(environment)
+    child_environment.pop("VIRTUAL_ENV", None)
+    child_environment["UV_PROJECT_ENVIRONMENT"] = str(context.repository_root / ".venv")
+    run_process(
+        ["uv", "sync", "--locked", "--extra", "dev"],
+        cwd=context.repository_root,
+        environment=child_environment,
+        secrets=secrets,
+        label="Worktree Python environment",
+    )
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
@@ -2676,12 +2705,22 @@ def project_inventory(repository_root: Path) -> tuple[Path, list[Path], list[Pat
     ]
     if not solution_projects or any(not project.is_file() for project in solution_projects):
         raise RunnerError("Solution project inventory is incomplete.")
-    excluded_parts = {".git", ".agent", ".sonarqube", "bin", "obj", "fixtures", "test-app"}
+    excluded_parts = {
+        ".git",
+        ".agent",
+        ".sonarqube",
+        ".venv",
+        "bin",
+        "obj",
+        "fixtures",
+        "test-app",
+    }
     discovered_projects = {
         path.resolve()
-        for path in iter_scanner_tree(repository_root, "*.csproj")
-        if not excluded_parts.intersection(
-            part.lower() for part in path.relative_to(repository_root).parts
+        for path in iter_scanner_tree(
+            repository_root,
+            "*.csproj",
+            excluded_directory_names=excluded_parts,
         )
     }
     projects = sorted(
@@ -4388,6 +4427,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
             stage = "SCANNER_BEGUN"
             claim = claim_coverage_run(context, plan, resolved_wave2)
             stage = "RUN_CLAIMED"
+            prepare_worktree_python_environment(context, inherited_environment, secrets)
             solution, projects, standalone_projects = project_inventory(context.repository_root)
             run_process(
                 ["dotnet", "build", str(solution), "-nr:false"],
@@ -4564,6 +4604,12 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 cleanup_result = cleanup_coverage_run(plan, producer_terminal)
             else:
                 cleanup_result = receipt.get("cleanup")
+            try:
+                clear_generated_artifacts(context, clean_environment)
+            except Exception as cleanup_error:
+                error.add_note(
+                    f"Generated-artifact cleanup also failed: {cleanup_error.__class__.__name__}."
+                )
             blocked = {
                 "schema_version": EXACT_HEAD_RECEIPT_V3_SCHEMA_VERSION,
                 "role": role,

@@ -11,6 +11,7 @@ from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from typing import Any
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -518,16 +519,26 @@ class TestSonarqubeExactHeadRunner(TestCase):
             root = Path(temporary_directory)
             project = root / "host" / "App.csproj"
             fixture = root / "tests" / "fixtures" / "BrokenFixture.csproj"
+            venv_project = root / ".venv" / "Lib" / "site-packages" / "Owned.csproj"
             project.parent.mkdir(parents=True)
             fixture.parent.mkdir(parents=True)
+            venv_project.parent.mkdir(parents=True)
             project.write_text("<Project />", encoding="utf-8")
             fixture.write_text("<Project />", encoding="utf-8")
+            venv_project.write_text("<Project />", encoding="utf-8")
             (root / "netcoredbg-mcp.sln").write_text(
                 'Project("{guid}") = "App", "host\\App.csproj", "{id}"\nEndProject\n',
                 encoding="utf-8",
             )
+            original_metadata = runner._scanner_tree_metadata
 
-            _, projects, standalone_projects = runner.project_inventory(root)
+            def metadata(path):
+                if ".venv" in path.relative_to(root).parts:
+                    raise AssertionError("project inventory entered .venv")
+                return original_metadata(path)
+
+            with patch.object(runner, "_scanner_tree_metadata", side_effect=metadata):
+                _, projects, standalone_projects = runner.project_inventory(root)
 
         self.assertEqual((projects, standalone_projects), ([project.resolve()], []))
 
@@ -2062,6 +2073,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         events: list[str],
         failing_step: str | None = None,
         producer_terminals: list[bool] | None = None,
+        generated_cleanup_calls: list[str] | None = None,
     ) -> None:
         context = self._context(root)
         plan = SimpleNamespace()
@@ -2092,6 +2104,11 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 producer_terminals.append(producer_terminal)
             return {}
 
+        def clear_generated(_context, _environment):
+            if generated_cleanup_calls is not None:
+                generated_cleanup_calls.append("clear")
+            return []
+
         with ExitStack() as patches:
             patches.enter_context(patch.object(runner, "process_environment", return_value={}))
             patches.enter_context(patch.object(runner, "scrub_sonar_environment", return_value={}))
@@ -2110,7 +2127,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 )
             )
             patches.enter_context(
-                patch.object(runner, "clear_generated_artifacts", return_value=[])
+                patch.object(runner, "clear_generated_artifacts", side_effect=clear_generated)
             )
             patches.enter_context(
                 patch.object(runner, "strict_cleanliness", return_value={"status": "clean"})
@@ -2160,6 +2177,13 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             )
             patches.enter_context(
                 patch.object(runner, "claim_coverage_run", side_effect=step("claim", claim))
+            )
+            patches.enter_context(
+                patch.object(
+                    runner,
+                    "prepare_worktree_python_environment",
+                    side_effect=step("python-env"),
+                )
             )
             patches.enter_context(
                 patch.object(runner, "run_coverage_producer", side_effect=step("produce"))
@@ -2355,6 +2379,64 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         self.assertIn(Path(command[11]).name.casefold(), {"bash", "bash.exe"})
         self.assertEqual(command.count("--dotnet-project"), 5)
         self.assertEqual(kwargs["environment"], {"SAFE_VALUE": "kept"})
+
+    def test_r03b_worktree_python_environment_is_locked_secret_free_and_cleanup_owned(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            captured: dict[str, Any] = {}
+
+            def capture(command, **kwargs):
+                captured["command"] = command
+                captured.update(kwargs)
+
+            with patch.object(runner, "run_process", side_effect=capture):
+                runner.prepare_worktree_python_environment(
+                    context,
+                    {
+                        "SAFE_VALUE": "kept",
+                        "SONAR_HOST_URL": "https://sonar.example.test",
+                        "SONAR_TOKEN": "secret",
+                        "UV_PROJECT_ENVIRONMENT": "foreign-environment",
+                        "VIRTUAL_ENV": "foreign-venv",
+                    },
+                    {"secret"},
+                )
+
+            self.assertEqual(captured["command"], ["uv", "sync", "--locked", "--extra", "dev"])
+            self.assertEqual(captured["cwd"], root)
+            self.assertEqual(
+                captured["environment"],
+                {
+                    "SAFE_VALUE": "kept",
+                    "UV_PROJECT_ENVIRONMENT": str(root / ".venv"),
+                },
+            )
+            self.assertEqual(captured["label"], "Worktree Python environment")
+
+            venv = root / ".venv"
+            venv.mkdir()
+            (venv / "owned.txt").write_text("generated", encoding="utf-8")
+            bytecode = root / "src" / "netcoredbg_mcp" / "__pycache__"
+            bytecode.mkdir(parents=True)
+            (bytecode / "module.pyc").write_bytes(b"generated")
+            original_metadata = runner._scanner_tree_metadata
+
+            def cleanup_metadata(path):
+                if ".venv" in path.relative_to(root).parts:
+                    raise AssertionError("cleanup traversal entered .venv")
+                return original_metadata(path)
+
+            with (
+                patch.object(runner, "is_tracked", return_value=False),
+                patch.object(runner, "_scanner_tree_metadata", side_effect=cleanup_metadata),
+            ):
+                removed = runner.clear_generated_artifacts(context, {})
+
+            self.assertIn(".venv", removed)
+            self.assertFalse(venv.exists())
+            self.assertIn("src/netcoredbg_mcp/__pycache__", removed)
+            self.assertFalse(bytecode.exists())
 
     def test_r04_python_cobertura_requires_root_and_positive_line_and_branch_denominators(self):
         with TemporaryDirectory() as temporary_directory:
@@ -2856,6 +2938,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 "preflight",
                 "begin",
                 "claim",
+                "python-env",
                 "build",
                 "produce",
                 "normalize",
@@ -2870,6 +2953,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             "preflight",
             "begin",
             "claim",
+            "python-env",
             "build",
             "produce",
             "normalize",
@@ -2897,6 +2981,19 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 )
 
         self.assertEqual(terminals, [True])
+
+    def test_r13b_failure_after_venv_creation_runs_generated_cleanup(self):
+        generated_cleanup_calls: list[str] = []
+        with TemporaryDirectory() as temporary_directory:
+            with self.assertRaisesRegex(runner.RunnerError, "injected build failure"):
+                self._transaction_events(
+                    Path(temporary_directory),
+                    [],
+                    failing_step="build",
+                    generated_cleanup_calls=generated_cleanup_calls,
+                )
+
+        self.assertEqual(generated_cleanup_calls, ["clear", "clear"])
 
     def test_r14_analysis_evidence_requires_canonical_two_language_components(self):
         identity = {
