@@ -4428,7 +4428,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
             claim = claim_coverage_run(context, plan, resolved_wave2)
             stage = "RUN_CLAIMED"
             prepare_worktree_python_environment(context, inherited_environment, secrets)
-            solution, projects, standalone_projects = project_inventory(context.repository_root)
+            solution, _, standalone_projects = project_inventory(context.repository_root)
             run_process(
                 ["dotnet", "build", str(solution), "-nr:false"],
                 cwd=context.repository_root,

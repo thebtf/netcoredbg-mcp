@@ -489,7 +489,7 @@ def capture_window_for_llm(
     import os
     import time
 
-    raw_png, orig_w, orig_h = capture_window(hwnd)
+    raw_png, _, _ = capture_window(hwnd)
     img_bytes, width, height, mime = _process_screenshot(raw_png, max_width, format, quality)
 
     result: dict[str, Any] = {
