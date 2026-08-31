@@ -14,7 +14,7 @@ Keep `scripts/run_sonarqube_exact_head.py` as the sole scanner, analysis-binding
 
 | Fact | Owner | Must not be owned by |
 | --- | --- | --- |
-| Wave-2 PR-head source and observed-main identity | `Wave2ClosureEntryV1` plus runtime verifier | A tracked source that claims current merge authority, a PR head as runtime authority, or a precomputed future merge SHA |
+| Wave-2 reviewed source, PR integration, and observed-main identity | `Wave2ClosureEntryV1` plus runtime verifier | A tracked source that claims current merge authority, a reviewed source head treated as the actual PR head, a PR head as runtime authority, or a precomputed future merge SHA |
 | Captured head, run ID, paths, and input order | `CoveragePlan` in the runner | A report glob or shell discovery |
 | Tool availability and VSTest/MTP compatibility | `preflight_coverage_toolchain` in the runner | Scanner begin or the producer |
 | Python policy | `.coveragerc` | An untracked user configuration |
@@ -82,7 +82,7 @@ stateDiagram-v2
 ### State invariants
 
 1. `CoveragePlan` is pure. It does not create a root, marker, report, resolved entry, or temporary directory.
-2. Before preflight, the runner validates the tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` artifact. It derives `observed_main_sha` and `artifact_commit_sha` at runtime, then verifies `release_intent: none`, receipt hash, accepted candidate, PR head identity, merged-PR evidence, and candidate/artifact ancestry to observed main. A missing or invalid artifact makes scanner begin and run-root claim unreachable.
+2. Before preflight, the runner validates the tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` artifact. It requires the reviewed source head to equal the accepted candidate and hashes the source and closure receipt from canonical Git blob bytes. Fail-closed first-party PR evidence must bind the actual PR head to a merge commit. The candidate must be ancestor-or-equal to the actual PR head, their trees must match, the path-history artifact commit must equal the merge commit or be ancestor-or-equal to observed main, and the merge commit must be ancestor-or-equal to observed main. A missing or invalid predicate makes preflight, scanner begin, and run-root claim unreachable.
 3. `RUN_CLAIMED` occurs only after scanner begin succeeds and only for a previously absent UUID root. It writes the marker and a hash-bound resolved Wave-2 entry copy under that root.
 4. `REPORTS_VALIDATED` requires the marker, tracked-entry binding, two final reports, all five private .NET inputs, normalizer evidence, positive final denominators, valid source sets, a matching post-producer head, and Stateless restoration.
 5. `SCANNER_ENDED` has no legal predecessor other than `REPORTS_VALIDATED`.
@@ -134,14 +134,17 @@ Wave2ClosureEntryV1 {
   tracked_relative_path: "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json"
   accepted_candidate_sha: Sha40
   closure_receipt: { relative_path, sha256 }
-  integration: { kind: pull_request_head, pull_request: 289, head_ref: string, head_sha: Sha40 }
+  integration: { kind: pull_request_head, pull_request: 289, head_ref: string, head_sha: Sha40 } // reviewed head equals accepted_candidate_sha
 }
 
 ResolvedWave2Entry {
-  source_sha256: Sha256
+  source_sha256: Sha256 // canonical Git blob bytes
   accepted_candidate_sha: Sha40
+  pull_request_head_ref: string
   pull_request_head_sha: Sha40
   artifact_commit_sha: Sha40
+  merge_commit_sha: Sha40
+  integrated_tree_sha: Sha40
   observed_main_sha: Sha40
 }
 
@@ -195,7 +198,7 @@ write_diagnostic_inventory(identity: ReceiptIdentity) -> InventoryReference
 validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None
 ```
 
-The runner resolves the entry source only at `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` in the checked-out repository. Wave-2 T014 places this `pull_request_head` artifact on PR #289 before merge; this packet does not create it. At runtime, Wave 3 proves that #289 actually merged before deriving `observed_main_sha` and writing it only in the resolved run-root entry and marker. Existing `candidate`, `post-merge`, and `diagnostic` CLI role shapes stay unchanged. There is no ambient `.agent` source, default, branch-derived runtime authority, or v2 compatibility path.
+The runner resolves the entry source only at `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` in the checked-out repository. Wave-2 T014 placed this `pull_request_head` artifact on PR #289 before its squash merge; this packet does not create it. `integration.head_sha` remains the reviewed candidate. At runtime, Wave 3 obtains the actual PR head and merge commit from first-party evidence, proves full-tree equality, then writes the resolved identities only under the claimed run root. Existing `candidate`, `post-merge`, and `diagnostic` CLI role shapes stay unchanged. There is no ambient `.agent` source, default, branch-derived runtime authority, or v2 compatibility path.
 
 ## Producer commands
 

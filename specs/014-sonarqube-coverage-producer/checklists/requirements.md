@@ -7,8 +7,8 @@
 - [ ] The packet names the parent Wave-3 two-report Cobertura contract and does not amend the parent.
 - [ ] The packet uses `specs/014-sonarqube-coverage-producer/` and documents the older parent pointer without editing it.
 - [ ] The packet names `scripts/run_sonarqube_exact_head.py` as the only scanner, normalization, analysis, and receipt authority.
-- [ ] The packet says Wave-2 PR #289 is open and that Wave-3 implementation and diagnostic execution are BLOCKED until the tracked PR-head artifact and runtime observed-main proof validate.
-- [ ] `wave2-closure-entry-v1.schema.json` requires the tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`, source `pull_request_head`, `release_intent: none`, accepted candidate, PR head-ref/SHA, closure receipt hash, and PR #289. It contains no current merge or future main claim. The runner proves merge and derives observed main/artifact commit at runtime; no branch-derived runtime or ambient `.agent` entry exists.
+- [ ] The packet says Wave-2 PR #289 is merged, its tracked closure entry unblocks the entry design, and T000 passed only after the parent validated live squash-aware evidence.
+- [ ] `wave2-closure-entry-v1.schema.json` requires the tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`, source `pull_request_head`, `release_intent: none`, accepted candidate, reviewed source ref/SHA, closure receipt hash, and PR #289. `integration.head_sha` equals the accepted candidate and is not the actual PR head. First-party evidence supplies the actual PR head and merge commit. Source and receipt hashes use canonical Git blob bytes. No branch-derived runtime or ambient `.agent` entry exists.
 - [ ] The hosted post-merge workflow validates the tracked entry source from a clean checkout before scanning and artifact sealing. It provisions no `.agent` state.
 
 ## Plan, preflight, and report layout
@@ -17,6 +17,7 @@
 - [ ] The preflight checks `uv`, `bash`, `dotnet`, Coverlet `10.0.1`, Test SDK `17.12.0`, VSTest, and MTP refusal before begin and claim.
 - [ ] The matrix proves every entry/preflight failure has zero begin and claim calls.
 - [ ] The marker names exactly two final Cobertura reports and five ordered private .NET producer inputs.
+- [ ] The marker requires the source hash, accepted candidate, actual PR head, artifact commit, merge commit, one integrated tree SHA, observed main, and resolved-copy path. It does not require the artifact commit to be an ancestor of the actual PR head.
 - [ ] The layout names exactly one Python final report and one .NET final report under `.tmp/sonarqube-coverage/<run-id>/`.
 - [ ] The five .NET paths under `dotnet/inputs/` are explicitly private inputs, not scanner report identities.
 - [ ] Scanner begin gets exactly one Python and one .NET Cobertura property with slash-relative paths.

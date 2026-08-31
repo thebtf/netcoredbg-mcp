@@ -20,9 +20,9 @@
 | OBSERVED | The five selected test projects target `net8.0` and directly reference `Microsoft.NET.Test.Sdk` `17.12.0`. | Current five project files | Preflight fixes the VSTest tuple rather than assuming it. |
 | OBSERVED | The broader build inventory is not the closed coverage producer inventory. | `agent://Wave3CoverageSource`; `agent://Wave3CoverageTests` | The five projects remain a fixed ordered input set. |
 | OBSERVED | Stateless coverage needs the exact `IncludeDirectory` and binary restoration check. | `agent://Wave3CoverageSource` | Preserve the Stateless-only branch. |
-| OBSERVED | Wave-2 PR #289 is open. | Operator instruction | Wave-3 execution is BLOCKED pending a tracked closure artifact; the observed main identity can exist only at later Wave-3 runtime. |
+| OBSERVED | PR #289 was squash-merged. The tracked source's accepted candidate and reviewed `integration.head_sha` are `d6460b3`; first-party evidence identifies actual PR head `8a47249` and merge/main `5d482b4`. | Merged Wave-2 entry and parent runtime evidence | `integration.head_sha` is not the final PR head. T000 must validate the live identity and tree chain. |
+| OBSERVED | The merged tree contains `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`. Checkout line endings can change source and receipt bytes across worktrees. | Parent runtime evidence | T000 hashes the tracked source and closure receipt as canonical Git blobs, not filesystem files. |
 | OBSERVED | `scripts/stateless_preview_artifact.py` requires receipt schema version 2 for post-merge artifact sealing. | Verifier recheck of `08a4231` | Wave 3 must migrate this receipt consumer and its focused proof to unified v3. |
-| OBSERVED | The current checkout contains no `specs/013-owner-scoped-prebuild-cleanup/` directory or tracked Wave-2 closure artifact. | Verifier recheck of `587d735` | This absence is current blocker evidence. Wave-2 T014/PR #289 must create and merge the tracked artifact before Wave 3 can execute. |
 
 ## Primary-source constraints
 
@@ -68,15 +68,19 @@
 
 ### Preserve callers through a tracked Wave-2 closure artifact and migrate the actual v3 consumer
 
-**SELECTED**: `GitContext` resolves only the tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` artifact. Wave-2 T014 produces it on PR #289 with `integration.kind: pull_request_head`, `release_intent: none`, accepted implementation candidate, PR head-ref/SHA, and closure receipt hash, but no current merge or future main SHA. At Wave-3 runtime, the verifier proves PR merge, derives observed main and artifact commit identities, and checks candidate/artifact ancestry. The hosted post-merge workflow performs the same clean-checkout proof before scanning. The same cutover migrates `scripts/stateless_preview_artifact.py` from schema v2 to the unified v3 post-merge receipt.
+**SELECTED**: `GitContext` resolves only the tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` artifact. Wave-2 T014 produced it on PR #289 with `integration.kind: pull_request_head`, `release_intent: none`, an accepted implementation candidate, a reviewed source ref/SHA, and a closure receipt hash. `integration.head_sha` must equal the accepted candidate. It cannot store the final PR-head SHA because that SHA did not exist when the source was committed.
 
-**Reason**: A PR-head artifact must not assert that its PR is already merged. Runtime observation supplies post-merge authority while the source artifact remains clone-reproducible and role CLI shapes stay stable.
+At Wave-3 runtime, first-party PR evidence supplies the actual PR head and merge commit. The verifier requires reviewed-candidate lineage to the PR head, full-tree equality between the PR head and merge commit, canonical Git-blob source and receipt hashes, valid artifact-path history, and merge ancestry to observed main. The hosted post-merge workflow performs the same clean-checkout proof before scanning. The same cutover migrates `scripts/stateless_preview_artifact.py` from schema v2 to the unified v3 post-merge receipt.
+
+**Reason**: A premerge source cannot name its own final PR head. Full-tree equality plus first-party PR evidence proves the squash integration without pretending that source commits must appear in main history.
 
 ## Rejected designs
 
 | Design | Disposition | Reason |
 | --- | --- | --- |
 | A branch head, a source record claiming merge, or a precomputed main SHA as Wave-2 authority | Rejected | The source records premerge candidate/PR-head facts only; Wave 3 proves merge and derives observed main after merge. |
+| Treat source `integration.head_sha` as the actual final PR head | Rejected | The premerge source records the reviewed implementation head. First-party PR evidence supplies the final head. |
+| Hash source or closure receipt checkout bytes | Rejected | Checkout line endings vary by worktree. Canonical Git blob bytes are stable. |
 | Static XML report paths or report globs | Rejected | They can admit stale or extra artifacts. |
 | Generic merger or report discovery | Rejected | The normalizer must consume the fixed input list and emit one fixed output. |
 | Automatic MTP fallback | Rejected | It masks the Coverlet compatibility boundary rather than proving VSTest compatibility. |
@@ -90,7 +94,7 @@
 | Live Sonar component and inventory paging | The exact diagnostic run proves complete pages and both language intersections. |
 | Project evaluation on the implementation head | Preflight proves the exact five tuples and refuses MTP. |
 | .NET normalization behavior | Focused fixtures prove union, deterministic output, source safety, and positive denominators. |
-| Wave-2 merge identity and tracked artifact | Wave-2 T014/PR #289 must create and merge `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`; T000 derives observed main and validates it only after merge. |
+| Wave-2 squash identity and tracked artifact | T000 validates the source's reviewed head, first-party PR head and merge OIDs, full-tree equality, canonical Git-blob hashes, artifact-path history, and observed-main lineage before it admits Wave-3 execution. |
 
 ## Research conclusion
 

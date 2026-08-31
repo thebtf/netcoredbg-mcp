@@ -2,11 +2,11 @@
 
 **Feature branch**: `work/issue450-sonar-coverage-producer`
 **Created**: 2026-08-31
-**Source base**: `1b8b2d548a45b17dde690b4cb8e4fc7153d326bc`
+**Source base**: `5d482b418118a9f17bf40fa0ab40b3c594df34d1`
 **Parent**: `specs/011-issue450-sonar-release-program/`, Wave 3
 **Design authority**: `agent://ArchitectWave3Coverage`
 **Release intent**: `none`
-**Status**: Planned packet. Wave-3 implementation and diagnostic execution are blocked until the typed Wave-2 closure entry evidence validates. Wave-2 PR #289 is open, so no such evidence exists in this packet. No implementation, diagnostic receipt, acceptance receipt, tag, publication, or release claim exists here.
+**Status**: T000 entry gate passed against merged Wave-2 evidence. The tracked source schema, reviewed-head equality, canonical Git-blob hashes, first-party PR/head/merge binding, candidate lineage, equal integration trees, artifact path history, and merge-to-observed-main lineage all validate. T001 through T028 may proceed; no implementation, diagnostic receipt, acceptance receipt, tag, publication, or release claim exists here.
 
 ## Purpose
 
@@ -21,9 +21,13 @@ The parent packet has an earlier Wave-3 directory pointer named `specs/014-sonar
 
 ## Entry condition
 
-Wave 3 requires a schema-valid tracked [Wave-2 closure artifact](contracts/wave2-closure-entry-v1.schema.json) at `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`. Wave-2 T014 produces it on PR #289's head before merge. Its truthful source state is `integration.kind: pull_request_head`; it carries `release_intent: none`, the accepted Wave-2 implementation candidate SHA, immutable closure receipt hash, and PR #289 head-ref/SHA identity. It must not claim that PR #289 is already merged or contain a future main SHA.
+Wave 3 requires a schema-valid tracked [Wave-2 closure artifact](contracts/wave2-closure-entry-v1.schema.json) at `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`. Wave-2 T014 wrote it on PR #289 before that PR's squash merge. Its truthful source state is `integration.kind: pull_request_head`; it carries `release_intent: none`, the accepted Wave-2 implementation candidate SHA, immutable closure receipt hash, and a reviewed source ref/SHA. `integration.head_sha` is the reviewed implementation head and must equal `accepted_candidate_sha`; it is not the final PR head. The source must not claim that PR #289 is already merged or contain a future main SHA.
 
-At Wave-3 runtime, the runner separately proves that PR #289 became merged through GitHub/workflow evidence or first-parent merge proof. It then derives `observed_main_sha` from checked-out `origin/main` and `artifact_commit_sha` from the tracked artifact's history, and verifies accepted candidate and artifact commit ancestry to observed main. Only after scanner begin and run-root claim does it write the observed main SHA into the hash-bound resolved entry and marker. A missing tracked artifact, wrong source kind, non-`none` intent, invalid PR head identity, absent merge proof, unmerged candidate/artifact ancestry, copied receipt, or stale observed-main proof is `WAVE2_CLOSURE_UNVERIFIED` and blocks implementation and diagnostic execution before preflight, scanner begin, and run-root claim.
+At Wave-3 runtime, fail-closed first-party PR evidence must bind PR #289's actual PR-head OID to `merge_commit_sha`. The runner requires `accepted_candidate_sha` to be ancestor-or-equal to that actual PR head and requires `tree(actual PR head) == tree(merge commit)`. It records the shared tree ID as `integrated_tree_sha`.
+
+The runner derives `artifact_commit_sha` from current history for the tracked path. It requires that commit to equal `merge_commit_sha` or be ancestor-or-equal to `observed_main_sha`, and it requires `merge_commit_sha` to be ancestor-or-equal to `observed_main_sha`. It hashes the tracked artifact and closure receipt from canonical Git blob bytes, not checkout bytes. The tracked artifact blob must equal the artifact blob at the actual PR head.
+
+Only after scanner begin and run-root claim does the runner write the hash-bound resolved entry and marker. They store `source_sha256`, `accepted_candidate_sha`, actual `pull_request_head_sha`, `artifact_commit_sha`, `merge_commit_sha`, `integrated_tree_sha`, and `observed_main_sha`. A missing tracked artifact, wrong source kind, non-`none` intent, reviewed-head mismatch, wrong PR head or merge OID, missing first-party evidence, unequal trees, mismatched canonical blob hash, invalid path history, or stale observed-main lineage is `WAVE2_CLOSURE_UNVERIFIED` and blocks implementation and diagnostic execution before preflight, scanner begin, and root claim.
 
 ## User scenarios and testing
 
@@ -79,7 +83,7 @@ A release owner needs candidate and post-merge PASS validation to consume the sa
 | ID | Requirement | Observable future acceptance |
 | --- | --- | --- |
 | **COV-001** | `scripts/run_sonarqube_exact_head.py` remains the only scanner, analysis-binding, normalization, and receipt authority. | The producer has no scanner, API, discovery, acceptance, or receipt behavior. |
-| **COV-002** | Wave-3 implementation and diagnostic execution require the tracked Wave-2 closure artifact at `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`. | Before preflight, the `pull_request_head` source schema, receipt hash, `release_intent: none`, accepted candidate, and PR #289 head identity must validate. Runtime merged-PR proof and ancestry to runtime-derived `observed_main_sha` must then validate. |
+| **COV-002** | Wave-3 implementation and diagnostic execution require the tracked Wave-2 closure artifact at `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`. | Before preflight, the `pull_request_head` source schema, canonical Git-blob source and receipt hashes, `release_intent: none`, and `accepted_candidate_sha == integration.head_sha` must validate. Fail-closed first-party PR evidence supplies the actual PR head and merge OIDs. The runner requires candidate-to-PR-head lineage, equal PR-head and merge trees, valid artifact-path history, and merge ancestry to runtime-derived `observed_main_sha`. The marker records the resolved identities and one `integrated_tree_sha`. |
 | **COV-003** | The runner derives a pure head-bound `CoveragePlan` before scanner begin without writing files. | A focused test observes deterministic final and private-input paths without filesystem writes. |
 | **COV-004** | The runner preflights `uv`, `bash`, and `dotnet`, plus the exact Coverlet VSTest tuple, before scanner begin and run-root claim. | Missing tools, `coverlet.msbuild != 10.0.1`, `Microsoft.NET.Test.Sdk != 17.12.0`, or active MTP fail at `PLANNED` with zero begin and claim calls. |
 | **COV-005** | After scanner begin, the runner claims only a previously absent UUID root and canonical marker. | A pre-seeded root, altered marker, or path escape blocks without scanner end. |
@@ -103,7 +107,7 @@ A release owner needs candidate and post-merge PASS validation to consume the sa
 | **COV-023** | The implementation satisfies the 15 behavior-first RED/GREEN rows in [tasks.md](tasks.md#binding-redgreen-matrix). | Every row has a caller-level RED reason, a nonzero GREEN oracle, an owner task, and a dependency. |
 | **COV-024** | A Wave-3 acceptance receipt is delayed until exact-head review, independent acceptance judgment, verified Wave-2 entry evidence, and a complete diagnostic transaction succeed. | No real receipt exists before the final task. |
 | **COV-025** | Every existing exact-head receipt consumer must migrate to the unified v3 contract in the same cutover. | `scripts/stateless_preview_artifact.py` rejects v2 and validates a v3 post-merge receipt without changing public artifact behavior. |
-| **COV-026** | The hosted post-merge workflow must prove a clean checkout can resolve and validate the tracked Wave-2 entry without `.agent` provisioning. | The workflow derives `observed_main_sha`, validates PR/head and ancestry evidence before post-merge scan and artifact sealing, and fails absent, untracked, or invalid input. |
+| **COV-026** | The hosted post-merge workflow must prove a clean checkout can resolve and validate the tracked Wave-2 entry without `.agent` provisioning. | The workflow derives canonical Git-blob hashes, actual PR-head and merge identities, `integrated_tree_sha`, and `observed_main_sha`. It validates the reviewed-head lineage, equal integration trees, artifact-path history, and merge-to-main ancestry before post-merge scan and artifact sealing. It fails absent, untracked, or invalid input. |
 
 ## Success criteria
 

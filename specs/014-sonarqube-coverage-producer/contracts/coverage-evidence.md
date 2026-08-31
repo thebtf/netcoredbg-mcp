@@ -7,10 +7,14 @@ This contract defines the evidence the future exact-head runner must accept befo
 Before the runner starts a scanner transaction, it must:
 
 1. Resolve `Wave2ClosureEntryV1` only from the tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` source and validate it against [wave2-closure-entry-v1.schema.json](wave2-closure-entry-v1.schema.json).
-2. Verify source `integration.kind: pull_request_head`, `release_intent: none`, the accepted candidate, closure receipt hash, and PR #289 head identity. At runtime, separately prove that #289 merged through GitHub/workflow evidence or first-parent history, derive `observed_main_sha` and `artifact_commit_sha`, and require candidate/artifact ancestry to observed main.
-3. Resolve and version-check `uv`, `bash`, and `dotnet`.
-4. Evaluate each fixed project for `net8.0`, direct private `coverlet.msbuild` `10.0.1`, `Microsoft.NET.Test.Sdk` `17.12.0`, and VSTest selection.
-5. Refuse MTP, including `TestingPlatformDotnetTestSupport` activation and Microsoft Testing Platform references.
+2. Verify source `integration.kind: pull_request_head`, `release_intent: none`, the accepted candidate, and `integration.head_sha == accepted_candidate_sha`. The source head is the reviewed implementation head, not the actual PR head.
+3. Hash the tracked source and closure receipt from canonical Git blob bytes. Do not hash checkout files.
+4. Obtain fail-closed first-party PR evidence that binds PR #289's actual PR head to `merge_commit_sha`.
+5. Require the accepted candidate to be ancestor-or-equal to the actual PR head, require equal PR-head and merge trees, record their shared `integrated_tree_sha`, and require the tracked artifact blob to equal the PR-head artifact blob.
+6. Derive `artifact_commit_sha` from current path history. Require it to equal `merge_commit_sha` or be ancestor-or-equal to `observed_main_sha`, and require `merge_commit_sha` to be ancestor-or-equal to `observed_main_sha`.
+7. Resolve and version-check `uv`, `bash`, and `dotnet`.
+8. Evaluate each fixed project for `net8.0`, direct private `coverlet.msbuild` `10.0.1`, `Microsoft.NET.Test.Sdk` `17.12.0`, and VSTest selection.
+9. Refuse MTP, including `TestingPlatformDotnetTestSupport` activation and Microsoft Testing Platform references.
 
 A failed entry or preflight emits a planned-stage failure. It has zero scanner-begin calls and zero run-root claims.
 
@@ -33,7 +37,7 @@ The shell receives no scanner credentials and performs no scanner, API, discover
 
 ## Marker and report identities
 
-The marker validates against [coverage-run-marker.schema.json](coverage-run-marker.schema.json). It binds the tracked Wave-2 source and resolved-copy hash plus two final reports and five ordered private producer inputs. Scanner arguments use only these final paths:
+The marker validates against [coverage-run-marker.schema.json](coverage-run-marker.schema.json). It binds the tracked Wave-2 source and resolved-copy hash, plus the accepted candidate, actual PR head, artifact commit, merge commit, one integrated tree SHA, observed main, two final reports, and five ordered private producer inputs. `source_sha256` is the SHA-256 of the tracked source's canonical Git blob bytes. Scanner arguments use only these final paths:
 
 ```text
 /d:sonar.python.coverage.reportPaths=.tmp/sonarqube-coverage/<run-id>/python/coverage.xml

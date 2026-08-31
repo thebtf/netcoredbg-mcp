@@ -5,7 +5,7 @@
 
 ## Before any Wave-3 execution
 
-Wave-2 PR #289 is open while this packet is authored. Do not implement or run a Wave-3 diagnostic until the tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` artifact exists in the PR and later on merged main. It must validate against `contracts/wave2-closure-entry-v1.schema.json`, state `integration.kind: pull_request_head`, carry `release_intent: none`, name the accepted candidate, hash-bind the Wave-2 closure receipt, and identify PR #289's head ref/SHA. It must not claim current merge state or contain a future main SHA. A PR head or tracked artifact alone is not runtime entry authority.
+Wave-2 PR #289 is merged. Its tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` artifact is available on main and validates against `contracts/wave2-closure-entry-v1.schema.json`. The source states `integration.kind: pull_request_head`, carries `release_intent: none`, names the accepted candidate, hash-binds the Wave-2 closure receipt, and records a reviewed source ref/SHA. `integration.head_sha` must equal `accepted_candidate_sha`; it is not the actual PR head. The source does not claim current merge state or contain a future main SHA. T000 remains unchecked until the parent validates live squash-aware evidence.
 
 Set non-secret values only after the entry record exists:
 
@@ -28,7 +28,11 @@ git rev-parse --show-toplevel
 git ls-files --error-unmatch specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json
 ```
 
-Continue only when the scanner worktree is detached and clean, `HEAD` equals `$ExpectedHead`, and `$Wave2Closure` is a tracked `pull_request_head` file whose schema, `release_intent`, receipt hash, accepted candidate, and PR head identity validate. The runner then proves #289 merged, derives `observed_main_sha` and `artifact_commit_sha`, verifies candidate/artifact ancestry, and copies the accepted record after claim into its own run root. A failed entry is `WAVE2_CLOSURE_UNVERIFIED`; it must make preflight, scanner begin, and root claim unreachable. The current open PR does not satisfy this step.
+Continue only when the scanner worktree is detached and clean, `HEAD` equals `$ExpectedHead`, and `$Wave2Closure` is a tracked `pull_request_head` file whose schema, `release_intent`, canonical Git-blob source and receipt hashes, and reviewed-head equality validate. Do not hash checkout files for this proof.
+
+The runner obtains first-party evidence that binds #289's actual PR head to `merge_commit_sha`. It requires the accepted candidate to be ancestor-or-equal to that PR head, requires equal PR-head and merge trees, derives the current-history artifact commit, and requires the artifact and merge commits to relate to `observed_main_sha`. It also requires the tracked artifact blob to equal the PR-head artifact blob.
+
+After tree equality, the runner copies the accepted record after claim into its own run root with the source hash, candidate, actual PR head, artifact commit, merge commit, `integrated_tree_sha`, and observed main. A failed entry is `WAVE2_CLOSURE_UNVERIFIED`; it makes preflight, scanner begin, and root claim unreachable.
 
 ## 2. Run focused contract proof
 

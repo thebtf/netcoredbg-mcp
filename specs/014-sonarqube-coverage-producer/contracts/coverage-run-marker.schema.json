@@ -42,6 +42,8 @@
         "pull_request_head_ref",
         "pull_request_head_sha",
         "artifact_commit_sha",
+        "merge_commit_sha",
+        "integrated_tree_sha",
         "observed_main_sha",
         "resolved_relative_path"
       ],
@@ -53,7 +55,8 @@
           "const": "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json"
         },
         "source_sha256": {
-          "$ref": "#/$defs/sha256"
+          "$ref": "#/$defs/sha256",
+          "description": "SHA-256 over the tracked entry's canonical Git blob bytes."
         },
         "accepted_candidate_sha": {
           "$ref": "#/$defs/sha40"
@@ -66,10 +69,20 @@
           "$ref": "#/$defs/sha40"
         },
         "artifact_commit_sha": {
-          "$ref": "#/$defs/sha40"
+          "$ref": "#/$defs/sha40",
+          "description": "Current-history commit for the tracked entry path; it is not a PR-head lineage field."
+        },
+        "merge_commit_sha": {
+          "$ref": "#/$defs/sha40",
+          "description": "Merge commit named by fail-closed first-party PR evidence."
+        },
+        "integrated_tree_sha": {
+          "$ref": "#/$defs/sha40",
+          "description": "Tree ID shared by the actual PR head and merge commit after equality proof."
         },
         "observed_main_sha": {
-          "$ref": "#/$defs/sha40"
+          "$ref": "#/$defs/sha40",
+          "description": "Observed origin/main commit that contains the resolved merge evidence."
         },
         "resolved_relative_path": {
           "type": "string",

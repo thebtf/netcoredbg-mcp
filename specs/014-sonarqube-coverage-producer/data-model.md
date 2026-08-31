@@ -17,7 +17,7 @@
 
 | Entity | Identity | Lifetime | Contract |
 | --- | --- | --- | --- |
-| `Wave2ClosureEntryV1` | Accepted Wave-2 candidate, PR-head identity, and closure receipt hash | Before all Wave-3 execution | [wave2-closure-entry-v1.schema.json](contracts/wave2-closure-entry-v1.schema.json) |
+| `Wave2ClosureEntryV1` | Accepted Wave-2 candidate, reviewed source head, and closure receipt hash | Before all Wave-3 execution | [wave2-closure-entry-v1.schema.json](contracts/wave2-closure-entry-v1.schema.json) |
 | `CoveragePlan` | Run ID, captured head, and deterministic paths | In memory before scanner begin | [architecture.md](architecture.md#caller-first-contract) |
 | `ToolchainPreflight` | Plan and five evaluated project tuples | Before scanner begin | COV-004 |
 | `CoverageRunClaim` | Plan plus marker bytes/hash | From exclusive claim through cleanup | [coverage-run-marker.schema.json](contracts/coverage-run-marker.schema.json) |
@@ -37,7 +37,7 @@ Wave2ClosureEntryV1 {
   tracked_relative_path: "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json"
   accepted_candidate_sha: Sha40
   closure_receipt: { relative_path, sha256 }
-  integration: { kind: pull_request_head, pull_request: 289, head_ref: string, head_sha: Sha40 }
+  integration: { kind: pull_request_head, pull_request: 289, head_ref: string, head_sha: Sha40 } // reviewed head equals accepted_candidate_sha
 }
 
 ToolchainPreflight {
@@ -57,9 +57,11 @@ ProjectCompatibility {
 }
 ```
 
-`verify_wave2_entry` first requires the tracked source schema to state `integration.kind: pull_request_head`, `release_intent: none`, immutable receipt hash and content, and PR #289 head identity. At runtime it separately proves PR #289 merged through GitHub/workflow evidence or first-parent merge proof. It then derives `observed_main_sha` from `origin/main` and `artifact_commit_sha` from the artifact path's repository history, and verifies accepted candidate and artifact commit ancestry to observed main. It rejects a missing or untracked artifact, source kind mismatch, PR head mismatch, absent merge proof, feature branch as runtime authority, missing receipt, non-`none` intent, or ancestry mismatch as `WAVE2_CLOSURE_UNVERIFIED`.
+`verify_wave2_entry` requires the tracked source schema to state `integration.kind: pull_request_head`, `release_intent: none`, and `integration.head_sha == accepted_candidate_sha`. The source head is the reviewed implementation head, not the final PR head. The runner derives `observed_main_sha` and the current-history `artifact_commit_sha`, then hashes the source and closure receipt through canonical Git blobs instead of checkout bytes.
 
-`resolve_wave2_entry` reads only `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` from the checked-out repository. Wave-2 T014/PR #289 creates the premerge source after the current open PR does its closure work. Existing role callers do not pass an entry-file argument. The source never claims merged state. After `RUN_CLAIMED`, the runner writes a hash-bound resolved copy with `observed_main_sha` beneath the run root; that copy is provenance, not authority.
+Fail-closed first-party PR evidence must bind PR #289's actual PR head to `merge_commit_sha`. The accepted candidate must be ancestor-or-equal to that PR head, and `tree(PR head) == tree(merge commit)` produces one `integrated_tree_sha`. The tracked artifact blob must equal the blob at the actual PR head. The artifact commit must equal the merge commit or be ancestor-or-equal to observed main, and the merge commit must be ancestor-or-equal to observed main. Any source, hash, PR, merge, tree, artifact-path, or observed-main mismatch is `WAVE2_CLOSURE_UNVERIFIED`.
+
+`resolve_wave2_entry` reads only `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` from the checked-out repository. Wave-2 T014 created the premerge source, and PR #289's squash merge placed it on main. Existing role callers do not pass an entry-file argument. The source never claims merged state. After `RUN_CLAIMED`, the runner writes a hash-bound resolved copy with all resolved identities beneath the run root; that copy is provenance, not authority.
 
 `preflight_coverage_toolchain` runs before scanner begin. It requires executable `uv`, `bash`, and `dotnet`, evaluates every fixed project, and rejects active MTP. It never injects a property to switch the test platform. `COVERAGE_TOOL_UNAVAILABLE`, `COVERAGE_VSTEST_INCOMPATIBLE`, and `COVERAGE_MTP_INCOMPATIBLE` stop at `PLANNED` before root claim.
 
@@ -88,7 +90,7 @@ CoverageProjectSpec {
 }
 ```
 
-`derive_coverage_plan` is pure. It writes no file. After scanner begin succeeds, `claim_coverage_run` creates the UUID root exclusively, writes canonical sorted compact JSON, and writes the hash-bound resolved Wave-2 entry below that root. The marker binds the tracked source path/hash, candidate SHA, PR head SHA, runtime artifact commit SHA, runtime observed main SHA, and resolved-copy path.
+`derive_coverage_plan` is pure. It writes no file. After scanner begin succeeds, `claim_coverage_run` creates the UUID root exclusively, writes canonical sorted compact JSON, and writes the hash-bound resolved Wave-2 entry below that root. The marker binds the tracked source path, `source_sha256` from canonical Git blob bytes, accepted candidate, actual PR head, runtime artifact commit, runtime merge commit, one integrated tree SHA, runtime observed main, and resolved-copy path.
 
 | Kind | ID | Format | Relative path |
 | --- | --- | --- |
@@ -101,7 +103,7 @@ CoverageProjectSpec {
 | Private producer input | `stateless` | Cobertura | `.tmp/sonarqube-coverage/<run-id>/dotnet/inputs/stateless/coverage.cobertura.xml` |
 | Private producer input | `host-prompts` | Cobertura | `.tmp/sonarqube-coverage/<run-id>/dotnet/inputs/host-prompts/coverage.cobertura.xml` |
 
-The marker binds the tracked Wave-2 source plus the two final reports, all five ordered producer inputs, the normalizer algorithm and order, tool versions, producer hash, and `.coveragerc` hash. It does not treat private inputs as Sonar reports.
+The marker binds the tracked Wave-2 source, canonical Git-blob source hash, resolved squash identities, two final reports, all five ordered producer inputs, the normalizer algorithm and order, tool versions, producer hash, and `.coveragerc` hash. It does not treat private inputs as Sonar reports.
 
 ## Coverage evidence
 

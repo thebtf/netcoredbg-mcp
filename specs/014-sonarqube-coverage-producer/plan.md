@@ -5,9 +5,9 @@
 **Spec**: [spec.md](spec.md)
 **Design depth**: D2
 **Parent**: `specs/011-issue450-sonar-release-program/`, Wave 3
-**Source base**: `1b8b2d548a45b17dde690b4cb8e4fc7153d326bc`
+**Source base**: `5d482b418118a9f17bf40fa0ab40b3c594df34d1`
 **Release intent**: `none`
-**Execution status**: BLOCKED. Wave-2 PR #289 is open. No Wave-3 implementation or diagnostic task may start until a valid tracked `Wave2ClosureEntryV1` and runtime-derived observed-main proof validate.
+**Execution status**: T000 entry gate passed against merged Wave-2 evidence. T001 through T028 may proceed under the squash-aware identity and Git-blob contract.
 
 ## Summary
 
@@ -20,8 +20,8 @@ The implementation changes the runner, focused runner tests, `.coveragerc`, `bui
 | Concern | Constraint |
 | --- | --- |
 | Parent report contract | Exactly two deterministic project-root-relative Cobertura reports: Python and one merged .NET report. |
-| Wave-2 entry source | External tracked `pull_request_head` artifact `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`, produced by Wave-2 T014 on PR #289 and available in every clone after that PR merges. It carries no current merge or future main SHA. |
-| Entry validation | Source schema, `release_intent: none`, receipt hash, accepted candidate, and PR-head identity validate before preflight. Runtime separately proves #289 merged, derives `artifact_commit_sha` and `observed_main_sha`, then proves candidate/artifact ancestry. A resolved copy is written only under the claimed Wave-3 root. |
+| Wave-2 entry source | External tracked `pull_request_head` artifact `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`, produced by Wave-2 T014 on PR #289 and now available in merged clones. It carries the reviewed source head, which equals the accepted candidate, but not the final PR head or a future main SHA. |
+| Entry validation | Before preflight, the source schema, `release_intent: none`, and canonical Git-blob source and receipt hashes validate. First-party PR evidence binds the actual PR head to the merge commit. The candidate must be ancestor-or-equal to the PR head, their integration trees must match, and the path-history artifact commit and merge commit must relate to observed main. A resolved copy under the claimed root records the source hash, candidate, PR head, artifact commit, merge commit, one integrated tree SHA, and observed main. |
 | .NET producer inventory | Five closed `net8.0` VSTest projects are private inputs in fixed order. They are not Sonar report identities. |
 | Pre-begin gate | `uv`, `bash`, `dotnet`, Coverlet `10.0.1`, Test SDK `17.12.0`, and VSTest must validate before begin and claim. MTP is refused. |
 | Scanner handoff | Runtime begin arguments name the two final Cobertura paths. `SonarQube.Analysis.xml` remains unchanged. |
@@ -31,7 +31,7 @@ The implementation changes the runner, focused runner tests, `.coveragerc`, `bui
 
 ## External entry prerequisite
 
-Wave 2, not this packet, must place the tracked `pull_request_head` `wave-closure-v1.json` beside its closure receipt on PR #289 before merge. The file is the only Wave-3 entry source, but it is not merge authority. Wave 3 verifies the later merge at runtime. Wave-3 never provisions or reads an ambient `.agent` entry file. A clean clone or hosted checkout must contain this tracked file before Wave-3 can begin.
+Wave 2, not this packet, placed the tracked `pull_request_head` `wave-closure-v1.json` beside its closure receipt on PR #289 before the squash merge. The file is the only Wave-3 entry source, but it is not merge authority and its `integration.head_sha` is the reviewed candidate rather than the final PR head. T000 uses first-party PR evidence and Git object identity to validate the later merge. Wave-3 never provisions or reads an ambient `.agent` entry file. A clean clone or hosted checkout must contain this tracked file before Wave-3 can begin.
 
 ## Scope and rollback
 
@@ -85,7 +85,7 @@ flowchart LR
 ## Verification plan
 
 | Layer | Command or proof | What it proves |
-| Entry and preflight | Focused command/event spy plus hosted-workflow fixture | Missing tracked artifact, invalid schema/receipt/release intent, PR head mismatch, absent merged-PR proof, invalid runtime candidate/artifact ancestry, missing tools, invalid tuple, and MTP leave begin and claim unreachable. |
+| Entry and preflight | Focused command/event spy plus hosted-workflow fixture | Missing tracked artifact; invalid schema, intent, or canonical Git-blob hash; wrong reviewed source head, PR head, or merge OID; absent first-party binding; unequal integration trees; invalid candidate lineage or artifact blob binding; invalid path history; merge absent from observed main; missing tools; invalid tuple; and MTP leave preflight, begin, and claim unreachable. A clean squash-merge fixture admits preflight only after every entry predicate passes. |
 | RED/GREEN contract | `uv run --locked --extra dev pytest tests/test_sonarqube_exact_head_runner.py -q` | All 15 rows exercise the runner boundary. |
 | Local producer | Runner-owned producer invocation | Five private inputs normalize into one final .NET Cobertura report and one Python report. |
 | Diagnostic transaction | `python scripts/run_sonarqube_exact_head.py --role diagnostic` | Tracked Wave-2 entry discovery, run-root resolved-copy provenance, two-report import, canonical identity, complete inventory, and unchanged coverage condition. |
