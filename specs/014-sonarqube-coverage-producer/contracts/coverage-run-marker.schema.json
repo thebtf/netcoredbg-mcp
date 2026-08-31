@@ -10,7 +10,9 @@
     "captured_head",
     "project_key",
     "tool_versions",
-    "reports",
+    "final_reports",
+    "dotnet_producers",
+    "normalizer",
     "producer_sha256",
     "coveragerc_sha256"
   ],
@@ -23,8 +25,7 @@
       "format": "uuid"
     },
     "captured_head": {
-      "type": "string",
-      "pattern": "^[0-9a-f]{40}$"
+      "$ref": "#/$defs/sha40"
     },
     "project_key": {
       "const": "thebtf_netcoredbg_mcp"
@@ -34,7 +35,8 @@
       "additionalProperties": false,
       "required": [
         "coverage_py",
-        "coverlet_msbuild"
+        "coverlet_msbuild",
+        "test_sdk"
       ],
       "properties": {
         "coverage_py": {
@@ -42,34 +44,88 @@
         },
         "coverlet_msbuild": {
           "const": "10.0.1"
+        },
+        "test_sdk": {
+          "const": "17.12.0"
         }
       }
     },
-    "reports": {
+    "final_reports": {
       "type": "array",
-      "minItems": 6,
-      "maxItems": 6,
+      "minItems": 2,
+      "maxItems": 2,
       "prefixItems": [
         {
-          "$ref": "#/$defs/python_report"
+          "$ref": "#/$defs/python_final_report"
         },
         {
-          "$ref": "#/$defs/codesearch_core_report"
-        },
-        {
-          "$ref": "#/$defs/host_report"
-        },
-        {
-          "$ref": "#/$defs/stateless_preview_report"
-        },
-        {
-          "$ref": "#/$defs/stateless_report"
-        },
-        {
-          "$ref": "#/$defs/host_prompts_report"
+          "$ref": "#/$defs/dotnet_final_report"
         }
       ],
       "items": false
+    },
+    "dotnet_producers": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/codesearch_core_producer"
+        },
+        {
+          "$ref": "#/$defs/host_producer"
+        },
+        {
+          "$ref": "#/$defs/stateless_preview_producer"
+        },
+        {
+          "$ref": "#/$defs/stateless_producer"
+        },
+        {
+          "$ref": "#/$defs/host_prompts_producer"
+        }
+      ],
+      "items": false
+    },
+    "normalizer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "output_report_id",
+        "input_order"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "cobertura-merge-normalize-v1"
+        },
+        "output_report_id": {
+          "const": "dotnet"
+        },
+        "input_order": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "prefixItems": [
+            {
+              "const": "codesearch-core"
+            },
+            {
+              "const": "host"
+            },
+            {
+              "const": "stateless-preview"
+            },
+            {
+              "const": "stateless"
+            },
+            {
+              "const": "host-prompts"
+            }
+          ],
+          "items": false
+        }
+      }
     },
     "producer_sha256": {
       "$ref": "#/$defs/sha256"
@@ -79,6 +135,10 @@
     }
   },
   "$defs": {
+    "sha40": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
     "sha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
@@ -87,7 +147,7 @@
       "type": "string",
       "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
     },
-    "report": {
+    "final_report": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -98,7 +158,10 @@
       ],
       "properties": {
         "id": {
-          "type": "string"
+          "enum": [
+            "python",
+            "dotnet"
+          ]
         },
         "language": {
           "enum": [
@@ -107,20 +170,17 @@
           ]
         },
         "format": {
-          "enum": [
-            "cobertura",
-            "opencover"
-          ]
+          "const": "cobertura"
         },
         "relative_path": {
           "$ref": "#/$defs/relative_path"
         }
       }
     },
-    "python_report": {
+    "python_final_report": {
       "allOf": [
         {
-          "$ref": "#/$defs/report"
+          "$ref": "#/$defs/final_report"
         },
         {
           "properties": {
@@ -129,9 +189,6 @@
             },
             "language": {
               "const": "python"
-            },
-            "format": {
-              "const": "cobertura"
             },
             "relative_path": {
               "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/python/coverage\\.xml$"
@@ -140,116 +197,173 @@
         }
       ]
     },
-    "codesearch_core_report": {
+    "dotnet_final_report": {
       "allOf": [
         {
-          "$ref": "#/$defs/report"
+          "$ref": "#/$defs/final_report"
+        },
+        {
+          "properties": {
+            "id": {
+              "const": "dotnet"
+            },
+            "language": {
+              "const": "dotnet"
+            },
+            "relative_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/coverage\\.xml$"
+            }
+          }
+        }
+      ]
+    },
+    "dotnet_producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "project",
+        "raw_cobertura_path",
+        "include_directory"
+      ],
+      "properties": {
+        "id": {
+          "enum": [
+            "codesearch-core",
+            "host",
+            "stateless-preview",
+            "stateless",
+            "host-prompts"
+          ]
+        },
+        "project": {
+          "$ref": "#/$defs/relative_path"
+        },
+        "raw_cobertura_path": {
+          "$ref": "#/$defs/relative_path"
+        },
+        "include_directory": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/relative_path"
+            }
+          ]
+        }
+      }
+    },
+    "codesearch_core_producer": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/dotnet_producer"
         },
         {
           "properties": {
             "id": {
               "const": "codesearch-core"
             },
-            "language": {
-              "const": "dotnet"
+            "project": {
+              "const": "host/NetCoreDbg.Mcp.CodeSearch.Core.Tests/NetCoreDbg.Mcp.CodeSearch.Core.Tests.csproj"
             },
-            "format": {
-              "const": "opencover"
+            "raw_cobertura_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/inputs/codesearch-core/coverage\\.cobertura\\.xml$"
             },
-            "relative_path": {
-              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/codesearch-core/coverage\\.opencover\\.xml$"
+            "include_directory": {
+              "type": "null"
             }
           }
         }
       ]
     },
-    "host_report": {
+    "host_producer": {
       "allOf": [
         {
-          "$ref": "#/$defs/report"
+          "$ref": "#/$defs/dotnet_producer"
         },
         {
           "properties": {
             "id": {
               "const": "host"
             },
-            "language": {
-              "const": "dotnet"
+            "project": {
+              "const": "host/NetCoreDbg.Mcp.Host.Tests/NetCoreDbg.Mcp.Host.Tests.csproj"
             },
-            "format": {
-              "const": "opencover"
+            "raw_cobertura_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/inputs/host/coverage\\.cobertura\\.xml$"
             },
-            "relative_path": {
-              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/host/coverage\\.opencover\\.xml$"
+            "include_directory": {
+              "type": "null"
             }
           }
         }
       ]
     },
-    "stateless_preview_report": {
+    "stateless_preview_producer": {
       "allOf": [
         {
-          "$ref": "#/$defs/report"
+          "$ref": "#/$defs/dotnet_producer"
         },
         {
           "properties": {
             "id": {
               "const": "stateless-preview"
             },
-            "language": {
-              "const": "dotnet"
+            "project": {
+              "const": "host/NetCoreDbg.Mcp.Stateless.Preview.Tests/NetCoreDbg.Mcp.Stateless.Preview.Tests.csproj"
             },
-            "format": {
-              "const": "opencover"
+            "raw_cobertura_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/inputs/stateless-preview/coverage\\.cobertura\\.xml$"
             },
-            "relative_path": {
-              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/stateless-preview/coverage\\.opencover\\.xml$"
+            "include_directory": {
+              "type": "null"
             }
           }
         }
       ]
     },
-    "stateless_report": {
+    "stateless_producer": {
       "allOf": [
         {
-          "$ref": "#/$defs/report"
+          "$ref": "#/$defs/dotnet_producer"
         },
         {
           "properties": {
             "id": {
               "const": "stateless"
             },
-            "language": {
-              "const": "dotnet"
+            "project": {
+              "const": "host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj"
             },
-            "format": {
-              "const": "opencover"
+            "raw_cobertura_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/inputs/stateless/coverage\\.cobertura\\.xml$"
             },
-            "relative_path": {
-              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/stateless/coverage\\.opencover\\.xml$"
+            "include_directory": {
+              "const": "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0"
             }
           }
         }
       ]
     },
-    "host_prompts_report": {
+    "host_prompts_producer": {
       "allOf": [
         {
-          "$ref": "#/$defs/report"
+          "$ref": "#/$defs/dotnet_producer"
         },
         {
           "properties": {
             "id": {
               "const": "host-prompts"
             },
-            "language": {
-              "const": "dotnet"
+            "project": {
+              "const": "tests/dotnet/NetCoreDbg.Mcp.Host.PromptTests/NetCoreDbg.Mcp.Host.PromptTests.csproj"
             },
-            "format": {
-              "const": "opencover"
+            "raw_cobertura_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/inputs/host-prompts/coverage\\.cobertura\\.xml$"
             },
-            "relative_path": {
-              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/host-prompts/coverage\\.opencover\\.xml$"
+            "include_directory": {
+              "type": "null"
             }
           }
         }

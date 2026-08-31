@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thebtf.github.io/netcoredbg-mcp/schemas/wave2-closure-entry-v1.json",
+  "title": "Wave-2 exact-closure entry evidence for Wave 3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "wave",
+    "closure_status",
+    "accepted_main_sha",
+    "closure_receipt",
+    "integration"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "wave": {
+      "const": 2
+    },
+    "closure_status": {
+      "const": "EXACT_CLOSED"
+    },
+    "accepted_main_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "closure_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "relative_path",
+        "sha256"
+      ],
+      "properties": {
+        "relative_path": {
+          "const": "specs/013-owner-scoped-prebuild-cleanup/acceptance-receipt.md"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "integration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "pull_request",
+        "accepted_ref"
+      ],
+      "properties": {
+        "kind": {
+          "const": "merged_pull_request"
+        },
+        "pull_request": {
+          "const": 289
+        },
+        "accepted_ref": {
+          "const": "origin/main"
+        }
+      }
+    }
+  }
+}

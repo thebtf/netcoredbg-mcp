@@ -1,5 +1,5 @@
 ---
-description: "Dependency-ordered Wave-3 tasks for the runner-owned exact-head SonarQube coverage producer"
+description: "Dependency-ordered Wave-3 tasks for the parent-compatible exact-head SonarQube coverage producer"
 ---
 
 # Tasks: exact-head SonarQube coverage producer
@@ -7,138 +7,122 @@ description: "Dependency-ordered Wave-3 tasks for the runner-owned exact-head So
 **Input**: [spec.md](spec.md), [architecture.md](architecture.md), [research.md](research.md), [data-model.md](data-model.md), [plan.md](plan.md), [quickstart.md](quickstart.md), and `contracts/`.
 **Parent**: `specs/011-issue450-sonar-release-program/`, Wave 3.
 **Release intent**: `none`.
-**Receipt state**: No actual diagnostic or acceptance receipt may exist before T028.
-**Format**: `[T###] [S#] [P?] Description. Requirements: ... Acceptance: ...`
-
-`[P]` permits parallel work only after the stated prerequisites and only when paths do not overlap. Every task that edits the runner or focused runner test module is serial. A task that discovers an incompatible source boundary returns to the owning slice; it does not broaden the change.
+**Execution gate**: Wave-2 PR #289 is open. T000 must validate a supplied accepted-main Wave-2 closure record before T001 through T028 may implement, run a producer, begin a scanner, claim a root, or invoke diagnostic.
+**Receipt state**: No actual diagnostic record, inventory artifact, or acceptance receipt may exist before T028.
 
 ## Binding RED/GREEN matrix
 
-The 15 rows are the implementation's behavior-first contract. Current RED means the current caller lacks the asserted behavior. A test must reach existing runner behavior, not fail because a missing import prevents collection.
+The matrix has exactly 15 rows. Current RED reaches the existing runner boundary. GREEN has a nonzero observable result and names its implementation owner.
 
 | ID | RED scenario and current oracle | GREEN oracle | Owner task |
 | --- | --- | --- | --- |
-| **R01 / V04** | Read coverage configuration and require branch mode, relative paths, and only `src/netcoredbg_mcp`. Current source has no `.coveragerc`. | `.coveragerc` produces a Cobertura report with positive line and branch denominators. | T006, T015 |
-| **R02 / V03, V12** | Spy on producer command/environment. Current runner invokes no external `uv` coverage workload and has no coverage-child scrubbing proof. | Command uses `uv run --isolated --locked --extra dev --with coverage==7.15.4`; child has no `SONAR_*`; pytest uses `-p no:cacheprovider`. | T006, T008, T014 |
-| **R03 / V04** | Feed a missing, line-only, or zero-denominator Cobertura report. Current runner accepts no report contract. | Root is `coverage`; positive lines and branches are required before end. | T001, T015 |
-| **R04 / V05** | Feed absolute, URI, `..`, duplicate, symlink, missing, outside-root, or test-only Python mappings. Current runner has no mapping validator. | Every mapping resolves once to tracked `.py` below `src/netcoredbg_mcp`. | T001, T015 |
-| **R05 / V01** | Pre-seed the planned root or inspect plan derivation before begin. Current runner has no claimed coverage root. | Plan writes nothing before begin; exclusive claim rejects a pre-seeded root and leaves end untouched. | T001, T012, T016 |
-| **R06 / V01** | Alter marker byte order, head, report order, report path, or digest. Current receipt has no marker binding. | Canonical marker binds UUID, head, project key, tool versions, six ordered reports, and config/producer hashes. | T001, T012, T015 |
-| **R07 / V02** | Capture scanner begin. Current argv lacks coverage properties. | One Python path and one ordered comma-delimited five-report OpenCover path are separate slash-relative arguments; XML has none. | T002, T013 |
-| **R08 / V06** | Capture producer inventory. Current broad build inventory is not a coverage inventory. | Exactly five fixed IDs/projects/reports occur in order. Fixtures, broad inventory, and substitutions fail. | T002, T010, T014 |
-| **R09 / V07** | Simulate zero-exit `--no-build` with no report. Current runner lacks report existence checks. | Every project restores then tests without `--no-build`; absent report is `COVERAGE_REPORT_MISSING` and end is untouched. | T002, T010, T015, T016 |
-| **R10 / V10** | Capture IncludeDirectory and mutate pre/post host hashes. Current runner has no Coverlet contract. | Only `stateless` gets absolute IncludeDirectory; its report maps production Stateless source and DLL/PDB hashes match. | T003, T011, T015 |
-| **R11 / V08** | Feed empty, malformed, wrong-root, or zero-sequence-point OpenCover XML. Current runner never parses it. | All five reports have `CoverageSession`, one direct Summary, positive sequence points, and positive aggregate branches. | T003, T015 |
-| **R12 / V09** | Feed .NET maps that escape, duplicate, use a URI, resolve only to test/fixture files, or use reparse points. | Each report maps a tracked non-test, non-fixture production `.cs` file; Stateless maps `host/NetCoreDbg.Mcp.Stateless`. | T003, T015 |
-| **R13 / V11** | Event spy observes current begin, build, end ordering with no coverage barrier. | Events are `begin -> claim -> build -> produce -> validate -> head check -> end`; every prior failure has zero end calls. | T004, T016 |
-| **R14 / V13, V14** | Fake a matching aggregate value with mismatched analysis/head or only one language component set. Current runner does not query coverage measures/components. | Two current-analysis bookends match the submitted analysis/head; aggregate and both-language mapped contributions are positive; `new_coverage` condition is OK at 80. | T004, T019, T020 |
-| **R15 / V15** | Provide v2, missing, forged, diagnostic-as-pass, raw-body, cleanup-failure, or stale-head receipt data. | Schema v3 retains secret-free report and cleanup metadata, preserves primary failure, and never allows diagnostic evidence to PASS. | T005, T021, T022 |
+| **R01 / V01** | Supply no Wave-2 entry record, an open PR #289 identity, a branch SHA, or a receipt hash mismatch. Current runner has no Wave-2 gate. | `WAVE2_CLOSURE_UNVERIFIED` occurs before preflight, begin, and claim. | T001, T012 |
+| **R02 / V02** | Hide `uv`, `bash`, or `dotnet`; alter the Coverlet/Test SDK tuple; or activate MTP. Current runner begins without producer preflight. | Typed planned-stage failure has zero begin and claim calls. | T001, T012 |
+| **R03 / V03** | Spy on Python producer command and environment. Current runner invokes no isolated coverage workload. | Exact isolated locked `uv` command, no `SONAR_*`, and cache-safe pytest arguments are observed. | T002, T006 to T008, T015 |
+| **R04 / V04** | Feed a missing, line-only, malformed, or zero-denominator Python Cobertura report. | Python final report has `coverage` root and positive line and branch denominators. | T002, T006, T016 |
+| **R05 / V05** | Feed absolute, URI, escape, duplicate, reparse, missing, or test-only Python mappings. | Every mapping resolves once to tracked `.py` below `src/netcoredbg_mcp`. | T002, T006, T016 |
+| **R06 / V06** | Inspect plan derivation before begin or alter marker final-report/input order. | Plan writes nothing; marker binds two final reports, five input records, tool tuple, and normalizer order. | T002, T013, T016 |
+| **R07 / V07** | Capture scanner begin. Current argv has no runtime coverage properties. | Begin has exactly Python and final .NET Cobertura properties with slash-relative paths. | T002, T014 |
+| **R08 / V08** | Substitute, duplicate, reorder, or broaden the five .NET producer projects. | Exactly five private project inputs occur in the fixed order. | T003, T009, T015 |
+| **R09 / V09** | Simulate a zero-exit producer without a private input or with `--no-build`. | Each project restores/tests without prohibited switches and missing input blocks before end. | T003, T010, T015, T016 |
+| **R10 / V10** | Remove Stateless `IncludeDirectory`, mutate its binary, or omit its production mapping. | Only Stateless receives the directory; hashes restore and production mapping validates. | T003, T011, T016 |
+| **R11 / V11** | Feed invalid private .NET Cobertura XML, zero line denominator, unsafe source, or no aggregate branch denominator. | Every private input validates before normalization. | T003, T016 |
+| **R12 / V12** | Feed an input set that causes a dropped, added, unsafe, non-deterministic, or zero-denominator final .NET report. | Normalizer emits one canonical final .NET Cobertura report whose source union and denominators validate. | T003, T016 |
+| **R13 / V13** | Event spy observes current begin/build/end ordering with no entry, preflight, or normalization barrier. | Events are `entry -> preflight -> begin -> claim -> build -> produce -> normalize -> validate -> head-check -> end`; every earlier injected failure has zero end calls. | T004, T017 |
+| **R14 / V14** | Fake mismatched analysis identity, incomplete component pages, or one-language component evidence. | Canonical identity and positive mapped component evidence validate for both languages. | T004, T019 |
+| **R15 / V15** | Provide v2, diagnostic-as-PASS, missing coverage linkage, incomplete/count-only inventory, forged artifact hash, stale identity, cleanup failure, or nonzero PASS release gate. | Unified v3 schema accepts only legal role/outcome combinations and rejects every forged or incomplete case. | T005, T018, T021 to T022 |
 
 ## Requirement coverage
 
 | Requirement | Tasks | Evidence |
 | --- | --- | --- |
-| COV-001 | T012 to T014, T024 | Sole runner authority and independent review. |
-| COV-002 | T012, T016 | Pure plan and event spy. |
-| COV-003 | T012, T015, T016 | Exclusive root, canonical marker, no-end failure. |
-| COV-004 | T013 | Exact runtime scanner arguments and XML guard. |
-| COV-005 | T008, T014 | Captured child environment. |
-| COV-006 | T006, T015 | `.coveragerc` and Cobertura behavior. |
-| COV-007 | T007 to T009, T014 | External `uv`, unchanged permanent dependency surfaces. |
-| COV-008 | T010 | Exact five direct private references. |
-| COV-009 | T010, T014 | Fixed ordered inventory. |
-| COV-010 | T010, T015, T016 | Restore/test command and absent-report failure. |
-| COV-011 | T011, T015 | Stateless mapping and byte restoration. |
-| COV-012 | T001, T015 | Python report/path/source validation. |
-| COV-013 | T003, T015 | .NET report/path/source validation. |
-| COV-014 | T016 | Ordered end barrier. |
-| COV-015 | T019 | Submitted/current analysis equality. |
-| COV-016 | T019 | Finite positive measures and unchanged condition. |
-| COV-017 | T020 | Complete two-language component proof. |
-| COV-018 | T019, T021 | Diagnostic schema v3 and redaction. |
-| COV-019 | T021, T022 | v3-only candidate/post-merge pass enforcement. |
-| COV-020 | T018, T022 | Claimed-root cleanup and primary failure precedence. |
-| COV-021 | T023 to T028 | Unchanged comparison surfaces and blocked finding treatment. |
-| COV-022 | T001 to T005, T015 to T022 | All 15 rows reach RED then GREEN. |
-| COV-023 | T024 to T028 | Exact review, judge, frozen head, and delayed receipt. |
+| COV-001 | T012 to T018, T024 | Sole runner authority. |
+| COV-002 | T000 to T001, T012, T028 | Typed Wave-2 accepted-main entry. |
+| COV-003 | T002, T013, T016 | Pure plan and marker proof. |
+| COV-004 | T001, T012, T022 | Event-spy preflight proof. |
+| COV-005 | T002, T013, T017 | Exclusive root and marker. |
+| COV-006 | T002, T014 | Exact two-property scanner argv. |
+| COV-007 | T002, T006 to T008, T015 | Scrubbed producer environment. |
+| COV-008 | T002, T006 to T008, T016 | Python Cobertura evidence. |
+| COV-009 | T003, T009, T012 | Fixed VSTest compatibility tuple. |
+| COV-010 | T003, T010, T015 to T016 | Private input production. |
+| COV-011 | T003, T016 | Canonical normalizer and final .NET output. |
+| COV-012 | T003, T011, T016 | Stateless input and restoration. |
+| COV-013 | T002, T016 | Python report/source validation. |
+| COV-014 | T003, T016 | Private input and final .NET validation. |
+| COV-015 | T004, T017 | Ordered end barrier. |
+| COV-016 | T004, T019 | Canonical analysis identity. |
+| COV-017 | T004, T019 | Complete two-language component proof. |
+| COV-018 | T005, T018, T021 | Diagnostic v3 contract. |
+| COV-019 | T005, T021 to T022 | Candidate/post-merge v3-only PASS contract. |
+| COV-020 | T005, T018, T022, T028 | Immutable complete diagnostic inventory. |
+| COV-021 | T020, T022 | Cleanup precedence. |
+| COV-022 | T023 to T028 | Immutable comparison surfaces. |
+| COV-023 | T001 to T005, T022 | All 15 RED/GREEN rows. |
+| COV-024 | T024 to T028 | Review, judgment, frozen head, delayed receipt. |
+
+## Entry task
+
+- [ ] **T000 [ENTRY]** Validate a supplied `Wave2ClosureEntryV1` against its schema, the immutable Wave-2 closure receipt, `origin/main`, and merged PR #289. **Requirements**: COV-002. **Acceptance**: the accepted-main SHA, closure receipt hash, and merged PR identity agree. While PR #289 remains open, return `WAVE2_CLOSURE_UNVERIFIED` and do not start any Wave-3 implementation or diagnostic action.
 
 ## Slice S1: behavior-first RED matrix
 
-**Goal**: Make every missing coverage behavior observable in the existing runner test seam before implementation changes behavior.
+- [ ] **T001 [S1]** Add R01 and R02 entry/preflight event-spy tests in `tests/test_sonarqube_exact_head_runner.py`. **Requirements**: COV-002, COV-004, COV-023. **Acceptance**: all invalid entry and toolchain inputs leave begin and claim at zero.
+- [ ] **T002 [S1]** Add R03 to R07 Python, plan, marker, and scanner-argument tests. **Requirements**: COV-003, COV-005 to COV-008, COV-013, COV-023. **Acceptance**: current runner fails through the planned caller boundary.
+- [ ] **T003 [S1]** Add R08 to R12 private-input, Stateless, and normalizer fixtures. **Requirements**: COV-009 to COV-012, COV-014, COV-023. **Acceptance**: current runner cannot accept the fixed input or final-output contract.
+- [ ] **T004 [S1]** Add R13 and R14 event/API fixtures. **Requirements**: COV-015 to COV-017, COV-023. **Acceptance**: current order lacks required barriers and analysis proof.
+- [ ] **T005 [S1]** Add R15 receipt, inventory, and cleanup fixtures and run the focused module to record the RED denominator. **Requirements**: COV-018 to COV-021, COV-023. **Acceptance**: each row has one named test and one future GREEN owner.
 
-- [ ] **T001 [S1]** Add local marker and Cobertura fixture builders plus R03 to R06 tests in `tests/test_sonarqube_exact_head_runner.py`. **Requirements**: COV-002, COV-003, COV-006, COV-012, COV-022. **Acceptance**: current runner fails through the planned validator/caller boundary for branch, source, root, and marker cases.
-- [ ] **T002 [S1]** Add command-capture tests for R07 to R09. **Requirements**: COV-004, COV-009, COV-010, COV-022. **Acceptance**: current scanner argv and build behavior cannot satisfy exact runtime paths, fixed coverage inventory, or the no-build/report rule.
-- [ ] **T003 [S1]** Add OpenCover, Stateless restoration, and .NET mapping fixtures for R10 to R12. **Requirements**: COV-008 to COV-013, COV-022. **Acceptance**: current runner fails through report/source validation behavior rather than fixture collection.
-- [ ] **T004 [S1]** Add event/API fixtures for R13 and R14. **Requirements**: COV-014 to COV-017, COV-022. **Acceptance**: current order lacks a pre-end barrier and current API behavior cannot prove exact analysis or both language sets.
-- [ ] **T005 [S1]** Add R15 receipt/cleanup fixtures and run the focused module to record the nonzero RED denominator. **Requirements**: COV-018, COV-020, COV-022. **Acceptance**: each R01 to R15 has one named test, current RED reason, future GREEN owner, and focused command output.
+## Slice S2: isolated producers and fixed inputs
 
-## Slice S2: isolated producers and fixed inventory
+- [ ] **T006 [S2]** Add `.coveragerc` and its branch, relative-file, source, and Python validator checks. **Requirements**: COV-008, COV-013. **Acceptance**: malformed and unsafe Python evidence fails.
+- [ ] **T007 [S2]** Add the external isolated locked `uv` invocation contract without changing `pyproject.toml`, `uv.lock`, or `.venv`. **Requirements**: COV-007, COV-008. **Acceptance**: command capture contains the exact tool flags and no Sonar input.
+- [ ] **T008 [S2]** Add strict `build/coverage.sh` argument parsing and Python producer commands. **Requirements**: COV-001, COV-007, COV-008. **Acceptance**: the shell has no scanner or receipt authority.
+- [ ] **T009 [S2]** Add direct private `coverlet.msbuild` `10.0.1` references to the five fixed projects and preserve VSTest `Microsoft.NET.Test.Sdk` `17.12.0`. **Requirements**: COV-009. **Acceptance**: exact tuple evaluation accepts only fixed producers and refuses MTP.
+- [ ] **T010 [S2]** Add per-project restore/test Cobertura-input commands without prohibited switches. **Requirements**: COV-010. **Acceptance**: each producer writes its planned private input or fails before end.
+- [ ] **T011 [S2]** Add the Stateless-only `IncludeDirectory` branch and binary restoration contract. **Requirements**: COV-012. **Acceptance**: only Stateless receives the directory and byte changes block.
 
-**Goal**: Create the deterministic six-report producer without permanent Python dependency changes or unsafe Coverlet shortcuts.
+## Slice S3: transaction, normalizer, and diagnostic evidence
 
-- [ ] **T006 [S2]** Add `.coveragerc` with branch mode, relative files, and the sole source root `src/netcoredbg_mcp`; add its RED/GREEN contract checks. **Requirements**: COV-006, COV-012. **Acceptance**: line-only, no-branch, outside-root, and duplicate mapping inputs fail.
-- [ ] **T007 [S2]** Add the external isolated locked `uv` invocation contract to the runner-to-producer seam without changing `pyproject.toml`, `uv.lock`, or `.venv`. **Requirements**: COV-005, COV-007. **Acceptance**: command capture contains `--isolated --locked --extra dev --with coverage==7.15.4`, `PYTHONDONTWRITEBYTECODE=1`, `COVERAGE_FILE`, and no `SONAR_*` input.
-- [ ] **T008 [S2]** Add `build/coverage.sh` as a strict plan-driven foreground executor. **Requirements**: COV-001, COV-005, COV-007, COV-009, COV-010. **Acceptance**: it validates exact five project groups, quotes paths, rejects duplicates/wrong count/`SONAR_*`, and owns no scanner/API/receipt work.
-- [ ] **T009 [S2]** Add the full Python workload commands in the shell: `coverage run --rcfile ... -m pytest -p no:cacheprovider -q`, then `coverage xml`. **Requirements**: COV-005 to COV-007. **Acceptance**: a standalone local producer invocation places Python data/XML only below the supplied root.
-- [ ] **T010 [S2]** Add exact `coverlet.msbuild` `10.0.1` `PrivateAssets=all` references to the five fixed test projects and the per-project restore/test OpenCover command. **Requirements**: COV-008 to COV-010. **Acceptance**: the closed inventory is exact, no command contains `--no-build` or prohibited filtering/merge/threshold switches, and no fixture project appears.
-- [ ] **T011 [S2]** Add the Stateless-only `IncludeDirectory` command branch and pre/post DLL/PDB hashing contract. **Requirements**: COV-011. **Acceptance**: only `stateless` receives IncludeDirectory; changed production bytes fail before scanner end.
+- [ ] **T012 [S3]** Implement Wave-2 entry verification and `preflight_coverage_toolchain` before scanner begin. **Requirements**: COV-001, COV-002, COV-004, COV-009. **Acceptance**: R01 and R02 turn green with zero begin/claim on failure.
+- [ ] **T013 [S3]** Implement `CoveragePlan`, two-final-report marker derivation, five private input paths, and exclusive claim. **Requirements**: COV-003, COV-005. **Acceptance**: plan is pure and marker schema v1 validates.
+- [ ] **T014 [S3]** Add exactly two runtime Cobertura scanner properties and static XML coverage-property rejection. **Requirements**: COV-006, COV-022. **Acceptance**: R07 turns green and XML stays unchanged.
+- [ ] **T015 [S3]** Invoke the scrubbed producer with the complete fixed input plan. **Requirements**: COV-007, COV-009, COV-010. **Acceptance**: no producer discovers paths or receives Sonar values.
+- [ ] **T016 [S3]** Implement private-input validation, `normalize_dotnet_cobertura`, final report validation, and Stateless restoration checks. **Requirements**: COV-008, COV-010 to COV-014. **Acceptance**: R04 to R06 and R09 to R12 turn green.
+- [ ] **T017 [S3]** Insert the transaction barrier and cleanup precedence. **Requirements**: COV-005, COV-015, COV-021. **Acceptance**: R13 proves zero end calls after every prior failure.
+- [ ] **T018 [S3]** Add unified v3 diagnostic receipt assembly and create-new complete inventory writer. **Requirements**: COV-018, COV-020. **Acceptance**: diagnostic completion requires complete artifact linkage and no release authority.
+- [ ] **T019 [S3]** Add canonical analysis identity, measures, and complete per-language component evidence. **Requirements**: COV-016, COV-017. **Acceptance**: R14 rejects mismatch, partial pages, and one-language import.
+- [ ] **T020 [S3]** Finalize typed failures and cleanup recording. **Requirements**: COV-021. **Acceptance**: primary failure remains primary and claimed-root cleanup is bounded.
 
-## Slice S3: runner transaction and diagnostic evidence
+## Slice S4: role enforcement and delayed receipt
 
-**Goal**: Make local valid coverage a mandatory scanner-end prerequisite and make both-language server import observable.
-
-- [ ] **T012 [S3]** Implement `CoveragePlan`, fixed inventory derivation, scanner-relative normalization, and exclusive `CoverageRunClaim` marker creation in `scripts/run_sonarqube_exact_head.py`. **Requirements**: COV-001 to COV-003. **Acceptance**: plan derivation is pure, marker bytes match schema v1, and pre-seeded root/marker cases block.
-- [ ] **T013 [S3]** Extend scanner-begin construction with exactly the Python Cobertura and ordered OpenCover properties; add XML coverage-property preflight. **Requirements**: COV-004, COV-021. **Acceptance**: runtime argv contains exactly two properties and XML remains unchanged.
-- [ ] **T014 [S3]** Integrate the scrubbed producer environment and invoke `build/coverage.sh` only with a fully enumerated plan. **Requirements**: COV-001, COV-005, COV-007, COV-009. **Acceptance**: captured children cannot see Sonar variables and no producer discovers paths independently.
-- [ ] **T015 [S3]** Implement common, Cobertura, OpenCover, source, denominator, and Stateless restoration validators. **Requirements**: COV-006, COV-010 to COV-013. **Acceptance**: R01, R03, R04, R06, R09 to R12 turn green with typed failures for every malformed input.
-- [ ] **T016 [S3]** Insert the transaction barrier: `begin -> claim -> build -> produce -> validate -> post-producer head -> end`. **Requirements**: COV-003, COV-010, COV-014. **Acceptance**: R05, R09, and R13 show zero end calls after every prior injected failure.
-- [ ] **T017 [S3]** Add typed coverage failure and cleanup behavior. **Requirements**: COV-018, COV-020. **Acceptance**: cleanup touches only the claimed root after producer termination and preserves the first failure.
-- [ ] **T018 [S3]** Add diagnostic receipt assembly through schema v3 without release authority. **Requirements**: COV-018, COV-021. **Acceptance**: a diagnostic result has only `DIAGNOSTIC_COMPLETE` or `BLOCKED`, relative metadata, and no secrets/report bodies.
-- [ ] **T019 [S3]** Add post-end report-task, CE, submitted/current-analysis bookends, and aggregate coverage measure binding. **Requirements**: COV-015, COV-016. **Acceptance**: mismatched ID/revision, nonfinite values, zero denominators, and a non-OK new-coverage condition block.
-- [ ] **T020 [S3]** Add complete component-tree paging and per-language source-set intersections. **Requirements**: COV-017. **Acceptance**: aggregate-only and one-language fixtures fail; both language sets require positive mapped lines/covered lines and a branch measure.
-
-## Slice S4: release-role enforcement and delayed receipt
-
-**Goal**: Make v3 coverage mandatory for release roles, independently examine the exact implementation head, and create a real receipt only after all evidence exists.
-
-- [ ] **T021 [S4]** Make candidate and post-merge PASS validation require v3 coverage evidence. Remove schema-v2 and optional-coverage compatibility paths in the same change. **Requirements**: COV-018, COV-019. **Acceptance**: v2, missing, forged, stale, diagnostic, or incomplete coverage evidence cannot pass a release role.
-- [ ] **T022 [S4]** Run R15 forgery/head/cleanup tests and the complete focused runner suite. **Requirements**: COV-018 to COV-020, COV-022. **Acceptance**: all fifteen rows are green with nonzero denominators and no out-of-scope source change.
-- [ ] **T023 [S4]** Inspect the implementation diff against the immutable comparison surfaces. **Requirements**: COV-021. **Acceptance**: `SonarQube.Analysis.xml`, `docs/RELEASE-PROTOCOL.md`, `pyproject.toml`, `uv.lock`, runtime routes, thresholds, exclusions, and gate policy remain unchanged.
-- [ ] **T024 [S4]** Freeze the exact implementation head and obtain an independent source review of the runner, producer, configuration, five references, and focused tests. **Requirements**: COV-001, COV-014, COV-018 to COV-021, COV-023. **Acceptance**: the reviewer receives the exact SHA, COV requirements, V01 to V15, and explicit prohibitions; every blocking finding returns to its owning task before any receipt exists.
-- [ ] **T025 [S4]** Apply only review-causal corrections, rerun focused evidence for each correction, and freeze a new exact head if source bytes change. **Requirements**: COV-022, COV-023. **Acceptance**: a corrected head has targeted proof and a fresh independent review. No receipt exists during correction.
-- [ ] **T026 [S4]** Obtain an independent acceptance judgment on the frozen reviewed head. **Requirements**: COV-015 to COV-023. **Acceptance**: the judge checks requirement/task bidirectionality, all 15 matrix results, two-language import logic, unchanged policy, and non-release authority. A rejection returns to the owning task.
-- [ ] **T027 [S4]** Bind review and judge verdicts to the exact source head that will enter the diagnostic scanner worktree. **Requirements**: COV-021, COV-023. **Acceptance**: the frozen SHA, review scope, judge scope, and candidate scanner worktree head are equal. No source mutation is allowed after this check.
-- [ ] **T028 [S4]** Run `python scripts/run_sonarqube_exact_head.py --role diagnostic` only from the prescribed fresh clean detached scanner worktree at the T027 SHA. Create `.agent/e/sonarqube/thebtf_netcoredbg_mcp/<sha>/diagnostic/<run-id>.json` and `acceptance-receipt.md` only if the diagnostic result is `DIAGNOSTIC_COMPLETE`, both-language import is proven, the unchanged new-coverage condition is `OK` at `80`, and review/judgment bind to the same SHA. **Requirements**: COV-015 to COV-023. **Acceptance**: the receipt names remaining global blockers, has `release_intent: none`, and cannot authorize release. If any condition blocks, neither receipt exists and Wave 3 remains open.
+- [ ] **T021 [S4]** Make candidate and post-merge PASS validation require [exact-head-receipt-v3.schema.json](contracts/exact-head-receipt-v3.schema.json). Remove schema-v2 and optional-coverage paths in the same change. **Requirements**: COV-018, COV-019. **Acceptance**: a PASS requires final coverage linkage, canonical identity, complete inventory, successful cleanup, and zero-blocking release gate.
+- [ ] **T022 [S4]** Run R15 forgery/head/inventory/cleanup tests and the complete focused runner suite. **Requirements**: COV-004, COV-019, COV-020, COV-022, COV-023. **Acceptance**: all 15 rows are green with nonzero denominators and no immutable-surface change.
+- [ ] **T023 [S4]** Inspect the implementation diff against immutable comparison surfaces. **Requirements**: COV-022. **Acceptance**: no policy, XML, lockfile, runtime route, threshold, exclusion, or release change appears.
+- [ ] **T024 [S4]** Freeze the exact implementation head and obtain independent source review. **Requirements**: COV-001, COV-015, COV-018 to COV-024. **Acceptance**: the reviewer receives the exact SHA, COV requirements, and V01 to V15.
+- [ ] **T025 [S4]** Apply review-causal corrections and rerun focused evidence. **Requirements**: COV-023, COV-024. **Acceptance**: a changed head gets targeted proof and a new independent review.
+- [ ] **T026 [S4]** Obtain independent acceptance judgment on the frozen reviewed head. **Requirements**: COV-016 to COV-024. **Acceptance**: the judge checks two-report contract, input/normalizer safety, entry gate, inventory, v3 roles, and non-release authority.
+- [ ] **T027 [S4]** Bind review and judgment to the exact diagnostic scanner head. **Requirements**: COV-002, COV-022, COV-024. **Acceptance**: entry evidence, frozen SHA, reviewer, judge, and scanner worktree agree.
+- [ ] **T028 [S4]** Run the diagnostic only from the prescribed fresh scanner worktree with the verified Wave-2 entry record. Create the v3 diagnostic record, immutable inventory artifact, and `acceptance-receipt.md` only after every predicate succeeds. **Requirements**: COV-002, COV-016 to COV-024. **Acceptance**: diagnostic completion has `release_intent: none`, complete inventory linkage, and no release authority. A block creates none of the three artifacts.
 
 ## Dependencies and execution order
 
 ```mermaid
 flowchart TD
+  Entry[T000 Wave-2 entry]
   T1[T001-T005 RED matrix]
-  T2[T006-T011 producer/config/inventory]
+  T2[T006-T011 producers]
   T3[T012-T020 runner transaction]
-  T4[T021-T023 v3 enforcement and proof]
-  Review[T024 exact-head source review]
-  Fix[T025 review-causal correction if needed]
-  Judge[T026 independent acceptance judgment]
-  Freeze[T027 bind exact frozen head]
-  Receipt[T028 delayed diagnostic and acceptance receipt]
-
-  T1 --> T2 --> T3 --> T4 --> Review
+  T4[T021-T023 v3 enforcement]
+  Review[T024 review]
+  Fix[T025 correction]
+  Judge[T026 judgment]
+  Freeze[T027 frozen head]
+  Receipt[T028 delayed diagnostic]
+  Entry --> T1 --> T2 --> T3 --> T4 --> Review
   Review --> Fix
   Fix --> Review
   Review --> Judge --> Freeze --> Receipt
 ```
 
-1. T001 through T005 must establish caller-level RED evidence before a producer, runner, schema, or project-reference change claims the new behavior.
-2. T006 through T011 may use separate files where marked, but no `build/coverage.sh` or `.csproj` task may race a task that reads its command contract.
-3. T012 through T020 are serial inside the runner and focused test module.
-4. T021 and T022 follow T020. T023 follows the complete focused proof.
-5. T024, T026, and T027 require an exact frozen head. T025 returns to the causal source task if review finds a defect.
-6. T028 is terminal. It is the first receipt-producing task and never opens release execution.
-
-## Parallel opportunities
-
-- T006 and T010 may proceed after T001 to T005 because they own `.coveragerc` versus five distinct `.csproj` files. T008 reads the fixed inventory after T010 declares it.
-- T019 and T020 share the runner and focused test module. They are not parallel.
-- Independent review and acceptance judgment are separate passes. The judgment begins only after the review binds a clean exact head.
+T001 through T028 are unavailable until T000 succeeds. T012 through T020 are serial in the runner and focused test module. T028 is terminal and never opens release execution.

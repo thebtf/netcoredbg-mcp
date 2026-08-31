@@ -1,0 +1,1088 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thebtf.github.io/netcoredbg-mcp/schemas/exact-head-receipt-v3.json",
+  "title": "Exact-head SonarQube receipt v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "role",
+    "outcome",
+    "release_intent",
+    "identity",
+    "coverage",
+    "analysis",
+    "global_inventory",
+    "release_gate",
+    "cleanup",
+    "failure"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 3
+    },
+    "role": {
+      "enum": [
+        "diagnostic",
+        "candidate",
+        "post-merge"
+      ]
+    },
+    "outcome": {
+      "enum": [
+        "DIAGNOSTIC_COMPLETE",
+        "PASS",
+        "BLOCKED"
+      ]
+    },
+    "release_intent": {
+      "enum": [
+        "none",
+        "v0.23.11"
+      ]
+    },
+    "identity": {
+      "$ref": "#/$defs/receipt_identity"
+    },
+    "coverage": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/coverage_evidence"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "analysis": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/analysis_evidence"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "global_inventory": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/inventory_reference"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "release_gate": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/release_gate"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "cleanup": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/cleanup"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "failure": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/failure"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "role": {
+            "const": "diagnostic"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "enum": [
+              "DIAGNOSTIC_COMPLETE",
+              "BLOCKED"
+            ]
+          },
+          "release_intent": {
+            "const": "none"
+          },
+          "release_gate": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "role": {
+            "enum": [
+              "candidate",
+              "post-merge"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "enum": [
+              "PASS",
+              "BLOCKED"
+            ]
+          },
+          "release_intent": {
+            "const": "v0.23.11"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "DIAGNOSTIC_COMPLETE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "identity": {
+            "$ref": "#/$defs/completed_identity"
+          },
+          "coverage": {
+            "$ref": "#/$defs/coverage_evidence"
+          },
+          "analysis": {
+            "$ref": "#/$defs/analysis_evidence"
+          },
+          "global_inventory": {
+            "$ref": "#/$defs/inventory_reference"
+          },
+          "cleanup": {
+            "$ref": "#/$defs/cleanup_ok"
+          },
+          "failure": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "PASS"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "identity": {
+            "$ref": "#/$defs/completed_identity"
+          },
+          "coverage": {
+            "$ref": "#/$defs/coverage_evidence"
+          },
+          "analysis": {
+            "$ref": "#/$defs/analysis_evidence"
+          },
+          "global_inventory": {
+            "$ref": "#/$defs/inventory_reference"
+          },
+          "release_gate": {
+            "$ref": "#/$defs/release_gate"
+          },
+          "cleanup": {
+            "$ref": "#/$defs/cleanup_ok"
+          },
+          "failure": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "BLOCKED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "failure": {
+            "$ref": "#/$defs/failure"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha40": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "relative_path": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+    },
+    "receipt_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "captured_head",
+        "project_key",
+        "analysis_id"
+      ],
+      "properties": {
+        "captured_head": {
+          "$ref": "#/$defs/sha40"
+        },
+        "project_key": {
+          "const": "thebtf_netcoredbg_mcp"
+        },
+        "analysis_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "completed_identity": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/receipt_identity"
+        },
+        {
+          "properties": {
+            "analysis_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ]
+    },
+    "artifact_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "relative_path",
+        "sha256",
+        "bytes"
+      ],
+      "properties": {
+        "relative_path": {
+          "$ref": "#/$defs/relative_path"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "final_report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "language",
+        "format",
+        "relative_path",
+        "sha256",
+        "bytes",
+        "xml_root",
+        "lines_valid",
+        "lines_covered",
+        "branches_valid",
+        "branches_covered",
+        "source_paths",
+        "source_set_sha256"
+      ],
+      "properties": {
+        "id": {
+          "enum": [
+            "python",
+            "dotnet"
+          ]
+        },
+        "language": {
+          "enum": [
+            "python",
+            "dotnet"
+          ]
+        },
+        "format": {
+          "const": "cobertura"
+        },
+        "relative_path": {
+          "$ref": "#/$defs/relative_path"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "xml_root": {
+          "const": "coverage"
+        },
+        "lines_valid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lines_covered": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "branches_valid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "branches_covered": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source_paths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/relative_path"
+          }
+        },
+        "source_set_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "python_final_report": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/final_report"
+        },
+        {
+          "properties": {
+            "id": {
+              "const": "python"
+            },
+            "language": {
+              "const": "python"
+            },
+            "relative_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/python/coverage\\.xml$"
+            }
+          }
+        }
+      ]
+    },
+    "dotnet_final_report": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/final_report"
+        },
+        {
+          "properties": {
+            "id": {
+              "const": "dotnet"
+            },
+            "language": {
+              "const": "dotnet"
+            },
+            "relative_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/coverage\\.xml$"
+            }
+          }
+        }
+      ]
+    },
+    "dotnet_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "project",
+        "relative_path",
+        "sha256",
+        "bytes",
+        "lines_valid",
+        "lines_covered",
+        "branches_valid",
+        "branches_covered",
+        "source_paths",
+        "source_set_sha256"
+      ],
+      "properties": {
+        "id": {
+          "enum": [
+            "codesearch-core",
+            "host",
+            "stateless-preview",
+            "stateless",
+            "host-prompts"
+          ]
+        },
+        "project": {
+          "$ref": "#/$defs/relative_path"
+        },
+        "relative_path": {
+          "$ref": "#/$defs/relative_path"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lines_valid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lines_covered": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "branches_valid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "branches_covered": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source_paths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/relative_path"
+          }
+        },
+        "source_set_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "codesearch_core_input": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/dotnet_input"
+        },
+        {
+          "properties": {
+            "id": {
+              "const": "codesearch-core"
+            },
+            "project": {
+              "const": "host/NetCoreDbg.Mcp.CodeSearch.Core.Tests/NetCoreDbg.Mcp.CodeSearch.Core.Tests.csproj"
+            },
+            "relative_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/inputs/codesearch-core/coverage\\.cobertura\\.xml$"
+            }
+          }
+        }
+      ]
+    },
+    "host_input": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/dotnet_input"
+        },
+        {
+          "properties": {
+            "id": {
+              "const": "host"
+            },
+            "project": {
+              "const": "host/NetCoreDbg.Mcp.Host.Tests/NetCoreDbg.Mcp.Host.Tests.csproj"
+            },
+            "relative_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/inputs/host/coverage\\.cobertura\\.xml$"
+            }
+          }
+        }
+      ]
+    },
+    "stateless_preview_input": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/dotnet_input"
+        },
+        {
+          "properties": {
+            "id": {
+              "const": "stateless-preview"
+            },
+            "project": {
+              "const": "host/NetCoreDbg.Mcp.Stateless.Preview.Tests/NetCoreDbg.Mcp.Stateless.Preview.Tests.csproj"
+            },
+            "relative_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/inputs/stateless-preview/coverage\\.cobertura\\.xml$"
+            }
+          }
+        }
+      ]
+    },
+    "stateless_input": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/dotnet_input"
+        },
+        {
+          "properties": {
+            "id": {
+              "const": "stateless"
+            },
+            "project": {
+              "const": "host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj"
+            },
+            "relative_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/inputs/stateless/coverage\\.cobertura\\.xml$"
+            }
+          }
+        }
+      ]
+    },
+    "host_prompts_input": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/dotnet_input"
+        },
+        {
+          "properties": {
+            "id": {
+              "const": "host-prompts"
+            },
+            "project": {
+              "const": "tests/dotnet/NetCoreDbg.Mcp.Host.PromptTests/NetCoreDbg.Mcp.Host.PromptTests.csproj"
+            },
+            "relative_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/inputs/host-prompts/coverage\\.cobertura\\.xml$"
+            }
+          }
+        }
+      ]
+    },
+    "coverage_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "marker",
+        "final_reports",
+        "dotnet_producers",
+        "normalization",
+        "stateless_host_binary"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "marker": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/artifact_reference"
+            },
+            {
+              "properties": {
+                "relative_path": {
+                  "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/coverage-run\\.json$"
+                }
+              }
+            }
+          ]
+        },
+        "final_reports": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/python_final_report"
+            },
+            {
+              "$ref": "#/$defs/dotnet_final_report"
+            }
+          ],
+          "items": false
+        },
+        "dotnet_producers": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/codesearch_core_input"
+            },
+            {
+              "$ref": "#/$defs/host_input"
+            },
+            {
+              "$ref": "#/$defs/stateless_preview_input"
+            },
+            {
+              "$ref": "#/$defs/stateless_input"
+            },
+            {
+              "$ref": "#/$defs/host_prompts_input"
+            }
+          ],
+          "items": false
+        },
+        "normalization": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "algorithm",
+            "input_set_sha256",
+            "output_report_id",
+            "source_union_complete"
+          ],
+          "properties": {
+            "algorithm": {
+              "const": "cobertura-merge-normalize-v1"
+            },
+            "input_set_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "output_report_id": {
+              "const": "dotnet"
+            },
+            "source_union_complete": {
+              "const": true
+            }
+          }
+        },
+        "stateless_host_binary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "dll_sha256",
+            "pdb_sha256",
+            "restored"
+          ],
+          "properties": {
+            "dll_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "pdb_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "restored": {
+              "const": true
+            }
+          }
+        }
+      }
+    },
+    "language_component_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_set_sha256",
+        "page_count",
+        "complete",
+        "mapped_path_count",
+        "lines_to_cover",
+        "covered_lines",
+        "branch_measure_path_count",
+        "mapped_paths_sha256"
+      ],
+      "properties": {
+        "source_set_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "page_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "complete": {
+          "const": true
+        },
+        "mapped_path_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lines_to_cover": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "covered_lines": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "branch_measure_path_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "mapped_paths_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "analysis_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observations",
+        "aggregate",
+        "new_coverage_condition",
+        "python_components",
+        "dotnet_components"
+      ],
+      "properties": {
+        "observations": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "submitted",
+            "current_before_measures",
+            "current_after_measures",
+            "current_final"
+          ],
+          "properties": {
+            "submitted": {
+              "const": true
+            },
+            "current_before_measures": {
+              "const": true
+            },
+            "current_after_measures": {
+              "const": true
+            },
+            "current_final": {
+              "const": true
+            }
+          }
+        },
+        "aggregate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "coverage",
+            "lines_to_cover",
+            "new_coverage",
+            "new_lines_to_cover"
+          ],
+          "properties": {
+            "coverage": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 100
+            },
+            "lines_to_cover": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "new_coverage": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "new_lines_to_cover": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "new_coverage_condition": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "threshold",
+            "actual_value"
+          ],
+          "properties": {
+            "status": {
+              "const": "OK"
+            },
+            "threshold": {
+              "const": 80
+            },
+            "actual_value": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            }
+          }
+        },
+        "python_components": {
+          "$ref": "#/$defs/language_component_evidence"
+        },
+        "dotnet_components": {
+          "$ref": "#/$defs/language_component_evidence"
+        }
+      }
+    },
+    "inventory_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "complete",
+        "result_empty",
+        "page_count",
+        "total",
+        "record_count",
+        "keys_sha256",
+        "blocking_key_count",
+        "blocking_keys_sha256"
+      ],
+      "properties": {
+        "complete": {
+          "const": true
+        },
+        "result_empty": {
+          "type": "boolean"
+        },
+        "page_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "record_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "keys_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "blocking_key_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "blocking_keys_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "inventory_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact",
+        "artifact_schema_version",
+        "issues",
+        "hotspots"
+      ],
+      "properties": {
+        "artifact": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/artifact_reference"
+            },
+            {
+              "properties": {
+                "relative_path": {
+                  "pattern": "^\\.agent/e/sonarqube/thebtf_netcoredbg_mcp/[0-9a-f]{40}/diagnostic/[0-9A-Fa-f-]{36}\\.inventory\\.json$"
+                }
+              }
+            }
+          ]
+        },
+        "artifact_schema_version": {
+          "const": 1
+        },
+        "issues": {
+          "$ref": "#/$defs/inventory_summary"
+        },
+        "hotspots": {
+          "$ref": "#/$defs/inventory_summary"
+        }
+      }
+    },
+    "release_gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "quality_gate_status",
+        "blocking_issue_count",
+        "blocking_hotspot_count"
+      ],
+      "properties": {
+        "quality_gate_status": {
+          "const": "OK"
+        },
+        "blocking_issue_count": {
+          "const": 0
+        },
+        "blocking_hotspot_count": {
+          "const": 0
+        }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claimed_root",
+        "producer_terminal",
+        "removed_paths",
+        "parent_removed_if_empty",
+        "status",
+        "failure"
+      ],
+      "properties": {
+        "claimed_root": {
+          "$ref": "#/$defs/relative_path"
+        },
+        "producer_terminal": {
+          "const": true
+        },
+        "removed_paths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/relative_path"
+          }
+        },
+        "parent_removed_if_empty": {
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "OK",
+            "FAILED"
+          ]
+        },
+        "failure": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/safe_failure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "cleanup_ok": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/cleanup"
+        },
+        {
+          "properties": {
+            "status": {
+              "const": "OK"
+            },
+            "failure": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    },
+    "safe_failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "stage",
+        "language",
+        "project_id",
+        "safe_message"
+      ],
+      "properties": {
+        "code": {
+          "pattern": "^(?:COVERAGE|WAVE2)_[A-Z0-9_]+$"
+        },
+        "stage": {
+          "enum": [
+            "PLANNED",
+            "TOOLCHAIN_READY",
+            "SCANNER_BEGUN",
+            "RUN_CLAIMED",
+            "PRODUCING",
+            "REPORTS_VALIDATED",
+            "SCANNER_ENDED",
+            "ANALYSIS_BOUND",
+            "CLEANED",
+            "BLOCKED"
+          ]
+        },
+        "language": {
+          "enum": [
+            "python",
+            "dotnet",
+            null
+          ]
+        },
+        "project_id": {
+          "enum": [
+            "python",
+            "codesearch-core",
+            "host",
+            "stateless-preview",
+            "stateless",
+            "host-prompts",
+            null
+          ]
+        },
+        "safe_message": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

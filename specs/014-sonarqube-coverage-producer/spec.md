@@ -5,141 +5,125 @@
 **Source base**: `1b8b2d548a45b17dde690b4cb8e4fc7153d326bc`
 **Parent**: `specs/011-issue450-sonar-release-program/`, Wave 3
 **Design authority**: `agent://ArchitectWave3Coverage`
-**Source evidence**: `agent://Wave3CoverageSource`
-**Test evidence**: `agent://Wave3CoverageTests`
-**Design depth**: D2
 **Release intent**: `none`
-**Status**: Planned packet. No implementation, diagnostic receipt, acceptance receipt, tag, publication, or release claim exists in this packet.
+**Status**: Planned packet. Wave-3 implementation and diagnostic execution are blocked until the typed Wave-2 closure entry evidence validates. Wave-2 PR #289 is open, so no such evidence exists in this packet. No implementation, diagnostic receipt, acceptance receipt, tag, publication, or release claim exists here.
 
 ## Purpose
 
-The exact-head Sonar runner must produce, validate, import, and bind real Python and .NET coverage from one captured source head. A stale, empty, unmapped, wrong-head, or partially imported report must not reach scanner end or support a release pass.
+The retained exact-head runner must produce, validate, import, and bind two deterministic project-root-relative Cobertura reports from one captured source head:
 
-The parent packet contains an earlier Wave-3 directory pointer named `specs/014-sonarqube-cross-language-coverage/`. This packet uses the path required by this task, `specs/014-sonarqube-coverage-producer/`. The parent Wave-3 semantics remain binding. This packet does not edit the parent pointer.
+- `.tmp/sonarqube-coverage/<run-id>/python/coverage.xml`
+- `.tmp/sonarqube-coverage/<run-id>/dotnet/coverage.xml`
 
-## Current evidence and non-goals
+The fixed five .NET test projects are producer inputs. They emit five private Cobertura inputs below `dotnet/inputs/`. The runner validates and normalizes those inputs into the one final .NET Cobertura report. Sonar receives only the two final report identities. A stale, empty, unmapped, wrong-head, incomplete, or substituted artifact must not reach scanner end or support a release PASS.
 
-`agent://Wave3CoverageSource` records that the retained runner currently executes scanner begin, builds, scanner end, and analysis readback without a coverage producer, report validation, report import argument, coverage measure binding, or coverage receipt identity. It also records a valid but blocked exact-head baseline with `new_coverage=0.0` against the unchanged threshold of `80`.
+The parent packet has an earlier Wave-3 directory pointer named `specs/014-sonarqube-cross-language-coverage/`. This packet uses the required directory `specs/014-sonarqube-coverage-producer/`. The parent contract remains binding. This packet does not edit the parent pointer.
 
-This feature does not repair the global finding denominator. It does not alter the quality gate, a threshold, New Code, the Sonar project key, exclusions, credentials, `SonarQube.Analysis.xml`, `docs/RELEASE-PROTOCOL.md`, a public runtime route, a package version, a tag, or publication.
+## Entry condition
+
+Wave 3 requires a schema-valid [Wave-2 closure entry record](contracts/wave2-closure-entry-v1.schema.json). The record must name an exact accepted `origin/main` SHA, the immutable Wave-2 closure receipt hash, and merged PR #289. The runner verifies the record against `origin/main`, the Wave-2 closure receipt, and the merged PR identity before any implementation-owned transaction begins.
+
+An unmerged PR head, a feature branch, a copied receipt, a stale accepted SHA, or missing evidence is `WAVE2_CLOSURE_UNVERIFIED`. It blocks implementation and diagnostic execution before producer preflight, scanner begin, and run-root claim. Packet authoring does not satisfy this entry condition.
 
 ## User scenarios and testing
 
-### User story 1: Produce evidence from one source head
+### User story 1: Produce parent-compatible evidence from one source head
 
-A quality owner runs the existing exact-head runner from a clean scanner worktree. The runner creates one fresh run root after scanner begin. It produces one Python Cobertura report and five fixed .NET OpenCover reports before scanner end.
+A quality owner runs the existing exact-head runner from a clean scanner worktree only after the Wave-2 entry record validates. Before scanner begin, the runner validates the producer toolchain. It then creates one fresh run root after scanner begin, produces the Python final report and five private .NET inputs, and normalizes the .NET inputs into the single final report.
 
-**Independent test**: A focused command-spy test proves that the runner derives the plan before begin, supplies exact runtime import properties, claims the root only after begin, invokes the isolated producer with the closed five-project inventory, and calls scanner end only after local validation succeeds.
-
-**Acceptance scenarios**:
-
-1. **Given** a captured 40-character source head and an absent run root, **when** scanner begin succeeds, **then** the runner exclusively creates `.tmp/sonarqube-coverage/<run-id>/` and writes one canonical marker for that head and fixed inventory.
-2. **Given** a coverage transaction, **when** the producer runs, **then** it writes exactly one Cobertura report and five ordered OpenCover reports at the planned paths.
-3. **Given** the Stateless test project, **when** it produces coverage, **then** it alone receives the absolute `IncludeDirectory` for the production Stateless output and the production DLL and PDB bytes match their pre-producer hashes.
-
-### User story 2: Reject invalid local coverage before import
-
-A quality owner must know that XML existence is not mistaken for coverage evidence. The runner rejects missing, empty, malformed, zero-denominator, escaping, symlinked, duplicate, test-only, stale, or wrong-head report data before scanner end.
-
-**Independent test**: Local marker and XML fixtures drive each failure through the runner boundary. The test observes a typed coverage failure and zero scanner-end calls.
+**Independent test**: A focused command and event spy proves `wave2-entry -> preflight -> begin -> claim -> build -> produce -> normalize -> validate -> head-check -> end`. It proves that a failed entry or preflight has zero begin and claim calls.
 
 **Acceptance scenarios**:
 
-1. **Given** a producer returns exit code zero without the planned OpenCover file, **when** validation runs, **then** the runner returns `COVERAGE_REPORT_MISSING` and does not end the scanner.
-2. **Given** a valid-shaped report whose denominator is zero or whose source paths resolve only to tests or fixtures, **when** validation runs, **then** the runner blocks the transaction.
-3. **Given** a pre-seeded run directory, altered marker bytes, or a report outside the planned root, **when** the runner prepares the transaction, **then** it rejects the evidence rather than reusing it.
+1. **Given** valid Wave-2 entry evidence, an available toolchain, a captured 40-character source head, and an absent run root, **when** the transaction runs, **then** the runner creates one canonical marker after begin and records only the two final scanner report paths.
+2. **Given** the fixed five .NET producers, **when** they complete, **then** the runner accepts their private Cobertura inputs only after source and denominator validation and writes one normalized `.NET` Cobertura report.
+3. **Given** the Stateless producer, **when** it collects coverage, **then** it alone receives the exact `IncludeDirectory`, maps production Stateless source, and preserves the selected DLL and PDB hashes.
 
-### User story 3: Record a diagnostic without changing release authority
+### User story 2: Fail before scanner begin when the producer cannot run safely
 
-A quality owner needs server evidence that both language source sets contributed to the submitted analysis. The diagnostic record remains non-release evidence while unrelated findings keep the overall Quality Gate red.
+A quality owner must know that an unavailable tool or an incompatible test platform cannot strand a scanner transaction. The runner resolves `uv`, `bash`, and `dotnet`, checks the five-project VSTest compatibility tuple, and refuses Microsoft Testing Platform activation before scanner begin.
 
-**Independent test**: Fake Sonar API responses prove that the runner requires matching submitted-analysis and current-analysis identities, positive coverage measures, complete component paging, and positive mapped contributions from both language source sets.
+**Independent test**: A command spy injects missing `uv`, `bash`, or `dotnet`, an incorrect `coverlet.msbuild` or `Microsoft.NET.Test.Sdk` version, and active MTP. Every case returns a typed planned-stage failure with zero begin and claim calls.
 
-**Acceptance scenarios**:
+### User story 3: Record a complete diagnostic without release authority
 
-1. **Given** all six reports validate, **when** scanner end and Compute Engine processing succeed, **then** two current-analysis bookends and the submitted analysis bind to the captured head.
-2. **Given** project-level coverage is positive but only one language has mapped component evidence, **when** the diagnostic validator evaluates the result, **then** it returns `COVERAGE_IMPORT_UNPROVEN`.
-3. **Given** both language sets and the unchanged `new_coverage` condition are valid, **when** the runner records a diagnostic result, **then** it writes schema-v3 evidence with `release_intent: none`, never a release pass.
+A quality owner needs a complete current issue and hotspot inventory that Wave 4 can use to assign every blocking key once. A `DIAGNOSTIC_COMPLETE` record binds a create-new, hash-checked inventory artifact that contains all paginated records and their routing fields. Counts alone never satisfy the record.
+
+**Independent test**: Synthetic receipt and inventory fixtures prove that incomplete pagination, count-only summaries, an artifact hash mismatch, a missing key, or an identity mismatch cannot produce `DIAGNOSTIC_COMPLETE`.
+
+### User story 4: Make every exact-head role use one v3 evidence contract
+
+A release owner needs candidate and post-merge PASS validation to consume the same fully specified v3 coverage evidence as diagnostic collection, while retaining distinct role and outcome rules.
+
+**Independent test**: The v3 validator rejects schema v2, missing coverage, diagnostic-as-PASS, incomplete inventory, forged marker or report linkage, stale identity, and a PASS without zero blocking findings or hotspots.
 
 ## Scope boundaries
 
 ### In scope
 
-- A runner-owned coverage transaction in `scripts/run_sonarqube_exact_head.py`.
-- A thin `build/coverage.sh` producer and `.coveragerc` configuration.
-- Isolated, locked `uv` execution with temporary `coverage==7.15.4`, without changing `pyproject.toml`, `uv.lock`, or the project `.venv`.
-- Exact private `coverlet.msbuild` `10.0.1` references in the five fixed test projects.
-- Local report, path, source, marker, head, analysis, and cleanup validation.
-- Runtime scanner report arguments, schema-v3 diagnostic evidence, and focused runner tests.
+- A runner-owned two-report Cobertura transaction in `scripts/run_sonarqube_exact_head.py`.
+- A thin `build/coverage.sh` producer, `.coveragerc`, and direct private `coverlet.msbuild` `10.0.1` references in the fixed five test projects.
+- The fixed merge-and-normalize algorithm that turns the five private .NET Cobertura inputs into the one final .NET Cobertura report.
+- The Wave-2 entry record, v3 unified receipt schema, complete diagnostic inventory schema, runtime scanner arguments, focused runner tests, and receipt validation.
 
 ### Out of scope
 
 - Any source or test edit while authoring this packet.
-- `SonarQube.Analysis.xml` coverage properties, static report globs, a second scanner command, a generic coverage merge, a filter, an exclusion, a threshold, or a New Code change.
-- A release-role waiver, a tag, a package publication, a public route change, or a claim that the global Quality Gate is green.
-- A timeout or process-tree ownership design beyond foreground producer completion. A later timeout feature must consume a proven owner capability or re-enter design.
+- A parent-contract amendment, a second scanner, static XML coverage properties, report globs, generic report discovery, an alternate report format, a filter, an exclusion, a threshold, or a New Code change.
+- Automatic MTP fallback or project-property injection. MTP is refused by this packet.
+- A release-role waiver, tag, package publication, public route change, or claim that the global Quality Gate is green.
 
 ## Functional requirements
 
 | ID | Requirement | Observable future acceptance |
 | --- | --- | --- |
-| **COV-001** | `scripts/run_sonarqube_exact_head.py` MUST remain the only scanner, analysis-binding, and receipt authority. | The existing `candidate` and `post-merge` entry points remain the only release callers. `build/coverage.sh` has no token, scanner, API, discovery, or receipt behavior. |
-| **COV-002** | The runner MUST derive a `CoveragePlan` from one captured 40-character head before scanner begin without creating files. | A focused test observes deterministic absolute and scanner-relative report paths without filesystem writes. |
-| **COV-003** | After scanner begin succeeds, the runner MUST claim a previously absent UUID run root and canonical marker with exclusive operations. | Pre-seeded root, marker, path escape, or altered marker bytes block the run before scanner end. |
-| **COV-004** | Scanner begin MUST receive exactly one Python report property and one ordered five-report OpenCover property as runtime arguments. | Command capture contains the two exact slash-normalized relative arguments and no static XML coverage property. |
-| **COV-005** | The producer environment MUST contain no `SONAR_*` name or secret value. | Captured `uv`, shell, pytest, restore, test, and test-host environments contain no `SONAR_*` variable. |
-| **COV-006** | `.coveragerc` MUST make Python branch coverage, relative source paths, and `src/netcoredbg_mcp` the only Python measurement root. | Cobertura XML has positive line and branch denominators and every accepted mapping resolves under `src/netcoredbg_mcp`. |
-| **COV-007** | Python coverage MUST run through `uv run --isolated --locked --extra dev --with coverage==7.15.4` without modifying `pyproject.toml`, `uv.lock`, or `.venv`. | Command capture and file hashes prove the external tool route and unchanged permanent Python dependency surfaces. |
-| **COV-008** | Each fixed .NET test project MUST reference `coverlet.msbuild` version `10.0.1` with `PrivateAssets=all`. | The five project files contain the exact direct test-only reference. |
-| **COV-009** | The .NET producer MUST run exactly the closed five-project inventory in the declared order. | Command capture rejects broad build inventory, project substitution, fixture projects, duplicate IDs, and wrong report count. |
-| **COV-010** | Every .NET producer MUST restore its exact test project and run without `--no-build`, filters, source exclusions, module filters, report merge, or threshold switches. | A zero-exit/no-report fixture blocks with `COVERAGE_REPORT_MISSING`; command capture rejects prohibited arguments. |
-| **COV-011** | Only the Stateless test project MUST receive the absolute `IncludeDirectory` for `host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0`. | Its report maps a production Stateless source file, and the selected production DLL and PDB hashes are unchanged after collection. |
-| **COV-012** | The runner MUST validate Cobertura roots, denominators, branch denominators, file mappings, path containment, and source-set uniqueness before scanner end. | Missing, malformed, zero, absolute, URI, duplicate, missing, test-only, symlinked, or escaping Python inputs block. |
-| **COV-013** | The runner MUST validate all five OpenCover roots, direct sequence-point denominators, aggregate branch denominator, production mappings, and the Stateless mapping before scanner end. | Missing, malformed, zero, test-only, fixture-only, duplicate, escaping, or invalid .NET inputs block. |
-| **COV-014** | Scanner end MUST be unreachable until marker, reports, source sets, report hashes, host restoration, and post-producer head all validate. | An event spy observes `begin -> claim -> build -> produce -> validate -> head check -> end`; any earlier failure has zero end calls. |
-| **COV-015** | After scanner end, the runner MUST bind the submitted analysis and two current-analysis bookends to the captured head before it reads coverage measures. | A changed analysis ID or revision blocks the diagnostic result. |
-| **COV-016** | The runner MUST require positive analysis-bound aggregate coverage and lines-to-cover and an unchanged `new_coverage` condition with threshold `80` and status `OK`. | A zero, malformed, mismatched, or non-OK measure condition blocks the diagnostic result. |
-| **COV-017** | The runner MUST prove both language source sets contributed server component measures. | Complete component paging intersects each validated source set and finds positive line coverage plus at least one branch measure for Python and .NET. |
-| **COV-018** | Diagnostic evidence MUST use schema version 3, be secret-free, and carry `release_intent: none`. | Schema-v2, an omitted coverage section, a forged hash, a path escape, a report body, or a diagnostic-as-pass representation is rejected. |
-| **COV-019** | Candidate and post-merge PASS validation MUST require schema-v3 coverage evidence with no compatibility path for schema-v2 receipts. | A release validator rejects missing, stale, incomplete, forged, or diagnostic coverage evidence. |
-| **COV-020** | Cleanup MUST remove only the claimed run root after foreground producers terminate. Cleanup failure MUST remain secondary to the first causal failure. | The cleanup test preserves foreign `.tmp` content, reports only planned relative paths, and retains primary failure precedence. |
-| **COV-021** | Global Quality Gate, findings, project identity, thresholds, New Code, exclusions, credentials, and release protocol authority MUST remain unchanged. | The final source diff excludes `SonarQube.Analysis.xml` and `docs/RELEASE-PROTOCOL.md`; the diagnostic record names unresolved global blockers instead of waiving them. |
-| **COV-022** | The implementation MUST satisfy the 15 behavior-first RED/GREEN rows in [tasks.md](tasks.md#binding-redgreen-matrix). | Every row fails through the current caller behavior before its implementation and passes only after its owned contract is present. |
-| **COV-023** | A future Wave-3 acceptance receipt MUST be created only by the final task after exact-head review, independent acceptance judgment, and the diagnostic transaction succeed. | No receipt file exists before the final task. The final receipt names the implementation SHA, diagnostic path and hash, review, judge, and remaining global blockers. |
+| **COV-001** | `scripts/run_sonarqube_exact_head.py` remains the only scanner, analysis-binding, normalization, and receipt authority. | The producer has no scanner, API, discovery, acceptance, or receipt behavior. |
+| **COV-002** | Wave-3 implementation and diagnostic execution require schema-valid, live-verified Wave-2 closure entry evidence. | Missing, unmerged, stale, branch-derived, or receipt-mismatched evidence blocks before preflight, begin, and claim. |
+| **COV-003** | The runner derives a pure head-bound `CoveragePlan` before scanner begin without writing files. | A focused test observes deterministic final and private-input paths without filesystem writes. |
+| **COV-004** | The runner preflights `uv`, `bash`, and `dotnet`, plus the exact Coverlet VSTest tuple, before scanner begin and run-root claim. | Missing tools, `coverlet.msbuild != 10.0.1`, `Microsoft.NET.Test.Sdk != 17.12.0`, or active MTP fail at `PLANNED` with zero begin and claim calls. |
+| **COV-005** | After scanner begin, the runner claims only a previously absent UUID root and canonical marker. | A pre-seeded root, altered marker, or path escape blocks without scanner end. |
+| **COV-006** | Scanner begin receives exactly two runtime Cobertura properties: Python and the one final .NET report. | The arguments use slash-relative final paths and `sonar.cs.cobertura.reportsPaths`; XML contains no coverage path. |
+| **COV-007** | Producer children receive no `SONAR_*` names or values. | Captured `uv`, Bash, pytest, restore, test, and test-host environments contain no Sonar variable. |
+| **COV-008** | Python coverage uses the isolated locked `uv` route and `.coveragerc` source policy without permanent dependency changes. | The Python final report has positive line and branch denominators and only valid `src/netcoredbg_mcp` mappings. |
+| **COV-009** | The .NET producer accepts exactly five ordered `net8.0` VSTest projects with direct private `coverlet.msbuild` `10.0.1` and `Microsoft.NET.Test.Sdk` `17.12.0`. | The command and evaluated-project checks reject substitutions, duplicate IDs, wrong versions, broad inventory use, and MTP. |
+| **COV-010** | Each fixed .NET producer restores and tests without `--no-build`, filters, exclusions, thresholds, or merge switches, and writes its planned private Cobertura input. | A zero-exit missing input blocks with `COVERAGE_REPORT_MISSING`. |
+| **COV-011** | The runner normalizes all five validated private .NET inputs into one deterministic final `.NET` Cobertura report. | The normalizer has a fixed input order, canonical source order, positive final denominators, and no scanner-visible private input identity. |
+| **COV-012** | Only the Stateless producer receives the fixed `IncludeDirectory` and must preserve its production DLL/PDB bytes. | A changed binary or missing production Stateless mapping blocks before scanner end. |
+| **COV-013** | The runner validates the Python final report for Cobertura shape, positive denominators, containment, and source-set uniqueness. | Missing, malformed, zero, absolute, URI, duplicate, test-only, symlinked, or escaping mappings block. |
+| **COV-014** | The runner validates every private .NET Cobertura input and the normalized final .NET Cobertura output for source safety and positive denominators. | An invalid input, invalid normalized output, dropped source, added source, zero final denominator, or path escape blocks before scanner end. |
+| **COV-015** | Scanner end is unreachable until marker, two final reports, five input records, normalization, source sets, hashes, host restoration, and post-producer head validate. | The event spy observes the required order and every prior injected failure has zero end calls. |
+| **COV-016** | After scanner end, the runner binds the submitted analysis and all current-analysis observations to one captured head and analysis identity. | A changed analysis ID or revision blocks the result. |
+| **COV-017** | The runner proves both final language source sets contributed server component measures. | Complete component paging finds positive mapped coverage and a branch measure for Python and .NET. |
+| **COV-018** | Diagnostic receipts use unified schema version 3, remain secret-free, and have `release_intent: none`. | A diagnostic record allows only `DIAGNOSTIC_COMPLETE` or `BLOCKED`; it cannot be PASS. |
+| **COV-019** | Candidate and post-merge PASS validation requires the unified schema-v3 coverage, identity, inventory, cleanup, and release-gate shape with no schema-v2 path. | Missing, stale, forged, diagnostic, incomplete, or v2 evidence cannot pass a release role. |
+| **COV-020** | `DIAGNOSTIC_COMPLETE` requires complete paginated issue and hotspot inventories bound to an immutable, hash-checked artifact sufficient for Wave-4 routing. | `complete:false`, count-only data, hash mismatch, identity mismatch, missing records, or missing routing fields are rejected. |
+| **COV-021** | Cleanup removes only the claimed root after foreground producers terminate and preserves the first causal failure. | The cleanup proof retains foreign content and reports cleanup failure only as secondary evidence. |
+| **COV-022** | Global Quality Gate, findings, project identity, thresholds, New Code, exclusions, credentials, and release protocol authority remain unchanged. | The final source diff excludes immutable comparison surfaces and leaves global blockers explicit. |
+| **COV-023** | The implementation satisfies the 15 behavior-first RED/GREEN rows in [tasks.md](tasks.md#binding-redgreen-matrix). | Every row has a caller-level RED reason, a nonzero GREEN oracle, an owner task, and a dependency. |
+| **COV-024** | A Wave-3 acceptance receipt is delayed until exact-head review, independent acceptance judgment, verified Wave-2 entry evidence, and a complete diagnostic transaction succeed. | No real receipt exists before the final task. |
 
 ## Success criteria
 
 | ID | Measurable outcome | Requirement links |
 | --- | --- | --- |
-| **SC-001** | The produced evidence contains exactly six planned reports: one Python Cobertura report and five ordered .NET OpenCover reports. | COV-002 to COV-011 |
-| **SC-002** | Every accepted report has a positive local denominator, a positive branch denominator, and at least one valid intended production mapping. | COV-006, COV-012, COV-013 |
-| **SC-003** | 100% of injected local producer, marker, report, mapping, and head failures make scanner end unreachable. | COV-003, COV-012 to COV-014, COV-020 |
-| **SC-004** | The post-analysis component inventory proves a positive covered-line contribution for both Python and .NET source sets. | COV-015 to COV-017 |
-| **SC-005** | The diagnostic record is schema-v3, redacts secrets, reports `release_intent: none`, and cannot satisfy release PASS validation. | COV-018, COV-019, COV-021 |
-| **SC-006** | All 15 RED/GREEN rows have an exact focused command, a nonzero oracle, a source owner, and a task dependency. | COV-022 |
-| **SC-007** | No acceptance or diagnostic receipt is created by this planning packet. The future receipt exists only after the final task completes. | COV-023 |
-
-## Key entities
-
-- **Coverage plan**: The pure, head-bound declaration of the run root, marker, Python report, five .NET reports, and source inventory.
-- **Coverage run claim**: The exclusive on-disk ownership of one planned root and marker after scanner begin.
-- **Marker**: Canonical JSON bytes that bind one run ID, head, project key, expected report set, tool versions, and producer/config hashes.
-- **Report evidence**: The identity, format, denominator, source set, and hash of one validated report. It never stores a report body.
-- **Coverage measure snapshot**: Analysis-bound aggregate and per-language Sonar values bracketed by current-analysis readbacks.
-- **Diagnostic receipt**: A schema-v3, non-release record for one exact analysis. It can be `DIAGNOSTIC_COMPLETE` or `BLOCKED`; it cannot be `PASS`.
+| **SC-001** | Sonar receives exactly two deterministic project-root-relative Cobertura reports. | COV-003, COV-006, COV-011 |
+| **SC-002** | Five fixed .NET test projects are private producer inputs, not scanner report identities. | COV-009 to COV-014 |
+| **SC-003** | Every entry or toolchain failure leaves both scanner begin and root claim unreachable. | COV-002, COV-004, COV-015 |
+| **SC-004** | A complete diagnostic binds a complete immutable issue/hotspot inventory usable for one-owner Wave-4 routing. | COV-016 to COV-020 |
+| **SC-005** | Candidate and post-merge PASS use a v3-only discriminated receipt contract. | COV-018, COV-019 |
+| **SC-006** | The matrix has exactly 15 rows and traceability is bidirectional. | COV-023 |
+| **SC-007** | No receipt, tag, publication, or release claim is created while authoring this packet. | COV-024 |
 
 ## Requirement traceability
 
-| Requirement | Design and contract authority | Implementation slice and tasks | Future proof |
+| Requirement range | Design and contract authority | Tasks | Future proof |
 | --- | --- | --- | --- |
-| COV-001 to COV-004 | [architecture.md](architecture.md), [contracts/coverage-evidence.md](contracts/coverage-evidence.md) | S3, T012 to T015 | V01, V02, V11 |
-| COV-005 to COV-007 | [architecture.md](architecture.md#producer-commands), [research.md](research.md) | S2, T006 to T009 | V03 to V05, V12 |
-| COV-008 to COV-011 | [architecture.md](architecture.md#fixed-net-producer-inventory), [data-model.md](data-model.md) | S2, T010 to T011 | V06 to V10 |
-| COV-012 to COV-014 | [data-model.md](data-model.md#validation-invariants), [contracts/coverage-evidence.md](contracts/coverage-evidence.md) | S1 and S3, T001 to T005 and T016 to T018 | V04, V05, V08 to V11 |
-| COV-015 to COV-017 | [architecture.md](architecture.md#analysis-binding), [data-model.md](data-model.md#analysis-evidence) | S3, T019 to T020 | V13, V14 |
-| COV-018 to COV-020 | [data-model.md](data-model.md#diagnostic-receipt), [contracts/diagnostic-receipt-v3.schema.json](contracts/diagnostic-receipt-v3.schema.json) | S3 and S4, T020 to T023 | V15 |
-| COV-021 to COV-023 | [plan.md](plan.md#scope-and-rollback), [tasks.md](tasks.md#slice-s4-release-role-enforcement-and-delayed-receipt) | S4, T024 to T028 | Final exact-head review, judge, and delayed receipt |
+| COV-001 to COV-006 | [architecture.md](architecture.md), [coverage-run-marker.schema.json](contracts/coverage-run-marker.schema.json), [wave2-closure-entry-v1.schema.json](contracts/wave2-closure-entry-v1.schema.json) | T000 to T014 | V01, V02, V06, V07, V13 |
+| COV-007 to COV-012 | [architecture.md](architecture.md#producer-commands), [coverage-evidence.md](contracts/coverage-evidence.md) | T003, T006 to T011, T015 to T016 | V03, V08 to V12 |
+| COV-013 to COV-017 | [data-model.md](data-model.md), [coverage-evidence.md](contracts/coverage-evidence.md) | T001, T004, T013 to T019 | V04, V05, V11 to V14 |
+| COV-018 to COV-020 | [exact-head-receipt-v3.schema.json](contracts/exact-head-receipt-v3.schema.json), [diagnostic-inventory-v1.schema.json](contracts/diagnostic-inventory-v1.schema.json) | T005, T018, T021 to T022 | V15 |
+| COV-021 to COV-024 | [plan.md](plan.md), [tasks.md](tasks.md#slice-s4-release-role-enforcement-and-delayed-receipt) | T020 to T028 | Focused proof, review, judgment, and delayed receipt |
 
 ## Receipt timing
 
-This packet intentionally contains schemas and a contract, not a receipt. `acceptance-receipt.md` is absent. The final implementation task, T028, is the first task that may create a diagnostic receipt and the Wave-3 acceptance receipt. Any red condition leaves both receipts absent and Wave 3 open.
+This packet contains schemas and contracts, not a receipt. `acceptance-receipt.md` is absent. T028 is the first task that may create a diagnostic record, its complete inventory artifact, and the Wave-3 acceptance receipt. Any red condition leaves all three absent and Wave 3 open.

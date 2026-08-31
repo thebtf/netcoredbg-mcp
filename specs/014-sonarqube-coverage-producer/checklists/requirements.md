@@ -1,50 +1,52 @@
 # Specification quality checklist: exact-head SonarQube coverage producer
 
-**Purpose**: Review this Wave-3 packet before implementation. Marking a checkbox records a document review only. It does not create a diagnostic receipt, acceptance receipt, release, tag, or publication.
+**Purpose**: Review this Wave-3 packet before implementation. Marking a checkbox records document review only. It creates no diagnostic receipt, inventory artifact, acceptance receipt, release, tag, or publication.
 
-## Scope and authority
+## Scope and entry authority
 
-- [ ] The packet states source base `1b8b2d548a45b17dde690b4cb8e4fc7153d326bc`, parent `specs/011-issue450-sonar-release-program/`, Wave 3, D2 authority `agent://ArchitectWave3Coverage`, and `release_intent: none`.
-- [ ] The packet uses the required directory `specs/014-sonarqube-coverage-producer/` and documents the older parent pointer without changing it.
-- [ ] The packet names `scripts/run_sonarqube_exact_head.py` as the sole scanner, analysis, and receipt authority.
-- [ ] `build/coverage.sh` is limited to fully enumerated producer execution and has no scanner token, API, report discovery, validation, or release authority.
-- [ ] The packet leaves `SonarQube.Analysis.xml`, `docs/RELEASE-PROTOCOL.md`, `pyproject.toml`, `uv.lock`, public routes, version, tag, publication, project key, threshold, New Code, exclusions, and credential policy out of mutation scope.
+- [ ] The packet names the parent Wave-3 two-report Cobertura contract and does not amend the parent.
+- [ ] The packet uses `specs/014-sonarqube-coverage-producer/` and documents the older parent pointer without editing it.
+- [ ] The packet names `scripts/run_sonarqube_exact_head.py` as the only scanner, normalization, analysis, and receipt authority.
+- [ ] The packet says Wave-2 PR #289 is open and that Wave-3 implementation and diagnostic execution are BLOCKED until typed accepted-main closure evidence validates.
+- [ ] `wave2-closure-entry-v1.schema.json` forbids a branch field and requires exact accepted-main SHA, Wave-2 closure receipt hash, `origin/main`, and merged PR #289.
+- [ ] The packet leaves `SonarQube.Analysis.xml`, `docs/RELEASE-PROTOCOL.md`, `pyproject.toml`, `uv.lock`, public routes, version, tag, publication, project key, threshold, New Code, exclusions, and credential policy outside mutation scope.
 
-## Plan and run layout
+## Plan, preflight, and report layout
 
-- [ ] The runner derives `CoveragePlan` before scanner begin without writes.
-- [ ] A fresh UUID root is claimed exclusively only after begin and has a canonical marker bound to head, project key, inventory, versions, and hashes.
-- [ ] The layout contains exactly one Cobertura XML and five ordered OpenCover XML files below `.tmp/sonarqube-coverage/<run-id>/`.
-- [ ] Scanner begin gets one Python and one ordered .NET runtime report property with slash-relative paths.
-- [ ] The packet prohibits static XML coverage properties, report globs, an alternate scanner, report merge, filters, source exclusions, threshold arguments, and `--no-build`.
-- [ ] The exact five .NET projects and the Stateless-only `IncludeDirectory` are documented in one stable order.
+- [ ] `CoveragePlan` is pure before scanner begin and root claim.
+- [ ] The preflight checks `uv`, `bash`, `dotnet`, Coverlet `10.0.1`, Test SDK `17.12.0`, VSTest, and MTP refusal before begin and claim.
+- [ ] The matrix proves every entry/preflight failure has zero begin and claim calls.
+- [ ] The marker names exactly two final Cobertura reports and five ordered private .NET producer inputs.
+- [ ] The layout names exactly one Python final report and one .NET final report under `.tmp/sonarqube-coverage/<run-id>/`.
+- [ ] The five .NET paths under `dotnet/inputs/` are explicitly private inputs, not scanner report identities.
+- [ ] Scanner begin gets exactly one Python and one .NET Cobertura property with slash-relative paths.
+- [ ] The packet prohibits static XML coverage properties, report globs, alternate report formats, generic discovery, filters, exclusions, threshold switches, and `--no-build`.
 
-## Producer and local evidence
+## Producer, normalizer, and local evidence
 
-- [ ] The Python route uses `uv run --isolated --locked --extra dev --with coverage==7.15.4` and does not make Coverage.py a permanent dependency.
-- [ ] `.coveragerc` owns branch mode, relative paths, and `src/netcoredbg_mcp` with no exclusion.
-- [ ] Each .NET test project carries direct private `coverlet.msbuild` `10.0.1` only.
-- [ ] Python XML rules require positive line and branch denominators and unique tracked source mappings below `src/netcoredbg_mcp`.
-- [ ] .NET XML rules require each positive direct sequence denominator, positive aggregate branch denominator, and a valid production `.cs` mapping per report.
-- [ ] The Stateless report requires a production host mapping and equal pre/post DLL/PDB hashes.
-- [ ] Invalid marker, root, file, XML, denominator, mapping, hash, or head evidence blocks scanner end.
+- [ ] The Python route uses isolated locked `uv` and does not make Coverage.py a permanent dependency.
+- [ ] Each .NET producer is one of the fixed five VSTest projects and has direct private Coverlet `10.0.1`.
+- [ ] The shell restores/tests each project and writes planned private Cobertura inputs without merge switches.
+- [ ] The normalizer consumes the fixed input order, canonicalizes source paths, unions coverage facts, and emits one lexical final .NET report.
+- [ ] Input and final validation require safe tracked production mappings and positive required denominators.
+- [ ] The Stateless input requires its production mapping and unchanged DLL/PDB bytes.
+- [ ] Invalid marker, root, input, normalizer output, source, denominator, hash, or head evidence blocks scanner end.
 
-## Server evidence, security, and receipt authority
+## Analysis, inventory, and v3 receipt authority
 
-- [ ] Submitted analysis and two current-analysis bookends must bind to the captured head.
-- [ ] Aggregate coverage and lines-to-cover must be positive; the unchanged `new_coverage` condition must be `OK` at threshold `80`.
-- [ ] Fully paginated server components must prove positive mapped coverage contributions from both language source sets. Aggregate-only evidence is rejected.
-- [ ] Producer and descendants receive no `SONAR_*` names or values. Receipts contain no credential, environment dump, raw report body, or secret-bearing command line.
-- [ ] Cleanup removes only the claimed root after foreground producers terminate and retains the first causal failure.
-- [ ] The schema allows only diagnostic `DIAGNOSTIC_COMPLETE` or `BLOCKED` outcomes with `release_intent: none`. It cannot model a release pass.
-- [ ] Candidate and post-merge PASS validation rejects schema-v2, missing, diagnostic, stale, forged, or incomplete coverage evidence.
+- [ ] Submitted and all current-analysis observations bind to one canonical identity.
+- [ ] Fully paginated components prove positive mapped coverage for both final language source sets.
+- [ ] `diagnostic-inventory-v1.schema.json` stores complete issue and hotspot records with pagination, key digests, and routing fields.
+- [ ] `DIAGNOSTIC_COMPLETE` rejects `complete:false`, count-only inventory, absent records, artifact hash mismatch, and identity mismatch.
+- [ ] `exact-head-receipt-v3.schema.json` has discriminated diagnostic, candidate, and post-merge role/outcome rules.
+- [ ] Candidate and post-merge PASS reject schema v2, diagnostic-as-PASS, missing coverage linkage, incomplete inventory, stale identity, failed cleanup, and nonzero release gate.
+- [ ] Diagnostic records remain `release_intent: none` and cannot authorize release.
 
-## Behavior-first, task, and receipt completeness
+## Behavior-first and delayed-receipt completeness
 
-- [ ] [tasks.md](../tasks.md#binding-redgreen-matrix) contains exactly 15 behavior-first RED/GREEN rows, R01 through R15.
-- [ ] Every row has a current RED oracle, a nonzero future GREEN oracle, a V01 to V15 label, an owner task, and no import-time-only failure.
-- [ ] Every COV-001 through COV-023 requirement appears in both `spec.md` traceability and `tasks.md` requirement coverage.
-- [ ] The plan has four dependency-ordered slices, S1 through S4, and no fifth implementation slice.
-- [ ] T024 requires an independent exact-head source review and T026 requires an independent exact-head acceptance judgment.
-- [ ] T028 is the first task allowed to run the diagnostic role or create either a diagnostic or Wave-3 acceptance receipt.
-- [ ] T028 leaves global blockers explicit and retains `release_intent: none`; it does not authorize release.
+- [ ] [tasks.md](../tasks.md#binding-redgreen-matrix) contains exactly 15 rows, R01 through R15.
+- [ ] Every row names a current RED oracle, a nonzero GREEN oracle, a V01 to V15 label, an owner task, and a dependency.
+- [ ] COV-001 through COV-024 appear in both `spec.md` traceability and `tasks.md` requirement coverage.
+- [ ] S1 explicitly depends on T000 Wave-2 entry validation.
+- [ ] T021 owns v3 candidate/post-merge PASS enforcement.
+- [ ] T028 is the first task allowed to invoke diagnostic or create a diagnostic record, inventory artifact, or acceptance receipt.

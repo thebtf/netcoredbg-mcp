@@ -7,27 +7,25 @@
 **Parent**: `specs/011-issue450-sonar-release-program/`, Wave 3
 **Source base**: `1b8b2d548a45b17dde690b4cb8e4fc7153d326bc`
 **Release intent**: `none`
-**Status**: Planning only. The final implementation task is the first task that may create a real diagnostic or acceptance receipt.
+**Execution status**: BLOCKED. Wave-2 PR #289 is open. No Wave-3 implementation or diagnostic task may start until a valid `Wave2ClosureEntryV1` names a verified accepted-main closure identity.
 
 ## Summary
 
-Extend the existing exact-head runner into one coverage transaction. It derives a plan before scanner begin, supplies exact runtime report arguments, claims a fresh root after begin, runs isolated Python and fixed-five .NET producers, validates local evidence, ends the scanner only after validation, binds analysis and component measures to the captured head, records a non-release diagnostic, and removes only the claimed root.
+Extend the retained exact-head runner into one parent-compatible coverage transaction. It verifies Wave-2 entry evidence and the producer toolchain before scanner begin, derives two final Cobertura paths, claims a root after begin, produces Python coverage and five private .NET Cobertura inputs, normalizes the .NET inputs into one final .NET Cobertura report, validates evidence, then ends the scanner. It binds analysis and complete issue/hotspot inventories to the captured head and emits a non-release diagnostic record.
 
-The implementation changes the runner, focused runner tests, `.coveragerc`, `build/coverage.sh`, and five test project files. It does not change `pyproject.toml`, `uv.lock`, `SonarQube.Analysis.xml`, `docs/RELEASE-PROTOCOL.md`, product runtime code, gate policy, release metadata, or public routes.
+The implementation changes the runner, focused runner tests, `.coveragerc`, `build/coverage.sh`, and five test project files. It adds no static scanner configuration, policy change, product behavior change, or release action.
 
 ## Technical context
 
 | Concern | Constraint |
 | --- | --- |
-| Runner authority | `scripts/run_sonarqube_exact_head.py` remains the only scanner, analysis, and receipt authority. |
-| Python producer | Isolated locked `uv run --extra dev --with coverage==7.15.4`; `.coveragerc` sets branch, relative files, and `src/netcoredbg_mcp`. |
-| .NET producer | Exactly five VSTest projects use direct private `coverlet.msbuild` `10.0.1` references and OpenCover XML. |
-| Report layout | One UUID root below `.tmp/sonarqube-coverage/` contains one marker, one Cobertura report, and five ordered OpenCover reports. |
-| Scanner handoff | Runtime begin arguments name exact slash-normalized relative report paths. No static XML property or wildcard is accepted. |
-| Local admission | Marker, files, XML roots, denominators, mappings, hashes, source sets, Stateless restoration, and post-producer head must validate before end. |
-| Server admission | Submitted analysis and two current-analysis bookends bind to the captured head. Both language source sets must have positive mapped component evidence. |
-| Diagnostic role | Schema-v3, `release_intent: none`, and never release authority. Unrelated global finding blockers remain explicit. |
-| Cleanup/security | Producers receive no `SONAR_*` value. The runner removes only its claimed root after foreground producers return. |
+| Parent report contract | Exactly two deterministic project-root-relative Cobertura reports: Python and one merged .NET report. |
+| .NET producer inventory | Five closed `net8.0` VSTest projects are private inputs in fixed order. They are not Sonar report identities. |
+| Pre-begin gate | `uv`, `bash`, `dotnet`, Coverlet `10.0.1`, Test SDK `17.12.0`, and VSTest must validate before begin and claim. MTP is refused. |
+| Scanner handoff | Runtime begin arguments name the two final Cobertura paths. `SonarQube.Analysis.xml` remains unchanged. |
+| Normalization | The runner owns `cobertura-merge-normalize-v1`; it validates all inputs and emits only the final `.NET` report. |
+| Diagnostic authority | `DIAGNOSTIC_COMPLETE` binds a create-new hash-checked inventory artifact with complete issue/hotspot records. |
+| Release roles | Unified v3 schema supports diagnostic, candidate, and post-merge roles with discriminated legal outcomes. |
 
 ## Scope and rollback
 
@@ -35,91 +33,60 @@ The implementation changes the runner, focused runner tests, `.coveragerc`, `bui
 
 | Surface | Change |
 | --- | --- |
-| `build/coverage.sh` | Add a thin plan-driven producer with exact argument parsing, `set -euo pipefail`, Python coverage, per-project restore/test commands, and no scanner behavior. |
-| `.coveragerc` | Add branch, relative-file, and `src/netcoredbg_mcp` configuration. |
-| Five fixed test `.csproj` files | Add exact private `coverlet.msbuild` `10.0.1` references. |
-| `scripts/run_sonarqube_exact_head.py` | Add plan, runtime arguments, root/marker claim, producer invocation, local validation, analysis measures, diagnostic evidence, pass enforcement, and cleanup. |
-| `tests/test_sonarqube_exact_head_runner.py` | Add 15 behavior-first rows and local marker/XML/API fixtures. |
+| `scripts/run_sonarqube_exact_head.py` | Add Wave-2 entry validation, preflight, plan/marker, runtime properties, producer call, normalizer, validators, inventory writer, unified v3 validation, and cleanup. |
+| `tests/test_sonarqube_exact_head_runner.py` | Add the 15 behavior-first rows and fixture builders. |
+| `.coveragerc` | Add Python branch, relative-path, and source configuration. |
+| `build/coverage.sh` | Add strict enumerated producer commands for Python and five private .NET inputs. |
+| Five fixed test `.csproj` files | Add direct private `coverlet.msbuild` `10.0.1` references. |
 
 ### Immutable comparison surfaces
 
-| Surface | Rule |
-| --- | --- |
-| `pyproject.toml`, `uv.lock` | No Coverage.py dependency, lock update, or temporary environment mutation. |
-| `SonarQube.Analysis.xml` | No coverage path, source root, exclusion, project-key, threshold, or policy change. |
-| `docs/RELEASE-PROTOCOL.md` | No manual coverage command or release policy change. |
-| Public Python/default route and stateless-preview boundary | No runtime behavior or route migration. |
-| Gate/finding authority | No suppression, accepted risk, WONTFIX, false positive, baseline reset, New Code, or server change. |
+`pyproject.toml`, `uv.lock`, `SonarQube.Analysis.xml`, `docs/RELEASE-PROTOCOL.md`, runtime product code, public routes, project key, thresholds, New Code, exclusions, credentials, finding dispositions, package version, tag, and publication remain unchanged.
 
-### Rollback
+Rollback removes the coverage transaction as one cohesive Wave-3 change. It never falls back to a branch-derived Wave-2 entry, an external report, an optional v2 validator, a policy reduction, or static report discovery.
 
-Before v3 pass enforcement, revert the producer/config/test-only dependency/runner changes as one atomic Wave-3 change. After enforcement, revert the runner, schema, five references, producer, config, and their tests together. Never roll back by accepting an external report, lowering the threshold, retaining an optional v2 path, or changing a tag.
-
-## Selected architecture
-
-The full decision is [architecture.md](architecture.md). Its key cut is one runner-owned transaction and one thin executor. The runner owns acceptance. The shell produces only the planned files. The scanner receives exact runtime paths. The server component inventory confirms both language sets after scanner end.
+## Slices and dependencies
 
 ```mermaid
 flowchart LR
+  Entry[Verified Wave-2 entry]
   S1[S1 behavior-first RED matrix]
-  S2[S2 isolated producers and fixed inventory]
-  S3[S3 runner transaction and diagnostic evidence]
-  S4[S4 v3 pass enforcement, review, judge, delayed receipt]
-  S1 --> S2 --> S3 --> S4
+  S2[S2 producers and fixed inputs]
+  S3[S3 transaction, normalizer, inventory]
+  S4[S4 v3 role enforcement and delayed receipt]
+  Entry --> S1 --> S2 --> S3 --> S4
 ```
-
-## Tracer-bullet slices
 
 | Slice | Outcome | Exact work | Blocked by | Acceptance checkpoint |
 | --- | --- | --- | --- | --- |
-| **S1** | Current runner behavior cannot silently satisfy the new contract. | Add 15 focused RED rows and local marker/XML/API fixtures in `tests/test_sonarqube_exact_head_runner.py`. | None | One focused command produces caller-level RED failures for every row. |
-| **S2** | Maintainers can produce six local reports without changing permanent Python dependencies or relying on `--no-build`. | Add `.coveragerc`, `build/coverage.sh`, exact package references, and local producer proof. | S1 | Real standalone producer proof creates the six planned reports; no permanent Python dependency surface changes. |
-| **S3** | The exact-head runner cannot end the scanner without same-run validated coverage and cannot mistake aggregate-only data for both-language import. | Add plan/claim, runtime arguments, validation, analysis/component binding, diagnostic schema use, and cleanup. | S2 | Focused suite is green. A real diagnostic run can reach only `DIAGNOSTIC_COMPLETE` or `BLOCKED`. |
-| **S4** | A candidate or post-merge pass cannot omit or forge coverage evidence. The Wave-3 receipt is delayed until exact review/judgment pass. | Enforce schema-v3 for release roles, remove v2 compatibility, run independent review and judge, then run the final diagnostic and create the receipt. | S3 | Exact head passes review and judgment. T028 is the only receipt-producing task. |
-
-### Granularity check
-
-| Slice | Independently useful? | Verifiable before later slices? |
-| --- | --- | --- |
-| S1 | Yes. It makes missing coverage acceptance behavior observable. | Yes. Current runner fails the focused tests. |
-| S2 | Yes. It creates an executable local producer and fixed inventory. | Yes. It produces and locally validates reports without Sonar. |
-| S3 | Yes. It creates same-transaction report admission and diagnostic analysis evidence. | Yes. Fake APIs and a future diagnostic run exercise it. |
-| S4 | Yes. It makes coverage mandatory for release roles and seals exact review/judgment evidence. | Yes. V2 and forged receipts fail before the delayed diagnostic run. |
+| **S1** | Current behavior cannot silently satisfy the entry, preflight, report, identity, inventory, or role contract. | Add 15 focused RED rows. | Verified Wave-2 entry | Each row has a caller-level RED result. |
+| **S2** | The producer can create Python evidence and five private .NET inputs without permanent Python dependency changes. | Add `.coveragerc`, shell, five references, and producer proof. | S1 | Inputs have fixed paths and no scanner authority. |
+| **S3** | The runner produces exactly two final reports, refuses unsafe pre-begin/input/normalization paths, and creates a complete diagnostic inventory. | Add entry/preflight, plan, marker, scanner args, normalizer, validation, analysis, inventory, and cleanup. | S2 | Focused proof is green and synthetic complete/blocked evidence validates correctly. |
+| **S4** | Candidate and post-merge PASS cannot bypass unified v3 evidence. A real diagnostic remains delayed. | Remove v2 compatibility, review, judge, freeze, and final diagnostic. | S3 | The exact head binds all evidence. T028 is the first receipt-producing task. |
 
 ## Requirements-to-files map
 
 | Requirements | Tasks | Planned files | Future proof |
 | --- | --- | --- | --- |
-| COV-001 to COV-004 | T012 to T016 | `scripts/run_sonarqube_exact_head.py`, `tests/test_sonarqube_exact_head_runner.py` | V01, V02, V11 |
-| COV-005 to COV-007 | T006 to T009 | `.coveragerc`, `build/coverage.sh`, `tests/test_sonarqube_exact_head_runner.py` | V03 to V05, V12 |
-| COV-008 to COV-011 | T010 to T011 | Five fixed test `.csproj` files, `build/coverage.sh`, focused tests | V06 to V10 |
-| COV-012 to COV-014 | T001 to T005, T015 to T018 | Runner and focused tests | V04, V05, V08 to V11 |
-| COV-015 to COV-017 | T019 to T020 | Runner and focused tests | V13, V14 |
-| COV-018 to COV-020 | T019 to T023 | Runner, focused tests, schemas | V15 |
-| COV-021 to COV-023 | T024 to T028 | All owned implementation files; no change to comparison surfaces | Exact review, judgment, and delayed receipt |
-
-## Milestones
-
-| Milestone | Slices | Internal value | Release intent |
-| --- | --- | --- | --- |
-| M1: trusted diagnostic coverage transaction | S1, S2, S3 | Wave 4 can consume a fresh same-head coverage/finding denominator. | `none` |
-| M2: release-role coverage enforcement | S4 | Future candidate/post-merge PASS requires v3 coverage evidence. | `none` |
-
-No milestone creates a tag, release, publication, or claim that the overall Quality Gate is green.
+| COV-001 to COV-006 | T000 to T014 | Runner, focused tests, entry/marker schemas | V01, V02, V06, V07, V13 |
+| COV-007 to COV-012 | T003, T006 to T016 | Shell, config, five projects, runner, tests | V03, V08 to V12 |
+| COV-013 to COV-017 | T001, T004, T013 to T019 | Runner and focused tests | V04, V05, V11 to V14 |
+| COV-018 to COV-020 | T005, T018, T021 to T022 | Unified receipt and inventory schemas, runner, tests | V15 |
+| COV-021 to COV-024 | T020 to T028 | Owned implementation files and evidence | Focused proof, review, judgment, delayed receipt |
 
 ## Verification plan
 
 | Layer | Command or proof | What it proves |
 | --- | --- | --- |
-| RED/GREEN contract | `uv run --locked --extra dev pytest tests/test_sonarqube_exact_head_runner.py -q` | The 15 behavior-first rows reach the runner boundary and have deterministic oracles. |
-| Local producer | Runner-owned command shape from [architecture.md](architecture.md#producer-commands) | The fixed inventory produces exactly six planned reports with local validation. |
-| Diagnostic transaction | `python scripts/run_sonarqube_exact_head.py --role diagnostic` from the prescribed clean detached scanner worktree | Same-head local evidence, scanner import, analysis binding, both-language component evidence, and unchanged coverage condition. |
-| Release roles | Candidate and post-merge receipt validators | Schema-v2, missing, forged, diagnostic, stale, or incomplete coverage evidence cannot PASS. |
-| Independent review | Exact implementation SHA and changed owned surfaces | No scanner replacement, gate weakening, secret exposure, source-route change, or optional pass path. |
-| Independent acceptance judgment | Exact implementation SHA, COV requirements, V01 to V15, and diagnostic result | The completed implementation meets the packet without treating global blockers as waived. |
+| Entry and preflight | Focused command/event spy | Missing Wave-2 entry, missing tools, invalid tuple, and MTP leave begin and claim unreachable. |
+| RED/GREEN contract | `uv run --locked --extra dev pytest tests/test_sonarqube_exact_head_runner.py -q` | All 15 rows exercise the runner boundary. |
+| Local producer | Runner-owned producer invocation | Five private inputs normalize into one final .NET Cobertura report and one Python report. |
+| Diagnostic transaction | `python scripts/run_sonarqube_exact_head.py --role diagnostic --wave2-entry-evidence <verified-entry>` | Same-head evidence, two-report import, canonical identity, complete inventory, and unchanged coverage condition. |
+| Release roles | Unified v3 receipt validators | Schema v2, diagnostic-as-PASS, missing linkage, incomplete inventory, or stale identity cannot PASS. |
+| Independent review and judgment | Exact implementation SHA | No policy or comparison-surface mutation; receipt remains non-release evidence. |
 
-The authoring task does not run a formatter, linter, build, test suite, scanner, or release operation. The commands above are future implementation proofs.
+No authoring command runs a formatter, linter, build, test suite, scanner, or release operation.
 
 ## Delayed receipt rule
 
-`contracts/` contains only schemas and contracts. This packet contains no `acceptance-receipt.md` and no `.agent/e` receipt. T028 runs after T024 to T027 bind review, judgment, and the final implementation SHA. T028 is the first task allowed to invoke the diagnostic role and write either the diagnostic receipt plus Wave-3 acceptance receipt, or no receipt if the run blocks.
+`contracts/` contains schemas and contracts only. This packet contains no `acceptance-receipt.md` and no diagnostic inventory artifact. T028 may create a diagnostic record, its inventory artifact, and the Wave-3 acceptance receipt only after T000 through T027 succeed. A blocked result creates none of them.

@@ -1,63 +1,67 @@
 # Data model: exact-head coverage evidence
 
 **Status**: Future evidence contract. It creates no database, persistent runtime service, or current receipt.
-**Source base**: `1b8b2d548a45b17dde690b4cb8e4fc7153d326bc`
 **Release intent**: `none`
 
 ## Modeling rules
 
-1. A changed source head creates new evidence. No record can be relabeled as evidence for different source bytes.
-2. A planned coverage path is not report evidence. The runner accepts only the exact report that the plan names.
-3. A report is not analysis evidence. The submitted analysis, current-analysis bookends, measures, and mapped component evidence must bind it to the captured head.
-4. A diagnostic record is never a release pass. Its allowed outcomes are `DIAGNOSTIC_COMPLETE` and `BLOCKED`.
-5. A missing or zero denominator is a blocker. It is not a zero-coverage result and is not a passing empty set.
-6. Receipts store metadata, relative paths, counts, hashes, safe error codes, and page summaries. They do not store credentials, environment dumps, report bodies, or secret-bearing command lines.
+1. A changed source head creates new evidence. No record can be relabeled for different source bytes.
+2. Sonar sees two final report identities only: Python Cobertura and .NET Cobertura. The five .NET project outputs are private producer inputs.
+3. A private input is not final report evidence. The runner must validate and normalize the complete fixed input set before it accepts the final .NET report.
+4. A diagnostic record is never a release PASS. Its legal outcomes are `DIAGNOSTIC_COMPLETE` and `BLOCKED`.
+5. A `DIAGNOSTIC_COMPLETE` record requires a complete, immutable, hash-bound issue and hotspot inventory. Counts alone are invalid.
+6. A missing or zero denominator is a blocker. It is not a zero-coverage result or a passing empty set.
+7. Receipts store safe metadata, relative paths, counts, and hashes. They do not store credentials, environment dumps, raw report bodies, or secret-bearing command lines.
 
 ## Entity overview
 
 | Entity | Identity | Lifetime | Contract |
 | --- | --- | --- | --- |
-| `CoveragePlan` | `run_id`, captured head, and deterministic relative paths | In memory before scanner begin | [architecture.md](architecture.md#caller-first-contract) |
-| `CoverageRunClaim` | `CoveragePlan` plus marker bytes/hash | From exclusive claim through cleanup | [coverage-run-marker.schema.json](contracts/coverage-run-marker.schema.json) |
-| `ReportEvidence` | Report ID, byte hash, source-set hash | From local validation through receipt sealing | [coverage-evidence.md](contracts/coverage-evidence.md) |
-| `CoverageEvidence` | One marker plus exactly six ordered reports | From local validation through receipt sealing | [diagnostic-receipt-v3.schema.json](contracts/diagnostic-receipt-v3.schema.json) |
-| `CoverageMeasureSnapshot` | Submitted analysis ID, revision, metric set, component pages | After scanner end | [coverage-evidence.md](contracts/coverage-evidence.md#analysis-binding) |
-| `CleanupEvidence` | Claimed root and relative removals | Finally path | [coverage-evidence.md](contracts/coverage-evidence.md#cleanup) |
-| `DiagnosticReceiptV3` | Head, run ID, project key, and record path | Durable non-release evidence | [diagnostic-receipt-v3.schema.json](contracts/diagnostic-receipt-v3.schema.json) |
-| `CoverageFailure` | First code, stage, language/project context | Terminal result for one run | [coverage-evidence.md](contracts/coverage-evidence.md#failure-semantics) |
+| `Wave2ClosureEntryV1` | Accepted Wave-2 main SHA and closure receipt hash | Before all Wave-3 execution | [wave2-closure-entry-v1.schema.json](contracts/wave2-closure-entry-v1.schema.json) |
+| `CoveragePlan` | Run ID, captured head, and deterministic paths | In memory before scanner begin | [architecture.md](architecture.md#caller-first-contract) |
+| `ToolchainPreflight` | Plan and five evaluated project tuples | Before scanner begin | COV-004 |
+| `CoverageRunClaim` | Plan plus marker bytes/hash | From exclusive claim through cleanup | [coverage-run-marker.schema.json](contracts/coverage-run-marker.schema.json) |
+| `CoverageEvidence` | Marker, two final reports, five private inputs, normalizer proof | From local validation through receipt sealing | [exact-head-receipt-v3.schema.json](contracts/exact-head-receipt-v3.schema.json) |
+| `DiagnosticInventoryV1` | Exact analysis identity and complete inventories | After analysis, before receipt sealing | [diagnostic-inventory-v1.schema.json](contracts/diagnostic-inventory-v1.schema.json) |
+| `ExactHeadReceiptV3` | Role, outcome, identity, and evidence links | Durable role evidence | [exact-head-receipt-v3.schema.json](contracts/exact-head-receipt-v3.schema.json) |
+| `CoverageFailure` | First code and stage | Terminal result for one run | [coverage-evidence.md](contracts/coverage-evidence.md) |
 
-## Core types
+## Entry evidence and preflight
 
 ```text
-Sha40 = lowercase 40-character hexadecimal Git commit
-Sha256 = lowercase 64-character hexadecimal digest
-RunId = UUID
-RelativePath = slash-separated nonempty path without URI scheme, drive, absolute root, or .. segment
-
-CoverageStage =
-  PLANNED |
-  SCANNER_BEGUN |
-  RUN_CLAIMED |
-  PRODUCING |
-  REPORTS_VALIDATED |
-  SCANNER_ENDED |
-  ANALYSIS_BOUND |
-  CLEANED |
-  BLOCKED
-
-CoveragePath {
-  absolute: Path
-  scanner_relative: RelativePath
+Wave2ClosureEntryV1 {
+  schema_version: 1
+  wave: 2
+  closure_status: EXACT_CLOSED
+  accepted_main_sha: Sha40
+  closure_receipt: { relative_path, sha256 }
+  integration: { kind: merged_pull_request, pull_request: 289, accepted_ref: origin/main }
 }
 
-CoverageProjectSpec {
-  id: codesearch-core | host | stateless-preview | stateless | host-prompts
-  project: RelativePath
-  report: CoveragePath
-  include_directory: Path | null
-  restore_check_files: tuple[Path, ...]
+ToolchainPreflight {
+  uv: available
+  bash: available
+  dotnet: available
+  projects: tuple[ProjectCompatibility, ProjectCompatibility, ProjectCompatibility, ProjectCompatibility, ProjectCompatibility]
 }
 
+ProjectCompatibility {
+  id: ProjectId
+  target_framework: net8.0
+  coverlet_msbuild: 10.0.1
+  coverlet_private_assets: all
+  test_sdk: 17.12.0
+  test_platform: vstest
+}
+```
+
+`verify_wave2_entry` checks the record schema, the immutable Wave-2 receipt hash and content, the accepted SHA in `origin/main`, and PR #289 merged identity. It rejects a PR head, feature branch, missing receipt, non-main SHA, or mismatch as `WAVE2_CLOSURE_UNVERIFIED`.
+
+`preflight_coverage_toolchain` runs before scanner begin. It requires executable `uv`, `bash`, and `dotnet`, evaluates every fixed project, and rejects active MTP. It never injects a property to switch the test platform. `COVERAGE_TOOL_UNAVAILABLE`, `COVERAGE_VSTEST_INCOMPATIBLE`, and `COVERAGE_MTP_INCOMPATIBLE` stop at `PLANNED` before root claim.
+
+## Coverage plan and marker
+
+```text
 CoveragePlan {
   run_id: RunId
   head: Sha40
@@ -66,265 +70,138 @@ CoveragePlan {
   marker: CoveragePath
   python_data: Path
   python_report: CoveragePath
-  dotnet: tuple[CoverageProjectSpec, CoverageProjectSpec, CoverageProjectSpec, CoverageProjectSpec, CoverageProjectSpec]
+  dotnet_report: CoveragePath
+  dotnet_inputs: tuple[CoverageProjectSpec, CoverageProjectSpec, CoverageProjectSpec, CoverageProjectSpec, CoverageProjectSpec]
 }
 
-CoverageRunClaim {
-  plan: CoveragePlan
-  marker_sha256: Sha256
-  marker_bytes: positive integer
+CoverageProjectSpec {
+  id: codesearch-core | host | stateless-preview | stateless | host-prompts
+  project: RelativePath
+  raw_cobertura_input: CoveragePath
+  include_directory: Path | null
 }
 ```
 
-## Coverage plan and marker
+`derive_coverage_plan` is pure. It writes no file. After scanner begin succeeds, `claim_coverage_run` creates the UUID root exclusively and writes canonical sorted compact JSON followed by one LF.
 
-`derive_coverage_plan` is pure. It receives `GitContext` and a `RunId`, computes the root and all report paths, and returns the fixed inventory in the order below. It creates no directory and writes no marker.
+| Kind | ID | Format | Relative path |
+| --- | --- | --- | --- |
+| Final scanner report | `python` | Cobertura | `.tmp/sonarqube-coverage/<run-id>/python/coverage.xml` |
+| Final scanner report | `dotnet` | Cobertura | `.tmp/sonarqube-coverage/<run-id>/dotnet/coverage.xml` |
+| Private producer input | `codesearch-core` | Cobertura | `.tmp/sonarqube-coverage/<run-id>/dotnet/inputs/codesearch-core/coverage.cobertura.xml` |
+| Private producer input | `host` | Cobertura | `.tmp/sonarqube-coverage/<run-id>/dotnet/inputs/host/coverage.cobertura.xml` |
+| Private producer input | `stateless-preview` | Cobertura | `.tmp/sonarqube-coverage/<run-id>/dotnet/inputs/stateless-preview/coverage.cobertura.xml` |
+| Private producer input | `stateless` | Cobertura | `.tmp/sonarqube-coverage/<run-id>/dotnet/inputs/stateless/coverage.cobertura.xml` |
+| Private producer input | `host-prompts` | Cobertura | `.tmp/sonarqube-coverage/<run-id>/dotnet/inputs/host-prompts/coverage.cobertura.xml` |
 
-| Index | Report ID | Language | Format | Relative path |
-| --- | --- | --- | --- | --- |
-| 1 | `python` | `python` | `cobertura` | `.tmp/sonarqube-coverage/<run-id>/python/coverage.xml` |
-| 2 | `codesearch-core` | `dotnet` | `opencover` | `.tmp/sonarqube-coverage/<run-id>/dotnet/codesearch-core/coverage.opencover.xml` |
-| 3 | `host` | `dotnet` | `opencover` | `.tmp/sonarqube-coverage/<run-id>/dotnet/host/coverage.opencover.xml` |
-| 4 | `stateless-preview` | `dotnet` | `opencover` | `.tmp/sonarqube-coverage/<run-id>/dotnet/stateless-preview/coverage.opencover.xml` |
-| 5 | `stateless` | `dotnet` | `opencover` | `.tmp/sonarqube-coverage/<run-id>/dotnet/stateless/coverage.opencover.xml` |
-| 6 | `host-prompts` | `dotnet` | `opencover` | `.tmp/sonarqube-coverage/<run-id>/dotnet/host-prompts/coverage.opencover.xml` |
+The marker binds the two final reports, all five ordered producer inputs, the normalizer algorithm and order, tool versions, producer hash, and `.coveragerc` hash. It does not treat private inputs as Sonar reports.
 
-After scanner begin succeeds, `claim_coverage_run` creates `CoveragePlan.root` exclusively and writes `coverage-run.json` with `O_EXCL` semantics. The marker uses canonical, sorted, compact JSON followed by one LF. It binds:
-
-- `schema_version: 1`
-- `run_id`
-- `captured_head`
-- `project_key`
-- the exact ordered six-report list
-- `coverage_py: 7.15.4`
-- `coverlet_msbuild: 10.0.1`
-- SHA-256 hashes of the producer and `.coveragerc`
-
-The JSON Schema checks shape and fixed values. The runner checks uniqueness, exact ordering, path containment, canonical bytes, and equality to the in-memory plan.
-
-## Report evidence
+## Coverage evidence
 
 ```text
-ReportEvidence {
-  id: python | codesearch-core | host | stateless-preview | stateless | host-prompts
+FinalReportEvidence {
+  id: python | dotnet
   language: python | dotnet
-  format: cobertura | opencover
+  format: cobertura
   relative_path: RelativePath
   sha256: Sha256
   bytes: positive integer
-  xml_root: coverage | CoverageSession
-  denominator: positive integer
-  covered_count: nonnegative integer
-  branch_denominator: nonnegative integer
-  branch_covered_count: nonnegative integer
-  source_paths: sorted tuple[RelativePath, ...]
+  xml_root: coverage
+  lines_valid: positive integer
+  lines_covered: nonnegative integer
+  branches_valid: positive integer
+  branches_covered: nonnegative integer
+  source_paths: sorted unique tuple[RelativePath, ...]
+  source_set_sha256: Sha256
+}
+
+DotnetInputEvidence {
+  id: ProjectId
+  project: RelativePath
+  relative_path: RelativePath
+  sha256: Sha256
+  bytes: positive integer
+  lines_valid: positive integer
+  lines_covered: nonnegative integer
+  branches_valid: nonnegative integer
+  branches_covered: nonnegative integer
+  source_paths: sorted unique tuple[RelativePath, ...]
   source_set_sha256: Sha256
 }
 
 CoverageEvidence {
-  marker: {
-    relative_path: RelativePath
-    sha256: Sha256
-    bytes: positive integer
-    schema_version: 1
+  run_id: RunId
+  marker: ArtifactReference
+  final_reports: tuple[FinalReportEvidence, FinalReportEvidence]
+  dotnet_producers: tuple[DotnetInputEvidence, DotnetInputEvidence, DotnetInputEvidence, DotnetInputEvidence, DotnetInputEvidence]
+  normalization: {
+    algorithm: cobertura-merge-normalize-v1
+    input_set_sha256: Sha256
+    output_report_id: dotnet
+    source_union_complete: true
   }
-  reports: tuple[ReportEvidence, ReportEvidence, ReportEvidence, ReportEvidence, ReportEvidence, ReportEvidence]
-  python_totals: {
-    lines_valid: positive integer
-    lines_covered: nonnegative integer
-    branches_valid: positive integer
-    branches_covered: nonnegative integer
-  }
-  dotnet_totals: {
-    sequence_points: positive integer
-    visited_sequence_points: nonnegative integer
-    branch_points: positive integer
-    visited_branch_points: nonnegative integer
-  }
-  stateless_host_binary: {
-    dll_before: Sha256
-    dll_after: Sha256
-    pdb_before: Sha256
-    pdb_after: Sha256
-  }
+  stateless_host_binary: { dll_sha256: Sha256, pdb_sha256: Sha256, restored: true }
 }
 ```
 
-### Report cardinality and ordering
+The final report tuple is ordered `python`, then `dotnet`. Any missing, extra, reordered, or substituted member fails. Each private input must map a tracked non-test production `.cs` path. The five inputs together must have a positive branch denominator. The final .NET report must have positive line and branch denominators and exactly the normalized source union.
 
-`CoverageEvidence.reports` contains exactly six members. They must use the marker order. `python` is first. The five .NET report IDs follow the declared fixed inventory. A missing, extra, reordered, duplicated, or differently named report invalidates the evidence.
+## Canonical identity and analysis evidence
 
-### Python evidence invariants
-
-1. `xml_root == "coverage"`.
-2. `lines_valid > 0`, `0 <= lines_covered <= lines_valid`.
-3. `branches_valid > 0`, `0 <= branches_covered <= branches_valid`.
-4. Every source path is a unique tracked regular `.py` file under `src/netcoredbg_mcp`.
-5. No accepted source path is a URI, absolute path, `..` escape, duplicate normalized path, test-only path, missing path, symbolic link, or reparse point.
-
-### .NET evidence invariants
-
-1. `xml_root == "CoverageSession"`.
-2. Each report uses exactly one direct `Summary` for its sequence denominator.
-3. Each `denominator` is `numSequencePoints > 0`, and `0 <= covered_count <= denominator`.
-4. Each branch count is nonnegative and ordered. `CoverageEvidence.dotnet_totals.branch_points > 0`.
-5. Each report resolves at least one tracked non-test, non-fixture `.cs` file inside the worktree.
-6. The allowed source set excludes `bin`, `obj`, `tests/fixtures`, and `host/NetCoreDbg.Mcp.Stateless.Tests/Fixtures`.
-7. The `stateless` report contains at least one source path below `host/NetCoreDbg.Mcp.Stateless`.
-8. The stored Stateless DLL/PDB before and after hashes are equal. A mismatch is `COVERAGE_INSTRUMENTATION_NOT_RESTORED`.
-
-## Analysis evidence
+`ExactHeadReceiptV3.identity` is the one canonical record for `captured_head`, `project_key`, and `analysis_id`. The receipt does not duplicate mutable identity fields. The runner proves that submitted analysis and every current-analysis observation equal that identity before it emits `analysis.observations` with all slots true.
 
 ```text
-AnalysisIdentity {
-  analysis_id: nonempty opaque string
-  revision: Sha40
-}
-
-LanguageComponentEvidence {
-  source_set_sha256: Sha256
-  page_count: positive integer
-  complete: true
-  mapped_path_count: positive integer
-  lines_to_cover: positive integer
-  covered_lines: positive integer
-  branch_measure_path_count: positive integer
-  mapped_paths_sha256: Sha256
-}
-
-CoverageMeasureSnapshot {
-  submitted: AnalysisIdentity
-  current_before_measures: AnalysisIdentity
-  current_after_measures: AnalysisIdentity
-  current_final: AnalysisIdentity
+AnalysisEvidence {
+  observations: {
+    submitted: true
+    current_before_measures: true
+    current_after_measures: true
+    current_final: true
+  }
   aggregate: {
     coverage: finite number greater than zero
     lines_to_cover: positive integer
-    uncovered_lines: nonnegative integer
-    line_coverage: finite number
-    branch_coverage: finite number
     new_coverage: finite number
     new_lines_to_cover: positive integer
-    new_uncovered_lines: nonnegative integer
-    new_line_coverage: finite number
-    new_branch_coverage: finite number
   }
-  new_coverage_condition: {
-    status: OK
-    threshold: 80
-    actual_value: aggregate.new_coverage normalized to the runner's numeric form
-  }
+  new_coverage_condition: { status: OK, threshold: 80, actual_value: number }
   python_components: LanguageComponentEvidence
   dotnet_components: LanguageComponentEvidence
 }
 ```
 
-### Analysis identity equations
+For each language, the runner requires complete component paging, at least one mapped path, positive lines to cover, positive covered lines, and a branch measure. A project aggregate never proves both reports were imported.
 
-```text
-captured_head
-== submitted.revision
-== current_before_measures.revision
-== current_after_measures.revision
-== current_final.revision
+## Diagnostic inventory authority
 
-submitted.analysis_id
-== current_before_measures.analysis_id
-== current_after_measures.analysis_id
-== current_final.analysis_id
-```
+`DiagnosticInventoryV1` is a create-new artifact. It stores the canonical identity and complete issue and hotspot inventories. Each page summary has `complete: true`, `result_empty`, page size and count, total, record count, full-key SHA-256, blocking-key count, and blocking-key SHA-256. Each issue record retains its key, component, path, rule, status, resolution, type, and severity. Each hotspot record retains its key, component, path, rule, and status.
 
-The runner reads the two bookends around the measure and component query. The final current-analysis read also protects the existing finding/hotspot readback. A differing project, analysis ID, revision, incomplete page set, non-finite number, or missing measure blocks the result.
+The diagnostic receipt stores an `InventoryReference` with the inventory artifact's coordination-relative path, SHA-256, byte count, schema version, and complete issue/hotspot summaries. The runner validates the artifact schema, full record count, unique keys, page totals, key digests, and exact identity before receipt sealing. `complete:false`, count-only data, absent records, or a hash or identity mismatch is `COVERAGE_INVENTORY_INCOMPLETE`.
 
-### Per-language import equation
+This makes the artifact sufficient for Wave 4 to derive a fresh manifest and assign each blocking key exactly once. It does not assign the owner itself.
 
-For each language `L` in `{python, dotnet}`:
+## Unified v3 receipt roles
 
-```text
-validated_source_set(L) ∩ normalized_server_component_paths(L) != ∅
-component_pages(L).complete == true
-component_lines_to_cover(L) > 0
-component_covered_lines(L) > 0
-component_branch_measure_path_count(L) > 0
-```
+| Role | Legal outcome | `release_intent` | Completion rule |
+| --- | --- | --- | --- |
+| `diagnostic` | `DIAGNOSTIC_COMPLETE` or `BLOCKED` | `none` | Complete diagnostic requires coverage, analysis, full inventory, successful cleanup, and no failure. |
+| `candidate` | `PASS` or `BLOCKED` | `v0.23.11` | PASS requires the same full evidence plus Quality Gate `OK` and zero blocking issue/hotspot counts. |
+| `post-merge` | `PASS` or `BLOCKED` | `v0.23.11` | PASS requires the same full evidence plus Quality Gate `OK` and zero blocking issue/hotspot counts. |
 
-A positive aggregate project coverage value without both language equations is `COVERAGE_IMPORT_UNPROVEN`.
-
-## Cleanup and failure evidence
-
-```text
-CleanupEvidence {
-  claimed_root: RelativePath
-  producer_terminal: true
-  removed_paths: tuple[RelativePath, ...]
-  parent_removed_if_empty: boolean
-  status: OK | FAILED
-  failure: SafeFailure | null
-}
-
-CoverageFailure {
-  code: string
-  stage: CoverageStage
-  language: python | dotnet | null
-  project_id: python | codesearch-core | host | stateless-preview | stateless | host-prompts | null
-  safe_message: nonempty string
-}
-
-SafeFailure {
-  code: string
-  message: nonempty string
-}
-```
-
-`CleanupEvidence.claimed_root` must equal the marker root. `removed_paths` must be relative to that root or the coverage parent. The parent may be removed only when empty. Cleanup cannot delete arbitrary `.tmp` content.
-
-The first causal `CoverageFailure` is the terminal failure. If cleanup also fails, `cleanup.failure` is secondary. Cleanup never turns a failure into `DIAGNOSTIC_COMPLETE`, and it cannot make scanner end legal.
+Schema version is exactly `3`. The runner rejects schema version 2 and has no compatibility branch. A diagnostic can never be a PASS.
 
 ## Failure vocabulary
 
 | Code | Stage | Required effect |
 | --- | --- | --- |
-| `COVERAGE_TOOL_UNAVAILABLE` | `PLANNED` | Block before scanner begin. Do not create a run root. |
-| `COVERAGE_RUN_ROOT_EXISTS` | `SCANNER_BEGUN` | Block. Scanner end is forbidden. |
-| `COVERAGE_MARKER_INVALID` | `RUN_CLAIMED` | Block. Scanner end is forbidden. |
-| `COVERAGE_PYTHON_FAILED` | `PRODUCING` | Block with language `python`. Scanner end is forbidden. |
-| `COVERAGE_DOTNET_RESTORE_FAILED` | `PRODUCING` | Block with the exact project ID. Scanner end is forbidden. |
-| `COVERAGE_DOTNET_TEST_FAILED` | `PRODUCING` | Block with the exact project ID. Scanner end is forbidden. |
-| `COVERAGE_REPORT_MISSING`, `COVERAGE_REPORT_EMPTY`, `COVERAGE_REPORT_MALFORMED`, `COVERAGE_REPORT_WRONG_ROOT` | `PRODUCING` or `REPORTS_VALIDATED` | Block even when producer exit code is zero. Scanner end is forbidden. |
-| `COVERAGE_DENOMINATOR_ZERO`, `COVERAGE_BRANCH_DENOMINATOR_ZERO` | `REPORTS_VALIDATED` | Block. Do not reinterpret the absence as zero coverage. |
-| `COVERAGE_SOURCE_MAPPING_INVALID`, `COVERAGE_HEAD_MISMATCH`, `COVERAGE_INSTRUMENTATION_NOT_RESTORED` | `REPORTS_VALIDATED` | Block. Scanner end is forbidden. |
-| `COVERAGE_SCANNER_END_FAILED`, `COVERAGE_ANALYSIS_MISMATCH`, `COVERAGE_IMPORT_UNPROVEN`, `COVERAGE_MEASURES_INVALID` | `SCANNER_ENDED` or `ANALYSIS_BOUND` | Record the submitted analysis if present, then block. |
-| `COVERAGE_CLEANUP_FAILED` | `CLEANED` | Record only as secondary cleanup evidence. |
+| `WAVE2_CLOSURE_UNVERIFIED` | `PLANNED` | Block implementation transaction before preflight, scanner begin, and root claim. |
+| `COVERAGE_TOOL_UNAVAILABLE` | `PLANNED` | Block before scanner begin and root claim. |
+| `COVERAGE_VSTEST_INCOMPATIBLE`, `COVERAGE_MTP_INCOMPATIBLE` | `PLANNED` | Block before scanner begin and root claim. |
+| `COVERAGE_RUN_ROOT_EXISTS`, `COVERAGE_MARKER_INVALID` | `SCANNER_BEGUN`, `RUN_CLAIMED` | Block. Scanner end is forbidden. |
+| `COVERAGE_PYTHON_FAILED`, `COVERAGE_DOTNET_RESTORE_FAILED`, `COVERAGE_DOTNET_TEST_FAILED` | `PRODUCING` | Block with exact language and project context. |
+| `COVERAGE_REPORT_MISSING`, `COVERAGE_REPORT_EMPTY`, `COVERAGE_REPORT_MALFORMED`, `COVERAGE_DENOMINATOR_ZERO`, `COVERAGE_SOURCE_MAPPING_INVALID`, `COVERAGE_DOTNET_NORMALIZATION_FAILED` | `PRODUCING`, `REPORTS_VALIDATED` | Block. Scanner end is forbidden. |
+| `COVERAGE_HEAD_MISMATCH`, `COVERAGE_INSTRUMENTATION_NOT_RESTORED` | `REPORTS_VALIDATED` | Block. Scanner end is forbidden. |
+| `COVERAGE_ANALYSIS_MISMATCH`, `COVERAGE_IMPORT_UNPROVEN`, `COVERAGE_MEASURES_INVALID`, `COVERAGE_INVENTORY_INCOMPLETE` | `SCANNER_ENDED`, `ANALYSIS_BOUND` | Record safe reached evidence, then block. |
+| `COVERAGE_CLEANUP_FAILED` | `CLEANED` | Secondary cleanup evidence only. |
 
-## Diagnostic receipt
-
-The future receipt uses [diagnostic-receipt-v3.schema.json](contracts/diagnostic-receipt-v3.schema.json).
-
-```text
-DiagnosticReceiptV3 {
-  schema_version: 3
-  role: diagnostic
-  outcome: DIAGNOSTIC_COMPLETE | BLOCKED
-  release_intent: none
-  captured_head: Sha40
-  project_key: "thebtf_netcoredbg_mcp"
-  coverage: CoverageEvidence
-  analysis: CoverageMeasureSnapshot | null
-  unresolved_global_blockers: {
-    complete: boolean
-    current_issue_count: nonnegative integer
-    blocking_issue_count: nonnegative integer
-    hotspot_count: nonnegative integer
-  }
-  cleanup: CleanupEvidence | null
-  failure: CoverageFailure | null
-}
-```
-
-A `DIAGNOSTIC_COMPLETE` record requires complete local evidence, an exact analysis identity, positive both-language component evidence, the unchanged `new_coverage` condition `OK` at threshold `80`, and `release_intent: none`. It may retain unresolved global issue/finding blockers.
-
-A `BLOCKED` record retains only the evidence safely reached before the failure. It is not a partial pass and cannot be converted into a release result. The JSON schema and runner cross-field validation reject a schema-v2 receipt, an omitted coverage section, a raw report body, an absolute receipt path, a release PASS outcome, or a changed `release_intent`.
-
-## Receipt state and final task
-
-No `DiagnosticReceiptV3` or `acceptance-receipt.md` exists in this planning packet. The final future task creates both only after the implementation head has passed focused proof, independent source review, and independent acceptance judgment. Any earlier task may define a schema or test a synthetic fixture, but it must not seal a real receipt.
+No receipt exists in this planning packet. T028 may create a real diagnostic record and inventory artifact only after the exact implementation head satisfies all predecessor tasks.
