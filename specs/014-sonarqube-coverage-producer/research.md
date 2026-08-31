@@ -1,7 +1,7 @@
 # Research: exact-head SonarQube coverage producer
 
 **Status**: Planning research. It records observed inputs and selected design conclusions. It reports no producer run, diagnostic result, green Quality Gate, or release.
-**Packet source base**: `1b8b2d548a45b17dde690b4cb8e4fc7153d326bc`
+**Packet source base**: `5d482b418118a9f17bf40fa0ab40b3c594df34d1`
 
 ## Evidence labels
 
