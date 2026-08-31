@@ -7,11 +7,12 @@
 - **Parent program:** `specs/011-issue450-sonar-release-program/`
 - **Wave contract:** `specs/013-owner-scoped-prebuild-cleanup/`
 - **Source base:** `1b8b2d548a45b17dde690b4cb8e4fc7153d326bc`
-- **Accepted candidate:** `baf2ab24f242ccd0b1b8db8a36d5efbd774b32e5`.
+- **Accepted candidate:** `209d151f9f9e0cba3fc5b6740196452611060a62`.
 - **Initial independent exact check:** `agent://CheckWave2ExactCandidate` returned `PASS` for predecessor implementation `480b67509fdfd996556d7954b736c46361025b2d`.
 - **PR correction verification:** `agent://VerifyWave2PrCorrection` returned `VERIFIED` for successor `598139418a40f0dc0fb07d204ac60864de104c49`.
 - **Lifecycle verification:** `agent://VerifyWave2LatestFix` returned `VERIFIED` for successor `a04e9384902493264a447faa1cd9195f63db56ed`.
-- **Final changed-byte verification:** `agent://VerifyWave2FinalFix` returned `VERIFIED` with no contradictions for exact final candidate `baf2ab24f242ccd0b1b8db8a36d5efbd774b32e5`.
+- **Final review verification:** `agent://VerifyWave2FinalFix` returned `VERIFIED` for successor `baf2ab24f242ccd0b1b8db8a36d5efbd774b32e5`.
+- **Gate serialization verification:** `agent://VerifyWave2FinalGateCandidate` returned `VERIFIED` with no contradictions for exact final candidate `209d151f9f9e0cba3fc5b6740196452611060a62`.
 - **Acceptance judgment:** `agent://JudgeWave2Final` returned `ACCEPT` for the pre-PR-review candidate; the verifier chain covers every later changed criterion.
 
 This receipt closes Wave 2 internally. It does not authorize Wave 3 implementation, a tag, release, package publication, Sonar waiver, route cutover, or a claim that global process cleanup caused either historical issue #450 incident.
@@ -128,6 +129,8 @@ The documentation audit `agent://AuditWave2Comments` retained the load-bearing a
 - `agent://VerifyWave2LatestFix`: independently verified all five final mechanisms against exact source/tests with no contradictions. The real fixture rerun remained locally blocked by a pre-existing foreign OwnerScopeAdapter process and was not PID-killed; these focused regressions do not depend on that residue.
 - A final review found graceful-disconnect ordering, overlapping admission ownership, and the `aclose()` return contract. Commit `baf2ab24f242ccd0b1b8db8a36d5efbd774b32e5` fixes them with retained RED/GREEN regressions.
 - `agent://VerifyWave2FinalFix`: independently verified all three exact final corrections with no contradictions.
+- A final concurrency review required one manager-owned lifecycle gate across adapter admission and the complete owner-drain/restore/build interval, plus preservation of a captured owner receipt across rebuild restart from both running and terminal states. Commits `11e8f1eb4b1aaffbce7a10e1da3468f2d03f222a` and `209d151f9f9e0cba3fc5b6740196452611060a62` implement that cutover.
+- `agent://VerifyWave2FinalGateCandidate`: verified lock coverage, running/terminal restart receipt preservation, fail-closed build gating, absence of recursive lock deadlock, and public route continuity for the exact final candidate.
 - `agent://JudgeWave2Final`: `ACCEPT` for the reviewed predecessor; the exact verifier chain binds the final candidate.
 
 ## Requirement closure
@@ -144,7 +147,7 @@ The documentation audit `agent://AuditWave2Comments` retained the load-bearing a
 - **WOC-010:** explicit safe Win32 signatures, private handles, intended inheritance, no breakaway/dependency leak.
 - **WOC-011:** public Python/default, host, installed CLI, dependency, Sonar, coverage, and release boundaries preserved.
 - **WOC-012:** load-bearing ownership and failure rationale is documented at the source seams.
-- **WOC-013:** exact final candidate `baf2ab24f242ccd0b1b8db8a36d5efbd774b32e5`, independent predecessor check, all PR changed-byte verifiers, terminal judgment, and this delayed non-release receipt are present.
+- **WOC-013:** exact final candidate `209d151f9f9e0cba3fc5b6740196452611060a62`, independent predecessor check, all PR changed-byte verifiers, terminal judgment, and this delayed non-release receipt are present.
 
 ## Handoff
 
