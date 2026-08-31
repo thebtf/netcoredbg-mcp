@@ -18,6 +18,7 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT_CONTRACT_PATH = PROJECT_ROOT / "scripts" / "stateless_preview_artifact.py"
+EXACT_HEAD_RUNNER_PATH = PROJECT_ROOT / "scripts" / "run_sonarqube_exact_head.py"
 RELEASE_GATE_CATALOG_CONTRACT = (
     PROJECT_ROOT / "specs" / "010-a1-preview-artifact" / "contracts" / "release-gate-catalog.md"
 )
@@ -1277,6 +1278,499 @@ def test_downloaded_receipt_provenance_refuses_semantic_mismatch(
     )
 
     with pytest.raises(ValueError, match="candidate exact-head receipt"):
+        preview_validator._download_and_validate_receipt_provenance(
+            downloader,
+            reference,
+            candidate_source,
+        )
+
+
+_V3_RUN_ID = "7d551ec6-40bc-4f8a-99e8-903a30783871"
+_V3_ANALYSIS_ID = "wave3-analysis-fixture"
+
+
+def _fixture_sha256(label: str) -> str:
+    return _sha256_bytes(label.encode("utf-8"))
+
+
+def _source_set_sha256(paths: list[str]) -> str:
+    return _sha256_bytes(_canonical_json_bytes(sorted(paths)))
+
+
+def _empty_inventory_summary() -> dict[str, Any]:
+    empty_keys_sha256 = _sha256_bytes(_canonical_json_bytes([]))
+    return {
+        "complete": True,
+        "result_empty": True,
+        "page_count": 0,
+        "total": 0,
+        "record_count": 0,
+        "keys_sha256": empty_keys_sha256,
+        "blocking_key_count": 0,
+        "blocking_keys_sha256": empty_keys_sha256,
+    }
+
+
+def _complete_inventory_document(source_commit: str) -> dict[str, Any]:
+    summary = _empty_inventory_summary()
+    pagination = {"page_size": 500, **summary}
+    return {
+        "schema_version": 1,
+        "write_mode": "create_new",
+        "identity": {
+            "captured_head": source_commit,
+            "project_key": "thebtf_netcoredbg_mcp",
+            "analysis_id": _V3_ANALYSIS_ID,
+        },
+        "issues": {"pagination": pagination, "records": []},
+        "hotspots": {"pagination": pagination, "records": []},
+    }
+
+
+def _final_report_evidence(
+    run_id: str,
+    report_id: str,
+    source_paths: list[str],
+) -> dict[str, Any]:
+    report_bytes = f"{report_id}-cobertura-fixture".encode()
+    return {
+        "id": report_id,
+        "language": report_id,
+        "format": "cobertura",
+        "relative_path": f".tmp/sonarqube-coverage/{run_id}/{report_id}/coverage.xml",
+        "sha256": _sha256_bytes(report_bytes),
+        "bytes": len(report_bytes),
+        "xml_root": "coverage",
+        "lines_valid": 10,
+        "lines_covered": 8,
+        "branches_valid": 4,
+        "branches_covered": 3,
+        "source_paths": source_paths,
+        "source_set_sha256": _source_set_sha256(source_paths),
+    }
+
+
+def _dotnet_producer_evidence(
+    run_id: str,
+    producer_id: str,
+    project: str,
+    source_path: str,
+) -> dict[str, Any]:
+    input_bytes = f"{producer_id}-cobertura-fixture".encode()
+    return {
+        "id": producer_id,
+        "project": project,
+        "relative_path": (
+            f".tmp/sonarqube-coverage/{run_id}/dotnet/inputs/{producer_id}/coverage.cobertura.xml"
+        ),
+        "sha256": _sha256_bytes(input_bytes),
+        "bytes": len(input_bytes),
+        "lines_valid": 4,
+        "lines_covered": 3,
+        "branches_valid": 2,
+        "branches_covered": 1,
+        "source_paths": [source_path],
+        "source_set_sha256": _source_set_sha256([source_path]),
+    }
+
+
+def _complete_v3_exact_head_receipt(
+    source_commit: str,
+    *,
+    role: str,
+    outcome: str,
+    release_intent: str,
+) -> dict[str, Any]:
+    dotnet_inputs = [
+        _dotnet_producer_evidence(
+            _V3_RUN_ID,
+            "codesearch-core",
+            "host/NetCoreDbg.Mcp.CodeSearch.Core.Tests/NetCoreDbg.Mcp.CodeSearch.Core.Tests.csproj",
+            "host/NetCoreDbg.Mcp.CodeSearch.Core/SymbolSearchEngine.cs",
+        ),
+        _dotnet_producer_evidence(
+            _V3_RUN_ID,
+            "host",
+            "host/NetCoreDbg.Mcp.Host.Tests/NetCoreDbg.Mcp.Host.Tests.csproj",
+            "host/NetCoreDbg.Mcp.Host/Program.cs",
+        ),
+        _dotnet_producer_evidence(
+            _V3_RUN_ID,
+            "stateless-preview",
+            "host/NetCoreDbg.Mcp.Stateless.Preview.Tests/NetCoreDbg.Mcp.Stateless.Preview.Tests.csproj",
+            "host/NetCoreDbg.Mcp.Stateless.Preview/Program.cs",
+        ),
+        _dotnet_producer_evidence(
+            _V3_RUN_ID,
+            "stateless",
+            "host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj",
+            "host/NetCoreDbg.Mcp.Stateless/Program.cs",
+        ),
+        _dotnet_producer_evidence(
+            _V3_RUN_ID,
+            "host-prompts",
+            "tests/dotnet/NetCoreDbg.Mcp.Host.PromptTests/NetCoreDbg.Mcp.Host.PromptTests.csproj",
+            "host/NetCoreDbg.Mcp.Host/NativePrompts.cs",
+        ),
+    ]
+    dotnet_source_paths = sorted(
+        source_path
+        for input_evidence in dotnet_inputs
+        for source_path in input_evidence["source_paths"]
+    )
+    inventory_document = _complete_inventory_document(source_commit)
+    inventory_bytes = _canonical_json_bytes(inventory_document)
+    inventory_summary = _empty_inventory_summary()
+    marker_bytes = _canonical_json_bytes({"captured_head": source_commit, "run_id": _V3_RUN_ID})
+
+    def component_evidence(paths: list[str]) -> dict[str, Any]:
+        return {
+            "source_set_sha256": _source_set_sha256(paths),
+            "page_count": 1,
+            "complete": True,
+            "mapped_path_count": len(paths),
+            "lines_to_cover": 10,
+            "covered_lines": 8,
+            "branch_measure_path_count": 1,
+            "mapped_paths_sha256": _source_set_sha256(paths),
+        }
+
+    return {
+        "schema_version": 3,
+        "role": role,
+        "outcome": outcome,
+        "release_intent": release_intent,
+        "identity": {
+            "captured_head": source_commit,
+            "project_key": "thebtf_netcoredbg_mcp",
+            "analysis_id": _V3_ANALYSIS_ID,
+        },
+        "coverage": {
+            "run_id": _V3_RUN_ID,
+            "marker": {
+                "relative_path": f".tmp/sonarqube-coverage/{_V3_RUN_ID}/coverage-run.json",
+                "sha256": _sha256_bytes(marker_bytes),
+                "bytes": len(marker_bytes),
+            },
+            "final_reports": [
+                _final_report_evidence(
+                    _V3_RUN_ID,
+                    "python",
+                    ["src/netcoredbg_mcp/server.py"],
+                ),
+                _final_report_evidence(_V3_RUN_ID, "dotnet", dotnet_source_paths),
+            ],
+            "dotnet_producers": dotnet_inputs,
+            "normalization": {
+                "algorithm": "cobertura-merge-normalize-v1",
+                "input_set_sha256": _sha256_bytes(_canonical_json_bytes(dotnet_inputs)),
+                "output_report_id": "dotnet",
+                "source_union_complete": True,
+            },
+            "stateless_host_binary": {
+                "dll_sha256": _fixture_sha256("stateless-dll"),
+                "pdb_sha256": _fixture_sha256("stateless-pdb"),
+                "restored": True,
+            },
+        },
+        "analysis": {
+            "observations": {
+                "submitted": True,
+                "current_before_measures": True,
+                "current_after_measures": True,
+                "current_final": True,
+            },
+            "aggregate": {
+                "coverage": 85.0,
+                "lines_to_cover": 100,
+                "new_coverage": 85.0,
+                "new_lines_to_cover": 20,
+            },
+            "new_coverage_condition": {
+                "status": "OK",
+                "threshold": 80,
+                "actual_value": 85.0,
+            },
+            "python_components": component_evidence(["src/netcoredbg_mcp/server.py"]),
+            "dotnet_components": component_evidence(dotnet_source_paths),
+        },
+        "global_inventory": {
+            "artifact": {
+                "relative_path": (
+                    ".agent/e/sonarqube/thebtf_netcoredbg_mcp/"
+                    f"{source_commit}/diagnostic/{_V3_RUN_ID}.inventory.json"
+                ),
+                "sha256": _sha256_bytes(inventory_bytes),
+                "bytes": len(inventory_bytes),
+            },
+            "artifact_schema_version": 1,
+            "issues": inventory_summary,
+            "hotspots": inventory_summary.copy(),
+        },
+        "release_gate": (
+            None
+            if role == "diagnostic"
+            else {
+                "quality_gate_status": "OK",
+                "blocking_issue_count": 0,
+                "blocking_hotspot_count": 0,
+            }
+        ),
+        "cleanup": {
+            "claimed_root": f".tmp/sonarqube-coverage/{_V3_RUN_ID}",
+            "producer_terminal": True,
+            "removed_paths": [f".tmp/sonarqube-coverage/{_V3_RUN_ID}"],
+            "parent_removed_if_empty": True,
+            "status": "OK",
+            "failure": None,
+        },
+        "failure": None,
+    }
+
+
+def _exact_head_runner_for_receipt_tests() -> Any:
+    assert EXACT_HEAD_RUNNER_PATH.is_file(), "R15 exact-head runner is missing"
+    spec = importlib.util.spec_from_file_location(
+        "wave3_exact_head_runner_for_receipt_tests",
+        EXACT_HEAD_RUNNER_PATH,
+    )
+    assert spec is not None and spec.loader is not None
+    runner = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = runner
+    spec.loader.exec_module(runner)
+    return runner
+
+
+def _v3_receipt_validator() -> tuple[Any, Any]:
+    runner = _exact_head_runner_for_receipt_tests()
+    validator = getattr(runner, "validate_exact_head_receipt_v3", None)
+    assert callable(validator), "R15 requires a unified v3 receipt validator"
+    return runner, validator
+
+
+def _write_v3_post_merge_scan_receipt(repository_root: Path, source_commit: str) -> Path:
+    path = (
+        repository_root
+        / ".agent"
+        / "e"
+        / "sonarqube"
+        / "thebtf_netcoredbg_mcp"
+        / source_commit
+        / "post-merge.json"
+    )
+    path.parent.mkdir(parents=True)
+    path.write_bytes(
+        _canonical_json_bytes(
+            _complete_v3_exact_head_receipt(
+                source_commit,
+                role="post-merge",
+                outcome="PASS",
+                release_intent="v0.23.11",
+            )
+        )
+    )
+    return path
+
+
+@pytest.mark.parametrize(
+    ("role", "outcome", "release_intent"),
+    [
+        ("diagnostic", "DIAGNOSTIC_COMPLETE", "none"),
+        ("candidate", "PASS", "v0.23.11"),
+        ("post-merge", "PASS", "v0.23.11"),
+    ],
+)
+def test_unified_v3_receipt_accepts_each_complete_legal_role_outcome(
+    role: str,
+    outcome: str,
+    release_intent: str,
+) -> None:
+    _, validator = _v3_receipt_validator()
+
+    validator(
+        _complete_v3_exact_head_receipt(
+            "a" * 40,
+            role=role,
+            outcome=outcome,
+            release_intent=release_intent,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("role", "outcome", "release_intent"),
+    [
+        ("diagnostic", "PASS", "none"),
+        ("candidate", "DIAGNOSTIC_COMPLETE", "v0.23.11"),
+        ("post-merge", "PASS", "none"),
+    ],
+)
+def test_unified_v3_receipt_refuses_illegal_role_outcome_combinations(
+    role: str,
+    outcome: str,
+    release_intent: str,
+) -> None:
+    runner, validator = _v3_receipt_validator()
+
+    with pytest.raises(runner.RunnerError):
+        validator(
+            _complete_v3_exact_head_receipt(
+                "a" * 40,
+                role=role,
+                outcome=outcome,
+                release_intent=release_intent,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda receipt: receipt.update({"schema_version": 2}),
+        lambda receipt: receipt["coverage"].update({"final_reports": []}),
+        lambda receipt: receipt["global_inventory"]["issues"].pop("complete"),
+        lambda receipt: receipt["global_inventory"]["artifact"].update({"sha256": "0" * 64}),
+        lambda receipt: receipt["identity"].update({"captured_head": "b" * 40}),
+        lambda receipt: receipt["cleanup"].update(
+            {
+                "status": "FAILED",
+                "failure": {
+                    "code": "COVERAGE_CLEANUP_FAILED",
+                    "message": "fixture cleanup failed",
+                },
+            }
+        ),
+    ],
+)
+def test_unified_v3_receipt_refuses_unbound_or_incomplete_completion_evidence(
+    mutate: Any,
+) -> None:
+    receipt = _complete_v3_exact_head_receipt(
+        "a" * 40,
+        role="diagnostic",
+        outcome="DIAGNOSTIC_COMPLETE",
+        release_intent="none",
+    )
+    mutate(receipt)
+    runner, validator = _v3_receipt_validator()
+
+    with pytest.raises(runner.RunnerError):
+        validator(receipt)
+
+
+@pytest.mark.parametrize(
+    ("role", "field"),
+    [
+        ("candidate", "blocking_issue_count"),
+        ("candidate", "blocking_hotspot_count"),
+        ("post-merge", "blocking_issue_count"),
+        ("post-merge", "blocking_hotspot_count"),
+    ],
+)
+def test_unified_v3_pass_refuses_blocking_findings_or_hotspots(
+    role: str,
+    field: str,
+) -> None:
+    receipt = _complete_v3_exact_head_receipt(
+        "a" * 40,
+        role=role,
+        outcome="PASS",
+        release_intent="v0.23.11",
+    )
+    assert receipt["release_gate"] is not None
+    receipt["release_gate"][field] = 1
+    runner, validator = _v3_receipt_validator()
+
+    with pytest.raises(runner.RunnerError):
+        validator(receipt)
+
+
+def test_post_merge_artifact_consumer_accepts_complete_v3_receipt(tmp_path: Path) -> None:
+    authority_root, source_commit, _ = _create_authority_repository(tmp_path)
+    _write_v3_post_merge_scan_receipt(authority_root, source_commit)
+
+    produced = produce_post_merge_exact_head_receipt(
+        authority_root,
+        _build_environment(source_commit),
+    )
+
+    assert produced["source_runner"]["receipt_schema_version"] == 3
+
+
+def test_post_merge_artifact_consumer_refuses_v2_receipt(tmp_path: Path) -> None:
+    authority_root, source_commit, _ = _create_authority_repository(tmp_path)
+    _write_post_merge_scan_receipt(authority_root, source_commit)
+
+    with pytest.raises(ValueError):
+        produce_post_merge_exact_head_receipt(
+            authority_root,
+            _build_environment(source_commit),
+        )
+
+
+def test_downloaded_post_merge_consumer_accepts_complete_v3_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_commit = "a" * 40
+    downloader, reference, candidate_source = _receipt_provenance_download_fixture(
+        tmp_path,
+        monkeypatch,
+        receipt=_complete_v3_exact_head_receipt(
+            source_commit,
+            role="post-merge",
+            outcome="PASS",
+            release_intent="v0.23.11",
+        ),
+    )
+
+    validated = preview_validator._download_and_validate_receipt_provenance(
+        downloader,
+        reference,
+        candidate_source,
+    )
+
+    assert validated.as_mapping() == reference.as_mapping()
+
+
+@pytest.mark.parametrize("case", ["v2", "optional_coverage", "stale_identity"])
+def test_downloaded_post_merge_consumer_refuses_v2_or_incomplete_v3_receipts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    source_commit = "a" * 40
+    if case == "v2":
+        receipt = _receipt_provenance_record(source_commit)
+    else:
+        receipt = _complete_v3_exact_head_receipt(
+            source_commit,
+            role="post-merge",
+            outcome="PASS",
+            release_intent="v0.23.11",
+        )
+        receipt.update(
+            {
+                "record_type": "sonarqube-exact-head",
+                "repository": REPOSITORY,
+                "source_ref": SOURCE_REF,
+                "stage": "post-merge",
+                "scanned_commit": source_commit,
+                "tag_target": source_commit,
+            }
+        )
+        if case == "optional_coverage":
+            receipt["coverage"] = None
+        else:
+            receipt["identity"]["captured_head"] = "b" * 40
+
+    downloader, reference, candidate_source = _receipt_provenance_download_fixture(
+        tmp_path,
+        monkeypatch,
+        receipt=receipt,
+    )
+
+    with pytest.raises(ValueError):
         preview_validator._download_and_validate_receipt_provenance(
             downloader,
             reference,
