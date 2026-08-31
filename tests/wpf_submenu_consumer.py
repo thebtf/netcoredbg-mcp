@@ -103,6 +103,8 @@ async def _poll_discovery(
             if remaining <= 0:
                 break
             await asyncio.sleep(min(POLL_INTERVAL_SECONDS, remaining))
+            if deadline - loop.time() <= 0:
+                break
             continue
 
         data = last_response.get("data")

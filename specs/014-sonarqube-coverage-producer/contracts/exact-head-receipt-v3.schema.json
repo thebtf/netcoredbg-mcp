@@ -1044,6 +1044,7 @@
       ],
       "properties": {
         "code": {
+          "type": "string",
           "pattern": "^(?:COVERAGE|WAVE2)_[A-Z0-9_]+$"
         },
         "stage": {

@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import re
 import stat
 import sys
 from contextlib import ExitStack, nullcontext
@@ -1540,6 +1541,26 @@ class TestSonarqubeExactHeadRunner(TestCase):
         self.assertEqual(replacement["outcome"], "BLOCKED")
         self.assertEqual(replacement["failure"]["code"], "COVERAGE_RUN_INCOMPLETE")
 
+    def test_v3_failure_code_schema_and_validator_reject_non_strings(self):
+        schema_path = (
+            RUNNER_PATH.parents[1]
+            / "specs/014-sonarqube-coverage-producer/contracts/exact-head-receipt-v3.schema.json"
+        )
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        self.assertEqual(schema["$defs"]["failure"]["properties"]["code"]["type"], "string")
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = runner.GitContext(root, root, root, root, "a" * 40)
+            for invalid_code in (1, True):
+                with self.subTest(invalid_code=invalid_code):
+                    receipt = runner.receipt_base(context, "candidate", "new-run")
+                    receipt["failure"]["code"] = invalid_code
+                    with self.assertRaisesRegex(
+                        runner.RunnerError, "EXACT_HEAD_RECEIPT_V3_INVALID"
+                    ):
+                        runner.validate_exact_head_receipt_v3(receipt)
+
     def test_cross_origin_api_response_is_rejected(self):
         class Response:
             def __enter__(self):
@@ -1995,11 +2016,13 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         lines_valid=2,
         branches_valid=2,
         sources=(".",),
+        line_xml: str | None = None,
     ) -> str:
+        line = line_xml or (
+            '<line number="1" hits="1" branch="true" condition-coverage="50% (1/2)"/>'
+        )
         classes = "".join(
-            f'<class name="module" filename="{filename}"><methods/><lines>'
-            '<line number="1" hits="1" branch="true" '
-            'condition-coverage="50% (1/2)"/></lines></class>'
+            f'<class name="module" filename="{filename}"><methods/><lines>{line}</lines></class>'
             for filename in filenames
         )
         source_xml = "".join(f"<source>{source}</source>" for source in sources)
@@ -2018,7 +2041,11 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         return source
 
     def _transaction_events(
-        self, root: Path, events: list[str], failing_step: str | None = None
+        self,
+        root: Path,
+        events: list[str],
+        failing_step: str | None = None,
+        producer_terminals: list[bool] | None = None,
     ) -> None:
         context = self._context(root)
         plan = SimpleNamespace()
@@ -2043,6 +2070,11 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 if failing_step == "end":
                     raise runner.RunnerError("injected end failure")
                 raise runner.RunnerError("stop after transaction event capture")
+
+        def cleanup(_plan, producer_terminal):
+            if producer_terminals is not None:
+                producer_terminals.append(producer_terminal)
+            return {}
 
         with ExitStack() as patches:
             patches.enter_context(patch.object(runner, "process_environment", return_value={}))
@@ -2131,7 +2163,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     return_value={"dll_sha256": "a" * 64, "pdb_sha256": "b" * 64},
                 )
             )
-            patches.enter_context(patch.object(runner, "cleanup_coverage_run", return_value={}))
+            patches.enter_context(patch.object(runner, "cleanup_coverage_run", side_effect=cleanup))
             patches.enter_context(
                 patch.object(runner, "assert_head_unchanged", side_effect=step("head-check"))
             )
@@ -2528,18 +2560,38 @@ class TestWave3CoverageProducerRedContracts(TestCase):
 
     def test_r09b_every_stateless_process_collection_class_is_excluded_from_coverlet(self):
         tests_root = RUNNER_PATH.parents[1] / "host" / "NetCoreDbg.Mcp.Stateless.Tests"
-        process_classes = 0
+        process_collection = re.compile(
+            r"\[\s*Collection\s*\(\s*(?:(?:global::)?[A-Za-z_]\w*\.)*"
+            r"NetCoreDbgSessionProcessCollection\.Name\s*\)\s*\]"
+        )
+        coverage_exclusion = re.compile(r'\[\s*Trait\s*\(\s*"Coverage"\s*,\s*"Exclude"\s*\)\s*\]')
+        class_declaration = re.compile(
+            r"(?:public|internal)\s+(?:(?:sealed|abstract|partial)\s+)*class\s+"
+            r"(?P<name>[A-Za-z_]\w*)"
+        )
+        process_classes: list[str] = []
         missing_traits: list[str] = []
         for path in tests_root.rglob("*.cs"):
-            source = path.read_text(encoding="utf-8")
-            collection_count = source.count("[Collection(")
-            if collection_count == 0 or "NetCoreDbgSessionProcessCollection.Name" not in source:
-                continue
-            process_classes += collection_count
-            if source.count('[Trait("Coverage", "Exclude")]') < collection_count:
-                missing_traits.append(path.relative_to(tests_root).as_posix())
+            pending_attributes: list[str] = []
+            for line in path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    pending_attributes.append(stripped)
+                    continue
+                declaration = class_declaration.search(stripped)
+                if declaration is not None:
+                    attributes = "\n".join(pending_attributes)
+                    if process_collection.search(attributes) is not None:
+                        class_identity = (
+                            f"{path.relative_to(tests_root).as_posix()}:{declaration['name']}"
+                        )
+                        process_classes.append(class_identity)
+                        if coverage_exclusion.search(attributes) is None:
+                            missing_traits.append(class_identity)
+                if stripped and not stripped.startswith("//"):
+                    pending_attributes.clear()
 
-        self.assertEqual(process_classes, 12)
+        self.assertEqual(len(process_classes), 12)
         self.assertEqual(missing_traits, [])
 
     def test_r10_only_stateless_gets_include_directory_and_restoration_and_mapping_are_required(
@@ -2612,6 +2664,75 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                         ):
                             runner.validate_dotnet_cobertura_input(context, spec, report)
 
+    def test_r11b_dotnet_cobertura_rejects_ambiguous_condition_identities(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            source_path = "host/NetCoreDbg.Mcp.Host/Program.cs"
+            source = self._write_source(root, source_path)
+            spec = SimpleNamespace(
+                id="host",
+                project="host/NetCoreDbg.Mcp.Host.Tests/NetCoreDbg.Mcp.Host.Tests.csproj",
+                include_directory=None,
+            )
+            report = root / "input.xml"
+            report.write_text(
+                self._cobertura(
+                    [source_path],
+                    line_xml=(
+                        '<line number="1" hits="1" branch="true" '
+                        'condition-coverage="50% (1/2)"><conditions>'
+                        '<condition number="0" type="jump" coverage="100%"/>'
+                        '<condition number="0" type="jump" coverage="0%"/>'
+                        "</conditions></line>"
+                    ),
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(
+                runner, "is_tracked", side_effect=lambda _root, _env, path: path == source
+            ):
+                with self.assertRaisesRegex(runner.RunnerError, "COVERAGE_REPORT_INVALID"):
+                    runner.validate_dotnet_cobertura_input(context, spec, report)
+
+    def test_r11c_dotnet_cobertura_keeps_grouped_conditions_as_safe_aggregate(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            source_path = "host/NetCoreDbg.Mcp.Host/Program.cs"
+            source = self._write_source(root, source_path)
+            spec = SimpleNamespace(
+                id="host",
+                project="host/NetCoreDbg.Mcp.Host.Tests/NetCoreDbg.Mcp.Host.Tests.csproj",
+                include_directory=None,
+            )
+            report = root / "input.xml"
+            report.write_text(
+                self._cobertura(
+                    [source_path],
+                    line_xml=(
+                        '<line number="1" hits="1" branch="true" '
+                        'condition-coverage="94.11% (16/17)"><conditions>'
+                        '<condition number="117" type="jump" coverage="100%"/>'
+                        '<condition number="124" type="switch" coverage="80%"/>'
+                        '<condition number="178" type="jump" coverage="100%"/>'
+                        '<condition number="189" type="jump" coverage="100%"/>'
+                        '<condition number="152" type="switch" coverage="100%"/>'
+                        '<condition number="200" type="jump" coverage="100%"/>'
+                        "</conditions></line>"
+                    ),
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(
+                runner, "is_tracked", side_effect=lambda _root, _env, path: path == source
+            ):
+                parsed = runner.validate_dotnet_cobertura_input(context, spec, report)
+
+        line = parsed["facts"][0]["lines"][0]
+        self.assertEqual((line["branches_covered"], line["branches_valid"]), (16, 17))
+        self.assertEqual(line["conditions"], [])
+
     def test_r12_dotnet_normalization_is_deterministic_and_final_output_must_equal_input_union(
         self,
     ):
@@ -2644,6 +2765,68 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     runner.RunnerError, "COVERAGE_DOTNET_NORMALIZATION_FAILED"
                 ):
                     runner.validate_final_dotnet_cobertura(context, plan, inputs, normalization)
+
+    def test_r12a_dotnet_normalization_unions_distinct_condition_identities(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            plan = self._plan(root)
+            shared_source = "host/Shared/Shared.cs"
+            first_branch = (
+                '<line number="1" hits="1" branch="true" condition-coverage="50% (1/2)">'
+                "<conditions>"
+                '<condition number="0" type="jump" coverage="100%"/>'
+                '<condition number="1" type="jump" coverage="0%"/>'
+                "</conditions></line>"
+            )
+            second_branch = (
+                '<line number="1" hits="1" branch="true" condition-coverage="50% (1/2)">'
+                "<conditions>"
+                '<condition number="0" type="jump" coverage="0%"/>'
+                '<condition number="1" type="jump" coverage="100%"/>'
+                "</conditions></line>"
+            )
+            for index, spec in enumerate(plan.dotnet_inputs):
+                if spec.id == "codesearch-core":
+                    source_path, line_xml = shared_source, first_branch
+                elif spec.id == "host":
+                    source_path, line_xml = shared_source, second_branch
+                elif spec.id == "stateless":
+                    source_path, line_xml = "host/NetCoreDbg.Mcp.Stateless/Source3.cs", None
+                else:
+                    source_path, line_xml = f"host/Production{index}/Source{index}.cs", None
+                self._write_source(root, source_path)
+                report = self._absolute(spec.raw_cobertura_input)
+                report.parent.mkdir(parents=True, exist_ok=True)
+                report.write_text(
+                    self._cobertura([source_path], line_xml=line_xml), encoding="utf-8"
+                )
+            with patch.object(runner, "is_tracked", return_value=True):
+                inputs = runner.validate_dotnet_cobertura_inputs(context, plan)
+                runner.normalize_dotnet_cobertura(plan, inputs)
+            normalized = runner.ElementTree.parse(self._absolute(plan.dotnet_report)).getroot()
+            shared_class = next(
+                element
+                for element in normalized.iter()
+                if element.tag == "class" and element.attrib.get("filename") == shared_source
+            )
+            normalized_line = next(
+                element
+                for element in shared_class.iter()
+                if element.tag == "line" and element.attrib.get("number") == "1"
+            )
+            normalized_conditions = next(
+                element for element in normalized_line if element.tag == "conditions"
+            )
+
+        self.assertEqual(normalized_line.attrib["condition-coverage"], "100% (2/2)")
+        self.assertEqual(
+            [
+                (element.attrib["number"], element.attrib["type"], element.attrib["coverage"])
+                for element in normalized_conditions
+            ],
+            [("0", "jump", "100%"), ("1", "jump", "100%")],
+        )
 
     def test_r13_transaction_orders_all_barriers_and_never_ends_after_prior_failure(self):
         with TemporaryDirectory() as temporary_directory:
@@ -2685,6 +2868,19 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 with self.assertRaisesRegex(runner.RunnerError, f"injected {failing_step} failure"):
                     self._transaction_events(Path(temporary_directory), events, failing_step)
                 self.assertNotIn("end", events)
+
+    def test_r13a_foreground_producer_failure_marks_terminal_before_cleanup(self):
+        terminals: list[bool] = []
+        with TemporaryDirectory() as temporary_directory:
+            with self.assertRaisesRegex(runner.RunnerError, "injected produce failure"):
+                self._transaction_events(
+                    Path(temporary_directory),
+                    [],
+                    failing_step="produce",
+                    producer_terminals=terminals,
+                )
+
+        self.assertEqual(terminals, [True])
 
     def test_r14_analysis_evidence_requires_canonical_two_language_components(self):
         identity = {

@@ -1,6 +1,6 @@
 # Architecture: runner-owned exact-head coverage transaction
 
-**Status**: Selected D2 architecture for a future implementation. It reports no completed coverage run or release result.
+**Status**: Implemented through T023: the runner-owned producer, fixed five-input normalization, unified v3 consumer cutover, and hosted-checkout entry verification are present. T010 records a real producer run at `8314071` with two validated final reports; T024 through T028 remain open. No diagnostic record, inventory artifact, acceptance receipt, or release result exists.
 **Parent binding**: Wave 3 must produce exactly one deterministic project-root-relative Python Cobertura report and one deterministic project-root-relative .NET Cobertura report in one scanner transaction.
 **Release intent**: `none`
 

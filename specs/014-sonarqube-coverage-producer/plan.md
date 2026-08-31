@@ -7,7 +7,7 @@
 **Parent**: `specs/011-issue450-sonar-release-program/`, Wave 3
 **Source base**: `5d482b418118a9f17bf40fa0ab40b3c594df34d1`
 **Release intent**: `none`
-**Execution status**: T000 entry gate passed against merged Wave-2 evidence. T001 through T028 may proceed under the squash-aware identity and Git-blob contract.
+**Execution status**: T000 through T023 are implemented. Producer evidence recorded by T010 shows the exact head `73247bf` generated both final reports from Python and all five private .NET inputs; T024 through T028 remain pending. No diagnostic record, inventory artifact, acceptance receipt, tag, publication, or release claim exists.
 
 ## Summary
 
@@ -86,6 +86,7 @@ flowchart LR
 ## Verification plan
 
 | Layer | Command or proof | What it proves |
+| --- | --- | --- |
 | Entry and preflight | Focused command/event spy plus hosted-workflow fixture | Missing tracked artifact; invalid schema, intent, or canonical Git-blob hash; wrong reviewed source head, PR head, or merge OID; absent first-party binding; unequal integration trees; invalid candidate lineage or artifact blob binding; invalid path history; merge absent from observed main; missing tools; invalid tuple; and MTP leave preflight, begin, and claim unreachable. A clean squash-merge fixture admits preflight only after every entry predicate passes. |
 | RED/GREEN contract | `uv run --locked --extra dev pytest tests/test_sonarqube_exact_head_runner.py -q` | All 15 rows exercise the runner boundary. |
 | Local producer | Runner-owned producer invocation | Five private inputs normalize into one final .NET Cobertura report and one Python report. |

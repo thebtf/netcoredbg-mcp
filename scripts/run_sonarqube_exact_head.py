@@ -1941,9 +1941,9 @@ def _positive_int(value: Any, code: str, detail: str, *, allow_zero: bool = Fals
     return number
 
 
-def _condition_totals(line: ElementTree.Element) -> tuple[int, int]:
+def _condition_totals(line: ElementTree.Element) -> tuple[int, int, list[dict[str, str | int]]]:
     if str(line.attrib.get("branch", "")).casefold() != "true":
-        return 0, 0
+        return 0, 0, []
     coverage = line.attrib.get("condition-coverage")
     match = re.search(r"\((\d+)\s*/\s*(\d+)\)", coverage or "")
     if match is None:
@@ -1951,7 +1951,64 @@ def _condition_totals(line: ElementTree.Element) -> tuple[int, int]:
     covered, valid = int(match.group(1)), int(match.group(2))
     if valid <= 0 or covered < 0 or covered > valid:
         _coverage_failure("COVERAGE_REPORT_INVALID", "branch condition denominator is invalid")
-    return covered, valid
+    containers = [child for child in line if child.tag.rsplit("}", 1)[-1] == "conditions"]
+    if not containers:
+        return covered, valid, []
+    if len(containers) != 1:
+        _coverage_failure("COVERAGE_REPORT_INVALID", "branch line has ambiguous conditions")
+    conditions = list(containers[0])
+    if not conditions or any(child.tag.rsplit("}", 1)[-1] != "condition" for child in conditions):
+        _coverage_failure("COVERAGE_REPORT_INVALID", "branch conditions are malformed")
+
+    parsed: list[tuple[str, str, float]] = []
+    identities: set[tuple[str, str]] = set()
+    for condition in conditions:
+        raw_number = condition.attrib.get("number")
+        condition_type = condition.attrib.get("type")
+        coverage_match = re.fullmatch(r"(\d+(?:\.\d+)?)%", condition.attrib.get("coverage", ""))
+        if (
+            not isinstance(raw_number, str)
+            or re.fullmatch(r"\d+", raw_number) is None
+            or not isinstance(condition_type, str)
+            or not condition_type
+            or coverage_match is None
+            or float(coverage_match.group(1)) > 100
+        ):
+            _coverage_failure("COVERAGE_REPORT_INVALID", "branch condition identity is malformed")
+        number = str(int(raw_number))
+        identity = (condition_type, number)
+        if identity in identities:
+            _coverage_failure(
+                "COVERAGE_REPORT_INVALID", "branch condition identities are ambiguous"
+            )
+        identities.add(identity)
+        parsed.append((number, condition_type, float(coverage_match.group(1))))
+
+    # Coverlet can collapse several switch/jump outcomes into one condition
+    # element (for example 16/17 across six condition identities). Cobertura
+    # does not expose the per-identity denominators in that shape, so retain
+    # only the trustworthy aggregate and let normalization merge it
+    # conservatively. Exact one-outcome identities remain unionable.
+    if valid != len(parsed):
+        return covered, valid, []
+
+    facts: list[dict[str, str | int]] = []
+    for number, condition_type, percentage in parsed:
+        if percentage not in {0.0, 100.0}:
+            _coverage_failure("COVERAGE_REPORT_INVALID", "branch condition coverage is not exact")
+        facts.append(
+            {
+                "number": number,
+                "type": condition_type,
+                "covered": int(percentage == 100.0),
+                "valid": 1,
+            }
+        )
+    if sum(int(fact["covered"]) for fact in facts) != covered:
+        _coverage_failure(
+            "COVERAGE_REPORT_INVALID", "branch condition identities disagree with totals"
+        )
+    return covered, valid, facts
 
 
 def _parse_cobertura(
@@ -2018,7 +2075,7 @@ def _parse_cobertura(
         )
         if source_path not in source_paths:
             source_paths.append(source_path)
-        line_facts: list[dict[str, int]] = []
+        line_facts: list[dict[str, Any]] = []
         for line in class_element.iter():
             if line.tag.rsplit("}", 1)[-1] != "line":
                 continue
@@ -2031,13 +2088,14 @@ def _parse_cobertura(
                 "line hits are invalid",
                 allow_zero=True,
             )
-            branch_covered, branch_valid = _condition_totals(line)
+            branch_covered, branch_valid, conditions = _condition_totals(line)
             line_facts.append(
                 {
                     "number": number,
                     "hits": hits,
                     "branches_covered": branch_covered,
                     "branches_valid": branch_valid,
+                    "conditions": conditions,
                 }
             )
         facts.append({"source_path": source_path, "lines": line_facts})
@@ -2171,7 +2229,8 @@ def normalize_dotnet_cobertura(
             "COVERAGE_DOTNET_NORMALIZATION_FAILED", "input order does not match marker order"
         )
     line_hits: dict[tuple[str, int], int] = {}
-    branch_hits: dict[tuple[str, int, int], bool] = {}
+    line_conditions: dict[tuple[str, int], dict[tuple[str, str], tuple[int, int]]] = {}
+    line_definitions: dict[tuple[str, int], tuple[str, tuple[tuple[str, str, int], ...]]] = {}
     source_union: set[str] = set()
     for input_evidence in inputs:
         facts = input_evidence.get("facts")
@@ -2196,12 +2255,16 @@ def normalize_dotnet_cobertura(
                     _coverage_failure(
                         "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated line fact is malformed"
                     )
-                number = int(line.get("number", 0))
-                hits = int(line.get("hits", 0))
-                branch_valid = int(line.get("branches_valid", 0))
-                branch_covered = int(line.get("branches_covered", 0))
+                number = line.get("number")
+                hits = line.get("hits")
+                branch_valid = line.get("branches_valid")
+                branch_covered = line.get("branches_covered")
                 if (
-                    number <= 0
+                    type(number) is not int
+                    or type(hits) is not int
+                    or type(branch_valid) is not int
+                    or type(branch_covered) is not int
+                    or number <= 0
                     or hits < 0
                     or branch_valid < 0
                     or branch_covered < 0
@@ -2212,12 +2275,90 @@ def normalize_dotnet_cobertura(
                     )
                 key = (source_path, number)
                 line_hits[key] = max(line_hits.get(key, 0), hits)
-                for ordinal in range(branch_valid):
-                    branch_key = (source_path, number, ordinal)
-                    branch_hits[branch_key] = (
-                        branch_hits.get(branch_key, False) or ordinal < branch_covered
+                raw_conditions = line.get("conditions", [])
+                if not isinstance(raw_conditions, list):
+                    _coverage_failure(
+                        "COVERAGE_DOTNET_NORMALIZATION_FAILED",
+                        "validated condition facts are malformed",
                     )
-    if not line_hits or not branch_hits:
+                if branch_valid == 0:
+                    if raw_conditions:
+                        _coverage_failure(
+                            "COVERAGE_DOTNET_NORMALIZATION_FAILED", "nonbranch line has conditions"
+                        )
+                    continue
+                parsed_conditions: dict[tuple[str, str], tuple[int, int]] = {}
+                if raw_conditions:
+                    for condition in raw_conditions:
+                        if (
+                            not isinstance(condition, Mapping)
+                            or set(condition) != {"number", "type", "covered", "valid"}
+                            or not isinstance(condition.get("number"), str)
+                            or re.fullmatch(r"\d+", condition["number"]) is None
+                            or not isinstance(condition.get("type"), str)
+                            or not condition["type"]
+                            or type(condition.get("covered")) is not int
+                            or type(condition.get("valid")) is not int
+                            or condition["valid"] <= 0
+                            or condition["covered"] < 0
+                            or condition["covered"] > condition["valid"]
+                        ):
+                            _coverage_failure(
+                                "COVERAGE_DOTNET_NORMALIZATION_FAILED",
+                                "validated condition fact is invalid",
+                            )
+                        identity = (condition["type"], str(int(condition["number"])))
+                        if identity in parsed_conditions:
+                            _coverage_failure(
+                                "COVERAGE_DOTNET_NORMALIZATION_FAILED",
+                                "validated condition identities are ambiguous",
+                            )
+                        parsed_conditions[identity] = (condition["valid"], condition["covered"])
+                    if (
+                        sum(valid for valid, _ in parsed_conditions.values()) != branch_valid
+                        or sum(covered for _, covered in parsed_conditions.values())
+                        != branch_covered
+                    ):
+                        _coverage_failure(
+                            "COVERAGE_DOTNET_NORMALIZATION_FAILED",
+                            "validated condition facts disagree with line coverage",
+                        )
+                    mode = "identified"
+                else:
+                    parsed_conditions = {("aggregate", "0"): (branch_valid, branch_covered)}
+                    mode = "aggregate"
+                definition = (
+                    mode,
+                    tuple(
+                        sorted(
+                            (condition_type, condition_number, valid)
+                            for (condition_type, condition_number), (
+                                valid,
+                                _,
+                            ) in parsed_conditions.items()
+                        )
+                    ),
+                )
+                existing_definition = line_definitions.get(key)
+                if existing_definition is not None and existing_definition != definition:
+                    _coverage_failure(
+                        "COVERAGE_DOTNET_NORMALIZATION_FAILED",
+                        "overlapping line has ambiguous condition identities",
+                    )
+                line_definitions[key] = definition
+                merged_conditions = line_conditions.setdefault(key, {})
+                for identity, (valid, covered) in parsed_conditions.items():
+                    previous = merged_conditions.get(identity)
+                    if previous is not None and previous[0] != valid:
+                        _coverage_failure(
+                            "COVERAGE_DOTNET_NORMALIZATION_FAILED",
+                            "condition identity has inconsistent denominator",
+                        )
+                    merged_conditions[identity] = (
+                        valid,
+                        max(covered, previous[1] if previous else 0),
+                    )
+    if not line_hits or not line_conditions:
         _coverage_failure(
             "COVERAGE_DOTNET_NORMALIZATION_FAILED", "normalized report has a zero denominator"
         )
@@ -2226,8 +2367,20 @@ def normalize_dotnet_cobertura(
         {
             "lines-valid": str(len(line_hits)),
             "lines-covered": str(sum(hits > 0 for hits in line_hits.values())),
-            "branches-valid": str(len(branch_hits)),
-            "branches-covered": str(sum(branch_hits.values())),
+            "branches-valid": str(
+                sum(
+                    valid
+                    for conditions in line_conditions.values()
+                    for valid, _ in conditions.values()
+                )
+            ),
+            "branches-covered": str(
+                sum(
+                    covered
+                    for conditions in line_conditions.values()
+                    for _, covered in conditions.values()
+                )
+            ),
         },
     )
     sources = ElementTree.SubElement(root, "sources")
@@ -2242,20 +2395,41 @@ def normalize_dotnet_cobertura(
         ElementTree.SubElement(class_element, "methods")
         lines_element = ElementTree.SubElement(class_element, "lines")
         for source, number in sorted(key for key in line_hits if key[0] == source_path):
-            branch_values = [
-                branch_hits[(source, number, ordinal)]
-                for ordinal in range(
-                    sum(1 for item in branch_hits if item[0] == source and item[1] == number)
-                )
-            ]
             attributes = {"number": str(number), "hits": str(line_hits[(source, number)])}
-            if branch_values:
-                covered = sum(branch_values)
-                condition_coverage = (
-                    f"{round(covered * 100 / len(branch_values))}% ({covered}/{len(branch_values)})"
+            conditions = line_conditions.get((source, number), {})
+            if conditions:
+                condition_values = list(conditions.values())
+                covered = sum(item[1] for item in condition_values)
+                valid = sum(item[0] for item in condition_values)
+                attributes.update(
+                    {
+                        "branch": "true",
+                        "condition-coverage": (
+                            f"{round(covered * 100 / valid)}% ({covered}/{valid})"
+                        ),
+                    }
                 )
-                attributes.update({"branch": "true", "condition-coverage": condition_coverage})
-            ElementTree.SubElement(lines_element, "line", attributes)
+            line_element = ElementTree.SubElement(lines_element, "line", attributes)
+            definition = line_definitions.get((source, number))
+            if conditions and definition is not None and definition[0] == "identified":
+                conditions_element = ElementTree.SubElement(line_element, "conditions")
+                for (condition_type, condition_number), (valid, covered) in sorted(
+                    conditions.items()
+                ):
+                    if covered * 100 % valid:
+                        _coverage_failure(
+                            "COVERAGE_DOTNET_NORMALIZATION_FAILED",
+                            "normalized condition coverage is not exact",
+                        )
+                    ElementTree.SubElement(
+                        conditions_element,
+                        "condition",
+                        {
+                            "number": condition_number,
+                            "type": condition_type,
+                            "coverage": f"{covered * 100 // valid}%",
+                        },
+                    )
     try:
         plan.dotnet_report.parent.mkdir(parents=True, exist_ok=True)
         ElementTree.ElementTree(root).write(
@@ -4227,8 +4401,10 @@ def execute(role: str, scanner_override: str | None) -> Path:
                     label=f"Standalone project build ({project.name})",
                 )
             stateless_before = capture_stateless_binary_hashes(plan)
-            run_coverage_producer(plan, inherited_environment)
-            producer_terminal = True
+            try:
+                run_coverage_producer(plan, inherited_environment)
+            finally:
+                producer_terminal = True
             stage = "PRODUCING"
             if isinstance(plan, CoveragePlan):
                 dotnet_inputs = validate_dotnet_cobertura_inputs(context, plan)

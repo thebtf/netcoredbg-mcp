@@ -1,6 +1,6 @@
 # Data model: exact-head coverage evidence
 
-**Status**: Future evidence contract. It creates no database, persistent runtime service, or current receipt.
+**Status**: Implemented contract through T023 for the runner-owned producer, normalized two-report evidence, v3 consumer cutover, and hosted-checkout entry verification. It creates no database or persistent runtime service. T024 through T028 remain open, so no current diagnostic record, inventory artifact, acceptance receipt, or release result exists.
 **Release intent**: `none`
 
 ## Modeling rules
@@ -93,7 +93,7 @@ CoverageProjectSpec {
 `derive_coverage_plan` is pure. It writes no file. After scanner begin succeeds, `claim_coverage_run` creates the UUID root exclusively, writes canonical sorted compact JSON, and writes the hash-bound resolved Wave-2 entry below that root. The marker binds the tracked source path, `source_sha256` from canonical Git blob bytes, accepted candidate, actual PR head, runtime artifact commit, runtime merge commit, one integrated tree SHA, runtime observed main, and resolved-copy path.
 
 | Kind | ID | Format | Relative path |
-| --- | --- | --- |
+| --- | --- | --- | --- |
 | Run provenance | `wave2-entry` | canonical JSON | `.tmp/sonarqube-coverage/<run-id>/wave2-entry.json` |
 | Final scanner report | `python` | Cobertura | `.tmp/sonarqube-coverage/<run-id>/python/coverage.xml` |
 | Final scanner report | `dotnet` | Cobertura | `.tmp/sonarqube-coverage/<run-id>/dotnet/coverage.xml` |

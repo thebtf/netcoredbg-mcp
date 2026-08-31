@@ -1176,6 +1176,14 @@ def _validate_produced_post_merge_record(
     _expect_datetime(record.get("recorded_at"), "post-merge receipt recorded_at")
 
 
+def validate_post_merge_receipt_record(
+    record: Mapping[str, Any], source: Mapping[str, Any]
+) -> None:
+    """Validate the sealed post-merge receipt wrapper against its source."""
+
+    _validate_produced_post_merge_record(record, source)
+
+
 def seal_build_records(
     repository_root: str | PathLike[str],
     environment: Mapping[str, str],
@@ -1863,6 +1871,7 @@ __all__ = [
     "seal_artifact_consumer_proof",
     "seal_build_records",
     "validate_artifact_consumer_proof_reference",
+    "validate_post_merge_receipt_record",
     "verify_and_extract_retained_artifact",
     "verify_retained_artifact",
     "verify_retained_artifact_inputs",
