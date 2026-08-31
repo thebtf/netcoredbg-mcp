@@ -119,7 +119,7 @@ python_test_paths=(
 )
 coverage run --source=src/netcoredbg_mcp --data-file="$shell_python_data" -m pytest \
   --cache-clear -o "cache_dir=$python_cache_directory" "${python_test_paths[@]}"
-coverage xml --data-file="$shell_python_data" --output="$shell_python_report"
+coverage xml --data-file="$shell_python_data" -o "$shell_python_report"
 
 coverage_root="$(dirname "$(dirname "$shell_python_data")")"
 preview_publish_directory="$coverage_root/preview/publish"
