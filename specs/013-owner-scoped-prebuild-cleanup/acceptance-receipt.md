@@ -7,14 +7,15 @@
 - **Parent program:** `specs/011-issue450-sonar-release-program/`
 - **Wave contract:** `specs/013-owner-scoped-prebuild-cleanup/`
 - **Source base:** `1b8b2d548a45b17dde690b4cb8e4fc7153d326bc`
-- **Accepted candidate:** `eeeb1b2655bcab6336b86068be5d205508d512ce`.
+- **Accepted candidate:** `8f3b3b3b7c05f01736070740570567acb30f23c7`.
 - **Initial independent exact check:** `agent://CheckWave2ExactCandidate` returned `PASS` for predecessor implementation `480b67509fdfd996556d7954b736c46361025b2d`.
 - **PR correction verification:** `agent://VerifyWave2PrCorrection` returned `VERIFIED` for successor `598139418a40f0dc0fb07d204ac60864de104c49`.
 - **Lifecycle verification:** `agent://VerifyWave2LatestFix` returned `VERIFIED` for successor `a04e9384902493264a447faa1cd9195f63db56ed`.
-- **Final review verification:** `agent://VerifyWave2FinalFix` returned `VERIFIED` for successor `baf2ab24f242ccd0b1b8db8a36d5efbd774b32e5`.
-- **Gate serialization verification:** `agent://VerifyWave2FinalGateCandidate` returned `VERIFIED` for successor `209d151f9f9e0cba3fc5b6740196452611060a62`.
-- **Final implementation verification:** `agent://VerifyWave2FinalImplementation` returned `VERIFIED` with no findings for `eeeb1b2655bcab6336b86068be5d205508d512ce`.
-- **Exact final judgment:** `agent://JudgeWave2ExactFinal` returned `ACCEPT` for exact final candidate `eeeb1b2655bcab6336b86068be5d205508d512ce`.
+- **Review verification:** `agent://VerifyWave2FinalFix` returned `VERIFIED` for successor `baf2ab24f242ccd0b1b8db8a36d5efbd774b32e5`.
+- **Gate verification:** `agent://VerifyWave2FinalGateCandidate` returned `VERIFIED` for successor `209d151f9f9e0cba3fc5b6740196452611060a62`.
+- **Process verification:** `agent://VerifyWave2FinalImplementation` returned `VERIFIED` for successor `eeeb1b2655bcab6336b86068be5d205508d512ce`.
+- **Final stop-evidence verification:** `agent://VerifyWave2StopEvidence` returned `VERIFIED` with no findings for `8f3b3b3b7c05f01736070740570567acb30f23c7`.
+- **Definitive exact judgment:** `agent://JudgeWave2DefinitiveFinal` returned `ACCEPT` for exact candidate `8f3b3b3b7c05f01736070740570567acb30f23c7`.
 
 This receipt closes Wave 2 internally. It does not authorize Wave 3 implementation, a tag, release, package publication, Sonar waiver, route cutover, or a claim that global process cleanup caused either historical issue #450 incident.
 
@@ -134,7 +135,9 @@ The documentation audit `agent://AuditWave2Comments` retained the load-bearing a
 - `agent://VerifyWave2FinalGateCandidate`: verified lock coverage, running/terminal restart receipt preservation, fail-closed build gating, absence of recursive lock deadlock, and public route continuity for the exact final candidate.
 - A final process-semantics correction distinguishes a live `STILL_ACTIVE` sentinel from a terminated root whose literal exit code is 259, while preserving typed fail-closed admission cleanup. Commits `3b99dfcc354dd784a7d15dc123a27888fc06ec06` and `eeeb1b2655bcab6336b86068be5d205508d512ce` implement those final bytes.
 - `agent://VerifyWave2FinalImplementation`: verified all combined lifecycle/process claims for exact final implementation `eeeb1b2655bcab6336b86068be5d205508d512ce` with no findings.
-- `agent://JudgeWave2ExactFinal`: exact `ACCEPT`, authorizing this receipt and tracked closure artifact for `eeeb1b2655bcab6336b86068be5d205508d512ce` only.
+- The definitive stop/attach correction preserves terminal adapter and debuggee observations, serializes the complete attach lifecycle, retains owner/generation on cancelled stop, returns and validates ordinary-stop receipts, and preserves failed pre-build receipts before generic stop. Commit `8f3b3b3b7c05f01736070740570567acb30f23c7` contains those final implementation bytes.
+- `agent://VerifyWave2StopEvidence`: exact successor `VERIFIED`, 6/6 claims and no findings.
+- `agent://JudgeWave2DefinitiveFinal`: definitive exact `ACCEPT`, authorizing this receipt and tracked closure artifact for `8f3b3b3b7c05f01736070740570567acb30f23c7` only.
 
 ## Requirement closure
 
@@ -150,7 +153,7 @@ The documentation audit `agent://AuditWave2Comments` retained the load-bearing a
 - **WOC-010:** explicit safe Win32 signatures, private handles, intended inheritance, no breakaway/dependency leak.
 - **WOC-011:** public Python/default, host, installed CLI, dependency, Sonar, coverage, and release boundaries preserved.
 - **WOC-012:** load-bearing ownership and failure rationale is documented at the source seams.
-- **WOC-013:** exact final candidate `eeeb1b2655bcab6336b86068be5d205508d512ce`, the complete independent checker/verifier chain, exact terminal judgment, and this delayed non-release receipt are present.
+- **WOC-013:** exact final candidate `8f3b3b3b7c05f01736070740570567acb30f23c7`, the complete independent checker/verifier chain, definitive exact judgment, and this delayed non-release receipt are present.
 
 ## Handoff
 
