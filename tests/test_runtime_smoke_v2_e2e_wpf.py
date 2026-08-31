@@ -148,9 +148,7 @@ def test_offscreen_row_target_drag_plan_uses_source_and_drop_ensure_visible() ->
 
 
 def test_manual_smoke_lists_offscreen_row_target_drag_scenario() -> None:
-    scenario_names = {
-        name for name, _fn in smoke_test_manual.get_scenarios(include_extended_gui=True)
-    }
+    scenario_names = {name for name, _fn in smoke_test_manual._complete_scenario_catalog()}
     assert "WPF V2 Offscreen Row-Target Drag Runtime Smoke" in scenario_names
 
 
@@ -452,9 +450,7 @@ def test_wpf_hover_live_evidence_accepts_complete_measured_contract() -> None:
 
 
 def test_manual_smoke_lists_wpf_selector_scoped_hover_scenario() -> None:
-    scenario_names = {
-        name for name, _fn in smoke_test_manual.get_scenarios(include_extended_gui=True)
-    }
+    scenario_names = {name for name, _fn in smoke_test_manual._complete_scenario_catalog()}
     assert "WPF V2 Selector-Scoped Hover Runtime Smoke" in scenario_names
 
 
@@ -696,8 +692,6 @@ async def test_guarded_child_admission_matrix_blocks_before_pointer_input() -> N
 
 
 def test_manual_smoke_lists_guarded_child_drag_scenario() -> None:
-    scenario_names = {
-        name for name, _fn in smoke_test_manual.get_scenarios(include_extended_gui=True)
-    }
+    scenario_names = {name for name, _fn in smoke_test_manual._complete_scenario_catalog()}
     assert "WPF V2 Guarded-Child Drag Runtime Smoke" in scenario_names
     assert "WPF V2 Guarded-Child Admission Matrix Runtime Smoke" in scenario_names

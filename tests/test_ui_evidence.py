@@ -4081,7 +4081,11 @@ def test_manual_smoke_list_includes_focused_ui_evidence_scenario() -> None:
         text=True,
     )
     assert extended_result.returncode == 0, extended_result.stderr
-    assert "WPF UI Grid Rows Alias Fixture Replay" in extended_result.stdout
+    from tests import smoke_test_manual
+
+    assert ("WPF UI Grid Rows Alias Fixture Replay" in extended_result.stdout) is (
+        smoke_test_manual.WPF_GUI_ENABLED
+    )
 
 
 def test_bridge_snapshot_query_uses_bounded_child_scan() -> None:

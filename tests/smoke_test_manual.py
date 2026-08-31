@@ -7406,8 +7406,8 @@ async def test_code_search():
     check("search_source", len(matches) > 0, f"count={len(matches)}")
 
 
-def get_scenarios(include_extended_gui: bool = False):
-    scenarios = [
+def _base_scenarios() -> list[tuple[str, Callable[..., Any]]]:
+    return [
         ("Hit Counting", test_hit_counting),
         ("Stack + Variables", test_stack_and_variables),
         ("Stepping", test_stepping),
@@ -7438,62 +7438,88 @@ def get_scenarios(include_extended_gui: bool = False):
         ("WPF Smoke Gallery", test_wpf_smoke_gallery),
         ("WinForms Smoke Gallery", test_winforms_smoke_gallery),
     ]
+
+
+def _winforms_extended_scenarios() -> list[tuple[str, Callable[..., Any]]]:
+    return [
+        ("UI Invoke + Toggle + Root ID", test_ui_invoke_toggle),
+        ("DataGrid Select + Read", test_datagrid_select),
+        ("Multi-Window Envelope", test_multi_window_envelope),
+        ("Drag Primitive", test_drag_primitive),
+        ("System Event Theme Toggle", test_system_event_theme),
+        ("Persistent Modifier Hold", test_persistent_modifier_hold),
+        ("Scoped Search Performance", test_scoped_search_performance),
+        ("Window Lifecycle", test_window_lifecycle),
+        ("Expand/Collapse Tree", test_expand_collapse_tree),
+        ("Set Value Slider", test_set_value_slider),
+        ("Realize Virtualized Item", test_realize_virtualized_item),
+        ("Clipboard Roundtrip", test_clipboard_roundtrip),
+    ]
+
+
+def _wpf_extended_scenarios() -> list[tuple[str, Callable[..., Any]]]:
+    return [
+        ("Stealth Launch", test_stealth_launch),
+        ("Stealth Click", test_stealth_click),
+        ("Stealth Screenshot", test_stealth_screenshot),
+        ("Typed BitBlt Fallback Native Bridge", test_typed_bitblt_fallback_native_bridge),
+        ("WPF V2 State Oracle Runtime Smoke", test_wpf_v2_state_oracle_runtime_smoke),
+        ("WPF V2 Selector-Scoped Hover Runtime Smoke", test_wpf_v2_hover_runtime_smoke),
+        ("WPF V2 Visible-Row Drag Runtime Smoke", test_wpf_v2_visible_row_drag_runtime_smoke),
+        (
+            "WPF V2 Offscreen Row-Target Drag Runtime Smoke",
+            test_wpf_v2_offscreen_row_target_drag_runtime_smoke,
+        ),
+        ("WPF V2 Edge-Scroll Drag Runtime Smoke", test_wpf_v2_edge_scroll_drag_runtime_smoke),
+        ("WPF V2 Multi-Row Drag Runtime Smoke", test_wpf_v2_multi_row_drag_runtime_smoke),
+        ("WPF V2 Negative Drag Runtime Smoke", test_wpf_v2_negative_drag_runtime_smoke),
+        ("WPF V2 Guarded-Child Drag Runtime Smoke", test_wpf_v2_guarded_child_drag_runtime_smoke),
+        (
+            "WPF V2 Guarded-Child Admission Matrix Runtime Smoke",
+            test_wpf_v2_guarded_child_admission_matrix_runtime_smoke,
+        ),
+        ("WPF Shift/DataGrid Evidence", test_wpf_shift_datagrid_evidence),
+        ("WPF UI Grid Rows Alias Fixture Replay", test_wpf_ui_grid_rows_alias_fixture_replay),
+        ("WPF Stealth Delayed Readiness Replay", test_wpf_stealth_delayed_readiness_replay),
+        ("WPF Selector Safety No Side Effect", test_wpf_selector_safety_no_side_effect),
+        ("WPF One-Call Runtime Smoke Workflow", test_wpf_one_call_runtime_smoke_workflow),
+        (
+            "WPF V2 Text Probe Missing Selector Runtime Smoke",
+            test_wpf_v2_text_probe_missing_selector_runtime_smoke,
+        ),
+    ]
+
+
+def _avalonia_extended_scenarios() -> list[tuple[str, Callable[..., Any]]]:
+    return [
+        ("Avalonia V2 State Oracle Runtime Smoke", test_avalonia_v2_state_oracle_runtime_smoke),
+        ("Avalonia UI Fixture Compatibility", test_avalonia_ui_fixture_compatibility),
+        (
+            "Avalonia V2 Text Probe Missing Selector Runtime Smoke",
+            test_avalonia_v2_text_probe_missing_selector_runtime_smoke,
+        ),
+    ]
+
+
+def _complete_scenario_catalog() -> list[tuple[str, Callable[..., Any]]]:
+    return [
+        *_base_scenarios(),
+        *_winforms_extended_scenarios(),
+        *_wpf_extended_scenarios(),
+        *_avalonia_extended_scenarios(),
+    ]
+
+
+def get_scenarios(include_extended_gui: bool = False):
+    scenarios = _base_scenarios()
     if not include_extended_gui:
         return scenarios
-
-    scenarios.extend(
-        [
-            ("Stealth Launch", test_stealth_launch),
-            ("Stealth Click", test_stealth_click),
-            ("Stealth Screenshot", test_stealth_screenshot),
-            ("Typed BitBlt Fallback Native Bridge", test_typed_bitblt_fallback_native_bridge),
-            ("WPF V2 State Oracle Runtime Smoke", test_wpf_v2_state_oracle_runtime_smoke),
-            ("WPF V2 Selector-Scoped Hover Runtime Smoke", test_wpf_v2_hover_runtime_smoke),
-            ("WPF V2 Visible-Row Drag Runtime Smoke", test_wpf_v2_visible_row_drag_runtime_smoke),
-            (
-                "WPF V2 Offscreen Row-Target Drag Runtime Smoke",
-                test_wpf_v2_offscreen_row_target_drag_runtime_smoke,
-            ),
-            ("WPF V2 Edge-Scroll Drag Runtime Smoke", test_wpf_v2_edge_scroll_drag_runtime_smoke),
-            ("WPF V2 Multi-Row Drag Runtime Smoke", test_wpf_v2_multi_row_drag_runtime_smoke),
-            ("WPF V2 Negative Drag Runtime Smoke", test_wpf_v2_negative_drag_runtime_smoke),
-            (
-                "WPF V2 Guarded-Child Drag Runtime Smoke",
-                test_wpf_v2_guarded_child_drag_runtime_smoke,
-            ),
-            (
-                "WPF V2 Guarded-Child Admission Matrix Runtime Smoke",
-                test_wpf_v2_guarded_child_admission_matrix_runtime_smoke,
-            ),
-            ("Avalonia V2 State Oracle Runtime Smoke", test_avalonia_v2_state_oracle_runtime_smoke),
-            ("UI Invoke + Toggle + Root ID", test_ui_invoke_toggle),
-            ("DataGrid Select + Read", test_datagrid_select),
-            ("Multi-Window Envelope", test_multi_window_envelope),
-            ("Drag Primitive", test_drag_primitive),
-            ("System Event Theme Toggle", test_system_event_theme),
-            ("Persistent Modifier Hold", test_persistent_modifier_hold),
-            ("Scoped Search Performance", test_scoped_search_performance),
-            ("Window Lifecycle", test_window_lifecycle),
-            ("Expand/Collapse Tree", test_expand_collapse_tree),
-            ("Set Value Slider", test_set_value_slider),
-            ("Realize Virtualized Item", test_realize_virtualized_item),
-            ("Clipboard Roundtrip", test_clipboard_roundtrip),
-            ("WPF Shift/DataGrid Evidence", test_wpf_shift_datagrid_evidence),
-            ("WPF UI Grid Rows Alias Fixture Replay", test_wpf_ui_grid_rows_alias_fixture_replay),
-            ("WPF Stealth Delayed Readiness Replay", test_wpf_stealth_delayed_readiness_replay),
-            ("WPF Selector Safety No Side Effect", test_wpf_selector_safety_no_side_effect),
-            ("WPF One-Call Runtime Smoke Workflow", test_wpf_one_call_runtime_smoke_workflow),
-            (
-                "WPF V2 Text Probe Missing Selector Runtime Smoke",
-                test_wpf_v2_text_probe_missing_selector_runtime_smoke,
-            ),
-            ("Avalonia UI Fixture Compatibility", test_avalonia_ui_fixture_compatibility),
-            (
-                "Avalonia V2 Text Probe Missing Selector Runtime Smoke",
-                test_avalonia_v2_text_probe_missing_selector_runtime_smoke,
-            ),
-        ]
-    )
+    if GUI_ENABLED:
+        scenarios.extend(_winforms_extended_scenarios())
+    if WPF_GUI_ENABLED:
+        scenarios.extend(_wpf_extended_scenarios())
+    if AVALONIA_GUI_ENABLED:
+        scenarios.extend(_avalonia_extended_scenarios())
     return scenarios
 
 
@@ -7507,8 +7533,10 @@ def _resolve_scenarios(
     *,
     include_extended_gui: bool = False,
 ) -> list[tuple[str, Callable[..., Any]]]:
-    scenarios = get_scenarios(
-        include_extended_gui=include_extended_gui or selected_names is not None
+    scenarios = (
+        _complete_scenario_catalog()
+        if selected_names is not None
+        else get_scenarios(include_extended_gui=include_extended_gui)
     )
     if selected_names is None:
         return scenarios
