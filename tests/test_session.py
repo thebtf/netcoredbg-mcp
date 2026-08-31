@@ -428,6 +428,62 @@ class TestSessionManagerStart:
         assert generations_seen_during_stop == [1]
         assert manager._active_dap_run is None
 
+    @pytest.mark.asyncio
+    async def test_startup_terminal_failed_receipt_retains_owner_for_prebuild(self):
+        """A failed startup drain must not degrade to the no-owner build path."""
+
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+
+        client = MagicMock()
+        client.is_running = False
+        client.adapter_pid = None
+        generation = 1
+        owner = OwnedProcessRef("startup-failed-owner", generation, 41014)
+        client.adapter_owner = owner
+        failed = OwnerDrainReceipt(
+            owner=owner,
+            status=DrainStatus.FAILED,
+            forced=True,
+            root_returncode=None,
+            active_processes=None,
+        )
+
+        async def start(*, generation: int) -> int:
+            manager._on_transport_terminal(
+                client,
+                DapTransportTerminal(
+                    generation=generation,
+                    first_trigger=DapTerminalTrigger.STDOUT_EOF,
+                    adapter_pid=owner.root_pid,
+                    process_exited=False,
+                    returncode=None,
+                    protocol_terminated=False,
+                    debuggee_exit_code=None,
+                    stdout_eof=True,
+                    last_dap_event=None,
+                    last_dap_event_body_preview=None,
+                    stderr_tail=b"",
+                    stderr_truncated=False,
+                    stderr_drained=True,
+                    reader_error=None,
+                    cleanup_outcome=DapCleanupOutcome.EXIT_UNOBSERVED,
+                ),
+            )
+            return generation
+
+        client.start = AsyncMock(side_effect=start)
+        client.stop = AsyncMock(return_value=failed)
+        manager._client = client
+
+        with pytest.raises(RuntimeError, match="netcoredbg terminated during startup"):
+            await manager.start()
+
+        captured = manager.capture_prebuild_owner()
+        assert manager._active_dap_run == generation
+        assert isinstance(captured, OwnedAdapterCleanup)
+        assert captured.owner == owner
+
 
 class TestSessionManagerTransportFences:
     """Regressions for generation-scoped manager lifecycle decisions."""
@@ -482,6 +538,62 @@ class TestSessionManagerTransportFences:
         assert isinstance(captured, OwnedAdapterCleanup)
         assert captured.owner == owner
         client.stop.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_owner_drain_joins_finalizer_before_releasing_gate(self, tmp_path):
+        """Cancellation is restored only after the elected owner finalizer completes."""
+
+        project = tmp_path / "App.csproj"
+        project.touch()
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+
+        generation = "cancelled-owner-finalizer"
+        owner = OwnedProcessRef("cancelled-finalizer-owner", generation, 41015)
+        stop_started = asyncio.Event()
+        release_stop = asyncio.Event()
+        stop_completed = asyncio.Event()
+        client = MagicMock()
+        client.is_running = True
+        client.adapter_owner = owner
+        client.adapter_pid = owner.root_pid
+        client.disconnect = AsyncMock()
+
+        async def stop(*, expected_owner: OwnedProcessRef | None = None):
+            assert expected_owner == owner
+            stop_started.set()
+            await release_stop.wait()
+            stop_completed.set()
+            return OwnerDrainReceipt(
+                owner=owner,
+                status=DrainStatus.DRAINED,
+                forced=False,
+                root_returncode=0,
+                active_processes=0,
+            )
+
+        client.stop = AsyncMock(side_effect=stop)
+        manager._client = client
+        manager._active_dap_run = generation
+        manager._state.state = DebugState.RUNNING
+        build_session = manager._build_manager.get_session(str(tmp_path))
+        build_session.restore = AsyncMock()
+        build_session.build = AsyncMock()
+
+        prebuild_task = asyncio.create_task(manager.pre_launch_build(str(project)))
+        await asyncio.wait_for(stop_started.wait(), timeout=1.0)
+        prebuild_task.cancel()
+        start_task = asyncio.create_task(manager.start())
+        await asyncio.sleep(0)
+        assert start_task.done() is False
+
+        release_stop.set()
+        with pytest.raises(asyncio.CancelledError):
+            await prebuild_task
+        assert stop_completed.is_set()
+        await asyncio.wait_for(start_task, timeout=1.0)
+        build_session.restore.assert_not_awaited()
+        build_session.build.assert_not_awaited()
 
     def test_old_run_event_cannot_mutate_current_manager_state(self):
         """Buffered events from an old adapter run cannot revive the current session state."""

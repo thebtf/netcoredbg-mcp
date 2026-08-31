@@ -882,13 +882,13 @@ class SessionManager:
                 self._windows_adapter_admission_generation = None
 
         if returned_generation != generation:
-            await self._client.stop()
-            self._active_dap_run = None
+            receipt = await self._client.stop()
+            if self._owner_receipt_releases_generation(receipt):
+                self._active_dap_run = None
             raise RuntimeError("DAP client returned a mismatched adapter generation")
         if self._state.state == DebugState.TERMINATED:
-            try:
-                await self._client.stop()
-            finally:
+            receipt = await self._client.stop()
+            if self._owner_receipt_releases_generation(receipt):
                 if self._active_dap_run == generation:
                     self._active_dap_run = None
             raise RuntimeError("netcoredbg terminated during startup")
@@ -1645,6 +1645,16 @@ class SessionManager:
 
         return OwnedAdapterCleanup(owner=owner, _drain=drain)
 
+    @staticmethod
+    def _owner_receipt_releases_generation(
+        receipt: OwnerDrainReceipt | None,
+    ) -> bool:
+        """Whether finalization proved that no retained owner remains."""
+
+        return receipt is None or (
+            receipt.status is DrainStatus.DRAINED and receipt.active_processes == 0
+        )
+
     async def _stop_owned_adapter(
         self,
         source_client: DAPClient,
@@ -1671,17 +1681,29 @@ class SessionManager:
             await source_client.disconnect(terminate=True)
         except Exception as error:
             logger.warning("Expected adapter disconnect failed: %s", error)
-        try:
-            receipt = await source_client.stop(expected_owner=expected)
-        except Exception as error:
-            logger.warning("Expected adapter owner drain failed: %s", error)
-            return OwnerDrainReceipt(
-                owner=expected,
-                status=DrainStatus.FAILED,
-                forced=False,
-                root_returncode=None,
-                active_processes=None,
-            )
+        stop_task = asyncio.create_task(source_client.stop(expected_owner=expected))
+        cancelled = False
+        while True:
+            try:
+                receipt = await asyncio.shield(stop_task)
+                break
+            except asyncio.CancelledError:
+                if stop_task.cancelled():
+                    raise
+                # Keep the lifecycle gate until the already-elected finalizer
+                # publishes its receipt, then restore caller cancellation.
+                cancelled = True
+            except Exception as error:
+                logger.warning("Expected adapter owner drain failed: %s", error)
+                return OwnerDrainReceipt(
+                    owner=expected,
+                    status=DrainStatus.FAILED,
+                    forced=False,
+                    root_returncode=None,
+                    active_processes=None,
+                )
+        if cancelled:
+            raise asyncio.CancelledError
         if receipt is not None:
             return receipt
         return OwnerDrainReceipt(
