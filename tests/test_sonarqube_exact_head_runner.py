@@ -2396,11 +2396,16 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             venv = root / ".venv"
             venv.mkdir()
             (venv / "owned.txt").write_text("generated", encoding="utf-8")
+            bytecode = root / "src" / "netcoredbg_mcp" / "__pycache__"
+            bytecode.mkdir(parents=True)
+            (bytecode / "module.pyc").write_bytes(b"generated")
             with patch.object(runner, "is_tracked", return_value=False):
                 removed = runner.clear_generated_artifacts(context, {})
 
             self.assertIn(".venv", removed)
             self.assertFalse(venv.exists())
+            self.assertIn("src/netcoredbg_mcp/__pycache__", removed)
+            self.assertFalse(bytecode.exists())
 
     def test_r04_python_cobertura_requires_root_and_positive_line_and_branch_denominators(self):
         with TemporaryDirectory() as temporary_directory:

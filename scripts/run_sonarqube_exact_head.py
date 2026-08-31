@@ -43,7 +43,7 @@ SOLUTION_PROJECT_RE = re.compile(
     r'^Project\("[^"]+"\) = "([^"]+)", "([^"]+\.csproj)"', re.MULTILINE
 )
 ISSUE_STATUSES = "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED,FIXED,IN_SANDBOX"
-GENERATED_DIRECTORY_NAMES = {"bin", "obj"}
+GENERATED_DIRECTORY_NAMES = {"__pycache__", "bin", "obj"}
 GENERATED_ROOT_NAMES = {".sonarqube", ".scannerwork", ".venv"}
 
 WAVE2_ENTRY_RELATIVE_PATH = "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json"
