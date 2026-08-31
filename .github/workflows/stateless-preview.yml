@@ -68,6 +68,27 @@ jobs:
             throw "Unable to install the required SonarScanner."
           }
 
+      - name: Verify the tracked Wave2 coverage entry
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          @'
+          from pathlib import Path
+
+          from scripts import run_sonarqube_exact_head as runner
+
+          environment = runner.scrub_sonar_environment(runner.process_environment())
+          context = runner.git_context(Path.cwd(), environment)
+          entry = runner.resolve_wave2_entry(context, environment)
+          runner.verify_wave2_entry(entry, context, environment)
+          runner.assert_post_merge_target(context, environment)
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tracked Wave2 coverage entry verification failed."
+          }
+
       - name: Produce the repository post-merge exact-head receipt
         shell: pwsh
         env:

@@ -36,6 +36,34 @@ class TestSonarqubeExactHeadRunner(TestCase):
             scanner_root, primary_root / ".git", scanner_root / ".git", primary_root, "a" * 40
         )
 
+    @staticmethod
+    def patch_wave3_transaction(patches: ExitStack) -> None:
+        plan = SimpleNamespace()
+        patches.enter_context(patch.object(runner, "resolve_wave2_entry", return_value={}))
+        patches.enter_context(patch.object(runner, "verify_wave2_entry", return_value={}))
+        patches.enter_context(patch.object(runner, "preflight_coverage_toolchain", return_value={}))
+        patches.enter_context(patch.object(runner, "derive_coverage_plan", return_value=plan))
+        patches.enter_context(patch.object(runner, "coverage_scanner_properties", return_value=()))
+        patches.enter_context(
+            patch.object(runner, "claim_coverage_run", return_value=SimpleNamespace())
+        )
+        patches.enter_context(patch.object(runner, "run_coverage_producer"))
+        patches.enter_context(patch.object(runner, "normalize_dotnet_cobertura", return_value={}))
+        patches.enter_context(patch.object(runner, "validate_coverage_reports", return_value={}))
+        patches.enter_context(patch.object(runner, "assert_head_unchanged"))
+        patches.enter_context(
+            patch.object(
+                runner,
+                "capture_stateless_binary_hashes",
+                return_value={"dll_sha256": "a" * 64, "pdb_sha256": "b" * 64},
+            )
+        )
+        patches.enter_context(patch.object(runner, "cleanup_coverage_run", return_value={}))
+        patches.enter_context(
+            patch.object(runner, "collect_coverage_analysis_evidence", return_value={})
+        )
+        patches.enter_context(patch.object(runner, "write_diagnostic_inventory", return_value={}))
+
     def test_build_environment_scrubs_all_sonar_credentials(self):
         build_environment = runner.scrub_sonar_environment(
             {
@@ -876,6 +904,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 return {"records": []}
 
             with ExitStack() as patches:
+                self.patch_wave3_transaction(patches)
                 patches.enter_context(patch.object(runner, "process_environment", return_value={}))
                 patches.enter_context(
                     patch.object(runner, "scrub_sonar_environment", return_value={})
@@ -984,23 +1013,24 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 "analysis_current_final",
             ],
         )
-        self.assertEqual(blocked_receipt["quality_gate"], error_quality_gate)
-        self.assertEqual(blocked_receipt["post_scan_issues"], full_inventory)
-        self.assertEqual(blocked_receipt["new_code_issues"], new_code_inventory)
-        self.assertEqual(blocked_receipt["new_code_issues"]["total"], 2)
         self.assertEqual(
-            blocked_receipt["quality_gate"]["conditions"][0]["actualValue"],
-            "137",
+            blocked_receipt["failure"]["safe_message"],
+            "Analysis-bound quality gate is ERROR; only OK passes.",
         )
-        self.assertEqual(blocked_receipt["analysis_current_after_issues"], binding)
-        self.assertEqual(blocked_receipt["hotspots"], {"records": []})
-        self.assertEqual(blocked_receipt["generated_artifacts_removed_after_scan"], ["obj"])
         self.assertEqual(
-            blocked_receipt["cleanup"],
-            {"status": "PASS", "removed": ["obj"]},
+            blocked_receipt["release_gate"],
+            {
+                "quality_gate_status": "ERROR",
+                "blocking_issue_count": 0,
+                "blocking_hotspot_count": 0,
+            },
         )
-        self.assertEqual(blocked_receipt["analysis_current_final"], binding)
-        self.assertEqual(blocked_receipt["post_scan_head"], head)
+        self.assertEqual(blocked_receipt["identity"]["analysis_id"], "analysis-1")
+        self.assertEqual(blocked_receipt["coverage"], {})
+        self.assertEqual(blocked_receipt["analysis"], {})
+        self.assertEqual(blocked_receipt["global_inventory"], {})
+        self.assertEqual(blocked_receipt["cleanup"], {})
+        self.assertEqual(new_code_inventory["total"], 2)
 
     def test_execute_disables_msbuild_node_reuse_for_solution_and_standalone_builds(self):
         with TemporaryDirectory() as temporary_directory:
@@ -1017,6 +1047,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     raise runner.RunnerError("stop after build command capture")
 
             with ExitStack() as patches:
+                self.patch_wave3_transaction(patches)
                 patches.enter_context(patch.object(runner, "process_environment", return_value={}))
                 patches.enter_context(
                     patch.object(runner, "scrub_sonar_environment", return_value={})
@@ -1121,16 +1152,15 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 "query": {"project": runner.PROJECT_KEY, "p": "1", "ps": "1"},
                 "revision": head,
             }
-            original_clear_generated_artifacts = runner.clear_generated_artifacts
 
             def capture_receipt(_path, receipt, _secrets):
                 captured_receipts.append(json.loads(json.dumps(receipt)))
 
-            def clear_artifacts(cleanup_context, environment):
+            def clear_artifacts(_cleanup_context, _environment):
                 nonlocal cleanup_calls
                 cleanup_calls += 1
                 if cleanup_calls == 2:
-                    return original_clear_generated_artifacts(cleanup_context, environment)
+                    events.append("generated_artifacts_removed_after_scan")
                 return []
 
             def full_issue_inventory(_host, _token):
@@ -1145,9 +1175,11 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 nonlocal binding_calls
                 binding_calls += 1
                 events.append(
-                    ("analysis_current_before_issues", "analysis_current_after_issues")[
-                        binding_calls - 1
-                    ]
+                    (
+                        "analysis_current_before_issues",
+                        "analysis_current_after_issues",
+                        "analysis_current_final",
+                    )[binding_calls - 1]
                 )
                 return binding
 
@@ -1163,11 +1195,22 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 events.append("hotspots")
                 return hotspots
 
-            def fail_removal(_path):
+            def fail_cleanup(_plan, _producer_terminal):
                 events.append("post_scan_cleanup")
-                raise PermissionError("access denied")
+                return {
+                    "claimed_root": ".tmp/sonarqube-coverage/fixture",
+                    "producer_terminal": True,
+                    "removed_paths": [],
+                    "parent_removed_if_empty": False,
+                    "status": "FAILED",
+                    "failure": {
+                        "code": "COVERAGE_CLEANUP_FAILED",
+                        "message": "PermissionError",
+                    },
+                }
 
             with ExitStack() as patches:
+                self.patch_wave3_transaction(patches)
                 patches.enter_context(patch.object(runner, "process_environment", return_value={}))
                 patches.enter_context(
                     patch.object(runner, "scrub_sonar_environment", return_value={})
@@ -1254,9 +1297,8 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     )
                 )
                 patches.enter_context(patch.object(runner, "assert_head_unchanged"))
-                patches.enter_context(patch.object(runner, "is_tracked", return_value=False))
                 patches.enter_context(
-                    patch.object(runner.shutil, "rmtree", side_effect=fail_removal)
+                    patch.object(runner, "cleanup_coverage_run", side_effect=fail_cleanup)
                 )
                 patches.enter_context(
                     patch.object(runner, "write_receipt", side_effect=capture_receipt)
@@ -1268,29 +1310,22 @@ class TestSonarqubeExactHeadRunner(TestCase):
         self.assertNotIn("Unexpected runner failure", str(raised.exception))
         self.assertEqual(blocked_receipt["outcome"], "BLOCKED")
         self.assertEqual(
-            blocked_receipt["failure"],
+            blocked_receipt["failure"]["safe_message"],
             "Analysis-bound quality gate is ERROR; only OK passes.",
         )
-        self.assertEqual(blocked_receipt["quality_gate"], error_quality_gate)
-        self.assertEqual(blocked_receipt["post_scan_issues"], full_inventory)
-        self.assertEqual(blocked_receipt["new_code_issues"], new_code_inventory)
-        self.assertEqual(blocked_receipt["hotspots"], hotspots)
-        self.assertEqual(blocked_receipt["analysis_current_after_issues"], binding)
-        self.assertEqual(blocked_receipt["cleanup"]["status"], "BLOCKED")
-        self.assertEqual(blocked_receipt["cleanup"]["removed"], [])
         self.assertEqual(
+            blocked_receipt["release_gate"],
             {
-                field: blocked_receipt["cleanup"]["failure"][field]
-                for field in ("path", "operation", "error_type")
-            },
-            {
-                "path": "generated/obj",
-                "operation": "rmtree",
-                "error_type": "PermissionError",
+                "quality_gate_status": "ERROR",
+                "blocking_issue_count": 0,
+                "blocking_hotspot_count": 0,
             },
         )
-        self.assertNotIn("post", blocked_receipt.get("cleanliness", {}))
-        self.assertNotIn("analysis_current_final", blocked_receipt)
+        self.assertEqual(blocked_receipt["cleanup"]["status"], "FAILED")
+        self.assertEqual(
+            blocked_receipt["cleanup"]["failure"],
+            {"code": "COVERAGE_CLEANUP_FAILED", "message": "PermissionError"},
+        )
         self.assertNotIn("post_scan_head", blocked_receipt)
         self.assertEqual(
             events,
@@ -1302,7 +1337,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 "new_code_issues",
                 "analysis_current_after_issues",
                 "hotspots",
+                "generated_artifacts_removed_after_scan",
                 "post_scan_cleanup",
+                "analysis_current_final",
             ],
         )
 
@@ -1484,7 +1521,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
 
         self.assertEqual(kernel32.closed_handles, [owned_handle])
 
-    def test_running_receipt_replaces_prior_pass_before_work(self):
+    def test_incomplete_v3_receipt_replaces_prior_pass_before_work(self):
         with TemporaryDirectory() as temporary_directory:
             receipt_path = Path(temporary_directory) / "candidate.json"
             runner.write_receipt(receipt_path, {"outcome": "PASS"}, ())
@@ -1500,7 +1537,8 @@ class TestSonarqubeExactHeadRunner(TestCase):
             )
             replacement = json.loads(receipt_path.read_text(encoding="utf-8"))
 
-        self.assertEqual(replacement["outcome"], "RUNNING")
+        self.assertEqual(replacement["outcome"], "BLOCKED")
+        self.assertEqual(replacement["failure"]["code"], "COVERAGE_RUN_INCOMPLETE")
 
     def test_cross_origin_api_response_is_rejected(self):
         class Response:
@@ -1943,7 +1981,8 @@ class TestWave3CoverageProducerRedContracts(TestCase):
 
     @staticmethod
     def _absolute(value) -> Path:
-        return Path(getattr(value, "absolute", value))
+        absolute = getattr(value, "absolute", value)
+        return Path(absolute() if callable(absolute) else absolute)
 
     @classmethod
     def _plan(cls, root: Path):
@@ -2079,6 +2118,14 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 patch.object(runner, "validate_coverage_reports", side_effect=step("validate", {}))
             )
             patches.enter_context(
+                patch.object(
+                    runner,
+                    "capture_stateless_binary_hashes",
+                    return_value={"dll_sha256": "a" * 64, "pdb_sha256": "b" * 64},
+                )
+            )
+            patches.enter_context(patch.object(runner, "cleanup_coverage_run", return_value={}))
+            patches.enter_context(
                 patch.object(runner, "assert_head_unchanged", side_effect=step("head-check"))
             )
             runner.execute("candidate", "scanner")
@@ -2111,7 +2158,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             (
                 "first-party-pr-head",
                 lambda entry, evidence: evidence["first_party_pull_request"].__setitem__(
-                    "head_sha", "1" * 40
+                    "head_sha", "not-a-sha"
                 ),
             ),
             (
@@ -2250,7 +2297,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 "--",
             ],
         )
-        self.assertIn("bash", command)
+        self.assertIn(Path(command[11]).name.casefold(), {"bash", "bash.exe"})
         self.assertEqual(command.count("--dotnet-project"), 5)
         self.assertEqual(kwargs["environment"], {"SAFE_VALUE": "kept"})
 
@@ -2450,11 +2497,13 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 if any("IncludeDirectory=" in argument for argument in command)
             ]
             self.assertEqual(len(include_commands), 1)
-            self.assertIn("NetCoreDbg.Mcp.Stateless.Tests.csproj", include_commands[0])
-            self.assertIn(
-                str(root / "host" / "NetCoreDbg.Mcp.Stateless" / "bin" / "Debug" / "net8.0"),
-                include_commands[0],
+            self.assertTrue(
+                any("NetCoreDbg.Mcp.Stateless.Tests.csproj" in item for item in include_commands[0])
             )
+            include_directory = str(
+                root / "host" / "NetCoreDbg.Mcp.Stateless" / "bin" / "Debug" / "net8.0"
+            )
+            self.assertTrue(any(item.endswith(include_directory) for item in include_commands[0]))
 
             stateless = plan.dotnet_inputs[3]
             report = self._absolute(stateless.raw_cobertura_input)
@@ -2512,7 +2561,11 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             context = self._context(root)
             plan = self._plan(root)
             for index, spec in enumerate(plan.dotnet_inputs):
-                source_path = f"host/Production{index}/Source{index}.cs"
+                source_path = (
+                    "host/NetCoreDbg.Mcp.Stateless/Source3.cs"
+                    if spec.id == "stateless"
+                    else f"host/Production{index}/Source{index}.cs"
+                )
                 self._write_source(root, source_path)
                 report = self._absolute(spec.raw_cobertura_input)
                 report.parent.mkdir(parents=True, exist_ok=True)
@@ -2637,3 +2690,133 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     "COVERAGE_(?:ANALYSIS_MISMATCH|IMPORT_UNPROVEN|MEASURES_INVALID)",
                 ):
                     runner.validate_coverage_analysis_evidence(identity, forged)
+
+    def test_wave3_analysis_collection_proves_both_language_source_sets(self):
+        identity = {
+            "captured_head": self.HEAD,
+            "project_key": runner.PROJECT_KEY,
+            "analysis_id": "analysis-1",
+        }
+        coverage = {
+            "final_reports": [
+                {"source_paths": ["src/netcoredbg_mcp/server.py"]},
+                {"source_paths": ["host/NetCoreDbg.Mcp.Host/Program.cs"]},
+            ]
+        }
+        observations = {
+            "submitted": identity,
+            "current_before_measures": identity,
+            "current_after_measures": identity,
+            "current_final": identity,
+        }
+        quality_gate = {
+            "conditions": [
+                {
+                    "metricKey": "new_coverage",
+                    "status": "ERROR",
+                    "errorThreshold": "80",
+                    "actualValue": "79.5",
+                }
+            ]
+        }
+        tree_response = {
+            "paging": {"total": 2},
+            "components": [
+                {
+                    "path": "src/netcoredbg_mcp/server.py",
+                    "measures": [
+                        {"metric": "lines_to_cover", "value": "10"},
+                        {"metric": "uncovered_lines", "value": "2"},
+                        {"metric": "conditions_to_cover", "value": "4"},
+                        {"metric": "uncovered_conditions", "value": "1"},
+                    ],
+                },
+                {
+                    "path": "host/NetCoreDbg.Mcp.Host/Program.cs",
+                    "measures": [
+                        {"metric": "lines_to_cover", "value": "12"},
+                        {"metric": "uncovered_lines", "value": "3"},
+                        {"metric": "conditions_to_cover", "value": "2"},
+                        {"metric": "uncovered_conditions", "value": "1"},
+                    ],
+                },
+            ],
+        }
+
+        def api_response(_host, endpoint, _parameters, _token):
+            if endpoint == "/api/measures/component":
+                return {
+                    "component": {
+                        "measures": [
+                            {"metric": "coverage", "value": "80"},
+                            {"metric": "lines_to_cover", "value": "22"},
+                            {"metric": "new_coverage", "value": "79.5"},
+                            {"metric": "new_lines_to_cover", "value": "8"},
+                        ]
+                    }
+                }
+            return tree_response
+
+        with patch.object(runner, "api_json", side_effect=api_response):
+            result = runner.collect_coverage_analysis_evidence(
+                "https://sonar.example.test",
+                "read-token",
+                identity,
+                quality_gate,
+                coverage,
+                observations,
+            )
+
+        self.assertEqual(result["new_coverage_condition"]["status"], "ERROR")
+        self.assertEqual(result["python_components"]["mapped_path_count"], 1)
+        self.assertEqual(result["dotnet_components"]["covered_lines"], 9)
+
+    def test_wave3_inventory_is_create_new_and_hash_bound(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            identity = {
+                "captured_head": self.HEAD,
+                "project_key": runner.PROJECT_KEY,
+                "analysis_id": "analysis-1",
+            }
+            issues = {
+                "total": 1,
+                "pages": [{"page_index": 1, "page_size": runner.PAGE_SIZE, "total": 1}],
+                "pagination_complete": True,
+                "result_empty": False,
+                "records": [{"key": "issue-1"}],
+            }
+            hotspots = {
+                "total": 0,
+                "pages": [{"page_index": 1, "page_size": runner.PAGE_SIZE, "total": 0}],
+                "pagination_complete": True,
+                "result_empty": True,
+                "records": [],
+            }
+            reference = runner.write_diagnostic_inventory(
+                context,
+                self.RUN_ID,
+                identity,
+                issues,
+                hotspots,
+                {
+                    "blocking_count": 1,
+                    "items": [{"key": "issue-1", "disposition": "BLOCKING_DISPOSITION"}],
+                },
+                {"blocking_count": 0, "items": []},
+            )
+            artifact = root / reference["artifact"]["relative_path"]
+            raw = artifact.read_bytes()
+            self.assertEqual(sha256(raw).hexdigest(), reference["artifact"]["sha256"])
+            self.assertEqual(reference["issues"]["blocking_key_count"], 1)
+            with self.assertRaisesRegex(runner.RunnerError, "COVERAGE_INVENTORY_WRITE_FAILED"):
+                runner.write_diagnostic_inventory(
+                    context,
+                    self.RUN_ID,
+                    identity,
+                    issues,
+                    hotspots,
+                    {"blocking_count": 0, "items": []},
+                    {"blocking_count": 0, "items": []},
+                )

@@ -121,7 +121,8 @@ public sealed class PreviewArtifactConsumerTests
 
         internal static VerifiedPreviewArtifact Extract()
         {
-            var artifactDirectory = Path.Combine(PreviewRepositoryLayout.Root, "artifacts", "stateless-preview");
+            var artifactDirectory = Environment.GetEnvironmentVariable("NETCOREDBG_PREVIEW_ARTIFACT_ROOT")
+                ?? Path.Combine(PreviewRepositoryLayout.Root, "artifacts", "stateless-preview");
             Assert.True(
                 Directory.Exists(artifactDirectory),
                 $"Required source-run preview artifact input is absent: '{artifactDirectory}'. Consumer proof must use a downloaded archive and manifest, never repository bin output.");

@@ -30,6 +30,11 @@ from typing import Any, NoReturn
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ARTIFACT_HELPER_PATH = _PROJECT_ROOT / "scripts" / "stateless_preview_artifact.py"
+_EXACT_HEAD_RUNNER_PATH = _PROJECT_ROOT / "scripts" / "run_sonarqube_exact_head.py"
+_CANONICAL_SOURCE_REF = "refs/heads/main"
+_SONAR_PROJECT_KEY = "thebtf_netcoredbg_mcp"
+_POST_MERGE_RELEASE_INTENT = "v0.23.11"
+
 _EXECUTABLE_NAME = "netcoredbg-mcp-stateless-preview.exe"
 _PROTOCOL_VERSION = "2026-07-28"
 _REQUEST_META = {
@@ -62,6 +67,47 @@ verify_and_extract_retained_artifact = _artifact.verify_and_extract_retained_art
 
 def _refuse(message: str) -> NoReturn:
     raise ValueError(message)
+
+
+def _load_exact_head_receipt_validator() -> Callable[[Mapping[str, Any]], None]:
+    specification = importlib.util.spec_from_file_location(
+        "_preview_artifact_exact_head_runner", _EXACT_HEAD_RUNNER_PATH
+    )
+    if specification is None or specification.loader is None:
+        _refuse("exact-head receipt authority is unavailable")
+    runner = importlib.util.module_from_spec(specification)
+    sys.modules[specification.name] = runner
+    try:
+        specification.loader.exec_module(runner)
+    except Exception as error:
+        raise ValueError("exact-head receipt authority is unavailable") from error
+    validator = getattr(runner, "validate_exact_head_receipt_v3", None)
+    if not callable(validator):
+        _refuse("exact-head receipt authority is unavailable")
+    return validator
+
+
+def _validate_downloaded_post_merge_receipt(
+    receipt: Mapping[str, Any], candidate_source: Mapping[str, Any]
+) -> None:
+    validator = _load_exact_head_receipt_validator()
+    try:
+        validator(receipt)
+    except Exception as error:
+        raise ValueError(
+            "downloaded receipt provenance does not match the candidate exact-head receipt"
+        ) from error
+    identity = receipt.get("identity")
+    if (
+        receipt.get("role") != "post-merge"
+        or receipt.get("outcome") != "PASS"
+        or receipt.get("release_intent") != _POST_MERGE_RELEASE_INTENT
+        or candidate_source.get("ref") != _CANONICAL_SOURCE_REF
+        or not isinstance(identity, Mapping)
+        or identity.get("captured_head") != candidate_source.get("commit")
+        or identity.get("project_key") != _SONAR_PROJECT_KEY
+    ):
+        _refuse("downloaded receipt provenance does not match the candidate exact-head receipt")
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -391,16 +437,7 @@ def _download_and_validate_receipt_provenance(
         "receipt provenance",
     )
     record = _load_json_object(provenance_bytes, "downloaded receipt provenance")
-    if (
-        record.get("record_type") != "sonarqube-exact-head"
-        or record.get("stage") != "post-merge"
-        or record.get("scanned_commit") != candidate_source["commit"]
-        or record.get("tag_target") != candidate_source["commit"]
-        or record.get("outcome") != "PASS"
-        or record.get("repository") != candidate_source["repository"]
-        or record.get("source_ref") != candidate_source["ref"]
-    ):
-        _refuse("downloaded receipt provenance does not match the candidate exact-head receipt")
+    _validate_downloaded_post_merge_receipt(record, candidate_source)
     return reference
 
 

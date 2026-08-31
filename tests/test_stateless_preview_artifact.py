@@ -478,15 +478,38 @@ def _write_post_merge_scan_receipt(
         / "post-merge.json"
     )
     path.parent.mkdir(parents=True)
+    receipt = _complete_v3_exact_head_receipt(
+        source_commit,
+        role="post-merge",
+        outcome=outcome,
+        release_intent="v0.23.11",
+    )
+    if captured_head is not None:
+        receipt["identity"]["captured_head"] = captured_head
+    path.write_bytes(_canonical_json_bytes(receipt))
+    return path
+
+
+def _write_post_merge_scan_receipt_v2(repository_root: Path, source_commit: str) -> Path:
+    path = (
+        repository_root
+        / ".agent"
+        / "e"
+        / "sonarqube"
+        / "thebtf_netcoredbg_mcp"
+        / source_commit
+        / "post-merge.json"
+    )
+    path.parent.mkdir(parents=True)
     path.write_text(
         json.dumps(
             {
                 "schema_version": 2,
                 "role": "post-merge",
-                "outcome": outcome,
+                "outcome": "PASS",
                 "project_key": "thebtf_netcoredbg_mcp",
                 "analysis_xml_project_key": "thebtf_netcoredbg_mcp",
-                "captured_head": captured_head or source_commit,
+                "captured_head": source_commit,
                 "post_scan_head": source_commit,
                 "quality_gate": {"status": "OK"},
                 "worktree": {"detached": True, "linked": True},
@@ -554,6 +577,39 @@ def test_admit_build_refuses_noncanonical_or_unbounded_inputs(
         admit_build(authority_root, environment)
 
 
+def test_coverage_preview_fixture_builder_emits_verified_archive_and_manifest(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / EXECUTABLE_NAME
+    executable.write_bytes(b"source-run-preview")
+    output = tmp_path / "artifact"
+    script = PROJECT_ROOT / "build" / "prepare_preview_fixture.py"
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--executable",
+            str(executable),
+            "--output",
+            str(output),
+            "--commit",
+            "a" * 40,
+        ],
+        check=True,
+    )
+
+    manifest_path = (
+        output / "netcoredbg-mcp-stateless-preview-win-x64-0.0.0-preview.1.manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    archive_path = output / manifest["archive"]["name"]
+    assert _sha256_path(archive_path) == manifest["archive"]["sha256"]
+    with zipfile.ZipFile(archive_path) as archive:
+        assert archive.namelist() == [EXECUTABLE_NAME]
+        assert archive.read(EXECUTABLE_NAME) == executable.read_bytes()
+
+
 def test_prepare_preview_payload_seals_the_inherited_manifest_equations(tmp_path: Path) -> None:
     authority_root, source_commit, _ = _create_authority_repository(tmp_path)
     executable = _create_publish_output(authority_root)
@@ -605,7 +661,7 @@ def test_post_merge_receipt_producer_binds_the_trusted_scan_to_main(tmp_path: Pa
         "source_runner": {
             "script": "scripts/run_sonarqube_exact_head.py",
             "role": "post-merge",
-            "receipt_schema_version": 2,
+            "receipt_schema_version": 3,
             "project_key": "thebtf_netcoredbg_mcp",
             "receipt_sha256": _sha256_path(raw_receipt),
         },
@@ -750,6 +806,13 @@ def test_stateless_preview_workflow_is_build_only_and_immutable() -> None:
     assert "actions: read" in workflow
     assert "cancel-in-progress: false" in workflow
     assert "python scripts/run_sonarqube_exact_head.py --role post-merge" in workflow
+    assert "Verify the tracked Wave2 coverage entry" in workflow
+    assert "GITHUB_TOKEN: ${{ github.token }}" in workflow
+    assert "runner.resolve_wave2_entry(context, environment)" in workflow
+    assert "runner.verify_wave2_entry(entry, context, environment)" in workflow
+    assert workflow.index("Verify the tracked Wave2 coverage entry") < workflow.index(
+        "Produce the repository post-merge exact-head receipt"
+    )
     assert "path: artifacts/stateless-preview/post-merge-receipt/" in workflow
     assert "A1_PAYLOAD_ARTIFACT_ID: ${{ steps.upload_payload.outputs.artifact-id }}" in workflow
     assert (
@@ -1124,7 +1187,14 @@ def _receipt_provenance_download_fixture(
 ) -> tuple[Any, Any, dict[str, Any]]:
     source_commit = "a" * 40
     receipt_bytes = _canonical_json_bytes(
-        _receipt_provenance_record(source_commit) if receipt is None else receipt
+        _complete_v3_exact_head_receipt(
+            source_commit,
+            role="post-merge",
+            outcome="PASS",
+            release_intent="v0.23.11",
+        )
+        if receipt is None
+        else receipt
     )
     wire_bytes = _validator_wire_zip(
         tmp_path,
@@ -1699,7 +1769,7 @@ def test_post_merge_artifact_consumer_accepts_complete_v3_receipt(tmp_path: Path
 
 def test_post_merge_artifact_consumer_refuses_v2_receipt(tmp_path: Path) -> None:
     authority_root, source_commit, _ = _create_authority_repository(tmp_path)
-    _write_post_merge_scan_receipt(authority_root, source_commit)
+    _write_post_merge_scan_receipt_v2(authority_root, source_commit)
 
     with pytest.raises(ValueError):
         produce_post_merge_exact_head_receipt(

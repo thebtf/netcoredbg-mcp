@@ -42,8 +42,9 @@ Wave 2, not this packet, placed the tracked `pull_request_head` `wave-closure-v1
 | `scripts/run_sonarqube_exact_head.py` | Add canonical Wave-2 entry resolution and validation, preflight, plan/marker, runtime properties, producer call, normalizer, validators, inventory writer, unified v3 validation, and cleanup. |
 | `tests/test_sonarqube_exact_head_runner.py` | Add the 15 behavior-first rows and fixture builders. |
 | `.coveragerc` | Add Python branch, relative-path, and source configuration. |
-| `build/coverage.sh` | Add strict enumerated producer commands for Python and five private .NET inputs. |
+| `build/coverage.sh` and `build/prepare_preview_fixture.py` | Add strict enumerated producer commands for Python and five private .NET inputs, plus one deterministic run-local Preview archive/manifest required by the fixed Preview consumer test. |
 | Five fixed test `.csproj` files | Add direct private `coverlet.msbuild` `10.0.1` references. |
+| `host/NetCoreDbg.Mcp.Stateless.Preview.Tests/PreviewArtifactConsumerTests.cs` | Accept only an explicit coverage-owned artifact root override; unchanged default behavior still requires the repository artifact location. |
 | `scripts/stateless_preview_artifact.py` and focused tests | Replace receipt schema v2 admission with unified v3 post-merge receipt validation while preserving artifact sealing behavior. |
 | `.github/workflows/stateless-preview.yml` | Add a hosted-checkout entry verification step before post-merge scan and artifact sealing. It verifies the tracked Wave-2 artifact and provisions no `.agent` state. |
 

@@ -224,6 +224,8 @@ dotnet test <exact-test-csproj> --configuration Debug --no-restore -nr:false \
 
 The expected private file is `<absolute-input-prefix>.cobertura.xml`. No command may use `--no-build`, `--filter`, `Include`, `Exclude`, `ExcludeByFile`, threshold switches, or a merge switch.
 
+The fixed Preview test project contains a real artifact-consumer journey and intentionally refuses repository `bin` output. Before the five test commands, the producer therefore publishes the Preview executable into the claimed run root, creates one deterministic local archive/manifest with `build/prepare_preview_fixture.py`, and passes its location only to that test process through `NETCOREDBG_PREVIEW_ARTIFACT_ROOT`. The default consumer-test path is unchanged. This local input is deleted with the claimed coverage root and has no release, tag, upload, or publication authority.
+
 ## Pre-begin toolchain gate
 
 The runner checks all of the following before scanner begin:
