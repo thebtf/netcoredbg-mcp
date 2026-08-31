@@ -1814,7 +1814,57 @@ def _coverage_environment() -> dict[str, str]:
     return scrub_sonar_environment(process_environment())
 
 
-def _safe_coverage_source(context: GitContext, filename: Any, language: str) -> str:
+def _cobertura_source_roots(context: GitContext, root: ElementTree.Element) -> tuple[Path, ...]:
+    values = [
+        (element.text or "").strip()
+        for element in root.iter()
+        if element.tag.rsplit("}", 1)[-1] == "source"
+    ]
+    if not values:
+        values = ["."]
+    roots: list[Path] = []
+    for value in values:
+        normalized = value.replace("\\", "/")
+        if not normalized or "://" in normalized or normalized.startswith("file:"):
+            _coverage_failure(
+                "COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura source root is absent or a URI"
+            )
+        if normalized == ".":
+            candidate = context.repository_root
+        elif normalized.startswith("/") or WINDOWS_ABSOLUTE_PATH_RE.match(normalized):
+            candidate = Path(normalized)
+        else:
+            parts = normalized.split("/")
+            if any(part in {"", ".", "..", "bin", "obj"} for part in parts):
+                _coverage_failure(
+                    "COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura source root is unsafe"
+                )
+            candidate = context.repository_root.joinpath(*parts)
+        try:
+            candidate.relative_to(context.repository_root)
+            metadata = _scanner_tree_metadata(candidate)
+        except (ValueError, RunnerError) as error:
+            _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", str(error))
+            raise AssertionError("unreachable") from error
+        attributes = int(getattr(metadata, "st_file_attributes", 0) or 0)
+        if not stat.S_ISDIR(metadata.st_mode) or attributes & 0x0400:
+            _coverage_failure(
+                "COVERAGE_SOURCE_MAPPING_INVALID",
+                "Cobertura source root is not a regular repository directory",
+            )
+        if candidate not in roots:
+            roots.append(candidate)
+    if context.repository_root not in roots:
+        roots.append(context.repository_root)
+    return tuple(roots)
+
+
+def _safe_coverage_source(
+    context: GitContext,
+    filename: Any,
+    language: str,
+    source_roots: Sequence[Path],
+) -> str:
     if not isinstance(filename, str) or not filename:
         _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura class filename is absent")
     normalized = filename.replace("\\", "/")
@@ -1830,24 +1880,35 @@ def _safe_coverage_source(context: GitContext, filename: Any, language: str) -> 
     parts = normalized.split("/")
     if any(part in {"", ".", "..", "bin", "obj"} for part in parts):
         _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura source path is unsafe")
-    candidate = context.repository_root.joinpath(*parts)
-    try:
-        candidate.relative_to(context.repository_root)
-        metadata = _scanner_tree_metadata(candidate)
-    except (ValueError, RunnerError) as error:
-        _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", str(error))
-        raise AssertionError("unreachable") from error
-    attributes = int(getattr(metadata, "st_file_attributes", 0) or 0)
-    if (
-        not stat.S_ISREG(getattr(metadata, "st_mode", 0))
-        or attributes & 0x0400
-        or not is_tracked(context.repository_root, _coverage_environment(), candidate)
-    ):
+    matches: list[Path] = []
+    for source_root in source_roots:
+        candidate = source_root.joinpath(*parts)
+        try:
+            candidate.relative_to(context.repository_root)
+            if not candidate.exists():
+                continue
+            metadata = _scanner_tree_metadata(candidate)
+        except (ValueError, RunnerError) as error:
+            _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", str(error))
+            raise AssertionError("unreachable") from error
+        attributes = int(getattr(metadata, "st_file_attributes", 0) or 0)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or attributes & 0x0400
+            or not is_tracked(context.repository_root, _coverage_environment(), candidate)
+        ):
+            _coverage_failure(
+                "COVERAGE_SOURCE_MAPPING_INVALID",
+                "Cobertura source is reparse-backed, nonregular, or untracked",
+            )
+        if candidate not in matches:
+            matches.append(candidate)
+    if len(matches) != 1:
         _coverage_failure(
             "COVERAGE_SOURCE_MAPPING_INVALID",
-            "Cobertura source is missing, reparse-backed, nonregular, or untracked",
+            "Cobertura source is missing or maps through multiple source roots",
         )
-    relative = candidate.relative_to(context.repository_root).as_posix()
+    relative = matches[0].relative_to(context.repository_root).as_posix()
     if language == "python":
         if not relative.startswith("src/netcoredbg_mcp/") or not relative.endswith(".py"):
             _coverage_failure(
@@ -1943,17 +2004,20 @@ def _parse_cobertura(
     )
     if lines_covered > lines_valid or branches_covered > branches_valid:
         _coverage_failure("COVERAGE_REPORT_INVALID", "Cobertura covered counts exceed denominators")
+    source_roots = _cobertura_source_roots(context, root)
     source_paths: list[str] = []
     facts: list[dict[str, Any]] = []
     for class_element in root.iter():
         if class_element.tag.rsplit("}", 1)[-1] != "class":
             continue
-        source_path = _safe_coverage_source(context, class_element.attrib.get("filename"), language)
-        if source_path in source_paths:
-            _coverage_failure(
-                "COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura source maps more than once"
-            )
-        source_paths.append(source_path)
+        source_path = _safe_coverage_source(
+            context,
+            class_element.attrib.get("filename"),
+            language,
+            source_roots,
+        )
+        if source_path not in source_paths:
+            source_paths.append(source_path)
         line_facts: list[dict[str, int]] = []
         for line in class_element.iter():
             if line.tag.rsplit("}", 1)[-1] != "line":

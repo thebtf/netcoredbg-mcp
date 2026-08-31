@@ -1989,17 +1989,24 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         return runner.derive_coverage_plan(cls._context(root), cls.RUN_ID)
 
     @staticmethod
-    def _cobertura(filenames, *, lines_valid=2, branches_valid=2) -> str:
+    def _cobertura(
+        filenames,
+        *,
+        lines_valid=2,
+        branches_valid=2,
+        sources=(".",),
+    ) -> str:
         classes = "".join(
             f'<class name="module" filename="{filename}"><methods/><lines>'
             '<line number="1" hits="1" branch="true" '
             'condition-coverage="50% (1/2)"/></lines></class>'
             for filename in filenames
         )
+        source_xml = "".join(f"<source>{source}</source>" for source in sources)
         return (
             f'<coverage lines-valid="{lines_valid}" lines-covered="1" '
             f'branches-valid="{branches_valid}" branches-covered="1">'
-            '<sources><source>.</source></sources><packages><package name="coverage">'
+            f'<sources>{source_xml}</sources><packages><package name="coverage">'
             f"<classes>{classes}</classes></package></packages></coverage>"
         )
 
@@ -2355,11 +2362,6 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 ("absolute", [str(source.resolve())], False),
                 ("uri", ["file:///source.py"], False),
                 ("escape", ["../source.py"], False),
-                (
-                    "duplicate",
-                    ["src/netcoredbg_mcp/module.py", "src/netcoredbg_mcp/module.py"],
-                    False,
-                ),
                 ("missing", ["src/netcoredbg_mcp/missing.py"], False),
                 ("test-only", ["tests/test_only.py"], False),
                 ("reparse", ["src/netcoredbg_mcp/reparse.py"], True),
@@ -2383,6 +2385,40 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                                 runner.RunnerError, "COVERAGE_SOURCE_MAPPING_INVALID"
                             ):
                                 runner.validate_python_cobertura(context, report)
+
+            report.write_text(
+                self._cobertura(["src/netcoredbg_mcp/module.py", "src/netcoredbg_mcp/module.py"]),
+                encoding="utf-8",
+            )
+            with patch.object(runner, "is_tracked", side_effect=source_is_tracked):
+                parsed = runner.validate_python_cobertura(context, report)
+            self.assertEqual(parsed["source_paths"], ["src/netcoredbg_mcp/module.py"])
+
+    def test_r05b_cobertura_source_roots_canonicalize_relative_and_absolute_inputs(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            source = self._write_source(root, "src/netcoredbg_mcp/module.py")
+            report = root / "coverage.xml"
+            with patch.object(runner, "is_tracked", return_value=True):
+                for source_root in (
+                    "src/netcoredbg_mcp",
+                    source.parent.as_posix(),
+                ):
+                    with self.subTest(source_root=source_root):
+                        report.write_text(
+                            self._cobertura(["module.py"], sources=(source_root,)),
+                            encoding="utf-8",
+                        )
+                        parsed = runner.validate_python_cobertura(context, report)
+                        self.assertEqual(parsed["source_paths"], ["src/netcoredbg_mcp/module.py"])
+
+                report.write_text(
+                    self._cobertura(["module.py"], sources=(root.parent.as_posix(),)),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(runner.RunnerError, "COVERAGE_SOURCE_MAPPING_INVALID"):
+                    runner.validate_python_cobertura(context, report)
 
     def test_r06_plan_is_pure_and_claim_marker_binds_reports_inputs_and_squash_identity(self):
         with TemporaryDirectory() as temporary_directory:
