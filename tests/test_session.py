@@ -1239,8 +1239,25 @@ class TestOwnerScopedPublicRouteRedMatrix:
         client = FakeLaunchClient()
         client.adapter_owner = owner
         client.adapter_pid = None
-        client.disconnect = AsyncMock()
-        client.stop = AsyncMock(return_value=receipt)
+        lifecycle: list[str] = []
+
+        async def disconnect(*, terminate: bool) -> None:
+            assert terminate is True
+            lifecycle.append("disconnect")
+
+        async def stop(
+            *,
+            expected_owner: OwnedProcessRef | None = None,
+        ) -> OwnerDrainReceipt | None:
+            if expected_owner is None:
+                lifecycle.append("general-stop")
+                return None
+            assert expected_owner == owner
+            lifecycle.append("owner-finalizer")
+            return receipt
+
+        client.disconnect = AsyncMock(side_effect=disconnect)
+        client.stop = AsyncMock(side_effect=stop)
         manager._client = client
         manager._active_dap_run = generation
         manager._state.state = DebugState.RUNNING
@@ -1258,6 +1275,7 @@ class TestOwnerScopedPublicRouteRedMatrix:
         build_session.restore.assert_not_awaited()
         build_session.build.assert_not_awaited()
         assert client.stop.await_args_list[0].kwargs == {"expected_owner": owner}
+        assert lifecycle[:2] == ["disconnect", "owner-finalizer"]
 
     @pytest.mark.asyncio
     async def test_no_owner_prebuild_passes_explicit_variant(self, tmp_path) -> None:
@@ -1315,6 +1333,65 @@ class TestOwnerScopedPublicRouteRedMatrix:
         finally:
             release.set()
             await start_task
+
+    @pytest.mark.asyncio
+    async def test_overlapping_starts_keep_current_windows_admission_blocked(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A prior start completion cannot clear the current run's admission guard."""
+
+        project = tmp_path / "App.csproj"
+        project.touch()
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+        first_started = asyncio.Event()
+        first_release = asyncio.Event()
+        second_started = asyncio.Event()
+        second_release = asyncio.Event()
+
+        async def start(*, generation: object) -> object:
+            if generation == 1:
+                first_started.set()
+                await first_release.wait()
+            elif generation == 2:
+                second_started.set()
+                await second_release.wait()
+            else:
+                raise AssertionError(f"unexpected generation: {generation!r}")
+            return generation
+
+        client = MagicMock()
+        client.is_running = False
+        client.adapter_owner = None
+        client.adapter_pid = None
+        client.start = start
+        client.initialize = AsyncMock()
+        manager._client = client
+        prebuild = AsyncMock(return_value=MagicMock(success=True))
+        manager._build_manager.pre_launch_build = prebuild
+        monkeypatch.setattr("netcoredbg_mcp.session.manager.os.name", "nt")
+        first_start = asyncio.create_task(manager.start())
+        second_start: asyncio.Task[None] | None = None
+        try:
+            await asyncio.wait_for(first_started.wait(), timeout=1.0)
+            second_start = asyncio.create_task(manager.start())
+            await asyncio.wait_for(second_started.wait(), timeout=1.0)
+            assert manager._active_dap_run == 2
+
+            first_release.set()
+            await asyncio.wait_for(first_start, timeout=1.0)
+
+            with pytest.raises(RuntimeError, match="adapter admission is in progress"):
+                await manager.pre_launch_build(str(project))
+            prebuild.assert_not_awaited()
+        finally:
+            first_release.set()
+            second_release.set()
+            await asyncio.wait_for(first_start, timeout=1.0)
+            if second_start is not None:
+                await asyncio.wait_for(second_start, timeout=1.0)
 
     def test_non_windows_active_adapter_has_no_owner_variant(self) -> None:
         """A current generation without an active Windows admission stays no-owner."""

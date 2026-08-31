@@ -56,7 +56,7 @@ class WindowsOwnedProcess:
         force_timeout: float,
     ) -> OwnerDrainReceipt: ...
     async def force_and_drain(self, *, timeout: float) -> OwnerDrainReceipt: ...
-    async def aclose(self) -> None: ...
+    async def aclose(self) -> OwnerDrainReceipt: ...
 ```
 
 `DAPClient` owns one instance inside one `_DapRun`. `BuildSession` owns a separate instance for each command. `BuildManager` does not receive an instance. It receives only a one-shot `OwnedAdapterCleanup` that can validate and drain the current adapter owner.
@@ -93,7 +93,7 @@ The boundary never invokes asyncio process launch as a Windows fallback. It neve
 4. A successful Windows receipt uses `status == DRAINED` and `active_processes == 0` from `JobObjectBasicAccountingInformation`.
 5. A query failure returns `FAILED`. A deadline result returns `TIMED_OUT`. Neither permits a pre-build continuation.
 6. Repeated callers join an in-flight operation. Only a literal-zero `DRAINED` receipt memoizes completion; a later explicit force call may retry a non-drained outcome.
-7. `aclose()` closes resources after the receipt is captured. `KILL_ON_JOB_CLOSE` is crash protection, not a substitute for a drain receipt.
+7. `aclose() -> OwnerDrainReceipt` returns the last truthful receipt before closing resources. `KILL_ON_JOB_CLOSE` is crash protection, not a substitute for a drain receipt.
 
 ## Adapter and pre-build integration
 

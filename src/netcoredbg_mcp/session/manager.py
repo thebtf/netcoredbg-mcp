@@ -143,7 +143,7 @@ class SessionManager:
         self._dap_generation_counter = 0
         self._active_dap_run: object | None = None
         self._stopping_dap_run: object | None = None
-        self._windows_adapter_admission_in_progress = False
+        self._windows_adapter_admission_generation: object | None = None
 
     def _create_session_state(self, state: DebugState = DebugState.IDLE) -> SessionState:
         session_state = SessionState(state=state)
@@ -856,7 +856,8 @@ class SessionManager:
         self._stopping_dap_run = None
         self._state.transport_terminal = None
 
-        self._windows_adapter_admission_in_progress = os.name == "nt"
+        if os.name == "nt":
+            self._windows_adapter_admission_generation = generation
         try:
             returned_generation = await self._client.start(generation=generation)
         except Exception:
@@ -864,7 +865,8 @@ class SessionManager:
                 self._active_dap_run = None
             raise
         finally:
-            self._windows_adapter_admission_in_progress = False
+            if self._windows_adapter_admission_generation == generation:
+                self._windows_adapter_admission_generation = None
 
         if returned_generation != generation:
             await self._client.stop()
@@ -1613,7 +1615,7 @@ class SessionManager:
 
         owner = source_client.adapter_owner
         if owner is None or owner.generation != generation:
-            if self._windows_adapter_admission_in_progress:
+            if self._windows_adapter_admission_generation == generation:
                 raise RuntimeError("adapter admission is in progress")
             return NoOwnedAdapter()
 
@@ -1631,7 +1633,7 @@ class SessionManager:
         generation: object,
         expected: OwnedProcessRef,
     ) -> OwnerDrainReceipt:
-        """Join the matching DAP finalizer or return a no-effect stale receipt."""
+        """Request graceful DAP shutdown, then join the matching owner finalizer."""
         # Revalidate without awaiting first. An older capture must not disconnect,
         # terminate, or mutate a newer generation when any captured fact differs.
         if (
@@ -1647,6 +1649,10 @@ class SessionManager:
                 active_processes=None,
             )
 
+        try:
+            await source_client.disconnect(terminate=True)
+        except Exception as error:
+            logger.warning("Expected adapter disconnect failed: %s", error)
         try:
             receipt = await source_client.stop(expected_owner=expected)
         except Exception as error:
