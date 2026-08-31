@@ -170,27 +170,30 @@ class PywinautoBackend:
     ) -> dict[str, Any]:
         """Return an explicit bounded block for unsupported physical hover."""
         timeout_ms = validate_hover_timeout(timeout_ms)
-        return {
-            "status": "BLOCKED",
-            "backend": "pywinauto",
-            "reason": "selector-scoped pointer hover requires the FlaUI bridge backend",
-            "capability": "selector-scoped pointer hover",
-            "requested": {
-                "selector": hover_selector(
-                    automation_id=automation_id,
-                    name=name,
-                    control_type=control_type,
-                    root_id=root_id,
-                    xpath=xpath,
-                ),
-                "timeout_ms": timeout_ms,
-            },
-            "accepted": {
-                "backend": "FlaUI",
+        return await self._fallback_response(
+            {
+                "status": "BLOCKED",
+                "backend": "pywinauto",
+                "reason": "selector-scoped pointer hover requires the FlaUI bridge backend",
                 "capability": "selector-scoped pointer hover",
+                "requested": {
+                    "selector": hover_selector(
+                        automation_id=automation_id,
+                        name=name,
+                        control_type=control_type,
+                        root_id=root_id,
+                        xpath=xpath,
+                    ),
+                    "timeout_ms": timeout_ms,
+                },
+                "accepted": {
+                    "backend": "FlaUI",
+                    "capability": "selector-scoped pointer hover",
+                },
+                "next_step": "Install or build FlaUIBridge.exe and retry ui_hover.",
             },
-            "next_step": "Install or build FlaUIBridge.exe and retry ui_hover.",
-        }
+            (automation_id, name, control_type, root_id, xpath, timeout_ms),
+        )
 
     async def invoke_element(
         self,
@@ -292,6 +295,7 @@ class PywinautoBackend:
         root_id: str | None = None,
     ) -> dict[str, Any]:
         """XPath search is not supported on pywinauto backend."""
+        await self._fallback_response(None, (xpath, root_id))
         raise NotImplementedError(
             "XPath search requires FlaUI backend. "
             "Install FlaUIBridge.exe or use automationId/name/controlType search instead."
@@ -468,22 +472,25 @@ class PywinautoBackend:
         maximum_nodes: int,
     ) -> dict[str, Any]:
         """Guarded child admission requires bridge-owned UIA evidence."""
-        return {
-            "status": "BLOCKED",
-            "reason": "guarded child resolution requires the FlaUI bridge backend",
-            "backend": "pywinauto",
-            "match_count": 0,
-            "requested": {
-                "parent": parent,
-                "predicate": predicate,
-                "maximum_nodes": maximum_nodes,
+        return await self._fallback_response(
+            {
+                "status": "BLOCKED",
+                "reason": "guarded child resolution requires the FlaUI bridge backend",
+                "backend": "pywinauto",
+                "match_count": 0,
+                "requested": {
+                    "parent": parent,
+                    "predicate": predicate,
+                    "maximum_nodes": maximum_nodes,
+                },
+                "accepted": {
+                    "backend": "FlaUI",
+                    "capability": "two-read guarded child resolution",
+                },
+                "next_step": "Use the FlaUI bridge backend before attempting guarded child drag.",
             },
-            "accepted": {
-                "backend": "FlaUI",
-                "capability": "two-read guarded child resolution",
-            },
-            "next_step": "Use the FlaUI bridge backend before attempting guarded child drag.",
-        }
+            (parent, predicate, maximum_nodes),
+        )
 
     async def drag(
         self,
@@ -521,24 +528,27 @@ class PywinautoBackend:
         cancel_key: str | None = None,
     ) -> dict[str, Any]:
         """Path-aware held-edge drags require the FlaUI bridge backend."""
-        return {
-            "status": "BLOCKED",
-            "reason": "path-aware drag requires the FlaUI backend",
-            "requested": {
-                "capability": "path-aware drag",
-                "points": points,
-                "speed_ms": speed_ms,
-                "hold_modifiers": hold_modifiers or [],
-                "cancel_key": cancel_key,
+        return await self._fallback_response(
+            {
+                "status": "BLOCKED",
+                "reason": "path-aware drag requires the FlaUI backend",
+                "requested": {
+                    "capability": "path-aware drag",
+                    "points": points,
+                    "speed_ms": speed_ms,
+                    "hold_modifiers": hold_modifiers or [],
+                    "cancel_key": cancel_key,
+                },
+                "accepted": {
+                    "backend": "FlaUI drag_path",
+                    "capability": "real pointer path with waypoint holds",
+                },
+                "next_step": (
+                    "Use the FlaUI bridge backend for release-critical path-aware drag proof."
+                ),
             },
-            "accepted": {
-                "backend": "FlaUI drag_path",
-                "capability": "real pointer path with waypoint holds",
-            },
-            "next_step": (
-                "Use the FlaUI bridge backend for release-critical path-aware drag proof."
-            ),
-        }
+            (points, speed_ms, hold_modifiers, cancel_key),
+        )
 
     async def send_keys(self, keys: str) -> None:
         """Send keyboard input to focused element."""
@@ -546,40 +556,49 @@ class PywinautoBackend:
 
     async def send_system_event(self, event: str, mode: str = "toggle") -> dict[str, Any]:
         """System events require the FlaUI bridge backend."""
-        return {
-            "switched": False,
-            "unsupported": True,
-            "reason": (
-                "FlaUI bridge required for send_system_event. "
-                "The pywinauto backend cannot broadcast system events."
-            ),
-        }
+        return await self._fallback_response(
+            {
+                "switched": False,
+                "unsupported": True,
+                "reason": (
+                    "FlaUI bridge required for send_system_event. "
+                    "The pywinauto backend cannot broadcast system events."
+                ),
+            },
+            (event, mode),
+        )
 
     async def hold_modifiers(self, modifiers: list[str]) -> dict[str, Any]:
         """Persistent held modifiers require the FlaUI bridge backend."""
-        return {
-            "switched": False,
-            "unsupported": True,
-            "reason": (
-                "FlaUI bridge required for hold_modifiers. "
-                "The pywinauto backend does not track persistent modifier state."
-            ),
-        }
+        return await self._fallback_response(
+            {
+                "switched": False,
+                "unsupported": True,
+                "reason": (
+                    "FlaUI bridge required for hold_modifiers. "
+                    "The pywinauto backend does not track persistent modifier state."
+                ),
+            },
+            (modifiers,),
+        )
 
     async def release_modifiers(self, modifiers: list[str] | str) -> dict[str, Any]:
         """Persistent held modifiers require the FlaUI bridge backend."""
-        return {
-            "switched": False,
-            "unsupported": True,
-            "reason": (
-                "FlaUI bridge required for release_modifiers. "
-                "The pywinauto backend does not track persistent modifier state."
-            ),
-        }
+        return await self._fallback_response(
+            {
+                "switched": False,
+                "unsupported": True,
+                "reason": (
+                    "FlaUI bridge required for release_modifiers. "
+                    "The pywinauto backend does not track persistent modifier state."
+                ),
+            },
+            (modifiers,),
+        )
 
     async def get_held_modifiers(self) -> dict[str, Any]:
         """The pywinauto backend has no persistent modifier hold state."""
-        return {"modifiers": []}
+        return await self._fallback_response({"modifiers": []}, ())
 
     async def scoped_key_sequence(
         self,
@@ -588,19 +607,22 @@ class PywinautoBackend:
         keys: list[str],
     ) -> dict[str, Any]:
         """Scoped held-modifier key sequences require the FlaUI bridge backend."""
-        return {
-            "status": "UNSUPPORTED",
-            "unsupported": True,
-            "backend": "pywinauto",
-            "reason": (
-                "FlaUI bridge required for scoped key sequence. "
-                "The pywinauto backend cannot prove held modifiers across keys."
-            ),
-        }
+        return await self._fallback_response(
+            {
+                "status": "UNSUPPORTED",
+                "unsupported": True,
+                "backend": "pywinauto",
+                "reason": (
+                    "FlaUI bridge required for scoped key sequence. "
+                    "The pywinauto backend cannot prove held modifiers across keys."
+                ),
+            },
+            (selector, modifiers, keys),
+        )
 
     async def grid_visible_rows(self, selector: dict[str, Any]) -> dict[str, Any]:
         """DataGrid evidence requires the FlaUI bridge backend."""
-        return self._unsupported_grid()
+        return await self._fallback_response(self._unsupported_grid(), (selector,))
 
     async def grid_selected_rows(
         self,
@@ -608,8 +630,7 @@ class PywinautoBackend:
         columns: list[str] | None = None,
     ) -> dict[str, Any]:
         """DataGrid evidence requires the FlaUI bridge backend."""
-        _ = columns
-        return self._unsupported_grid()
+        return await self._fallback_response(self._unsupported_grid(), (selector, columns))
 
     async def grid_snapshot(
         self,
@@ -618,7 +639,7 @@ class PywinautoBackend:
         columns: list[str] | None = None,
     ) -> dict[str, Any]:
         """DataGrid cell evidence requires the FlaUI bridge backend."""
-        return self._unsupported_grid()
+        return await self._fallback_response(self._unsupported_grid(), (selector, rows, columns))
 
     async def grid_assert_rows(
         self,
@@ -627,7 +648,7 @@ class PywinautoBackend:
         columns: list[str] | None = None,
     ) -> dict[str, Any]:
         """DataGrid row-cell assertions require the FlaUI bridge backend."""
-        return self._unsupported_grid()
+        return await self._fallback_response(self._unsupported_grid(), (selector, rows, columns))
 
     async def grid_select_range(
         self,
@@ -636,7 +657,9 @@ class PywinautoBackend:
         end_index: int,
     ) -> dict[str, Any]:
         """DataGrid selection evidence requires the FlaUI bridge backend."""
-        return self._unsupported_grid()
+        return await self._fallback_response(
+            self._unsupported_grid(), (selector, start_index, end_index)
+        )
 
     async def grid_click_row(
         self,
@@ -646,7 +669,9 @@ class PywinautoBackend:
         columns: list[str] | None = None,
     ) -> dict[str, Any]:
         """DataGrid row click evidence requires the FlaUI bridge backend."""
-        return self._unsupported_grid()
+        return await self._fallback_response(
+            self._unsupported_grid(), (selector, row_index, column, columns)
+        )
 
     async def grid_right_click_row(
         self,
@@ -656,7 +681,9 @@ class PywinautoBackend:
         columns: list[str] | None = None,
     ) -> dict[str, Any]:
         """DataGrid row right-click evidence requires the FlaUI bridge backend."""
-        return self._unsupported_grid()
+        return await self._fallback_response(
+            self._unsupported_grid(), (selector, row_index, column, columns)
+        )
 
     async def grid_double_click_row(
         self,
@@ -666,7 +693,9 @@ class PywinautoBackend:
         columns: list[str] | None = None,
     ) -> dict[str, Any]:
         """DataGrid row double-click evidence requires the FlaUI bridge backend."""
-        return self._unsupported_grid()
+        return await self._fallback_response(
+            self._unsupported_grid(), (selector, row_index, column, columns)
+        )
 
     async def grid_ensure_visible(
         self,
@@ -681,7 +710,19 @@ class PywinautoBackend:
         scroll_settle_ms: int | None = None,
     ) -> dict[str, Any]:
         """DataGrid row realization/scroll support requires the FlaUI bridge backend."""
-        return self._unsupported_grid()
+        return await self._fallback_response(
+            self._unsupported_grid(),
+            (
+                selector,
+                row_key,
+                row_index,
+                identity,
+                rows,
+                columns,
+                max_scrolls,
+                scroll_settle_ms,
+            ),
+        )
 
     async def grid_assert_range(
         self,
@@ -690,7 +731,9 @@ class PywinautoBackend:
         end_index: int,
     ) -> dict[str, Any]:
         """DataGrid range assertion evidence requires the FlaUI bridge backend."""
-        return self._unsupported_grid()
+        return await self._fallback_response(
+            self._unsupported_grid(), (selector, start_index, end_index)
+        )
 
     async def query_ui(
         self,
@@ -699,15 +742,18 @@ class PywinautoBackend:
         max_results: int = 20,
     ) -> dict[str, Any]:
         """Focused field-limited UI evidence requires the FlaUI bridge backend."""
-        return {
-            "status": "UNSUPPORTED",
-            "unsupported": True,
-            "backend": "pywinauto",
-            "reason": (
-                "FlaUI bridge required for focused UI evidence. "
-                "The pywinauto backend cannot provide bounded field proof."
-            ),
-        }
+        return await self._fallback_response(
+            {
+                "status": "UNSUPPORTED",
+                "unsupported": True,
+                "backend": "pywinauto",
+                "reason": (
+                    "FlaUI bridge required for focused UI evidence. "
+                    "The pywinauto backend cannot provide bounded field proof."
+                ),
+            },
+            (selector, fields, max_results),
+        )
 
     async def list_invoke_item(
         self,
@@ -716,7 +762,9 @@ class PywinautoBackend:
         invoke: str = "default",
     ) -> dict[str, Any]:
         """Scoped list item invocation requires the FlaUI bridge backend."""
-        return self._unsupported_scoped_list()
+        return await self._fallback_response(
+            self._unsupported_scoped_list(), (selector, item, invoke)
+        )
 
     async def list_toggle_item_child(
         self,
@@ -726,19 +774,32 @@ class PywinautoBackend:
         target_state: str | None = None,
     ) -> dict[str, Any]:
         """Scoped list item child toggles require the FlaUI bridge backend."""
-        return self._unsupported_scoped_list()
+        return await self._fallback_response(
+            self._unsupported_scoped_list(), (selector, item, child, target_state)
+        )
 
     async def assert_focus(self, selector: dict[str, Any]) -> dict[str, Any]:
         """Focus proof requires the FlaUI bridge backend."""
-        return {
-            "status": "UNSUPPORTED",
-            "unsupported": True,
-            "backend": "pywinauto",
-            "reason": (
-                "FlaUI bridge required for focus assertion evidence. "
-                "The pywinauto backend cannot prove focus containment safely."
-            ),
-        }
+        return await self._fallback_response(
+            {
+                "status": "UNSUPPORTED",
+                "unsupported": True,
+                "backend": "pywinauto",
+                "reason": (
+                    "FlaUI bridge required for focus assertion evidence. "
+                    "The pywinauto backend cannot prove focus containment safely."
+                ),
+            },
+            (selector,),
+        )
+
+    @staticmethod
+    async def _fallback_response(
+        response: Any,
+        requested_values: tuple[object, ...],
+    ) -> Any:
+        """Yield once while keeping unsupported-call inputs off the wire payload."""
+        return (await asyncio.sleep(0, result=(requested_values, response)))[1]
 
     @staticmethod
     def _unsupported_grid() -> dict[str, Any]:
@@ -772,7 +833,7 @@ class PywinautoBackend:
         """
         # pywinauto backend doesn't have a direct multi_select;
         # the tools/ui.py handles the Ctrl+Click logic directly
-        return 0
+        return await self._fallback_response(0, (container_id, indices))
 
     async def get_window_tree(self, max_depth: int = 3, max_children: int = 50) -> Any:
         """Get window tree via pywinauto."""
@@ -793,18 +854,28 @@ class PywinautoBackend:
         so the tool layer can surface a clean error without try/except on a
         NotImplementedError.
         """
-        return {
-            "switched": False,
-            "unsupported": True,
-            "reason": (
-                "switch_window requires the FlaUI bridge backend. "
-                "The pywinauto backend does not support multi-window retargeting."
-            ),
-        }
+        return await self._fallback_response(
+            {
+                "switched": False,
+                "unsupported": True,
+                "reason": (
+                    "switch_window requires the FlaUI bridge backend. "
+                    "The pywinauto backend does not support multi-window retargeting."
+                ),
+            },
+            (name, automation_id),
+        )
 
     def get_cached_rect(self, automation_id: str) -> dict | None:
         """Get cached rectangle for an element by AutomationId."""
         return self._ui.get_cached_rect(automation_id)
+
+    @staticmethod
+    def _unsupported_pattern(pattern: str) -> dict[str, Any]:
+        return {
+            "unsupported": True,
+            "reason": f"FlaUI bridge required for {pattern}",
+        }
 
     # -- v0.11.1: Pattern expansion fallbacks --
     # All methods below require the FlaUI bridge and return {unsupported: True}
@@ -812,38 +883,33 @@ class PywinautoBackend:
 
     async def close_window(self, window_title: str | None = None) -> dict[str, Any]:
         """WindowPattern requires FlaUI bridge backend."""
-        return {
-            "unsupported": True,
-            "reason": "FlaUI bridge required for WindowPattern",
-        }
+        return await self._fallback_response(
+            self._unsupported_pattern("WindowPattern"), (window_title,)
+        )
 
     async def maximize_window(self, window_title: str | None = None) -> dict[str, Any]:
         """WindowPattern requires FlaUI bridge backend."""
-        return {
-            "unsupported": True,
-            "reason": "FlaUI bridge required for WindowPattern",
-        }
+        return await self._fallback_response(
+            self._unsupported_pattern("WindowPattern"), (window_title,)
+        )
 
     async def minimize_window(self, window_title: str | None = None) -> dict[str, Any]:
         """WindowPattern requires FlaUI bridge backend."""
-        return {
-            "unsupported": True,
-            "reason": "FlaUI bridge required for WindowPattern",
-        }
+        return await self._fallback_response(
+            self._unsupported_pattern("WindowPattern"), (window_title,)
+        )
 
     async def restore_window(self, window_title: str | None = None) -> dict[str, Any]:
         """WindowPattern requires FlaUI bridge backend."""
-        return {
-            "unsupported": True,
-            "reason": "FlaUI bridge required for WindowPattern",
-        }
+        return await self._fallback_response(
+            self._unsupported_pattern("WindowPattern"), (window_title,)
+        )
 
     async def move_window(self, x: int, y: int, window_title: str | None = None) -> dict[str, Any]:
         """TransformPattern requires FlaUI bridge backend."""
-        return {
-            "unsupported": True,
-            "reason": "FlaUI bridge required for TransformPattern",
-        }
+        return await self._fallback_response(
+            self._unsupported_pattern("TransformPattern"), (x, y, window_title)
+        )
 
     async def resize_window(
         self,
@@ -852,45 +918,39 @@ class PywinautoBackend:
         window_title: str | None = None,
     ) -> dict[str, Any]:
         """TransformPattern requires FlaUI bridge backend."""
-        return {
-            "unsupported": True,
-            "reason": "FlaUI bridge required for TransformPattern",
-        }
+        return await self._fallback_response(
+            self._unsupported_pattern("TransformPattern"), (width, height, window_title)
+        )
 
     async def expand(self, automation_id: str) -> dict[str, Any]:
         """ExpandCollapsePattern requires FlaUI bridge backend."""
-        return {
-            "unsupported": True,
-            "reason": "FlaUI bridge required for ExpandCollapsePattern",
-        }
+        return await self._fallback_response(
+            self._unsupported_pattern("ExpandCollapsePattern"), (automation_id,)
+        )
 
     async def collapse(self, automation_id: str) -> dict[str, Any]:
         """ExpandCollapsePattern requires FlaUI bridge backend."""
-        return {
-            "unsupported": True,
-            "reason": "FlaUI bridge required for ExpandCollapsePattern",
-        }
+        return await self._fallback_response(
+            self._unsupported_pattern("ExpandCollapsePattern"), (automation_id,)
+        )
 
     async def set_value(self, automation_id: str, value: float) -> dict[str, Any]:
         """RangeValuePattern requires FlaUI bridge backend."""
-        return {
-            "unsupported": True,
-            "reason": "FlaUI bridge required for RangeValuePattern",
-        }
+        return await self._fallback_response(
+            self._unsupported_pattern("RangeValuePattern"), (automation_id, value)
+        )
 
     async def clipboard_read(self) -> dict[str, Any]:
         """Clipboard (STA threading) requires FlaUI bridge backend."""
-        return {
-            "unsupported": True,
-            "reason": "FlaUI bridge required for Clipboard (STA threading)",
-        }
+        return await self._fallback_response(
+            self._unsupported_pattern("Clipboard (STA threading)"), ()
+        )
 
     async def clipboard_write(self, text: str) -> dict[str, Any]:
         """Clipboard (STA threading) requires FlaUI bridge backend."""
-        return {
-            "unsupported": True,
-            "reason": "FlaUI bridge required for Clipboard (STA threading)",
-        }
+        return await self._fallback_response(
+            self._unsupported_pattern("Clipboard (STA threading)"), (text,)
+        )
 
     async def realize_virtualized_item(
         self,
@@ -899,7 +959,7 @@ class PywinautoBackend:
         value: str,
     ) -> dict[str, Any]:
         """VirtualizedItemPattern requires FlaUI bridge backend."""
-        return {
-            "unsupported": True,
-            "reason": "FlaUI bridge required for VirtualizedItemPattern",
-        }
+        return await self._fallback_response(
+            self._unsupported_pattern("VirtualizedItemPattern"),
+            (container_automation_id, prop_name, value),
+        )
