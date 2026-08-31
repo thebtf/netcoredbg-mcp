@@ -517,23 +517,50 @@ class DAPClient:
         logger.info("netcoredbg started with PID %s", process.pid)
         return generation
 
-    async def stop(self) -> None:
+    async def stop(
+        self,
+        *,
+        expected_owner: OwnedProcessRef | None = None,
+    ) -> OwnerDrainReceipt | None:
         """Join the current generation's guarded finalizer.
 
-        The manager records explicit-stop policy before awaiting this method.
-        The client records only transport facts and performs the one bounded
-        cleanup sequence shared with EOF, reader failure, and process exit.
+        An expected owner is a stale-call fence, not cleanup authority. The
+        retained capability remains in the selected run, and a matching call
+        joins its existing Wave-1 finalizer instead of opening another shutdown
+        branch.
         """
-
         run = self._run
+        if expected_owner is not None and (
+            run is None or run.owner is None or run.owner.owner != expected_owner
+        ):
+            return OwnerDrainReceipt(
+                owner=expected_owner,
+                status=DrainStatus.STALE,
+                forced=False,
+                root_returncode=None,
+                active_processes=None,
+            )
         if run is None:
             self._settle_pending(self._pending, cancel=True)
             logger.info("netcoredbg stopped")
-            return
+            return None
 
         finalizer, _ = self._request_finalization(run, DapTerminalTrigger.EXPLICIT_STOP)
         await asyncio.shield(finalizer)
         logger.info("netcoredbg stopped")
+        if expected_owner is None:
+            return None
+
+        receipt = run.owner_drain_receipt
+        if receipt is not None:
+            return receipt
+        return OwnerDrainReceipt(
+            owner=expected_owner,
+            status=DrainStatus.FAILED,
+            forced=False,
+            root_returncode=None,
+            active_processes=None,
+        )
 
     def _run_for_direct_reader(self) -> _DapRun:
         """Bind legacy direct-reader tests to a real run-scoped authority."""

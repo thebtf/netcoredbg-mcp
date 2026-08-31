@@ -1,7 +1,7 @@
 # Data Model: Owner-Scoped Pre-Build Cleanup
 
 **Status:** Planned semantic contract. It introduces no persistence service, database schema, registry extension, or accepted runtime result.
-**Source base:** `3ffaefee7d8dbd9680537804c83b96a8f836e8fe`
+**Source base:** `1b8b2d548a45b17dde690b4cb8e4fc7153d326bc`
 **Release intent:** `none`
 
 The model names ownership facts and illegal combinations. Private Python field spellings, ctypes layout names, handle values, timeout values, and log formatting remain implementation details if they preserve this model.

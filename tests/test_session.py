@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from netcoredbg_mcp.build.cleanup import NoOwnedAdapter, OwnedAdapterCleanup
 from netcoredbg_mcp.dap import DAPEvent, DAPResponse
 from netcoredbg_mcp.dap.client import (
     DapCleanupOutcome,
@@ -15,7 +16,8 @@ from netcoredbg_mcp.dap.client import (
     DapTransportTerminal,
 )
 from netcoredbg_mcp.session import DebugState, SessionManager
-from tests.owner_scope_red import BlockingStream, TreeProcess
+from netcoredbg_mcp.windows_process_owner import DrainStatus, OwnedProcessRef
+from tests.owner_scope_red import BlockingStream, OwnedCommandProcess, TreeProcess
 
 
 def _natural_exit_terminal(generation: object) -> DapTransportTerminal:
@@ -1070,6 +1072,7 @@ class FakeLaunchClient:
         self.capabilities: dict[str, object] = {}
         self.events: list[str] = []
         self.hot_reload_enabled: bool | None = None
+        self.adapter_owner: OwnedProcessRef | None = None
 
     async def set_hot_reload(self, enable: bool) -> DAPResponse:
         self.events.append("set_hot_reload")
@@ -1153,7 +1156,10 @@ class TestOwnerScopedPublicRouteRedMatrix:
         manager.check_dbgshim_compatibility = MagicMock(return_value=None)
 
         with (
-            patch("netcoredbg_mcp.dap.client.asyncio.create_subprocess_exec", return_value=process),
+            patch(
+                "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch",
+                return_value=OwnedCommandProcess(process, "c1"),
+            ),
             patch(
                 "netcoredbg_mcp.session.manager.detect_enc_support",
                 return_value={"supported": False, "ncdbhook_path": None, "error": None},
@@ -1186,6 +1192,10 @@ class TestOwnerScopedPublicRouteRedMatrix:
             manager = SessionManager(project_path=str(tmp_path))
         fake_client = FakeLaunchClient()
         manager._client = fake_client
+        generation = "c2"
+        owner = OwnedProcessRef("owner-c2", generation, 45002)
+        fake_client.adapter_owner = owner
+        manager._active_dap_run = generation
         manager._initialized_event.set()
         manager.check_dbgshim_compatibility = MagicMock(return_value=None)
         prebuild = AsyncMock(return_value=MagicMock(success=True))
@@ -1203,22 +1213,13 @@ class TestOwnerScopedPublicRouteRedMatrix:
             manager.stop = AsyncMock(return_value={"success": True})
             await manager.restart(rebuild=True)
 
-        assert all("owner" in call.kwargs for call in prebuild.await_args_list), (
-            "current start/restart reaches pre-build without an explicit owner capability"
-        )
+        owners = [call.kwargs["owner"] for call in prebuild.await_args_list]
+        assert owners and all(isinstance(value, OwnedAdapterCleanup) for value in owners)
+        assert all(value.owner == owner for value in owners)
 
     @pytest.mark.asyncio
-    async def test_no_owner_prebuild_does_not_discover_a_process_before_build(
-        self, tmp_path
-    ) -> None:
-        """No-owner is a legal variant, not a license for selector cleanup.
-
-        This is the stale/no-owner control: without a current admitted adapter,
-        SessionManager may ask BuildManager to build only through an explicit
-        no-owner value.  Current code supplies no variant at all, so downstream
-        cleanup cannot reject a stale capture before it starts process work.
-        """
-
+    async def test_no_owner_prebuild_passes_explicit_variant(self, tmp_path) -> None:
+        """A manager without an admitted adapter delegates NoOwnedAdapter."""
         project = tmp_path / "App.csproj"
         project.touch()
         with patch("netcoredbg_mcp.session.manager.DAPClient"):
@@ -1230,6 +1231,52 @@ class TestOwnerScopedPublicRouteRedMatrix:
         await manager.pre_launch_build(str(project))
 
         captured = prebuild.await_args
-        assert captured is not None and "owner" in captured.kwargs, (
-            "current no-owner pre-build passes no explicit variant to prevent discovery"
-        )
+        assert captured is not None
+        assert isinstance(captured.kwargs["owner"], NoOwnedAdapter)
+
+    @pytest.mark.asyncio
+    async def test_stale_capture_cannot_touch_a_newer_adapter(self) -> None:
+        """A stale handoff has no disconnect, stop, or state-changing effect."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+        generation = "generation-a"
+        owner = OwnedProcessRef("owner-a", generation, 45003)
+        source = MagicMock()
+        source.adapter_owner = owner
+        source.disconnect = AsyncMock()
+        source.stop = AsyncMock()
+        manager._client = source
+        manager._active_dap_run = generation
+
+        captured = manager.capture_prebuild_owner()
+        assert isinstance(captured, OwnedAdapterCleanup)
+
+        manager._client = MagicMock()
+        manager._active_dap_run = "generation-b"
+        receipt = await captured.drain()
+
+        assert receipt.status is DrainStatus.STALE
+        source.disconnect.assert_not_awaited()
+        source.stop.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stop_unregisters_observations_without_registry_termination(self) -> None:
+        """Normal stop leaves retained-owner cleanup to the DAP finalizer."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+        client = MagicMock()
+        client.adapter_pid = 45004
+        client.is_running = False
+        client.stop = AsyncMock()
+        manager._client = client
+        manager._state.process_id = 45005
+        manager._process_registry.cleanup_all = MagicMock()
+        manager._process_registry.unregister = MagicMock()
+
+        await manager.stop()
+
+        manager._process_registry.cleanup_all.assert_not_called()
+        assert {call.args[0] for call in manager._process_registry.unregister.call_args_list} == {
+            45004,
+            45005,
+        }

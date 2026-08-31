@@ -215,7 +215,7 @@ async def test_c3_legacy_cli_route_keeps_owner_admission_private_and_safe() -> N
     from unittest.mock import patch
 
     from netcoredbg_mcp.dap.client import DAPClient
-    from tests.owner_scope_red import BlockingStream, TreeProcess
+    from tests.owner_scope_red import BlockingStream, OwnedCommandProcess, TreeProcess
 
     version = subprocess.run(
         [sys.executable, "-m", "netcoredbg_mcp", "--version"],
@@ -234,7 +234,10 @@ async def test_c3_legacy_cli_route_keeps_owner_admission_private_and_safe() -> N
     )
     client = DAPClient("/path/to/netcoredbg")
 
-    with patch("netcoredbg_mcp.dap.client.asyncio.create_subprocess_exec", return_value=process):
+    with patch(
+        "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch",
+        return_value=OwnedCommandProcess(process, "c3"),
+    ):
         await client.start()
     await client.stop()
 

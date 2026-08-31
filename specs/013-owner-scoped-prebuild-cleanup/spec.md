@@ -3,7 +3,7 @@
 **Feature branch:** `work/issue450-owner-scoped-cleanup`
 **Created:** 2026-08-31
 **Status:** Planned D2 implementation packet. This packet records no product implementation, test result, review verdict, acceptance receipt, tag, package, or publication.
-**Source base:** `3ffaefee7d8dbd9680537804c83b96a8f836e8fe`
+**Source base:** `1b8b2d548a45b17dde690b4cb8e4fc7153d326bc`
 **Parent:** `specs/011-issue450-sonar-release-program/`, Wave 2.
 **Parent anchors:** PRG-003, PRG-007, PRG-008, and PRG-010.
 **Design authority:** `agent://ArchitectWave2Ownership`.
@@ -107,7 +107,7 @@ A consumer continues to use the legacy Python/default route. Existing `start_deb
 
 ## Functional requirements
 
-- **WOC-001: Behavior-first RED matrix.** Before production code changes, add deterministic behavioral RED coverage for the fifteen required acceptance rows in [plan.md](plan.md#deterministic-red-and-green-matrix). The denominator is eleven owner-safety rows and four compatibility controls. Each row must fail against `3ffaefee7d8dbd9680537804c83b96a8f836e8fe` because current behavior permits a selector, post-start admission, missing capability threading, or missing preservation proof. A test must not fail only because a planned symbol is absent.
+- **WOC-001: Behavior-first RED matrix.** Before production code changes, add deterministic behavioral RED coverage for the fifteen required acceptance rows in [plan.md](plan.md#deterministic-red-and-green-matrix). The denominator is eleven owner-safety rows and four compatibility controls. Each row must fail against `1b8b2d548a45b17dde690b4cb8e4fc7153d326bc` because current behavior permits a selector, post-start admission, missing capability threading, or missing preservation proof. A test must not fail only because a planned symbol is absent.
 - **WOC-002: One private Windows owner boundary.** Windows process creation for the adapter and each `BuildSession` command MUST use `WindowsOwnedProcess` in `src/netcoredbg_mcp/windows_process_owner.py`. It MUST create an unnamed private Job, set `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, create the child with `CREATE_SUSPENDED`, assign the retained root handle, verify membership and accounting, attach only intended standard handles, and call `ResumeThread` last. No global lifecycle service, singleton map, or registry-backed capability may be added.
 - **WOC-003: Preserve Wave 1 adapter lifecycle.** Each existing `_DapRun` generation MUST hold exactly one distinct `WindowsOwnedProcess` capability on Windows. The existing manager-issued generation, one guarded finalizer, terminal callback ordering, and stale-generation fencing MUST retain their meanings. Owner drain occurs inside the existing finalizer rather than through a second adapter shutdown path.
 - **WOC-004: Own every Windows build command.** Each `BuildSession` command MUST receive a fresh capability. Normal completion, build timeout, `BuildSession.cancel()`, and outer task cancellation MUST perform the command's bounded owner cleanup and drain before they complete. The old post-spawn Job methods and PID reopen path must be deleted after callers migrate.

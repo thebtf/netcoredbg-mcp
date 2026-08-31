@@ -1,13 +1,19 @@
 """Tests for build manager."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from netcoredbg_mcp.build.cleanup import (
+    NoOwnedAdapter,
+    OwnedAdapterCleanup,
+    PreBuildOwnerError,
+)
 from netcoredbg_mcp.build.manager import BuildManager
 from netcoredbg_mcp.build.policy import BuildCommand
 from netcoredbg_mcp.build.session import BuildSession
 from netcoredbg_mcp.build.state import BuildError, BuildState
+from netcoredbg_mcp.windows_process_owner import DrainStatus, OwnedProcessRef, OwnerDrainReceipt
 
 
 class TestBuildManagerSessions:
@@ -99,166 +105,125 @@ class TestBuildManagerStateListeners:
 
 
 class TestBuildManagerBuild:
-    """Tests for build execution through manager."""
+    """Tests for build delegation through the manager."""
 
     @pytest.mark.asyncio
     async def test_build_delegates_to_session(self, tmp_path):
-        """Test build delegates to session."""
         manager = BuildManager()
         project = tmp_path / "Test.csproj"
         project.touch()
+        session = manager.get_session(str(tmp_path))
+        expected = MagicMock(success=True)
+        session.build = AsyncMock(return_value=expected)
 
-        with patch("asyncio.create_subprocess_exec") as mock_exec:
-            mock_process = AsyncMock()
-            mock_process.pid = None  # Avoid job object code path
-            mock_process.returncode = 0
-            mock_process.stdout = AsyncMock()
-            mock_process.stdout.readline = AsyncMock(return_value=b"")
-            mock_process.stderr = AsyncMock()
-            mock_process.stderr.readline = AsyncMock(return_value=b"")
-            mock_process.wait = AsyncMock(return_value=0)
-            mock_exec.return_value = mock_process
+        result = await manager.build(str(tmp_path), str(project), BuildCommand.BUILD)
 
-            result = await manager.build(str(tmp_path), str(project), BuildCommand.BUILD)
-
-        assert result.success is True
+        assert result is expected
+        session.build.assert_awaited_once_with(
+            str(project), BuildCommand.BUILD, "Debug", None, 300.0
+        )
 
     @pytest.mark.asyncio
     async def test_build_with_relative_path(self, tmp_path):
-        """Test build with relative project path."""
         manager = BuildManager()
         project = tmp_path / "Test.csproj"
         project.touch()
+        session = manager.get_session(str(tmp_path))
+        expected = MagicMock(success=True)
+        session.build = AsyncMock(return_value=expected)
 
-        with patch("asyncio.create_subprocess_exec") as mock_exec:
-            mock_process = AsyncMock()
-            mock_process.pid = None  # Avoid job object code path
-            mock_process.returncode = 0
-            mock_process.stdout = AsyncMock()
-            mock_process.stdout.readline = AsyncMock(return_value=b"")
-            mock_process.stderr = AsyncMock()
-            mock_process.stderr.readline = AsyncMock(return_value=b"")
-            mock_process.wait = AsyncMock(return_value=0)
-            mock_exec.return_value = mock_process
+        result = await manager.build(str(tmp_path), "Test.csproj")
 
-            result = await manager.build(str(tmp_path), "Test.csproj")
-
-        assert result.success is True
+        assert result is expected
+        assert session.build.await_args.args[0] == str(project)
 
 
 class TestBuildManagerPreLaunchBuild:
-    """Tests for pre-launch build sequence."""
+    """Tests for the owner-gated pre-launch build sequence."""
 
     @pytest.mark.asyncio
     async def test_pre_launch_build_restore_and_build(self, tmp_path):
-        """Test pre-launch build runs restore then build."""
+        """A no-owner variant preserves restore followed by build."""
         manager = BuildManager()
         project = tmp_path / "Test.csproj"
         project.touch()
+        session = manager.get_session(str(tmp_path))
+        events: list[str] = []
 
-        commands = []
+        async def restore(*_args, **_kwargs):
+            events.append("restore")
+            return MagicMock(success=True)
 
-        async def capture_exec(*args, **kwargs):
-            commands.append(args)
-            mock_process = AsyncMock()
-            mock_process.pid = None  # Avoid job object code path
-            mock_process.returncode = 0
-            mock_process.stdout = AsyncMock()
-            mock_process.stdout.readline = AsyncMock(return_value=b"")
-            mock_process.stderr = AsyncMock()
-            mock_process.stderr.readline = AsyncMock(return_value=b"")
-            mock_process.wait = AsyncMock(return_value=0)
-            return mock_process
+        async def build(*_args, **_kwargs):
+            events.append("build")
+            return MagicMock(success=True)
 
-        with patch("asyncio.create_subprocess_exec", capture_exec):
-            result = await manager.pre_launch_build(str(tmp_path), str(project), restore_first=True)
+        session.restore = AsyncMock(side_effect=restore)
+        session.build = AsyncMock(side_effect=build)
+
+        result = await manager.pre_launch_build(
+            str(tmp_path), str(project), owner=NoOwnedAdapter(), restore_first=True
+        )
 
         assert result.success is True
-        # Filter to dotnet commands only (exclude cleanup taskkill calls)
-        dotnet_commands = [c for c in commands if c[0] == "dotnet"]
-        assert len(dotnet_commands) == 2
-        assert "restore" in dotnet_commands[0]
-        assert "build" in dotnet_commands[1]
+        assert events == ["restore", "build"]
 
     @pytest.mark.asyncio
     async def test_pre_launch_build_without_restore(self, tmp_path):
-        """Test pre-launch build without restore."""
+        """A no-owner variant may build without a restore."""
         manager = BuildManager()
         project = tmp_path / "Test.csproj"
         project.touch()
+        session = manager.get_session(str(tmp_path))
+        session.restore = AsyncMock()
+        session.build = AsyncMock(return_value=MagicMock(success=True))
 
-        commands = []
-
-        async def capture_exec(*args, **kwargs):
-            commands.append(args)
-            mock_process = AsyncMock()
-            mock_process.pid = None  # Avoid job object code path
-            mock_process.returncode = 0
-            mock_process.stdout = AsyncMock()
-            mock_process.stdout.readline = AsyncMock(return_value=b"")
-            mock_process.stderr = AsyncMock()
-            mock_process.stderr.readline = AsyncMock(return_value=b"")
-            mock_process.wait = AsyncMock(return_value=0)
-            return mock_process
-
-        with patch("asyncio.create_subprocess_exec", capture_exec):
-            result = await manager.pre_launch_build(
-                str(tmp_path), str(project), restore_first=False
-            )
+        result = await manager.pre_launch_build(
+            str(tmp_path), str(project), owner=NoOwnedAdapter(), restore_first=False
+        )
 
         assert result.success is True
-        # Filter to dotnet commands only (exclude cleanup taskkill calls)
-        dotnet_commands = [c for c in commands if c[0] == "dotnet"]
-        assert len(dotnet_commands) == 1
-        assert "build" in dotnet_commands[0]
+        session.restore.assert_not_awaited()
+        session.build.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_pre_launch_build_restore_failure_raises(self, tmp_path):
-        """Test pre-launch build raises on restore failure."""
+        """A restore failure remains a BuildError after the owner gate passes."""
         manager = BuildManager()
         project = tmp_path / "Test.csproj"
         project.touch()
+        session = manager.get_session(str(tmp_path))
+        session.restore = AsyncMock(
+            return_value=MagicMock(success=False, error_count=1, diagnostics=[], exit_code=1)
+        )
+        session.build = AsyncMock()
 
-        async def fail_restore(*args, **kwargs):
-            mock_process = AsyncMock()
-            mock_process.pid = None  # Avoid job object code path
-            # Fail on restore (dotnet restore), succeed on others (cleanup)
-            is_restore = args[0] == "dotnet" and "restore" in args
-            mock_process.returncode = 1 if is_restore else 0
-            mock_process.stdout = AsyncMock()
-            mock_process.stdout.readline = AsyncMock(return_value=b"")
-            mock_process.stderr = AsyncMock()
-            mock_process.stderr.readline = AsyncMock(return_value=b"")
-            mock_process.wait = AsyncMock(return_value=mock_process.returncode)
-            return mock_process
+        with pytest.raises(BuildError, match="Restore failed"):
+            await manager.pre_launch_build(str(tmp_path), str(project), owner=NoOwnedAdapter())
 
-        with patch("asyncio.create_subprocess_exec", fail_restore):
-            with pytest.raises(BuildError, match="Restore failed"):
-                await manager.pre_launch_build(str(tmp_path), str(project))
+        session.build.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_pre_launch_build_failure_raises(self, tmp_path):
-        """Test pre-launch build raises on build failure."""
+        """A build failure remains a BuildError after the owner gate passes."""
         manager = BuildManager()
         project = tmp_path / "Test.csproj"
         project.touch()
+        session = manager.get_session(str(tmp_path))
+        session.restore = AsyncMock(return_value=MagicMock(success=True))
+        session.build = AsyncMock(
+            return_value=MagicMock(success=False, error_count=1, diagnostics=[], exit_code=1)
+        )
 
-        async def fail_build(*args, **kwargs):
-            mock_process = AsyncMock()
-            mock_process.pid = None  # Avoid job object code path
-            # Fail on build (dotnet build), succeed on restore and cleanup
-            is_build = args[0] == "dotnet" and "build" in args
-            mock_process.returncode = 1 if is_build else 0
-            mock_process.stdout = AsyncMock()
-            mock_process.stdout.readline = AsyncMock(return_value=b"")
-            mock_process.stderr = AsyncMock()
-            mock_process.stderr.readline = AsyncMock(return_value=b"")
-            mock_process.wait = AsyncMock(return_value=mock_process.returncode)
-            return mock_process
+        with pytest.raises(BuildError, match="Build failed"):
+            await manager.pre_launch_build(str(tmp_path), str(project), owner=NoOwnedAdapter())
 
-        with patch("asyncio.create_subprocess_exec", fail_build):
-            with pytest.raises(BuildError, match="Build failed"):
-                await manager.pre_launch_build(str(tmp_path), str(project))
+    def test_pre_launch_build_requires_owner(self):
+        """The internal cutover leaves no optional owner route."""
+        import inspect
+
+        parameter = inspect.signature(BuildManager.pre_launch_build).parameters["owner"]
+        assert parameter.default is inspect.Parameter.empty
 
 
 class TestBuildManagerCancel:
@@ -376,26 +341,19 @@ class TestBuildManagerStatus:
         assert len(d["sessions"]) == 1
 
 
-class TestOwnerScopedPreBuildRedMatrix:
-    """RED coverage for pre-build's missing call-scoped owner boundary."""
+class TestOwnerScopedPreBuild:
+    """Behavior coverage for the explicit adapter-owner gate."""
 
     @pytest.mark.asyncio
-    async def test_o10_prebuild_for_owner_a_cannot_select_owner_b_or_sentinel(
-        self, tmp_path
-    ) -> None:
-        """O10: two owners and a tempting foreign sentinel must stay isolated.
-
-        The real manager/build delegation path is exercised.  The selector is
-        represented by a deterministic test fake because issuing the current
-        global ``taskkill`` against real same-image processes would itself be
-        unsafe.  Its ability to kill every identity demonstrates that the
-        current call carries no retained owner capability.
-        """
-
+    async def test_o10_prebuild_drains_only_captured_owner(self, tmp_path) -> None:
+        """O10: owner A drains before build while owner B stays untouched."""
         manager = BuildManager()
         project = tmp_path / "OwnerA.csproj"
         project.touch()
-        manager.get_session(str(tmp_path))._create_job_object = AsyncMock(return_value=None)
+        session = manager.get_session(str(tmp_path))
+        session.build = AsyncMock(return_value=MagicMock(success=True))
+        owner_a = OwnedProcessRef("owner-a", "generation-a", 44001)
+        owner_b = OwnedProcessRef("owner-b", "generation-b", 44002)
         liveness = {
             "owner-a-root": True,
             "owner-a-descendant": True,
@@ -403,31 +361,81 @@ class TestOwnerScopedPreBuildRedMatrix:
             "owner-b-descendant": True,
             "foreign-sentinel": True,
         }
+        drained: list[OwnedProcessRef] = []
 
-        async def global_selector(**_kwargs) -> int:
-            for identity in liveness:
-                liveness[identity] = False
-            return len(liveness)
+        async def drain(expected: OwnedProcessRef) -> OwnerDrainReceipt:
+            drained.append(expected)
+            liveness["owner-a-root"] = False
+            liveness["owner-a-descendant"] = False
+            return OwnerDrainReceipt(
+                owner=expected,
+                status=DrainStatus.DRAINED,
+                forced=False,
+                root_returncode=0,
+                active_processes=0,
+            )
 
-        async def completed_command(*_args, **_kwargs):
-            process = MagicMock()
-            process.pid = None
-            process.returncode = 0
-            process.stdout.readline = AsyncMock(return_value=b"")
-            process.stderr.readline = AsyncMock(return_value=b"")
-            process.wait = AsyncMock(return_value=0)
-            return process
+        result = await manager.pre_launch_build(
+            str(tmp_path),
+            str(project),
+            owner=OwnedAdapterCleanup(owner_a, drain),
+            restore_first=False,
+        )
 
-        with (
-            patch("netcoredbg_mcp.build.session.cleanup_for_build", global_selector),
-            patch("netcoredbg_mcp.build.session.asyncio.create_subprocess_exec", completed_command),
-        ):
-            await manager.pre_launch_build(str(tmp_path), str(project), restore_first=False)
-
+        assert result.success is True
+        assert drained == [owner_a]
+        assert owner_b not in drained
         assert liveness == {
             "owner-a-root": False,
             "owner-a-descendant": False,
             "owner-b-root": True,
             "owner-b-descendant": True,
             "foreign-sentinel": True,
-        }, "current pre-build passes no owner and lets a global selector kill foreign trees"
+        }
+        session.build.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "active_processes"),
+        [
+            (DrainStatus.STALE, None),
+            (DrainStatus.FAILED, None),
+            (DrainStatus.TIMED_OUT, 1),
+            (DrainStatus.DRAINED, 1),
+        ],
+    )
+    async def test_non_drained_owner_starts_no_restore_or_build(
+        self,
+        tmp_path,
+        status: DrainStatus,
+        active_processes: int | None,
+    ) -> None:
+        """A stale or nonzero drain receipt fails before any build command."""
+        manager = BuildManager()
+        project = tmp_path / "OwnerA.csproj"
+        project.touch()
+        session = manager.get_session(str(tmp_path))
+        session.restore = AsyncMock()
+        session.build = AsyncMock()
+        owner = OwnedProcessRef("owner-a", "generation-a", 44001)
+        receipt = OwnerDrainReceipt(
+            owner=owner,
+            status=status,
+            forced=False,
+            root_returncode=None,
+            active_processes=active_processes,
+        )
+
+        async def drain(_expected: OwnedProcessRef) -> OwnerDrainReceipt:
+            return receipt
+
+        with pytest.raises(PreBuildOwnerError) as error:
+            await manager.pre_launch_build(
+                str(tmp_path),
+                str(project),
+                owner=OwnedAdapterCleanup(owner, drain),
+            )
+
+        assert error.value.outcome.receipt is receipt
+        session.restore.assert_not_awaited()
+        session.build.assert_not_awaited()

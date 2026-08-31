@@ -13,6 +13,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from ..build import BuildManager, BuildResult
+from ..build.cleanup import NoOwnedAdapter, OwnedAdapterCleanup, PreBuildOwner
 from ..dap import DAPClient, DAPEvent, DAPResponse
 from ..dap.client import DapTransportTerminal, sanitize_terminal_tail
 from ..dap.events import (
@@ -45,6 +46,7 @@ from ..ui.foreground import (
 )
 from ..ui.temp_manager import SessionTempManager
 from ..utils.version import check_version_compatibility
+from ..windows_process_owner import DrainStatus, OwnedProcessRef, OwnerDrainReceipt
 from .hygiene import RuntimeHygieneService
 from .instrumentation import InstrumentationGroupService
 from .output_assertions import OutputAssertionService
@@ -1594,6 +1596,68 @@ class SessionManager:
 
             return result
 
+    def capture_prebuild_owner(self) -> PreBuildOwner:
+        """Capture one generation-bound adapter capability for a pre-build call."""
+        source_client = self._client
+        generation = self._active_dap_run
+        if generation is None:
+            return NoOwnedAdapter()
+
+        owner = source_client.adapter_owner
+        if owner is None or owner.generation != generation:
+            return NoOwnedAdapter()
+
+        # Capture all three fencing facts in this synchronous turn. They are not
+        # authority by themselves. The callback rechecks them before asking the
+        # DAP client to join its retained-owner finalizer.
+        async def drain(expected: OwnedProcessRef) -> OwnerDrainReceipt:
+            return await self._stop_owned_adapter(source_client, generation, expected)
+
+        return OwnedAdapterCleanup(owner=owner, _drain=drain)
+
+    async def _stop_owned_adapter(
+        self,
+        source_client: DAPClient,
+        generation: object,
+        expected: OwnedProcessRef,
+    ) -> OwnerDrainReceipt:
+        """Join the matching DAP finalizer or return a no-effect stale receipt."""
+        # Revalidate without awaiting first. An older capture must not disconnect,
+        # terminate, or mutate a newer generation when any captured fact differs.
+        if (
+            self._client is not source_client
+            or self._active_dap_run != generation
+            or source_client.adapter_owner != expected
+        ):
+            return OwnerDrainReceipt(
+                owner=expected,
+                status=DrainStatus.STALE,
+                forced=False,
+                root_returncode=None,
+                active_processes=None,
+            )
+
+        try:
+            receipt = await source_client.stop(expected_owner=expected)
+        except Exception as error:
+            logger.warning("Expected adapter owner drain failed: %s", error)
+            return OwnerDrainReceipt(
+                owner=expected,
+                status=DrainStatus.FAILED,
+                forced=False,
+                root_returncode=None,
+                active_processes=None,
+            )
+        if receipt is not None:
+            return receipt
+        return OwnerDrainReceipt(
+            owner=expected,
+            status=DrainStatus.FAILED,
+            forced=False,
+            root_returncode=None,
+            active_processes=None,
+        )
+
     async def pre_launch_build(
         self,
         project_file: str,
@@ -1626,9 +1690,11 @@ class SessionManager:
         validated_project = self.validate_path(project_file, must_exist=True)
 
         # Run pre-launch build
+        owner = self.capture_prebuild_owner()
         result = await self._build_manager.pre_launch_build(
             workspace_root=self._project_path,
             project_path=validated_project,
+            owner=owner,
             configuration=configuration,
             restore_first=restore_first,
             timeout=timeout,
@@ -1693,8 +1759,6 @@ class SessionManager:
             if self.is_active:
                 logger.info("[launch] stopping existing session before build")
                 await self.stop()
-                # Give processes time to release file handles
-                await asyncio.sleep(0.5)
 
             logger.info("[launch] phase 2/9: dotnet build")
             await self.pre_launch_build(
@@ -1849,6 +1913,11 @@ class SessionManager:
 
         stopping_generation = self._active_dap_run
         self._stopping_dap_run = stopping_generation
+        observed_pids = tuple(
+            pid
+            for pid in (self._client.adapter_pid, self._state.process_id)
+            if isinstance(pid, int) and pid > 0
+        )
         try:
             # The explicit-stop marker suppresses only this generation's terminal
             # publication. Join foreground work inside the `try` so cancellation
@@ -1861,7 +1930,11 @@ class SessionManager:
                     logger.warning("Error during disconnect: %s", error)
             await self._client.stop()
 
-            self._process_registry.cleanup_all()
+            # Registry records are observations only. Once the retained owner
+            # finalizer has completed, remove these exact status records without
+            # reopening a PID as termination authority.
+            for pid in observed_pids:
+                self._process_registry.unregister(pid)
 
             if self._session_id:
                 self._temp_manager.cleanup_session(self._session_id)

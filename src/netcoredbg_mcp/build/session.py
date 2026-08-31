@@ -5,7 +5,6 @@ IDLE → BUILDING → READY | FAILED | CANCELLED
      ↑__________________|
 
 Uses one private WindowsOwnedProcess capability per Windows command.
-Includes process cleanup before build to release file locks.
 """
 
 from __future__ import annotations
@@ -17,7 +16,6 @@ import time
 from collections.abc import Awaitable, Callable
 
 from ..windows_process_owner import DrainStatus, OwnerDrainReceipt, WindowsOwnedProcess
-from .cleanup import cleanup_for_build
 from .policy import BuildCommand, BuildPolicy
 from .state import BuildError, BuildResult, BuildState
 
@@ -309,8 +307,6 @@ class BuildSession:
     async def _run_build_with_retry(
         self,
         cmd: list[str],
-        project_path: str,
-        configuration: str,
         timeout: float,
         retry_on_lock: bool,
         output_callback: Callable[[str, str], Awaitable[None]] | None = None,
@@ -319,8 +315,6 @@ class BuildSession:
 
         Args:
             cmd: Build command
-            project_path: Project path
-            configuration: Build configuration
             timeout: Timeout in seconds
             retry_on_lock: Whether to retry on lock errors
 
@@ -351,11 +345,9 @@ class BuildSession:
                         f"Build failed due to file locks "
                         f"(attempt {attempt + 1}/{MAX_BUILD_RETRIES}), retrying..."
                     )
-                    # Run cleanup and retry
-                    await cleanup_for_build(
-                        project_path=project_path,
-                        configurations=[configuration],
-                    )
+                    # The failed command already drained its own capability.
+                    # A retry starts a fresh command capability without deriving
+                    # process authority from an observation.
                     await asyncio.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
                     continue
 
@@ -371,7 +363,6 @@ class BuildSession:
         configuration: str = "Debug",
         extra_args: list[str] | None = None,
         timeout: float = 300.0,
-        cleanup_before_build: bool = False,
         retry_on_lock: bool = True,
         output_callback: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> BuildResult:
@@ -383,7 +374,6 @@ class BuildSession:
             configuration: Build configuration
             extra_args: Additional arguments
             timeout: Timeout in seconds
-            cleanup_before_build: Kill processes in output directories first
             retry_on_lock: Retry build if file lock errors detected
 
         Returns:
@@ -400,15 +390,6 @@ class BuildSession:
             try:
                 # Validate project path
                 validated_path = self._policy.validate_project_path(project_path)
-
-                # Cleanup processes before build if requested
-                if cleanup_before_build:
-                    killed = await cleanup_for_build(
-                        project_path=validated_path,
-                        configurations=[configuration],
-                    )
-                    if killed > 0:
-                        logger.info(f"Pre-build cleanup: {killed} processes killed")
 
                 # For rebuild, run clean first
                 if command == BuildCommand.REBUILD:
@@ -447,8 +428,6 @@ class BuildSession:
 
                 exit_code, stdout, stderr = await self._run_build_with_retry(
                     cmd=cmd,
-                    project_path=validated_path,
-                    configuration=configuration,
                     timeout=timeout,
                     retry_on_lock=retry_on_lock,
                     output_callback=output_callback,

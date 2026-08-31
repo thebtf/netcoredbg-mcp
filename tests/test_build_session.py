@@ -588,23 +588,18 @@ class TestOwnerScopedBuildMatrix:
         assert owner.aclose_calls == 1
 
     @pytest.mark.asyncio
-    async def test_o11_lock_retry_never_falls_back_to_a_selector(self, tmp_path) -> None:
-        """O11 remains RED until T008 deletes selector cleanup from retries."""
-
+    async def test_o11_lock_retry_relaunches_only_the_build_command(self, tmp_path) -> None:
+        """O11: each lock retry relies on its new command capability."""
         session = BuildSession(workspace_root=str(tmp_path))
         session._run_command = AsyncMock(return_value=(1, "MSB3021 file in use", ""))
-        selector = AsyncMock(return_value=0)
+        delay = AsyncMock()
 
-        with (
-            patch("netcoredbg_mcp.build.session.cleanup_for_build", selector),
-            patch("netcoredbg_mcp.build.session.asyncio.sleep", AsyncMock()),
-        ):
+        with patch("netcoredbg_mcp.build.session.asyncio.sleep", delay):
             await session._run_build_with_retry(
                 ["dotnet", "build"],
-                project_path=str(tmp_path / "OwnerA.csproj"),
-                configuration="Debug",
                 timeout=0.1,
                 retry_on_lock=True,
             )
 
-        assert selector.await_count == 0, "current lock retry reaches selector cleanup"
+        assert session._run_command.await_count == 3
+        assert delay.await_count == 2

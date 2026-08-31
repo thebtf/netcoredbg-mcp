@@ -1683,3 +1683,34 @@ class TestOwnerScopedAdapterRedMatrix:
         assert active_counts_at_terminal == [0], (
             "current grace escalation kills the root but publishes with a live descendant"
         )
+
+    @pytest.mark.asyncio
+    async def test_expected_owner_mismatch_is_stale_and_match_joins_finalizer(self) -> None:
+        """Expected-owner drain refuses stale input and reuses the elected finalizer."""
+        process = TreeProcess(
+            pid=43010,
+            stdout=BlockingStream(),
+            stderr=BlockingStream(),
+        )
+        owner = OwnedTestProcess(process, "generation-a")
+        foreign = OwnedProcessRef("foreign", "generation-b", 43011)
+        client = DAPClient("/path/to/netcoredbg")
+
+        with (
+            patch(
+                "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch",
+                return_value=owner,
+            ),
+            patch("netcoredbg_mcp.dap.client.NATURAL_EXIT_TIMEOUT", 0.001),
+            patch("netcoredbg_mcp.dap.client.TERMINATE_TIMEOUT", 0.001),
+            patch("netcoredbg_mcp.dap.client.KILL_TIMEOUT", 0.1),
+        ):
+            await client.start(generation="generation-a")
+            stale = await client.stop(expected_owner=foreign)
+            receipt = await client.stop(expected_owner=owner.owner)
+
+        assert stale is not None and stale.status is DrainStatus.STALE
+        assert process.child_alive is False
+        assert receipt is not None
+        assert receipt.status is DrainStatus.DRAINED
+        assert receipt.owner == owner.owner
