@@ -2691,7 +2691,16 @@ def project_inventory(repository_root: Path) -> tuple[Path, list[Path], list[Pat
     ]
     if not solution_projects or any(not project.is_file() for project in solution_projects):
         raise RunnerError("Solution project inventory is incomplete.")
-    excluded_parts = {".git", ".agent", ".sonarqube", "bin", "obj", "fixtures", "test-app"}
+    excluded_parts = {
+        ".git",
+        ".agent",
+        ".sonarqube",
+        ".venv",
+        "bin",
+        "obj",
+        "fixtures",
+        "test-app",
+    }
     discovered_projects = {
         path.resolve()
         for path in iter_scanner_tree(repository_root, "*.csproj")

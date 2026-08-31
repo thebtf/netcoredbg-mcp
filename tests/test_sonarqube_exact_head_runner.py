@@ -520,9 +520,12 @@ class TestSonarqubeExactHeadRunner(TestCase):
             project = root / "host" / "App.csproj"
             fixture = root / "tests" / "fixtures" / "BrokenFixture.csproj"
             project.parent.mkdir(parents=True)
+            venv_project = root / ".venv" / "Lib" / "site-packages" / "Owned.csproj"
             fixture.parent.mkdir(parents=True)
+            venv_project.parent.mkdir(parents=True)
             project.write_text("<Project />", encoding="utf-8")
             fixture.write_text("<Project />", encoding="utf-8")
+            venv_project.write_text("<Project />", encoding="utf-8")
             (root / "netcoredbg-mcp.sln").write_text(
                 'Project("{guid}") = "App", "host\\App.csproj", "{id}"\nEndProject\n',
                 encoding="utf-8",
