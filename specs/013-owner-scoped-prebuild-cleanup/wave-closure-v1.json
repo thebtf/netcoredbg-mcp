@@ -4,15 +4,15 @@
   "closure_status": "EXACT_CLOSED",
   "release_intent": "none",
   "tracked_relative_path": "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json",
-  "accepted_candidate_sha": "209d151f9f9e0cba3fc5b6740196452611060a62",
+  "accepted_candidate_sha": "eeeb1b2655bcab6336b86068be5d205508d512ce",
   "closure_receipt": {
     "relative_path": "specs/013-owner-scoped-prebuild-cleanup/acceptance-receipt.md",
-    "sha256": "33c7073d600acad8a2fcdd4b2a3a6605369dfc9e6e8eba627a7dac74074df043"
+    "sha256": "74b709a54adbdb9fc28897cc0afc0e8fa4544c7b5a1ff8b6624bb36b8d386072"
   },
   "integration": {
-    "kind": "merged_pull_request",
+    "kind": "pull_request_head",
     "pull_request": 289,
     "head_ref": "work/issue450-owner-scoped-cleanup",
-    "head_sha": "209d151f9f9e0cba3fc5b6740196452611060a62"
+    "head_sha": "eeeb1b2655bcab6336b86068be5d205508d512ce"
   }
 }
