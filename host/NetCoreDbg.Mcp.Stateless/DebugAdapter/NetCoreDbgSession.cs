@@ -1480,17 +1480,17 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
                 CloseHandle(threadHandle);
                 threadHandle = IntPtr.Zero;
-                input = new FileStream(standardInput!, FileAccess.Write, bufferSize: 4096, isAsync: false);
+                input = new FileStream(standardInput, FileAccess.Write, bufferSize: 4096, isAsync: false);
                 standardInput = null;
-                output = new FileStream(standardOutput!, FileAccess.Read, bufferSize: 4096, isAsync: false);
+                output = new FileStream(standardOutput, FileAccess.Read, bufferSize: 4096, isAsync: false);
                 standardOutput = null;
-                error = new FileStream(standardError!, FileAccess.Read, bufferSize: 4096, isAsync: false);
+                error = new FileStream(standardError, FileAccess.Read, bufferSize: 4096, isAsync: false);
                 standardError = null;
                 CloseHandle(processHandle);
                 processHandle = IntPtr.Zero;
-                var ownership = new WindowsProcessTreeOwnership(job!);
+                var ownership = new WindowsProcessTreeOwnership(job);
                 job = null;
-                return new WindowsProcessTreeLaunch(process!, input!, output!, error!, ownership);
+                return new WindowsProcessTreeLaunch(process, input, output, error, ownership);
             }
             catch
             {
