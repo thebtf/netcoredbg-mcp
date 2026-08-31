@@ -632,9 +632,12 @@ class DAPClient:
             run.returncode = receipt.root_returncode
         if receipt.status is DrainStatus.DRAINED and receipt.active_processes == 0:
             run.process_exited = True
-            run.cleanup_outcome = (
-                DapCleanupOutcome.KILLED if receipt.forced else DapCleanupOutcome.NATURAL_EXIT
-            )
+            if receipt.root_was_forced is True:
+                run.cleanup_outcome = DapCleanupOutcome.KILLED
+            elif receipt.root_was_forced is False:
+                run.cleanup_outcome = DapCleanupOutcome.NATURAL_EXIT
+            else:
+                run.cleanup_outcome = DapCleanupOutcome.EXIT_UNOBSERVED
             return
         logger.error(
             "Owned adapter drain did not reach zero accounting: status=%s active=%s",

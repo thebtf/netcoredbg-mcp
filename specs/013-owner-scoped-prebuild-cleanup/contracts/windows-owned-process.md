@@ -34,6 +34,15 @@ class OwnerDrainReceipt:
     active_processes: int | None
     failure_stage: AdmissionStage | None = None
     winerror: int | None = None
+    root_was_forced: bool | None = None
+
+
+class AdmissionCleanupError(RuntimeError):
+    admission_stage: AdmissionStage | None
+    admission_winerror: int | None
+    cleanup_stage: AdmissionStage
+    cleanup_winerror: int | None
+    controlling_handles_retained: Literal[True]
 
 
 class WindowsOwnedProcess:
@@ -74,14 +83,16 @@ class WindowsOwnedProcess:
 
 ## Admission failures
 
-`ProcessAdmissionError` includes the stage and optional Windows error. It has these required effects:
+`ProcessAdmissionError` includes the stage and optional Windows error. If its
+cleanup cannot prove root exit, `AdmissionCleanupError` instead preserves both
+the admission fact and the cleanup failure fact. It has these required effects:
 
 | Failure stage | Resume permitted | Cleanup action |
 |---|---:|---|
 | `create_job` or `set_limits` | No | Close partial resources. No child exists. |
 | `create_process` | No | Close Job, attribute list, and pipe handles. |
-| `assign`, `verify`, or `wire_io` | No | Terminate the retained suspended root. Terminate the Job if admission may have happened. Wait within the bound and close handles. |
-| `resume` | No successful resume | Terminate the admitted Job, wait for accounting drain, close handles, and report failure. |
+| `assign`, `verify`, or `wire_io` | No | Terminate the retained suspended root, wait within the bound for its exit, then close controlling handles. A terminate error or wait failure raises `AdmissionCleanupError` and retains Job/process/thread handles. |
+| `resume` | No successful resume | Terminate the admitted Job, wait for root exit, then close handles and report the original admission error. If root termination fails, the admitted Job may be the fallback; a Job termination or bounded-wait failure raises `AdmissionCleanupError` and retains controlling handles. |
 
 The boundary never invokes asyncio process launch as a Windows fallback. It never requests breakaway to bypass a parent Job conflict.
 
@@ -91,9 +102,10 @@ The boundary never invokes asyncio process launch as a Windows fallback. It neve
 2. If the tree remains active after that bound, it calls `TerminateJobObject` once for this capability's Job.
 3. `force_and_drain()` may skip the grace wait only for a build-command cancellation or another explicit force policy that the caller already selected.
 4. A successful Windows receipt uses `status == DRAINED` and `active_processes == 0` from `JobObjectBasicAccountingInformation`.
-5. A query failure returns `FAILED`. A deadline result returns `TIMED_OUT`. Neither permits a pre-build continuation.
-6. Repeated callers join an in-flight operation. Only a literal-zero `DRAINED` receipt memoizes completion; a later explicit force call may retry a non-drained outcome.
-7. `aclose() -> OwnerDrainReceipt` returns the last truthful receipt before closing resources. `KILL_ON_JOB_CLOSE` is crash protection, not a substitute for a drain receipt.
+5. `forced` records Job-wide escalation. `root_was_forced` records the root outcome separately: `False` means no Job force included the root, `True` means the root was observed active immediately before a successful Job force, and `None` is a legacy or unavailable observation. DAP terminal cleanup maps from this root fact, never from `forced` alone.
+6. A query failure returns `FAILED`. A deadline result returns `TIMED_OUT`. Neither permits a pre-build continuation.
+7. Repeated callers join an in-flight operation. Only a literal-zero `DRAINED` receipt memoizes completion; a later explicit force call may retry a non-drained outcome.
+8. `aclose() -> OwnerDrainReceipt` returns the last truthful receipt before closing resources. `KILL_ON_JOB_CLOSE` is crash protection, not a substitute for a drain receipt.
 
 ## Adapter and pre-build integration
 
@@ -128,7 +140,7 @@ The implementation must not add any of the following to launch, drain, retry, pr
 
 ## Observability and privacy
 
-The boundary may report bounded owner ID, generation, root PID, admission stage, forced marker, known root return code, active-process count, drain status, selected bounds, and Windows error code. It must not emit raw handles, full environment values, command secrets, or unbounded stream content.
+The boundary may report bounded owner ID, generation, root PID, admission stage, cleanup failure stage, forced markers, known root return code, active-process count, drain status, selected bounds, and Windows error code. `AdmissionCleanupError` may report that controlling handles are retained, but never their values. It must not emit raw handles, full environment values, command secrets, or unbounded stream content.
 
 ## Contract proof
 

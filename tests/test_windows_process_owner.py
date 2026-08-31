@@ -22,6 +22,7 @@ from netcoredbg_mcp.build.manager import BuildManager
 from netcoredbg_mcp.dap.client import DAPClient, DapTransportTerminal
 from netcoredbg_mcp.session import SessionManager
 from netcoredbg_mcp.windows_process_owner import (
+    AdmissionCleanupError,
     AdmissionStage,
     DrainStatus,
     ProcessAdmissionError,
@@ -220,6 +221,29 @@ async def test_admission_orders_private_job_before_resume(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
+async def test_forced_job_drain_records_an_already_exited_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forced descendant drain must retain the root's prior natural exit fact."""
+
+    events: list[str] = []
+    api = _FakeApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    api._active_counts = [1, 0]
+
+    try:
+        receipt = await owner.drain_after_grace(grace_timeout=0.0, force_timeout=0.1)
+
+        assert receipt.status is DrainStatus.DRAINED
+        assert receipt.forced is True
+        assert receipt.root_returncode == 0
+        assert receipt.root_was_forced is False
+        assert events.count("terminate-job") == 1
+    finally:
+        await owner.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("api_kwargs", "stage"),
     [
@@ -262,6 +286,81 @@ async def test_resume_failure_terminates_admitted_job_and_closes_handles(
     assert events.count("resume-thread") == 1
     assert "terminate-job" in events
     assert "terminate-process" in events
+    assert {"close:11", "close:21", "close:31"}.issubset(events)
+
+
+@pytest.mark.asyncio
+async def test_pre_admission_terminate_failure_retains_controlling_handles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed root termination cannot release the only suspended-root handles."""
+
+    class RootTerminateFailureApi(_FakeApi):
+        def terminate_process(self, _process: int) -> None:
+            self.events.append("terminate-process")
+            raise _Win32CallError(AdmissionStage.DRAIN, 55)
+
+    events: list[str] = []
+    api = RootTerminateFailureApi(events, assign_ok=False)
+
+    with pytest.raises(AdmissionCleanupError) as raised:
+        await _launch(monkeypatch, api, events)
+
+    failure = raised.value
+    assert failure.admission_stage is AdmissionStage.ASSIGN
+    assert failure.cleanup_stage is AdmissionStage.DRAIN
+    assert failure.cleanup_winerror == 55
+    assert "wait-process" not in events
+    assert {"close:11", "close:21", "close:31"}.isdisjoint(events)
+
+
+@pytest.mark.asyncio
+async def test_pre_admission_wait_timeout_retains_controlling_handles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bounded wait timeout is not evidence that the suspended root exited."""
+
+    class WaitTimeoutApi(_FakeApi):
+        def wait_for_process(self, _process: int, _timeout_ms: int) -> bool:
+            self.events.append("wait-process")
+            return False
+
+    events: list[str] = []
+    api = WaitTimeoutApi(events, assign_ok=False)
+
+    with pytest.raises(AdmissionCleanupError) as raised:
+        await _launch(monkeypatch, api, events)
+
+    failure = raised.value
+    assert failure.admission_stage is AdmissionStage.ASSIGN
+    assert failure.cleanup_stage is AdmissionStage.DRAIN
+    assert failure.cleanup_winerror is None
+    assert events.index("terminate-process") < events.index("wait-process")
+    assert {"close:11", "close:21", "close:31"}.isdisjoint(events)
+
+
+@pytest.mark.asyncio
+async def test_admitted_job_fallback_confirms_root_before_releasing_handles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An admitted Job may recover root termination only after its root exit is observed."""
+
+    class RootTerminateFailureApi(_FakeApi):
+        def terminate_process(self, _process: int) -> None:
+            self.events.append("terminate-process")
+            raise _Win32CallError(AdmissionStage.DRAIN, 55)
+
+    events: list[str] = []
+    api = RootTerminateFailureApi(events, resume_ok=False)
+
+    with pytest.raises(ProcessAdmissionError) as raised:
+        await _launch(monkeypatch, api, events)
+
+    assert not isinstance(raised.value, AdmissionCleanupError)
+    assert raised.value.stage is AdmissionStage.RESUME
+    assert events.index("terminate-process") < events.index("terminate-job")
+    assert events.index("terminate-job") < events.index("wait-process")
+    assert events.index("wait-process") < events.index("close:31")
     assert {"close:11", "close:21", "close:31"}.issubset(events)
 
 

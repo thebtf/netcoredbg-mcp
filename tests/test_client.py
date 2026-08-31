@@ -89,6 +89,7 @@ class OwnedTestProcess:
             forced=forced,
             root_returncode=self._process.returncode,
             active_processes=0,
+            root_was_forced=forced,
         )
 
     async def aclose(self) -> None:
@@ -1687,6 +1688,51 @@ class TestOwnerScopedAdapterRedMatrix:
         assert active_counts_at_terminal == [0], (
             "current grace escalation kills the root but publishes with a live descendant"
         )
+
+    @pytest.mark.asyncio
+    async def test_forced_descendant_drain_preserves_natural_root_outcome(self) -> None:
+        """Forced Job cleanup of a descendant must not relabel an exited root."""
+
+        class NaturalRootForcedDescendantOwner(OwnedTestProcess):
+            async def drain_after_grace(
+                self,
+                *,
+                grace_timeout: float,
+                force_timeout: float,
+            ) -> OwnerDrainReceipt:
+                del grace_timeout, force_timeout
+                self._process.returncode = 0
+                self._process._root_exit.set()
+                self._process.child_alive = False
+                return OwnerDrainReceipt(
+                    owner=self.owner,
+                    status=DrainStatus.DRAINED,
+                    forced=True,
+                    root_returncode=0,
+                    active_processes=0,
+                    root_was_forced=False,
+                )
+
+        process = TreeProcess(
+            pid=43011,
+            stdout=BlockingStream(),
+            stderr=BlockingStream(),
+        )
+        owner = NaturalRootForcedDescendantOwner(process, "natural-root")
+        client = DAPClient("/path/to/netcoredbg")
+
+        with patch(
+            "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch",
+            return_value=owner,
+        ):
+            await client.start(generation="natural-root")
+            receipt = await client.stop(expected_owner=owner.owner)
+
+        run = client._run
+        assert receipt is not None
+        assert receipt.root_was_forced is False
+        assert run is not None and run.terminal is not None
+        assert run.terminal.cleanup_outcome is DapCleanupOutcome.NATURAL_EXIT
 
     @pytest.mark.asyncio
     async def test_expected_owner_mismatch_is_stale_and_match_joins_finalizer(self) -> None:

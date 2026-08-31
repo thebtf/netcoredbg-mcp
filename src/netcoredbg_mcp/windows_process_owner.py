@@ -69,7 +69,14 @@ class DrainStatus(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class OwnerDrainReceipt:
-    """Bounded evidence captured before the owner releases its handles."""
+    """Bounded evidence captured before the owner releases its handles.
+
+    ``forced`` records Job-wide escalation. ``root_was_forced`` separately
+    records whether that escalation still included the retained root, so a
+    forced descendant drain cannot relabel an already exited root as killed.
+    ``None`` preserves compatibility for receipts created before that fact was
+    available.
+    """
 
     owner: OwnedProcessRef
     status: DrainStatus
@@ -78,6 +85,7 @@ class OwnerDrainReceipt:
     active_processes: int | None
     failure_stage: AdmissionStage | None = None
     winerror: int | None = None
+    root_was_forced: bool | None = None
 
 
 class ProcessAdmissionError(RuntimeError):
@@ -95,6 +103,33 @@ class ProcessAdmissionError(RuntimeError):
         detail = f"Windows process admission failed at {stage.value}"
         if winerror is not None:
             detail = f"{detail} (winerror {winerror})"
+        super().__init__(detail)
+
+
+class AdmissionCleanupError(RuntimeError):
+    """Admission cleanup could not prove root exit, so controlling handles stay open."""
+
+    def __init__(
+        self,
+        *,
+        owner_id: str,
+        admission_stage: AdmissionStage | None,
+        admission_winerror: int | None,
+        cleanup_stage: AdmissionStage,
+        cleanup_winerror: int | None,
+    ) -> None:
+        self.owner_id = owner_id
+        self.admission_stage = admission_stage
+        self.admission_winerror = admission_winerror
+        self.cleanup_stage = cleanup_stage
+        self.cleanup_winerror = cleanup_winerror
+        self.controlling_handles_retained = True
+        detail = "Windows process admission cleanup did not confirm root exit"
+        if admission_stage is not None:
+            detail = f"{detail} after {admission_stage.value}"
+        detail = f"{detail} at {cleanup_stage.value}"
+        if cleanup_winerror is not None:
+            detail = f"{detail} (winerror {cleanup_winerror})"
         super().__init__(detail)
 
 
@@ -691,26 +726,38 @@ class WindowsOwnedProcess:
                 transports=transports,
             )
         except _Win32CallError as error:
-            await _cleanup_failed_admission(
-                api=api,
-                job_handle=job_handle,
-                process_handle=process_handle,
-                thread_handle=thread_handle,
-                pipe_ends=endpoints,
-                transports=transports,
-                admitted=admitted,
-            )
+            try:
+                await _cleanup_failed_admission(
+                    api=api,
+                    owner_id=owner_id,
+                    admission_stage=error.stage,
+                    admission_winerror=error.winerror,
+                    job_handle=job_handle,
+                    process_handle=process_handle,
+                    thread_handle=thread_handle,
+                    pipe_ends=endpoints,
+                    transports=transports,
+                    admitted=admitted,
+                )
+            except AdmissionCleanupError as cleanup_error:
+                raise cleanup_error from error
             raise ProcessAdmissionError(error.stage, owner_id, error.winerror) from error
-        except BaseException:
-            await _cleanup_failed_admission(
-                api=api,
-                job_handle=job_handle,
-                process_handle=process_handle,
-                thread_handle=thread_handle,
-                pipe_ends=endpoints,
-                transports=transports,
-                admitted=admitted,
-            )
+        except BaseException as error:
+            try:
+                await _cleanup_failed_admission(
+                    api=api,
+                    owner_id=owner_id,
+                    admission_stage=None,
+                    admission_winerror=None,
+                    job_handle=job_handle,
+                    process_handle=process_handle,
+                    thread_handle=thread_handle,
+                    pipe_ends=endpoints,
+                    transports=transports,
+                    admitted=admitted,
+                )
+            except AdmissionCleanupError as cleanup_error:
+                raise cleanup_error from error
             raise
 
     async def wait(self) -> int:
@@ -739,6 +786,23 @@ class WindowsOwnedProcess:
         if self._job_handle is None:
             raise _Win32CallError(AdmissionStage.DRAIN, None)
         return self._api.active_processes(self._job_handle)
+
+    def _root_is_active_before_force(self) -> bool | None:
+        """Observe whether the retained root is still active before Job force."""
+
+        if self._returncode is not None:
+            return False
+        handle = self._process_handle
+        if handle is None:
+            return None
+        try:
+            returncode = self._api.exit_code(handle)
+        except _Win32CallError:
+            return None
+        if returncode is None:
+            return True
+        self._returncode = returncode
+        return False
 
     async def drain_after_grace(
         self,
@@ -774,7 +838,11 @@ class WindowsOwnedProcess:
         return await asyncio.shield(task)
 
     async def _drain(self, grace_timeout: float, force_timeout: float) -> OwnerDrainReceipt:
-        graceful = await self._wait_for_zero(grace_timeout, forced=False)
+        graceful = await self._wait_for_zero(
+            grace_timeout,
+            forced=False,
+            root_was_forced=False,
+        )
         if graceful.status is DrainStatus.DRAINED:
             self._drain_receipt = graceful
             return graceful
@@ -791,6 +859,7 @@ class WindowsOwnedProcess:
             )
             self._drain_receipt = receipt
             return receipt
+        root_was_forced = self._root_is_active_before_force()
         try:
             self._api.terminate_job(self._job_handle)
         except _Win32CallError as error:
@@ -803,11 +872,21 @@ class WindowsOwnedProcess:
             )
             self._drain_receipt = receipt
             return receipt
-        forced = await self._wait_for_zero(force_timeout, forced=True)
+        forced = await self._wait_for_zero(
+            force_timeout,
+            forced=True,
+            root_was_forced=root_was_forced,
+        )
         self._drain_receipt = forced
         return forced
 
-    async def _wait_for_zero(self, timeout: float, *, forced: bool) -> OwnerDrainReceipt:
+    async def _wait_for_zero(
+        self,
+        timeout: float,
+        *,
+        forced: bool,
+        root_was_forced: bool | None = None,
+    ) -> OwnerDrainReceipt:
         deadline = time.monotonic() + max(timeout, 0.0)
         while True:
             try:
@@ -819,6 +898,7 @@ class WindowsOwnedProcess:
                     active_processes=None,
                     failure_stage=error.stage,
                     winerror=error.winerror,
+                    root_was_forced=root_was_forced,
                 )
             if active_processes == 0:
                 try:
@@ -826,13 +906,14 @@ class WindowsOwnedProcess:
                 except (_Win32CallError, RuntimeError):
                     pass
                 # Job accounting, not root exit or KILL_ON_JOB_CLOSE, is the
-                # success fact.  A DRAINED receipt always records literal zero.
+                # success fact. A DRAINED receipt always records literal zero.
                 return self._receipt(
                     status=DrainStatus.DRAINED,
                     forced=forced,
                     active_processes=0,
                     failure_stage=None,
                     winerror=None,
+                    root_was_forced=root_was_forced,
                 )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -842,6 +923,7 @@ class WindowsOwnedProcess:
                     active_processes=active_processes,
                     failure_stage=None,
                     winerror=None,
+                    root_was_forced=root_was_forced,
                 )
             await asyncio.sleep(min(_ACCOUNTING_POLL_SECONDS, remaining))
 
@@ -853,6 +935,7 @@ class WindowsOwnedProcess:
         active_processes: int | None,
         failure_stage: AdmissionStage | None,
         winerror: int | None,
+        root_was_forced: bool | None = None,
     ) -> OwnerDrainReceipt:
         return OwnerDrainReceipt(
             owner=self.owner,
@@ -862,6 +945,7 @@ class WindowsOwnedProcess:
             active_processes=active_processes,
             failure_stage=failure_stage,
             winerror=winerror,
+            root_was_forced=root_was_forced,
         )
 
     async def aclose(self) -> OwnerDrainReceipt:
@@ -902,6 +986,9 @@ class WindowsOwnedProcess:
 async def _cleanup_failed_admission(
     *,
     api: _WindowsApi,
+    owner_id: str,
+    admission_stage: AdmissionStage | None,
+    admission_winerror: int | None,
     job_handle: int | None,
     process_handle: int | None,
     thread_handle: int | None,
@@ -909,39 +996,52 @@ async def _cleanup_failed_admission(
     transports: tuple[asyncio.BaseTransport, ...],
     admitted: bool,
 ) -> None:
-    """Fail closed before resume and release every retained direct resource."""
+    """Release admission resources only after the retained root exit is confirmed."""
+
+    def cleanup_failure(error: _Win32CallError | None = None) -> AdmissionCleanupError:
+        return AdmissionCleanupError(
+            owner_id=owner_id,
+            admission_stage=admission_stage,
+            admission_winerror=admission_winerror,
+            cleanup_stage=AdmissionStage.DRAIN if error is None else error.stage,
+            cleanup_winerror=None if error is None else error.winerror,
+        )
 
     for transport in transports:
         transport.close()
     if pipe_ends is not None:
         pipe_ends.close_unwired(api)
-    if process_handle is not None:
-        _close_or_ignore(lambda: api.terminate_process(process_handle))
-    if admitted and job_handle is not None:
-        _close_or_ignore(lambda: api.terminate_job(job_handle))
-    if process_handle is not None:
-        await _wait_or_ignore(api, process_handle)
-    if thread_handle is not None:
-        _close_ignoring_errors(api, thread_handle)
-    if process_handle is not None:
-        _close_ignoring_errors(api, process_handle)
-    if job_handle is not None:
-        _close_ignoring_errors(api, job_handle)
+    if process_handle is None:
+        if thread_handle is not None:
+            _close_ignoring_errors(api, thread_handle)
+        if job_handle is not None:
+            _close_ignoring_errors(api, job_handle)
+        return
 
-
-def _close_or_ignore(action: Any) -> None:
     try:
-        action()
-    except _Win32CallError:
-        pass
-
-
-async def _wait_or_ignore(api: _WindowsApi, process_handle: int) -> None:
+        api.terminate_process(process_handle)
+    except _Win32CallError as error:
+        if not admitted or job_handle is None:
+            raise cleanup_failure(error)
+    if admitted:
+        if job_handle is None:
+            raise cleanup_failure()
+        try:
+            api.terminate_job(job_handle)
+        except _Win32CallError as error:
+            raise cleanup_failure(error)
     try:
-        await asyncio.to_thread(
+        root_exited = await asyncio.to_thread(
             api.wait_for_process,
             process_handle,
             int(_ADMISSION_CLEANUP_TIMEOUT * 1000),
         )
-    except _Win32CallError:
-        pass
+    except _Win32CallError as error:
+        raise cleanup_failure(error)
+    if not root_exited:
+        raise cleanup_failure()
+    if thread_handle is not None:
+        _close_ignoring_errors(api, thread_handle)
+    _close_ignoring_errors(api, process_handle)
+    if job_handle is not None:
+        _close_ignoring_errors(api, job_handle)
