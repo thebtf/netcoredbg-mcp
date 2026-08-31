@@ -29,6 +29,7 @@ jobs:
     permissions:
       actions: read
       contents: read
+      pull-requests: read
     env:
       A1_PREVIEW_VERSION: ${{ inputs.preview_version }}
       A1_PREVIEW_TAG: ${{ inputs.preview_tag }}
@@ -74,6 +75,7 @@ jobs:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_READ_TOKEN: ${{ secrets.SONAR_READ_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
           $scanWorktree = Join-Path $env:RUNNER_TEMP "stateless-preview-post-merge-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
@@ -85,6 +87,20 @@ jobs:
           try {
             Push-Location $scanWorktree
             $entered = $true
+            @'
+            from pathlib import Path
+
+            from scripts import run_sonarqube_exact_head as runner
+
+            environment = runner.scrub_sonar_environment(runner.process_environment())
+            context = runner.git_context(Path.cwd(), environment)
+            entry = runner.resolve_wave2_entry(context, environment)
+            runner.verify_wave2_entry(entry, context, environment)
+            runner.assert_post_merge_target(context, environment)
+            '@ | python -
+            if ($LASTEXITCODE -ne 0) {
+              throw "Tracked Wave2 coverage entry verification failed."
+            }
             python scripts/run_sonarqube_exact_head.py --role post-merge
             if ($LASTEXITCODE -ne 0) {
               throw "Post-merge exact-head receipt production failed."

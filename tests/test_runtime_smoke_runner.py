@@ -705,6 +705,30 @@ async def test_ui_invoke_preserves_non_selector_backend_exception() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ui_operation_adapters_disconnects_owned_backend() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.disconnected = False
+
+        async def disconnect(self) -> None:
+            self.disconnected = True
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.disconnect"]()
+
+    assert result == {
+        "status": "PASS",
+        "reason": "ui backend disconnected",
+        "backend": "FakeBackend",
+    }
+    assert backend.disconnected is True
+
+
+@pytest.mark.asyncio
 async def test_ui_operation_adapters_click_uses_invoke_element_with_bounded_evidence() -> None:
     class FakeBackend:
         def __init__(self) -> None:

@@ -7,6 +7,7 @@ using Xunit;
 namespace NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
 
 [Collection(NetCoreDbgSessionProcessCollection.Name)]
+[Trait("Coverage", "Exclude")]
 public sealed class GetThreadsContractTests
 {
     private const string Tool = "get_threads";
@@ -40,6 +41,7 @@ public sealed class GetThreadsContractTests
                 "get_debug_state",
                 "stop_debug",
                 Tool,
+                "get_call_stack",
                 "get_ui_probe_capabilities",
                 "capture_visual_evidence",
                 "read_capture_artifact",

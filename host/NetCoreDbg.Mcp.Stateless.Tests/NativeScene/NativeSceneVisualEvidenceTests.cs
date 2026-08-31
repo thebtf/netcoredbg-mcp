@@ -9,6 +9,7 @@ using Xunit;
 namespace NetCoreDbg.Mcp.Stateless.Tests.NativeScene;
 
 [Collection(NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter.NetCoreDbgSessionProcessCollection.Name)]
+[Trait("Coverage", "Exclude")]
 public sealed class NativeSceneVisualEvidenceTests
 {
     private const string ActiveProtocolVersion = "native-scene-probe/1";

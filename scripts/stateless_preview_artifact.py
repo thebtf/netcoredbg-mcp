@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -24,6 +25,10 @@ _TRUSTED_WORKFLOW_PATH = ".github/workflows/stateless-preview.yml"
 _TRUSTED_BUILD_MODE = "build"
 _TRUSTED_BUILD_EVENT = "workflow_dispatch"
 _PREVIEW_EXECUTABLE = "netcoredbg-mcp-stateless-preview.exe"
+_EXACT_HEAD_RUNNER_PATH = Path(__file__).with_name("run_sonarqube_exact_head.py")
+_EXACT_HEAD_RECEIPT_SCHEMA_VERSION = 3
+_POST_MERGE_RELEASE_INTENT = "v0.23.11"
+
 _POLICY_AUTHORITY_PATHS = (
     "AGENTS.md",
     "CONTRIBUTING.md",
@@ -1000,23 +1005,38 @@ def _load_json_object(raw: bytes, name: str) -> dict[str, Any]:
     return result
 
 
+def _load_exact_head_receipt_validator() -> Callable[[Mapping[str, Any]], None]:
+    specification = importlib.util.spec_from_file_location(
+        "_stateless_preview_exact_head_runner", _EXACT_HEAD_RUNNER_PATH
+    )
+    if specification is None or specification.loader is None:
+        _refuse("exact-head receipt authority is unavailable")
+    runner = importlib.util.module_from_spec(specification)
+    sys.modules[specification.name] = runner
+    try:
+        specification.loader.exec_module(runner)
+    except Exception:
+        _refuse("exact-head receipt authority is unavailable")
+    validator = getattr(runner, "validate_exact_head_receipt_v3", None)
+    if not callable(validator):
+        _refuse("exact-head receipt authority is unavailable")
+    return validator
+
+
 def _validate_post_merge_scan_receipt(receipt: Mapping[str, Any], source_commit: str) -> None:
-    quality_gate = receipt.get("quality_gate")
-    worktree = receipt.get("worktree")
+    validator = _load_exact_head_receipt_validator()
+    try:
+        validator(receipt)
+    except Exception:
+        _refuse("post-merge exact-head scan receipt is not trusted")
+    identity = receipt.get("identity")
     if (
-        type(receipt.get("schema_version")) is not int
-        or receipt.get("schema_version") != 2
-        or receipt.get("role") != "post-merge"
+        receipt.get("role") != "post-merge"
         or receipt.get("outcome") != "PASS"
-        or receipt.get("project_key") != _SONAR_PROJECT_KEY
-        or receipt.get("analysis_xml_project_key") != _SONAR_PROJECT_KEY
-        or receipt.get("captured_head") != source_commit
-        or receipt.get("post_scan_head") != source_commit
-        or not isinstance(quality_gate, Mapping)
-        or quality_gate.get("status") != "OK"
-        or not isinstance(worktree, Mapping)
-        or worktree.get("detached") is not True
-        or worktree.get("linked") is not True
+        or receipt.get("release_intent") != _POST_MERGE_RELEASE_INTENT
+        or not isinstance(identity, Mapping)
+        or identity.get("captured_head") != source_commit
+        or identity.get("project_key") != _SONAR_PROJECT_KEY
     ):
         _refuse("post-merge exact-head scan receipt is not trusted")
 
@@ -1058,7 +1078,7 @@ def produce_post_merge_exact_head_receipt(
         "source_runner": {
             "script": "scripts/run_sonarqube_exact_head.py",
             "role": "post-merge",
-            "receipt_schema_version": 2,
+            "receipt_schema_version": _EXACT_HEAD_RECEIPT_SCHEMA_VERSION,
             "project_key": _SONAR_PROJECT_KEY,
             "receipt_sha256": _sha256_bytes(raw_receipt),
         },
@@ -1148,12 +1168,20 @@ def _validate_produced_post_merge_record(
         or source_runner.get("script") != "scripts/run_sonarqube_exact_head.py"
         or source_runner.get("role") != "post-merge"
         or type(source_runner.get("receipt_schema_version")) is not int
-        or source_runner.get("receipt_schema_version") != 2
+        or source_runner.get("receipt_schema_version") != _EXACT_HEAD_RECEIPT_SCHEMA_VERSION
         or source_runner.get("project_key") != _SONAR_PROJECT_KEY
     ):
         _refuse("post-merge receipt record is not trusted")
     _expect_sha256(source_runner["receipt_sha256"], "post-merge receipt source hash")
     _expect_datetime(record.get("recorded_at"), "post-merge receipt recorded_at")
+
+
+def validate_post_merge_receipt_record(
+    record: Mapping[str, Any], source: Mapping[str, Any]
+) -> None:
+    """Validate the sealed post-merge receipt wrapper against its source."""
+
+    _validate_produced_post_merge_record(record, source)
 
 
 def seal_build_records(
@@ -1843,6 +1871,7 @@ __all__ = [
     "seal_artifact_consumer_proof",
     "seal_build_records",
     "validate_artifact_consumer_proof_reference",
+    "validate_post_merge_receipt_record",
     "verify_and_extract_retained_artifact",
     "verify_retained_artifact",
     "verify_retained_artifact_inputs",

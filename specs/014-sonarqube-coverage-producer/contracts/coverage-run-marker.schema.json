@@ -1,0 +1,433 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thebtf.github.io/netcoredbg-mcp/schemas/coverage-run-marker-v1.json",
+  "title": "Exact-head coverage run marker",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "captured_head",
+    "project_key",
+    "tool_versions",
+    "wave2_entry",
+    "final_reports",
+    "dotnet_producers",
+    "normalizer",
+    "producer_sha256",
+    "coveragerc_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "run_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "captured_head": {
+      "$ref": "#/$defs/sha40"
+    },
+    "project_key": {
+      "const": "thebtf_netcoredbg_mcp"
+    },
+    "wave2_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_kind",
+        "tracked_relative_path",
+        "source_sha256",
+        "accepted_candidate_sha",
+        "pull_request_head_ref",
+        "pull_request_head_sha",
+        "artifact_commit_sha",
+        "merge_commit_sha",
+        "integrated_tree_sha",
+        "observed_main_sha",
+        "resolved_relative_path"
+      ],
+      "properties": {
+        "source_kind": {
+          "const": "pull_request_head"
+        },
+        "tracked_relative_path": {
+          "const": "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json"
+        },
+        "source_sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "SHA-256 over the tracked entry's canonical Git blob bytes."
+        },
+        "accepted_candidate_sha": {
+          "$ref": "#/$defs/sha40"
+        },
+        "pull_request_head_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pull_request_head_sha": {
+          "$ref": "#/$defs/sha40"
+        },
+        "artifact_commit_sha": {
+          "$ref": "#/$defs/sha40",
+          "description": "Current-history commit for the tracked entry path; it is not a PR-head lineage field."
+        },
+        "merge_commit_sha": {
+          "$ref": "#/$defs/sha40",
+          "description": "Merge commit named by fail-closed first-party PR evidence."
+        },
+        "integrated_tree_sha": {
+          "$ref": "#/$defs/sha40",
+          "description": "Tree ID shared by the actual PR head and merge commit after equality proof."
+        },
+        "observed_main_sha": {
+          "$ref": "#/$defs/sha40",
+          "description": "Observed origin/main commit that contains the resolved merge evidence."
+        },
+        "resolved_relative_path": {
+          "type": "string",
+          "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/wave2-entry\\.json$"
+        }
+      }
+    },
+    "tool_versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "coverage_py",
+        "coverlet_msbuild",
+        "test_sdk"
+      ],
+      "properties": {
+        "coverage_py": {
+          "const": "7.15.4"
+        },
+        "coverlet_msbuild": {
+          "const": "10.0.1"
+        },
+        "test_sdk": {
+          "const": "17.12.0"
+        }
+      }
+    },
+    "final_reports": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/python_final_report"
+        },
+        {
+          "$ref": "#/$defs/dotnet_final_report"
+        }
+      ],
+      "items": false
+    },
+    "dotnet_producers": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/codesearch_core_producer"
+        },
+        {
+          "$ref": "#/$defs/host_producer"
+        },
+        {
+          "$ref": "#/$defs/stateless_preview_producer"
+        },
+        {
+          "$ref": "#/$defs/stateless_producer"
+        },
+        {
+          "$ref": "#/$defs/host_prompts_producer"
+        }
+      ],
+      "items": false
+    },
+    "normalizer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "output_report_id",
+        "input_order"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "cobertura-merge-normalize-v1"
+        },
+        "output_report_id": {
+          "const": "dotnet"
+        },
+        "input_order": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "prefixItems": [
+            {
+              "const": "codesearch-core"
+            },
+            {
+              "const": "host"
+            },
+            {
+              "const": "stateless-preview"
+            },
+            {
+              "const": "stateless"
+            },
+            {
+              "const": "host-prompts"
+            }
+          ],
+          "items": false
+        }
+      }
+    },
+    "producer_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "coveragerc_sha256": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "$defs": {
+    "sha40": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "relative_path": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+    },
+    "final_report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "language",
+        "format",
+        "relative_path"
+      ],
+      "properties": {
+        "id": {
+          "enum": [
+            "python",
+            "dotnet"
+          ]
+        },
+        "language": {
+          "enum": [
+            "python",
+            "dotnet"
+          ]
+        },
+        "format": {
+          "const": "cobertura"
+        },
+        "relative_path": {
+          "$ref": "#/$defs/relative_path"
+        }
+      }
+    },
+    "python_final_report": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/final_report"
+        },
+        {
+          "properties": {
+            "id": {
+              "const": "python"
+            },
+            "language": {
+              "const": "python"
+            },
+            "relative_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/python/coverage\\.xml$"
+            }
+          }
+        }
+      ]
+    },
+    "dotnet_final_report": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/final_report"
+        },
+        {
+          "properties": {
+            "id": {
+              "const": "dotnet"
+            },
+            "language": {
+              "const": "dotnet"
+            },
+            "relative_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/coverage\\.xml$"
+            }
+          }
+        }
+      ]
+    },
+    "dotnet_producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "project",
+        "raw_cobertura_path",
+        "include_directory"
+      ],
+      "properties": {
+        "id": {
+          "enum": [
+            "codesearch-core",
+            "host",
+            "stateless-preview",
+            "stateless",
+            "host-prompts"
+          ]
+        },
+        "project": {
+          "$ref": "#/$defs/relative_path"
+        },
+        "raw_cobertura_path": {
+          "$ref": "#/$defs/relative_path"
+        },
+        "include_directory": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/relative_path"
+            }
+          ]
+        }
+      }
+    },
+    "codesearch_core_producer": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/dotnet_producer"
+        },
+        {
+          "properties": {
+            "id": {
+              "const": "codesearch-core"
+            },
+            "project": {
+              "const": "host/NetCoreDbg.Mcp.CodeSearch.Core.Tests/NetCoreDbg.Mcp.CodeSearch.Core.Tests.csproj"
+            },
+            "raw_cobertura_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/inputs/codesearch-core/coverage\\.cobertura\\.xml$"
+            },
+            "include_directory": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    },
+    "host_producer": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/dotnet_producer"
+        },
+        {
+          "properties": {
+            "id": {
+              "const": "host"
+            },
+            "project": {
+              "const": "host/NetCoreDbg.Mcp.Host.Tests/NetCoreDbg.Mcp.Host.Tests.csproj"
+            },
+            "raw_cobertura_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/inputs/host/coverage\\.cobertura\\.xml$"
+            },
+            "include_directory": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    },
+    "stateless_preview_producer": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/dotnet_producer"
+        },
+        {
+          "properties": {
+            "id": {
+              "const": "stateless-preview"
+            },
+            "project": {
+              "const": "host/NetCoreDbg.Mcp.Stateless.Preview.Tests/NetCoreDbg.Mcp.Stateless.Preview.Tests.csproj"
+            },
+            "raw_cobertura_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/inputs/stateless-preview/coverage\\.cobertura\\.xml$"
+            },
+            "include_directory": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    },
+    "stateless_producer": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/dotnet_producer"
+        },
+        {
+          "properties": {
+            "id": {
+              "const": "stateless"
+            },
+            "project": {
+              "const": "host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj"
+            },
+            "raw_cobertura_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/inputs/stateless/coverage\\.cobertura\\.xml$"
+            },
+            "include_directory": {
+              "const": "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0"
+            }
+          }
+        }
+      ]
+    },
+    "host_prompts_producer": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/dotnet_producer"
+        },
+        {
+          "properties": {
+            "id": {
+              "const": "host-prompts"
+            },
+            "project": {
+              "const": "tests/dotnet/NetCoreDbg.Mcp.Host.PromptTests/NetCoreDbg.Mcp.Host.PromptTests.csproj"
+            },
+            "raw_cobertura_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/inputs/host-prompts/coverage\\.cobertura\\.xml$"
+            },
+            "include_directory": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -567,13 +567,15 @@ internal static class Program
                 return NotFound();
             }
 
-            if (!_sessions.TryGetValue(sessionId!, out var session))
+            if (!_sessions.TryRemove(sessionId!, out var session))
             {
                 await RemoveNativeSceneBindingAsync(sessionId!).ConfigureAwait(false);
                 return NotFound();
             }
 
-            if (_slots.TryGetValue(sessionId!, out var slot))
+            _slots.TryRemove(sessionId!, out var slot);
+            await RemoveNativeSceneBindingAsync(sessionId!).ConfigureAwait(false);
+            if (slot is not null)
             {
                 try
                 {
@@ -586,13 +588,6 @@ internal static class Program
                 }
             }
 
-            if (!_sessions.TryRemove(sessionId!, out session))
-            {
-                await RemoveNativeSceneBindingAsync(sessionId!).ConfigureAwait(false);
-                return NotFound();
-            }
-
-            await RemoveNativeSceneBindingAsync(sessionId!).ConfigureAwait(false);
             try
             {
                 await session.StopAsync(cancellationToken).ConfigureAwait(false);

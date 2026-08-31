@@ -8,6 +8,7 @@ namespace NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
 
 
 [Collection(NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter.NetCoreDbgSessionProcessCollection.Name)]
+[Trait("Coverage", "Exclude")]
 public sealed class ModernProtocolContractTests
 {
     private const string ValidProgram = "controlled-program.dll";

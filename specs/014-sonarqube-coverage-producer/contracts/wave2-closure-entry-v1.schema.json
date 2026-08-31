@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thebtf.github.io/netcoredbg-mcp/schemas/wave2-closure-entry-v1.json",
+  "title": "Tracked Wave-2 PR-head closure evidence for Wave 3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "wave",
+    "closure_status",
+    "release_intent",
+    "tracked_relative_path",
+    "accepted_candidate_sha",
+    "closure_receipt",
+    "integration"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "wave": {
+      "const": 2
+    },
+    "closure_status": {
+      "const": "EXACT_CLOSED"
+    },
+    "release_intent": {
+      "const": "none"
+    },
+    "tracked_relative_path": {
+      "const": "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json"
+    },
+    "accepted_candidate_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "closure_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "relative_path",
+        "sha256"
+      ],
+      "properties": {
+        "relative_path": {
+          "const": "specs/013-owner-scoped-prebuild-cleanup/acceptance-receipt.md"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "integration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "pull_request",
+        "head_ref",
+        "head_sha"
+      ],
+      "properties": {
+        "kind": {
+          "const": "pull_request_head"
+        },
+        "pull_request": {
+          "const": 289
+        },
+        "head_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "head_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      }
+    }
+  }
+}

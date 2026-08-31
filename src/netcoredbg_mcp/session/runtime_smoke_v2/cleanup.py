@@ -59,6 +59,9 @@ async def run_cleanup(
                 )
                 if str(result.get("status", "PASS")) == "PASS":
                     isolated_profiles_torn_down += 1
+            elif kind == "ui.disconnect":
+                attempted.append("ui.disconnect")
+                result = await context.call_adapter("ui.disconnect")
             elif kind == "debug.stop":
                 mode = str(step.get("mode") or "graceful")
                 attempted.append(f"debug.stop:{mode}")

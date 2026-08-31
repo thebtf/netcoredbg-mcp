@@ -8,6 +8,7 @@ using Xunit;
 namespace NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
 
 [Collection(NetCoreDbgSessionProcessCollection.Name)]
+[Trait("Coverage", "Exclude")]
 public sealed class GetCallStackContractTests
 {
     private const string Tool = "get_call_stack";

@@ -16,6 +16,7 @@ namespace NetCoreDbg.Mcp.Stateless.Tests.NativeScene;
 /// prove stability without wall-clock delays or a live UI target.
 /// </summary>
 [Collection(NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter.NetCoreDbgSessionProcessCollection.Name)]
+[Trait("Coverage", "Exclude")]
 public sealed class NativeSceneStabilityTests
 {
     private static readonly DateTimeOffset Start = new(2026, 8, 19, 12, 0, 0, TimeSpan.Zero);

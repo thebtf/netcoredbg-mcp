@@ -55,6 +55,20 @@ def ui_operation_adapters(
             "backend": type(backend).__name__,
         }
 
+    async def disconnect(**_: Any) -> dict[str, Any]:
+        backend = await _backend_or_blocked(observation_provider)
+        if isinstance(backend, dict):
+            return backend
+        disconnect_backend = getattr(backend, "disconnect", None)
+        if not callable(disconnect_backend):
+            return _adapter_blocked("ui.disconnect", "UI backend has no disconnect operation")
+        await disconnect_backend()
+        return {
+            "status": "PASS",
+            "reason": "ui backend disconnected",
+            "backend": type(backend).__name__,
+        }
+
     async def grid_snapshot(**args: Any) -> dict[str, Any]:
         backend = await _backend_or_blocked(observation_provider)
         if isinstance(backend, dict):
@@ -1038,6 +1052,7 @@ def ui_operation_adapters(
 
     adapters: OperationAdapterMap = {
         "ui.ensure_connected": ensure_connected,
+        "ui.disconnect": disconnect,
         "ui.grid.get_state": grid_get_state,
         "ui.grid.snapshot": grid_snapshot,
         "ui.grid.viewport": grid_viewport,

@@ -36,6 +36,10 @@ class CleanupSmokeSession:
         self.calls.append(("debug.stop", mode))
         return {"status": "PASS"}
 
+    async def disconnect_ui(self) -> dict[str, Any]:
+        self.calls.append(("ui.disconnect", None))
+        return {"status": "PASS"}
+
     async def process_registry_count(self) -> dict[str, Any]:
         self.calls.append(("process.registry.count", None))
         return dict(self.process_registry_result)
@@ -50,6 +54,7 @@ def _runner(session: CleanupSmokeSession) -> RuntimeSmokeRunner:
             "debug.tracepoint.remove": session.remove_tracepoint,
             "isolated_profile.teardown": session.teardown_profile,
             "debug.stop": session.stop_debug,
+            "ui.disconnect": session.disconnect_ui,
             "process.registry.count": session.process_registry_count,
         },
     )
@@ -64,6 +69,7 @@ def _v2_runner(session: CleanupSmokeSession) -> RuntimeStateOracleRunner:
             "debug.tracepoint.remove": session.remove_tracepoint,
             "isolated_profile.teardown": session.teardown_profile,
             "debug.stop": session.stop_debug,
+            "ui.disconnect": session.disconnect_ui,
             "process.registry.count": session.process_registry_count,
         },
     )
@@ -88,6 +94,7 @@ async def test_v2_lifecycle_stop_runs_case_and_plan_cleanup() -> None:
         "cleanup": {
             "steps": [
                 {"kind": "debug.stop"},
+                {"kind": "ui.disconnect"},
                 {"kind": "process.registry.assert_empty"},
             ]
         },
@@ -125,6 +132,7 @@ async def test_v2_lifecycle_stop_runs_case_and_plan_cleanup() -> None:
     assert stopped["cleanup"]["attempted"] == [
         "case:case_a:debug.tracepoint.remove:tp-a",
         "case:case_a:fixture.restore:case-a.txt",
+        "ui.disconnect",
         "debug.stop:graceful",
         "process.registry.assert_empty",
     ]
@@ -132,6 +140,7 @@ async def test_v2_lifecycle_stop_runs_case_and_plan_cleanup() -> None:
     assert stopped["cleanup"]["process_registry_after"] == 0
     assert ("fixture.restore", "case-a.txt", "baseline-a.txt") in session.calls
     assert ("debug.tracepoint.remove", "tp-a") in session.calls
+    assert ("ui.disconnect", None) in session.calls
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,115 @@
+# Quickstart: verify a future exact-head coverage diagnostic
+
+**Status**: Future implementation guide. No command in this file was run while authoring this packet. This guide is not a receipt, release authority, or permission to change Sonar policy.
+**Release intent**: `none`
+
+## Before any Wave-3 execution
+
+Wave-2 PR #289 is merged. Its tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` artifact is available on main and validates against `contracts/wave2-closure-entry-v1.schema.json`. The source states `integration.kind: pull_request_head`, carries `release_intent: none`, names the accepted candidate, hash-binds the Wave-2 closure receipt, and records a reviewed source ref/SHA. `integration.head_sha` must equal `accepted_candidate_sha`; it is not the actual PR head. The source does not claim current merge state or contain a future main SHA. T000 remains unchecked until the parent validates live squash-aware evidence.
+
+Set non-secret values only after the entry record exists:
+
+```powershell
+$Repo = '<fresh-detached-scanner-worktree>'
+$CoordinationRoot = '<primary-coordination-root>'
+$Wave2Closure = Join-Path $Repo 'specs\013-owner-scoped-prebuild-cleanup\wave-closure-v1.json'
+$ExpectedHead = '<frozen-implementation-sha>'
+$ProjectKey = 'thebtf_netcoredbg_mcp'
+```
+
+## 1. Confirm the exact source and entry identities
+
+Run from `$Repo`:
+
+```powershell
+git status --short --branch
+git rev-parse HEAD
+git rev-parse --show-toplevel
+git ls-files --error-unmatch specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json
+```
+
+Continue only when the scanner worktree is detached and clean, `HEAD` equals `$ExpectedHead`, and `$Wave2Closure` is a tracked `pull_request_head` file whose schema, `release_intent`, canonical Git-blob source and receipt hashes, and reviewed-head equality validate. Do not hash checkout files for this proof.
+
+The runner obtains first-party evidence that binds #289's actual PR head to `merge_commit_sha`. It requires the accepted candidate to be ancestor-or-equal to that PR head, requires equal PR-head and merge trees, derives the current-history artifact commit, and requires the artifact and merge commits to relate to `observed_main_sha`. It also requires the tracked artifact blob to equal the PR-head artifact blob.
+
+After tree equality, the runner copies the accepted record after claim into its own run root with the source hash, candidate, actual PR head, artifact commit, merge commit, `integrated_tree_sha`, and observed main. A failed entry is `WAVE2_CLOSURE_UNVERIFIED`; it makes preflight, scanner begin, and root claim unreachable.
+
+## 2. Run focused contract proof
+
+After T021 and T022 make all rows green, run:
+
+```powershell
+uv run --locked --extra dev pytest tests/test_sonarqube_exact_head_runner.py -q
+```
+
+The output must cover exactly R01 through R15 from [tasks.md](tasks.md#binding-redgreen-matrix). It must prove the Wave-2 entry and preflight failures occur before scanner begin and claim.
+
+## 3. Inspect the planned layout and scanner arguments
+
+During a successful transaction, the producer and runner use this layout:
+
+```text
+.tmp/sonarqube-coverage/<run-id>/
+├── coverage-run.json
+├── wave2-entry.json
+├── python/.coverage
+├── python/coverage.xml
+├── dotnet/coverage.xml
+└── dotnet/inputs/
+    ├── codesearch-core/coverage.cobertura.xml
+    ├── host/coverage.cobertura.xml
+    ├── stateless-preview/coverage.cobertura.xml
+    ├── stateless/coverage.cobertura.xml
+    └── host-prompts/coverage.cobertura.xml
+```
+
+The five paths under `dotnet/inputs/` are private producer inputs. Sonar receives only:
+
+```text
+/d:sonar.python.coverage.reportPaths=.tmp/sonarqube-coverage/<run-id>/python/coverage.xml
+/d:sonar.cs.cobertura.reportsPaths=.tmp/sonarqube-coverage/<run-id>/dotnet/coverage.xml
+```
+
+## 4. Understand the private producer and preflight
+
+The runner preflights `uv`, `bash`, and `dotnet`; exact Coverlet `10.0.1`; Test SDK `17.12.0`; and VSTest selection for every fixed project. It refuses MTP rather than modifying project configuration. The shell then receives five `--dotnet-project` groups in the inventory order and produces a private Cobertura input for each group. The runner validates them, normalizes their canonical source union, and writes `dotnet/coverage.xml`.
+
+A missing executable, invalid package tuple, or MTP activation has zero begin and claim calls. A missing private input, unsafe source mapping, invalid final output, or zero final denominator has zero scanner-end calls.
+
+## 5. Run the diagnostic transaction
+
+Run only after the exact head has review, judgment, and verified Wave-2 entry evidence. The runner loads credentials at its existing approved boundary. Do not echo `SONAR_*`.
+
+```powershell
+python scripts/run_sonarqube_exact_head.py --role diagnostic
+```
+
+A valid order is:
+
+```text
+wave2-entry -> preflight -> begin -> claim -> build -> produce -> normalize -> validate -> post-producer-head -> end -> analysis -> inventory -> receipt -> cleanup
+```
+
+## 6. Verify diagnostic evidence
+
+A `DIAGNOSTIC_COMPLETE` run writes a secret-free v3 receipt and a create-new inventory artifact below the coordination root:
+
+```text
+$CoordinationRoot/.agent/e/sonarqube/thebtf_netcoredbg_mcp/<head>/diagnostic/<run-id>.json
+$CoordinationRoot/.agent/e/sonarqube/thebtf_netcoredbg_mcp/<head>/diagnostic/<run-id>.inventory.json
+```
+
+Verify that:
+
+- the receipt role is `diagnostic`, its outcome is `DIAGNOSTIC_COMPLETE`, and its `release_intent` is `none`;
+- the receipt has two final Cobertura reports and five private input records, with normalizer output ID `dotnet`;
+- the canonical identity, all analysis observations, and the inventory artifact identity bind to `$ExpectedHead`;
+- final Python and .NET reports have positive line and branch denominators and valid source sets;
+- component paging and issue/hotspot paging are complete;
+- the inventory artifact hash, byte count, record counts, key digests, and routing fields validate;
+- the unchanged `new_coverage` condition is `OK` at threshold `80`;
+- unresolved global blockers remain explicit and do not turn the diagnostic into a release PASS.
+
+## 7. Create the delayed Wave-3 acceptance receipt
+
+T028 is the only task allowed to create `acceptance-receipt.md`. It may do so only when the Wave-2 entry, T024 review, T026 acceptance judgment, T027 frozen scanner head, complete diagnostic receipt, and complete immutable inventory all bind to the same implementation head. If any condition fails, create no receipt, tag, publication, or release claim.

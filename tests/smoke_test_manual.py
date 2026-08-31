@@ -4331,6 +4331,7 @@ def _v2_state_oracle_plan(
         "cleanup": {
             "steps": [
                 {"kind": "debug.stop"},
+                {"kind": "ui.disconnect"},
                 {"kind": "process.registry.assert_empty"},
             ]
         },
@@ -5042,6 +5043,7 @@ def _v2_guarded_child_drag_plan(
         "cleanup": {
             "steps": [
                 {"kind": "debug.stop"},
+                {"kind": "ui.disconnect"},
                 {"kind": "process.registry.assert_empty"},
             ]
         },

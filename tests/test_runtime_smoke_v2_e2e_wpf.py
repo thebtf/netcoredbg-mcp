@@ -595,6 +595,7 @@ def test_guarded_child_drag_plan_uses_scoped_source_and_relative_drop() -> None:
     assert action["drop"] == {"relative_to": "source", "x": 24, "y": 0}
     assert plan["cleanup"]["steps"] == [
         {"kind": "debug.stop"},
+        {"kind": "ui.disconnect"},
         {"kind": "process.registry.assert_empty"},
     ]
 
