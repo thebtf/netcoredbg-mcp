@@ -883,6 +883,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     (
                         "analysis_current_before_issues",
                         "analysis_current_after_issues",
+                        "analysis_current_before_measures",
                         "analysis_current_final",
                     )[binding_calls - 1]
                 )
@@ -899,6 +900,10 @@ class TestSonarqubeExactHeadRunner(TestCase):
             def quality_gate(_host, _analysis_id, _token):
                 events.append("quality_gate")
                 return error_quality_gate
+
+            def coverage_measures(*_args, **_kwargs):
+                events.append("coverage_measures")
+                return {}
 
             def hotspot_inventory(_host, _token):
                 events.append("hotspots")
@@ -977,6 +982,13 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 patches.enter_context(
                     patch.object(
                         runner,
+                        "collect_coverage_analysis_evidence",
+                        side_effect=coverage_measures,
+                    )
+                )
+                patches.enter_context(
+                    patch.object(
+                        runner,
                         "issue_dispositions",
                         return_value={"blocking_count": 0, "items": []},
                     )
@@ -1011,6 +1023,8 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 "analysis_current_after_issues",
                 "hotspots",
                 "generated_artifacts_removed_after_scan",
+                "analysis_current_before_measures",
+                "coverage_measures",
                 "analysis_current_final",
             ],
         )
@@ -1179,6 +1193,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     (
                         "analysis_current_before_issues",
                         "analysis_current_after_issues",
+                        "analysis_current_before_measures",
                         "analysis_current_final",
                     )[binding_calls - 1]
                 )
@@ -1340,6 +1355,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 "hotspots",
                 "generated_artifacts_removed_after_scan",
                 "post_scan_cleanup",
+                "analysis_current_before_measures",
                 "analysis_current_final",
             ],
         )

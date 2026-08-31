@@ -4481,7 +4481,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
             stage = "CLEANED"
             strict_cleanliness(context, clean_environment, "receipt publication")
             assert_head_unchanged(context, clean_environment)
-            current_final = current_analysis_binding(
+            current_before_measures = current_analysis_binding(
                 credentials["SONAR_HOST_URL"],
                 analysis_id,
                 context.head,
@@ -4506,13 +4506,18 @@ def execute(role: str, scanner_override: str | None) -> Path:
                         "analysis_id": current_after.get("analysis_id"),
                     },
                     "current_final": {
-                        "captured_head": current_final.get("revision"),
+                        "captured_head": current_before_measures.get("revision"),
                         "project_key": PROJECT_KEY,
-                        "analysis_id": current_final.get("analysis_id"),
+                        "analysis_id": current_before_measures.get("analysis_id"),
                     },
                 },
             )
-            stage = "CLEANED"
+            _current_after_measures = current_analysis_binding(
+                credentials["SONAR_HOST_URL"],
+                analysis_id,
+                context.head,
+                credentials["SONAR_READ_TOKEN"],
+            )
             release_gate = None
             outcome = "DIAGNOSTIC_COMPLETE"
             gate_error: RunnerError | None = None
