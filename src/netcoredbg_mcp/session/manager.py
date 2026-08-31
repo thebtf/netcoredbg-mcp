@@ -143,6 +143,7 @@ class SessionManager:
         self._dap_generation_counter = 0
         self._active_dap_run: object | None = None
         self._stopping_dap_run: object | None = None
+        self._windows_adapter_admission_in_progress = False
 
     def _create_session_state(self, state: DebugState = DebugState.IDLE) -> SessionState:
         session_state = SessionState(state=state)
@@ -855,12 +856,15 @@ class SessionManager:
         self._stopping_dap_run = None
         self._state.transport_terminal = None
 
+        self._windows_adapter_admission_in_progress = os.name == "nt"
         try:
             returned_generation = await self._client.start(generation=generation)
         except Exception:
             if self._active_dap_run == generation:
                 self._active_dap_run = None
             raise
+        finally:
+            self._windows_adapter_admission_in_progress = False
 
         if returned_generation != generation:
             await self._client.stop()
@@ -936,6 +940,10 @@ class SessionManager:
         if active_generation is None:
             self._active_dap_run = terminal.generation
 
+        if isinstance(terminal.adapter_pid, int) and terminal.adapter_pid > 0:
+            # A terminal record is sufficient identity for an observation-only
+            # unregister; never reopen this PID as cleanup authority.
+            self._process_registry.unregister(terminal.adapter_pid)
         last_event_seq: int | None = None
         last_event_name: str | None = None
         if terminal.last_dap_event is not None:
@@ -1605,6 +1613,8 @@ class SessionManager:
 
         owner = source_client.adapter_owner
         if owner is None or owner.generation != generation:
+            if self._windows_adapter_admission_in_progress:
+                raise RuntimeError("adapter admission is in progress")
             return NoOwnedAdapter()
 
         # Capture all three fencing facts in this synchronous turn. They are not

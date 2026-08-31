@@ -116,10 +116,12 @@ class OwnedCommandProcess:
         generation: object,
         *,
         normal_status: DrainStatus = DrainStatus.DRAINED,
+        force_status: DrainStatus = DrainStatus.DRAINED,
     ) -> None:
         self._process = process
         self.owner = OwnedProcessRef(f"command-owner-{generation}", generation, process.pid)
         self._normal_status = normal_status
+        self._force_status = force_status
         self.receipt: OwnerDrainReceipt | None = None
         self.drain_calls: list[str] = []
         self.drain_operation_count = 0
@@ -164,14 +166,15 @@ class OwnedCommandProcess:
         if self.receipt is not None:
             return self.receipt
         self.drain_operation_count += 1
-        if not forced and self._normal_status is not DrainStatus.DRAINED:
+        status = self._force_status if forced else self._normal_status
+        if status is not DrainStatus.DRAINED:
             active_processes = (
                 self._process.active_processes if isinstance(self._process, TreeProcess) else None
             )
             self.receipt = OwnerDrainReceipt(
                 owner=self.owner,
-                status=self._normal_status,
-                forced=False,
+                status=status,
+                forced=forced,
                 root_returncode=self.returncode,
                 active_processes=active_processes,
             )

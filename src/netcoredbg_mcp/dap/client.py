@@ -623,6 +623,25 @@ class DAPClient:
         run.finalizer_task = asyncio.create_task(self._finalize_run(run))
         return run.finalizer_task, True
 
+    @staticmethod
+    def _apply_owner_drain_receipt(run: _DapRun, receipt: OwnerDrainReceipt) -> None:
+        """Publish the latest bounded owner result for this elected finalizer."""
+
+        run.owner_drain_receipt = receipt
+        if receipt.root_returncode is not None:
+            run.returncode = receipt.root_returncode
+        if receipt.status is DrainStatus.DRAINED and receipt.active_processes == 0:
+            run.process_exited = True
+            run.cleanup_outcome = (
+                DapCleanupOutcome.KILLED if receipt.forced else DapCleanupOutcome.NATURAL_EXIT
+            )
+            return
+        logger.error(
+            "Owned adapter drain did not reach zero accounting: status=%s active=%s",
+            receipt.status.value,
+            receipt.active_processes,
+        )
+
     async def _finalize_run(self, run: _DapRun) -> DapTransportTerminal:
         """Settle work, join bounded observations, clean up, and publish once."""
 
@@ -638,20 +657,7 @@ class DAPClient:
                 grace_timeout=NATURAL_EXIT_TIMEOUT,
                 force_timeout=TERMINATE_TIMEOUT + KILL_TIMEOUT,
             )
-            run.owner_drain_receipt = receipt
-            if receipt.root_returncode is not None:
-                run.returncode = receipt.root_returncode
-            run.process_exited = run.process_exited or receipt.status is DrainStatus.DRAINED
-            if receipt.status is DrainStatus.DRAINED:
-                run.cleanup_outcome = (
-                    DapCleanupOutcome.KILLED if receipt.forced else DapCleanupOutcome.NATURAL_EXIT
-                )
-            else:
-                logger.error(
-                    "Owned adapter drain did not reach zero accounting: status=%s active=%s",
-                    receipt.status.value,
-                    receipt.active_processes,
-                )
+            self._apply_owner_drain_receipt(run, receipt)
         else:
             assert not isinstance(process, WindowsOwnedProcess)
             if not run.process_exited and process.returncode is None:
@@ -722,7 +728,9 @@ class DAPClient:
         ):
             run.stdout_task.cancel()
         if run.owner is not None:
-            await run.owner.aclose()
+            close_receipt = await run.owner.aclose()
+            if close_receipt is not None:
+                self._apply_owner_drain_receipt(run, close_receipt)
 
         terminal = DapTransportTerminal(
             generation=run.generation,

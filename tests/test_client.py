@@ -1718,3 +1718,53 @@ class TestOwnerScopedAdapterRedMatrix:
         assert receipt is not None
         assert receipt.status is DrainStatus.DRAINED
         assert receipt.owner == owner.owner
+
+    @pytest.mark.asyncio
+    async def test_finalizer_publishes_successful_close_retry_receipt(self) -> None:
+        """A close retry that proves zero must replace the earlier failed receipt."""
+
+        class RetryingCloseOwner(OwnedTestProcess):
+            async def drain_after_grace(
+                self,
+                *,
+                grace_timeout: float,
+                force_timeout: float,
+            ) -> OwnerDrainReceipt:
+                del grace_timeout, force_timeout
+                return OwnerDrainReceipt(
+                    owner=self.owner,
+                    status=DrainStatus.TIMED_OUT,
+                    forced=True,
+                    root_returncode=None,
+                    active_processes=1,
+                )
+
+            async def aclose(self) -> OwnerDrainReceipt:
+                self._process.kill()
+                self._process.child_alive = False
+                return OwnerDrainReceipt(
+                    owner=self.owner,
+                    status=DrainStatus.DRAINED,
+                    forced=True,
+                    root_returncode=self._process.returncode,
+                    active_processes=0,
+                )
+
+        process = TreeProcess(
+            pid=43012,
+            stdout=BlockingStream(),
+            stderr=BlockingStream(),
+        )
+        owner = RetryingCloseOwner(process, "close-retry")
+        client = DAPClient("/path/to/netcoredbg")
+
+        with patch(
+            "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch",
+            return_value=owner,
+        ):
+            await client.start(generation="close-retry")
+            receipt = await client.stop(expected_owner=owner.owner)
+
+        assert receipt is not None
+        assert receipt.status is DrainStatus.DRAINED
+        assert receipt.active_processes == 0

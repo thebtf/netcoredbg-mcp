@@ -1277,6 +1277,56 @@ class TestOwnerScopedPublicRouteRedMatrix:
         assert isinstance(captured.kwargs["owner"], NoOwnedAdapter)
 
     @pytest.mark.asyncio
+    async def test_active_adapter_admission_rejects_prebuild_before_build(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A Windows pre-build cannot race suspended adapter admission into no-owner."""
+
+        project = tmp_path / "App.csproj"
+        project.touch()
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+        admitted = asyncio.Event()
+        release = asyncio.Event()
+
+        async def start(*, generation: object) -> object:
+            admitted.set()
+            await release.wait()
+            return generation
+
+        client = MagicMock()
+        client.is_running = False
+        client.adapter_owner = None
+        client.adapter_pid = None
+        client.start = start
+        client.initialize = AsyncMock()
+        manager._client = client
+        prebuild = AsyncMock(return_value=MagicMock(success=True))
+        manager._build_manager.pre_launch_build = prebuild
+        monkeypatch.setattr("netcoredbg_mcp.session.manager.os.name", "nt")
+        start_task = asyncio.create_task(manager.start())
+        try:
+            await asyncio.wait_for(admitted.wait(), timeout=1.0)
+            with pytest.raises(RuntimeError, match="adapter admission is in progress"):
+                await manager.pre_launch_build(str(project))
+            prebuild.assert_not_awaited()
+        finally:
+            release.set()
+            await start_task
+
+    def test_non_windows_active_adapter_has_no_owner_variant(self) -> None:
+        """A current generation without an active Windows admission stays no-owner."""
+
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+        manager._client = MagicMock(adapter_owner=None)
+        manager._active_dap_run = "posix-generation"
+
+        assert isinstance(manager.capture_prebuild_owner(), NoOwnedAdapter)
+
+    @pytest.mark.asyncio
     async def test_stale_capture_cannot_touch_a_newer_adapter(self) -> None:
         """A stale handoff has no disconnect, stop, or state-changing effect."""
         with patch("netcoredbg_mcp.session.manager.DAPClient"):
@@ -1322,3 +1372,18 @@ class TestOwnerScopedPublicRouteRedMatrix:
             45004,
             45005,
         }
+
+    def test_terminal_adapter_pid_is_unregistered_without_explicit_stop(self) -> None:
+        """Terminal publication clears the exact adapter observation after a crash."""
+
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+        generation = "crashed-adapter"
+        client = MagicMock()
+        manager._client = client
+        manager._active_dap_run = generation
+        manager._process_registry.unregister = MagicMock()
+
+        manager._on_transport_terminal(client, _natural_exit_terminal(generation))
+
+        manager._process_registry.unregister.assert_called_once_with(41011)

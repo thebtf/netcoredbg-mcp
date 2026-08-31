@@ -333,7 +333,12 @@ class _PipeEnds:
     def create(cls, stdin_mode: Literal["pipe", "devnull"]) -> _PipeEnds:
         from asyncio import windows_utils
 
+        stdin_child: int | None = None
         stdin_parent: int | None = None
+        stdout_parent: int | None = None
+        stdout_child: int | None = None
+        stderr_parent: int | None = None
+        stderr_child: int | None = None
         devnull_fd: int | None = None
         try:
             if stdin_mode == "pipe":
@@ -364,7 +369,24 @@ class _PipeEnds:
             )
         except BaseException:
             if devnull_fd is not None:
-                os.close(devnull_fd)
+                try:
+                    os.close(devnull_fd)
+                except OSError:
+                    pass
+                stdin_child = None
+            closed_handles: set[int] = set()
+            for handle in (
+                stdin_child,
+                stdin_parent,
+                stdout_parent,
+                stdout_child,
+                stderr_parent,
+                stderr_child,
+            ):
+                if handle is None or int(handle) in closed_handles:
+                    continue
+                closed_handles.add(int(handle))
+                _close_raw_handle(int(handle))
             raise
 
     def handle_list(self) -> list[int]:
@@ -448,6 +470,17 @@ def _close_ignoring_errors(api: _WindowsApi, handle: int) -> None:
     try:
         api.close_handle(handle)
     except _Win32CallError:
+        pass
+
+
+def _close_raw_handle(handle: int) -> None:
+    """Release a pipe handle before a `_PipeEnds` instance can own it."""
+
+    try:
+        import _winapi
+
+        _winapi.CloseHandle(handle)
+    except (AttributeError, OSError):
         pass
 
 
@@ -831,17 +864,26 @@ class WindowsOwnedProcess:
             winerror=winerror,
         )
 
-    async def aclose(self) -> None:
-        """Close streams and retained handles after preserving drain evidence."""
+    async def aclose(self) -> OwnerDrainReceipt:
+        """Close resources and return the last truthful owner-drain receipt."""
 
         if self._closed:
-            return
+            if self._drain_receipt is not None:
+                return self._drain_receipt
+            return self._receipt(
+                status=DrainStatus.FAILED,
+                forced=False,
+                active_processes=None,
+                failure_stage=AdmissionStage.DRAIN,
+                winerror=None,
+            )
+        receipt = self._drain_receipt
         if (
-            self._drain_receipt is None
-            or self._drain_receipt.status is not DrainStatus.DRAINED
-            or self._drain_receipt.active_processes != 0
+            receipt is None
+            or receipt.status is not DrainStatus.DRAINED
+            or receipt.active_processes != 0
         ):
-            await self.force_and_drain(timeout=_ADMISSION_CLEANUP_TIMEOUT)
+            receipt = await self.force_and_drain(timeout=_ADMISSION_CLEANUP_TIMEOUT)
         if self.stdin is not None:
             self.stdin.close()
         for transport in self._transports:
@@ -854,6 +896,7 @@ class WindowsOwnedProcess:
             _close_ignoring_errors(self._api, self._job_handle)
             self._job_handle = None
         self._closed = True
+        return receipt
 
 
 async def _cleanup_failed_admission(

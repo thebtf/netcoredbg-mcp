@@ -36,6 +36,17 @@ COMMAND_OWNER_FORCE_TIMEOUT: float = 7.0
 _IS_WINDOWS = os.name == "nt"
 
 
+class OwnerDrainError(RuntimeError):
+    """A command outcome cannot be reported while its retained tree is unproven."""
+
+    def __init__(self, receipt: OwnerDrainReceipt) -> None:
+        self.receipt = receipt
+        super().__init__(
+            "Windows build command owner did not drain "
+            f"(status={receipt.status.value}, active={receipt.active_processes})"
+        )
+
+
 class BuildSession:
     """Per-workspace build session with state machine.
 
@@ -122,36 +133,45 @@ class BuildSession:
             )
         )
         drain_task = asyncio.create_task(operation)
-        cancelled = False
+        cancellation: asyncio.CancelledError | None = None
         while True:
             try:
                 receipt = await asyncio.shield(drain_task)
                 break
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as error:
                 if drain_task.cancelled():
-                    raise
+                    receipt = OwnerDrainReceipt(
+                        owner=owner.owner,
+                        status=DrainStatus.FAILED,
+                        forced=force,
+                        root_returncode=owner.returncode,
+                        active_processes=None,
+                    )
+                    self._last_owner_drain_receipt = receipt
+                    raise OwnerDrainError(receipt) from error
                 # Shielding keeps the retained Job drain alive through a second
                 # cancellation. We must wait for its accounting receipt before
                 # restoring the original cancellation outcome to the caller.
-                cancelled = True
+                cancellation = error
 
         self._last_owner_drain_receipt = receipt
-        if cancelled:
-            raise asyncio.CancelledError
+        if cancellation is not None:
+            try:
+                self._require_drained_owner_receipt(receipt)
+            except OwnerDrainError as error:
+                raise error from cancellation
+            raise cancellation
         return receipt
 
     @staticmethod
     def _require_drained_owner_receipt(receipt: OwnerDrainReceipt) -> None:
-        """Reject normal completion unless private-Job accounting reached zero."""
+        """Reject completion unless private-Job accounting reached literal zero."""
         if receipt.status is DrainStatus.DRAINED and receipt.active_processes == 0:
             return
         # A root exit, root kill, or numeric PID says nothing about descendants.
         # Only zero accounting from this retained private Job proves this command
-        # tree is drained, so normal command completion must fail closed here.
-        raise RuntimeError(
-            "Windows build command owner did not drain "
-            f"(status={receipt.status.value}, active={receipt.active_processes})"
-        )
+        # tree is drained, so timeout and cancellation must fail closed as well.
+        raise OwnerDrainError(receipt)
 
     async def _run_command(
         self,
@@ -252,13 +272,17 @@ class BuildSession:
                     ),
                     timeout=timeout,
                 )
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as timeout_error:
                 logger.warning(f"Build timeout after {timeout}s")
                 if owner is not None:
                     # Preserve the timeout only after the exact owner has
                     # recorded its drain receipt. Returning first could report
                     # a timed-out build while a retained Job still has children.
-                    await self._drain_windows_owner(owner, force=True)
+                    receipt = await self._drain_windows_owner(owner, force=True)
+                    try:
+                        self._require_drained_owner_receipt(receipt)
+                    except OwnerDrainError as error:
+                        raise error from timeout_error
                 else:
                     assert not isinstance(process, WindowsOwnedProcess)
                     process.kill()
@@ -270,12 +294,16 @@ class BuildSession:
                 self._require_drained_owner_receipt(receipt)
             return exit_code, "".join(stdout_lines), "".join(stderr_lines)
 
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as cancellation:
             if owner is not None:
                 # Outer cancellation and BuildSession.cancel() share this owner
-                # operation. Its receipt must exist before this original
-                # cancellation is re-raised, even if cleanup is cancelled again.
-                await self._drain_windows_owner(owner, force=True)
+                # operation. Only a zero-accounting receipt permits restoration
+                # of the original cancellation outcome.
+                receipt = await self._drain_windows_owner(owner, force=True)
+                try:
+                    self._require_drained_owner_receipt(receipt)
+                except OwnerDrainError as error:
+                    raise error from cancellation
             raise
         finally:
             self._current_process = None
@@ -505,7 +533,8 @@ class BuildSession:
         self._cancel_requested = True
 
         if self._current_owner is not None:
-            await self._drain_windows_owner(self._current_owner, force=True)
+            receipt = await self._drain_windows_owner(self._current_owner, force=True)
+            self._require_drained_owner_receipt(receipt)
         elif not _IS_WINDOWS and self._current_process is not None:
             assert not isinstance(self._current_process, WindowsOwnedProcess)
             try:

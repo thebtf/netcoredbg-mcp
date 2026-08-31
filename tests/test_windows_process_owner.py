@@ -331,6 +331,65 @@ def test_unresolvable_bare_executable_fails_before_create_process(
     created.assert_not_called()
 
 
+def test_partial_pipe_allocation_closes_every_created_raw_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later pipe allocation failure releases every earlier raw pipe handle."""
+
+    import netcoredbg_mcp.windows_process_owner as owner_module
+
+    outcomes: list[tuple[int, int] | OSError] = [
+        (11, 12),
+        (21, 22),
+        OSError("stderr pipe allocation failed"),
+    ]
+    closed: list[int] = []
+
+    def pipe(*_args: Any, **_kwargs: Any) -> tuple[int, int]:
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, OSError):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(asyncio, "windows_utils", SimpleNamespace(pipe=pipe), raising=False)
+    monkeypatch.setattr(os, "set_handle_inheritable", lambda *_args: None, raising=False)
+    monkeypatch.setattr(owner_module, "_close_raw_handle", closed.append, raising=False)
+
+    with pytest.raises(OSError, match="stderr pipe allocation failed"):
+        owner_module._PipeEnds.create("pipe")
+
+    assert sorted(closed) == [11, 12, 21, 22]
+
+
+def test_pipe_inheritability_failure_closes_every_created_raw_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A handle-attribute failure releases all pipe ends before admission owns them."""
+
+    import netcoredbg_mcp.windows_process_owner as owner_module
+
+    outcomes = iter(((11, 12), (21, 22), (31, 32)))
+    closed: list[int] = []
+
+    def set_handle_inheritable(handle: int, _inheritable: bool) -> None:
+        if handle == 22:
+            raise OSError("stdout handle inheritance failed")
+
+    monkeypatch.setattr(
+        asyncio,
+        "windows_utils",
+        SimpleNamespace(pipe=lambda *_args, **_kwargs: next(outcomes)),
+        raising=False,
+    )
+    monkeypatch.setattr(os, "set_handle_inheritable", set_handle_inheritable, raising=False)
+    monkeypatch.setattr(owner_module, "_close_raw_handle", closed.append, raising=False)
+
+    with pytest.raises(OSError, match="stdout handle inheritance failed"):
+        owner_module._PipeEnds.create("pipe")
+
+    assert sorted(closed) == [11, 12, 21, 22, 31, 32]
+
+
 @pytest.mark.asyncio
 async def test_non_drained_receipt_allows_later_force_escalation(
     monkeypatch: pytest.MonkeyPatch,
