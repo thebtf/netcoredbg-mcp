@@ -107,107 +107,75 @@ class OperationSchema:
     required_fields: tuple[str, ...] = ()
 
 
-OPERATION_SCHEMAS: dict[str, OperationSchema] = {
-    "launch": OperationSchema("launch"),
-    "debug.hygiene_preflight": OperationSchema("debug_hygiene_preflight"),
-    "debug.freshness.verify": OperationSchema("verify_debug_freshness"),
-    "debug.output_checkpoint": OperationSchema("output_checkpoint"),
-    "debug.output_assert_since": OperationSchema(
-        "output_assert_since",
-        ("checkpoint",),
-    ),
-    "instrumentation.group_clear": OperationSchema(
-        "instrumentation_group_clear",
-        ("name",),
-    ),
-    "ui.key_sequence": OperationSchema(
-        "ui_key_sequence",
-        (SCHEMA_FIELD_SELECTOR, "keys"),
-    ),
-    "ui.grid.snapshot": OperationSchema(
-        "ui.grid.snapshot",
-        (SCHEMA_FIELD_SELECTOR,),
-    ),
-    "ui.grid.get_state": OperationSchema(
-        "ui.grid.get_state",
-        (SCHEMA_FIELD_SELECTOR,),
-    ),
-    "ui.grid.ensure_visible": OperationSchema(
+_OPERATION_SCHEMA_DEFINITIONS: tuple[
+    tuple[str, str | None, tuple[str, ...]],
+    ...,
+] = (
+    ("launch", None, ()),
+    ("debug.hygiene_preflight", "debug_hygiene_preflight", ()),
+    ("debug.freshness.verify", "verify_debug_freshness", ()),
+    ("debug.output_checkpoint", "output_checkpoint", ()),
+    ("debug.output_assert_since", "output_assert_since", ("checkpoint",)),
+    ("instrumentation.group_clear", "instrumentation_group_clear", ("name",)),
+    ("ui.key_sequence", "ui_key_sequence", (SCHEMA_FIELD_SELECTOR, "keys")),
+    ("ui.grid.snapshot", None, (SCHEMA_FIELD_SELECTOR,)),
+    ("ui.grid.get_state", None, (SCHEMA_FIELD_SELECTOR,)),
+    (
         "ui.grid.ensure_visible",
+        None,
         (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ROW),
     ),
-    "ui.grid.select_range": OperationSchema(
+    (
         "ui.grid.select_range",
+        None,
         (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_START_INDEX, SCHEMA_FIELD_END_INDEX),
     ),
-    "ui.grid.assert_range": OperationSchema(
+    (
         "ui.grid.assert_range",
+        None,
         (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_START_INDEX, SCHEMA_FIELD_END_INDEX),
     ),
-    "ui.grid.select_row": OperationSchema(
-        "ui.grid.select_row",
-        (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ROW),
-    ),
-    "ui.grid.click_row": OperationSchema(
-        "ui.grid.click_row",
-        (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ROW),
-    ),
-    "ui.grid.right_click_row": OperationSchema(
+    ("ui.grid.select_row", None, (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ROW)),
+    ("ui.grid.click_row", None, (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ROW)),
+    (
         "ui.grid.right_click_row",
+        None,
         (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ROW),
     ),
-    "ui.grid.double_click_row": OperationSchema(
+    (
         "ui.grid.double_click_row",
+        None,
         (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ROW),
     ),
-    "ui.grid.assert_rows": OperationSchema(
-        "ui.grid.assert_rows",
-        (SCHEMA_FIELD_SELECTOR, "rows"),
-    ),
-    "ui.list.invoke_item": OperationSchema(
+    ("ui.grid.assert_rows", None, (SCHEMA_FIELD_SELECTOR, "rows")),
+    (
         "ui.list.invoke_item",
+        None,
         (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ITEM),
     ),
-    "ui.list.toggle_item_child": OperationSchema(
+    (
         "ui.list.toggle_item_child",
+        None,
         (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ITEM, SCHEMA_FIELD_CHILD),
     ),
-    "ui.focus.assert": OperationSchema(
-        "ui.focus.assert",
-        (SCHEMA_FIELD_SELECTOR,),
-    ),
-    "ui.text.assert": OperationSchema(
-        "ui.text.assert",
-        (SCHEMA_FIELD_SELECTOR,),
-    ),
-    "ui.text.read": OperationSchema(
-        "ui.text.read",
-        (SCHEMA_FIELD_SELECTOR,),
-    ),
-    "ui.text.get_state": OperationSchema(
-        "ui.text.get_state",
-        (SCHEMA_FIELD_SELECTOR,),
-    ),
-    "ui.text.set_text": OperationSchema(
+    ("ui.focus.assert", None, (SCHEMA_FIELD_SELECTOR,)),
+    ("ui.text.assert", None, (SCHEMA_FIELD_SELECTOR,)),
+    ("ui.text.read", None, (SCHEMA_FIELD_SELECTOR,)),
+    ("ui.text.get_state", None, (SCHEMA_FIELD_SELECTOR,)),
+    (
         "ui.text.set_text",
+        None,
         (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_TEXT),
     ),
-    "ui.text.assert_selection": OperationSchema(
-        "ui.text.assert_selection",
-        (SCHEMA_FIELD_SELECTOR,),
-    ),
-    "ui.get_property": OperationSchema(
-        "ui.get_property",
-        (SCHEMA_FIELD_SELECTOR,),
-    ),
-    "ui.invoke": OperationSchema(
-        "ui.invoke",
-        (SCHEMA_FIELD_SELECTOR,),
-    ),
-    "fixture.restore": OperationSchema(
-        "fixture.restore",
-        ("path",),
-    ),
+    ("ui.text.assert_selection", None, (SCHEMA_FIELD_SELECTOR,)),
+    ("ui.get_property", None, (SCHEMA_FIELD_SELECTOR,)),
+    ("ui.invoke", None, (SCHEMA_FIELD_SELECTOR,)),
+    ("fixture.restore", None, ("path",)),
+)
+
+OPERATION_SCHEMAS: dict[str, OperationSchema] = {
+    public_name: OperationSchema(internal_name or public_name, required_fields)
+    for public_name, internal_name, required_fields in _OPERATION_SCHEMA_DEFINITIONS
 }
 
 
