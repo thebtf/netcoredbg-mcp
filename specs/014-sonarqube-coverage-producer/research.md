@@ -22,6 +22,7 @@
 | OBSERVED | Stateless coverage needs the exact `IncludeDirectory` and binary restoration check. | `agent://Wave3CoverageSource` | Preserve the Stateless-only branch. |
 | OBSERVED | Wave-2 PR #289 is open. | Operator instruction | Wave-3 execution is BLOCKED pending typed accepted-main closure evidence. |
 | OBSERVED | `scripts/stateless_preview_artifact.py` requires receipt schema version 2 for post-merge artifact sealing. | Verifier recheck of `08a4231` | Wave 3 must migrate this receipt consumer and its focused proof to unified v3. |
+| OBSERVED | The current checkout contains no `specs/013-owner-scoped-prebuild-cleanup/` directory or tracked Wave-2 closure artifact. | Verifier recheck of `587d735` | This absence is current blocker evidence. Wave-2 T014/PR #289 must create and merge the tracked artifact before Wave 3 can execute. |
 
 ## Primary-source constraints
 
@@ -65,11 +66,11 @@
 
 **Reason**: The prior diagnostic-only schema could not define a release PASS shape. One role-discriminated schema gives every caller the same coverage linkage and identity contract.
 
-### Preserve callers through canonical entry discovery and migrate the actual v3 consumer
+### Preserve callers through a tracked Wave-2 closure artifact and migrate the actual v3 consumer
 
-**SELECTED**: `GitContext` resolves the Wave-2 entry record at the canonical coordination-root path, so existing candidate and post-merge CLI calls retain their shape. The same cutover migrates `scripts/stateless_preview_artifact.py` from schema v2 to the unified v3 post-merge receipt.
+**SELECTED**: `GitContext` resolves only the tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` artifact. Wave-2 T014/PR #289 must create it with `release_intent: none`, accepted candidate/main identities, and closure receipt hash. The hosted post-merge workflow verifies it in a clean checkout before scanning. The same cutover migrates `scripts/stateless_preview_artifact.py` from schema v2 to the unified v3 post-merge receipt.
 
-**Reason**: CLI argument changes would require unrelated caller changes. Canonical discovery keeps the entry authoritative while the known artifact consumer receives the required v3 contract migration.
+**Reason**: The current repository has no Wave-2 artifact and hosted workspaces do not share local `.agent` state. A tracked merge artifact makes the prerequisite clone-reproducible while role CLI shapes remain stable.
 
 ## Rejected designs
 
@@ -90,8 +91,8 @@
 | Live Sonar component and inventory paging | The exact diagnostic run proves complete pages and both language intersections. |
 | Project evaluation on the implementation head | Preflight proves the exact five tuples and refuses MTP. |
 | .NET normalization behavior | Focused fixtures prove union, deterministic output, source safety, and positive denominators. |
-| Wave-2 merge identity | T000 validates the supplied record only after PR #289 merges and its closure receipt is available on accepted main. |
+| Wave-2 merge identity and tracked artifact | Wave-2 T014/PR #289 must create and merge `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`; T000 validates it only after merge. |
 
 ## Research conclusion
 
-The selected shape retains the existing scanner authority and role CLI shapes, meets the parent two-report Cobertura contract, keeps the five projects as deterministic producer inputs, fails known toolchain defects before begin, gives Wave 4 a full inventory authority, migrates the existing post-merge receipt consumer, and defines every v3 role without a v2 compatibility path.
+The selected shape retains the existing scanner authority and role CLI shapes, requires a tracked Wave-2 merge artifact before execution, meets the parent two-report Cobertura contract, keeps the five projects as deterministic producer inputs, fails known toolchain defects before begin, gives Wave 4 a full inventory authority, migrates the existing post-merge receipt consumer, and defines every v3 role without a v2 compatibility path.

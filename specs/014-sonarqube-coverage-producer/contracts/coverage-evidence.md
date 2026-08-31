@@ -6,8 +6,8 @@ This contract defines the evidence the future exact-head runner must accept befo
 
 Before the runner starts a scanner transaction, it must:
 
-1. Resolve `Wave2ClosureEntryV1` only from `<coordination-root>/.agent/e/issue450-sonar-v02311/wave2-closure-entry.json` and validate it against [wave2-closure-entry-v1.schema.json](wave2-closure-entry-v1.schema.json).
-2. Verify the canonical record's accepted SHA is on `origin/main`, its Wave-2 receipt hash matches, and PR #289 is merged to that accepted identity.
+1. Resolve `Wave2ClosureEntryV1` only from the tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` source and validate it against [wave2-closure-entry-v1.schema.json](wave2-closure-entry-v1.schema.json).
+2. Verify `release_intent: none`, the accepted candidate, candidate-to-main ancestry, accepted-main ancestry in `origin/main`, closure receipt hash, and PR #289 merged identity.
 3. Resolve and version-check `uv`, `bash`, and `dotnet`.
 4. Evaluate each fixed project for `net8.0`, direct private `coverlet.msbuild` `10.0.1`, `Microsoft.NET.Test.Sdk` `17.12.0`, and VSTest selection.
 5. Refuse MTP, including `TestingPlatformDotnetTestSupport` activation and Microsoft Testing Platform references.
@@ -21,7 +21,7 @@ After entry and preflight succeed, `scripts/run_sonarqube_exact_head.py`:
 1. Captures one clean detached head and pre-analysis identity.
 2. Derives the pure `CoveragePlan` and two runtime scanner properties.
 3. Starts SonarScanner with those properties.
-4. Claims the UUID root and canonical marker exclusively.
+4. Claims the UUID root and canonical marker exclusively, then writes a hash-bound resolved Wave-2 entry copy under that root.
 5. Builds the retained broad scanner inventory.
 6. Invokes the private `build/coverage.sh` producer with an enumerated plan and scrubbed environment.
 7. Validates the Python final report and five private .NET Cobertura inputs.
@@ -33,7 +33,7 @@ The shell receives no scanner credentials and performs no scanner, API, discover
 
 ## Marker and report identities
 
-The marker validates against [coverage-run-marker.schema.json](coverage-run-marker.schema.json). It binds two final reports and five ordered private producer inputs. Scanner arguments use only these final paths:
+The marker validates against [coverage-run-marker.schema.json](coverage-run-marker.schema.json). It binds the tracked Wave-2 source and resolved-copy hash plus two final reports and five ordered private producer inputs. Scanner arguments use only these final paths:
 
 ```text
 /d:sonar.python.coverage.reportPaths=.tmp/sonarqube-coverage/<run-id>/python/coverage.xml

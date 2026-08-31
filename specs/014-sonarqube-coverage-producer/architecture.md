@@ -81,10 +81,10 @@ stateDiagram-v2
 
 ### State invariants
 
-1. `CoveragePlan` is pure. It does not create a root, marker, report, or temporary directory.
-2. A missing or invalid `Wave2ClosureEntryV1` and every failed toolchain check stop in `PLANNED`. They make scanner begin and run-root claim unreachable.
-3. `RUN_CLAIMED` occurs only after scanner begin succeeds and only for a previously absent UUID root.
-4. `REPORTS_VALIDATED` requires the marker, two final reports, all five private .NET inputs, normalizer evidence, positive final denominators, valid source sets, a matching post-producer head, and Stateless restoration.
+1. `CoveragePlan` is pure. It does not create a root, marker, report, resolved entry, or temporary directory.
+2. Before preflight, the runner validates the tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` artifact. Schema, `release_intent: none`, receipt hash, accepted candidate, candidate-to-main ancestry, and accepted-main ancestry must agree. A missing or invalid artifact makes scanner begin and run-root claim unreachable.
+3. `RUN_CLAIMED` occurs only after scanner begin succeeds and only for a previously absent UUID root. It writes the marker and a hash-bound resolved Wave-2 entry copy under that root.
+4. `REPORTS_VALIDATED` requires the marker, tracked-entry binding, two final reports, all five private .NET inputs, normalizer evidence, positive final denominators, valid source sets, a matching post-producer head, and Stateless restoration.
 5. `SCANNER_ENDED` has no legal predecessor other than `REPORTS_VALIDATED`.
 6. A completed diagnostic creates its full inventory artifact before receipt sealing. Counts alone are not inventory evidence.
 7. Cleanup starts only after foreground producers return and preserves the first failure.
@@ -96,6 +96,7 @@ The runner owns this exact tree. `<run-id>` is one UUID. Producers use absolute 
 ```text
 .tmp/sonarqube-coverage/<run-id>/
 ├── coverage-run.json
+├── wave2-entry.json
 ├── python/
 │   ├── .coverage
 │   └── coverage.xml
@@ -109,7 +110,7 @@ The runner owns this exact tree. `<run-id>` is one UUID. Producers use absolute 
         └── host-prompts/coverage.cobertura.xml
 ```
 
-`python/coverage.xml` and `dotnet/coverage.xml` are the only report identities sent to Sonar. The five paths below `dotnet/inputs/` are private producer inputs. The runner accepts no alternate path, report glob, parent traversal, absolute scanner path, symbolic link, reparse point, URI, duplicate normalized path, or report outside this tree.
+`python/coverage.xml` and `dotnet/coverage.xml` are the only report identities sent to Sonar. The five paths below `dotnet/inputs/` are private producer inputs. `wave2-entry.json` is a run-local hash-bound copy of the previously validated tracked source. It never replaces entry validation. The runner accepts no alternate path, report glob, parent traversal, absolute scanner path, symbolic link, reparse point, URI, duplicate normalized path, or report outside this tree.
 
 ## Fixed .NET producer inventory
 
@@ -130,16 +131,12 @@ Wave2ClosureEntryV1 {
   schema_version: 1
   wave: 2
   closure_status: EXACT_CLOSED
+  release_intent: none
+  tracked_relative_path: "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json"
+  accepted_candidate_sha: Sha40
   accepted_main_sha: Sha40
   closure_receipt: { relative_path, sha256 }
   integration: { kind: merged_pull_request, pull_request: 289, accepted_ref: origin/main }
-}
-
-CoverageProjectSpec {
-  id: ProjectId
-  project: Path
-  raw_cobertura_input: CoveragePath
-  include_directory: Path | null
 }
 
 CoveragePlan {
@@ -147,10 +144,19 @@ CoveragePlan {
   head: Sha40
   root: Path
   marker: CoveragePath
+  tracked_wave2_entry: RepositoryPath
+  resolved_wave2_entry: CoveragePath
   python_data: Path
   python_report: CoveragePath
   dotnet_report: CoveragePath
   dotnet_inputs: tuple[CoverageProjectSpec, CoverageProjectSpec, CoverageProjectSpec, CoverageProjectSpec, CoverageProjectSpec]
+}
+
+CoverageProjectSpec {
+  id: ProjectId
+  project: Path
+  raw_cobertura_input: CoveragePath
+  include_directory: Path | null
 }
 
 ToolchainPreflight {
@@ -183,7 +189,7 @@ write_diagnostic_inventory(identity: ReceiptIdentity) -> InventoryReference
 validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None
 ```
 
-The runner resolves the entry record at `<coordination-root>/.agent/e/issue450-sonar-v02311/wave2-closure-entry.json`. Existing `candidate`, `post-merge`, and `diagnostic` CLI role shapes stay unchanged. There is no default, branch-derived, or v2 compatibility path.
+The runner resolves the entry source only at `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` in the checked-out repository. Wave-2 T014/PR #289 must add it before merge; this packet does not create it. Existing `candidate`, `post-merge`, and `diagnostic` CLI role shapes stay unchanged. There is no ambient `.agent` source, default, branch-derived, or v2 compatibility path.
 
 ## Producer commands
 

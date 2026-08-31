@@ -33,6 +33,9 @@ Wave2ClosureEntryV1 {
   schema_version: 1
   wave: 2
   closure_status: EXACT_CLOSED
+  release_intent: none
+  tracked_relative_path: "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json"
+  accepted_candidate_sha: Sha40
   accepted_main_sha: Sha40
   closure_receipt: { relative_path, sha256 }
   integration: { kind: merged_pull_request, pull_request: 289, accepted_ref: origin/main }
@@ -55,9 +58,9 @@ ProjectCompatibility {
 }
 ```
 
-`verify_wave2_entry` checks the record schema, the immutable Wave-2 receipt hash and content, the accepted SHA in `origin/main`, and PR #289 merged identity. It rejects a PR head, feature branch, missing receipt, non-main SHA, or mismatch as `WAVE2_CLOSURE_UNVERIFIED`.
+`verify_wave2_entry` checks the tracked record schema, `release_intent`, immutable Wave-2 receipt hash and content, accepted candidate-to-main ancestry, accepted-main ancestry in `origin/main`, and PR #289 merged identity. It rejects a missing or untracked artifact, PR head, feature branch, missing receipt, non-main SHA, non-`none` intent, or mismatch as `WAVE2_CLOSURE_UNVERIFIED`.
 
-`resolve_wave2_entry` reads only `<coordination-root>/.agent/e/issue450-sonar-v02311/wave2-closure-entry.json`. Existing role callers do not pass an entry-file argument. The resolver validates that exact record before the transaction can reach preflight.
+`resolve_wave2_entry` reads only `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` from the checked-out repository. Wave-2 T014/PR #289 creates this external prerequisite after the current open PR closes. Existing role callers do not pass an entry-file argument. The resolver validates the tracked source before preflight. After `RUN_CLAIMED`, it writes a hash-bound copy beneath the run root; that copy is provenance, not authority.
 
 `preflight_coverage_toolchain` runs before scanner begin. It requires executable `uv`, `bash`, and `dotnet`, evaluates every fixed project, and rejects active MTP. It never injects a property to switch the test platform. `COVERAGE_TOOL_UNAVAILABLE`, `COVERAGE_VSTEST_INCOMPATIBLE`, and `COVERAGE_MTP_INCOMPATIBLE` stop at `PLANNED` before root claim.
 
@@ -70,6 +73,8 @@ CoveragePlan {
   project_key: "thebtf_netcoredbg_mcp"
   root: Path
   marker: CoveragePath
+  tracked_wave2_entry: RepositoryPath
+  resolved_wave2_entry: CoveragePath
   python_data: Path
   python_report: CoveragePath
   dotnet_report: CoveragePath
@@ -84,10 +89,11 @@ CoverageProjectSpec {
 }
 ```
 
-`derive_coverage_plan` is pure. It writes no file. After scanner begin succeeds, `claim_coverage_run` creates the UUID root exclusively and writes canonical sorted compact JSON followed by one LF.
+`derive_coverage_plan` is pure. It writes no file. After scanner begin succeeds, `claim_coverage_run` creates the UUID root exclusively, writes canonical sorted compact JSON, and writes the hash-bound resolved Wave-2 entry below that root. The marker binds the tracked source path, source hash, candidate SHA, main SHA, and resolved-copy path.
 
 | Kind | ID | Format | Relative path |
-| --- | --- | --- | --- |
+| --- | --- | --- |
+| Run provenance | `wave2-entry` | canonical JSON | `.tmp/sonarqube-coverage/<run-id>/wave2-entry.json` |
 | Final scanner report | `python` | Cobertura | `.tmp/sonarqube-coverage/<run-id>/python/coverage.xml` |
 | Final scanner report | `dotnet` | Cobertura | `.tmp/sonarqube-coverage/<run-id>/dotnet/coverage.xml` |
 | Private producer input | `codesearch-core` | Cobertura | `.tmp/sonarqube-coverage/<run-id>/dotnet/inputs/codesearch-core/coverage.cobertura.xml` |
@@ -96,7 +102,7 @@ CoverageProjectSpec {
 | Private producer input | `stateless` | Cobertura | `.tmp/sonarqube-coverage/<run-id>/dotnet/inputs/stateless/coverage.cobertura.xml` |
 | Private producer input | `host-prompts` | Cobertura | `.tmp/sonarqube-coverage/<run-id>/dotnet/inputs/host-prompts/coverage.cobertura.xml` |
 
-The marker binds the two final reports, all five ordered producer inputs, the normalizer algorithm and order, tool versions, producer hash, and `.coveragerc` hash. It does not treat private inputs as Sonar reports.
+The marker binds the tracked Wave-2 source plus the two final reports, all five ordered producer inputs, the normalizer algorithm and order, tool versions, producer hash, and `.coveragerc` hash. It does not treat private inputs as Sonar reports.
 
 ## Coverage evidence
 

@@ -20,12 +20,18 @@ The implementation changes the runner, focused runner tests, `.coveragerc`, `bui
 | Concern | Constraint |
 | --- | --- |
 | Parent report contract | Exactly two deterministic project-root-relative Cobertura reports: Python and one merged .NET report. |
+| Wave-2 entry source | External tracked artifact `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`, produced by Wave-2 T014/PR #289 and available in every clone after merge. |
+| Entry validation | Schema, `release_intent: none`, receipt hash, accepted candidate, and candidate/main ancestry must validate before preflight. A resolved copy is written only under the claimed Wave-3 root. |
 | .NET producer inventory | Five closed `net8.0` VSTest projects are private inputs in fixed order. They are not Sonar report identities. |
 | Pre-begin gate | `uv`, `bash`, `dotnet`, Coverlet `10.0.1`, Test SDK `17.12.0`, and VSTest must validate before begin and claim. MTP is refused. |
 | Scanner handoff | Runtime begin arguments name the two final Cobertura paths. `SonarQube.Analysis.xml` remains unchanged. |
 | Normalization | The runner owns `cobertura-merge-normalize-v1`; it validates all inputs and emits only the final `.NET` report. |
 | Diagnostic authority | `DIAGNOSTIC_COMPLETE` binds a create-new hash-checked inventory artifact with complete issue/hotspot records. |
 | Release roles | Unified v3 schema supports diagnostic, candidate, and post-merge roles with discriminated legal outcomes. |
+
+## External entry prerequisite
+
+Wave 2, not this packet, must place the tracked `wave-closure-v1.json` beside its closure receipt in the merged PR #289 result. The file is the only Wave-3 entry source. Wave-3 never provisions or reads an ambient `.agent` entry file. A clean clone or hosted checkout must contain this tracked file before Wave-3 can begin.
 
 ## Scope and rollback
 
@@ -39,10 +45,11 @@ The implementation changes the runner, focused runner tests, `.coveragerc`, `bui
 | `build/coverage.sh` | Add strict enumerated producer commands for Python and five private .NET inputs. |
 | Five fixed test `.csproj` files | Add direct private `coverlet.msbuild` `10.0.1` references. |
 | `scripts/stateless_preview_artifact.py` and focused tests | Replace receipt schema v2 admission with unified v3 post-merge receipt validation while preserving artifact sealing behavior. |
+| `.github/workflows/stateless-preview.yml` | Add a hosted-checkout entry verification step before post-merge scan and artifact sealing. It verifies the tracked Wave-2 artifact and provisions no `.agent` state. |
 
 ### Immutable comparison surfaces
 
-`pyproject.toml`, `uv.lock`, `SonarQube.Analysis.xml`, `docs/RELEASE-PROTOCOL.md`, runtime product code, public routes, project key, thresholds, New Code, exclusions, credentials, finding dispositions, package version, tag, and publication remain unchanged. `scripts/stateless_preview_artifact.py` is an explicit v3 receipt-consumer migration exception; it must not change public artifact behavior.
+`pyproject.toml`, `uv.lock`, `SonarQube.Analysis.xml`, `docs/RELEASE-PROTOCOL.md`, runtime product code, public routes, project key, thresholds, New Code, exclusions, credentials, finding dispositions, package version, tag, and publication remain unchanged. `scripts/stateless_preview_artifact.py` and `.github/workflows/stateless-preview.yml` are explicit receipt/entry migration exceptions; neither may change public artifact behavior.
 
 Rollback removes the coverage transaction as one cohesive Wave-3 change. It never falls back to a branch-derived Wave-2 entry, an external report, an optional v2 validator, a policy reduction, or static report discovery.
 
@@ -73,21 +80,20 @@ flowchart LR
 | COV-007 to COV-012 | T003, T006 to T016 | Shell, config, five projects, runner, tests | V03, V08 to V12 |
 | COV-013 to COV-017 | T001, T004, T013 to T019 | Runner and focused tests | V04, V05, V11 to V14 |
 | COV-018 to COV-020 | T005, T018, T021 to T022 | Unified receipt and inventory schemas, runner, tests | V15 |
-| COV-021 to COV-025 | T020 to T028 | Owned implementation files, artifact consumer, and evidence | Focused proof, review, judgment, consumer cutover, delayed receipt |
+| COV-021 to COV-026 | T020 to T028 | Owned implementation files, hosted workflow, artifact consumer, and evidence | Focused proof, review, judgment, consumer cutover, clean-clone entry verification, delayed receipt |
 
 ## Verification plan
 
 | Layer | Command or proof | What it proves |
-| --- | --- | --- |
-| Entry and preflight | Focused command/event spy | Missing Wave-2 entry, missing tools, invalid tuple, and MTP leave begin and claim unreachable. |
+| Entry and preflight | Focused command/event spy plus hosted-workflow fixture | Missing tracked artifact, invalid schema/receipt/release intent, invalid candidate/main ancestry, missing tools, invalid tuple, and MTP leave begin and claim unreachable. |
 | RED/GREEN contract | `uv run --locked --extra dev pytest tests/test_sonarqube_exact_head_runner.py -q` | All 15 rows exercise the runner boundary. |
 | Local producer | Runner-owned producer invocation | Five private inputs normalize into one final .NET Cobertura report and one Python report. |
-| Diagnostic transaction | `python scripts/run_sonarqube_exact_head.py --role diagnostic` | Canonical Wave-2 entry discovery, two-report import, canonical identity, complete inventory, and unchanged coverage condition. |
+| Diagnostic transaction | `python scripts/run_sonarqube_exact_head.py --role diagnostic` | Tracked Wave-2 entry discovery, run-root resolved-copy provenance, two-report import, canonical identity, complete inventory, and unchanged coverage condition. |
 | Release roles and consumer | Unified v3 receipt validators plus `stateless_preview_artifact.py` focused proof | Schema v2, diagnostic-as-PASS, missing linkage, incomplete inventory, stale identity, or a v2 consumer cannot seal a post-merge artifact. |
+| Hosted post-merge workflow | `.github/workflows/stateless-preview.yml` verification step | A fresh checkout uses tracked Wave-2 evidence and requires no `.agent` provisioning. |
 | Independent review and judgment | Exact implementation SHA | No policy or comparison-surface mutation; receipt remains non-release evidence. |
 
 No authoring command runs a formatter, linter, build, test suite, scanner, or release operation.
 
 ## Delayed receipt rule
-
 `contracts/` contains schemas and contracts only. This packet contains no `acceptance-receipt.md` and no diagnostic inventory artifact. T028 may create a diagnostic record, its inventory artifact, and the Wave-3 acceptance receipt only after T000 through T027 succeed. A blocked result creates none of them.

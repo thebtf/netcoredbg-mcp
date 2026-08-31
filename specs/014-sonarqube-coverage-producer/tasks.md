@@ -7,7 +7,7 @@ description: "Dependency-ordered Wave-3 tasks for the parent-compatible exact-he
 **Input**: [spec.md](spec.md), [architecture.md](architecture.md), [research.md](research.md), [data-model.md](data-model.md), [plan.md](plan.md), [quickstart.md](quickstart.md), and `contracts/`.
 **Parent**: `specs/011-issue450-sonar-release-program/`, Wave 3.
 **Release intent**: `none`.
-**Execution gate**: Wave-2 PR #289 is open. T000 must validate the canonical coordination-root Wave-2 closure record before T001 through T028 may implement, run a producer, begin a scanner, claim a root, or invoke diagnostic.
+**Execution gate**: Wave-2 PR #289 is open. T000 must discover the tracked `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` and validate its schema, `release_intent: none`, accepted candidate, receipt hash, and merged-main ancestry before T001 through T028 may implement, run a producer, begin a scanner, claim a root, or invoke diagnostic.
 **Receipt state**: No actual diagnostic record, inventory artifact, or acceptance receipt may exist before T028.
 
 ## Binding RED/GREEN matrix
@@ -16,7 +16,7 @@ The matrix has exactly 15 rows. Current RED reaches the existing runner boundary
 
 | ID | RED scenario and current oracle | GREEN oracle | Owner task |
 | --- | --- | --- | --- |
-| **R01 / V01** | Hide the canonical Wave-2 entry record, retain an open PR #289 identity, use a branch SHA, or alter the receipt hash. Current runner has no Wave-2 gate. | `WAVE2_CLOSURE_UNVERIFIED` occurs before preflight, begin, and claim. | T001, T012 |
+| **R01 / V01** | In a clean-clone or hosted-workspace fixture, omit or untrack the Wave-2 artifact; alter its receipt hash, release intent, candidate SHA, or main ancestry. Current runner has no Wave-2 gate. | `WAVE2_CLOSURE_UNVERIFIED` occurs before preflight, begin, and claim; only after claim does the runner write a hash-bound resolved copy inside its own run root. | T000, T001, T012, T013, T023 |
 | **R02 / V02** | Hide `uv`, `bash`, or `dotnet`; alter the Coverlet/Test SDK tuple; or activate MTP. Current runner begins without producer preflight. | Typed planned-stage failure has zero begin and claim calls. | T001, T012 |
 | **R03 / V03** | Spy on Python producer command and environment. Current runner invokes no isolated coverage workload. | Exact isolated locked `uv` command, no `SONAR_*`, and cache-safe pytest arguments are observed. | T002, T006 to T008, T015 |
 | **R04 / V04** | Feed a missing, line-only, malformed, or zero-denominator Python Cobertura report. | Python final report has `coverage` root and positive line and branch denominators. | T002, T006, T016 |
@@ -61,14 +61,15 @@ The matrix has exactly 15 rows. Current RED reaches the existing runner boundary
 | COV-023 | T001 to T005, T022 | All 15 RED/GREEN rows. |
 | COV-024 | T024 to T028 | Review, judgment, frozen head, delayed receipt. |
 | COV-025 | T005, T021 to T023 | Existing v3 receipt-consumer cutover. |
+| COV-026 | T001, T012, T023 | Tracked clean-clone hosted-workflow entry proof. |
 
 ## Entry task
 
-- [ ] **T000 [ENTRY]** Resolve the canonical `.agent/e/issue450-sonar-v02311/wave2-closure-entry.json` from the coordination root and validate it against its schema, the immutable Wave-2 closure receipt, `origin/main`, and merged PR #289. **Requirements**: COV-002. **Acceptance**: the accepted-main SHA, closure receipt hash, and merged PR identity agree. While PR #289 remains open, return `WAVE2_CLOSURE_UNVERIFIED` and do not start any Wave-3 implementation or diagnostic action.
+- [ ] **T000 [ENTRY]** Treat `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json` as an external Wave-2 prerequisite. After Wave-2 T014/PR #289 merges it, validate its schema, `release_intent: none`, closure receipt hash, accepted candidate, candidate-to-main ancestry, and accepted-main ancestry in `origin/main`. **Requirements**: COV-002. **Acceptance**: only the merged tracked artifact admits Wave 3; while PR #289 remains open, return `WAVE2_CLOSURE_UNVERIFIED` without starting Wave-3 implementation or diagnostic action.
 
 ## Slice S1: behavior-first RED matrix
 
-- [ ] **T001 [S1]** Add R01 and R02 entry/preflight event-spy tests in `tests/test_sonarqube_exact_head_runner.py`. **Requirements**: COV-002, COV-004, COV-023. **Acceptance**: all invalid entry and toolchain inputs leave begin and claim at zero.
+- [ ] **T001 [S1]** Add R01 and R02 entry/preflight event-spy tests, including a clean-clone/hosted-workspace fixture with no `.agent` entry state. **Requirements**: COV-002, COV-004, COV-023, COV-026. **Acceptance**: all invalid entry and toolchain inputs leave begin and claim at zero.
 - [ ] **T002 [S1]** Add R03 to R07 Python, plan, marker, and scanner-argument tests. **Requirements**: COV-003, COV-005 to COV-008, COV-013, COV-023. **Acceptance**: current runner fails through the planned caller boundary.
 - [ ] **T003 [S1]** Add R08 to R12 private-input, Stateless, and normalizer fixtures. **Requirements**: COV-009 to COV-012, COV-014, COV-023. **Acceptance**: current runner cannot accept the fixed input or final-output contract.
 - [ ] **T004 [S1]** Add R13 and R14 event/API fixtures. **Requirements**: COV-015 to COV-017, COV-023. **Acceptance**: current order lacks required barriers and analysis proof.
@@ -85,8 +86,8 @@ The matrix has exactly 15 rows. Current RED reaches the existing runner boundary
 
 ## Slice S3: transaction, normalizer, and diagnostic evidence
 
-- [ ] **T012 [S3]** Implement canonical Wave-2 entry resolution and `preflight_coverage_toolchain` before scanner begin. **Requirements**: COV-001, COV-002, COV-004, COV-009. **Acceptance**: R01 and R02 turn green with zero begin/claim on failure while existing role CLI shapes remain unchanged.
-- [ ] **T013 [S3]** Implement `CoveragePlan`, two-final-report marker derivation, five private input paths, and exclusive claim. **Requirements**: COV-003, COV-005. **Acceptance**: plan is pure and marker schema v1 validates.
+- [ ] **T012 [S3]** Implement tracked Wave-2 entry resolution, schema/release-intent/ancestry validation, and `preflight_coverage_toolchain` before scanner begin. **Requirements**: COV-001, COV-002, COV-004, COV-009, COV-026. **Acceptance**: R01 and R02 turn green with zero begin/claim on failure while existing role CLI shapes remain unchanged.
+- [ ] **T013 [S3]** Implement `CoveragePlan`, two-final-report marker derivation, tracked-entry hash binding, a run-root resolved entry copy after claim, five private input paths, and exclusive claim. **Requirements**: COV-002, COV-003, COV-005. **Acceptance**: plan is pure; no run-local entry exists before claim; marker schema v1 validates.
 - [ ] **T014 [S3]** Add exactly two runtime Cobertura scanner properties and static XML coverage-property rejection. **Requirements**: COV-006, COV-022. **Acceptance**: R07 turns green and XML stays unchanged.
 - [ ] **T015 [S3]** Invoke the scrubbed producer with the complete fixed input plan. **Requirements**: COV-007, COV-009, COV-010. **Acceptance**: no producer discovers paths or receives Sonar values.
 - [ ] **T016 [S3]** Implement private-input validation, `normalize_dotnet_cobertura`, final report validation, and Stateless restoration checks. **Requirements**: COV-008, COV-010 to COV-014. **Acceptance**: R04 to R06 and R09 to R12 turn green.
@@ -99,12 +100,12 @@ The matrix has exactly 15 rows. Current RED reaches the existing runner boundary
 
 - [ ] **T021 [S4]** Make candidate and post-merge PASS validation require [exact-head-receipt-v3.schema.json](contracts/exact-head-receipt-v3.schema.json). Migrate `scripts/stateless_preview_artifact.py` and its focused tests from schema v2 to the v3 post-merge consumer contract. Remove v2 and optional-coverage paths in the same change. **Requirements**: COV-018, COV-019, COV-025. **Acceptance**: a PASS and artifact sealing require final coverage linkage, canonical identity, complete inventory, successful cleanup, and zero-blocking release gate.
 - [ ] **T022 [S4]** Run R15 forgery/head/inventory/cleanup/consumer tests and the complete focused runner suite. **Requirements**: COV-004, COV-019, COV-020, COV-022, COV-023, COV-025. **Acceptance**: all 15 rows are green with nonzero denominators and no immutable-surface change.
-- [ ] **T023 [S4]** Inspect the implementation diff against immutable comparison surfaces. **Requirements**: COV-022, COV-025. **Acceptance**: no policy, XML, lockfile, runtime route, threshold, exclusion, or release change appears; `scripts/stateless_preview_artifact.py` changes only its receipt-consumer contract.
-- [ ] **T024 [S4]** Freeze the exact implementation head and obtain independent source review. **Requirements**: COV-001, COV-015, COV-018 to COV-025. **Acceptance**: the reviewer receives the exact SHA, COV requirements, and V01 to V15.
-- [ ] **T025 [S4]** Apply review-causal corrections and rerun focused evidence. **Requirements**: COV-023 to COV-025. **Acceptance**: a changed head gets targeted proof and a new independent review.
-- [ ] **T026 [S4]** Obtain independent acceptance judgment on the frozen reviewed head. **Requirements**: COV-016 to COV-025. **Acceptance**: the judge checks two-report contract, input/normalizer safety, entry gate, inventory, v3 roles, consumer cutover, and non-release authority.
-- [ ] **T027 [S4]** Bind review and judgment to the exact diagnostic scanner head. **Requirements**: COV-002, COV-022, COV-024, COV-025. **Acceptance**: canonical entry evidence, frozen SHA, reviewer, judge, and scanner worktree agree.
-- [ ] **T028 [S4]** Run the diagnostic only from the prescribed fresh scanner worktree after canonical Wave-2 entry validation. Create the v3 diagnostic record, immutable inventory artifact, and `acceptance-receipt.md` only after every predicate succeeds. **Requirements**: COV-002, COV-016 to COV-025. **Acceptance**: diagnostic completion has `release_intent: none`, complete inventory linkage, and no release authority. A block creates none of the three artifacts.
+- [ ] **T023 [S4]** Add the hosted post-merge workflow verification that runs tracked Wave-2 entry validation before scanning and artifact sealing. Inspect the implementation diff against immutable comparison surfaces. **Requirements**: COV-022, COV-025, COV-026. **Acceptance**: a fresh hosted checkout needs no `.agent` provisioning; no policy, XML, lockfile, runtime route, threshold, exclusion, or release change appears; only declared workflow and consumer migration behavior changes.
+- [ ] **T024 [S4]** Freeze the exact implementation head and obtain independent source review, including the tracked Wave-2 prerequisite boundary and hosted post-merge workflow change. **Requirements**: COV-001, COV-015, COV-018 to COV-026. **Acceptance**: the reviewer receives the exact SHA, COV requirements, V01 to V15, and the external Wave-2 artifact contract.
+- [ ] **T025 [S4]** Apply review-causal corrections and rerun focused evidence. **Requirements**: COV-023 to COV-026. **Acceptance**: a changed head gets targeted proof and a new independent review.
+- [ ] **T026 [S4]** Obtain independent acceptance judgment on the frozen reviewed head. **Requirements**: COV-016 to COV-026. **Acceptance**: the judge checks two-report contract, input/normalizer safety, tracked entry, inventory, v3 roles, consumer cutover, hosted-workflow proof, and non-release authority.
+- [ ] **T027 [S4]** Bind review and judgment to the exact diagnostic scanner head. **Requirements**: COV-002, COV-022, COV-024 to COV-026. **Acceptance**: tracked entry, frozen SHA, reviewer, judge, and scanner worktree agree.
+- [ ] **T028 [S4]** Run the diagnostic only from the prescribed fresh scanner worktree after tracked Wave-2 entry validation. Create the v3 diagnostic record, immutable inventory artifact, and `acceptance-receipt.md` only after every predicate succeeds. **Requirements**: COV-002, COV-016 to COV-026. **Acceptance**: diagnostic completion has `release_intent: none`, complete inventory linkage, and no release authority. A block creates none of the three artifacts.
 
 ## Dependencies and execution order
 

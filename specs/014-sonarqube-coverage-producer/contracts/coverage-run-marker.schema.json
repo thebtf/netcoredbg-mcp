@@ -10,6 +10,7 @@
     "captured_head",
     "project_key",
     "tool_versions",
+    "wave2_entry",
     "final_reports",
     "dotnet_producers",
     "normalizer",
@@ -29,6 +30,35 @@
     },
     "project_key": {
       "const": "thebtf_netcoredbg_mcp"
+    },
+    "wave2_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tracked_relative_path",
+        "source_sha256",
+        "accepted_candidate_sha",
+        "accepted_main_sha",
+        "resolved_relative_path"
+      ],
+      "properties": {
+        "tracked_relative_path": {
+          "const": "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json"
+        },
+        "source_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "accepted_candidate_sha": {
+          "$ref": "#/$defs/sha40"
+        },
+        "accepted_main_sha": {
+          "$ref": "#/$defs/sha40"
+        },
+        "resolved_relative_path": {
+          "type": "string",
+          "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/wave2-entry\\.json$"
+        }
+      }
     },
     "tool_versions": {
       "type": "object",
