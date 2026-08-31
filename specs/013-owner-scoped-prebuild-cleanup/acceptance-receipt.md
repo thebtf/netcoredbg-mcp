@@ -7,7 +7,7 @@
 - **Parent program:** `specs/011-issue450-sonar-release-program/`
 - **Wave contract:** `specs/013-owner-scoped-prebuild-cleanup/`
 - **Source base:** `1b8b2d548a45b17dde690b4cb8e4fc7153d326bc`
-- **Accepted candidate:** `0d8466fc498dd2ec7140fa2457ed202191405c45`.
+- **Accepted candidate:** `fdef12494722311c9050d2d59cf248abd6142e4f`.
 - **Initial independent exact check:** `agent://CheckWave2ExactCandidate` returned `PASS` for predecessor implementation `480b67509fdfd996556d7954b736c46361025b2d`.
 - **PR correction verification:** `agent://VerifyWave2PrCorrection` returned `VERIFIED` for successor `598139418a40f0dc0fb07d204ac60864de104c49`.
 - **Lifecycle verification:** `agent://VerifyWave2LatestFix` returned `VERIFIED` for successor `a04e9384902493264a447faa1cd9195f63db56ed`.
@@ -15,8 +15,9 @@
 - **Gate verification:** `agent://VerifyWave2FinalGateCandidate` returned `VERIFIED` for successor `209d151f9f9e0cba3fc5b6740196452611060a62`.
 - **Process verification:** `agent://VerifyWave2FinalImplementation` returned `VERIFIED` for successor `eeeb1b2655bcab6336b86068be5d205508d512ce`.
 - **Stop-evidence verification:** `agent://VerifyWave2StopEvidence` returned `VERIFIED` for successor `8f3b3b3b7c05f01736070740570567acb30f23c7`.
-- **Late lifecycle verification:** `agent://VerifyWave2LateLifecycleFix` returned `VERIFIED` with no findings for exact final candidate `0d8466fc498dd2ec7140fa2457ed202191405c45`.
-- **Exact final judgment:** `agent://JudgeWave2LateFinal` returned `ACCEPT` for exact final candidate `0d8466fc498dd2ec7140fa2457ed202191405c45`.
+- **Late lifecycle verification:** `agent://VerifyWave2LateLifecycleFix` returned `VERIFIED` for successor `0d8466fc498dd2ec7140fa2457ed202191405c45`.
+- **Reaper verification:** `agent://VerifyWave2ReaperSuccessor` returned `VERIFIED` with no findings for exact final candidate `fdef12494722311c9050d2d59cf248abd6142e4f`.
+- **True final judgment:** `agent://JudgeWave2TrueFinal` returned `ACCEPT` for exact final candidate `fdef12494722311c9050d2d59cf248abd6142e4f`.
 
 This receipt closes Wave 2 internally. It does not authorize Wave 3 implementation, a tag, release, package publication, Sonar waiver, route cutover, or a claim that global process cleanup caused either historical issue #450 incident.
 
@@ -140,7 +141,9 @@ The documentation audit `agent://AuditWave2Comments` retained the load-bearing a
 - `agent://VerifyWave2StopEvidence`: exact successor `VERIFIED`, 6/6 claims and no findings.
 - The late final correction keeps the lifecycle gate held until a canceled expected-owner finalizer produces its receipt and retains an immediate-startup failed owner/generation for later fail-closed pre-build. Commit `0d8466fc498dd2ec7140fa2457ed202191405c45` contains those final bytes.
 - `agent://VerifyWave2LateLifecycleFix`: exact successor `VERIFIED`, 2/2 claims and no findings.
-- `agent://JudgeWave2LateFinal`: exact `ACCEPT`, authorizing this receipt and tracked closure artifact for `0d8466fc498dd2ec7140fa2457ed202191405c45` only.
+- The final cleanup correction transfers failed-admission handles into a reachable private retry reaper and holds the lifecycle gate through a canceled expected-owner disconnect and matching finalizer receipt. Commits `42d2c8f1bcffb603ff36067c8f95132abcd1136d` and `fdef12494722311c9050d2d59cf248abd6142e4f` contain those final bytes.
+- `agent://VerifyWave2ReaperSuccessor`: exact successor `VERIFIED`, all focused claims and no findings.
+- `agent://JudgeWave2TrueFinal`: exact `ACCEPT`, authorizing this receipt and tracked closure artifact for `fdef12494722311c9050d2d59cf248abd6142e4f` only.
 
 ## Requirement closure
 
@@ -156,7 +159,7 @@ The documentation audit `agent://AuditWave2Comments` retained the load-bearing a
 - **WOC-010:** explicit safe Win32 signatures, private handles, intended inheritance, no breakaway/dependency leak.
 - **WOC-011:** public Python/default, host, installed CLI, dependency, Sonar, coverage, and release boundaries preserved.
 - **WOC-012:** load-bearing ownership and failure rationale is documented at the source seams.
-- **WOC-013:** exact final candidate `0d8466fc498dd2ec7140fa2457ed202191405c45`, the complete independent checker/verifier chain, exact final judgment, and this delayed non-release receipt are present.
+- **WOC-013:** exact final candidate `fdef12494722311c9050d2d59cf248abd6142e4f`, the complete independent checker/verifier chain, true final judgment, and this delayed non-release receipt are present.
 
 ## Handoff
 
