@@ -942,7 +942,7 @@ internal sealed class NativeSceneArtifactStagingDriver
     public NativeSceneArtifactStagingDriver(object staged)
     {
         _staged = staged;
-        ArtifactId = RequiredString(staged, "ArtifactId");
+        ArtifactId = RequiredString(staged, nameof(ArtifactId));
         _commitAsync = RequiredGenericTaskMethod(staged.GetType(), "CommitAsync", typeof(CancellationToken));
     }
 
@@ -1014,9 +1014,9 @@ internal sealed class NativeSceneArtifactCommitResultSnapshot
         _result = result;
     }
 
-    public string? Code => OptionalString(_result, "Code");
+    public string? Code => OptionalString(_result, nameof(Code));
 
-    public string? Message => OptionalString(_result, "Message");
+    public string? Message => OptionalString(_result, nameof(Message));
 
     public NativeSceneArtifactDescriptorSnapshot? Descriptor
     {
@@ -1037,17 +1037,17 @@ internal sealed class NativeSceneArtifactDescriptorSnapshot
         _descriptor = descriptor;
     }
 
-    public string ArtifactId => RequiredString(_descriptor, "ArtifactId");
+    public string ArtifactId => RequiredString(_descriptor, nameof(ArtifactId));
 
-    public string CaptureId => RequiredString(_descriptor, "CaptureId");
+    public string CaptureId => RequiredString(_descriptor, nameof(CaptureId));
 
-    public string MediaType => RequiredString(_descriptor, "MediaType");
+    public string MediaType => RequiredString(_descriptor, nameof(MediaType));
 
-    public long ByteLength => RequiredInt64(_descriptor, "ByteLength");
+    public long ByteLength => RequiredInt64(_descriptor, nameof(ByteLength));
 
-    public string Sha256 => RequiredString(_descriptor, "Sha256");
+    public string Sha256 => RequiredString(_descriptor, nameof(Sha256));
 
-    public string ArtifactSchemaVersion => RequiredString(_descriptor, "ArtifactSchemaVersion");
+    public string ArtifactSchemaVersion => RequiredString(_descriptor, nameof(ArtifactSchemaVersion));
 
     public PropertyInfo[] PublicProperties => _descriptor.GetType()
         .GetProperties(BindingFlags.Instance | BindingFlags.Public)
@@ -1064,31 +1064,31 @@ internal sealed class NativeSceneArtifactReadResultSnapshot
         _result = result;
     }
 
-    public string Kind => RequiredString(_result, "Kind");
+    public string Kind => RequiredString(_result, nameof(Kind));
 
-    public string? Tool => OptionalString(_result, "Tool");
+    public string? Tool => OptionalString(_result, nameof(Tool));
 
-    public string? Code => OptionalString(_result, "Code");
+    public string? Code => OptionalString(_result, nameof(Code));
 
-    public string? Message => OptionalString(_result, "Message");
+    public string? Message => OptionalString(_result, nameof(Message));
 
-    public string ArtifactId => RequiredString(_result, "ArtifactId");
+    public string ArtifactId => RequiredString(_result, nameof(ArtifactId));
 
-    public long Offset => RequiredInt64(_result, "Offset");
+    public long Offset => RequiredInt64(_result, nameof(Offset));
 
-    public int BytesRead => RequiredInt32(_result, "BytesRead");
+    public int BytesRead => RequiredInt32(_result, nameof(BytesRead));
 
-    public string DataBase64 => RequiredString(_result, "DataBase64");
+    public string DataBase64 => RequiredString(_result, nameof(DataBase64));
 
-    public bool EndOfArtifact => RequiredBoolean(_result, "EndOfArtifact");
+    public bool EndOfArtifact => RequiredBoolean(_result, nameof(EndOfArtifact));
 
-    public string MediaType => RequiredString(_result, "MediaType");
+    public string MediaType => RequiredString(_result, nameof(MediaType));
 
-    public long ByteLength => RequiredInt64(_result, "ByteLength");
+    public long ByteLength => RequiredInt64(_result, nameof(ByteLength));
 
-    public string Sha256 => RequiredString(_result, "Sha256");
+    public string Sha256 => RequiredString(_result, nameof(Sha256));
 
-    public string ArtifactSchemaVersion => RequiredString(_result, "ArtifactSchemaVersion");
+    public string ArtifactSchemaVersion => RequiredString(_result, nameof(ArtifactSchemaVersion));
 
     public string[] PublicPropertyNames => _result.GetType()
         .GetProperties(BindingFlags.Instance | BindingFlags.Public)
