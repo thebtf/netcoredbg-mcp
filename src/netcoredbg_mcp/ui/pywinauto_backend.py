@@ -18,6 +18,19 @@ logger = logging.getLogger(__name__)
 _TOGGLE_STATE_NAMES = {0: "Off", 1: "On", 2: "Indeterminate"}
 
 
+class _ImmediateFallbackResult:
+    """Awaitable fallback result that completes without yielding control."""
+
+    __slots__ = ("_result",)
+
+    def __init__(self, requested_values: tuple[object, ...], response: Any) -> None:
+        self._result = (requested_values, response)
+
+    def __await__(self):
+        yield from ()
+        return self._result[1]
+
+
 class PywinautoBackend:
     """UIBackend implementation wrapping the existing UIAutomation class."""
 
@@ -798,8 +811,8 @@ class PywinautoBackend:
         response: Any,
         requested_values: tuple[object, ...],
     ) -> Any:
-        """Yield once while keeping unsupported-call inputs off the wire payload."""
-        return (await asyncio.sleep(0, result=(requested_values, response)))[1]
+        """Consume unsupported-call inputs without changing task scheduling."""
+        return await _ImmediateFallbackResult(requested_values, response)
 
     @staticmethod
     def _unsupported_grid() -> dict[str, Any]:
