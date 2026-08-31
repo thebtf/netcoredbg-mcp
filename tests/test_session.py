@@ -1204,10 +1204,11 @@ class TestOwnerScopedPublicRouteRedMatrix:
         fake_client.adapter_pid = None
         fake_client.disconnect = AsyncMock()
 
-        async def stop_client(**_kwargs):
+        async def stop_client(**kwargs):
             fake_client.is_running = False
+            expected_owner = kwargs.get("expected_owner")
             return OwnerDrainReceipt(
-                owner=owner,
+                owner=expected_owner or owner,
                 status=DrainStatus.DRAINED,
                 forced=False,
                 root_returncode=0,
@@ -1243,8 +1244,11 @@ class TestOwnerScopedPublicRouteRedMatrix:
             await manager.restart(rebuild=True)
 
         owners = [call.kwargs["owner"] for call in prebuild.await_args_list]
-        assert owners and all(isinstance(value, OwnedAdapterCleanup) for value in owners)
-        assert all(value.owner == owner for value in owners)
+        assert len(owners) == 2
+        assert all(isinstance(value, OwnedAdapterCleanup) for value in owners)
+        assert owners[0].owner == owner
+        assert owners[1].owner.owner_id == "owner-c2-restart"
+        assert owners[1].owner.generation == 1
 
     @pytest.mark.asyncio
     async def test_c2_failed_active_owner_drain_blocks_prebuild(self, tmp_path) -> None:
@@ -1307,10 +1311,11 @@ class TestOwnerScopedPublicRouteRedMatrix:
         assert lifecycle[:2] == ["disconnect", "owner-finalizer"]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("lifecycle_state", [DebugState.RUNNING, DebugState.TERMINATED])
     async def test_restart_rebuild_preserves_failed_owner_receipt_for_build_gate(
-        self, tmp_path
+        self, tmp_path, lifecycle_state: DebugState
     ) -> None:
-        """Restart must retain a failed owner receipt after its generic stop resets state."""
+        """Restart retains a failed owner receipt from running or terminal state."""
 
         program = tmp_path / "App.dll"
         project = tmp_path / "App.csproj"
@@ -1352,7 +1357,7 @@ class TestOwnerScopedPublicRouteRedMatrix:
         client.stop = AsyncMock(side_effect=stop)
         manager._client = client
         manager._active_dap_run = generation
-        manager._state.state = DebugState.RUNNING
+        manager._state.state = lifecycle_state
         manager._last_launch_config = {
             "program": str(program),
             "cwd": None,

@@ -1761,9 +1761,12 @@ class SessionManager:
         was_active = self.is_active
         if was_active:
             logger.info("[launch] stopping existing session before build")
-            if isinstance(prebuild_owner, OwnedAdapterCleanup):
-                receipt = await prebuild_owner.drain()
-                prebuild_owner = prebuild_owner.with_receipt(receipt)
+        # A terminalized DAP run can still retain its owner and final receipt.
+        # Drain/rebind every captured capability before generic stop clears the
+        # generation, not only sessions whose public state is currently active.
+        if isinstance(prebuild_owner, OwnedAdapterCleanup):
+            receipt = await prebuild_owner.drain()
+            prebuild_owner = prebuild_owner.with_receipt(receipt)
 
         if was_active or stop_current_session:
             await self._stop_locked()
