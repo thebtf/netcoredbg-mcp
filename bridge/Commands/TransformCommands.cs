@@ -137,7 +137,7 @@ public static class TransformCommands
                         ["unit"] = PhysicalPixelsKey,
                         [CoordinateSpaceKey] = ScreenCoordinateSpace,
                         [SourceApiKey] = "GetWindowRect",
-                    }
+                    },
                 },
                 ["mismatch_fields"] = mismatchFields,
             };
