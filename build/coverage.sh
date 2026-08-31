@@ -148,7 +148,6 @@ for index in "${!dotnet_ids[@]}"; do
   if [[ "$include_directory" != "-" ]]; then
     include_directory="$(to_shell_path "$include_directory")"
   fi
-
   mkdir -p "$(dirname "$output_prefix")"
   dotnet restore "$project" -nr:false
 
@@ -163,6 +162,9 @@ for index in "${!dotnet_ids[@]}"; do
   )
   if [[ "$include_directory" != "-" ]]; then
     test_arguments+=("-p:IncludeDirectory=$include_directory")
+  fi
+  if [[ "${dotnet_ids[$index]}" == "stateless" ]]; then
+    test_arguments+=(--filter "Coverage!=Exclude")
   fi
   if [[ "${dotnet_ids[$index]}" == "stateless-preview" ]]; then
     NETCOREDBG_PREVIEW_ARTIFACT_ROOT="$preview_artifact_directory" dotnet test "${test_arguments[@]}"

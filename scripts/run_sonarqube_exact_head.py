@@ -1753,6 +1753,8 @@ def dotnet_producer_commands(plan: CoveragePlan) -> list[list[str]]:
             command.append(
                 f"-p:IncludeDirectory={plan.repository_root / Path(spec.include_directory)}"
             )
+        if spec.id == "stateless":
+            command.extend(["--filter", "Coverage!=Exclude"])
         commands.append(command)
     return commands
 

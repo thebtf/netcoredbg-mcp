@@ -20,6 +20,7 @@ namespace NetCoreDbg.Mcp.Stateless.Tests.NativeScene;
 /// supplies the explicit session candidate without discovery or attachment.
 /// </summary>
 [Collection(NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter.NetCoreDbgSessionProcessCollection.Name)]
+[Trait("Coverage", "Exclude")]
 public sealed class NativeSceneAtomicityTests
 {
     private const string ActiveProtocolVersion = "native-scene-probe/1";

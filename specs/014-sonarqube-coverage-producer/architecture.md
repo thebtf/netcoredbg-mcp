@@ -215,7 +215,7 @@ uv run --project <repo> --isolated --locked --extra dev --with coverage==7.15.4 
 
 The final `--dotnet-project` group occurs exactly five times in fixed order. The shell uses foreground commands, `set -euo pipefail`, quoted paths, and no report discovery. Each .NET command restores and then runs:
 
-The Python producer runs the broad deterministic unit/integration suite but does not nest customer-mode release gates inside coverage generation. `tests/critical/`, the installed-wheel WPF submenu journey, and the three real Windows Job Object owner tests remain explicit independent gates. The producer records coverage from the remaining stable suite; it does not reinterpret excluded live evidence as passing or optional.
+The Python producer runs a curated production-source unit/integration suite and does not nest customer-mode release gates inside coverage generation. `tests/critical/`, the installed-wheel WPF submenu journey, the exact runner/artifact contract suites, and the real Windows Job Object owner tests remain explicit independent gates. Excluding them from coverage generation never reinterprets their evidence as passing or optional.
 
 ```text
 dotnet test <exact-test-csproj> --configuration Debug --no-restore -nr:false \
@@ -224,7 +224,7 @@ dotnet test <exact-test-csproj> --configuration Debug --no-restore -nr:false \
   -p:CoverletOutput=<absolute-input-prefix>
 ```
 
-The expected private file is `<absolute-input-prefix>.cobertura.xml`. No command may use `--no-build`, `--filter`, `Include`, `Exclude`, `ExcludeByFile`, threshold switches, or a merge switch.
+The expected private file is `<absolute-input-prefix>.cobertura.xml`. No command may use `--no-build`, caller-supplied filters, `Include`, `Exclude`, `ExcludeByFile`, threshold switches, or a merge switch. The Stateless project alone receives the runner-owned exact filter `Coverage!=Exclude`; its two NativeScene fixture classes are explicitly trait-marked because Coverlet instrumentation changes their timing, and they remain separate integration gates.
 
 The fixed Preview test project contains a real artifact-consumer journey and intentionally refuses repository `bin` output. Before the five test commands, the producer therefore publishes the Preview executable into the claimed run root, creates one deterministic local archive/manifest with `build/prepare_preview_fixture.py`, and passes its location only to that test process through `NETCOREDBG_PREVIEW_ARTIFACT_ROOT`. The default consumer-test path is unchanged. This local input is deleted with the claimed coverage root and has no release, tag, upload, or publication authority.
 

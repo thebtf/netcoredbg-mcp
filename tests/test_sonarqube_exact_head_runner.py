@@ -2480,6 +2480,13 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 self.assertIn("--no-restore", command)
                 self.assertNotIn("--no-build", command)
                 self.assertIn("-p:CoverletOutputFormat=cobertura", command)
+            filtered = [command for command in test_commands if "--filter" in command]
+            self.assertEqual(len(filtered), 1)
+            self.assertTrue(
+                any("NetCoreDbg.Mcp.Stateless.Tests.csproj" in item for item in filtered[0])
+            )
+            filter_index = filtered[0].index("--filter")
+            self.assertEqual(filtered[0][filter_index + 1], "Coverage!=Exclude")
             with self.assertRaisesRegex(runner.RunnerError, "COVERAGE_REPORT_MISSING"):
                 runner.validate_dotnet_cobertura_inputs(context, plan)
 
