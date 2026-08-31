@@ -284,15 +284,23 @@ def _scanner_tree_metadata(path: Path) -> Any:
     return metadata
 
 
-def iter_scanner_tree(root: Path, pattern: str) -> Iterator[Path]:
+def iter_scanner_tree(
+    root: Path,
+    pattern: str,
+    *,
+    excluded_directory_names: Collection[str] = (),
+) -> Iterator[Path]:
     root_metadata = _scanner_tree_metadata(root)
     if not stat.S_ISDIR(getattr(root_metadata, "st_mode", 0)):
         return
+    excluded = {name.casefold() for name in excluded_directory_names}
     pending = [root]
     while pending:
         directory = pending.pop()
         try:
             for path in directory.iterdir():
+                if path.name.casefold() in excluded:
+                    continue
                 metadata = _scanner_tree_metadata(path)
                 if path.match(pattern):
                     yield path
@@ -895,7 +903,11 @@ def normalized_repository_relative_path(context: GitContext, path: Path) -> str:
 def clear_generated_artifacts(context: GitContext, environment: Mapping[str, str]) -> list[str]:
     """Delete only known ignored scanner/build output from the disposable worktree."""
     candidates = [context.repository_root / name for name in GENERATED_ROOT_NAMES]
-    for directory in iter_scanner_tree(context.repository_root, "*"):
+    for directory in iter_scanner_tree(
+        context.repository_root,
+        "*",
+        excluded_directory_names=GENERATED_ROOT_NAMES,
+    ):
         if directory.name in GENERATED_DIRECTORY_NAMES and directory.is_dir():
             candidates.append(directory)
     candidate_paths = [
@@ -936,11 +948,13 @@ def prepare_worktree_python_environment(
     environment: Mapping[str, str],
     secrets: Iterable[str],
 ) -> None:
-    """Create the locked worktree venv required by real-Python Host tests."""
+    child_environment = scrub_sonar_environment(environment)
+    child_environment.pop("VIRTUAL_ENV", None)
+    child_environment["UV_PROJECT_ENVIRONMENT"] = str(context.repository_root / ".venv")
     run_process(
         ["uv", "sync", "--locked", "--extra", "dev"],
         cwd=context.repository_root,
-        environment=scrub_sonar_environment(environment),
+        environment=child_environment,
         secrets=secrets,
         label="Worktree Python environment",
     )
@@ -2703,9 +2717,10 @@ def project_inventory(repository_root: Path) -> tuple[Path, list[Path], list[Pat
     }
     discovered_projects = {
         path.resolve()
-        for path in iter_scanner_tree(repository_root, "*.csproj")
-        if not excluded_parts.intersection(
-            part.lower() for part in path.relative_to(repository_root).parts
+        for path in iter_scanner_tree(
+            repository_root,
+            "*.csproj",
+            excluded_directory_names=excluded_parts,
         )
     }
     projects = sorted(
@@ -4589,6 +4604,12 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 cleanup_result = cleanup_coverage_run(plan, producer_terminal)
             else:
                 cleanup_result = receipt.get("cleanup")
+            try:
+                clear_generated_artifacts(context, clean_environment)
+            except Exception as cleanup_error:
+                error.add_note(
+                    f"Generated-artifact cleanup also failed: {cleanup_error.__class__.__name__}."
+                )
             blocked = {
                 "schema_version": EXACT_HEAD_RECEIPT_V3_SCHEMA_VERSION,
                 "role": role,
