@@ -7,6 +7,7 @@ using Xunit;
 namespace NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
 
 [Collection(NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter.NetCoreDbgSessionProcessCollection.Name)]
+[Trait("Coverage", "Exclude")]
 public sealed class CapabilityLifecycleContractTests
 {
     [Fact]

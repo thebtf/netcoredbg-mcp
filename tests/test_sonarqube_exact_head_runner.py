@@ -2490,6 +2490,22 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             with self.assertRaisesRegex(runner.RunnerError, "COVERAGE_REPORT_MISSING"):
                 runner.validate_dotnet_cobertura_inputs(context, plan)
 
+    def test_r09b_every_stateless_process_collection_class_is_excluded_from_coverlet(self):
+        tests_root = RUNNER_PATH.parents[1] / "host" / "NetCoreDbg.Mcp.Stateless.Tests"
+        process_classes = 0
+        missing_traits: list[str] = []
+        for path in tests_root.rglob("*.cs"):
+            source = path.read_text(encoding="utf-8")
+            collection_count = source.count("[Collection(")
+            if collection_count == 0 or "NetCoreDbgSessionProcessCollection.Name" not in source:
+                continue
+            process_classes += collection_count
+            if source.count('[Trait("Coverage", "Exclude")]') < collection_count:
+                missing_traits.append(path.relative_to(tests_root).as_posix())
+
+        self.assertEqual(process_classes, 12)
+        self.assertEqual(missing_traits, [])
+
     def test_r10_only_stateless_gets_include_directory_and_restoration_and_mapping_are_required(
         self,
     ):

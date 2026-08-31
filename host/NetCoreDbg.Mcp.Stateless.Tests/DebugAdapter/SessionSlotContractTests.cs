@@ -6,6 +6,7 @@ using Xunit;
 namespace NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter;
 
 [Collection(NetCoreDbgSessionProcessCollection.Name)]
+[Trait("Coverage", "Exclude")]
 public sealed class SessionSlotContractTests
 {
     private const string ProductionAssemblyName = "NetCoreDbg.Mcp.Stateless";

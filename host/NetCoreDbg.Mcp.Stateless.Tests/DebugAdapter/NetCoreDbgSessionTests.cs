@@ -15,6 +15,7 @@ public sealed class NetCoreDbgSessionProcessCollection
 }
 
 [Collection(NetCoreDbgSessionProcessCollection.Name)]
+[Trait("Coverage", "Exclude")]
 public sealed class NetCoreDbgSessionTests
 {
     private static readonly TimeSpan InitializeTimeout = TimeSpan.FromSeconds(2);
