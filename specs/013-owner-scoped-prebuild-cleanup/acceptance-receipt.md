@@ -7,9 +7,10 @@
 - **Parent program:** `specs/011-issue450-sonar-release-program/`
 - **Wave contract:** `specs/013-owner-scoped-prebuild-cleanup/`
 - **Source base:** `1b8b2d548a45b17dde690b4cb8e4fc7153d326bc`
-- **Accepted candidate:** `480b67509fdfd996556d7954b736c46361025b2d`
-- **Independent exact check:** `agent://CheckWave2ExactCandidate` returned `PASS`.
-- **Acceptance judgment:** `agent://JudgeWave2Final` returned `ACCEPT` with no findings.
+- **Accepted candidate:** `598139418a40f0dc0fb07d204ac60864de104c49`
+- **Initial independent exact check:** `agent://CheckWave2ExactCandidate` returned `PASS` for predecessor implementation `480b67509fdfd996556d7954b736c46361025b2d`.
+- **Final changed-byte verification:** `agent://VerifyWave2PrCorrection` returned `VERIFIED` with no findings for exact successor `598139418a40f0dc0fb07d204ac60864de104c49`.
+- **Acceptance judgment:** `agent://JudgeWave2Final` returned `ACCEPT` for the pre-PR-review candidate; the final verifier covers every later changed criterion.
 
 This receipt closes Wave 2 internally. It does not authorize Wave 3 implementation, a tag, release, package publication, Sonar waiver, route cutover, or a claim that global process cleanup caused either historical issue #450 incident.
 
@@ -119,7 +120,9 @@ The documentation audit `agent://AuditWave2Comments` retained the load-bearing a
 - `agent://CheckWave2PrebuildCutover`: PASS for owner capture, BuildManager gate, selector deletion, registry non-authority, and compatibility.
 - `agent://ReviewWave2Candidate`: incomplete no-probe review. Its lack-of-reverification concern did not identify a product defect and was superseded by the next exact checker.
 - `agent://CheckWave2ExactCandidate`: PASS after reading every named source owner and independently running the bounded owner, host, release-critical, selector, and static evidence.
-- `agent://JudgeWave2Final`: `ACCEPT`, authorizing this delayed receipt for exact candidate `480b67509fdfd996556d7954b736c46361025b2d`.
+- PR #289 review found seven unique correction criteria: child-PATH executable resolution, failed drain preservation, later force escalation after a non-drained receipt, explicit Windows-path testing, host pre-build invocation proof, cross-platform fake seam support, and current receipt wording. Commit `598139418a40f0dc0fb07d204ac60864de104c49` fixes them; all eight review threads are resolved.
+- `agent://VerifyWave2PrCorrection`: independently verified all seven criteria against exact diff `711a4a5..5981394` with no contradictions or findings. Two canonical checker attempts and one generic reviewer attempt failed before execution due provider 429; those automation failures do not supersede the completed verifier evidence.
+- `agent://JudgeWave2Final`: `ACCEPT` for the reviewed predecessor; `agent://VerifyWave2PrCorrection` binds the final exact successor.
 
 ## Requirement closure
 
@@ -135,7 +138,7 @@ The documentation audit `agent://AuditWave2Comments` retained the load-bearing a
 - **WOC-010:** explicit safe Win32 signatures, private handles, intended inheritance, no breakaway/dependency leak.
 - **WOC-011:** public Python/default, host, installed CLI, dependency, Sonar, coverage, and release boundaries preserved.
 - **WOC-012:** load-bearing ownership and failure rationale is documented at the source seams.
-- **WOC-013:** exact candidate, independent check, terminal judgment, and this delayed non-release receipt are present.
+- **WOC-013:** exact final candidate `598139418a40f0dc0fb07d204ac60864de104c49`, independent predecessor check, final changed-byte verification, terminal judgment, and this delayed non-release receipt are present.
 
 ## Handoff
 
