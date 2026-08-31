@@ -45,6 +45,11 @@ internal static class Program
         await Console.OpenStandardOutput().FlushAsync();
         await Console.Error.WriteLineAsync("owner-scope-stderr-ready");
 
+        if (int.TryParse(Environment.GetEnvironmentVariable("OWNER_SCOPE_ROOT_EXIT_CODE"), out var exitCode))
+        {
+            return exitCode;
+        }
+
         await Task.Delay(Timeout.InfiniteTimeSpan);
         return 0;
     }

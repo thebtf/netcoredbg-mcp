@@ -28,6 +28,7 @@ from netcoredbg_mcp.windows_process_owner import (
     ProcessAdmissionError,
     WindowsOwnedProcess,
     _create_suspended_process,
+    _Kernel32,
     _Win32CallError,
 )
 
@@ -68,6 +69,19 @@ async def _wait_for_path(path: Path) -> None:
             return
         await asyncio.sleep(0.01)
     pytest.fail(f"fixture marker was not written: {path}")
+
+
+async def _read_marker_pid(path: Path) -> int:
+    for _ in range(300):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            await asyncio.sleep(0.01)
+            continue
+        if type(value.get("pid")) is int:
+            return value["pid"]
+        await asyncio.sleep(0.01)
+    pytest.fail(f"fixture marker did not contain a PID: {path}")
 
 
 async def _wait_for_pid_exit(pid: int) -> None:
@@ -241,6 +255,60 @@ async def test_forced_job_drain_records_an_already_exited_root(
         assert events.count("terminate-job") == 1
     finally:
         await owner.aclose()
+
+
+def test_exit_code_distinguishes_a_signaled_259_from_still_active() -> None:
+    """WAIT_OBJECT_0 makes a terminated root's literal 259 observable."""
+
+    wait = MagicMock(return_value=0)
+
+    def get_exit_code(_handle: int, value: Any) -> bool:
+        value._obj.value = 259
+        return True
+
+    kernel32 = _Kernel32.__new__(_Kernel32)
+    kernel32._wait_for_single_object = wait
+    kernel32._get_exit_code = MagicMock(side_effect=get_exit_code)
+    kernel32._wintypes = ctypes.wintypes
+    kernel32._ctypes = ctypes
+
+    assert kernel32.exit_code(41) == 259
+    wait.assert_called_once_with(41, 0)
+
+
+def test_exit_code_returns_none_without_reading_a_live_process_exit_code() -> None:
+    """WAIT_TIMEOUT identifies the live sentinel before GetExitCodeProcess."""
+
+    wait = MagicMock(return_value=258)
+    get_exit_code = MagicMock()
+    kernel32 = _Kernel32.__new__(_Kernel32)
+    kernel32._wait_for_single_object = wait
+    kernel32._get_exit_code = get_exit_code
+    kernel32._wintypes = ctypes.wintypes
+    kernel32._ctypes = ctypes
+
+    assert kernel32.exit_code(41) is None
+    wait.assert_called_once_with(41, 0)
+    get_exit_code.assert_not_called()
+
+
+def test_exit_code_fails_closed_when_liveness_probe_fails() -> None:
+    """A failed zero-time wait never turns into an exit-code observation."""
+
+    wait = MagicMock(return_value=0xFFFFFFFF)
+    get_exit_code = MagicMock()
+    failure = _Win32CallError(AdmissionStage.DRAIN, 5)
+    kernel32 = _Kernel32.__new__(_Kernel32)
+    kernel32._wait_for_single_object = wait
+    kernel32._get_exit_code = get_exit_code
+    kernel32._error = MagicMock(return_value=failure)
+
+    with pytest.raises(_Win32CallError) as raised:
+        kernel32.exit_code(41)
+
+    assert raised.value is failure
+    wait.assert_called_once_with(41, 0)
+    get_exit_code.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -590,6 +658,83 @@ async def test_production_dap_path_inherits_descendant_and_drains_job(
         assert receipt.status is DrainStatus.DRAINED
         assert receipt.active_processes == 0
         assert b"owner-scope-stderr-ready" in terminals[0].stderr_tail
+        await _wait_for_pid_exit(child_pid)
+    finally:
+        if client.is_running:
+            await client.stop()
+        if child_pid is not None and psutil.pid_exists(child_pid):
+            psutil.Process(child_pid).kill()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object proof")
+@pytest.mark.skipif(shutil.which("dotnet") is None, reason="dotnet CLI is required")
+@pytest.mark.asyncio
+async def test_real_exit_259_is_natural_when_the_job_forces_its_descendant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A natural root exit code of 259 is not the live-process sentinel."""
+
+    fixture_output = tmp_path / "fixture"
+    fixture_exe = fixture_output / "OwnerScopeAdapter.exe"
+    build = subprocess.run(
+        [
+            "dotnet",
+            "build",
+            str(FIXTURE_PROJECT),
+            "-c",
+            "Debug",
+            "-v",
+            "quiet",
+            "-o",
+            str(fixture_output),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert build.returncode == 0, build.stdout + build.stderr
+    assert fixture_exe.is_file(), f"fixture build did not produce {fixture_exe}"
+
+    root_marker = tmp_path / "root.json"
+    child_marker = tmp_path / "child.json"
+    monkeypatch.setenv("OWNER_SCOPE_ROOT_MARKER", str(root_marker))
+    monkeypatch.setenv("OWNER_SCOPE_CHILD_MARKER", str(child_marker))
+    monkeypatch.setenv("OWNER_SCOPE_ROOT_EXIT_CODE", "259")
+
+    output_seen = asyncio.Event()
+    terminal_seen = asyncio.Event()
+    terminals: list[DapTransportTerminal] = []
+    client = DAPClient(str(fixture_exe))
+    client.on_event(
+        "output",
+        lambda event: output_seen.set()
+        if event.body.get("output") == "owner-scope-ready"
+        else None,
+    )
+    client.set_transport_terminal_handler(
+        lambda terminal: (terminals.append(terminal), terminal_seen.set())
+    )
+    child_pid: int | None = None
+    try:
+        await client.start(generation="real-owner-exit-259")
+        run = client._run
+        assert run is not None and run.owner is not None
+        await asyncio.wait_for(output_seen.wait(), timeout=10.0)
+        await _wait_for_path(child_marker)
+        child_pid = await _read_marker_pid(child_marker)
+
+        await asyncio.wait_for(terminal_seen.wait(), timeout=10.0)
+
+        receipt = run.owner_drain_receipt
+        assert receipt is not None
+        assert receipt.status is DrainStatus.DRAINED
+        assert receipt.active_processes == 0
+        assert receipt.forced is True
+        assert receipt.root_returncode == 259
+        assert receipt.root_was_forced is False
+        assert terminals[0].returncode == 259
+        assert terminals[0].cleanup_outcome.value == "natural_exit"
         await _wait_for_pid_exit(child_pid)
     finally:
         if client.is_running:

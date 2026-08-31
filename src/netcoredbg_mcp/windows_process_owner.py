@@ -21,7 +21,6 @@ from typing import Any, Literal, Protocol
 _ADMISSION_CLEANUP_TIMEOUT = 5.0
 _ACCOUNTING_POLL_SECONDS = 0.01
 _INFINITE = 0xFFFFFFFF
-_STILL_ACTIVE = 259
 _WAIT_FAILED = 0xFFFFFFFF
 _WAIT_TIMEOUT = 258
 _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
@@ -327,11 +326,15 @@ class _Kernel32:
         return result != _WAIT_TIMEOUT
 
     def exit_code(self, process_handle: int) -> int | None:
+        wait_result = int(self._wait_for_single_object(process_handle, 0))
+        if wait_result == _WAIT_FAILED:
+            raise self._error(AdmissionStage.DRAIN)
+        if wait_result == _WAIT_TIMEOUT:
+            return None
         value = self._wintypes.DWORD()
         if not self._get_exit_code(process_handle, self._ctypes.byref(value)):
             raise self._error(AdmissionStage.DRAIN)
-        result = int(value.value)
-        return None if result == _STILL_ACTIVE else result
+        return int(value.value)
 
     def close_handle(self, handle: int) -> None:
         if not self._close_handle(handle):
