@@ -13,6 +13,7 @@ _SOURCE_KINDS = ("row_index", "row_identity", "cached_element", "point", "guarde
 _GUARDED_CHILD_SELECTOR_KEYS = frozenset({"automation_id", "name", "control_type"})
 _GUARDED_CHILD_MAXIMUM_NODES = 4_096
 REASON_NO_ROUTE_EVIDENCE = "real pointer route evidence unavailable"
+_REASON_INVALID_DRAG_SOURCE = "invalid drag source"
 
 
 async def handle_ui_drag(
@@ -168,7 +169,7 @@ def _source_from_action(
     source = action.get("source")
     if not isinstance(source, Mapping):
         return {}, _blocked(
-            reason="invalid drag source",
+            reason=_REASON_INVALID_DRAG_SOURCE,
             requested={"source": source},
             accepted={
                 "source": [
@@ -224,7 +225,7 @@ def _normalize_source(
     kind = present_kinds[0]
     if kind in {"row_index", "row_identity"} and selector_dict is None:
         return {}, _blocked(
-            reason="invalid drag source",
+            reason=_REASON_INVALID_DRAG_SOURCE,
             requested={"source": source},
             accepted={kind: "requires source.selector for grid disambiguation"},
             next_step=f"Provide source.selector with source.{kind}.",
@@ -242,7 +243,7 @@ def _normalize_source(
         row_identity = str(source.get("row_identity") or "")
         if not row_identity:
             return {}, _blocked(
-                reason="invalid drag source",
+                reason=_REASON_INVALID_DRAG_SOURCE,
                 requested={"row_identity": source.get("row_identity")},
                 accepted={"row_identity": "non-empty visible row identity"},
                 next_step="Provide source.row_identity as a non-empty string.",
@@ -256,7 +257,7 @@ def _normalize_source(
         point = source.get("point")
         if not isinstance(point, Mapping):
             return {}, _blocked(
-                reason="invalid drag source",
+                reason=_REASON_INVALID_DRAG_SOURCE,
                 requested={"point": point},
                 accepted={"point": "object with relative_to, x, and y"},
                 next_step="Provide source.point as a pointer coordinate object.",
@@ -266,7 +267,7 @@ def _normalize_source(
     cached_element = source.get("cached_element")
     if not cached_element:
         return {}, _blocked(
-            reason="invalid drag source",
+            reason=_REASON_INVALID_DRAG_SOURCE,
             requested={"cached_element": cached_element},
             accepted={"cached_element": "non-empty backend element reference"},
             next_step="Provide source.cached_element from earlier UI evidence.",
@@ -432,14 +433,14 @@ def _row_index_from_source(source: dict[str, Any]) -> tuple[int, dict[str, Any] 
     raw_row_index = source.get("row_index")
     if raw_row_index is None:
         return 0, _blocked(
-            reason="invalid drag source",
+            reason=_REASON_INVALID_DRAG_SOURCE,
             requested={"row_index": raw_row_index},
             accepted={"row_index": "non-negative integer"},
             next_step="Provide source.row_index as a non-negative integer.",
         )
     if isinstance(raw_row_index, bool):
         return 0, _blocked(
-            reason="invalid drag source",
+            reason=_REASON_INVALID_DRAG_SOURCE,
             requested={"row_index": raw_row_index},
             accepted={"row_index": "non-negative integer"},
             next_step="Provide source.row_index as a non-negative integer.",
@@ -450,14 +451,14 @@ def _row_index_from_source(source: dict[str, Any]) -> tuple[int, dict[str, Any] 
         row_index = int(raw_row_index)
     else:
         return 0, _blocked(
-            reason="invalid drag source",
+            reason=_REASON_INVALID_DRAG_SOURCE,
             requested={"row_index": raw_row_index},
             accepted={"row_index": "non-negative integer"},
             next_step="Provide source.row_index as a non-negative integer.",
         )
     if row_index < 0:
         return 0, _blocked(
-            reason="invalid drag source",
+            reason=_REASON_INVALID_DRAG_SOURCE,
             requested={"row_index": raw_row_index},
             accepted={"row_index": "non-negative integer"},
             next_step="Provide source.row_index as a non-negative integer.",
