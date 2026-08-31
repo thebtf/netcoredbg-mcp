@@ -833,13 +833,16 @@ def test_stateless_preview_workflow_is_build_only_and_immutable() -> None:
     assert "contents: read" in workflow
     assert "actions: read" in workflow
     assert "cancel-in-progress: false" in workflow
-    assert "python scripts/run_sonarqube_exact_head.py --role post-merge" in workflow
-    assert "Verify the tracked Wave2 coverage entry" in workflow
-    assert "GITHUB_TOKEN: ${{ github.token }}" in workflow
-    assert "runner.resolve_wave2_entry(context, environment)" in workflow
-    assert "runner.verify_wave2_entry(entry, context, environment)" in workflow
-    assert workflow.index("Verify the tracked Wave2 coverage entry") < workflow.index(
-        "Produce the repository post-merge exact-head receipt"
+    producer_step = workflow.split(
+        "- name: Produce the repository post-merge exact-head receipt", maxsplit=1
+    )[1].split("- name:", maxsplit=1)[0]
+    assert "GITHUB_TOKEN: ${{ github.token }}" in producer_step
+    assert "runner.resolve_wave2_entry(context, environment)" in producer_step
+    assert "runner.verify_wave2_entry(entry, context, environment)" in producer_step
+    assert (
+        producer_step.index("worktree add --detach")
+        < producer_step.index("runner.git_context(Path.cwd(), environment)")
+        < producer_step.index("python scripts/run_sonarqube_exact_head.py --role post-merge")
     )
     assert "path: artifacts/stateless-preview/post-merge-receipt/" in workflow
     assert "A1_PAYLOAD_ARTIFACT_ID: ${{ steps.upload_payload.outputs.artifact-id }}" in workflow
