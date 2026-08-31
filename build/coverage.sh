@@ -83,7 +83,42 @@ done
 cd "$shell_repo_root"
 mkdir -p "$(dirname "$shell_python_data")" "$(dirname "$shell_python_report")"
 python_cache_directory="$(dirname "$shell_python_data")/.pytest_cache"
-coverage run --source=src/netcoredbg_mcp --data-file="$shell_python_data" -m pytest --cache-clear -o "cache_dir=$python_cache_directory"
+python_test_paths=(
+  tests/test_app_type.py
+  tests/test_backends.py
+  tests/test_build_cleanup.py
+  tests/test_build_manager.py
+  tests/test_build_policy.py
+  tests/test_build_session.py
+  tests/test_build_state.py
+  tests/test_client.py
+  tests/test_code_search.py
+  tests/test_collection_analyzer.py
+  tests/test_context_tools.py
+  tests/test_debug_freshness.py
+  tests/test_debug_launch_preflight.py
+  tests/test_host_proxy.py
+  tests/test_inspection_tools.py
+  tests/test_process_registry.py
+  tests/test_project_utils.py
+  tests/test_protocol.py
+  tests/test_resource_updates.py
+  tests/test_runtime_smoke_runner.py
+  tests/test_runtime_smoke_schema.py
+  tests/test_runtime_smoke_v2_actions.py
+  tests/test_runtime_smoke_v2_cleanup.py
+  tests/test_session.py
+  tests/test_source_context.py
+  tests/test_state.py
+  tests/test_stealth_mode.py
+  tests/test_ui_backend.py
+  tests/test_ui_evidence.py
+  tests/test_ui_grid_helpers.py
+  tests/test_ui_new_tools.py
+  tests/test_ui_screenshot.py
+)
+coverage run --source=src/netcoredbg_mcp --data-file="$shell_python_data" -m pytest \
+  --cache-clear -o "cache_dir=$python_cache_directory" "${python_test_paths[@]}"
 coverage xml --data-file="$shell_python_data" --output="$shell_python_report"
 
 coverage_root="$(dirname "$(dirname "$shell_python_data")")"

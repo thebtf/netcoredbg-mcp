@@ -2820,3 +2820,24 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     {"blocking_count": 0, "items": []},
                     {"blocking_count": 0, "items": []},
                 )
+
+    def test_python_coverage_workload_uses_curated_non_live_suite(self):
+        script = (RUNNER_PATH.parents[1] / "build" / "coverage.sh").read_text(encoding="utf-8")
+
+        self.assertIn("python_test_paths=(", script)
+        for path in (
+            "tests/test_client.py",
+            "tests/test_session.py",
+            "tests/test_runtime_smoke_runner.py",
+            "tests/test_stealth_mode.py",
+            "tests/test_ui_evidence.py",
+        ):
+            self.assertIn(path, script)
+        for excluded in (
+            "tests/critical",
+            "tests/test_wpf_runtime_workflow_fixture.py",
+            "tests/test_windows_process_owner.py",
+            "tests/test_sonarqube_exact_head_runner.py",
+            "tests/test_stateless_preview_artifact.py",
+        ):
+            self.assertNotIn(excluded, script)

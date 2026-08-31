@@ -215,6 +215,8 @@ uv run --project <repo> --isolated --locked --extra dev --with coverage==7.15.4 
 
 The final `--dotnet-project` group occurs exactly five times in fixed order. The shell uses foreground commands, `set -euo pipefail`, quoted paths, and no report discovery. Each .NET command restores and then runs:
 
+The Python producer runs the broad deterministic unit/integration suite but does not nest customer-mode release gates inside coverage generation. `tests/critical/`, the installed-wheel WPF submenu journey, and the three real Windows Job Object owner tests remain explicit independent gates. The producer records coverage from the remaining stable suite; it does not reinterpret excluded live evidence as passing or optional.
+
 ```text
 dotnet test <exact-test-csproj> --configuration Debug --no-restore -nr:false \
   -p:CollectCoverage=true \
