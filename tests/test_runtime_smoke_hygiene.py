@@ -16,6 +16,7 @@ from netcoredbg_mcp.session.hygiene import RuntimeHygieneService
 from netcoredbg_mcp.session.state import Breakpoint, BreakpointRegistry, DebugState
 from netcoredbg_mcp.session.tracepoints import TracepointManager
 from netcoredbg_mcp.tools.runtime_smoke import register_runtime_smoke_tools
+from tests import smoke_test_manual
 
 
 class FakeTracepointManager:
@@ -236,13 +237,212 @@ async def test_server_registers_debug_hygiene_preflight(mock_netcoredbg_path) ->
     assert "get_output" in tool_names
 
 
-def test_manual_smoke_list_includes_hygiene_scenario() -> None:
+def _manual_smoke_list(*args: str) -> str:
     result = subprocess.run(
-        [sys.executable, "tests/smoke_test_manual.py", "--list"],
+        [sys.executable, "tests/smoke_test_manual.py", "--list", *args],
         check=False,
         capture_output=True,
         text=True,
     )
-
     assert result.returncode == 0, result.stderr
-    assert "Runtime Hygiene Preflight" in result.stdout
+    return result.stdout
+
+
+def test_manual_smoke_default_inventory_keeps_only_gallery_gui_scenarios() -> None:
+    default_names = {name for name, _fn in smoke_test_manual.get_scenarios()}
+    available_names = {
+        name for name, _fn in smoke_test_manual.get_scenarios(include_extended_gui=True)
+    }
+    complete_names = {name for name, _fn in smoke_test_manual._complete_scenario_catalog()}
+    extended_examples = {
+        "UI Invoke + Toggle + Root ID",
+        "WPF V2 State Oracle Runtime Smoke",
+        "Avalonia UI Fixture Compatibility",
+        "Typed BitBlt Fallback Native Bridge",
+    }
+
+    assert {"WPF Smoke Gallery", "WinForms Smoke Gallery"} <= default_names
+    assert extended_examples.isdisjoint(default_names)
+    assert extended_examples <= complete_names
+    assert ("UI Invoke + Toggle + Root ID" in available_names) is smoke_test_manual.GUI_ENABLED
+    assert ("WPF V2 State Oracle Runtime Smoke" in available_names) is (
+        smoke_test_manual.WPF_GUI_ENABLED
+    )
+    assert ("Avalonia UI Fixture Compatibility" in available_names) is (
+        smoke_test_manual.AVALONIA_GUI_ENABLED
+    )
+    assert "Runtime Hygiene Preflight" in default_names
+
+
+def test_manual_smoke_list_respects_extended_gui_flag() -> None:
+    default_output = _manual_smoke_list()
+    extended_output = _manual_smoke_list("--extended-gui")
+
+    assert "WPF Smoke Gallery" in default_output
+    assert "WinForms Smoke Gallery" in default_output
+    assert "WPF V2 State Oracle Runtime Smoke" not in default_output
+    assert "Avalonia UI Fixture Compatibility" not in default_output
+    assert ("WPF V2 State Oracle Runtime Smoke" in extended_output) is (
+        smoke_test_manual.WPF_GUI_ENABLED
+    )
+    assert ("Avalonia UI Fixture Compatibility" in extended_output) is (
+        smoke_test_manual.AVALONIA_GUI_ENABLED
+    )
+    assert "Startup Temp GC Prefix Filter" in default_output
+    assert ("Typed BitBlt Fallback Native Bridge" in extended_output) is (
+        smoke_test_manual.WPF_GUI_ENABLED
+    )
+
+
+def test_manual_smoke_exact_selection_resolves_extended_inventory() -> None:
+    selected = smoke_test_manual._resolve_scenarios({"WPF V2 State Oracle Runtime Smoke"})
+
+    assert selected == [
+        (
+            "WPF V2 State Oracle Runtime Smoke",
+            smoke_test_manual.test_wpf_v2_state_oracle_runtime_smoke,
+        )
+    ]
+
+
+def test_manual_smoke_extended_run_filters_unavailable_fixtures_but_exact_selection_does_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(smoke_test_manual, "GUI_ENABLED", False)
+    monkeypatch.setattr(smoke_test_manual, "WPF_GUI_ENABLED", False)
+    monkeypatch.setattr(smoke_test_manual, "AVALONIA_GUI_ENABLED", False)
+
+    available = {name for name, _fn in smoke_test_manual.get_scenarios(include_extended_gui=True)}
+    assert "UI Invoke + Toggle + Root ID" not in available
+    assert "WPF Shift/DataGrid Evidence" not in available
+    assert "Avalonia UI Fixture Compatibility" not in available
+
+    selected = smoke_test_manual._resolve_scenarios({"Avalonia UI Fixture Compatibility"})
+    assert selected == [
+        (
+            "Avalonia UI Fixture Compatibility",
+            smoke_test_manual.test_avalonia_ui_fixture_compatibility,
+        )
+    ]
+
+
+class _GallerySession:
+    def __init__(self, *, fail_launch: bool = False) -> None:
+        self.state = SimpleNamespace(process_id=7001)
+        self.process_registry = object()
+        self.launches: list[dict[str, Any]] = []
+        self.stop_calls = 0
+        self.fail_launch = fail_launch
+
+    async def launch(self, **kwargs: Any) -> None:
+        self.launches.append(kwargs)
+        if self.fail_launch:
+            raise RuntimeError("launch failure")
+
+    async def stop(self) -> None:
+        self.stop_calls += 1
+
+
+class _GalleryBackend:
+    def __init__(self, *, fail_connect: bool = False) -> None:
+        self.connect_pids: list[int] = []
+        self.disconnect_calls = 0
+        self.fail_connect = fail_connect
+
+    async def connect(self, pid: int) -> None:
+        self.connect_pids.append(pid)
+        if self.fail_connect:
+            raise RuntimeError("connect failure")
+
+    async def disconnect(self) -> None:
+        self.disconnect_calls += 1
+
+
+@pytest.mark.asyncio
+async def test_gui_smoke_gallery_owner_runs_one_lifecycle() -> None:
+    session = _GallerySession()
+    backend = _GalleryBackend()
+
+    async with smoke_test_manual._GuiSmokeGallery(
+        program="fixture.dll",
+        cwd="fixture",
+        args=["gui"],
+        session_factory=lambda: session,
+        backend_factory=lambda actual_session: backend,
+    ) as gallery:
+        assert gallery.session is session
+        assert gallery.backend is backend
+        assert session.launches == [{"program": "fixture.dll", "cwd": "fixture", "args": ["gui"]}]
+        assert backend.connect_pids == [7001]
+
+    assert backend.disconnect_calls == 1
+    assert session.stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_gui_smoke_gallery_owner_closes_once_after_failure() -> None:
+    session = _GallerySession()
+    backend = _GalleryBackend()
+
+    with pytest.raises(RuntimeError, match="gallery failure"):
+        async with smoke_test_manual._GuiSmokeGallery(
+            program="fixture.dll",
+            session_factory=lambda: session,
+            backend_factory=lambda actual_session: backend,
+        ):
+            raise RuntimeError("gallery failure")
+
+    assert len(session.launches) == 1
+    assert backend.connect_pids == [7001]
+    assert backend.disconnect_calls == 1
+    assert session.stop_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_stage", "expected_disconnects"),
+    [
+        ("launch", 0),
+        ("backend_factory", 0),
+        ("connect", 1),
+    ],
+)
+async def test_gui_smoke_gallery_owner_cleans_partial_context_entry(
+    failure_stage: str,
+    expected_disconnects: int,
+) -> None:
+    session = _GallerySession(fail_launch=failure_stage == "launch")
+    backend = _GalleryBackend(fail_connect=failure_stage == "connect")
+
+    def backend_factory(_actual_session: Any) -> _GalleryBackend:
+        if failure_stage == "backend_factory":
+            raise RuntimeError("backend factory failure")
+        return backend
+
+    with pytest.raises(RuntimeError, match="failure"):
+        async with smoke_test_manual._GuiSmokeGallery(
+            program="fixture.dll",
+            session_factory=lambda: session,
+            backend_factory=backend_factory,
+        ):
+            pytest.fail("context entry should not complete")
+
+    assert session.stop_calls == 1
+    assert backend.disconnect_calls == expected_disconnects
+
+
+@pytest.mark.asyncio
+async def test_gui_smoke_gallery_retries_missing_automation_id_by_name() -> None:
+    calls: list[dict[str, str]] = []
+
+    async def find(**selector: str) -> dict[str, Any]:
+        calls.append(selector)
+        return {"found": "name" in selector, **selector}
+
+    result = await smoke_test_manual._call_by_automation_id_or_name(find, "btnInvoke")
+
+    assert result == {"found": True, "name": "btnInvoke"}
+    assert calls == [
+        {"automation_id": "btnInvoke"},
+        {"name": "btnInvoke"},
+    ]

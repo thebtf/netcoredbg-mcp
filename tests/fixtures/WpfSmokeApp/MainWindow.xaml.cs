@@ -21,6 +21,8 @@ public partial class MainWindow : Window
     private readonly MainViewModel _viewModel = new();
     private readonly Stack<Action> _undoStack = new();
     private readonly string? _mutableFile;
+    private const string CanonicalMutableFileBaseline = "baseline";
+    private long _galleryGeneration;
     private int _dataGridAnchorIndex;
     private int _dataGridCurrentIndex;
     private Point? _dragStartPoint;
@@ -111,12 +113,113 @@ public partial class MainWindow : Window
             handledEventsToo: true);
         SetHoverState("closed", surfaceVisible: false);
         UpdateGuardedChildGestureStatus();
+        PublishGalleryReadyStatus();
         if (_captureCalibrationMode is "marker" or "black")
         {
             ContentRendered += OnCalibrationContentRendered;
             Closed += OnCalibrationClosed;
         }
     }
+    private void ResetGallery_Click(object sender, RoutedEventArgs e)
+    {
+        ResetGallery();
+    }
+
+    private void ResetGallery()
+    {
+        _suppressCharacterSelection = true;
+        _suppressSelectionSync = true;
+        try
+        {
+            _viewModel.ResetToCanonicalState();
+            ClearGallerySelections();
+        }
+        finally
+        {
+            _suppressCharacterSelection = false;
+            _suppressSelectionSync = false;
+        }
+
+        _undoStack.Clear();
+        ResetDragState();
+        ResetGuardedChildState();
+        StopAndCloseHoverState();
+        SubmenuParent.IsSubmenuOpen = false;
+        ResetCueGridViewport();
+        Keyboard.ClearFocus();
+        WriteMutableState(CanonicalMutableFileBaseline);
+        PublishGalleryReadyStatus();
+    }
+
+    private void ClearGallerySelections()
+    {
+        CueDataGrid.SelectedItems.Clear();
+        CueDataGrid.SelectedItem = null;
+        CueDataGrid.SelectedIndex = -1;
+        CueDataGrid.CurrentCell = default;
+        CharactersListBox.SelectedItem = null;
+        CharactersListBox.SelectedIndex = -1;
+        ItemsListView.SelectedItem = null;
+        ItemsListView.SelectedIndex = -1;
+        OptionsComboBox.SelectedIndex = 0;
+        _dataGridAnchorIndex = -1;
+        _dataGridCurrentIndex = -1;
+    }
+
+    private void ResetDragState()
+    {
+        _dragStartPoint = null;
+        _dragSourceRow = null;
+        _dragPayload = null;
+        ResetEdgeScrollEvidence();
+    }
+
+    private void ResetGuardedChildState()
+    {
+        _guardedChildGestureStart = null;
+        _guardedChildGestureLast = null;
+        _guardedChildPointerDownCount = 0;
+        _guardedChildPointerMoveCount = 0;
+        _guardedChildPointerUpCount = 0;
+        _guardedChildGestureMoved = false;
+        _guardedChildLastDeltaX = 0;
+        _guardedChildLastDeltaY = 0;
+        GuardedChildIdentityDrift.ResetDriftEvidence();
+        GuardedChildRectangleDrift.ResetDriftEvidence();
+        UpdateGuardedChildGestureStatus();
+    }
+
+    private void StopAndCloseHoverState()
+    {
+        _hoverCloseTimer.Stop();
+        _measurementArmed = false;
+        PreviewMouseLeftButtonDownCount = 0;
+        PreviewMouseLeftButtonUpCount = 0;
+        ClickCount = 0;
+        FocusChangeCount = 0;
+        SetHoverState("closed", surfaceVisible: false);
+    }
+
+    private void ResetCueGridViewport()
+    {
+        CueDataGrid.UpdateLayout();
+        if (FindVisualChild<ScrollViewer>(CueDataGrid) is { } scrollViewer)
+        {
+            scrollViewer.ScrollToHorizontalOffset(0);
+            scrollViewer.ScrollToVerticalOffset(0);
+        }
+    }
+
+    private void PublishGalleryReadyStatus()
+    {
+        _galleryGeneration = checked(_galleryGeneration + 1);
+        _viewModel.GalleryStatusText = JsonSerializer.Serialize(new
+        {
+            generation = _galleryGeneration,
+            state = "ready",
+        });
+    }
+
 
     private void OnCalibrationContentRendered(object? sender, EventArgs e)
     {
@@ -968,6 +1071,16 @@ public sealed class GuardedChildDriftButton : Button
 
     protected override AutomationPeer OnCreateAutomationPeer() =>
         new GuardedChildDriftButtonAutomationPeer(this);
+    internal void ResetDriftEvidence()
+    {
+        _boundingRectangleReads = 0;
+        if (DriftMode == GuardedChildDriftMode.Identity)
+        {
+            AutomationProperties.SetAutomationId(this, "guardedChildIdentityDrift");
+            AutomationProperties.SetName(this, "Guarded child identity drift");
+        }
+    }
+
 
     internal Rect ReadAutomationBounds(Rect bounds)
     {
@@ -1000,14 +1113,71 @@ public sealed class GuardedChildDriftButton : Button
 
 public class MainViewModel : INotifyPropertyChanged
 {
+    private readonly record struct CueRowSeed(
+        string Start,
+        string End,
+        string Character,
+        string Phrase);
+
+    private readonly record struct CharacterSeed(string Name, bool IsFemale);
+
+    private static readonly string[] CanonicalItems =
+    {
+        "Item 1",
+        "Item 2",
+        "Item 3",
+        "Item 4",
+        "Item 5",
+    };
+
+    private static readonly CueRowSeed[] CanonicalCueRowSeeds =
+    {
+        new("00:00:01.0", "00:00:03.0", "Narrator", "Fixture cue one"),
+        new("00:00:04.0", "00:00:06.0", "Narrator", "Fixture cue two"),
+        new("00:00:07.0", "00:00:09.0", "Narrator", "Fixture cue three"),
+        new("00:00:10.0", "00:00:12.0", "Narrator", "Fixture cue four"),
+        new("00:00:13.0", "00:00:15.0", "Narrator", "Fixture cue five"),
+        new("00:00:16.0", "00:00:18.0", "Narrator", "Fixture cue six"),
+        new("00:00:19.0", "00:00:21.0", "Narrator", "Fixture cue seven"),
+        new("00:00:22.0", "00:00:24.0", "Narrator", "Fixture cue eight"),
+        new("00:00:25.0", "00:00:27.0", "Narrator", "Fixture cue nine"),
+        new("00:00:28.0", "00:00:30.0", "Narrator", "Fixture cue ten"),
+        new("00:00:31.0", "00:00:33.0", "Narrator", "Fixture cue eleven"),
+        new("00:00:34.0", "00:00:36.0", "Narrator", "Fixture cue twelve"),
+        new("00:00:37.0", "00:00:39.0", "Narrator", "Fixture cue thirteen"),
+        new("00:00:40.0", "00:00:42.0", "Narrator", "Fixture cue fourteen"),
+        new("00:00:43.0", "00:00:45.0", "Narrator", "Fixture cue fifteen"),
+        new("00:00:46.0", "00:00:48.0", "Narrator", "Fixture cue sixteen"),
+        new("00:00:49.0", "00:00:51.0", "Narrator", "Fixture cue seventeen"),
+        new("00:00:52.0", "00:00:54.0", "Narrator", "Fixture cue eighteen"),
+        new("00:00:55.0", "00:00:57.0", "Narrator", "Fixture cue nineteen"),
+        new("00:00:58.0", "00:00:60.0", "Narrator", "Fixture cue twenty"),
+        new("00:00:61.0", "00:00:63.0", "Narrator", "Fixture cue twenty-one"),
+        new("00:00:64.0", "00:00:66.0", "Narrator", "Fixture cue twenty-two"),
+        new("00:00:67.0", "00:00:69.0", "Narrator", "Fixture cue twenty-three"),
+        new("00:00:70.0", "00:00:72.0", "Narrator", "Fixture cue twenty-four"),
+    };
+
+    private static readonly CharacterSeed[] CanonicalCharacterSeeds =
+    {
+        new("ALICE", IsFemale: false),
+        new("BOB", IsFemale: false),
+    };
+
     private string _statusText = "Ready";
     private string _genderStatusText = "No gender change";
     private string _selectorSafetyStatusText = "Selector side effects: 0";
     private string _hoverStatusText = string.Empty;
     private string _guardedChildStatusText = string.Empty;
+    private string _galleryStatusText = string.Empty;
     private bool _isFeatureEnabled;
     private int _invokeCount;
     private int _selectorSafetyCount;
+
+    public MainViewModel()
+    {
+        ResetToCanonicalState();
+    }
 
     public string StatusText
     {
@@ -1050,54 +1220,59 @@ public class MainViewModel : INotifyPropertyChanged
         get => _hoverStatusText;
         set { _hoverStatusText = value; OnPropertyChanged(); }
     }
+
     public string GuardedChildStatusText
     {
         get => _guardedChildStatusText;
         set { _guardedChildStatusText = value; OnPropertyChanged(); }
     }
 
-    public ObservableCollection<string> Items { get; } = new()
+    public string GalleryStatusText
     {
-        "Item 1",
-        "Item 2",
-        "Item 3",
-        "Item 4",
-        "Item 5",
-    };
+        get => _galleryStatusText;
+        set { _galleryStatusText = value; OnPropertyChanged(); }
+    }
 
-    public ObservableCollection<CueRow> CueRows { get; } = new()
-    {
-        new("00:00:01.0", "00:00:03.0", "Narrator", "Fixture cue one"),
-        new("00:00:04.0", "00:00:06.0", "Narrator", "Fixture cue two"),
-        new("00:00:07.0", "00:00:09.0", "Narrator", "Fixture cue three"),
-        new("00:00:10.0", "00:00:12.0", "Narrator", "Fixture cue four"),
-        new("00:00:13.0", "00:00:15.0", "Narrator", "Fixture cue five"),
-        new("00:00:16.0", "00:00:18.0", "Narrator", "Fixture cue six"),
-        new("00:00:19.0", "00:00:21.0", "Narrator", "Fixture cue seven"),
-        new("00:00:22.0", "00:00:24.0", "Narrator", "Fixture cue eight"),
-        new("00:00:25.0", "00:00:27.0", "Narrator", "Fixture cue nine"),
-        new("00:00:28.0", "00:00:30.0", "Narrator", "Fixture cue ten"),
-        new("00:00:31.0", "00:00:33.0", "Narrator", "Fixture cue eleven"),
-        new("00:00:34.0", "00:00:36.0", "Narrator", "Fixture cue twelve"),
-        new("00:00:37.0", "00:00:39.0", "Narrator", "Fixture cue thirteen"),
-        new("00:00:40.0", "00:00:42.0", "Narrator", "Fixture cue fourteen"),
-        new("00:00:43.0", "00:00:45.0", "Narrator", "Fixture cue fifteen"),
-        new("00:00:46.0", "00:00:48.0", "Narrator", "Fixture cue sixteen"),
-        new("00:00:49.0", "00:00:51.0", "Narrator", "Fixture cue seventeen"),
-        new("00:00:52.0", "00:00:54.0", "Narrator", "Fixture cue eighteen"),
-        new("00:00:55.0", "00:00:57.0", "Narrator", "Fixture cue nineteen"),
-        new("00:00:58.0", "00:00:60.0", "Narrator", "Fixture cue twenty"),
-        new("00:00:61.0", "00:00:63.0", "Narrator", "Fixture cue twenty-one"),
-        new("00:00:64.0", "00:00:66.0", "Narrator", "Fixture cue twenty-two"),
-        new("00:00:67.0", "00:00:69.0", "Narrator", "Fixture cue twenty-three"),
-        new("00:00:70.0", "00:00:72.0", "Narrator", "Fixture cue twenty-four"),
-    };
+    public ObservableCollection<string> Items { get; } = new();
 
-    public ObservableCollection<CharacterRow> Characters { get; } = new()
+    public ObservableCollection<CueRow> CueRows { get; } = new();
+
+    public ObservableCollection<CharacterRow> Characters { get; } = new();
+
+    public void ResetToCanonicalState()
     {
-        new("ALICE", isFemale: false),
-        new("BOB", isFemale: false),
-    };
+        SeedCanonicalCollections();
+        StatusText = "Ready";
+        GenderStatusText = "No gender change";
+        SelectorSafetyStatusText = "Selector side effects: 0";
+        HoverStatusText = string.Empty;
+        GuardedChildStatusText = string.Empty;
+        GalleryStatusText = string.Empty;
+        IsFeatureEnabled = false;
+        InvokeCount = 0;
+        SelectorSafetyCount = 0;
+    }
+
+    private void SeedCanonicalCollections()
+    {
+        Items.Clear();
+        foreach (var item in CanonicalItems)
+        {
+            Items.Add(item);
+        }
+
+        CueRows.Clear();
+        foreach (var seed in CanonicalCueRowSeeds)
+        {
+            CueRows.Add(new CueRow(seed.Start, seed.End, seed.Character, seed.Phrase));
+        }
+
+        Characters.Clear();
+        foreach (var seed in CanonicalCharacterSeeds)
+        {
+            Characters.Add(new CharacterRow(seed.Name, seed.IsFemale));
+        }
+    }
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
