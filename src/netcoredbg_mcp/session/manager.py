@@ -13,7 +13,13 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from ..build import BuildManager, BuildResult
-from ..build.cleanup import NoOwnedAdapter, OwnedAdapterCleanup, PreBuildOwner
+from ..build.cleanup import (
+    NoOwnedAdapter,
+    OwnedAdapterCleanup,
+    PreBuildOwner,
+    PreBuildOwnerError,
+    PreBuildOwnerOutcome,
+)
 from ..dap import DAPClient, DAPEvent, DAPResponse
 from ..dap.client import DapTransportTerminal, sanitize_terminal_tail
 from ..dap.events import (
@@ -949,10 +955,15 @@ class SessionManager:
         if active_generation is None:
             self._active_dap_run = terminal.generation
 
-        if isinstance(terminal.adapter_pid, int) and terminal.adapter_pid > 0:
-            # A terminal record is sufficient identity for an observation-only
-            # unregister; never reopen this PID as cleanup authority.
-            self._process_registry.unregister(terminal.adapter_pid)
+        observed_pids = dict.fromkeys(
+            pid
+            for pid in (terminal.adapter_pid, self._state.process_id)
+            if isinstance(pid, int) and pid > 0
+        )
+        for pid in observed_pids:
+            # Terminal facts identify registry observations only. Unregistering
+            # never reopens a PID or grants termination authority.
+            self._process_registry.unregister(pid)
         last_event_seq: int | None = None
         last_event_name: str | None = None
         if terminal.last_dap_event is not None:
@@ -1759,6 +1770,7 @@ class SessionManager:
 
         prebuild_owner = self.capture_prebuild_owner()
         was_active = self.is_active
+        validated_owner_receipt: OwnerDrainReceipt | None = None
         if was_active:
             logger.info("[launch] stopping existing session before build")
         # A terminalized DAP run can still retain its owner and final receipt.
@@ -1767,9 +1779,16 @@ class SessionManager:
         if isinstance(prebuild_owner, OwnedAdapterCleanup):
             receipt = await prebuild_owner.drain()
             prebuild_owner = prebuild_owner.with_receipt(receipt)
+            validated_owner_receipt = receipt
+            if receipt.status is not DrainStatus.DRAINED or receipt.active_processes != 0:
+                # Preserve the captured failed receipt as the build-gate error.
+                # Generic stop must not replace it with a missing/stale result.
+                raise PreBuildOwnerError(
+                    PreBuildOwnerOutcome(owner=prebuild_owner, receipt=receipt)
+                )
 
         if was_active or stop_current_session:
-            await self._stop_locked()
+            await self._stop_locked(validated_owner_receipt=validated_owner_receipt)
 
         logger.info("[launch] phase 2/9: dotnet build")
         await self._pre_launch_build_with_owner_locked(
@@ -1982,9 +2001,14 @@ class SessionManager:
         return result
 
     async def attach(self, process_id: int) -> dict[str, Any]:
-        """Attach to running process."""
+        """Attach to a running process under the lifecycle serialization gate."""
+        async with self._lifecycle_lock:
+            return await self._attach_locked(process_id)
+
+    async def _attach_locked(self, process_id: int) -> dict[str, Any]:
+        """Complete attach while the caller holds the lifecycle serialization gate."""
         if not self._client.is_running:
-            await self.start()
+            await self._start_locked()
 
         dap_generation = self._active_dap_run
 
@@ -2022,10 +2046,14 @@ class SessionManager:
         async with self._lifecycle_lock:
             return await self._stop_locked()
 
-    async def _stop_locked(self) -> dict[str, Any]:
-        """Stop the current session through one generation-scoped reset path."""
-
+    async def _stop_locked(
+        self, validated_owner_receipt: OwnerDrainReceipt | None = None
+    ) -> dict[str, Any]:
+        """Stop one session without erasing an owner that did not drain."""
         stopping_generation = self._active_dap_run
+        owner = self._client.adapter_owner
+        requires_owner_receipt = isinstance(owner, OwnedProcessRef)
+        joined_and_drained = False
         self._stopping_dap_run = stopping_generation
         observed_pids = tuple(
             pid
@@ -2042,7 +2070,24 @@ class SessionManager:
                     await self._client.disconnect(terminate=True)
                 except Exception as error:
                     logger.warning("Error during disconnect: %s", error)
-            await self._client.stop()
+            receipt = await self._client.stop()
+            effective_receipt = receipt or validated_owner_receipt
+            if requires_owner_receipt and (
+                effective_receipt is None
+                or effective_receipt.status is not DrainStatus.DRAINED
+                or effective_receipt.active_processes != 0
+            ):
+                status = "missing" if effective_receipt is None else effective_receipt.status.value
+                active_processes = (
+                    None if effective_receipt is None else effective_receipt.active_processes
+                )
+                raise RuntimeError(
+                    f"Adapter owner did not drain (status={status}, active={active_processes})"
+                )
+
+            # A no-owner platform path remains compatible. An admitted owner
+            # reaches here only after the finalizer's literal zero accounting.
+            joined_and_drained = True
 
             # Registry records are observations only. Once the retained owner
             # finalizer has completed, remove these exact status records without
@@ -2069,7 +2114,10 @@ class SessionManager:
             self._publish_resource_updates(STATE_URI, THREADS_URI, OUTPUT_URI)
             return {"success": True}
         finally:
-            if self._active_dap_run == stopping_generation:
+            # Cancellation before joining the finalizer, and a nonzero receipt,
+            # both retain this generation's capability for a later retry or
+            # pre-build gate. Only a joined successful drain releases it.
+            if joined_and_drained and self._active_dap_run == stopping_generation:
                 self._active_dap_run = None
             if self._stopping_dap_run == stopping_generation:
                 self._stopping_dap_run = None

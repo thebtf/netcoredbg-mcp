@@ -1766,8 +1766,8 @@ class TestOwnerScopedAdapterRedMatrix:
         assert receipt.owner == owner.owner
 
     @pytest.mark.asyncio
-    async def test_finalizer_publishes_successful_close_retry_receipt(self) -> None:
-        """A close retry that proves zero must replace the earlier failed receipt."""
+    async def test_ordinary_stop_returns_final_close_retry_receipt(self) -> None:
+        """Ordinary stop returns the final owner receipt after close retries."""
 
         class RetryingCloseOwner(OwnedTestProcess):
             async def drain_after_grace(
@@ -1809,7 +1809,7 @@ class TestOwnerScopedAdapterRedMatrix:
             return_value=owner,
         ):
             await client.start(generation="close-retry")
-            receipt = await client.stop(expected_owner=owner.owner)
+            receipt = await client.stop()
 
         assert receipt is not None
         assert receipt.status is DrainStatus.DRAINED

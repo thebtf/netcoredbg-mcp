@@ -548,14 +548,15 @@ class DAPClient:
         finalizer, _ = self._request_finalization(run, DapTerminalTrigger.EXPLICIT_STOP)
         await asyncio.shield(finalizer)
         logger.info("netcoredbg stopped")
-        if expected_owner is None:
+        owner = run.owner
+        if owner is None:
             return None
 
         receipt = run.owner_drain_receipt
         if receipt is not None:
             return receipt
         return OwnerDrainReceipt(
-            owner=expected_owner,
+            owner=owner.owner,
             status=DrainStatus.FAILED,
             forced=False,
             root_returncode=None,
