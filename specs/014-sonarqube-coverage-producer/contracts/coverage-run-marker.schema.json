@@ -1,0 +1,259 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thebtf.github.io/netcoredbg-mcp/schemas/coverage-run-marker-v1.json",
+  "title": "Exact-head coverage run marker",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "captured_head",
+    "project_key",
+    "tool_versions",
+    "reports",
+    "producer_sha256",
+    "coveragerc_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "run_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "captured_head": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "project_key": {
+      "const": "thebtf_netcoredbg_mcp"
+    },
+    "tool_versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "coverage_py",
+        "coverlet_msbuild"
+      ],
+      "properties": {
+        "coverage_py": {
+          "const": "7.15.4"
+        },
+        "coverlet_msbuild": {
+          "const": "10.0.1"
+        }
+      }
+    },
+    "reports": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/python_report"
+        },
+        {
+          "$ref": "#/$defs/codesearch_core_report"
+        },
+        {
+          "$ref": "#/$defs/host_report"
+        },
+        {
+          "$ref": "#/$defs/stateless_preview_report"
+        },
+        {
+          "$ref": "#/$defs/stateless_report"
+        },
+        {
+          "$ref": "#/$defs/host_prompts_report"
+        }
+      ],
+      "items": false
+    },
+    "producer_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "coveragerc_sha256": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "relative_path": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+    },
+    "report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "language",
+        "format",
+        "relative_path"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "language": {
+          "enum": [
+            "python",
+            "dotnet"
+          ]
+        },
+        "format": {
+          "enum": [
+            "cobertura",
+            "opencover"
+          ]
+        },
+        "relative_path": {
+          "$ref": "#/$defs/relative_path"
+        }
+      }
+    },
+    "python_report": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/report"
+        },
+        {
+          "properties": {
+            "id": {
+              "const": "python"
+            },
+            "language": {
+              "const": "python"
+            },
+            "format": {
+              "const": "cobertura"
+            },
+            "relative_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/python/coverage\\.xml$"
+            }
+          }
+        }
+      ]
+    },
+    "codesearch_core_report": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/report"
+        },
+        {
+          "properties": {
+            "id": {
+              "const": "codesearch-core"
+            },
+            "language": {
+              "const": "dotnet"
+            },
+            "format": {
+              "const": "opencover"
+            },
+            "relative_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/codesearch-core/coverage\\.opencover\\.xml$"
+            }
+          }
+        }
+      ]
+    },
+    "host_report": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/report"
+        },
+        {
+          "properties": {
+            "id": {
+              "const": "host"
+            },
+            "language": {
+              "const": "dotnet"
+            },
+            "format": {
+              "const": "opencover"
+            },
+            "relative_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/host/coverage\\.opencover\\.xml$"
+            }
+          }
+        }
+      ]
+    },
+    "stateless_preview_report": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/report"
+        },
+        {
+          "properties": {
+            "id": {
+              "const": "stateless-preview"
+            },
+            "language": {
+              "const": "dotnet"
+            },
+            "format": {
+              "const": "opencover"
+            },
+            "relative_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/stateless-preview/coverage\\.opencover\\.xml$"
+            }
+          }
+        }
+      ]
+    },
+    "stateless_report": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/report"
+        },
+        {
+          "properties": {
+            "id": {
+              "const": "stateless"
+            },
+            "language": {
+              "const": "dotnet"
+            },
+            "format": {
+              "const": "opencover"
+            },
+            "relative_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/stateless/coverage\\.opencover\\.xml$"
+            }
+          }
+        }
+      ]
+    },
+    "host_prompts_report": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/report"
+        },
+        {
+          "properties": {
+            "id": {
+              "const": "host-prompts"
+            },
+            "language": {
+              "const": "dotnet"
+            },
+            "format": {
+              "const": "opencover"
+            },
+            "relative_path": {
+              "pattern": "^\\.tmp/sonarqube-coverage/[0-9A-Fa-f-]{36}/dotnet/host-prompts/coverage\\.opencover\\.xml$"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
