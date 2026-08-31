@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -185,7 +186,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
             try
             {
                 StartBridge(targetIdentity.ProcessId);
-                bridgeResult = await _bridgeClient!.SendAsync(
+                bridgeResult = await _bridgeClient.SendAsync(
                     AuthorizationNonce,
                     new JsonObject
                     {
@@ -419,7 +420,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
         try
         {
             StartBridge(target.ProcessId);
-            result = await _bridgeClient!.SendAsync(AuthorizationNonce, request, cancellationToken).ConfigureAwait(false);
+            result = await _bridgeClient.SendAsync(AuthorizationNonce, request, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -476,6 +477,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
     }
 
 
+    [MemberNotNull(nameof(_bridgeClient))]
     private void StartBridge(int processId)
     {
         if (_bridgeClient is not null || _bridgeProcess is not null || !TryGetBridgePath(out var bridgePath))
