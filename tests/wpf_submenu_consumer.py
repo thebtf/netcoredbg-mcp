@@ -12,7 +12,8 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult, TextContent
 
-POLL_DEADLINE_SECONDS = 10.0
+POLL_DEADLINE_SECONDS = 15.0
+POLL_CALL_TIMEOUT_SECONDS = 2.0
 POLL_INTERVAL_SECONDS = 0.25
 REQUIRED_TOOLS = frozenset(
     {
@@ -82,6 +83,7 @@ async def _poll_discovery(
     deadline = loop.time() + POLL_DEADLINE_SECONDS
     attempts = 0
     last_response: dict[str, Any] | None = None
+    terminal_event = "deadline_elapsed_without_match"
 
     while True:
         remaining = deadline - loop.time()
@@ -92,11 +94,16 @@ async def _poll_discovery(
         attempts += 1
         try:
             last_response = await asyncio.wait_for(
-                _call(session, name, arguments), timeout=remaining
+                _call(session, name, arguments),
+                timeout=min(POLL_CALL_TIMEOUT_SECONDS, remaining),
             )
         except asyncio.TimeoutError:
-            terminal_event = "timeout_no_response"
-            break
+            terminal_event = "attempt_timeout_no_response"
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(POLL_INTERVAL_SECONDS, remaining))
+            continue
 
         data = last_response.get("data")
         if isinstance(data, dict) and matches(data):
