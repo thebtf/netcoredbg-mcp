@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "wave": 2,
+  "closure_status": "EXACT_CLOSED",
+  "release_intent": "none",
+  "tracked_relative_path": "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json",
+  "accepted_candidate_sha": "baf2ab24f242ccd0b1b8db8a36d5efbd774b32e5",
+  "closure_receipt": {
+    "relative_path": "specs/013-owner-scoped-prebuild-cleanup/acceptance-receipt.md",
+    "sha256": "8569e9ecc27e829390e8e4ff08f16ed8f0a1ab54e81abfa0b18466cb984be7b7"
+  },
+  "integration": {
+    "kind": "merged_pull_request",
+    "pull_request": 289,
+    "head_ref": "work/issue450-owner-scoped-cleanup",
+    "head_sha": "baf2ab24f242ccd0b1b8db8a36d5efbd774b32e5"
+  }
+}

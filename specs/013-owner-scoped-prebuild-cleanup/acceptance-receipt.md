@@ -7,10 +7,11 @@
 - **Parent program:** `specs/011-issue450-sonar-release-program/`
 - **Wave contract:** `specs/013-owner-scoped-prebuild-cleanup/`
 - **Source base:** `1b8b2d548a45b17dde690b4cb8e4fc7153d326bc`
-- **Accepted candidate:** `a04e9384902493264a447faa1cd9195f63db56ed`.
+- **Accepted candidate:** `baf2ab24f242ccd0b1b8db8a36d5efbd774b32e5`.
 - **Initial independent exact check:** `agent://CheckWave2ExactCandidate` returned `PASS` for predecessor implementation `480b67509fdfd996556d7954b736c46361025b2d`.
 - **PR correction verification:** `agent://VerifyWave2PrCorrection` returned `VERIFIED` for successor `598139418a40f0dc0fb07d204ac60864de104c49`.
-- **Final changed-byte verification:** `agent://VerifyWave2LatestFix` returned `VERIFIED` with no contradictions for exact final lifecycle successor `a04e9384902493264a447faa1cd9195f63db56ed`.
+- **Lifecycle verification:** `agent://VerifyWave2LatestFix` returned `VERIFIED` for successor `a04e9384902493264a447faa1cd9195f63db56ed`.
+- **Final changed-byte verification:** `agent://VerifyWave2FinalFix` returned `VERIFIED` with no contradictions for exact final candidate `baf2ab24f242ccd0b1b8db8a36d5efbd774b32e5`.
 - **Acceptance judgment:** `agent://JudgeWave2Final` returned `ACCEPT` for the pre-PR-review candidate; the verifier chain covers every later changed criterion.
 
 This receipt closes Wave 2 internally. It does not authorize Wave 3 implementation, a tag, release, package publication, Sonar waiver, route cutover, or a claim that global process cleanup caused either historical issue #450 incident.
@@ -125,7 +126,9 @@ The documentation audit `agent://AuditWave2Comments` retained the load-bearing a
 - `agent://VerifyWave2PrCorrection`: independently verified all seven criteria against exact diff `711a4a5..5981394` with no contradictions or findings. Two canonical checker attempts and one generic reviewer attempt failed before execution due provider 429; those automation failures do not supersede the completed verifier evidence.
 - A final PR pass found five evidence-lifetime defects: active admission could appear ownerless; timeout/cancellation could outlive a failed drain; final close could produce a newer receipt; terminal PID observations could remain registered; partial pipe allocation could leak handles. Commit `a04e9384902493264a447faa1cd9195f63db56ed` fixes all five with retained RED/GREEN regressions.
 - `agent://VerifyWave2LatestFix`: independently verified all five final mechanisms against exact source/tests with no contradictions. The real fixture rerun remained locally blocked by a pre-existing foreign OwnerScopeAdapter process and was not PID-killed; these focused regressions do not depend on that residue.
-- `agent://JudgeWave2Final`: `ACCEPT` for the reviewed predecessor; the exact verifier chain binds the final successor.
+- A final review found graceful-disconnect ordering, overlapping admission ownership, and the `aclose()` return contract. Commit `baf2ab24f242ccd0b1b8db8a36d5efbd774b32e5` fixes them with retained RED/GREEN regressions.
+- `agent://VerifyWave2FinalFix`: independently verified all three exact final corrections with no contradictions.
+- `agent://JudgeWave2Final`: `ACCEPT` for the reviewed predecessor; the exact verifier chain binds the final candidate.
 
 ## Requirement closure
 
@@ -141,7 +144,7 @@ The documentation audit `agent://AuditWave2Comments` retained the load-bearing a
 - **WOC-010:** explicit safe Win32 signatures, private handles, intended inheritance, no breakaway/dependency leak.
 - **WOC-011:** public Python/default, host, installed CLI, dependency, Sonar, coverage, and release boundaries preserved.
 - **WOC-012:** load-bearing ownership and failure rationale is documented at the source seams.
-- **WOC-013:** exact final lifecycle candidate `a04e9384902493264a447faa1cd9195f63db56ed`, independent predecessor check, both PR changed-byte verifiers, terminal judgment, and this delayed non-release receipt are present.
+- **WOC-013:** exact final candidate `baf2ab24f242ccd0b1b8db8a36d5efbd774b32e5`, independent predecessor check, all PR changed-byte verifiers, terminal judgment, and this delayed non-release receipt are present.
 
 ## Handoff
 
