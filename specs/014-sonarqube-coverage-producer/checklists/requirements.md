@@ -8,7 +8,7 @@
 - [ ] The packet uses `specs/014-sonarqube-coverage-producer/` and documents the older parent pointer without editing it.
 - [ ] The packet names `scripts/run_sonarqube_exact_head.py` as the only scanner, normalization, analysis, and receipt authority.
 - [ ] The packet says Wave-2 PR #289 is open and that Wave-3 implementation and diagnostic execution are BLOCKED until typed accepted-main closure evidence validates.
-- [ ] `wave2-closure-entry-v1.schema.json` forbids a branch field and requires exact accepted-main SHA, Wave-2 closure receipt hash, `origin/main`, and merged PR #289.
+- [ ] `wave2-closure-entry-v1.schema.json` and the canonical coordination-root locator require exact accepted-main SHA, Wave-2 closure receipt hash, `origin/main`, and merged PR #289; no branch-derived entry exists.
 - [ ] The packet leaves `SonarQube.Analysis.xml`, `docs/RELEASE-PROTOCOL.md`, `pyproject.toml`, `uv.lock`, public routes, version, tag, publication, project key, threshold, New Code, exclusions, and credential policy outside mutation scope.
 
 ## Plan, preflight, and report layout
@@ -46,7 +46,7 @@
 
 - [ ] [tasks.md](../tasks.md#binding-redgreen-matrix) contains exactly 15 rows, R01 through R15.
 - [ ] Every row names a current RED oracle, a nonzero GREEN oracle, a V01 to V15 label, an owner task, and a dependency.
-- [ ] COV-001 through COV-024 appear in both `spec.md` traceability and `tasks.md` requirement coverage.
+- [ ] COV-001 through COV-025 appear in both `spec.md` traceability and `tasks.md` requirement coverage.
 - [ ] S1 explicitly depends on T000 Wave-2 entry validation.
-- [ ] T021 owns v3 candidate/post-merge PASS enforcement.
+- [ ] T021 owns v3 candidate/post-merge PASS enforcement and `scripts/stateless_preview_artifact.py` consumer migration.
 - [ ] T028 is the first task allowed to invoke diagnostic or create a diagnostic record, inventory artifact, or acceptance receipt.

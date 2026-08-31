@@ -13,7 +13,7 @@
 
 Extend the retained exact-head runner into one parent-compatible coverage transaction. It verifies Wave-2 entry evidence and the producer toolchain before scanner begin, derives two final Cobertura paths, claims a root after begin, produces Python coverage and five private .NET Cobertura inputs, normalizes the .NET inputs into one final .NET Cobertura report, validates evidence, then ends the scanner. It binds analysis and complete issue/hotspot inventories to the captured head and emits a non-release diagnostic record.
 
-The implementation changes the runner, focused runner tests, `.coveragerc`, `build/coverage.sh`, and five test project files. It adds no static scanner configuration, policy change, product behavior change, or release action.
+The implementation changes the runner, focused runner tests, `.coveragerc`, `build/coverage.sh`, five test project files, and `scripts/stateless_preview_artifact.py` with its focused tests. It adds no static scanner configuration, policy change, product behavior change, or release action.
 
 ## Technical context
 
@@ -33,15 +33,16 @@ The implementation changes the runner, focused runner tests, `.coveragerc`, `bui
 
 | Surface | Change |
 | --- | --- |
-| `scripts/run_sonarqube_exact_head.py` | Add Wave-2 entry validation, preflight, plan/marker, runtime properties, producer call, normalizer, validators, inventory writer, unified v3 validation, and cleanup. |
+| `scripts/run_sonarqube_exact_head.py` | Add canonical Wave-2 entry resolution and validation, preflight, plan/marker, runtime properties, producer call, normalizer, validators, inventory writer, unified v3 validation, and cleanup. |
 | `tests/test_sonarqube_exact_head_runner.py` | Add the 15 behavior-first rows and fixture builders. |
 | `.coveragerc` | Add Python branch, relative-path, and source configuration. |
 | `build/coverage.sh` | Add strict enumerated producer commands for Python and five private .NET inputs. |
 | Five fixed test `.csproj` files | Add direct private `coverlet.msbuild` `10.0.1` references. |
+| `scripts/stateless_preview_artifact.py` and focused tests | Replace receipt schema v2 admission with unified v3 post-merge receipt validation while preserving artifact sealing behavior. |
 
 ### Immutable comparison surfaces
 
-`pyproject.toml`, `uv.lock`, `SonarQube.Analysis.xml`, `docs/RELEASE-PROTOCOL.md`, runtime product code, public routes, project key, thresholds, New Code, exclusions, credentials, finding dispositions, package version, tag, and publication remain unchanged.
+`pyproject.toml`, `uv.lock`, `SonarQube.Analysis.xml`, `docs/RELEASE-PROTOCOL.md`, runtime product code, public routes, project key, thresholds, New Code, exclusions, credentials, finding dispositions, package version, tag, and publication remain unchanged. `scripts/stateless_preview_artifact.py` is an explicit v3 receipt-consumer migration exception; it must not change public artifact behavior.
 
 Rollback removes the coverage transaction as one cohesive Wave-3 change. It never falls back to a branch-derived Wave-2 entry, an external report, an optional v2 validator, a policy reduction, or static report discovery.
 
@@ -72,7 +73,7 @@ flowchart LR
 | COV-007 to COV-012 | T003, T006 to T016 | Shell, config, five projects, runner, tests | V03, V08 to V12 |
 | COV-013 to COV-017 | T001, T004, T013 to T019 | Runner and focused tests | V04, V05, V11 to V14 |
 | COV-018 to COV-020 | T005, T018, T021 to T022 | Unified receipt and inventory schemas, runner, tests | V15 |
-| COV-021 to COV-024 | T020 to T028 | Owned implementation files and evidence | Focused proof, review, judgment, delayed receipt |
+| COV-021 to COV-025 | T020 to T028 | Owned implementation files, artifact consumer, and evidence | Focused proof, review, judgment, consumer cutover, delayed receipt |
 
 ## Verification plan
 
@@ -81,8 +82,8 @@ flowchart LR
 | Entry and preflight | Focused command/event spy | Missing Wave-2 entry, missing tools, invalid tuple, and MTP leave begin and claim unreachable. |
 | RED/GREEN contract | `uv run --locked --extra dev pytest tests/test_sonarqube_exact_head_runner.py -q` | All 15 rows exercise the runner boundary. |
 | Local producer | Runner-owned producer invocation | Five private inputs normalize into one final .NET Cobertura report and one Python report. |
-| Diagnostic transaction | `python scripts/run_sonarqube_exact_head.py --role diagnostic --wave2-entry-evidence <verified-entry>` | Same-head evidence, two-report import, canonical identity, complete inventory, and unchanged coverage condition. |
-| Release roles | Unified v3 receipt validators | Schema v2, diagnostic-as-PASS, missing linkage, incomplete inventory, or stale identity cannot PASS. |
+| Diagnostic transaction | `python scripts/run_sonarqube_exact_head.py --role diagnostic` | Canonical Wave-2 entry discovery, two-report import, canonical identity, complete inventory, and unchanged coverage condition. |
+| Release roles and consumer | Unified v3 receipt validators plus `stateless_preview_artifact.py` focused proof | Schema v2, diagnostic-as-PASS, missing linkage, incomplete inventory, stale identity, or a v2 consumer cannot seal a post-merge artifact. |
 | Independent review and judgment | Exact implementation SHA | No policy or comparison-surface mutation; receipt remains non-release evidence. |
 
 No authoring command runs a formatter, linter, build, test suite, scanner, or release operation.

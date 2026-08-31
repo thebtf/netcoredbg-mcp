@@ -57,6 +57,8 @@ ProjectCompatibility {
 
 `verify_wave2_entry` checks the record schema, the immutable Wave-2 receipt hash and content, the accepted SHA in `origin/main`, and PR #289 merged identity. It rejects a PR head, feature branch, missing receipt, non-main SHA, or mismatch as `WAVE2_CLOSURE_UNVERIFIED`.
 
+`resolve_wave2_entry` reads only `<coordination-root>/.agent/e/issue450-sonar-v02311/wave2-closure-entry.json`. Existing role callers do not pass an entry-file argument. The resolver validates that exact record before the transaction can reach preflight.
+
 `preflight_coverage_toolchain` runs before scanner begin. It requires executable `uv`, `bash`, and `dotnet`, evaluates every fixed project, and rejects active MTP. It never injects a property to switch the test platform. `COVERAGE_TOOL_UNAVAILABLE`, `COVERAGE_VSTEST_INCOMPATIBLE`, and `COVERAGE_MTP_INCOMPATIBLE` stop at `PLANNED` before root claim.
 
 ## Coverage plan and marker
@@ -188,7 +190,7 @@ This makes the artifact sufficient for Wave 4 to derive a fresh manifest and ass
 | `candidate` | `PASS` or `BLOCKED` | `v0.23.11` | PASS requires the same full evidence plus Quality Gate `OK` and zero blocking issue/hotspot counts. |
 | `post-merge` | `PASS` or `BLOCKED` | `v0.23.11` | PASS requires the same full evidence plus Quality Gate `OK` and zero blocking issue/hotspot counts. |
 
-Schema version is exactly `3`. The runner rejects schema version 2 and has no compatibility branch. A diagnostic can never be a PASS.
+Schema version is exactly `3`. The runner rejects schema version 2 and has no compatibility branch. A diagnostic can never be a PASS. `scripts/stateless_preview_artifact.py` is a v3 post-merge consumer and must reject schema version 2 in the same cutover.
 
 ## Failure vocabulary
 

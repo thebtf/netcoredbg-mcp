@@ -171,8 +171,8 @@ DotnetNormalizationEvidence {
 ```
 
 ```text
+resolve_wave2_entry(context: GitContext) -> Wave2ClosureEntryV1
 verify_wave2_entry(entry: Wave2ClosureEntryV1, main: GitRef, receipt: Artifact) -> None
-preflight_coverage_toolchain(plan: CoveragePlan) -> ToolchainPreflight
 derive_coverage_plan(context: GitContext, run_id: UUID) -> CoveragePlan
 coverage_scanner_properties(plan: CoveragePlan) -> tuple[str, str]
 claim_coverage_run(context: GitContext, plan: CoveragePlan) -> CoverageRunClaim
@@ -183,7 +183,7 @@ write_diagnostic_inventory(identity: ReceiptIdentity) -> InventoryReference
 validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None
 ```
 
-The existing `candidate`, `post-merge`, and new `diagnostic` roles use the unified receipt schema. The coverage transaction requires a supplied Wave-2 entry record for every role. There is no default, branch-derived, or v2 compatibility path.
+The runner resolves the entry record at `<coordination-root>/.agent/e/issue450-sonar-v02311/wave2-closure-entry.json`. Existing `candidate`, `post-merge`, and `diagnostic` CLI role shapes stay unchanged. There is no default, branch-derived, or v2 compatibility path.
 
 ## Producer commands
 
@@ -251,6 +251,8 @@ Before sealing `DIAGNOSTIC_COMPLETE`, the runner writes a create-new inventory a
 | `diagnostic` | `DIAGNOSTIC_COMPLETE` or `BLOCKED` | `none` | Complete diagnostics require coverage, analysis, full inventory, successful cleanup, and no failure. |
 | `candidate` | `PASS` or `BLOCKED` | `v0.23.11` | PASS requires the same coverage, analysis, full inventory, successful cleanup, and zero-blocking release gate. |
 | `post-merge` | `PASS` or `BLOCKED` | `v0.23.11` | PASS has the same required shape as candidate. |
+
+`scripts/stateless_preview_artifact.py` is an existing post-merge receipt consumer. T021 migrates it and its focused tests from schema v2 to the unified v3 post-merge contract. This consumer-only change preserves public stateless-preview artifact behavior.
 
 ## Deliberate exclusions
 

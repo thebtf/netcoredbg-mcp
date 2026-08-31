@@ -7,7 +7,7 @@ description: "Dependency-ordered Wave-3 tasks for the parent-compatible exact-he
 **Input**: [spec.md](spec.md), [architecture.md](architecture.md), [research.md](research.md), [data-model.md](data-model.md), [plan.md](plan.md), [quickstart.md](quickstart.md), and `contracts/`.
 **Parent**: `specs/011-issue450-sonar-release-program/`, Wave 3.
 **Release intent**: `none`.
-**Execution gate**: Wave-2 PR #289 is open. T000 must validate a supplied accepted-main Wave-2 closure record before T001 through T028 may implement, run a producer, begin a scanner, claim a root, or invoke diagnostic.
+**Execution gate**: Wave-2 PR #289 is open. T000 must validate the canonical coordination-root Wave-2 closure record before T001 through T028 may implement, run a producer, begin a scanner, claim a root, or invoke diagnostic.
 **Receipt state**: No actual diagnostic record, inventory artifact, or acceptance receipt may exist before T028.
 
 ## Binding RED/GREEN matrix
@@ -16,7 +16,7 @@ The matrix has exactly 15 rows. Current RED reaches the existing runner boundary
 
 | ID | RED scenario and current oracle | GREEN oracle | Owner task |
 | --- | --- | --- | --- |
-| **R01 / V01** | Supply no Wave-2 entry record, an open PR #289 identity, a branch SHA, or a receipt hash mismatch. Current runner has no Wave-2 gate. | `WAVE2_CLOSURE_UNVERIFIED` occurs before preflight, begin, and claim. | T001, T012 |
+| **R01 / V01** | Hide the canonical Wave-2 entry record, retain an open PR #289 identity, use a branch SHA, or alter the receipt hash. Current runner has no Wave-2 gate. | `WAVE2_CLOSURE_UNVERIFIED` occurs before preflight, begin, and claim. | T001, T012 |
 | **R02 / V02** | Hide `uv`, `bash`, or `dotnet`; alter the Coverlet/Test SDK tuple; or activate MTP. Current runner begins without producer preflight. | Typed planned-stage failure has zero begin and claim calls. | T001, T012 |
 | **R03 / V03** | Spy on Python producer command and environment. Current runner invokes no isolated coverage workload. | Exact isolated locked `uv` command, no `SONAR_*`, and cache-safe pytest arguments are observed. | T002, T006 to T008, T015 |
 | **R04 / V04** | Feed a missing, line-only, malformed, or zero-denominator Python Cobertura report. | Python final report has `coverage` root and positive line and branch denominators. | T002, T006, T016 |
@@ -30,7 +30,7 @@ The matrix has exactly 15 rows. Current RED reaches the existing runner boundary
 | **R12 / V12** | Feed an input set that causes a dropped, added, unsafe, non-deterministic, or zero-denominator final .NET report. | Normalizer emits one canonical final .NET Cobertura report whose source union and denominators validate. | T003, T016 |
 | **R13 / V13** | Event spy observes current begin/build/end ordering with no entry, preflight, or normalization barrier. | Events are `entry -> preflight -> begin -> claim -> build -> produce -> normalize -> validate -> head-check -> end`; every earlier injected failure has zero end calls. | T004, T017 |
 | **R14 / V14** | Fake mismatched analysis identity, incomplete component pages, or one-language component evidence. | Canonical identity and positive mapped component evidence validate for both languages. | T004, T019 |
-| **R15 / V15** | Provide v2, diagnostic-as-PASS, missing coverage linkage, incomplete/count-only inventory, forged artifact hash, stale identity, cleanup failure, or nonzero PASS release gate. | Unified v3 schema accepts only legal role/outcome combinations and rejects every forged or incomplete case. | T005, T018, T021 to T022 |
+| **R15 / V15** | Provide v2, diagnostic-as-PASS, missing coverage linkage, incomplete/count-only inventory, forged artifact hash, stale identity, cleanup failure, nonzero PASS release gate, or a v2-only artifact consumer. | Unified v3 schema accepts only legal role/outcome combinations and `stateless_preview_artifact.py` accepts only a valid v3 post-merge receipt. | T005, T018, T021 to T022 |
 
 ## Requirement coverage
 
@@ -60,10 +60,11 @@ The matrix has exactly 15 rows. Current RED reaches the existing runner boundary
 | COV-022 | T023 to T028 | Immutable comparison surfaces. |
 | COV-023 | T001 to T005, T022 | All 15 RED/GREEN rows. |
 | COV-024 | T024 to T028 | Review, judgment, frozen head, delayed receipt. |
+| COV-025 | T005, T021 to T023 | Existing v3 receipt-consumer cutover. |
 
 ## Entry task
 
-- [ ] **T000 [ENTRY]** Validate a supplied `Wave2ClosureEntryV1` against its schema, the immutable Wave-2 closure receipt, `origin/main`, and merged PR #289. **Requirements**: COV-002. **Acceptance**: the accepted-main SHA, closure receipt hash, and merged PR identity agree. While PR #289 remains open, return `WAVE2_CLOSURE_UNVERIFIED` and do not start any Wave-3 implementation or diagnostic action.
+- [ ] **T000 [ENTRY]** Resolve the canonical `.agent/e/issue450-sonar-v02311/wave2-closure-entry.json` from the coordination root and validate it against its schema, the immutable Wave-2 closure receipt, `origin/main`, and merged PR #289. **Requirements**: COV-002. **Acceptance**: the accepted-main SHA, closure receipt hash, and merged PR identity agree. While PR #289 remains open, return `WAVE2_CLOSURE_UNVERIFIED` and do not start any Wave-3 implementation or diagnostic action.
 
 ## Slice S1: behavior-first RED matrix
 
@@ -71,7 +72,7 @@ The matrix has exactly 15 rows. Current RED reaches the existing runner boundary
 - [ ] **T002 [S1]** Add R03 to R07 Python, plan, marker, and scanner-argument tests. **Requirements**: COV-003, COV-005 to COV-008, COV-013, COV-023. **Acceptance**: current runner fails through the planned caller boundary.
 - [ ] **T003 [S1]** Add R08 to R12 private-input, Stateless, and normalizer fixtures. **Requirements**: COV-009 to COV-012, COV-014, COV-023. **Acceptance**: current runner cannot accept the fixed input or final-output contract.
 - [ ] **T004 [S1]** Add R13 and R14 event/API fixtures. **Requirements**: COV-015 to COV-017, COV-023. **Acceptance**: current order lacks required barriers and analysis proof.
-- [ ] **T005 [S1]** Add R15 receipt, inventory, and cleanup fixtures and run the focused module to record the RED denominator. **Requirements**: COV-018 to COV-021, COV-023. **Acceptance**: each row has one named test and one future GREEN owner.
+- [ ] **T005 [S1]** Add R15 receipt, inventory, cleanup, and existing-consumer fixtures and run the focused module to record the RED denominator. **Requirements**: COV-018 to COV-021, COV-023, COV-025. **Acceptance**: each row has one named test and one future GREEN owner.
 
 ## Slice S2: isolated producers and fixed inputs
 
@@ -84,7 +85,7 @@ The matrix has exactly 15 rows. Current RED reaches the existing runner boundary
 
 ## Slice S3: transaction, normalizer, and diagnostic evidence
 
-- [ ] **T012 [S3]** Implement Wave-2 entry verification and `preflight_coverage_toolchain` before scanner begin. **Requirements**: COV-001, COV-002, COV-004, COV-009. **Acceptance**: R01 and R02 turn green with zero begin/claim on failure.
+- [ ] **T012 [S3]** Implement canonical Wave-2 entry resolution and `preflight_coverage_toolchain` before scanner begin. **Requirements**: COV-001, COV-002, COV-004, COV-009. **Acceptance**: R01 and R02 turn green with zero begin/claim on failure while existing role CLI shapes remain unchanged.
 - [ ] **T013 [S3]** Implement `CoveragePlan`, two-final-report marker derivation, five private input paths, and exclusive claim. **Requirements**: COV-003, COV-005. **Acceptance**: plan is pure and marker schema v1 validates.
 - [ ] **T014 [S3]** Add exactly two runtime Cobertura scanner properties and static XML coverage-property rejection. **Requirements**: COV-006, COV-022. **Acceptance**: R07 turns green and XML stays unchanged.
 - [ ] **T015 [S3]** Invoke the scrubbed producer with the complete fixed input plan. **Requirements**: COV-007, COV-009, COV-010. **Acceptance**: no producer discovers paths or receives Sonar values.
@@ -96,14 +97,14 @@ The matrix has exactly 15 rows. Current RED reaches the existing runner boundary
 
 ## Slice S4: role enforcement and delayed receipt
 
-- [ ] **T021 [S4]** Make candidate and post-merge PASS validation require [exact-head-receipt-v3.schema.json](contracts/exact-head-receipt-v3.schema.json). Remove schema-v2 and optional-coverage paths in the same change. **Requirements**: COV-018, COV-019. **Acceptance**: a PASS requires final coverage linkage, canonical identity, complete inventory, successful cleanup, and zero-blocking release gate.
-- [ ] **T022 [S4]** Run R15 forgery/head/inventory/cleanup tests and the complete focused runner suite. **Requirements**: COV-004, COV-019, COV-020, COV-022, COV-023. **Acceptance**: all 15 rows are green with nonzero denominators and no immutable-surface change.
-- [ ] **T023 [S4]** Inspect the implementation diff against immutable comparison surfaces. **Requirements**: COV-022. **Acceptance**: no policy, XML, lockfile, runtime route, threshold, exclusion, or release change appears.
-- [ ] **T024 [S4]** Freeze the exact implementation head and obtain independent source review. **Requirements**: COV-001, COV-015, COV-018 to COV-024. **Acceptance**: the reviewer receives the exact SHA, COV requirements, and V01 to V15.
-- [ ] **T025 [S4]** Apply review-causal corrections and rerun focused evidence. **Requirements**: COV-023, COV-024. **Acceptance**: a changed head gets targeted proof and a new independent review.
-- [ ] **T026 [S4]** Obtain independent acceptance judgment on the frozen reviewed head. **Requirements**: COV-016 to COV-024. **Acceptance**: the judge checks two-report contract, input/normalizer safety, entry gate, inventory, v3 roles, and non-release authority.
-- [ ] **T027 [S4]** Bind review and judgment to the exact diagnostic scanner head. **Requirements**: COV-002, COV-022, COV-024. **Acceptance**: entry evidence, frozen SHA, reviewer, judge, and scanner worktree agree.
-- [ ] **T028 [S4]** Run the diagnostic only from the prescribed fresh scanner worktree with the verified Wave-2 entry record. Create the v3 diagnostic record, immutable inventory artifact, and `acceptance-receipt.md` only after every predicate succeeds. **Requirements**: COV-002, COV-016 to COV-024. **Acceptance**: diagnostic completion has `release_intent: none`, complete inventory linkage, and no release authority. A block creates none of the three artifacts.
+- [ ] **T021 [S4]** Make candidate and post-merge PASS validation require [exact-head-receipt-v3.schema.json](contracts/exact-head-receipt-v3.schema.json). Migrate `scripts/stateless_preview_artifact.py` and its focused tests from schema v2 to the v3 post-merge consumer contract. Remove v2 and optional-coverage paths in the same change. **Requirements**: COV-018, COV-019, COV-025. **Acceptance**: a PASS and artifact sealing require final coverage linkage, canonical identity, complete inventory, successful cleanup, and zero-blocking release gate.
+- [ ] **T022 [S4]** Run R15 forgery/head/inventory/cleanup/consumer tests and the complete focused runner suite. **Requirements**: COV-004, COV-019, COV-020, COV-022, COV-023, COV-025. **Acceptance**: all 15 rows are green with nonzero denominators and no immutable-surface change.
+- [ ] **T023 [S4]** Inspect the implementation diff against immutable comparison surfaces. **Requirements**: COV-022, COV-025. **Acceptance**: no policy, XML, lockfile, runtime route, threshold, exclusion, or release change appears; `scripts/stateless_preview_artifact.py` changes only its receipt-consumer contract.
+- [ ] **T024 [S4]** Freeze the exact implementation head and obtain independent source review. **Requirements**: COV-001, COV-015, COV-018 to COV-025. **Acceptance**: the reviewer receives the exact SHA, COV requirements, and V01 to V15.
+- [ ] **T025 [S4]** Apply review-causal corrections and rerun focused evidence. **Requirements**: COV-023 to COV-025. **Acceptance**: a changed head gets targeted proof and a new independent review.
+- [ ] **T026 [S4]** Obtain independent acceptance judgment on the frozen reviewed head. **Requirements**: COV-016 to COV-025. **Acceptance**: the judge checks two-report contract, input/normalizer safety, entry gate, inventory, v3 roles, consumer cutover, and non-release authority.
+- [ ] **T027 [S4]** Bind review and judgment to the exact diagnostic scanner head. **Requirements**: COV-002, COV-022, COV-024, COV-025. **Acceptance**: canonical entry evidence, frozen SHA, reviewer, judge, and scanner worktree agree.
+- [ ] **T028 [S4]** Run the diagnostic only from the prescribed fresh scanner worktree after canonical Wave-2 entry validation. Create the v3 diagnostic record, immutable inventory artifact, and `acceptance-receipt.md` only after every predicate succeeds. **Requirements**: COV-002, COV-016 to COV-025. **Acceptance**: diagnostic completion has `release_intent: none`, complete inventory linkage, and no release authority. A block creates none of the three artifacts.
 
 ## Dependencies and execution order
 

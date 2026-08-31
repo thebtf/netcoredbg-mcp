@@ -6,8 +6,8 @@ This contract defines the evidence the future exact-head runner must accept befo
 
 Before the runner starts a scanner transaction, it must:
 
-1. Validate `Wave2ClosureEntryV1` against [wave2-closure-entry-v1.schema.json](wave2-closure-entry-v1.schema.json).
-2. Verify its accepted SHA is on `origin/main`, its Wave-2 receipt hash matches, and PR #289 is merged to that accepted identity.
+1. Resolve `Wave2ClosureEntryV1` only from `<coordination-root>/.agent/e/issue450-sonar-v02311/wave2-closure-entry.json` and validate it against [wave2-closure-entry-v1.schema.json](wave2-closure-entry-v1.schema.json).
+2. Verify the canonical record's accepted SHA is on `origin/main`, its Wave-2 receipt hash matches, and PR #289 is merged to that accepted identity.
 3. Resolve and version-check `uv`, `bash`, and `dotnet`.
 4. Evaluate each fixed project for `net8.0`, direct private `coverlet.msbuild` `10.0.1`, `Microsoft.NET.Test.Sdk` `17.12.0`, and VSTest selection.
 5. Refuse MTP, including `TestingPlatformDotnetTestSupport` activation and Microsoft Testing Platform references.
@@ -70,7 +70,7 @@ Before `DIAGNOSTIC_COMPLETE`, the runner writes a create-new artifact that valid
 
 ## Receipt rule
 
-All roles validate against [exact-head-receipt-v3.schema.json](exact-head-receipt-v3.schema.json). Diagnostic records can be `DIAGNOSTIC_COMPLETE` or `BLOCKED` and always have `release_intent: none`. Candidate and post-merge records can be `PASS` or `BLOCKED` and require v3 coverage, canonical identity, complete inventory, successful cleanup, and a zero-blocking release gate for PASS. Schema v2 has no compatibility path.
+All roles validate against [exact-head-receipt-v3.schema.json](exact-head-receipt-v3.schema.json). Diagnostic records can be `DIAGNOSTIC_COMPLETE` or `BLOCKED` and always have `release_intent: none`. Candidate and post-merge records can be `PASS` or `BLOCKED` and require v3 coverage, canonical identity, complete inventory, successful cleanup, and a zero-blocking release gate for PASS. `scripts/stateless_preview_artifact.py` must consume the same v3 post-merge shape. Schema v2 has no compatibility path.
 
 ## Protect secrets and cleanup
 

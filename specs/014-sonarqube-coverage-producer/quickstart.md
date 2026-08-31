@@ -13,7 +13,6 @@ Set non-secret values only after the entry record exists:
 $Repo = '<fresh-detached-scanner-worktree>'
 $CoordinationRoot = '<primary-coordination-root>'
 $ExpectedHead = '<frozen-implementation-sha>'
-$Wave2Entry = '<verified-wave2-entry-evidence.json>'
 $ProjectKey = 'thebtf_netcoredbg_mcp'
 ```
 
@@ -27,7 +26,7 @@ git rev-parse HEAD
 git rev-parse --show-toplevel
 ```
 
-Continue only when the scanner worktree is detached and clean, `HEAD` equals `$ExpectedHead`, and the runner accepts `$Wave2Entry`. A failed entry is `WAVE2_CLOSURE_UNVERIFIED`; it must make preflight, scanner begin, and root claim unreachable.
+Continue only when the scanner worktree is detached and clean, `HEAD` equals `$ExpectedHead`, and the runner resolves the canonical entry record from `$CoordinationRoot/.agent/e/issue450-sonar-v02311/wave2-closure-entry.json`. A failed entry is `WAVE2_CLOSURE_UNVERIFIED`; it must make preflight, scanner begin, and root claim unreachable.
 
 ## 2. Run focused contract proof
 
@@ -75,7 +74,7 @@ A missing executable, invalid package tuple, or MTP activation has zero begin an
 Run only after the exact head has review, judgment, and verified Wave-2 entry evidence. The runner loads credentials at its existing approved boundary. Do not echo `SONAR_*`.
 
 ```powershell
-python scripts/run_sonarqube_exact_head.py --role diagnostic --wave2-entry-evidence $Wave2Entry
+python scripts/run_sonarqube_exact_head.py --role diagnostic
 ```
 
 A valid order is:

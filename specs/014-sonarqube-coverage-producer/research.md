@@ -21,6 +21,7 @@
 | OBSERVED | The broader build inventory is not the closed coverage producer inventory. | `agent://Wave3CoverageSource`; `agent://Wave3CoverageTests` | The five projects remain a fixed ordered input set. |
 | OBSERVED | Stateless coverage needs the exact `IncludeDirectory` and binary restoration check. | `agent://Wave3CoverageSource` | Preserve the Stateless-only branch. |
 | OBSERVED | Wave-2 PR #289 is open. | Operator instruction | Wave-3 execution is BLOCKED pending typed accepted-main closure evidence. |
+| OBSERVED | `scripts/stateless_preview_artifact.py` requires receipt schema version 2 for post-merge artifact sealing. | Verifier recheck of `08a4231` | Wave 3 must migrate this receipt consumer and its focused proof to unified v3. |
 
 ## Primary-source constraints
 
@@ -64,6 +65,12 @@
 
 **Reason**: The prior diagnostic-only schema could not define a release PASS shape. One role-discriminated schema gives every caller the same coverage linkage and identity contract.
 
+### Preserve callers through canonical entry discovery and migrate the actual v3 consumer
+
+**SELECTED**: `GitContext` resolves the Wave-2 entry record at the canonical coordination-root path, so existing candidate and post-merge CLI calls retain their shape. The same cutover migrates `scripts/stateless_preview_artifact.py` from schema v2 to the unified v3 post-merge receipt.
+
+**Reason**: CLI argument changes would require unrelated caller changes. Canonical discovery keeps the entry authoritative while the known artifact consumer receives the required v3 contract migration.
+
 ## Rejected designs
 
 | Design | Disposition | Reason |
@@ -87,4 +94,4 @@
 
 ## Research conclusion
 
-The selected shape retains the existing scanner authority, meets the parent two-report Cobertura contract, keeps the five projects as deterministic producer inputs, fails known toolchain defects before begin, gives Wave 4 a full inventory authority, and defines every v3 role without a v2 compatibility path.
+The selected shape retains the existing scanner authority and role CLI shapes, meets the parent two-report Cobertura contract, keeps the five projects as deterministic producer inputs, fails known toolchain defects before begin, gives Wave 4 a full inventory authority, migrates the existing post-merge receipt consumer, and defines every v3 role without a v2 compatibility path.
