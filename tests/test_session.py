@@ -1074,6 +1074,12 @@ class FakeLaunchClient:
         self.hot_reload_enabled: bool | None = None
         self.adapter_owner: OwnedProcessRef | None = None
 
+    def set_transport_terminal_handler(self, _handler) -> None:
+        pass
+
+    def on_event(self, _event, _handler) -> None:
+        pass
+
     async def set_hot_reload(self, enable: bool) -> DAPResponse:
         self.events.append("set_hot_reload")
         self.hot_reload_enabled = enable
@@ -1195,6 +1201,30 @@ class TestOwnerScopedPublicRouteRedMatrix:
         generation = "c2"
         owner = OwnedProcessRef("owner-c2", generation, 45002)
         fake_client.adapter_owner = owner
+        fake_client.adapter_pid = None
+        fake_client.disconnect = AsyncMock()
+
+        async def stop_client(**_kwargs):
+            fake_client.is_running = False
+            return OwnerDrainReceipt(
+                owner=owner,
+                status=DrainStatus.DRAINED,
+                forced=False,
+                root_returncode=0,
+                active_processes=0,
+            )
+
+        async def start_client(*, generation):
+            fake_client.is_running = True
+            fake_client.adapter_owner = OwnedProcessRef("owner-c2-restart", generation, 45003)
+            return generation
+
+        async def initialize_client():
+            manager._initialized_event.set()
+
+        fake_client.stop = AsyncMock(side_effect=stop_client)
+        fake_client.start = AsyncMock(side_effect=start_client)
+        fake_client.initialize = AsyncMock(side_effect=initialize_client)
         manager._active_dap_run = generation
         manager._initialized_event.set()
         manager.check_dbgshim_compatibility = MagicMock(return_value=None)
@@ -1210,7 +1240,6 @@ class TestOwnerScopedPublicRouteRedMatrix:
                 pre_build=True,
                 build_project=str(project),
             )
-            manager.stop = AsyncMock(return_value={"success": True})
             await manager.restart(rebuild=True)
 
         owners = [call.kwargs["owner"] for call in prebuild.await_args_list]
@@ -1278,6 +1307,155 @@ class TestOwnerScopedPublicRouteRedMatrix:
         assert lifecycle[:2] == ["disconnect", "owner-finalizer"]
 
     @pytest.mark.asyncio
+    async def test_restart_rebuild_preserves_failed_owner_receipt_for_build_gate(
+        self, tmp_path
+    ) -> None:
+        """Restart must retain a failed owner receipt after its generic stop resets state."""
+
+        program = tmp_path / "App.dll"
+        project = tmp_path / "App.csproj"
+        program.write_bytes(b"")
+        project.touch()
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+        generation = "restart-failed-owner"
+        owner = OwnedProcessRef("owner-restart-failed", generation, 45007)
+        receipt = OwnerDrainReceipt(
+            owner=owner,
+            status=DrainStatus.FAILED,
+            forced=True,
+            root_returncode=None,
+            active_processes=None,
+        )
+        lifecycle: list[str] = []
+
+        async def disconnect(*, terminate: bool) -> None:
+            assert terminate is True
+            lifecycle.append("disconnect")
+
+        async def stop(
+            *,
+            expected_owner: OwnedProcessRef | None = None,
+        ) -> OwnerDrainReceipt | None:
+            if expected_owner is None:
+                lifecycle.append("general-stop")
+                return None
+            assert expected_owner == owner
+            lifecycle.append("owner-finalizer")
+            return receipt
+
+        client = FakeLaunchClient()
+        client.is_running = False
+        client.adapter_owner = owner
+        client.adapter_pid = None
+        client.disconnect = AsyncMock(side_effect=disconnect)
+        client.stop = AsyncMock(side_effect=stop)
+        manager._client = client
+        manager._active_dap_run = generation
+        manager._state.state = DebugState.RUNNING
+        manager._last_launch_config = {
+            "program": str(program),
+            "cwd": None,
+            "args": None,
+            "env": None,
+            "stop_at_entry": False,
+            "pre_build": True,
+            "build_project": str(project),
+            "build_configuration": "Debug",
+            "stealth_mode": False,
+        }
+        build_session = manager._build_manager.get_session(str(tmp_path))
+        build_session.restore = AsyncMock(return_value=MagicMock(success=True))
+        build_session.build = AsyncMock(side_effect=AssertionError("build invoked"))
+
+        with pytest.raises(PreBuildOwnerError, match="did not drain"):
+            await manager.restart(rebuild=True)
+
+        build_session.restore.assert_not_awaited()
+        build_session.build.assert_not_awaited()
+        assert lifecycle == ["disconnect", "owner-finalizer", "general-stop"]
+        assert client.stop.await_args_list[0].kwargs == {"expected_owner": owner}
+        assert client.stop.await_args_list[1].kwargs == {}
+
+    @pytest.mark.asyncio
+    async def test_owner_gate_serializes_adapter_start_through_restore_and_build(
+        self, tmp_path
+    ) -> None:
+        """A new adapter may not enter admission until the owner-gated build is complete."""
+
+        project = tmp_path / "App.csproj"
+        project.touch()
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+        generation = "prebuild-owner"
+        owner = OwnedProcessRef("owner-prebuild", generation, 45008)
+        receipt = OwnerDrainReceipt(
+            owner=owner,
+            status=DrainStatus.DRAINED,
+            forced=False,
+            root_returncode=0,
+            active_processes=0,
+        )
+        events: list[str] = []
+        build_started = asyncio.Event()
+        release_build = asyncio.Event()
+        adapter_start = asyncio.Event()
+
+        async def disconnect(*, terminate: bool) -> None:
+            assert terminate is True
+            events.append("disconnect")
+
+        async def stop(*, expected_owner: OwnedProcessRef | None = None) -> OwnerDrainReceipt:
+            assert expected_owner == owner
+            events.append("owner-finalizer")
+            return receipt
+
+        async def restore(*_args, **_kwargs):
+            events.append("restore")
+            return MagicMock(success=True)
+
+        async def build(*_args, **_kwargs):
+            events.append("build")
+            build_started.set()
+            await release_build.wait()
+            return MagicMock(success=True)
+
+        async def start(*, generation: object) -> object:
+            events.append("adapter-start")
+            adapter_start.set()
+            return generation
+
+        client = MagicMock()
+        client.is_running = False
+        client.adapter_owner = owner
+        client.adapter_pid = None
+        client.disconnect = AsyncMock(side_effect=disconnect)
+        client.stop = AsyncMock(side_effect=stop)
+        client.start = start
+        client.initialize = AsyncMock()
+        manager._client = client
+        manager._active_dap_run = generation
+        build_session = manager._build_manager.get_session(str(tmp_path))
+        build_session.restore = restore
+        build_session.build = build
+
+        prebuild_task = asyncio.create_task(manager.pre_launch_build(str(project)))
+        start_task: asyncio.Task[None] | None = None
+        try:
+            await asyncio.wait_for(build_started.wait(), timeout=1.0)
+            start_task = asyncio.create_task(manager.start())
+            await asyncio.sleep(0)
+
+            assert adapter_start.is_set() is False
+        finally:
+            release_build.set()
+            await asyncio.wait_for(prebuild_task, timeout=1.0)
+            if start_task is not None:
+                await asyncio.wait_for(start_task, timeout=1.0)
+
+        assert events == ["disconnect", "owner-finalizer", "restore", "build", "adapter-start"]
+
+    @pytest.mark.asyncio
     async def test_no_owner_prebuild_passes_explicit_variant(self, tmp_path) -> None:
         """A manager without an admitted adapter delegates NoOwnedAdapter."""
         project = tmp_path / "App.csproj"
@@ -1295,12 +1473,12 @@ class TestOwnerScopedPublicRouteRedMatrix:
         assert isinstance(captured.kwargs["owner"], NoOwnedAdapter)
 
     @pytest.mark.asyncio
-    async def test_active_adapter_admission_rejects_prebuild_before_build(
+    async def test_active_adapter_admission_serializes_prebuild_before_build(
         self,
         tmp_path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A Windows pre-build cannot race suspended adapter admission into no-owner."""
+        """A pre-build waits for suspended adapter admission before it can start a command."""
 
         project = tmp_path / "App.csproj"
         project.touch()
@@ -1325,22 +1503,31 @@ class TestOwnerScopedPublicRouteRedMatrix:
         manager._build_manager.pre_launch_build = prebuild
         monkeypatch.setattr("netcoredbg_mcp.session.manager.os.name", "nt")
         start_task = asyncio.create_task(manager.start())
+        prebuild_task = None
         try:
             await asyncio.wait_for(admitted.wait(), timeout=1.0)
-            with pytest.raises(RuntimeError, match="adapter admission is in progress"):
-                await manager.pre_launch_build(str(project))
+            prebuild_task = asyncio.create_task(manager.pre_launch_build(str(project)))
+            await asyncio.sleep(0)
+
+            assert prebuild_task.done() is False
             prebuild.assert_not_awaited()
         finally:
             release.set()
-            await start_task
+            await asyncio.wait_for(start_task, timeout=1.0)
+            if prebuild_task is not None and prebuild_task.done():
+                prebuild_task.exception()
+
+        assert prebuild_task is not None
+        await asyncio.wait_for(prebuild_task, timeout=1.0)
+        prebuild.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_overlapping_starts_keep_current_windows_admission_blocked(
+    async def test_overlapping_starts_serialize_admission_and_prebuild(
         self,
         tmp_path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A prior start completion cannot clear the current run's admission guard."""
+        """A second start and a pre-build wait for the current lifecycle transition."""
 
         project = tmp_path / "App.csproj"
         project.touch()
@@ -1373,18 +1560,21 @@ class TestOwnerScopedPublicRouteRedMatrix:
         manager._build_manager.pre_launch_build = prebuild
         monkeypatch.setattr("netcoredbg_mcp.session.manager.os.name", "nt")
         first_start = asyncio.create_task(manager.start())
-        second_start: asyncio.Task[None] | None = None
+        second_start = None
+        prebuild_task = None
         try:
             await asyncio.wait_for(first_started.wait(), timeout=1.0)
             second_start = asyncio.create_task(manager.start())
-            await asyncio.wait_for(second_started.wait(), timeout=1.0)
-            assert manager._active_dap_run == 2
+            await asyncio.sleep(0)
+            assert second_started.is_set() is False
 
             first_release.set()
             await asyncio.wait_for(first_start, timeout=1.0)
+            await asyncio.wait_for(second_started.wait(), timeout=1.0)
 
-            with pytest.raises(RuntimeError, match="adapter admission is in progress"):
-                await manager.pre_launch_build(str(project))
+            prebuild_task = asyncio.create_task(manager.pre_launch_build(str(project)))
+            await asyncio.sleep(0)
+            assert prebuild_task.done() is False
             prebuild.assert_not_awaited()
         finally:
             first_release.set()
@@ -1392,6 +1582,12 @@ class TestOwnerScopedPublicRouteRedMatrix:
             await asyncio.wait_for(first_start, timeout=1.0)
             if second_start is not None:
                 await asyncio.wait_for(second_start, timeout=1.0)
+            if prebuild_task is not None and prebuild_task.done():
+                prebuild_task.exception()
+
+        assert prebuild_task is not None
+        await asyncio.wait_for(prebuild_task, timeout=1.0)
+        prebuild.assert_awaited_once()
 
     def test_non_windows_active_adapter_has_no_owner_variant(self) -> None:
         """A current generation without an active Windows admission stays no-owner."""

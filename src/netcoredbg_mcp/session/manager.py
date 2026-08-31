@@ -119,6 +119,7 @@ class SessionManager:
         self._last_version_warning: str | None = None  # dbgshim version mismatch warning
         self._session_id: str | None = None
         self._stealth_mode = False
+        self._lifecycle_lock = asyncio.Lock()
         self._quick_eval_lock = asyncio.Lock()
         self._runtime_smoke = RuntimeSmokeSession()
         self._worktree_cache_map: dict[str, list[str]] = {}
@@ -835,7 +836,13 @@ class SessionManager:
             self._set_state(previous_state)
 
     async def start(self) -> None:
-        """Start one manager-issued adapter generation and initialize DAP.
+        """Start one manager-issued adapter generation and initialize DAP."""
+
+        async with self._lifecycle_lock:
+            await self._start_locked()
+
+    async def _start_locked(self) -> None:
+        """Start one adapter generation while the lifecycle gate excludes pre-build work.
 
         The manager binds the generation and terminal sink before awaiting
         process startup. That ordering closes the early-EOF window: even an
@@ -1700,17 +1707,18 @@ class SessionManager:
             ValueError: If project path is invalid or outside scope
         """
 
-        owner = self.capture_prebuild_owner()
-        return await self._pre_launch_build_with_owner(
-            project_file=project_file,
-            owner=owner,
-            configuration=configuration,
-            restore_first=restore_first,
-            timeout=timeout,
-            output_callback=output_callback,
-        )
+        async with self._lifecycle_lock:
+            owner = self.capture_prebuild_owner()
+            return await self._pre_launch_build_with_owner_locked(
+                project_file=project_file,
+                owner=owner,
+                configuration=configuration,
+                restore_first=restore_first,
+                timeout=timeout,
+                output_callback=output_callback,
+            )
 
-    async def _pre_launch_build_with_owner(
+    async def _pre_launch_build_with_owner_locked(
         self,
         *,
         project_file: str,
@@ -1738,6 +1746,44 @@ class SessionManager:
         self._last_build_result = result
         return result
 
+    async def _prebuild_for_launch_locked(
+        self,
+        *,
+        program: str,
+        build_project: str,
+        build_configuration: str,
+        output_callback: Callable[[str, str], Awaitable[None]] | None,
+        stop_current_session: bool,
+    ) -> str:
+        """Drain the captured owner and finish restore/build before another admission."""
+
+        prebuild_owner = self.capture_prebuild_owner()
+        was_active = self.is_active
+        if was_active:
+            logger.info("[launch] stopping existing session before build")
+            if isinstance(prebuild_owner, OwnedAdapterCleanup):
+                receipt = await prebuild_owner.drain()
+                prebuild_owner = prebuild_owner.with_receipt(receipt)
+
+        if was_active or stop_current_session:
+            await self._stop_locked()
+
+        logger.info("[launch] phase 2/9: dotnet build")
+        await self._pre_launch_build_with_owner_locked(
+            project_file=build_project,
+            owner=prebuild_owner,
+            configuration=build_configuration,
+            restore_first=True,
+            timeout=300.0,
+            output_callback=output_callback,
+        )
+
+        # Re-validate program path after build (now file should exist)
+        # Also apply smart .exe → .dll resolution for .NET 6+
+        program = self.validate_program(program, must_exist=True)
+        logger.info(f"[launch] post-build program path: {program}")
+        return program
+
     async def launch(
         self,
         program: str,
@@ -1751,6 +1797,38 @@ class SessionManager:
         stealth_mode: bool = False,
         progress_callback: Callable[[float, float, str], Awaitable[None]] | None = None,
         output_callback: Callable[[str, str], Awaitable[None]] | None = None,
+    ) -> dict[str, Any]:
+        """Launch program for debugging."""
+
+        async with self._lifecycle_lock:
+            return await self._launch_locked(
+                program=program,
+                cwd=cwd,
+                args=args,
+                env=env,
+                stop_at_entry=stop_at_entry,
+                pre_build=pre_build,
+                build_project=build_project,
+                build_configuration=build_configuration,
+                stealth_mode=stealth_mode,
+                progress_callback=progress_callback,
+                output_callback=output_callback,
+            )
+
+    async def _launch_locked(
+        self,
+        program: str,
+        cwd: str | None = None,
+        args: list[str] | None = None,
+        env: dict[str, str | None] | None = None,
+        stop_at_entry: bool = False,
+        pre_build: bool = False,
+        build_project: str | None = None,
+        build_configuration: str = "Debug",
+        stealth_mode: bool = False,
+        progress_callback: Callable[[float, float, str], Awaitable[None]] | None = None,
+        output_callback: Callable[[str, str], Awaitable[None]] | None = None,
+        _prebuilt_program: str | None = None,
     ) -> dict[str, Any]:
         """Launch program for debugging.
 
@@ -1787,37 +1865,20 @@ class SessionManager:
             if not build_project:
                 raise ValueError("build_project required when pre_build=True")
 
-            logger.info("[launch] phase 1/9: pre-build")
-            await report(0, 100, "Building project...")
-
-            # Capture before generic stop clears the active generation. A
-            # non-drained owner receipt must reach BuildManager instead of
-            # becoming the no-owner variant after session teardown.
-            prebuild_owner = self.capture_prebuild_owner()
-            if self.is_active:
-                logger.info("[launch] stopping existing session before build")
-                if isinstance(prebuild_owner, OwnedAdapterCleanup):
-                    receipt = await prebuild_owner.drain()
-                    prebuild_owner = prebuild_owner.with_receipt(receipt)
-                await self.stop()
-
-            logger.info("[launch] phase 2/9: dotnet build")
-            await self._pre_launch_build_with_owner(
-                project_file=build_project,
-                owner=prebuild_owner,
-                configuration=build_configuration,
-                restore_first=True,
-                timeout=300.0,
-                output_callback=output_callback,
-            )
-
-            logger.info("[launch] phase 3/9: build complete")
-            await report(50, 100, "Build complete, starting debugger...")
-
-            # Re-validate program path after build (now file should exist)
-            # Also apply smart .exe → .dll resolution for .NET 6+
-            program = self.validate_program(program, must_exist=True)
-            logger.info(f"[launch] post-build program path: {program}")
+            if _prebuilt_program is None:
+                logger.info("[launch] phase 1/9: pre-build")
+                await report(0, 100, "Building project...")
+                program = await self._prebuild_for_launch_locked(
+                    program=program,
+                    build_project=build_project,
+                    build_configuration=build_configuration,
+                    output_callback=output_callback,
+                    stop_current_session=False,
+                )
+                logger.info("[launch] phase 3/9: build complete")
+                await report(50, 100, "Build complete, starting debugger...")
+            else:
+                program = _prebuilt_program
         else:
             await report(0, 100, "Starting debugger...")
 
@@ -1837,7 +1898,7 @@ class SessionManager:
 
         if not self._client.is_running:
             logger.info("[launch] phase 5/9: starting netcoredbg process")
-            await self.start()
+            await self._start_locked()
 
         dap_generation = self._active_dap_run
 
@@ -1955,6 +2016,12 @@ class SessionManager:
     async def stop(self) -> dict[str, Any]:
         """Stop the current session through one generation-scoped reset path."""
 
+        async with self._lifecycle_lock:
+            return await self._stop_locked()
+
+    async def _stop_locked(self) -> dict[str, Any]:
+        """Stop the current session through one generation-scoped reset path."""
+
         stopping_generation = self._active_dap_run
         self._stopping_dap_run = stopping_generation
         observed_pids = tuple(
@@ -2020,24 +2087,32 @@ class SessionManager:
                          or if rebuild requested but no build_project configured
             BuildError: If rebuild fails
         """
-        if not self._last_launch_config:
-            raise RuntimeError("No previous launch configuration for restart")
+        async with self._lifecycle_lock:
+            if not self._last_launch_config:
+                raise RuntimeError("No previous launch configuration for restart")
 
-        config = self._last_launch_config.copy()
+            config = self._last_launch_config.copy()
+            build_project = config.get("build_project")
+            if rebuild and not build_project:
+                raise RuntimeError(
+                    "Cannot rebuild on restart: no build_project in saved configuration"
+                )
 
-        # Validate rebuild request - cannot rebuild without build_project
-        if rebuild and not config.get("build_project"):
-            raise RuntimeError("Cannot rebuild on restart: no build_project in saved configuration")
+            if rebuild:
+                config["pre_build"] = True
+                prebuilt_program = await self._prebuild_for_launch_locked(
+                    program=config["program"],
+                    build_project=str(build_project),
+                    build_configuration=config["build_configuration"],
+                    output_callback=None,
+                    stop_current_session=True,
+                )
+                return await self._launch_locked(**config, _prebuilt_program=prebuilt_program)
 
-        # Always stop existing session first to ensure clean state
-        # This is needed even when pre_build=False to avoid relaunch issues
-        await self.stop()
-
-        # Force pre_build if rebuild requested and we have build info
-        if rebuild and config.get("build_project"):
-            config["pre_build"] = True
-
-        return await self.launch(**config)
+            # Preserve the existing no-rebuild restart route, including an
+            # originally configured pre-build, while using the same lock.
+            await self._stop_locked()
+            return await self._launch_locked(**config)
 
     async def _enable_hot_reload_if_supported(self) -> None:
         enc_support = detect_enc_support(self.netcoredbg_path)
