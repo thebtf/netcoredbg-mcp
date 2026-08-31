@@ -832,6 +832,7 @@ def test_stateless_preview_workflow_is_build_only_and_immutable() -> None:
     assert "permissions: {}" in workflow
     assert "contents: read" in workflow
     assert "actions: read" in workflow
+    assert "pull-requests: read" in workflow
     assert "cancel-in-progress: false" in workflow
     producer_step = workflow.split(
         "- name: Produce the repository post-merge exact-head receipt", maxsplit=1

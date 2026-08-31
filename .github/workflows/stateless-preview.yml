@@ -29,6 +29,7 @@ jobs:
     permissions:
       actions: read
       contents: read
+      pull-requests: read
     env:
       A1_PREVIEW_VERSION: ${{ inputs.preview_version }}
       A1_PREVIEW_TAG: ${{ inputs.preview_tag }}
