@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from netcoredbg_mcp.build.cleanup import NoOwnedAdapter, OwnedAdapterCleanup
+from netcoredbg_mcp.build.cleanup import NoOwnedAdapter, OwnedAdapterCleanup, PreBuildOwnerError
 from netcoredbg_mcp.dap import DAPEvent, DAPResponse
 from netcoredbg_mcp.dap.client import (
     DapCleanupOutcome,
@@ -16,7 +16,7 @@ from netcoredbg_mcp.dap.client import (
     DapTransportTerminal,
 )
 from netcoredbg_mcp.session import DebugState, SessionManager
-from netcoredbg_mcp.windows_process_owner import DrainStatus, OwnedProcessRef
+from netcoredbg_mcp.windows_process_owner import DrainStatus, OwnedProcessRef, OwnerDrainReceipt
 from tests.owner_scope_red import BlockingStream, OwnedCommandProcess, TreeProcess
 
 
@@ -1216,6 +1216,48 @@ class TestOwnerScopedPublicRouteRedMatrix:
         owners = [call.kwargs["owner"] for call in prebuild.await_args_list]
         assert owners and all(isinstance(value, OwnedAdapterCleanup) for value in owners)
         assert all(value.owner == owner for value in owners)
+
+    @pytest.mark.asyncio
+    async def test_c2_failed_active_owner_drain_blocks_prebuild(self, tmp_path) -> None:
+        """A failed active-owner drain must not be erased before the build gate."""
+
+        program = tmp_path / "App.dll"
+        project = tmp_path / "App.csproj"
+        program.write_bytes(b"")
+        project.touch()
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+        generation = "failed-owner"
+        owner = OwnedProcessRef("owner-failed", generation, 45006)
+        receipt = OwnerDrainReceipt(
+            owner=owner,
+            status=DrainStatus.FAILED,
+            forced=True,
+            root_returncode=None,
+            active_processes=None,
+        )
+        client = FakeLaunchClient()
+        client.adapter_owner = owner
+        client.adapter_pid = None
+        client.disconnect = AsyncMock()
+        client.stop = AsyncMock(return_value=receipt)
+        manager._client = client
+        manager._active_dap_run = generation
+        manager._state.state = DebugState.RUNNING
+        build_session = manager._build_manager.get_session(str(tmp_path))
+        build_session.restore = AsyncMock(return_value=MagicMock(success=True))
+        build_session.build = AsyncMock(side_effect=AssertionError("build invoked"))
+
+        with pytest.raises(PreBuildOwnerError, match="did not drain"):
+            await manager.launch(
+                program=str(program),
+                pre_build=True,
+                build_project=str(project),
+            )
+
+        build_session.restore.assert_not_awaited()
+        build_session.build.assert_not_awaited()
+        assert client.stop.await_args_list[0].kwargs == {"expected_owner": owner}
 
     @pytest.mark.asyncio
     async def test_no_owner_prebuild_passes_explicit_variant(self, tmp_path) -> None:

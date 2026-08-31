@@ -1588,6 +1588,10 @@ class TestOwnerScopedAdapterRedMatrix:
     child or publishes terminal state; a process ID is only diagnostic data.
     """
 
+    @pytest.fixture(autouse=True)
+    def _use_windows_owner_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("netcoredbg_mcp.dap.client.os.name", "nt")
+
     @pytest.mark.asyncio
     async def test_o1_adapter_does_not_execute_before_private_owner_admission(self) -> None:
         """O1: the direct adapter route must not run before admission completes.

@@ -1,6 +1,8 @@
 """Tests for build session - per-workspace state machine."""
 
 import asyncio
+import os
+import shutil
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -20,6 +22,7 @@ from tests.owner_scope_red import (
 def _use_asyncio_compatibility_path(monkeypatch, request) -> None:
     """Keep existing cross-platform command tests on their established path."""
     if request.cls is not None and request.cls.__name__ == "TestOwnerScopedBuildMatrix":
+        monkeypatch.setattr("netcoredbg_mcp.build.session._IS_WINDOWS", True)
         return
     monkeypatch.setattr("netcoredbg_mcp.build.session._IS_WINDOWS", False)
 
@@ -603,3 +606,24 @@ class TestOwnerScopedBuildMatrix:
 
         assert session._run_command.await_count == 3
         assert delay.await_count == 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows private-Job smoke")
+@pytest.mark.skipif(shutil.which("dotnet") is None, reason="dotnet CLI is required")
+@pytest.mark.asyncio
+async def test_windows_build_command_resolves_bare_dotnet_from_path(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real Windows owner path resolves BuildPolicy's bare dotnet command."""
+
+    monkeypatch.setattr("netcoredbg_mcp.build.session._IS_WINDOWS", True)
+    session = BuildSession(workspace_root=str(tmp_path))
+
+    exit_code, stdout, stderr = await session._run_command(["dotnet", "--version"], timeout=30.0)
+
+    assert exit_code == 0, stdout + stderr
+    receipt = session._last_owner_drain_receipt
+    assert receipt is not None
+    assert receipt.status is DrainStatus.DRAINED
+    assert receipt.active_processes == 0

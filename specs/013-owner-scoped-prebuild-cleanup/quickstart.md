@@ -132,4 +132,4 @@ After all 15 rows are GREEN on one exact candidate:
 3. obtain a separate acceptance judgment for the reviewed candidate; and
 4. only then create `acceptance-receipt.md` with the exact candidate SHA, 15-row matrix, fixture evidence, review/judgment identities, unchanged-route comparison, and `release_intent: none`.
 
-The receipt is intentionally absent now. It is an internal Wave 2 closure artifact, not authority to start a release, create a tag, publish a package, or treat the candidate as v0.23.11.
+The receipt exists only as an internal Wave 2 closure artifact. It does not authorize a release, tag, package publication, or treating the candidate as v0.23.11.

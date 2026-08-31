@@ -1683,14 +1683,33 @@ class SessionManager:
             BuildError: If build fails
             ValueError: If project path is invalid or outside scope
         """
+
+        owner = self.capture_prebuild_owner()
+        return await self._pre_launch_build_with_owner(
+            project_file=project_file,
+            owner=owner,
+            configuration=configuration,
+            restore_first=restore_first,
+            timeout=timeout,
+            output_callback=output_callback,
+        )
+
+    async def _pre_launch_build_with_owner(
+        self,
+        *,
+        project_file: str,
+        owner: PreBuildOwner,
+        configuration: str,
+        restore_first: bool,
+        timeout: float,
+        output_callback: Callable[[str, str], Awaitable[None]] | None,
+    ) -> BuildResult:
+        """Run pre-build with an owner captured before any session state reset."""
+
         if not self._project_path:
             raise ValueError("Project path not set for pre-launch build")
 
-        # Validate project file path
         validated_project = self.validate_path(project_file, must_exist=True)
-
-        # Run pre-launch build
-        owner = self.capture_prebuild_owner()
         result = await self._build_manager.pre_launch_build(
             workspace_root=self._project_path,
             project_path=validated_project,
@@ -1755,15 +1774,24 @@ class SessionManager:
             logger.info("[launch] phase 1/9: pre-build")
             await report(0, 100, "Building project...")
 
-            # Stop existing session first to release file locks
+            # Capture before generic stop clears the active generation. A
+            # non-drained owner receipt must reach BuildManager instead of
+            # becoming the no-owner variant after session teardown.
+            prebuild_owner = self.capture_prebuild_owner()
             if self.is_active:
                 logger.info("[launch] stopping existing session before build")
+                if isinstance(prebuild_owner, OwnedAdapterCleanup):
+                    receipt = await prebuild_owner.drain()
+                    prebuild_owner = prebuild_owner.with_receipt(receipt)
                 await self.stop()
 
             logger.info("[launch] phase 2/9: dotnet build")
-            await self.pre_launch_build(
+            await self._pre_launch_build_with_owner(
                 project_file=build_project,
+                owner=prebuild_owner,
                 configuration=build_configuration,
+                restore_first=True,
+                timeout=300.0,
                 output_callback=output_callback,
             )
 

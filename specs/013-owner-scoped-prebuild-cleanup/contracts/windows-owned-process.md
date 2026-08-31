@@ -92,7 +92,7 @@ The boundary never invokes asyncio process launch as a Windows fallback. It neve
 3. `force_and_drain()` may skip the grace wait only for a build-command cancellation or another explicit force policy that the caller already selected.
 4. A successful Windows receipt uses `status == DRAINED` and `active_processes == 0` from `JobObjectBasicAccountingInformation`.
 5. A query failure returns `FAILED`. A deadline result returns `TIMED_OUT`. Neither permits a pre-build continuation.
-6. Repeated drain callers join the same operation and receive the same outcome. They do not create a second Job termination path.
+6. Repeated callers join an in-flight operation. Only a literal-zero `DRAINED` receipt memoizes completion; a later explicit force call may retry a non-drained outcome.
 7. `aclose()` closes resources after the receipt is captured. `KILL_ON_JOB_CLOSE` is crash protection, not a substitute for a drain receipt.
 
 ## Adapter and pre-build integration

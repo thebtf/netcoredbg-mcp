@@ -1435,6 +1435,7 @@ async def test_c4_shared_host_backend_prebuild_requires_owner_capability(tmp_pat
         )
 
     assert "error" not in response
+    assert prebuild.await_count == 1
     assert all("owner" in call.kwargs for call in prebuild.await_args_list), (
         "current shared host/direct backend forwards pre-build without owner authority"
     )

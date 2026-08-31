@@ -8,8 +8,10 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -24,6 +26,7 @@ from netcoredbg_mcp.windows_process_owner import (
     DrainStatus,
     ProcessAdmissionError,
     WindowsOwnedProcess,
+    _create_suspended_process,
     _Win32CallError,
 )
 
@@ -177,7 +180,7 @@ async def _launch(
     api: _FakeApi,
     events: list[str],
 ) -> WindowsOwnedProcess:
-    monkeypatch.setattr(os, "set_handle_inheritable", lambda *_args: None)
+    monkeypatch.setattr(os, "set_handle_inheritable", lambda *_args: None, raising=False)
     return await WindowsOwnedProcess._launch_with(
         generation="owner-generation",
         argv=("fixture.exe", "--interpreter=vscode"),
@@ -260,6 +263,113 @@ async def test_resume_failure_terminates_admitted_job_and_closes_handles(
     assert "terminate-job" in events
     assert "terminate-process" in events
     assert {"close:11", "close:21", "close:31"}.issubset(events)
+
+
+def _prepare_fake_create_process(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    created = MagicMock(return_value=(21, 31, 41, 51))
+    monkeypatch.setitem(sys.modules, "_winapi", SimpleNamespace(CreateProcess=created))
+    monkeypatch.setattr(
+        subprocess,
+        "STARTUPINFO",
+        lambda: SimpleNamespace(dwFlags=0),
+        raising=False,
+    )
+    monkeypatch.setattr(subprocess, "STARTF_USESTDHANDLES", 1, raising=False)
+    return created
+
+
+def _fake_pipe_ends() -> SimpleNamespace:
+    return SimpleNamespace(
+        stdin_child=11,
+        stdout_child=12,
+        stderr_child=13,
+        handle_list=lambda: (11, 12, 13),
+    )
+
+
+def test_bare_executable_uses_child_path_for_create_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A bare command must resolve through the supplied child PATH."""
+
+    created = _prepare_fake_create_process(monkeypatch)
+    resolved = str(tmp_path / "toolchain" / "dotnet.exe")
+    which = MagicMock(return_value=resolved)
+    monkeypatch.setattr(shutil, "which", which)
+    child_path = str(tmp_path / "toolchain")
+
+    _create_suspended_process(
+        argv=("dotnet", "build"),
+        cwd=str(tmp_path),
+        env={"Path": child_path},
+        pipe_ends=_fake_pipe_ends(),
+    )
+
+    assert created.call_args.args[0] == resolved
+    which.assert_called_once_with("dotnet", path=child_path)
+
+
+def test_unresolvable_bare_executable_fails_before_create_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An explicit application name is never guessed from the current directory."""
+
+    created = _prepare_fake_create_process(monkeypatch)
+    monkeypatch.setattr(shutil, "which", MagicMock(return_value=None))
+
+    with pytest.raises(_Win32CallError) as raised:
+        _create_suspended_process(
+            argv=("dotnet", "build"),
+            cwd=str(tmp_path),
+            env={"Path": str(tmp_path / "toolchain")},
+            pipe_ends=_fake_pipe_ends(),
+        )
+
+    assert raised.value.stage is AdmissionStage.CREATE_PROCESS
+    created.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_non_drained_receipt_allows_later_force_escalation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timed-out drain cannot prevent a later explicit force attempt."""
+
+    events: list[str] = []
+    api = _FakeApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    api._active_counts = [1, 1, 1, 0]
+
+    timed_out = await owner.drain_after_grace(grace_timeout=0.0, force_timeout=0.0)
+    drained = await owner.force_and_drain(timeout=0.1)
+
+    assert timed_out.status is DrainStatus.TIMED_OUT
+    assert drained.status is DrainStatus.DRAINED
+    assert drained.active_processes == 0
+    assert events.count("terminate-job") == 2
+
+
+@pytest.mark.asyncio
+async def test_aclose_retries_non_drained_receipt_with_force(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closing an owner cannot treat a timed-out receipt as cleanup evidence."""
+
+    events: list[str] = []
+    api = _FakeApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    api._active_counts = [1, 1, 1, 0]
+
+    timed_out = await owner.drain_after_grace(grace_timeout=0.0, force_timeout=0.0)
+    await owner.aclose()
+
+    assert timed_out.status is DrainStatus.TIMED_OUT
+    assert owner._drain_receipt is not None
+    assert owner._drain_receipt.status is DrainStatus.DRAINED
+    assert owner._drain_receipt.active_processes == 0
+    assert events.count("terminate-job") == 2
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Object proof")

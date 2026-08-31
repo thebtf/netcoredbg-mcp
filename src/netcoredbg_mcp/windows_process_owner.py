@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import subprocess
 import time
 import uuid
@@ -457,6 +458,30 @@ def _make_non_inheritable(handle: int, stage: AdmissionStage) -> None:
         raise _Win32CallError(stage, error.winerror) from error
 
 
+def _resolve_application_name(
+    executable: str,
+    environment: Mapping[str, str] | None,
+) -> str:
+    """Resolve a bare executable before passing it as lpApplicationName."""
+
+    if os.path.dirname(executable):
+        return os.path.abspath(executable)
+
+    search_path: str | None = None
+    if environment is not None:
+        for name, value in environment.items():
+            if name.casefold() == "path":
+                search_path = value
+                break
+        if not search_path:
+            raise _Win32CallError(AdmissionStage.CREATE_PROCESS, None)
+
+    resolved = shutil.which(executable, path=search_path)
+    if resolved is None:
+        raise _Win32CallError(AdmissionStage.CREATE_PROCESS, None)
+    return os.path.abspath(resolved)
+
+
 def _create_suspended_process(
     *,
     argv: Sequence[str],
@@ -468,7 +493,7 @@ def _create_suspended_process(
 
     if not argv:
         raise _Win32CallError(AdmissionStage.CREATE_PROCESS, None)
-    application_name = os.path.abspath(os.fspath(argv[0]))
+    application_name = _resolve_application_name(os.fspath(argv[0]), env)
     command_line = subprocess.list2cmdline([os.fspath(item) for item in argv])
     startup_info = subprocess.STARTUPINFO()
     startup_info.dwFlags |= subprocess.STARTF_USESTDHANDLES
@@ -702,10 +727,15 @@ class WindowsOwnedProcess:
         grace_timeout: float,
         force_timeout: float,
     ) -> OwnerDrainReceipt:
-        if self._drain_receipt is not None:
+        if (
+            self._drain_receipt is not None
+            and self._drain_receipt.status is DrainStatus.DRAINED
+            and self._drain_receipt.active_processes == 0
+        ):
             return self._drain_receipt
         task = self._drain_task
-        if task is None:
+        if task is None or task.done():
+            self._drain_receipt = None
             task = asyncio.create_task(self._drain(grace_timeout, force_timeout))
             self._drain_task = task
         return await asyncio.shield(task)
@@ -806,7 +836,11 @@ class WindowsOwnedProcess:
 
         if self._closed:
             return
-        if self._drain_receipt is None:
+        if (
+            self._drain_receipt is None
+            or self._drain_receipt.status is not DrainStatus.DRAINED
+            or self._drain_receipt.active_processes != 0
+        ):
             await self.force_and_drain(timeout=_ADMISSION_CLEANUP_TIMEOUT)
         if self.stdin is not None:
             self.stdin.close()

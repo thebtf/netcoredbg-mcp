@@ -30,10 +30,19 @@ class OwnedAdapterCleanup:
 
     owner: OwnedProcessRef
     _drain: Callable[[OwnedProcessRef], Awaitable[OwnerDrainReceipt]]
+    _receipt: OwnerDrainReceipt | None = None
 
     async def drain(self) -> OwnerDrainReceipt:
         """Ask the captured manager/client pair to validate and drain this owner."""
+        if self._receipt is not None:
+            return self._receipt
         return await self._drain(self.owner)
+
+    def with_receipt(self, receipt: OwnerDrainReceipt) -> OwnedAdapterCleanup:
+        """Bind an already-observed owner result through the later build gate."""
+        if receipt.owner != self.owner:
+            raise ValueError("pre-build receipt does not match the captured owner")
+        return OwnedAdapterCleanup(owner=self.owner, _drain=self._drain, _receipt=receipt)
 
 
 PreBuildOwner = NoOwnedAdapter | OwnedAdapterCleanup
