@@ -114,15 +114,12 @@ async def test_v2_wpf_state_oracle_runs_five_ab_cases_with_diffs() -> None:
         for case in result["cases"]
     )
     assert any(
-        any(path.startswith("ui.property.") for path in case["before"])
-        for case in result["cases"]
+        any(path.startswith("ui.property.") for path in case["before"]) for case in result["cases"]
     )
 
 
 def test_manual_smoke_exposes_offscreen_row_target_drag_entrypoint() -> None:
-    assert hasattr(
-        smoke_test_manual, "test_wpf_v2_offscreen_row_target_drag_runtime_smoke"
-    )
+    assert hasattr(smoke_test_manual, "test_wpf_v2_offscreen_row_target_drag_runtime_smoke")
 
 
 def test_offscreen_row_target_drag_plan_uses_source_and_drop_ensure_visible() -> None:
@@ -145,19 +142,15 @@ def test_offscreen_row_target_drag_plan_uses_source_and_drop_ensure_visible() ->
     assert action["expect"]["row_count_preserved"] is True
     assert action["expect"]["identity_set_preserved"] is True
     assert any(
-        probe["kind"] == "ui.grid.viewport"
-        and probe["name"] == "offscreen_target_viewport"
+        probe["kind"] == "ui.grid.viewport" and probe["name"] == "offscreen_target_viewport"
         for probe in transition["probes"]
     )
 
 
 def test_manual_smoke_lists_offscreen_row_target_drag_scenario() -> None:
-    if not smoke_test_manual.WPF_GUI_ENABLED:
-        pytest.skip(
-            "WPF fixture build required for WPF manual-smoke scenario inventory"
-        )
-
-    scenario_names = {name for name, _fn in smoke_test_manual.get_scenarios()}
+    scenario_names = {
+        name for name, _fn in smoke_test_manual.get_scenarios(include_extended_gui=True)
+    }
     assert "WPF V2 Offscreen Row-Target Drag Runtime Smoke" in scenario_names
 
 
@@ -247,15 +240,10 @@ def test_wpf_hover_selector_matrix_covers_real_root_and_target_cardinality() -> 
     assert all(case["expect_status"] == "PASS" for case in cases[8:])
     by_id = {case["id"]: case for case in cases}
     assert by_id["precedence_automation_id_wins"]["expect_criterion"] == "automationId"
-    assert (
-        by_id["precedence_xpath_after_automation_id_miss"]["expect_criterion"]
-        == "xpath"
-    )
+    assert by_id["precedence_xpath_after_automation_id_miss"]["expect_criterion"] == "xpath"
 
 
-def test_wpf_hover_selector_matrix_checks_each_blocked_call_for_pointer_movement() -> (
-    None
-):
+def test_wpf_hover_selector_matrix_checks_each_blocked_call_for_pointer_movement() -> None:
     cases = smoke_test_manual._wpf_hover_selector_matrix_cases()
     results = []
     for case in cases:
@@ -303,9 +291,7 @@ def test_wpf_hover_selector_matrix_checks_each_blocked_call_for_pointer_movement
 
     assert evidence["status"] == "PASS"
     assert moved["status"] == "FAIL"
-    assert (
-        "root_zero pointer moved before selector uniqueness passed" in moved["failures"]
-    )
+    assert "root_zero pointer moved before selector uniqueness passed" in moved["failures"]
 
 
 def test_wpf_hover_plan_arms_after_focus_then_runs_four_measured_transitions() -> None:
@@ -337,16 +323,12 @@ def test_wpf_hover_plan_arms_after_focus_then_runs_four_measured_transitions() -
         "wait",
     ]
     assert [
-        transition["action"].get("selector", {}).get("automation_id")
-        for transition in measured[:3]
+        transition["action"].get("selector", {}).get("automation_id") for transition in measured[:3]
     ] == ["hoverTrigger", "hoverFlyoutSurface", "hoverOutsideSentinel"]
     assert all(
-        transition["action"]["selector"]["root_id"] == "hoverRegion"
-        for transition in measured[:3]
+        transition["action"]["selector"]["root_id"] == "hoverRegion" for transition in measured[:3]
     )
-    assert all(
-        transition["action"]["timeout_ms"] == 5000 for transition in measured[:3]
-    )
+    assert all(transition["action"]["timeout_ms"] == 5000 for transition in measured[:3])
     assert "idle_ms" not in measured[2]
     assert measured[2]["settle"] == {"idle_ms": 100}
     assert measured[3]["action"] == {"kind": "wait", "idle_ms": 900}
@@ -470,7 +452,9 @@ def test_wpf_hover_live_evidence_accepts_complete_measured_contract() -> None:
 
 
 def test_manual_smoke_lists_wpf_selector_scoped_hover_scenario() -> None:
-    scenario_names = {name for name, _fn in smoke_test_manual.get_scenarios()}
+    scenario_names = {
+        name for name, _fn in smoke_test_manual.get_scenarios(include_extended_gui=True)
+    }
     assert "WPF V2 Selector-Scoped Hover Runtime Smoke" in scenario_names
 
 
@@ -712,6 +696,8 @@ async def test_guarded_child_admission_matrix_blocks_before_pointer_input() -> N
 
 
 def test_manual_smoke_lists_guarded_child_drag_scenario() -> None:
-    scenario_names = {name for name, _fn in smoke_test_manual.get_scenarios()}
+    scenario_names = {
+        name for name, _fn in smoke_test_manual.get_scenarios(include_extended_gui=True)
+    }
     assert "WPF V2 Guarded-Child Drag Runtime Smoke" in scenario_names
     assert "WPF V2 Guarded-Child Admission Matrix Runtime Smoke" in scenario_names

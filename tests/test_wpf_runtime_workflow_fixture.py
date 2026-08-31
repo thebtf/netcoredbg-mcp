@@ -46,6 +46,66 @@ def test_wpf_fixture_code_provides_assignment_toggle_undo_and_output_markers() -
     assert "CueDataGrid.Focus()" in code
 
 
+def test_wpf_fixture_reset_gallery_restores_canonical_ready_contract() -> None:
+    xaml = (FIXTURE_ROOT / "MainWindow.xaml").read_text(encoding="utf-8")
+    code = (FIXTURE_ROOT / "MainWindow.xaml.cs").read_text(encoding="utf-8")
+
+    assert 'Content="Reset gallery"' in xaml
+    assert 'AutomationProperties.AutomationId="smokeGalleryReset"' in xaml
+    assert 'Click="ResetGallery_Click"' in xaml
+    assert 'AutomationProperties.AutomationId="smokeGalleryStatus"' in xaml
+    assert 'Text="{Binding GalleryStatusText}"' in xaml
+    assert "private void ResetGallery_Click(object sender, RoutedEventArgs e)" in code
+    assert "private void ResetGallery()" in code
+
+    for reset_operation in (
+        "_viewModel.ResetToCanonicalState();",
+        "_undoStack.Clear();",
+        "CueDataGrid.SelectedItems.Clear();",
+        "CueDataGrid.CurrentCell = default;",
+        "scrollViewer.ScrollToHorizontalOffset(0);",
+        "scrollViewer.ScrollToVerticalOffset(0);",
+        "Keyboard.ClearFocus();",
+        "SubmenuParent.IsSubmenuOpen = false;",
+        "ResetDragState();",
+        "ResetEdgeScrollEvidence();",
+        "StopAndCloseHoverState();",
+        "_hoverCloseTimer.Stop();",
+        "_measurementArmed = false;",
+        "ResetGuardedChildState();",
+        "GuardedChildIdentityDrift.ResetDriftEvidence();",
+        "GuardedChildRectangleDrift.ResetDriftEvidence();",
+        "WriteMutableState(CanonicalMutableFileBaseline);",
+        'CanonicalMutableFileBaseline = "baseline"',
+    ):
+        assert reset_operation in code
+
+    for canonical_reset in (
+        "Items.Clear();",
+        "CueRows.Clear();",
+        "Characters.Clear();",
+        'StatusText = "Ready";',
+        'GenderStatusText = "No gender change";',
+        'SelectorSafetyStatusText = "Selector side effects: 0";',
+        "HoverStatusText = string.Empty;",
+        "GuardedChildStatusText = string.Empty;",
+        "IsFeatureEnabled = false;",
+        "InvokeCount = 0;",
+        "SelectorSafetyCount = 0;",
+        "private void SeedCanonicalCollections()",
+        "public void ResetToCanonicalState()",
+        "SeedCanonicalCollections();",
+        "public MainViewModel()",
+        "ResetToCanonicalState();",
+    ):
+        assert canonical_reset in code
+
+    assert "_galleryGeneration = checked(_galleryGeneration + 1);" in code
+    assert "_viewModel.GalleryStatusText = JsonSerializer.Serialize(new" in code
+    assert "generation = _galleryGeneration," in code
+    assert 'state = "ready",' in code
+
+
 def test_wpf_fixture_declares_cue_grid_drag_drop_bindings() -> None:
     xaml = (FIXTURE_ROOT / "MainWindow.xaml").read_text(encoding="utf-8")
 

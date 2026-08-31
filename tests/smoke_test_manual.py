@@ -1,19 +1,23 @@
 """Comprehensive smoke test for netcoredbg-mcp.
 
-Tests ALL MCP tool functionality against real netcoredbg + SmokeTestApp.
-Each scenario runs in a fresh debug session to avoid state leakage.
+The default run covers the broad non-GUI contract plus one WPF and one
+WinForms gallery process. Pass ``--extended-gui`` to add the exhaustive
+per-scenario GUI, startup, raster, and Avalonia checks. Exact ``--scenario``
+selection can address either inventory without enabling the full extended run.
 
 Requires: netcoredbg in PATH or NETCOREDBG_PATH env var.
 Build first: dotnet build tests/fixtures/SmokeTestApp -c Debug
 
-Usage: python tests/smoke_test.py
+Usage: python tests/smoke_test_manual.py [--extended-gui]
 """
 
 import asyncio
+import json
 import os
 import re
 import sys
 import traceback
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
@@ -124,6 +128,108 @@ def _grid_alias_evidence(response: dict[str, Any]) -> tuple[dict[str, Any], str 
 
 async def new_session() -> SessionManager:
     return SessionManager()
+
+
+def _create_flaui_gallery_backend(session: SessionManager) -> Any:
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    backend = create_backend(process_registry=session.process_registry)
+    if not isinstance(backend, FlaUIBackend):
+        raise RuntimeError("FlaUI bridge is required for the GUI smoke galleries")
+    return backend
+
+
+class _GuiSmokeGallery:
+    """Own one GUI fixture session and one FlaUI backend for a gallery run."""
+
+    def __init__(
+        self,
+        *,
+        program: str,
+        cwd: str | None = None,
+        args: list[str] | None = None,
+        session_factory: Callable[[], SessionManager] = SessionManager,
+        backend_factory: Callable[[SessionManager], Any] | None = None,
+    ) -> None:
+        self._program = program
+        self._cwd = cwd
+        self._args = args
+        self._session_factory = session_factory
+        self._backend_factory = backend_factory or _create_flaui_gallery_backend
+        self.session: SessionManager | None = None
+        self.backend: Any | None = None
+        self._closed = False
+
+    async def __aenter__(self) -> "_GuiSmokeGallery":
+        try:
+            self.session = self._session_factory()
+            await self.session.launch(
+                program=self._program,
+                cwd=self._cwd,
+                args=self._args,
+            )
+            pid = self.session.state.process_id
+            if not isinstance(pid, int) or pid <= 0:
+                raise RuntimeError("GUI smoke gallery launch did not provide a process ID")
+            self.backend = self._backend_factory(self.session)
+            await self.backend.connect(pid)
+            return self
+        except BaseException:
+            await self.aclose()
+            raise
+
+    async def __aexit__(self, *_args: Any) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if self.backend is not None:
+                await self.backend.disconnect()
+        finally:
+            if self.session is not None:
+                await self.session.stop()
+
+
+def _text_from_ui_result(result: Any) -> str:
+    if isinstance(result, dict):
+        for key in ("text", "name", "value"):
+            value = result.get(key)
+            if isinstance(value, str):
+                return value
+    return ""
+
+
+def _parse_gallery_status(result: Any) -> dict[str, Any] | None:
+    try:
+        status = json.loads(_text_from_ui_result(result))
+    except json.JSONDecodeError:
+        return None
+    return status if isinstance(status, dict) else None
+
+
+def _is_ready_gallery_status(status: dict[str, Any] | None) -> bool:
+    return (
+        isinstance(status, dict)
+        and type(status.get("generation")) is int
+        and status["generation"] > 0
+        and status.get("state") == "ready"
+    )
+
+
+async def _call_by_automation_id_or_name(
+    method: Callable[..., Any], element_id: str
+) -> dict[str, Any]:
+    try:
+        result = await method(automation_id=element_id)
+    except (RuntimeError, LookupError):
+        return await method(name=element_id)
+    if isinstance(result, dict) and result.get("found") is False:
+        return await method(name=element_id)
+    return result
 
 
 async def _get_debug_state_via_tool(session: SessionManager) -> dict[str, Any]:
@@ -859,6 +965,141 @@ async def test_threads_and_pause():
 
 # ─────────────────────────────────────────────────────────────
 # Main runner
+
+
+async def test_wpf_smoke_gallery():
+    """Exercise the WPF fixture's representative UIA paths in one process."""
+    print("\n--- WPF Smoke Gallery ---")
+    if not WPF_GUI_ENABLED:
+        check("WPF smoke gallery fixture built", True, "skipped: build tests/fixtures/WpfSmokeApp")
+        return
+
+    from netcoredbg_mcp.tools.ui_evidence import query_ui_fields
+    from netcoredbg_mcp.ui.grid import read_grid_visible_rows
+
+    try:
+        async with _GuiSmokeGallery(
+            program=WPF_DLL,
+            cwd=os.path.dirname(WPF_DLL),
+        ) as gallery:
+            backend = gallery.backend
+            if backend is None:
+                raise RuntimeError("WPF smoke gallery did not create a backend")
+
+            before_reset = _parse_gallery_status(
+                await backend.extract_text(automation_id="smokeGalleryStatus")
+            )
+            reset_receipt = await backend.invoke_element(automation_id="smokeGalleryReset")
+            after_reset = _parse_gallery_status(
+                await backend.extract_text(automation_id="smokeGalleryStatus")
+            )
+            check(
+                "WPF gallery reset receipt",
+                reset_receipt.get("invoked") is True,
+                str(reset_receipt),
+            )
+            check(
+                "WPF gallery reset reaches ready state",
+                _is_ready_gallery_status(after_reset),
+                str(after_reset),
+            )
+            check(
+                "WPF gallery reset advances generation",
+                _is_ready_gallery_status(before_reset)
+                and _is_ready_gallery_status(after_reset)
+                and after_reset["generation"] > before_reset["generation"],
+                f"before={before_reset} after={after_reset}",
+            )
+
+            invoke = await backend.invoke_element(automation_id="btnInvoke")
+            check("WPF gallery invoke", invoke.get("invoked") is True, str(invoke))
+
+            toggle = await backend.toggle_element(automation_id="chkEnabled")
+            check("WPF gallery toggle", toggle.get("toggled") is True, str(toggle))
+
+            grid_selector = {"automation_id": "dataGrid"}
+            grid_query = await query_ui_fields(
+                backend,
+                grid_selector,
+                fields=["enabled", "visible"],
+            )
+            grid_rows = await read_grid_visible_rows(backend, grid_selector)
+            check(
+                "WPF gallery grid query",
+                grid_query.get("status") == "PASS",
+                str(grid_query),
+            )
+            check(
+                "WPF gallery grid read",
+                isinstance(grid_rows.get("visible_rows"), list) and bool(grid_rows["visible_rows"]),
+                str(grid_rows),
+            )
+
+            status_before_screenshot = _parse_gallery_status(
+                await backend.extract_text(automation_id="smokeGalleryStatus")
+            )
+
+            screenshot = await backend.client.call("screenshot", {})
+            status_after_screenshot = _parse_gallery_status(
+                await backend.extract_text(automation_id="smokeGalleryStatus")
+            )
+            check(
+                "WPF gallery screenshot returned image",
+                bool(screenshot.get("base64")),
+                str(screenshot),
+            )
+            check(
+                "WPF gallery screenshot is read-only",
+                status_after_screenshot == status_before_screenshot,
+                f"before={status_before_screenshot} after={status_after_screenshot}",
+            )
+    except Exception as exc:
+        check("WPF smoke gallery", False, str(exc))
+
+
+async def test_winforms_smoke_gallery():
+    """Exercise the WinForms fixture's representative UIA paths in one process."""
+    print("\n--- WinForms Smoke Gallery ---")
+    if not GUI_ENABLED:
+        check(
+            "WinForms smoke gallery fixture built",
+            True,
+            "skipped: build tests/fixtures/SmokeTestApp",
+        )
+        return
+
+    try:
+        async with _GuiSmokeGallery(program=DLL, args=["gui"]) as gallery:
+            backend = gallery.backend
+            if backend is None:
+                raise RuntimeError("WinForms smoke gallery did not create a backend")
+
+            invoke = await _call_by_automation_id_or_name(backend.invoke_element, "btnInvoke")
+            check("WinForms gallery invoke", invoke.get("invoked") is True, str(invoke))
+
+            toggle = await _call_by_automation_id_or_name(backend.toggle_element, "chkEnabled")
+            check("WinForms gallery toggle", toggle.get("toggled") is True, str(toggle))
+
+            grid = await _call_by_automation_id_or_name(backend.find_element, "dataGrid")
+            check("WinForms gallery DataGrid found", grid.get("found") is True, str(grid))
+
+            selected_count = await backend.multi_select("multiList", [0, 2])
+            check(
+                "WinForms gallery list selection",
+                selected_count == 2,
+                f"selected={selected_count}",
+            )
+
+            selected_item = await backend.get_selected_item("multiList")
+            check(
+                "WinForms gallery selected item read",
+                selected_item.get("found") is True,
+                str(selected_item),
+            )
+    except Exception as exc:
+        check("WinForms smoke gallery", False, str(exc))
+
+
 # ─────────────────────────────────────────────────────────────
 async def test_ui_invoke_toggle():
     """Scenario 11: UI tools — invoke, toggle, root_id (requires GUI scenario)."""
@@ -7165,7 +7406,7 @@ async def test_code_search():
     check("search_source", len(matches) > 0, f"count={len(matches)}")
 
 
-def get_scenarios():
+def get_scenarios(include_extended_gui: bool = False):
     scenarios = [
         ("Hit Counting", test_hit_counting),
         ("Stack + Variables", test_stack_and_variables),
@@ -7185,133 +7426,115 @@ def get_scenarios():
         ("Path Validation", test_path_validation_worktrees),
         ("Project Root Timeout Fallback", test_project_root_timeout_fallback),
         ("Managed Bridge Fallback", test_managed_bridge_fallback),
-        (
-            "Startup Temp GC Prefix Filter",
-            test_startup_temp_gc_skips_unrelated_entries,
-        ),
+        ("Startup Temp GC Prefix Filter", test_startup_temp_gc_skips_unrelated_entries),
         ("Heartbeat During Wait", test_heartbeat_during_wait),
         ("Runtime Hygiene Preflight", test_runtime_hygiene_preflight),
         ("Instrumentation Group Lifecycle", test_instrumentation_group_lifecycle),
         ("Output Checkpoint Assertions", test_output_checkpoint_assertions),
         ("Runtime Smoke Bounded Runner", test_runtime_smoke_bounded_runner),
         ("UI Focused Evidence", test_ui_focused_evidence),
-        ("Stealth Launch", test_stealth_launch),
-        ("Stealth Click", test_stealth_click),
-        ("Stealth Screenshot", test_stealth_screenshot),
-        ("Typed BitBlt Fallback Native Bridge", test_typed_bitblt_fallback_native_bridge),
-        ("Screenshot Black Frame Guard", test_screenshot_black_frame_guard),
         ("Code Search", test_code_search),
-        ("WPF V2 State Oracle Runtime Smoke", test_wpf_v2_state_oracle_runtime_smoke),
-        (
-            "WPF V2 Selector-Scoped Hover Runtime Smoke",
-            test_wpf_v2_hover_runtime_smoke,
-        ),
-        (
-            "WPF V2 Visible-Row Drag Runtime Smoke",
-            test_wpf_v2_visible_row_drag_runtime_smoke,
-        ),
-        (
-            "WPF V2 Offscreen Row-Target Drag Runtime Smoke",
-            test_wpf_v2_offscreen_row_target_drag_runtime_smoke,
-        ),
-        (
-            "WPF V2 Edge-Scroll Drag Runtime Smoke",
-            test_wpf_v2_edge_scroll_drag_runtime_smoke,
-        ),
-        (
-            "WPF V2 Multi-Row Drag Runtime Smoke",
-            test_wpf_v2_multi_row_drag_runtime_smoke,
-        ),
-        (
-            "WPF V2 Negative Drag Runtime Smoke",
-            test_wpf_v2_negative_drag_runtime_smoke,
-        ),
-        (
-            "WPF V2 Guarded-Child Drag Runtime Smoke",
-            test_wpf_v2_guarded_child_drag_runtime_smoke,
-        ),
-        (
-            "WPF V2 Guarded-Child Admission Matrix Runtime Smoke",
-            test_wpf_v2_guarded_child_admission_matrix_runtime_smoke,
-        ),
-        (
-            "Avalonia V2 State Oracle Runtime Smoke",
-            test_avalonia_v2_state_oracle_runtime_smoke,
-        ),
+        ("Screenshot Black Frame Guard", test_screenshot_black_frame_guard),
+        ("WPF Smoke Gallery", test_wpf_smoke_gallery),
+        ("WinForms Smoke Gallery", test_winforms_smoke_gallery),
     ]
+    if not include_extended_gui:
+        return scenarios
 
-    if GUI_ENABLED:
-        scenarios.extend(
-            [
-                ("UI Invoke + Toggle + Root ID", test_ui_invoke_toggle),
-                ("DataGrid Select + Read", test_datagrid_select),
-                ("Multi-Window Envelope", test_multi_window_envelope),
-                ("Drag Primitive", test_drag_primitive),
-                ("System Event Theme Toggle", test_system_event_theme),
-                ("Persistent Modifier Hold", test_persistent_modifier_hold),
-                ("Scoped Search Performance", test_scoped_search_performance),
-                ("Window Lifecycle", test_window_lifecycle),
-                ("Expand/Collapse Tree", test_expand_collapse_tree),
-                ("Set Value Slider", test_set_value_slider),
-                ("Realize Virtualized Item", test_realize_virtualized_item),
-                ("Clipboard Roundtrip", test_clipboard_roundtrip),
-            ]
-        )
-    if WPF_GUI_ENABLED:
-        scenarios.append(("WPF Shift/DataGrid Evidence", test_wpf_shift_datagrid_evidence))
-        scenarios.append(
+    scenarios.extend(
+        [
+            ("Stealth Launch", test_stealth_launch),
+            ("Stealth Click", test_stealth_click),
+            ("Stealth Screenshot", test_stealth_screenshot),
+            ("Typed BitBlt Fallback Native Bridge", test_typed_bitblt_fallback_native_bridge),
+            ("WPF V2 State Oracle Runtime Smoke", test_wpf_v2_state_oracle_runtime_smoke),
+            ("WPF V2 Selector-Scoped Hover Runtime Smoke", test_wpf_v2_hover_runtime_smoke),
+            ("WPF V2 Visible-Row Drag Runtime Smoke", test_wpf_v2_visible_row_drag_runtime_smoke),
             (
-                "WPF UI Grid Rows Alias Fixture Replay",
-                test_wpf_ui_grid_rows_alias_fixture_replay,
-            )
-        )
-        scenarios.append(
+                "WPF V2 Offscreen Row-Target Drag Runtime Smoke",
+                test_wpf_v2_offscreen_row_target_drag_runtime_smoke,
+            ),
+            ("WPF V2 Edge-Scroll Drag Runtime Smoke", test_wpf_v2_edge_scroll_drag_runtime_smoke),
+            ("WPF V2 Multi-Row Drag Runtime Smoke", test_wpf_v2_multi_row_drag_runtime_smoke),
+            ("WPF V2 Negative Drag Runtime Smoke", test_wpf_v2_negative_drag_runtime_smoke),
             (
-                "WPF Stealth Delayed Readiness Replay",
-                test_wpf_stealth_delayed_readiness_replay,
-            )
-        )
-        scenarios.append(
+                "WPF V2 Guarded-Child Drag Runtime Smoke",
+                test_wpf_v2_guarded_child_drag_runtime_smoke,
+            ),
             (
-                "WPF Selector Safety No Side Effect",
-                test_wpf_selector_safety_no_side_effect,
-            )
-        )
-        scenarios.append(
-            (
-                "WPF One-Call Runtime Smoke Workflow",
-                test_wpf_one_call_runtime_smoke_workflow,
-            )
-        )
-        scenarios.append(
+                "WPF V2 Guarded-Child Admission Matrix Runtime Smoke",
+                test_wpf_v2_guarded_child_admission_matrix_runtime_smoke,
+            ),
+            ("Avalonia V2 State Oracle Runtime Smoke", test_avalonia_v2_state_oracle_runtime_smoke),
+            ("UI Invoke + Toggle + Root ID", test_ui_invoke_toggle),
+            ("DataGrid Select + Read", test_datagrid_select),
+            ("Multi-Window Envelope", test_multi_window_envelope),
+            ("Drag Primitive", test_drag_primitive),
+            ("System Event Theme Toggle", test_system_event_theme),
+            ("Persistent Modifier Hold", test_persistent_modifier_hold),
+            ("Scoped Search Performance", test_scoped_search_performance),
+            ("Window Lifecycle", test_window_lifecycle),
+            ("Expand/Collapse Tree", test_expand_collapse_tree),
+            ("Set Value Slider", test_set_value_slider),
+            ("Realize Virtualized Item", test_realize_virtualized_item),
+            ("Clipboard Roundtrip", test_clipboard_roundtrip),
+            ("WPF Shift/DataGrid Evidence", test_wpf_shift_datagrid_evidence),
+            ("WPF UI Grid Rows Alias Fixture Replay", test_wpf_ui_grid_rows_alias_fixture_replay),
+            ("WPF Stealth Delayed Readiness Replay", test_wpf_stealth_delayed_readiness_replay),
+            ("WPF Selector Safety No Side Effect", test_wpf_selector_safety_no_side_effect),
+            ("WPF One-Call Runtime Smoke Workflow", test_wpf_one_call_runtime_smoke_workflow),
             (
                 "WPF V2 Text Probe Missing Selector Runtime Smoke",
                 test_wpf_v2_text_probe_missing_selector_runtime_smoke,
-            )
-        )
-    if AVALONIA_GUI_ENABLED:
-        scenarios.append(
-            (
-                "Avalonia UI Fixture Compatibility",
-                test_avalonia_ui_fixture_compatibility,
-            )
-        )
-        scenarios.append(
+            ),
+            ("Avalonia UI Fixture Compatibility", test_avalonia_ui_fixture_compatibility),
             (
                 "Avalonia V2 Text Probe Missing Selector Runtime Smoke",
                 test_avalonia_v2_text_probe_missing_selector_runtime_smoke,
-            )
-        )
+            ),
+        ]
+    )
     return scenarios
 
 
-def list_scenarios():
-    for index, (name, _) in enumerate(get_scenarios(), 1):
+def list_scenarios(include_extended_gui: bool = False):
+    for index, (name, _) in enumerate(get_scenarios(include_extended_gui), 1):
         print(f"{index}. {name}")
 
 
-async def run_all(selected_names: set[str] | None = None):
-    if not os.path.exists(DLL):
+def _resolve_scenarios(
+    selected_names: set[str] | None,
+    *,
+    include_extended_gui: bool = False,
+) -> list[tuple[str, Callable[..., Any]]]:
+    scenarios = get_scenarios(
+        include_extended_gui=include_extended_gui or selected_names is not None
+    )
+    if selected_names is None:
+        return scenarios
+
+    selected = [(name, fn) for name, fn in scenarios if name in selected_names]
+    missing = selected_names - {name for name, _ in selected}
+    if missing:
+        raise ValueError(f"Unknown smoke scenario: {sorted(missing)}")
+    return selected
+
+
+async def run_all(
+    selected_names: set[str] | None = None,
+    *,
+    include_extended_gui: bool = False,
+):
+    try:
+        scenarios = _resolve_scenarios(
+            selected_names,
+            include_extended_gui=include_extended_gui,
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return False
+
+    if not os.path.exists(DLL) and selected_names is None:
         print("ERROR: Build SmokeTestApp first:")
         print("  dotnet build tests/fixtures/SmokeTestApp -c Debug")
         return False
@@ -7319,13 +7542,6 @@ async def run_all(selected_names: set[str] | None = None):
     print("=== SMOKE TEST: netcoredbg-mcp v0.6.0 ===")
     print(f"DLL: {DLL}")
     print(f"Source: {SOURCE}")
-
-    scenarios = get_scenarios()
-    if selected_names is not None:
-        scenarios = [(name, fn) for name, fn in scenarios if name in selected_names]
-        if {name for name, _ in scenarios} != selected_names:
-            print(f"ERROR: Unknown smoke scenario: {sorted(selected_names)}")
-            return False
 
     if not GUI_ENABLED:
         print("\n  [SKIP] GUI scenarios — net8.0-windows build not found")
@@ -7346,8 +7562,9 @@ async def run_all(selected_names: set[str] | None = None):
 
 
 if __name__ == "__main__":
+    include_extended_gui = "--extended-gui" in sys.argv
     if "--list" in sys.argv:
-        list_scenarios()
+        list_scenarios(include_extended_gui)
         sys.exit(0)
     selected_names = None
     if "--scenario" in sys.argv:
@@ -7356,5 +7573,5 @@ if __name__ == "__main__":
             print("ERROR: --scenario requires an exact scenario name")
             sys.exit(2)
         selected_names = {sys.argv[scenario_index]}
-    success = asyncio.run(run_all(selected_names))
+    success = asyncio.run(run_all(selected_names, include_extended_gui=include_extended_gui))
     sys.exit(0 if success else 1)

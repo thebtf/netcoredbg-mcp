@@ -4073,9 +4073,15 @@ def test_manual_smoke_list_includes_focused_ui_evidence_scenario() -> None:
 
     assert result.returncode == 0, result.stderr
     assert "UI Focused Evidence" in result.stdout
-    wpf_fixture = Path("tests/fixtures/WpfSmokeApp/bin/Debug/net8.0-windows/WpfSmokeApp.dll")
-    if wpf_fixture.exists():
-        assert "WPF UI Grid Rows Alias Fixture Replay" in result.stdout
+
+    extended_result = subprocess.run(
+        [sys.executable, "tests/smoke_test_manual.py", "--list", "--extended-gui"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert extended_result.returncode == 0, extended_result.stderr
+    assert "WPF UI Grid Rows Alias Fixture Replay" in extended_result.stdout
 
 
 def test_bridge_snapshot_query_uses_bounded_child_scan() -> None:

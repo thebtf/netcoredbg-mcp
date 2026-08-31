@@ -16,13 +16,22 @@
         <!-- Header and popup submenu fixture -->
         <DockPanel Grid.Row="0" Margin="10">
             <Menu DockPanel.Dock="Left" Margin="0,0,10,0">
-                <MenuItem Header="Actions"
+                <MenuItem x:Name="SubmenuParent" Header="Actions"
                           AutomationProperties.AutomationId="submenuParent">
                     <MenuItem Header="Run submenu action"
                               AutomationProperties.AutomationId="submenuChild"
                               Click="SubmenuChild_Click"/>
                 </MenuItem>
             </Menu>
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal"
+                        VerticalAlignment="Center">
+                <Button Content="Reset gallery" Padding="6,2"
+                        AutomationProperties.AutomationId="smokeGalleryReset"
+                        Click="ResetGallery_Click"/>
+                <TextBlock Margin="8,0,0,0" FontFamily="Consolas" FontSize="10"
+                           Text="{Binding GalleryStatusText}"
+                           AutomationProperties.AutomationId="smokeGalleryStatus"/>
+            </StackPanel>
             <TextBlock Text="WPF Smoke Test App" FontSize="18" FontWeight="Bold"
                        AutomationProperties.AutomationId="lblHeader"/>
         </DockPanel>
@@ -49,7 +58,7 @@
                          AutomationProperties.AutomationId="txtOutput"/>
 
                 <!-- ComboBox for selection testing -->
-                <ComboBox Margin="0,5"
+                <ComboBox x:Name="OptionsComboBox" Margin="0,5"
                           AutomationProperties.AutomationId="cmbOptions"
                           SelectedIndex="0">
                     <ComboBoxItem Content="Option A"/>
@@ -79,7 +88,7 @@
                 </GroupBox>
 
                 <!-- ListView for collection testing -->
-                <ListView Margin="0,5" Height="80"
+                <ListView x:Name="ItemsListView" Margin="0,5" Height="80"
                           AutomationProperties.AutomationId="lstItems"
                           ItemsSource="{Binding Items}"/>
 
@@ -218,11 +227,11 @@
                                 Content="Outside"
                                 AutomationProperties.Name="Guarded child outside client"
                                 AutomationProperties.AutomationId="guardedChildOutsideClient"/>
-                        <local:GuardedChildDriftButton Width="8" Height="8" Canvas.Left="84" Canvas.Top="32"
+                        <local:GuardedChildDriftButton x:Name="GuardedChildIdentityDrift" Width="8" Height="8" Canvas.Left="84" Canvas.Top="32"
                                                        Content="Identity drift" DriftMode="Identity"
                                                        AutomationProperties.Name="Guarded child identity drift"
                                                        AutomationProperties.AutomationId="guardedChildIdentityDrift"/>
-                        <local:GuardedChildDriftButton Width="8" Height="8" Canvas.Left="98" Canvas.Top="32"
+                        <local:GuardedChildDriftButton x:Name="GuardedChildRectangleDrift" Width="8" Height="8" Canvas.Left="98" Canvas.Top="32"
                                                        Content="Rectangle drift" DriftMode="Rectangle"
                                                        AutomationProperties.Name="Guarded child rectangle drift"
                                                        AutomationProperties.AutomationId="guardedChildRectangleDrift"/>
