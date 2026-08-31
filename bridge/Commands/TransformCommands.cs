@@ -10,9 +10,9 @@ public static class TransformCommands
     public static JsonNode MoveWindow(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         var x = @params?["x"]?.GetValue<int>()
-            ?? throw new ArgumentException("Missing required parameter: x");
+            ?? throw new ArgumentException(MissingRequiredParameterMessagePrefix + "x");
         var y = @params?["y"]?.GetValue<int>()
-            ?? throw new ArgumentException("Missing required parameter: y");
+            ?? throw new ArgumentException(MissingRequiredParameterMessagePrefix + "y");
 
         var target = WindowResolver.Resolve(@params, automation, mainWindow);
         var title = WindowResolver.SafeGetTitle(target);
@@ -49,9 +49,9 @@ public static class TransformCommands
     public static JsonNode ResizeWindow(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         var width = @params?["width"]?.GetValue<int>()
-            ?? throw new ArgumentException("Missing required parameter: width");
+            ?? throw new ArgumentException(MissingRequiredParameterMessagePrefix + "width");
         var height = @params?["height"]?.GetValue<int>()
-            ?? throw new ArgumentException("Missing required parameter: height");
+            ?? throw new ArgumentException(MissingRequiredParameterMessagePrefix + "height");
 
         var target = WindowResolver.Resolve(@params, automation, mainWindow);
         var title = WindowResolver.SafeGetTitle(target);
@@ -112,7 +112,7 @@ public static class TransformCommands
                 mismatchFields.Add("window_height");
             result["target_comparability"] = new JsonObject
             {
-                ["status"] = mismatchFields.Count == 0 ? "MATCHED" : "MISMATCH",
+                ["status"] = mismatchFields.Count == 0 ? MatchedStatus : MismatchStatus,
                 ["requested"] = new JsonObject
                 {
                     ["width"] = width,
@@ -231,5 +231,8 @@ public static class TransformCommands
     private const string PhysicalPixelsKey = "physical_px";
     private const string ScreenCoordinateSpace = "screen";
     private const string SourceApiKey = "source_api";
+    private const string MissingRequiredParameterMessagePrefix = "Missing required parameter: ";
+    private const string MatchedStatus = "MATCHED";
+    private const string MismatchStatus = "MISMATCH";
 
 }
