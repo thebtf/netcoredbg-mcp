@@ -286,9 +286,9 @@ def _normalize_guarded_child_source(
             accepted={
                 "source": {
                     "guarded_child": {
-                        "parent": "exact selector object",
-                        "predicate": "exact selector object",
-                        "maximum_nodes": "integer from 1 through 4096",
+                        "parent": _GUARDED_CHILD_EXACT_SELECTOR_OBJECT,
+                        "predicate": _GUARDED_CHILD_EXACT_SELECTOR_OBJECT,
+                        "maximum_nodes": _GUARDED_CHILD_MAXIMUM_NODES_TEXT,
                     }
                 }
             },
@@ -306,9 +306,9 @@ def _normalize_guarded_child_source(
             requested={"guarded_child": guarded_child},
             accepted={
                 "guarded_child": {
-                    "parent": "exact selector object",
-                    "predicate": "exact selector object",
-                    "maximum_nodes": "integer from 1 through 4096",
+                    "parent": _GUARDED_CHILD_EXACT_SELECTOR_OBJECT,
+                    "predicate": _GUARDED_CHILD_EXACT_SELECTOR_OBJECT,
+                    "maximum_nodes": _GUARDED_CHILD_MAXIMUM_NODES_TEXT,
                 }
             },
             next_step=(
@@ -332,7 +332,7 @@ def _normalize_guarded_child_source(
         return {}, _blocked(
             reason=_REASON_INVALID_GUARDED_CHILD_SOURCE,
             requested={"maximum_nodes": maximum_nodes},
-            accepted={"maximum_nodes": "integer from 1 through 4096"},
+            accepted={"maximum_nodes": _GUARDED_CHILD_MAXIMUM_NODES_TEXT},
             next_step="Provide source.guarded_child.maximum_nodes from 1 through 4096.",
         )
 
@@ -436,15 +436,15 @@ def _row_index_from_source(source: dict[str, Any]) -> tuple[int, dict[str, Any] 
         return 0, _blocked(
             reason=_REASON_INVALID_DRAG_SOURCE,
             requested={"row_index": raw_row_index},
-            accepted={"row_index": "non-negative integer"},
-            next_step="Provide source.row_index as a non-negative integer.",
+            accepted={"row_index": _NON_NEGATIVE_INTEGER},
+            next_step=_ROW_INDEX_NON_NEGATIVE_INTEGER_NEXT_STEP,
         )
     if isinstance(raw_row_index, bool):
         return 0, _blocked(
             reason=_REASON_INVALID_DRAG_SOURCE,
             requested={"row_index": raw_row_index},
-            accepted={"row_index": "non-negative integer"},
-            next_step="Provide source.row_index as a non-negative integer.",
+            accepted={"row_index": _NON_NEGATIVE_INTEGER},
+            next_step=_ROW_INDEX_NON_NEGATIVE_INTEGER_NEXT_STEP,
         )
     if isinstance(raw_row_index, int):
         row_index = raw_row_index
@@ -454,15 +454,15 @@ def _row_index_from_source(source: dict[str, Any]) -> tuple[int, dict[str, Any] 
         return 0, _blocked(
             reason=_REASON_INVALID_DRAG_SOURCE,
             requested={"row_index": raw_row_index},
-            accepted={"row_index": "non-negative integer"},
-            next_step="Provide source.row_index as a non-negative integer.",
+            accepted={"row_index": _NON_NEGATIVE_INTEGER},
+            next_step=_ROW_INDEX_NON_NEGATIVE_INTEGER_NEXT_STEP,
         )
     if row_index < 0:
         return 0, _blocked(
             reason=_REASON_INVALID_DRAG_SOURCE,
             requested={"row_index": raw_row_index},
-            accepted={"row_index": "non-negative integer"},
-            next_step="Provide source.row_index as a non-negative integer.",
+            accepted={"row_index": _NON_NEGATIVE_INTEGER},
+            next_step=_ROW_INDEX_NON_NEGATIVE_INTEGER_NEXT_STEP,
         )
     return row_index, None
 
@@ -897,3 +897,9 @@ def _with_duration(
     started: float,
 ) -> dict[str, Any]:
     return {**output, "route": "drag", "duration_ms": context.elapsed_ms(started)}
+
+
+_GUARDED_CHILD_EXACT_SELECTOR_OBJECT = "exact selector object"
+_GUARDED_CHILD_MAXIMUM_NODES_TEXT = "integer from 1 through 4096"
+_NON_NEGATIVE_INTEGER = "non-negative integer"
+_ROW_INDEX_NON_NEGATIVE_INTEGER_NEXT_STEP = "Provide source.row_index as a non-negative integer."
