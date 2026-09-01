@@ -8,7 +8,11 @@ from typing import Any
 import pytest
 
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner, RuntimeSmokeSession
-from netcoredbg_mcp.session.runtime_smoke_schema import validate_plan
+from netcoredbg_mcp.session.runtime_smoke_schema import (
+    normalize_plan_step,
+    schema_help_fields,
+    validate_plan,
+)
 from netcoredbg_mcp.session.state import DebugState
 
 
@@ -571,6 +575,105 @@ async def test_legacy_runtime_smoke_grid_state_actions_reach_adapters() -> None:
                 "column": "Phrase",
             },
         ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_schema_preserves_public_operation_identifiers() -> None:
+    session = SchemaSmokeSession()
+    operation_cases = (
+        (
+            "ui.grid.ensure_visible",
+            {
+                "selector": {"automation_id": "CueDataGrid"},
+                "row": {"index": 0},
+            },
+            ["selector", "row"],
+        ),
+        (
+            "ui.grid.select_row",
+            {
+                "selector": {"automation_id": "CueDataGrid"},
+                "row": {"index": 1},
+            },
+            ["selector", "row"],
+        ),
+        (
+            "ui.grid.click_row",
+            {
+                "selector": {"automation_id": "CueDataGrid"},
+                "row": {"index": 2},
+            },
+            ["selector", "row"],
+        ),
+        (
+            "ui.grid.right_click_row",
+            {
+                "selector": {"automation_id": "CueDataGrid"},
+                "row": {"index": 3},
+            },
+            ["selector", "row"],
+        ),
+        (
+            "ui.grid.double_click_row",
+            {
+                "selector": {"automation_id": "CueDataGrid"},
+                "row": {"index": 4},
+            },
+            ["selector", "row"],
+        ),
+        (
+            "ui.list.toggle_item_child",
+            {
+                "selector": {"automation_id": "CharacterList"},
+                "item": {"name": "Alice"},
+                "child": {"automation_id": "ExpandButton"},
+            },
+            ["selector", "item", "child"],
+        ),
+    )
+    operation_names = [operation_name for operation_name, _, _ in operation_cases]
+    schema_help = schema_help_fields()
+
+    assert [
+        operation_name
+        for operation_name in schema_help["accepted_operation_names"]
+        if operation_name in operation_names
+    ] == sorted(operation_names)
+    for operation_name, _, required_fields in operation_cases:
+        assert schema_help["operation_aliases"][operation_name] == operation_name
+        assert schema_help["operation_required_fields"][operation_name] == required_fields
+
+    plan = {
+        "schema": "netcoredbg.runtime_smoke.v1",
+        "steps": [{"op": operation_name, **args} for operation_name, args, _ in operation_cases],
+    }
+
+    assert validate_plan(plan) == []
+    assert [normalize_plan_step(step) for step in plan["steps"]] == [
+        {"name": operation_name, "args": args} for operation_name, args, _ in operation_cases
+    ]
+
+    async def toggle_item_child(**request: Any) -> dict[str, Any]:
+        session.adapter_calls.append(("ui.list.toggle_item_child", request))
+        return {"status": "PASS", "toggled": True}
+
+    result = await RuntimeSmokeRunner(
+        session,
+        service_adapters={
+            "ui.grid.ensure_visible": session.grid_ensure_visible,
+            "ui.grid.select_row": session.grid_select_row,
+            "ui.grid.click_row": session.grid_click_row,
+            "ui.grid.right_click_row": session.grid_right_click_row,
+            "ui.grid.double_click_row": session.grid_double_click_row,
+            "ui.list.toggle_item_child": toggle_item_child,
+        },
+    ).run(plan)
+
+    assert result["status"] == "PASS"
+    assert "validation_errors" not in result
+    assert session.adapter_calls == [
+        (operation_name, args) for operation_name, args, _ in operation_cases
     ]
 
 
