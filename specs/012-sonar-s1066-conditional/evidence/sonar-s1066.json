@@ -1,0 +1,9 @@
+{
+  "issue_id": "02f653e6-ffbe-42df-b23f-9a8c737c0a0d",
+  "rule": "python:S1066",
+  "message": "Merge this if statement with the enclosing one.",
+  "component": "src/netcoredbg_mcp/session/runtime_smoke_schema.py",
+  "line": 1169,
+  "analysis": "89bc77e7-8002-477e-99da-3bb4168ad076",
+  "head": "c64218f6a988309c4fa9d676e6cede3a89097411"
+}

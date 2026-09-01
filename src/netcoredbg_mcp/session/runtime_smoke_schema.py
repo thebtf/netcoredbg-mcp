@@ -1161,13 +1161,17 @@ def _validate_op_args(
                 errors.append(f"{prefix}.ensure_visible must be a boolean for op {op_name}")
             _validate_int_arg(prefix, op_name, args, "max_scrolls", errors)
             _validate_int_arg(prefix, op_name, args, "scroll_settle_ms", errors)
-        if op_name in {
-            _OPERATION_UI_GRID_CLICK_ROW,
-            _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
-            _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
-        }:
-            if "column" in args and not isinstance(args["column"], str):
-                errors.append(f"{prefix}.column must be a string for op {op_name}")
+        if (
+            op_name
+            in {
+                _OPERATION_UI_GRID_CLICK_ROW,
+                _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
+                _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
+            }
+            and "column" in args
+            and not isinstance(args["column"], str)
+        ):
+            errors.append(f"{prefix}.column must be a string for op {op_name}")
     elif op_name in {"ui.grid.select_range", "ui.grid.assert_range"}:
         _validate_int_arg(prefix, op_name, args, "start_index", errors)
         _validate_int_arg(prefix, op_name, args, "end_index", errors)
