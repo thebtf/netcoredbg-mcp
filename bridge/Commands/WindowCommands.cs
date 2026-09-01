@@ -23,6 +23,8 @@ public static class WindowCommands
     // not accidentally restored (un-maximized) when we just want focus.
     private const int SW_SHOW = 5;
     private const int SW_RESTORE = 9;
+    private const string WindowPatternUnsupportedMessage = "Element does not support WindowPattern";
+    private const string WindowTitleKey = "window_title";
 
     internal static void EnsureForeground(AutomationElement? window)
     {
@@ -61,7 +63,7 @@ public static class WindowCommands
         var title = WindowResolver.SafeGetTitle(target);
 
         if (!target.Patterns.Window.TryGetPattern(out var pattern))
-            throw new InvalidOperationException("Element does not support WindowPattern");
+            throw new InvalidOperationException(WindowPatternUnsupportedMessage);
 
         pattern.Close();
         Program.Log($"close_window: closed '{title}'");
@@ -69,7 +71,7 @@ public static class WindowCommands
         return new JsonObject
         {
             ["closed"] = true,
-            ["window_title"] = title
+            [WindowTitleKey] = title
         };
     }
 
@@ -79,7 +81,7 @@ public static class WindowCommands
         var title = WindowResolver.SafeGetTitle(target);
 
         if (!target.Patterns.Window.TryGetPattern(out var pattern))
-            throw new InvalidOperationException("Element does not support WindowPattern");
+            throw new InvalidOperationException(WindowPatternUnsupportedMessage);
 
         // Guard: reject if window cannot be maximized or is in a busy state
         var canMaximize = pattern.CanMaximize.ValueOrDefault;
@@ -90,7 +92,7 @@ public static class WindowCommands
             {
                 ["maximized"] = false,
                 ["reason"] = "window cannot be maximized",
-                ["window_title"] = title
+                [WindowTitleKey] = title
             };
         }
 
@@ -103,7 +105,7 @@ public static class WindowCommands
             {
                 ["maximized"] = false,
                 ["reason"] = "window busy",
-                ["window_title"] = title
+                [WindowTitleKey] = title
             };
         }
 
@@ -114,7 +116,7 @@ public static class WindowCommands
         return new JsonObject
         {
             ["maximized"] = true,
-            ["window_title"] = title
+            [WindowTitleKey] = title
         };
     }
 
@@ -124,7 +126,7 @@ public static class WindowCommands
         var title = WindowResolver.SafeGetTitle(target);
 
         if (!target.Patterns.Window.TryGetPattern(out var pattern))
-            throw new InvalidOperationException("Element does not support WindowPattern");
+            throw new InvalidOperationException(WindowPatternUnsupportedMessage);
 
         pattern.SetWindowVisualState(WindowVisualState.Minimized);
         Program.Log($"minimize_window: minimized '{title}'");
@@ -132,7 +134,7 @@ public static class WindowCommands
         return new JsonObject
         {
             ["minimized"] = true,
-            ["window_title"] = title
+            [WindowTitleKey] = title
         };
     }
 
@@ -142,7 +144,7 @@ public static class WindowCommands
         var title = WindowResolver.SafeGetTitle(target);
 
         if (!target.Patterns.Window.TryGetPattern(out var pattern))
-            throw new InvalidOperationException("Element does not support WindowPattern");
+            throw new InvalidOperationException(WindowPatternUnsupportedMessage);
 
         EnsureForeground(target);
         pattern.SetWindowVisualState(WindowVisualState.Normal);
@@ -151,7 +153,7 @@ public static class WindowCommands
         return new JsonObject
         {
             ["restored"] = true,
-            ["window_title"] = title
+            [WindowTitleKey] = title
         };
     }
 }
