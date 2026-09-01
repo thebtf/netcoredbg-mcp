@@ -48,10 +48,10 @@ public static class TransformCommands
 
     public static JsonNode ResizeWindow(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
-        var width = @params?["width"]?.GetValue<int>()
-            ?? throw new ArgumentException(MissingRequiredParameterMessagePrefix + "width");
-        var height = @params?["height"]?.GetValue<int>()
-            ?? throw new ArgumentException(MissingRequiredParameterMessagePrefix + "height");
+        var width = @params?[WidthKey]?.GetValue<int>()
+            ?? throw new ArgumentException(MissingRequiredParameterMessagePrefix + WidthKey);
+        var height = @params?[HeightKey]?.GetValue<int>()
+            ?? throw new ArgumentException(MissingRequiredParameterMessagePrefix + HeightKey);
 
         var target = WindowResolver.Resolve(@params, automation, mainWindow);
         var title = WindowResolver.SafeGetTitle(target);
@@ -79,13 +79,13 @@ public static class TransformCommands
         var result = new JsonObject
         {
             ["resized"] = true,
-            ["width"] = width,
-            ["height"] = height,
+            [WidthKey] = width,
+            [HeightKey] = height,
             [WindowTitleKey] = title,
             ["request"] = new JsonObject
             {
-                ["width"] = width,
-                ["height"] = height,
+                [WidthKey] = width,
+                [HeightKey] = height,
                 ["unit"] = UiaPatternUnits,
                 [CoordinateSpaceKey] = UiaTransformPatternResizeCoordinateSpace,
             }
@@ -112,11 +112,11 @@ public static class TransformCommands
                 mismatchFields.Add("window_height");
             result["target_comparability"] = new JsonObject
             {
-                ["status"] = mismatchFields.Count == 0 ? MatchedStatus : MismatchStatus,
+                [StatusKey] = mismatchFields.Count == 0 ? MatchedStatus : MismatchStatus,
                 ["requested"] = new JsonObject
                 {
-                    ["width"] = width,
-                    ["height"] = height,
+                    [WidthKey] = width,
+                    [HeightKey] = height,
                     ["unit"] = UiaPatternUnits,
                     [CoordinateSpaceKey] = UiaTransformPatternResizeCoordinateSpace,
                 },
@@ -124,16 +124,16 @@ public static class TransformCommands
                 {
                     ["uia_bounds"] = new JsonObject
                     {
-                        ["width"] = uiaWidth,
-                        ["height"] = uiaHeight,
+                        [WidthKey] = uiaWidth,
+                        [HeightKey] = uiaHeight,
                         ["unit"] = PhysicalPixelsKey,
                         [CoordinateSpaceKey] = ScreenCoordinateSpace,
                         [SourceApiKey] = "UIA.BoundingRectangle",
                     },
                     ["window_bounds"] = new JsonObject
                     {
-                        ["width"] = windowWidth,
-                        ["height"] = windowHeight,
+                        [WidthKey] = windowWidth,
+                        [HeightKey] = windowHeight,
                         ["unit"] = PhysicalPixelsKey,
                         [CoordinateSpaceKey] = ScreenCoordinateSpace,
                         [SourceApiKey] = "GetWindowRect",
@@ -146,7 +146,7 @@ public static class TransformCommands
             uiaBounds["source_coordinate_space"] = "uia_element_bounds";
             result["geometry"] = new JsonObject
             {
-                ["status"] = "available",
+                [StatusKey] = "available",
                 ["hwnd"] = native.Hwnd,
                 ["uia_bounds"] = uiaBounds,
                 ["window_bounds"] = Bounds(
@@ -172,17 +172,17 @@ public static class TransformCommands
         {
             result["geometry"] = new JsonObject
             {
-                ["status"] = "unavailable",
+                [StatusKey] = "unavailable",
                 ["code"] = "POST_RESIZE_GEOMETRY_UNAVAILABLE",
                 ["reason"] = error.Message,
             };
             result["target_comparability"] = new JsonObject
             {
-                ["status"] = "UNAVAILABLE",
+                [StatusKey] = "UNAVAILABLE",
                 ["requested"] = new JsonObject
                 {
-                    ["width"] = width,
-                    ["height"] = height,
+                    [WidthKey] = width,
+                    [HeightKey] = height,
                     ["unit"] = UiaPatternUnits,
                     [CoordinateSpaceKey] = UiaTransformPatternResizeCoordinateSpace,
                 },
@@ -234,5 +234,8 @@ public static class TransformCommands
     private const string MissingRequiredParameterMessagePrefix = "Missing required parameter: ";
     private const string MatchedStatus = "MATCHED";
     private const string MismatchStatus = "MISMATCH";
+    private const string WidthKey = "width";
+    private const string HeightKey = "height";
+    private const string StatusKey = "status";
 
 }
