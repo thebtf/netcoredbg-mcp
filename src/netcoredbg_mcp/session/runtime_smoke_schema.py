@@ -97,6 +97,12 @@ SCHEMA_FIELD_END_INDEX = "end_index"
 SCHEMA_FIELD_ITEM = "item"
 SCHEMA_FIELD_CHILD = "child"
 SCHEMA_FIELD_TEXT = "text"
+_OPERATION_UI_GRID_ENSURE_VISIBLE = "ui.grid.ensure_visible"
+_OPERATION_UI_GRID_SELECT_ROW = "ui.grid.select_row"
+_OPERATION_UI_GRID_CLICK_ROW = "ui.grid.click_row"
+_OPERATION_UI_GRID_RIGHT_CLICK_ROW = "ui.grid.right_click_row"
+_OPERATION_UI_GRID_DOUBLE_CLICK_ROW = "ui.grid.double_click_row"
+_OPERATION_UI_LIST_TOGGLE_ITEM_CHILD = "ui.list.toggle_item_child"
 
 
 @dataclass(frozen=True)
@@ -121,7 +127,7 @@ _OPERATION_SCHEMA_DEFINITIONS: tuple[
     ("ui.grid.snapshot", None, (SCHEMA_FIELD_SELECTOR,)),
     ("ui.grid.get_state", None, (SCHEMA_FIELD_SELECTOR,)),
     (
-        "ui.grid.ensure_visible",
+        _OPERATION_UI_GRID_ENSURE_VISIBLE,
         None,
         (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ROW),
     ),
@@ -135,15 +141,15 @@ _OPERATION_SCHEMA_DEFINITIONS: tuple[
         None,
         (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_START_INDEX, SCHEMA_FIELD_END_INDEX),
     ),
-    ("ui.grid.select_row", None, (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ROW)),
-    ("ui.grid.click_row", None, (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ROW)),
+    (_OPERATION_UI_GRID_SELECT_ROW, None, (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ROW)),
+    (_OPERATION_UI_GRID_CLICK_ROW, None, (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ROW)),
     (
-        "ui.grid.right_click_row",
+        _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
         None,
         (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ROW),
     ),
     (
-        "ui.grid.double_click_row",
+        _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
         None,
         (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ROW),
     ),
@@ -154,7 +160,7 @@ _OPERATION_SCHEMA_DEFINITIONS: tuple[
         (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ITEM),
     ),
     (
-        "ui.list.toggle_item_child",
+        _OPERATION_UI_LIST_TOGGLE_ITEM_CHILD,
         None,
         (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_ITEM, SCHEMA_FIELD_CHILD),
     ),
@@ -1122,11 +1128,11 @@ def _validate_op_args(
     if op_name in {
         "ui.grid.snapshot",
         "ui.grid.get_state",
-        "ui.grid.ensure_visible",
-        "ui.grid.select_row",
-        "ui.grid.click_row",
-        "ui.grid.right_click_row",
-        "ui.grid.double_click_row",
+        _OPERATION_UI_GRID_ENSURE_VISIBLE,
+        _OPERATION_UI_GRID_SELECT_ROW,
+        _OPERATION_UI_GRID_CLICK_ROW,
+        _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
+        _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
     }:
         if "rows" in args and not isinstance(args["rows"], dict):
             errors.append(f"{prefix}.rows must be an object for op {op_name}")
@@ -1134,28 +1140,32 @@ def _validate_op_args(
         if "identity" in args and not isinstance(args["identity"], dict):
             errors.append(f"{prefix}.identity must be an object for op {op_name}")
         if op_name in {
-            "ui.grid.ensure_visible",
-            "ui.grid.select_row",
-            "ui.grid.click_row",
-            "ui.grid.right_click_row",
-            "ui.grid.double_click_row",
+            _OPERATION_UI_GRID_ENSURE_VISIBLE,
+            _OPERATION_UI_GRID_SELECT_ROW,
+            _OPERATION_UI_GRID_CLICK_ROW,
+            _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
+            _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
         }:
             if "row" in args and not isinstance(args["row"], dict):
                 errors.append(f"{prefix}.row must be an object for op {op_name}")
-        if op_name == "ui.grid.ensure_visible":
+        if op_name == _OPERATION_UI_GRID_ENSURE_VISIBLE:
             _validate_int_arg(prefix, op_name, args, "max_scrolls", errors)
             _validate_int_arg(prefix, op_name, args, "scroll_settle_ms", errors)
         if op_name in {
-            "ui.grid.select_row",
-            "ui.grid.click_row",
-            "ui.grid.right_click_row",
-            "ui.grid.double_click_row",
+            _OPERATION_UI_GRID_SELECT_ROW,
+            _OPERATION_UI_GRID_CLICK_ROW,
+            _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
+            _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
         }:
             if "ensure_visible" in args and not isinstance(args["ensure_visible"], bool):
                 errors.append(f"{prefix}.ensure_visible must be a boolean for op {op_name}")
             _validate_int_arg(prefix, op_name, args, "max_scrolls", errors)
             _validate_int_arg(prefix, op_name, args, "scroll_settle_ms", errors)
-        if op_name in {"ui.grid.click_row", "ui.grid.right_click_row", "ui.grid.double_click_row"}:
+        if op_name in {
+            _OPERATION_UI_GRID_CLICK_ROW,
+            _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
+            _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
+        }:
             if "column" in args and not isinstance(args["column"], str):
                 errors.append(f"{prefix}.column must be a string for op {op_name}")
     elif op_name in {"ui.grid.select_range", "ui.grid.assert_range"}:
@@ -1168,13 +1178,13 @@ def _validate_op_args(
             errors.append(f"{prefix}.rows must be a list for op {op_name}")
         elif isinstance(rows, list):
             _validate_grid_row_assertions(prefix, op_name, rows, errors)
-    elif op_name in {"ui.list.invoke_item", "ui.list.toggle_item_child"}:
+    elif op_name in {"ui.list.invoke_item", _OPERATION_UI_LIST_TOGGLE_ITEM_CHILD}:
         item = args.get("item")
         if "item" in args and not isinstance(item, dict):
             errors.append(f"{prefix}.item must be an object for op {op_name}")
         elif isinstance(item, dict):
             _validate_list_item_index(prefix, op_name, item, errors)
-        if op_name == "ui.list.toggle_item_child":
+        if op_name == _OPERATION_UI_LIST_TOGGLE_ITEM_CHILD:
             child = args.get("child")
             if "child" in args and not isinstance(child, dict):
                 errors.append(f"{prefix}.child must be an object for op {op_name}")
