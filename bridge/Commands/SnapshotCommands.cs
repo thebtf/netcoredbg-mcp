@@ -8,10 +8,13 @@ namespace FlaUIBridge.Commands;
 
 public static class SnapshotCommands
 {
+    private const string FocusField = "focus";
+    private const string SelectionField = "selection";
+
     private static readonly HashSet<string> AllowedFields = new(StringComparer.OrdinalIgnoreCase)
     {
-        "focus",
-        "selection",
+        FocusField,
+        SelectionField,
         "value",
         "text",
         "enabled",
@@ -76,7 +79,7 @@ public static class SnapshotCommands
     {
         var fieldsNode = @params?["fields"] as JsonArray;
         if (fieldsNode is null || fieldsNode.Count == 0)
-            return new List<string> { "focus", "selection", "text" };
+            return new List<string> { FocusField, SelectionField, "text" };
 
         var fields = new List<string>();
         foreach (var node in fieldsNode)
@@ -103,11 +106,11 @@ public static class SnapshotCommands
         {
             switch (field)
             {
-                case "focus":
-                    record["focus"] = IsFocused(element, automation);
+                case FocusField:
+                    record[FocusField] = IsFocused(element, automation);
                     break;
-                case "selection":
-                    record["selection"] = SelectionState(element);
+                case SelectionField:
+                    record[SelectionField] = SelectionState(element);
                     break;
                 case "value":
                     record["value"] = ValueState(element);
