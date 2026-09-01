@@ -14,7 +14,6 @@ _GUARDED_CHILD_SELECTOR_KEYS = frozenset({"automation_id", "name", "control_type
 _GUARDED_CHILD_MAXIMUM_NODES = 4_096
 REASON_NO_ROUTE_EVIDENCE = "real pointer route evidence unavailable"
 _REASON_INVALID_DRAG_SOURCE = "invalid drag source"
-_REASON_INVALID_GUARDED_CHILD_SOURCE = "invalid guarded child source"
 
 
 async def handle_ui_drag(
@@ -281,7 +280,7 @@ def _normalize_guarded_child_source(
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     if set(source) != {"guarded_child"}:
         return {}, _blocked(
-            reason=_REASON_INVALID_GUARDED_CHILD_SOURCE,
+            reason=_INVALID_GUARDED_CHILD_REASON,
             requested={"source": source},
             accepted={
                 "source": {
@@ -302,7 +301,7 @@ def _normalize_guarded_child_source(
         "maximum_nodes",
     }:
         return {}, _blocked(
-            reason=_REASON_INVALID_GUARDED_CHILD_SOURCE,
+            reason=_INVALID_GUARDED_CHILD_REASON,
             requested={"guarded_child": guarded_child},
             accepted={
                 "guarded_child": {
@@ -330,7 +329,7 @@ def _normalize_guarded_child_source(
         or not 1 <= maximum_nodes <= _GUARDED_CHILD_MAXIMUM_NODES
     ):
         return {}, _blocked(
-            reason=_REASON_INVALID_GUARDED_CHILD_SOURCE,
+            reason=_INVALID_GUARDED_CHILD_REASON,
             requested={"maximum_nodes": maximum_nodes},
             accepted={"maximum_nodes": _GUARDED_CHILD_MAXIMUM_NODES_TEXT},
             next_step="Provide source.guarded_child.maximum_nodes from 1 through 4096.",
@@ -353,7 +352,7 @@ def _guarded_child_selector(
 ) -> tuple[dict[str, str], dict[str, Any] | None]:
     if not isinstance(value, Mapping):
         return {}, _blocked(
-            reason=_REASON_INVALID_GUARDED_CHILD_SOURCE,
+            reason=_INVALID_GUARDED_CHILD_REASON,
             requested={role: value},
             accepted={role: "selector object with automation_id, name, or control_type"},
             next_step=f"Provide source.guarded_child.{role} as an exact selector object.",
@@ -367,7 +366,7 @@ def _guarded_child_selector(
         or any(not isinstance(field, str) or not field for field in selector.values())
     ):
         return {}, _blocked(
-            reason=_REASON_INVALID_GUARDED_CHILD_SOURCE,
+            reason=_INVALID_GUARDED_CHILD_REASON,
             requested={role: dict(value), "unexpected": unexpected},
             accepted={
                 role: "selector using only non-empty automation_id, name, or control_type strings"
@@ -903,3 +902,4 @@ _GUARDED_CHILD_EXACT_SELECTOR_OBJECT = "exact selector object"
 _GUARDED_CHILD_MAXIMUM_NODES_TEXT = "integer from 1 through 4096"
 _NON_NEGATIVE_INTEGER = "non-negative integer"
 _ROW_INDEX_NON_NEGATIVE_INTEGER_NEXT_STEP = "Provide source.row_index as a non-negative integer."
+_INVALID_GUARDED_CHILD_REASON = "invalid guarded child source"
