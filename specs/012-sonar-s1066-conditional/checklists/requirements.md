@@ -16,9 +16,9 @@
 - [x] **Q09** [data-model.md](../data-model.md) models only the current in-memory predicate relationship and disclaims persistence/public API creation.
 - [x] **Q10** [research.md](../research.md) records Challenge-LITE GO and rejects retaining nesting, a helper, and a broader merge.
 - [x] **Q11** [plan.md](../plan.md) names boundaries, integration points, no-change witnesses, rollback, and exactly one independent checker.
-- [x] **Q12** [tasks.md](../tasks.md) is dependency ordered, confines source work to the named module, and leaves external proof unchecked.
-- [x] **Q13** [quickstart.md](../quickstart.md) gives the exact existing three-node pytest command without claiming execution.
+- [x] **Q12** [tasks.md](../tasks.md) is dependency ordered, confines source work to the named module, and records the completed parent proof and read-only independent checker receipt.
+- [x] **Q13** [quickstart.md](../quickstart.md) records the exact existing three-node pytest command, its parent-run result, and the checker's read-only receipt verification.
 - [x] **Q14** Internal links connect specification, research, model, plan, tasks, quickstart, checklist, and evidence.
 - [x] **Q15** The packet states that the maker neither executes tests nor self-certifies acceptance.
 
-**Recheck note:** This checklist confirms the planning text only. Parent-run focused proof and the single independent checker commitment remain outstanding.
+**Recheck note:** This checklist remains a planning-quality review. The packet now separately records the completed parent-focused proof and the independent checker's read-only source, packet, and receipt result; neither authorizes release.

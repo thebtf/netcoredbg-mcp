@@ -48,4 +48,4 @@ The evidence file deliberately contains only these supplied non-secret fields; i
 
 ## Research conclusion
 
-The smallest coherent source change is local to the reported nested conditional. The exact focused three-node pytest command in [quickstart.md](quickstart.md) covers valid dispatch, public identifiers, and the exact invalid diagnostic; one independent checker must execute it on the committed candidate.
+The smallest coherent source change is local to the reported nested conditional. The exact focused three-node pytest command in [quickstart.md](quickstart.md) covers valid dispatch, public identifiers, and the exact invalid diagnostic. The parent executed that command against `99400a9254e77fe097286bfc233aef69af107ed9` with `3 passed in 0.83s`; one independent checker then completed a read-only predicate, packet, and receipt check.

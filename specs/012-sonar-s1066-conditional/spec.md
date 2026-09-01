@@ -2,7 +2,7 @@
 title: "Sonar Runtime-Smoke Column Predicate"
 feature: "012-sonar-s1066-conditional"
 design_depth: "D1"
-status: "implemented-pending-independent-check"
+status: "implemented-with-focused-proof-and-independent-check"
 source_base: "c64218f6a988309c4fa9d676e6cede3a89097411"
 release_intent: "none"
 ---
@@ -38,7 +38,7 @@ A maintainer validates an existing runtime-smoke plan using `ui.grid.click_row`,
 | **S1066-002** | The predicate MUST preserve short-circuit evaluation order O → C → ¬T. |
 | **S1066-003** | The appended error wording, interpolation, operation identifiers, and all behavior for every input MUST remain unchanged. |
 | **S1066-004** | The source mutation MUST be confined to `src/netcoredbg_mcp/session/runtime_smoke_schema.py`; no test-source change belongs to this slice. |
-| **S1066-005** | Exactly one independent checker MUST run the named three-node focused pytest command against the committed candidate and inspect the changed predicate against this specification. |
+| **S1066-005** | Exactly one independent checker MUST inspect the changed predicate against this specification and verify the parent receipt for the named three-node focused pytest command against the committed candidate. |
 
 ## Nonfunctional preservation contract
 
@@ -56,6 +56,6 @@ Do not merge the predicate with the broader grid branch, add a helper, modify te
 - [Research](research.md) records the single sanitized finding and selected shape.
 - [Data model](data-model.md) describes the existing validation relation only.
 - [Plan](plan.md) defines integration boundaries, Challenge-LITE, and checker work.
-- [Tasks](tasks.md) orders implementation and external verification.
-- [Quickstart](quickstart.md) names the exact future command.
+- [Tasks](tasks.md) records completed implementation, parent proof, and read-only independent checking.
+- [Quickstart](quickstart.md) records the exact parent command and its result.
 - [Requirements checklist](checklists/requirements.md) records packet-quality review.

@@ -28,19 +28,19 @@
 
 ## Implementation sequence
 
-1. Replace the nested branch with one multi-line conjunctive predicate ordered O → C → ¬T.
-2. Retain the append statement exactly.
-3. Commit only the source refactor and this packet.
-4. Have exactly one independent checker inspect the source invariant and run the [quickstart.md](quickstart.md) command from the candidate root.
+1. The source refactor replaced the nested branch with one multi-line conjunctive predicate ordered O → C → ¬T.
+2. The refactor retained the append statement exactly.
+3. The source refactor and its original packet were committed at `99400a9254e77fe097286bfc233aef69af107ed9`.
+4. The parent executed the [quickstart.md](quickstart.md) command from that candidate with `3 passed in 0.83s`. One independent checker then inspected the source invariant and verified the parent receipt.
 
 ## Test plan
 
-The implementation maker does not execute tests under this assignment. The parent/checker must run the three explicit existing test nodes together; they cover valid adapter dispatch, public operation identifier preservation, and the exact invalid column diagnostics. No broader test suite, formatter, linter, build, or Sonar scan substitutes for that proof.
+The implementation maker did not execute tests under this assignment. The parent executed the three explicit existing test nodes together against `99400a9254e77fe097286bfc233aef69af107ed9` with `3 passed in 0.83s`; they cover valid adapter dispatch, public operation identifier preservation, and the exact invalid column diagnostics. The independent checker verified that receipt without running pytest. No broader test suite, formatter, linter, build, or Sonar scan substituted for that proof.
 
 ## Rollback
 
 If the focused proof shows a semantic mismatch, restore only this predicate to the prior nested form. Do not add a suppression, alias, helper, fallback, or broader grid-branch change.
 
-## Independent checker commitment
+## Independent checker receipt
 
-One checker who did not make this source edit MUST inspect the committed source against [spec.md](spec.md), confirm the O → C → ¬T order and unchanged append string, then run the exact three-node command in [quickstart.md](quickstart.md) from the committed candidate root. This is the only acceptance-checker commitment; it does not authorize release.
+One checker who did not make this source edit inspected the committed source against [spec.md](spec.md), confirmed the O → C → ¬T order and unchanged append string, and verified the parent's exact three-node receipt from [quickstart.md](quickstart.md). The checker was read-only and did not run pytest. Its substantive source and packet checks passed; its prior `CHANGES_REQUIRED` status named only the then-pending T002 proof, which the parent subsequently completed. This receipt does not authorize release.
