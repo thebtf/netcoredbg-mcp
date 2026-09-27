@@ -190,6 +190,34 @@ def test_failed_shift_release_still_attempts_ctrl_release(send_keys, mock_user32
     ]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
+def test_drag_failed_shift_release_still_attempts_ctrl_release(send_keys, mock_user32):
+    from netcoredbg_mcp.ui.automation import _send_drag
+
+    events = []
+
+    def capture(_count, input_pointer, _size):
+        event = input_pointer._obj
+        key = event._input.ki
+        events.append((event.type, key.wVk, key.dwFlags))
+        return 0 if key.wVk == 0x10 and key.dwFlags & 0x0002 else 1
+
+    mock_user32.SendInput.side_effect = capture
+    ctypes.windll.kernel32.GetLastError.return_value = 5
+
+    with pytest.raises(OSError, match="SendInput failed") as error:
+        _send_drag(10, 20, 30, 40, speed_ms=20, hold_modifiers=["ctrl", "shift"])
+
+    assert error.value.errno == 5
+    assert events == [
+        (1, 0x11, 0),
+        (1, 0x10, 0),
+        (1, 0x10, 0x0002),
+        (1, 0x11, 0x0002),
+    ]
+    assert [call.args[0] for call in mock_user32.mouse_event.call_args_list] == [0x0002, 0x0004]
+
+
 class TestSendKeysParser:
     """Test key sequence parsing logic."""
 

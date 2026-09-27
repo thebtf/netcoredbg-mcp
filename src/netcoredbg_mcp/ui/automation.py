@@ -108,6 +108,21 @@ def _release(vk: int) -> None:
     _send_keyboard_input(vk, flags=0x0002)
 
 
+def _release_modifiers(pressed_modifiers: list[int]) -> None:
+    import time
+
+    first_error: Exception | None = None
+    for modifier in reversed(pressed_modifiers):
+        try:
+            _release(modifier)
+        except Exception as error:
+            if first_error is None:
+                first_error = error
+        time.sleep(0.01)
+    if first_error is not None:
+        raise first_error
+
+
 def _tap(vk: int) -> None:
     """Press and release a virtual key."""
     import time
@@ -268,18 +283,6 @@ def _send_keys_via_input(keys: str) -> None:
         ctrl = bool(result & 0x200)
         alt = bool(result & 0x400)
         return (vk, shift, ctrl, alt)
-
-    def _release_modifiers(pressed_modifiers: list[int]) -> None:
-        first_error: Exception | None = None
-        for modifier in reversed(pressed_modifiers):
-            try:
-                _release(modifier)
-            except Exception as error:
-                if first_error is None:
-                    first_error = error
-            time.sleep(0.01)
-        if first_error is not None:
-            raise first_error
 
     def _type_char(ch: str, held_modifiers: list[int]) -> None:
         """Type a single character, adding Shift/Ctrl/Alt if VkKeyScanW requires them."""
@@ -454,9 +457,7 @@ def _send_drag(
             if mouse_down_sent:
                 user32.mouse_event(mouseeventf_leftup, 0, 0, 0, RUNNER_INPUT_SIGNATURE)
     finally:
-        for modifier_vk in reversed(pressed_modifier_vks):
-            _release(modifier_vk)
-            time.sleep(0.01)
+        _release_modifiers(pressed_modifier_vks)
 
 
 logger = logging.getLogger(__name__)
