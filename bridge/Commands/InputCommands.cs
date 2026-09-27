@@ -184,10 +184,11 @@ public static partial class InputCommands
                         KeySequenceCommands.SendSignedText(literal);
                         sent.Add(literal);
                     }
-                    else if (SpecialKeys.TryGetValue(keyName, out var vk))
+                    else if (SpecialKeys.TryGetValue(keyName, out var vk) ||
+                             KeySequenceCommands.KeypadKeys.TryGetValue(keyName, out vk))
                     {
-                        KeySequenceCommands.SendSignedKeyDown(vk);
-                        KeySequenceCommands.SendSignedKeyUp(vk);
+                        KeySequenceCommands.SendSignedKeyDown(vk, keyName.Equals("NUMPADENTER", StringComparison.OrdinalIgnoreCase));
+                        KeySequenceCommands.SendSignedKeyUp(vk, keyName.Equals("NUMPADENTER", StringComparison.OrdinalIgnoreCase));
                         sent.Add($"{{{keyName}}}");
                     }
                     else
@@ -324,10 +325,11 @@ public static partial class InputCommands
 
     private static void TypeToken(string token, bool preserveModifierShortcut = false)
     {
-        if (SpecialKeys.TryGetValue(token, out var vk))
+        if (SpecialKeys.TryGetValue(token, out var vk) ||
+            KeySequenceCommands.KeypadKeys.TryGetValue(token, out vk))
         {
-            KeySequenceCommands.SendSignedKeyDown(vk);
-            KeySequenceCommands.SendSignedKeyUp(vk);
+            KeySequenceCommands.SendSignedKeyDown(vk, token.Equals("NUMPADENTER", StringComparison.OrdinalIgnoreCase));
+            KeySequenceCommands.SendSignedKeyUp(vk, token.Equals("NUMPADENTER", StringComparison.OrdinalIgnoreCase));
         }
         else if (preserveModifierShortcut && TryParseLiteralVirtualKey(token, out var literalVk))
         {

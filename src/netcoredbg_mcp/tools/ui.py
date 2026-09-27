@@ -958,6 +958,9 @@ def register_ui_tools(
         - Arrow keys: {LEFT} {RIGHT} {UP} {DOWN}
         - Navigation: {HOME} {END} {PGUP} {PGDN}
         - Function keys: {F1} {F2} ... {F12}
+        - Physical keypad: {NUMPAD0} ... {NUMPAD9}, {NUMPADADD},
+          {NUMPADSUBTRACT}, {NUMPADMULTIPLY}, {NUMPADDIVIDE},
+          {NUMPADDECIMAL}, {NUMPADENTER}, {NUMLOCK} (press/release, not lock-state setting)
         - Combined: Ctrl+End = "^{END}", Alt+Z = "%z"
 
         IMPORTANT: Modifier prefixes (^%+) apply to the NEXT character or {KEY}.
@@ -1036,6 +1039,9 @@ def register_ui_tools(
         - Arrows: {LEFT} {RIGHT} {UP} {DOWN}
         - Navigation: {HOME} {END} {PGUP} {PGDN}
         - Combined: Ctrl+End = "^{END}", Ctrl+Home = "^{HOME}"
+        - Physical keypad: {NUMPAD0} ... {NUMPAD9}, {NUMPADADD},
+          {NUMPADSUBTRACT}, {NUMPADMULTIPLY}, {NUMPADDIVIDE},
+          {NUMPADDECIMAL}, {NUMPADENTER}, {NUMLOCK} (press/release)
 
         IMPORTANT: For Alt+Z send "%z" (NOT "{ALT}z").
 
@@ -1086,6 +1092,7 @@ def register_ui_tools(
         Args:
             keys: List of key strings, each sent separately with delay.
                   Example: ["{DOWN}", "{DOWN}", "{DOWN}"] for 3 arrow presses.
+                  Physical keypad example: ["{NUMPAD1}", "{NUMPADADD}"].
             automation_id: Target element to focus before sending.
             delay_ms: Milliseconds between each key (default 50ms).
         """

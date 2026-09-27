@@ -214,6 +214,24 @@ ui_click(automation_id="saveButton")
 # Trigger the breakpoint, then inspect state after it reports STOPPED.
 ```
 
+### Physical numeric keypad input
+
+On the default Python server's Windows FlaUI path,
+`ui_send_keys(keys="{NUMPAD1}", automation_id="myInput")` sends the physical
+keypad 1 key, not the text `"1"` or the top-row digit key.
+`ui_send_keys_focused(keys="{NUMPADENTER}")` sends keypad Enter, distinct from `{ENTER}`.
+`ui_send_keys_batch(keys=["{NUMPAD1}", "{NUMPADADD}", "{NUMPADENTER}"], automation_id="myInput")`
+sends them in order;
+`ui_key_sequence(keys=["NUMPAD1", "NUMPADENTER"], modifiers=[], automation_id="myInput")`
+accepts names without braces.
+
+Supported physical keys: `{NUMPAD0}`–`{NUMPAD9}`, `{NUMPADADD}`,
+`{NUMPADSUBTRACT}`, `{NUMPADMULTIPLY}`, `{NUMPADDIVIDE}`, `{NUMPADDECIMAL}`,
+`{NUMPADENTER}`, and `{NUMLOCK}` (17 keys). `{NUMLOCK}` presses and releases
+the lock key; it does not set a chosen lock state. Physical-key delivery is
+scoped to the Windows FlaUI backend, not the alternative UI backend or the
+opt-in .NET preview.
+
 ### Screenshot modes
 
 `ui_take_screenshot()` returns a WebP navigation preview with

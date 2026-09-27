@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import json
 import os
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -15,12 +17,17 @@ from mcp.types import CallToolResult, TextContent
 POLL_DEADLINE_SECONDS = 15.0
 POLL_CALL_TIMEOUT_SECONDS = 2.0
 POLL_INTERVAL_SECONDS = 0.25
+BRIDGE_READINESS_TIMEOUT_SECONDS = 45.0
 REQUIRED_TOOLS = frozenset(
     {
         "start_debug",
         "cleanup_processes",
         "ui_find_element",
         "ui_get_window_tree",
+        "ui_set_focus",
+        "ui_send_keys",
+        "ui_send_keys_focused",
+        "ui_send_keys_batch",
         "ui_key_sequence",
         "ui_invoke",
         "ui_text",
@@ -140,6 +147,38 @@ def _server_environment() -> dict[str, str]:
     }
 
 
+def _num_lock_enabled() -> bool:
+    """Read the foreground input queue's lock state, not this client's stale queue."""
+    user32 = ctypes.windll.user32
+    foreground = user32.GetForegroundWindow()
+    thread = user32.GetWindowThreadProcessId(foreground, None)
+    current = ctypes.windll.kernel32.GetCurrentThreadId()
+    if (
+        not foreground
+        or not thread
+        or (thread != current and not user32.AttachThreadInput(current, thread, True))
+    ):
+        raise RuntimeError("cannot read foreground NumLock state")
+    try:
+        return bool(user32.GetKeyState(0x90) & 1)
+    finally:
+        if thread != current:
+            user32.AttachThreadInput(current, thread, False)
+
+
+def _restore_num_lock(initial: bool) -> bool:
+    """Restore independently of the MCP server, even when its input call fails."""
+    user32 = ctypes.windll.user32
+    if _num_lock_enabled() != initial:
+        user32.keybd_event(0x90, 0x45, 0x01, 0)
+        user32.keybd_event(0x90, 0x45, 0x03, 0)
+        time.sleep(0.05)
+    restored = _num_lock_enabled() == initial
+    if not restored:
+        raise AssertionError("NumLock state was not restored")
+    return restored
+
+
 async def main() -> None:
     consumer_cli = _environment("NETCOREDBG_MCP_CONSUMER_CLI")
     wpf_root = _environment("NETCOREDBG_MCP_WPF_ROOT")
@@ -153,6 +192,7 @@ async def main() -> None:
     )
     async with stdio_client(params) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
+            num_lock_initial: bool | None = None
             try:
                 await session.initialize()
                 tools = await session.list_tools()
@@ -173,6 +213,22 @@ async def main() -> None:
                 )
                 assert launch.get("success") is True, launch
                 evidence["start_debug"] = {"success": launch["success"]}
+                try:
+                    ready_tree = _data(
+                        await asyncio.wait_for(
+                            _call(
+                                session, "ui_get_window_tree", {"max_depth": 1, "max_children": 5}
+                            ),
+                            timeout=BRIDGE_READINESS_TIMEOUT_SECONDS,
+                        )
+                    )
+                except asyncio.TimeoutError as error:
+                    raise AssertionError(
+                        f"bridge readiness deadline: ui_get_window_tree did not respond "
+                        f"within {BRIDGE_READINESS_TIMEOUT_SECONDS}s"
+                    ) from error
+                assert ready_tree.get("count", 0) > 0, f"bridge readiness failed: {ready_tree}"
+                evidence["bridge_readiness"] = {"window_count": ready_tree["count"]}
 
                 parent, parent_poll = await _poll_discovery(
                     session,
@@ -249,6 +305,144 @@ async def main() -> None:
                     )
                 )
                 assert output.get("text") == "WpfWorkflow Submenu child invoked", output
+
+                key_status_selector = {"automation_id": "keyEventStatus", "control_type": "Text"}
+                target_selector = {"automation_id": "txtOutput", "control_type": "Edit"}
+                key_cases = (
+                    (
+                        "selector_keypad",
+                        "ui_send_keys",
+                        {"keys": "{NUMPAD1}", **target_selector},
+                        ((0x4F, False, None),),
+                    ),
+                    (
+                        "selector_ordinary",
+                        "ui_send_keys",
+                        {"keys": "{ENTER}", **target_selector},
+                        ((0x1C, False, 0x0D),),
+                    ),
+                    (
+                        "focused_add",
+                        "ui_send_keys_focused",
+                        {"keys": "{NUMPADADD}"},
+                        ((0x4E, False, None),),
+                    ),
+                    (
+                        "focused_ordinary",
+                        "ui_send_keys_focused",
+                        {"keys": "{ENTER}"},
+                        ((0x1C, False, 0x0D),),
+                    ),
+                    (
+                        "batch_order",
+                        "ui_send_keys_batch",
+                        {
+                            "keys": ["{NUMPADSUBTRACT}", "{NUMPADENTER}", "{ENTER}"],
+                            "automation_id": "txtOutput",
+                        },
+                        ((0x4A, False, None), (0x1C, True, None), (0x1C, False, 0x0D)),
+                    ),
+                    (
+                        "sequence_order",
+                        "ui_key_sequence",
+                        {
+                            "modifiers": [],
+                            "keys": [
+                                "NUMPAD1",
+                                "NUMPADADD",
+                                "NUMPADSUBTRACT",
+                                "NUMPADENTER",
+                                "1",
+                                "ENTER",
+                            ],
+                            **target_selector,
+                        },
+                        (
+                            (0x4F, False, None),
+                            (0x4E, False, None),
+                            (0x4A, False, None),
+                            (0x1C, True, None),
+                            (0x02, False, 0x31),
+                            (0x1C, False, 0x0D),
+                        ),
+                    ),
+                )
+                # Each eight-key call fits within the fixture's 32-event observer window.
+                keypad_tokens = (
+                    *(
+                        (f"NUMPAD{digit}", scan, False, None)
+                        for digit, scan in enumerate(
+                            (0x52, 0x4F, 0x50, 0x51, 0x4B, 0x4C, 0x4D, 0x47, 0x48, 0x49)
+                        )
+                    ),
+                    ("NUMPADADD", 0x4E, False, None),
+                    ("NUMPADSUBTRACT", 0x4A, False, None),
+                    ("NUMPADMULTIPLY", 0x37, False, None),
+                    ("NUMPADDIVIDE", 0x35, True, None),
+                    ("NUMPADDECIMAL", 0x53, False, None),
+                    ("NUMPADENTER", 0x1C, True, None),
+                )
+                for start in (0, 8):
+                    chunk = keypad_tokens[start : start + 8]
+                    key_cases += (
+                        (
+                            f"vocabulary_{start // 8 + 1}",
+                            "ui_send_keys_batch",
+                            {"keys": [f"{{{token}}}" for token, *_ in chunk], **target_selector},
+                            tuple((scan, extended, vk) for _, scan, extended, vk in chunk),
+                        ),
+                    )
+                key_cases += (
+                    (
+                        "numlock",
+                        "ui_send_keys",
+                        {"keys": "{NUMLOCK}", **target_selector},
+                        ((0x45, False, 0x90),),
+                    ),
+                )
+                observed_keys = {}
+                for case, tool, arguments, physical_keys in key_cases:
+                    if case.startswith("focused_"):
+                        focus = _data(await _call(session, "ui_set_focus", target_selector))
+                        assert focus.get("focused") is True, focus
+                    before = _data(await _call(session, "ui_find_element", key_status_selector))
+                    previous_events = json.loads(before.get("name") or "[]")
+                    if case == "numlock":
+                        num_lock_initial = _num_lock_enabled()
+                    delivery = _data(await _call(session, tool, arguments))
+                    if tool == "ui_key_sequence":
+                        assert delivery.get("status") == "PASS", delivery
+                        assert delivery.get("sent_count") == len(physical_keys), delivery
+                    expected = tuple(
+                        (scan, extended, vk, down)
+                        for scan, extended, vk in physical_keys
+                        for down in (True, False)
+                    )
+
+                    def matches(data: dict[str, Any]) -> bool:
+                        events = json.loads(data.get("name") or "[]")
+                        if len(events) != min(32, len(previous_events) + len(expected)):
+                            return False
+                        if events == previous_events:
+                            return False
+                        return all(
+                            event["scan"] == scan
+                            and event["extended"] is extended
+                            and (vk is None or event["vk"] == vk)
+                            and event["down"] is down
+                            for event, (scan, extended, vk, down) in zip(
+                                events[-len(expected) :], expected, strict=True
+                            )
+                        )
+
+                    observed, _ = await _poll_discovery(
+                        session,
+                        name="ui_find_element",
+                        arguments=key_status_selector,
+                        matches=matches,
+                    )
+                    observed_keys[case] = json.loads(observed["name"])[-len(expected) :]
+                evidence["keypad_events"] = observed_keys
                 evidence["observable_result"] = output["text"]
                 evidence["polling"] = [parent_poll, child_poll]
             except AssertionError as error:
@@ -259,10 +453,16 @@ async def main() -> None:
                 raise
             finally:
                 try:
-                    cleanup = _data(await _call(session, "cleanup_processes", {"force": True}))
-                    evidence["cleanup"] = {"terminated": cleanup.get("terminated")}
+                    if num_lock_initial is not None:
+                        evidence["numlock_restored"] = _restore_num_lock(num_lock_initial)
                 finally:
-                    print(f"WPF installed submenu evidence: {json.dumps(evidence, sort_keys=True)}")
+                    try:
+                        cleanup = _data(await _call(session, "cleanup_processes", {"force": True}))
+                        evidence["cleanup"] = {"terminated": cleanup.get("terminated")}
+                    finally:
+                        print(
+                            "WPF installed submenu evidence:", json.dumps(evidence, sort_keys=True)
+                        )
 
 
 if __name__ == "__main__":

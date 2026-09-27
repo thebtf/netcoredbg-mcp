@@ -114,6 +114,28 @@ public static class KeySequenceCommands
             ["F12"] = VirtualKeyShort.F12,
         };
 
+    internal static readonly IReadOnlyDictionary<string, VirtualKeyShort> KeypadKeys =
+        new Dictionary<string, VirtualKeyShort>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["NUMPAD0"] = (VirtualKeyShort)0x60,
+            ["NUMPAD1"] = (VirtualKeyShort)0x61,
+            ["NUMPAD2"] = (VirtualKeyShort)0x62,
+            ["NUMPAD3"] = (VirtualKeyShort)0x63,
+            ["NUMPAD4"] = (VirtualKeyShort)0x64,
+            ["NUMPAD5"] = (VirtualKeyShort)0x65,
+            ["NUMPAD6"] = (VirtualKeyShort)0x66,
+            ["NUMPAD7"] = (VirtualKeyShort)0x67,
+            ["NUMPAD8"] = (VirtualKeyShort)0x68,
+            ["NUMPAD9"] = (VirtualKeyShort)0x69,
+            ["NUMPADADD"] = (VirtualKeyShort)0x6B,
+            ["NUMPADSUBTRACT"] = (VirtualKeyShort)0x6D,
+            ["NUMPADMULTIPLY"] = (VirtualKeyShort)0x6A,
+            ["NUMPADDIVIDE"] = (VirtualKeyShort)0x6F,
+            ["NUMPADDECIMAL"] = (VirtualKeyShort)0x6E,
+            ["NUMPADENTER"] = VirtualKeyShort.RETURN,
+            ["NUMLOCK"] = (VirtualKeyShort)0x90,
+        };
+
     private static readonly IReadOnlyDictionary<string, VirtualKeyShort> ModifierKeys =
         new Dictionary<string, VirtualKeyShort>(StringComparer.OrdinalIgnoreCase)
         {
@@ -165,8 +187,8 @@ public static class KeySequenceCommands
 
                 foreach (var key in parsedKeys)
                 {
-                    SendSignedKeyDown(key.Key);
-                    SendSignedKeyUp(key.Key);
+                    SendSignedKeyDown(key.Key, key.Name == "NUMPADENTER");
+                    SendSignedKeyUp(key.Key, key.Name == "NUMPADENTER");
                     sent.Add(key.Name);
                 }
                 if (scopedHeld.Count > 0 && sent.Count > 0)
@@ -321,7 +343,8 @@ public static class KeySequenceCommands
         var normalized = key.Trim();
         if (normalized.StartsWith('{') && normalized.EndsWith('}'))
             normalized = normalized[1..^1];
-        if (SpecialKeys.TryGetValue(normalized, out var special))
+        if (SpecialKeys.TryGetValue(normalized, out var special) ||
+            KeypadKeys.TryGetValue(normalized, out special))
             return (normalized.ToUpperInvariant(), special);
         if (normalized.Length == 1)
         {
@@ -370,14 +393,14 @@ public static class KeySequenceCommands
         }
     }
 
-    internal static void SendSignedKeyDown(VirtualKeyShort key)
+    internal static void SendSignedKeyDown(VirtualKeyShort key, bool keypadEnter = false)
     {
-        SendKey(key, keyUp: false);
+        SendKey(key, keyUp: false, keypadEnter: keypadEnter);
     }
 
-    internal static void SendSignedKeyUp(VirtualKeyShort key)
+    internal static void SendSignedKeyUp(VirtualKeyShort key, bool keypadEnter = false)
     {
-        SendKey(key, keyUp: true);
+        SendKey(key, keyUp: true, keypadEnter: keypadEnter);
     }
 
     internal static void SendSignedText(string text)
@@ -431,7 +454,7 @@ public static class KeySequenceCommands
         }
     }
 
-    private static void SendKey(VirtualKeyShort key, bool keyUp)
+    private static void SendKey(VirtualKeyShort key, bool keyUp, bool keypadEnter)
     {
         var input = new INPUT
         {
@@ -443,7 +466,7 @@ public static class KeySequenceCommands
                     wVk = 0,
                     wScan = (ushort)MapVirtualKey((uint)key, MAPVK_VK_TO_VSC),
                     dwFlags = KEYEVENTF_SCANCODE |
-                              (IsExtendedKey(key) ? KEYEVENTF_EXTENDEDKEY : 0) |
+                              (keypadEnter || IsExtendedKey(key) ? KEYEVENTF_EXTENDEDKEY : 0) |
                               (keyUp ? KEYEVENTF_KEYUP : 0),
                     time = 0,
                     dwExtraInfo = InputSignature.RunnerInputSignatureIntPtr
@@ -474,7 +497,8 @@ public static class KeySequenceCommands
             VirtualKeyShort.DELETE or
             VirtualKeyShort.RCONTROL or
             VirtualKeyShort.RMENU or
-            VirtualKeyShort.LWIN;
+            VirtualKeyShort.LWIN or
+            (VirtualKeyShort)0x6F;
     }
 
     private static List<string> ReadStringArray(JsonNode? node, string name)

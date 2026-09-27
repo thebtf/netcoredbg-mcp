@@ -10,6 +10,7 @@ using System.Windows.Automation.Peers;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
 using Microsoft.Win32;
@@ -20,6 +21,7 @@ public partial class MainWindow : Window
 {
     private readonly MainViewModel _viewModel = new();
     private readonly Stack<Action> _undoStack = new();
+    private readonly List<object> _keyEvents = new();
     private readonly string? _mutableFile;
     private const string CanonicalMutableFileBaseline = "baseline";
     private long _galleryGeneration;
@@ -96,6 +98,34 @@ public partial class MainWindow : Window
         public Rect Bounds { get; }
     }
 
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        HwndSource.FromHwnd(new WindowInteropHelper(this).Handle)?.AddHook(ObserveKeyMessages);
+    }
+
+    private IntPtr ObserveKeyMessages(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg is not (0x0100 or 0x0101 or 0x0104 or 0x0105))
+        {
+            return IntPtr.Zero;
+        }
+
+        var bits = lParam.ToInt64();
+        _keyEvents.Add(new
+        {
+            vk = wParam.ToInt64(),
+            scan = (bits >> 16) & 0xFF,
+            extended = (bits & (1L << 24)) != 0,
+            down = msg is 0x0100 or 0x0104,
+        });
+        if (_keyEvents.Count > 32)
+        {
+            _keyEvents.RemoveAt(0);
+        }
+        _viewModel.KeyEventStatusText = JsonSerializer.Serialize(_keyEvents);
+        return IntPtr.Zero;
+    }
 
     public MainWindow()
     {
@@ -132,6 +162,7 @@ public partial class MainWindow : Window
         try
         {
             _viewModel.ResetToCanonicalState();
+            _keyEvents.Clear();
             ClearGallerySelections();
         }
         finally
@@ -1170,6 +1201,7 @@ public class MainViewModel : INotifyPropertyChanged
     private string _hoverStatusText = string.Empty;
     private string _guardedChildStatusText = string.Empty;
     private string _galleryStatusText = string.Empty;
+    private string _keyEventStatusText = string.Empty;
     private bool _isFeatureEnabled;
     private int _invokeCount;
     private int _selectorSafetyCount;
@@ -1233,6 +1265,13 @@ public class MainViewModel : INotifyPropertyChanged
         set { _galleryStatusText = value; OnPropertyChanged(); }
     }
 
+    public string KeyEventStatusText
+    {
+        get => _keyEventStatusText;
+        set { _keyEventStatusText = value; OnPropertyChanged(); }
+    }
+
+
     public ObservableCollection<string> Items { get; } = new();
 
     public ObservableCollection<CueRow> CueRows { get; } = new();
@@ -1248,6 +1287,7 @@ public class MainViewModel : INotifyPropertyChanged
         HoverStatusText = string.Empty;
         GuardedChildStatusText = string.Empty;
         GalleryStatusText = string.Empty;
+        KeyEventStatusText = string.Empty;
         IsFeatureEnabled = false;
         InvokeCount = 0;
         SelectorSafetyCount = 0;
