@@ -4538,6 +4538,7 @@ def _v2_hover_plan(*, program: str, build_project: str) -> dict[str, Any]:
         "cleanup": {
             "steps": [
                 {"kind": "debug.stop"},
+                {"kind": "ui.disconnect"},
                 {"kind": "process.registry.assert_empty"},
             ]
         },
