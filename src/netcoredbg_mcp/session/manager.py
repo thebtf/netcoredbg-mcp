@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import binascii
 import logging
 import os
 import time
@@ -88,6 +87,8 @@ MAX_OUTPUT_ENTRY = int(os.environ.get("NETCOREDBG_MAX_OUTPUT_ENTRY", "100000")) 
 
 
 BreakpointResourceSnapshot = tuple[tuple[str, int, int | None, str | None, bool], ...]
+_NO_THREAD_FOR_STEPPING = "No thread for stepping"
+_MEMORY_REFERENCE_REQUIRED = "memory_reference is required"
 
 
 class _ResourceOutputBuffer(deque[OutputEntry]):
@@ -224,6 +225,21 @@ class SessionManager:
         if self._stealth_foreground_restore_join_task is task:
             self._stealth_foreground_restore_join_task = None
 
+    @staticmethod
+    async def _observe_foreground_task(task: asyncio.Task[Any], kind: str, operation: str) -> None:
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if not task.cancelled():
+                raise
+        except Exception as exc:
+            logger.debug(
+                "[launch] stealth foreground %s ended during %s: %s",
+                kind,
+                operation,
+                exc,
+            )
+
     async def _cancel_and_join_stealth_foreground_restore(
         self,
         outer: asyncio.Task[None] | None,
@@ -234,22 +250,9 @@ class SessionManager:
 
         try:
             if worker is not None:
-                try:
-                    await asyncio.shield(worker)
-                except asyncio.CancelledError:
-                    if not worker.cancelled():
-                        raise
-                except Exception as exc:
-                    logger.debug("[launch] stealth foreground worker ended during join: %s", exc)
-
+                await self._observe_foreground_task(worker, "worker", "join")
             if outer is not None:
-                try:
-                    await asyncio.shield(outer)
-                except asyncio.CancelledError:
-                    if not outer.cancelled():
-                        raise
-                except Exception as exc:
-                    logger.debug("[launch] stealth foreground task ended during join: %s", exc)
+                await self._observe_foreground_task(outer, "task", "join")
         finally:
             if self._stealth_foreground_restore_worker is worker and (
                 worker is None or worker.done()
@@ -269,12 +272,7 @@ class SessionManager:
         outer = self._stealth_foreground_restore_task
         if outer is not None and not outer.done():
             try:
-                await asyncio.shield(outer)
-            except asyncio.CancelledError:
-                if not outer.cancelled():
-                    raise
-            except Exception as exc:
-                logger.debug("[launch] stealth foreground task ended during observation: %s", exc)
+                await self._observe_foreground_task(outer, "task", "observation")
             finally:
                 if self._stealth_foreground_restore_task is outer and outer.done():
                     self._stealth_foreground_restore_task = None
@@ -291,12 +289,7 @@ class SessionManager:
 
         worker_was_pending = not worker.done()
         try:
-            await asyncio.shield(worker)
-        except asyncio.CancelledError:
-            if not worker.cancelled():
-                raise
-        except Exception as exc:
-            logger.debug("[launch] stealth foreground worker ended during observation: %s", exc)
+            await self._observe_foreground_task(worker, "worker", "observation")
         finally:
             if self._stealth_foreground_restore_worker is worker and worker.done():
                 self._stealth_foreground_restore_worker = None
@@ -564,6 +557,25 @@ class SessionManager:
         except ValueError:
             return False
 
+    @staticmethod
+    def _worktree_from_gitdir(worktrees_dir: str, entry: str) -> str | None:
+        gitdir_file = os.path.join(worktrees_dir, entry, "gitdir")
+        if not os.path.isfile(gitdir_file):
+            logger.debug(f"[worktree] {entry}: no gitdir file")
+            return None
+        try:
+            with open(gitdir_file) as f:
+                wt_gitdir = f.read().strip()
+            wt_path = os.path.dirname(os.path.abspath(wt_gitdir))
+            logger.debug(
+                f"[worktree] {entry}: gitdir={wt_gitdir!r}, "
+                f"path={wt_path}, exists={os.path.isdir(wt_path)}"
+            )
+            return wt_path if os.path.isdir(wt_path) else None
+        except (OSError, ValueError) as e:
+            logger.debug(f"[worktree] {entry}: error reading gitdir: {e}")
+            return None
+
     def _get_worktree_paths(self, project_path: str | None = None) -> list[str]:
         """Auto-detect git worktree paths from filesystem (no subprocess).
 
@@ -599,24 +611,9 @@ class SessionManager:
                     entries = os.listdir(worktrees_dir)
                     logger.debug(f"[worktree] entries in {worktrees_dir}: {entries}")
                     for entry in entries:
-                        gitdir_file = os.path.join(worktrees_dir, entry, "gitdir")
-                        if os.path.isfile(gitdir_file):
-                            try:
-                                with open(gitdir_file) as f:
-                                    wt_gitdir = f.read().strip()
-                                # gitdir contains path to <worktree>/.git
-                                wt_path = os.path.dirname(os.path.abspath(wt_gitdir))
-                                logger.debug(
-                                    f"[worktree] {entry}: gitdir={wt_gitdir!r}, "
-                                    f"path={wt_path}, exists={os.path.isdir(wt_path)}"
-                                )
-                                if os.path.isdir(wt_path):
-                                    worktree_cache.append(wt_path)
-                            except (OSError, ValueError) as e:
-                                logger.debug(f"[worktree] {entry}: error reading gitdir: {e}")
-                                continue
-                        else:
-                            logger.debug(f"[worktree] {entry}: no gitdir file")
+                        wt_path = self._worktree_from_gitdir(worktrees_dir, entry)
+                        if wt_path is not None:
+                            worktree_cache.append(wt_path)
                 else:
                     logger.debug(f"[worktree] no worktrees dir at {worktrees_dir}")
                 logger.debug(
@@ -791,7 +788,7 @@ class SessionManager:
                 return
 
     def _finish_resource_update_task(self, task: asyncio.Task[None]) -> None:
-        for uri, tracked in list(self._resource_update_tasks.items()):
+        for uri, tracked in self._resource_update_tasks.items():
             if tracked is task:
                 if self._resource_update_tasks.get(uri) is task:
                     del self._resource_update_tasks[uri]
@@ -847,6 +844,17 @@ class SessionManager:
         async with self._lifecycle_lock:
             await self._start_locked()
 
+    async def _drain_failed_start(self, generation: object) -> None:
+        owner = self._client.adapter_owner
+        expected_owner = owner if isinstance(owner, OwnedProcessRef) else None
+        if expected_owner is not None:
+            receipt = await self._client.stop(expected_owner=expected_owner)
+        else:
+            receipt = await self._client.stop()
+        if self._owner_receipt_releases_generation(receipt, expected_owner=expected_owner):
+            if self._active_dap_run == generation:
+                self._active_dap_run = None
+
     async def _start_locked(self) -> None:
         """Start one adapter generation while the lifecycle gate excludes pre-build work.
 
@@ -883,25 +891,10 @@ class SessionManager:
                 self._windows_adapter_admission_generation = None
 
         if returned_generation != generation:
-            owner = self._client.adapter_owner
-            expected_owner = owner if isinstance(owner, OwnedProcessRef) else None
-            if expected_owner is not None:
-                receipt = await self._client.stop(expected_owner=expected_owner)
-            else:
-                receipt = await self._client.stop()
-            if self._owner_receipt_releases_generation(receipt, expected_owner=expected_owner):
-                self._active_dap_run = None
+            await self._drain_failed_start(generation)
             raise RuntimeError("DAP client returned a mismatched adapter generation")
         if self._state.state == DebugState.TERMINATED:
-            owner = self._client.adapter_owner
-            expected_owner = owner if isinstance(owner, OwnedProcessRef) else None
-            if expected_owner is not None:
-                receipt = await self._client.stop(expected_owner=expected_owner)
-            else:
-                receipt = await self._client.stop()
-            if self._owner_receipt_releases_generation(receipt, expected_owner=expected_owner):
-                if self._active_dap_run == generation:
-                    self._active_dap_run = None
+            await self._drain_failed_start(generation)
             raise RuntimeError("netcoredbg terminated during startup")
 
         adapter_pid = self._client.adapter_pid
@@ -1386,50 +1379,78 @@ class SessionManager:
             body.count,
         )
 
+    def _breakpoint_with_id(self, breakpoint_id: int) -> tuple[str, Breakpoint] | None:
+        for file_path, bps in self.breakpoints.get_all().items():
+            for bp in bps:
+                if bp.id == breakpoint_id:
+                    return file_path, bp
+        return None
+
     def _on_breakpoint(self, event: DAPEvent) -> None:
         """Handle breakpoint changed/added/removed events from adapter."""
 
         body = BreakpointEventBody.from_dict(event.body)
         logger.debug(f"Breakpoint event: reason={body.reason}, id={body.breakpoint_id}")
 
-        if body.reason == "removed" and body.breakpoint_id is not None:
-            # Remove breakpoint by ID from registry
-            for file_path, bps in self.breakpoints.get_all().items():
-                for bp in bps:
-                    if bp.id == body.breakpoint_id:
-                        self.breakpoints.remove(file_path, bp.line)
-                        self._publish_resource_updates(BREAKPOINTS_URI)
-                        logger.info(f"Breakpoint {body.breakpoint_id} removed by adapter")
-                        return
-        elif body.reason in ("changed", "new") and body.breakpoint_id is not None:
-            # Update existing breakpoint's verified status; record DAP-adjusted line if changed.
-            for file_path, bps in self.breakpoints.get_all().items():
-                for bp in bps:
-                    if bp.id == body.breakpoint_id:
-                        old_value = (bp.verified, bp.dap_line)
-                        bp.verified = body.verified
-                        # Mirror BreakpointRegistry.update_from_dap: clear any
-                        # stale adjustment when the adapter now reports the
-                        # requested line, otherwise record the new adjustment.
-                        if body.line is not None:
-                            bp.dap_line = body.line if body.line != bp.line else None
-                        # Propagate to any tracepoint whose underlying bp matches
-                        mgr = getattr(self, "_tracepoint_manager", None)
-                        if mgr is not None:
-                            mgr.set_dap_line_for_breakpoint(body.breakpoint_id, bp.dap_line)
-                        if old_value != (bp.verified, bp.dap_line):
-                            self._publish_resource_updates(BREAKPOINTS_URI)
-                        logger.debug(
-                            f"Breakpoint {body.breakpoint_id} updated: "
-                            f"verified={body.verified}, requested_line={bp.line}, "
-                            f"dap_line={bp.dap_line}"
-                        )
-                        return
+        if body.breakpoint_id is None or body.reason not in ("removed", "changed", "new"):
+            return
+        matched = self._breakpoint_with_id(body.breakpoint_id)
+        if matched is None:
             # New breakpoint from adapter — log but don't create (we don't know the file)
             if body.reason == "new":
                 logger.info(
                     f"Adapter reported new breakpoint {body.breakpoint_id} (not in our registry)"
                 )
+            return
+
+        file_path, bp = matched
+        if body.reason == "removed":
+            self.breakpoints.remove(file_path, bp.line)
+            self._publish_resource_updates(BREAKPOINTS_URI)
+            logger.info(f"Breakpoint {body.breakpoint_id} removed by adapter")
+            return
+
+        old_value = (bp.verified, bp.dap_line)
+        bp.verified = body.verified
+        # Mirror BreakpointRegistry.update_from_dap: clear any stale adjustment
+        # when the adapter now reports the requested line.
+        if body.line is not None:
+            bp.dap_line = body.line if body.line != bp.line else None
+        mgr = getattr(self, "_tracepoint_manager", None)
+        if mgr is not None:
+            mgr.set_dap_line_for_breakpoint(body.breakpoint_id, bp.dap_line)
+        if old_value != (bp.verified, bp.dap_line):
+            self._publish_resource_updates(BREAKPOINTS_URI)
+        logger.debug(
+            f"Breakpoint {body.breakpoint_id} updated: "
+            f"verified={body.verified}, requested_line={bp.line}, "
+            f"dap_line={bp.dap_line}"
+        )
+
+    def _update_module(self, body: ModuleEventBody) -> bool:
+        for module in self._state.modules:
+            if module.id == body.module_id:
+                previous = (
+                    module.name,
+                    module.path,
+                    module.version,
+                    module.is_optimized,
+                    module.symbol_status,
+                )
+                module.name = body.name
+                module.path = body.path
+                module.version = body.version
+                module.is_optimized = body.is_optimized
+                module.symbol_status = body.symbol_status
+                logger.debug(f"Module updated: {body.name}")
+                return previous != (
+                    module.name,
+                    module.path,
+                    module.version,
+                    module.is_optimized,
+                    module.symbol_status,
+                )
+        return False
 
     def _on_module(self, event: DAPEvent) -> None:
         """Handle module load/change/unload events."""
@@ -1459,29 +1480,7 @@ class SessionManager:
                 changed = True
                 logger.info(f"Module loaded: {body.name}")
         elif body.reason == "changed":
-            for module in self._state.modules:
-                if module.id == body.module_id:
-                    previous = (
-                        module.name,
-                        module.path,
-                        module.version,
-                        module.is_optimized,
-                        module.symbol_status,
-                    )
-                    module.name = body.name
-                    module.path = body.path
-                    module.version = body.version
-                    module.is_optimized = body.is_optimized
-                    module.symbol_status = body.symbol_status
-                    changed = previous != (
-                        module.name,
-                        module.path,
-                        module.version,
-                        module.is_optimized,
-                        module.symbol_status,
-                    )
-                    logger.debug(f"Module updated: {body.name}")
-                    break
+            changed = self._update_module(body)
         elif body.reason == "removed":
             remaining = [module for module in self._state.modules if module.id != body.module_id]
             changed = len(remaining) != len(self._state.modules)
@@ -1517,6 +1516,16 @@ class SessionManager:
         will set this new event when the program stops.
         """
         self._execution_event = asyncio.Event()
+
+    @staticmethod
+    async def _send_wait_heartbeat(
+        callback: Callable[[float], Awaitable[None]] | None, elapsed: float
+    ) -> None:
+        if callback:
+            try:
+                await callback(elapsed)
+            except Exception as exc:
+                logger.debug("heartbeat_callback raised %s: %s", type(exc).__name__, exc)
 
     async def wait_for_stopped(
         self,
@@ -1568,11 +1577,7 @@ class SessionManager:
                     break
                 # Not stopped yet — fire heartbeat
                 elapsed = time.monotonic() - start_time
-                if heartbeat_callback:
-                    try:
-                        await heartbeat_callback(elapsed)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.debug("heartbeat_callback raised %s: %s", type(exc).__name__, exc)
+                await self._send_wait_heartbeat(heartbeat_callback, elapsed)
                 # Continue waiting
 
         return StoppedSnapshot(
@@ -1704,6 +1709,27 @@ class SessionManager:
         if self._active_dap_run == owner.generation:
             self._active_dap_run = None
 
+    @staticmethod
+    async def _join_expected_disconnect(
+        source_client: DAPClient, propagate_cancellation: bool
+    ) -> bool:
+        disconnect_task = asyncio.create_task(source_client.disconnect(terminate=True))
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(disconnect_task)
+                return cancelled
+            except asyncio.CancelledError:
+                if disconnect_task.cancelled():
+                    if propagate_cancellation:
+                        raise
+                    logger.warning("Expected adapter disconnect was cancelled before finalization")
+                    return cancelled
+                cancelled = True
+            except Exception as error:
+                logger.warning("Expected adapter disconnect failed: %s", error)
+                return cancelled
+
     async def _join_owned_adapter_finalizer(
         self,
         source_client: DAPClient,
@@ -1732,23 +1758,9 @@ class SessionManager:
 
         cancelled = False
         if request_disconnect:
-            disconnect_task = asyncio.create_task(source_client.disconnect(terminate=True))
-            while True:
-                try:
-                    await asyncio.shield(disconnect_task)
-                    break
-                except asyncio.CancelledError:
-                    if disconnect_task.cancelled():
-                        if propagate_disconnect_cancellation:
-                            raise
-                        logger.warning(
-                            "Expected adapter disconnect was cancelled before finalization"
-                        )
-                        break
-                    cancelled = True
-                except Exception as error:
-                    logger.warning("Expected adapter disconnect failed: %s", error)
-                    break
+            cancelled = await self._join_expected_disconnect(
+                source_client, propagate_disconnect_cancellation
+            )
 
         stop_task = asyncio.create_task(source_client.stop(expected_owner=expected))
         while True:
@@ -1948,6 +1960,36 @@ class SessionManager:
                 output_callback=output_callback,
             )
 
+    async def _prepare_launch_program(
+        self,
+        program: str,
+        pre_build: bool,
+        build_project: str | None,
+        build_configuration: str,
+        output_callback: Callable[[str, str], Awaitable[None]] | None,
+        prebuilt_program: str | None,
+        report: Callable[[float, float, str], Awaitable[None]],
+    ) -> str:
+        if not pre_build:
+            await report(0, 100, "Starting debugger...")
+            return program
+        if not build_project:
+            raise ValueError("build_project required when pre_build=True")
+        if prebuilt_program is not None:
+            return prebuilt_program
+        logger.info("[launch] phase 1/9: pre-build")
+        await report(0, 100, "Building project...")
+        program = await self._prebuild_for_launch_locked(
+            program=program,
+            build_project=build_project,
+            build_configuration=build_configuration,
+            output_callback=output_callback,
+            stop_current_session=False,
+        )
+        logger.info("[launch] phase 3/9: build complete")
+        await report(50, 100, "Build complete, starting debugger...")
+        return program
+
     async def _launch_locked(
         self,
         program: str,
@@ -1993,27 +2035,15 @@ class SessionManager:
         self._stealth_mode = stealth_mode
         saved_foreground_hwnd = get_foreground_window() if stealth_mode else None
 
-        # Run pre-launch build if requested
-        if pre_build:
-            if not build_project:
-                raise ValueError("build_project required when pre_build=True")
-
-            if _prebuilt_program is None:
-                logger.info("[launch] phase 1/9: pre-build")
-                await report(0, 100, "Building project...")
-                program = await self._prebuild_for_launch_locked(
-                    program=program,
-                    build_project=build_project,
-                    build_configuration=build_configuration,
-                    output_callback=output_callback,
-                    stop_current_session=False,
-                )
-                logger.info("[launch] phase 3/9: build complete")
-                await report(50, 100, "Build complete, starting debugger...")
-            else:
-                program = _prebuilt_program
-        else:
-            await report(0, 100, "Starting debugger...")
+        program = await self._prepare_launch_program(
+            program,
+            pre_build,
+            build_project,
+            build_configuration,
+            output_callback,
+            _prebuilt_program,
+            report,
+        )
 
         # Try dynamic dbgshim swap before version check (eliminates mismatch)
         logger.info("[launch] phase 4/9: dbgshim version management")
@@ -2157,6 +2187,40 @@ class SessionManager:
         async with self._lifecycle_lock:
             return await self._stop_locked()
 
+    async def _drain_adapter_on_stop(
+        self,
+        owner: OwnedProcessRef | None,
+        generation: object | None,
+        validated_owner_receipt: OwnerDrainReceipt | None,
+    ) -> bool:
+        if isinstance(owner, OwnedProcessRef):
+            if validated_owner_receipt is None:
+                effective_receipt, cancelled = await self._join_owned_adapter_finalizer(
+                    self._client,
+                    generation,
+                    owner,
+                    request_disconnect=self._client.is_running,
+                    propagate_disconnect_cancellation=True,
+                )
+            else:
+                effective_receipt, cancelled = validated_owner_receipt, False
+            if not self._owner_receipt_releases_generation(effective_receipt, expected_owner=owner):
+                status = "missing" if effective_receipt is None else effective_receipt.status.value
+                active_processes = (
+                    None if effective_receipt is None else effective_receipt.active_processes
+                )
+                raise RuntimeError(
+                    f"Adapter owner did not drain (status={status}, active={active_processes})"
+                )
+            return cancelled
+        if self._client.is_running:
+            try:
+                await self._client.disconnect(terminate=True)
+            except Exception as error:
+                logger.warning("Error during disconnect: %s", error)
+        await self._client.stop()
+        return False
+
     async def _stop_locked(
         self, validated_owner_receipt: OwnerDrainReceipt | None = None
     ) -> dict[str, Any]:
@@ -2176,37 +2240,9 @@ class SessionManager:
             # publication. Join foreground work inside the `try` so cancellation
             # cannot strand that marker and misclassify a delayed finalizer result.
             await self._cancel_stealth_foreground_restore_task()
-            if isinstance(owner, OwnedProcessRef):
-                if validated_owner_receipt is None:
-                    effective_receipt, cancelled = await self._join_owned_adapter_finalizer(
-                        self._client,
-                        stopping_generation,
-                        owner,
-                        request_disconnect=self._client.is_running,
-                        propagate_disconnect_cancellation=True,
-                    )
-                else:
-                    effective_receipt = validated_owner_receipt
-                if not self._owner_receipt_releases_generation(
-                    effective_receipt,
-                    expected_owner=owner,
-                ):
-                    status = (
-                        "missing" if effective_receipt is None else effective_receipt.status.value
-                    )
-                    active_processes = (
-                        None if effective_receipt is None else effective_receipt.active_processes
-                    )
-                    raise RuntimeError(
-                        f"Adapter owner did not drain (status={status}, active={active_processes})"
-                    )
-            else:
-                if self._client.is_running:
-                    try:
-                        await self._client.disconnect(terminate=True)
-                    except Exception as error:
-                        logger.warning("Error during disconnect: %s", error)
-                await self._client.stop()
+            cancelled = await self._drain_adapter_on_stop(
+                owner, stopping_generation, validated_owner_receipt
+            )
 
             # A no-owner platform path remains compatible. An admitted owner
             # reaches here only after the finalizer's literal zero accounting.
@@ -2414,26 +2450,27 @@ class SessionManager:
             # Without file filter, also drop function breakpoints — they're not
             # file-scoped and otherwise persist invisibly across restart cycles.
             if not file:
-                existing_function_breakpoints = self._breakpoints.get_function_breakpoints()
-                fbp_count = len(existing_function_breakpoints)
-                if fbp_count > 0:
-                    self._breakpoints.clear_function_breakpoints()
-                    if self.is_active:
-                        try:
-                            response = await self._sync_function_breakpoints()
-                            if response is not None and not response.success:
-                                raise RuntimeError(
-                                    response.message or "setFunctionBreakpoints failed"
-                                )
-                        except Exception:
-                            for bp in existing_function_breakpoints:
-                                self._breakpoints.add_function_breakpoint(bp)
-                            raise
-                    count += fbp_count
+                count += await self._clear_function_breakpoints()
 
             return count
         finally:
             self._publish_breakpoints_if_changed(before)
+
+    async def _clear_function_breakpoints(self) -> int:
+        existing = self._breakpoints.get_function_breakpoints()
+        if not existing:
+            return 0
+        self._breakpoints.clear_function_breakpoints()
+        if self.is_active:
+            try:
+                response = await self._sync_function_breakpoints()
+                if response is not None and not response.success:
+                    raise RuntimeError(response.message or "setFunctionBreakpoints failed")
+            except Exception:
+                for bp in existing:
+                    self._breakpoints.add_function_breakpoint(bp)
+                raise
+        return len(existing)
 
     async def add_function_breakpoint(
         self, name: str, condition: str | None = None, hit_condition: str | None = None
@@ -2499,7 +2536,7 @@ class SessionManager:
         """Step over."""
         tid = thread_id or self._state.current_thread_id
         if tid is None:
-            raise RuntimeError("No thread for stepping")
+            raise RuntimeError(_NO_THREAD_FOR_STEPPING)
 
         response = await self._client.step_over(tid)
         return {"success": response.success, "threadId": tid}
@@ -2510,7 +2547,7 @@ class SessionManager:
         """Step into, optionally targeting a specific call on the line."""
         tid = thread_id or self._state.current_thread_id
         if tid is None:
-            raise RuntimeError("No thread for stepping")
+            raise RuntimeError(_NO_THREAD_FOR_STEPPING)
 
         response = await self._client.step_in(tid, target_id=target_id)
         return {"success": response.success, "threadId": tid}
@@ -2532,7 +2569,7 @@ class SessionManager:
         """Step out."""
         tid = thread_id or self._state.current_thread_id
         if tid is None:
-            raise RuntimeError("No thread for stepping")
+            raise RuntimeError(_NO_THREAD_FOR_STEPPING)
 
         response = await self._client.step_out(tid)
         return {"success": response.success, "threadId": tid}
@@ -2572,6 +2609,28 @@ class SessionManager:
             return threads
         return []
 
+    async def _stack_trace_with_retry(
+        self, thread_id: int, start_frame: int, levels: int
+    ) -> DAPResponse:
+        # Retry on CORDBG_E_PROCESS_NOT_SYNCHRONIZED (0x80131302) — race
+        # between stopped event and ICorDebug internal synchronization.
+        # Occurs after step_in/step_over/step_out when stackTrace is called
+        # before netcoredbg finishes syncing the debuggee process.
+        max_retries = 3
+        retry_delay = 0.1  # 100ms between retries
+        for attempt in range(max_retries):
+            response = await self._client.stack_trace(thread_id, start_frame, levels)
+            if response.success or "0x80131302" not in (response.message or ""):
+                return response
+            logger.debug(
+                "stack_trace: PROCESS_NOT_SYNCHRONIZED, retry %d/%d after %.0fms",
+                attempt + 1,
+                max_retries,
+                retry_delay * 1000,
+            )
+            await asyncio.sleep(retry_delay)
+        return await self._client.stack_trace(thread_id, start_frame, levels)
+
     async def get_stack_trace(
         self, thread_id: int | None = None, start_frame: int = 0, levels: int = 20
     ) -> list[StackFrame]:
@@ -2580,29 +2639,7 @@ class SessionManager:
         if tid is None:
             raise RuntimeError("No thread for stack trace")
 
-        # Retry on CORDBG_E_PROCESS_NOT_SYNCHRONIZED (0x80131302) — race
-        # between stopped event and ICorDebug internal synchronization.
-        # Occurs after step_in/step_over/step_out when stackTrace is called
-        # before netcoredbg finishes syncing the debuggee process.
-        max_retries = 3
-        retry_delay = 0.1  # 100ms between retries
-        response = None
-        for attempt in range(max_retries + 1):
-            response = await self._client.stack_trace(tid, start_frame, levels)
-            if response.success:
-                break
-            if "0x80131302" in (response.message or "") and attempt < max_retries:
-                logger.debug(
-                    "stack_trace: PROCESS_NOT_SYNCHRONIZED, retry %d/%d after %.0fms",
-                    attempt + 1,
-                    max_retries,
-                    retry_delay * 1000,
-                )
-                await asyncio.sleep(retry_delay)
-                continue
-            break
-
-        assert response is not None
+        response = await self._stack_trace_with_retry(tid, start_frame, levels)
         logger.debug(
             f"stack_trace response for thread {tid}: success={response.success}, "
             f"body={response.body}, message={response.message}"
@@ -2704,7 +2741,7 @@ class SessionManager:
     ) -> list[dict[str, Any]]:
         """Disassemble machine instructions from a DAP memory reference."""
         if not memory_reference:
-            raise ValueError("memory_reference is required")
+            raise ValueError(_MEMORY_REFERENCE_REQUIRED)
         if instruction_count <= 0:
             raise ValueError("instruction_count must be greater than 0")
 
@@ -2747,7 +2784,7 @@ class SessionManager:
     ) -> dict[str, Any]:
         """Read bytes from a DAP memory reference."""
         if not memory_reference:
-            raise ValueError("memory_reference is required")
+            raise ValueError(_MEMORY_REFERENCE_REQUIRED)
         if count < 0:
             raise ValueError("count must be greater than or equal to 0")
         if count == 0:
@@ -2771,10 +2808,10 @@ class SessionManager:
     ) -> dict[str, Any]:
         """Write base64-encoded bytes to a DAP memory reference."""
         if not memory_reference:
-            raise ValueError("memory_reference is required")
+            raise ValueError(_MEMORY_REFERENCE_REQUIRED)
         try:
             base64.b64decode(data, validate=True)
-        except (binascii.Error, ValueError) as e:
+        except ValueError as e:
             raise ValueError("data must be valid base64") from e
 
         response = await self._client.write_memory(
@@ -2831,6 +2868,39 @@ class SessionManager:
             return response.body
         return None
 
+    async def _exception_frame_variables(self, frame_id: int) -> dict[str, Any]:
+        scopes = await self.get_scopes(frame_id)
+        scope_vars: dict[str, Any] = {}
+        for scope in scopes:
+            ref = scope.get("variablesReference", 0)
+            if ref:
+                variables = await self.get_variables(ref)
+                scope_vars[scope.get("name", "Locals")] = [
+                    {"name": v.name, "value": v.value, "type": v.type} for v in variables[:20]
+                ]
+        return scope_vars
+
+    async def _inner_exception_chain(self, limit: int) -> list[dict[str, Any]]:
+        inner_exceptions: list[dict[str, Any]] = []
+        prefix = "$exception.InnerException"
+        for depth in range(1, limit + 1):
+            try:
+                type_result = await self.evaluate(f"{prefix}.GetType().FullName")
+                if "error" in type_result:
+                    break
+                msg_result = await self.evaluate(f"{prefix}.Message")
+                inner_exceptions.append(
+                    {
+                        "type": type_result.get("result", "Unknown"),
+                        "message": msg_result.get("result", ""),
+                        "depth": depth,
+                    }
+                )
+                prefix = f"{prefix}.InnerException"
+            except Exception:
+                break
+        return inner_exceptions
+
     async def get_exception_context(
         self,
         max_frames: int = 10,
@@ -2878,17 +2948,7 @@ class SessionManager:
             # Include variables for top N frames
             if i < include_variables_for_frames:
                 try:
-                    scopes = await self.get_scopes(frame.id)
-                    scope_vars = {}
-                    for scope in scopes:
-                        ref = scope.get("variablesReference", 0)
-                        if ref:
-                            variables = await self.get_variables(ref)
-                            scope_vars[scope.get("name", "Locals")] = [
-                                {"name": v.name, "value": v.value, "type": v.type}
-                                for v in variables[:20]  # Cap at 20 vars per scope
-                            ]
-                    fd["variables"] = scope_vars
+                    fd["variables"] = await self._exception_frame_variables(frame.id)
                 except Exception as e:
                     fd["variables"] = {"error": str(e)}
 
@@ -2898,28 +2958,21 @@ class SessionManager:
         result["totalFrames"] = len(frames)
 
         # 3. Inner exceptions via $exception evaluation
-        inner_exceptions = []
-        prefix = "$exception.InnerException"
-        for depth in range(1, max_inner_exceptions + 1):
-            try:
-                type_result = await self.evaluate(f"{prefix}.GetType().FullName")
-                if "error" in type_result:
-                    break
-                msg_result = await self.evaluate(f"{prefix}.Message")
-                inner_exceptions.append(
-                    {
-                        "type": type_result.get("result", "Unknown"),
-                        "message": msg_result.get("result", ""),
-                        "depth": depth,
-                    }
-                )
-                prefix = f"{prefix}.InnerException"
-            except Exception:
-                break
-
-        result["innerExceptions"] = inner_exceptions
+        result["innerExceptions"] = await self._inner_exception_chain(max_inner_exceptions)
 
         return result
+
+    async def _stop_context_locals(self, frame_id: int) -> list[dict[str, Any]]:
+        scopes = await self.get_scopes(frame_id)
+        local_vars: list[dict[str, Any]] = []
+        for scope in scopes:
+            ref = scope.get("variablesReference", 0)
+            if ref:
+                variables = await self.get_variables(ref)
+                for v in variables[:15]:
+                    local_vars.append({"name": v.name, "value": v.value, "type": v.type})
+                break  # Only first scope (Locals)
+        return local_vars
 
     async def get_stop_context(
         self,
@@ -2960,22 +3013,7 @@ class SessionManager:
             # Variables for top frame
             if include_variables and frames:
                 try:
-                    scopes = await self.get_scopes(frames[0].id)
-                    local_vars = []
-                    for scope in scopes:
-                        ref = scope.get("variablesReference", 0)
-                        if ref:
-                            variables = await self.get_variables(ref)
-                            for v in variables[:15]:
-                                local_vars.append(
-                                    {
-                                        "name": v.name,
-                                        "value": v.value,
-                                        "type": v.type,
-                                    }
-                                )
-                            break  # Only first scope (Locals)
-                    result["locals"] = local_vars
+                    result["locals"] = await self._stop_context_locals(frames[0].id)
                 except Exception as e:
                     result["locals"] = [{"error": str(e)}]
 
