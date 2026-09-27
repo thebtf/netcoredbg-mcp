@@ -269,6 +269,18 @@ def _send_keys_via_input(keys: str) -> None:
         alt = bool(result & 0x400)
         return (vk, shift, ctrl, alt)
 
+    def _release_modifiers(pressed_modifiers: list[int]) -> None:
+        first_error: Exception | None = None
+        for modifier in reversed(pressed_modifiers):
+            try:
+                _release(modifier)
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+            time.sleep(0.01)
+        if first_error is not None:
+            raise first_error
+
     def _type_char(ch: str, held_modifiers: list[int]) -> None:
         """Type a single character, adding Shift/Ctrl/Alt if VkKeyScanW requires them."""
         vk, needs_shift, needs_ctrl, needs_alt = _char_to_vk(ch)
@@ -289,9 +301,7 @@ def _send_keys_via_input(keys: str) -> None:
                 time.sleep(0.01)
             _tap(vk)
         finally:
-            for m in reversed(pressed_mods):
-                _release(m)
-                time.sleep(0.01)
+            _release_modifiers(pressed_mods)
 
     i = 0
     length = len(keys)
@@ -324,9 +334,7 @@ def _send_keys_via_input(keys: str) -> None:
                     _type_char(gch, held_modifiers)
                     time.sleep(0.02)
             finally:
-                for mod_vk in reversed(pressed_modifiers):
-                    _release(mod_vk)
-                    time.sleep(0.01)
+                _release_modifiers(pressed_modifiers)
             i = close + 1
             time.sleep(0.02)
             continue
@@ -366,10 +374,7 @@ def _send_keys_via_input(keys: str) -> None:
                 _type_char(ch, held_modifiers)
                 i += 1
         finally:
-            # Release held modifiers in reverse order
-            for mod_vk in reversed(pressed_modifiers):
-                _release(mod_vk)
-                time.sleep(0.01)
+            _release_modifiers(pressed_modifiers)
 
         time.sleep(0.02)
 
