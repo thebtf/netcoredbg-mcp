@@ -16,6 +16,11 @@ Prepared: 2026-09-27
 
 There are no new tool arguments or response shapes, and the Python backend selection remains unchanged. The scoped sequence still requires FlaUI; the opt-in source-only .NET preview is unchanged.
 
+## Release gates and residual risks
+
+- Installed-wheel Windows keypad journeys passed: all 17 named keys reached the WPF target, the pywinauto path passed 6/6 manual checks, and the final keypad regression suite passed 82/82. The original NumLock state was restored.
+- The mandatory candidate SonarQube scan is **blocked**, not passed: analysis of `38de1d59e4de28df3346974b600c3b42731b364f` returned an analysis-bound `ERROR` quality gate (22.5% new-code coverage against 80%; 866 open issues; no hotspots). The post-merge scan has not run. Do not merge, tag, or publish this release until both exact-head scans satisfy the release protocol; replace this status with final receipts before publication.
+
 ---
 
 # netcoredbg-mcp v0.23.11
