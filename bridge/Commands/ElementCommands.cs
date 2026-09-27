@@ -10,6 +10,9 @@ namespace FlaUIBridge.Commands;
 
 public static class ElementCommands
 {
+    private const string IdentityUnavailable = "IDENTITY_UNAVAILABLE";
+    private const string ProcessMismatch = "PROCESS_MISMATCH";
+
     public static JsonNode Connect(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         var pid = @params?["pid"]?.GetValue<int>()
@@ -85,6 +88,12 @@ public static class ElementCommands
     {
         try { return element.IsOffscreen; }
         catch { return true; }
+    }
+
+    private static bool SafeIsEnabled(AutomationElement element)
+    {
+        try { return element.IsEnabled; }
+        catch { return false; }
     }
 
     private static string StableWindowKey(AutomationElement window)
@@ -603,7 +612,7 @@ public static class ElementCommands
         var predicate = ReadGuardedSelectorCriteria(request.Predicate);
         var boundProcessId = JsonRpcHandler.ProcessId;
         if (boundProcessId <= 0)
-            return GuardedChildBlocked("IDENTITY_UNAVAILABLE", 0);
+            return GuardedChildBlocked(IdentityUnavailable, 0);
 
         if (!TryGetBoundTopLevelWindows(
                 mainWindow,
@@ -612,14 +621,15 @@ public static class ElementCommands
                 out var topLevelWindows,
                 out var topLevelHandles))
         {
-            return GuardedChildBlocked("IDENTITY_UNAVAILABLE", 0);
+            return GuardedChildBlocked(IdentityUnavailable, 0);
         }
 
-        var parentResolution = ResolveUniqueGuardedParent(
+        var parentResolution = ResolveUniqueGuardedElement(
             topLevelWindows,
+            includeRoots: true,
             parentSelector,
             boundProcessId,
-            automation);
+            request.MaximumNodes);
         if (parentResolution.Outcome != GuardedChildResolutionOutcome.Unique)
         {
             return parentResolution.Outcome switch
@@ -627,8 +637,8 @@ public static class ElementCommands
                 GuardedChildResolutionOutcome.Missing or GuardedChildResolutionOutcome.Ambiguous =>
                     GuardedChildBlocked("PARENT_NOT_UNIQUE", parentResolution.MatchCount),
                 GuardedChildResolutionOutcome.ProcessMismatch =>
-                    GuardedChildBlocked("PROCESS_MISMATCH", parentResolution.MatchCount),
-                _ => GuardedChildBlocked("IDENTITY_UNAVAILABLE", parentResolution.MatchCount),
+                    GuardedChildBlocked(ProcessMismatch, parentResolution.MatchCount),
+                _ => GuardedChildBlocked(IdentityUnavailable, parentResolution.MatchCount),
             };
         }
 
@@ -647,11 +657,20 @@ public static class ElementCommands
                 GuardedChildResolutionOutcome.Ambiguous =>
                     GuardedChildBlocked("CHILD_AMBIGUOUS", childResolution.MatchCount),
                 GuardedChildResolutionOutcome.ProcessMismatch =>
-                    GuardedChildBlocked("PROCESS_MISMATCH", childResolution.MatchCount),
-                _ => GuardedChildBlocked("IDENTITY_UNAVAILABLE", childResolution.MatchCount),
+                    GuardedChildBlocked(ProcessMismatch, childResolution.MatchCount),
+                _ => GuardedChildBlocked(IdentityUnavailable, childResolution.MatchCount),
             };
         }
 
+        return ValidateGuardedChildStability(childResolution, topLevelHandles, boundProcessId, predicate);
+    }
+
+    private static JsonObject ValidateGuardedChildStability(
+        GuardedChildResolution childResolution,
+        HashSet<IntPtr> topLevelHandles,
+        int boundProcessId,
+        GuardedSelectorCriteria predicate)
+    {
         var before = ReadGuardedChildSnapshot(
             childResolution.Element!,
             topLevelHandles,
@@ -672,7 +691,7 @@ public static class ElementCommands
 
         var afterSnapshot = after.Snapshot!.Value;
         if (JsonRpcHandler.ProcessId != boundProcessId)
-            return GuardedChildBlocked("PROCESS_MISMATCH", childResolution.MatchCount);
+            return GuardedChildBlocked(ProcessMismatch, childResolution.MatchCount);
         if (beforeSnapshot.Hwnd != afterSnapshot.Hwnd)
             return GuardedChildBlocked("HWND_MISMATCH", childResolution.MatchCount);
         if (beforeSnapshot != afterSnapshot || !MatchesGuardedChildSnapshot(afterSnapshot, predicate))
@@ -714,55 +733,6 @@ public static class ElementCommands
             controlTypeText is null ? null : ParseControlType(controlTypeText));
     }
 
-    private static GuardedChildResolution ResolveUniqueGuardedParent(
-        IReadOnlyList<AutomationElement> roots,
-        GuardedSelectorCriteria selector,
-        int boundProcessId,
-        UIA3Automation automation)
-    {
-        var factory = new ConditionFactory(automation.PropertyLibrary);
-        var conditions = new List<ConditionBase>();
-        if (selector.AutomationId is not null)
-            conditions.Add(factory.ByAutomationId(selector.AutomationId));
-        if (selector.Name is not null)
-            conditions.Add(factory.ByName(selector.Name));
-        if (selector.ControlType is not null)
-            conditions.Add(factory.ByControlType(selector.ControlType.Value));
-        var condition = conditions.Count == 1
-            ? conditions[0]
-            : new AndCondition(conditions.ToArray());
-        AutomationElement? match = null;
-        var matchCount = 0;
-        foreach (var root in roots)
-        {
-            var candidates = new List<AutomationElement>();
-            if (TryMatchesGuardedSelector(root, selector, out var rootMatches) && rootMatches)
-                candidates.Add(root);
-            try
-            {
-                candidates.AddRange(root.FindAllDescendants(condition));
-            }
-            catch
-            {
-                return GuardedChildResolution.IdentityUnavailable(matchCount);
-            }
-            foreach (var candidate in candidates)
-            {
-                var processId = TryReadProcessId(candidate);
-                if (processId is null)
-                    return GuardedChildResolution.IdentityUnavailable(matchCount);
-                if (processId != boundProcessId)
-                    return GuardedChildResolution.ProcessMismatch(matchCount);
-                matchCount++;
-                if (matchCount == 2)
-                    return GuardedChildResolution.Ambiguous(matchCount);
-                match = candidate;
-            }
-        }
-        return matchCount == 1
-            ? GuardedChildResolution.Unique(match!)
-            : GuardedChildResolution.Missing();
-    }
 
     private static bool TryGetBoundTopLevelWindows(
         AutomationElement mainWindow,
@@ -944,27 +914,36 @@ public static class ElementCommands
         HashSet<IntPtr> topLevelHandles,
         int boundProcessId)
     {
-        var automationId = SafeString(() => element.AutomationId);
-        var name = SafeString(() => element.Name);
+        string automationId;
+        string name;
+        try
+        {
+            automationId = element.AutomationId ?? string.Empty;
+            name = element.Name ?? string.Empty;
+        }
+        catch
+        {
+            return GuardedChildSnapshotRead.Failure(IdentityUnavailable);
+        }
         var resolvedControlType = SafeControlType(element);
         if (resolvedControlType is null)
-            return GuardedChildSnapshotRead.Failure("IDENTITY_UNAVAILABLE");
+            return GuardedChildSnapshotRead.Failure(IdentityUnavailable);
         var controlType = resolvedControlType.Value.ToString();
 
         if (string.IsNullOrEmpty(controlType))
-            return GuardedChildSnapshotRead.Failure("IDENTITY_UNAVAILABLE");
+            return GuardedChildSnapshotRead.Failure(IdentityUnavailable);
         var processId = TryReadProcessId(element);
         if (processId is null)
-            return GuardedChildSnapshotRead.Failure("IDENTITY_UNAVAILABLE");
+            return GuardedChildSnapshotRead.Failure(IdentityUnavailable);
         if (processId != boundProcessId)
-            return GuardedChildSnapshotRead.Failure("PROCESS_MISMATCH");
+            return GuardedChildSnapshotRead.Failure(ProcessMismatch);
 
         if (!TryResolveOwningTopLevelHwnd(element, topLevelHandles, out var hwnd))
             return GuardedChildSnapshotRead.Failure("HWND_MISMATCH");
         if (GetWindowThreadProcessId(hwnd, out var hwndProcessId) == 0)
             return GuardedChildSnapshotRead.Failure("HWND_MISMATCH");
         if (hwndProcessId != (uint)boundProcessId)
-            return GuardedChildSnapshotRead.Failure("PROCESS_MISMATCH");
+            return GuardedChildSnapshotRead.Failure(ProcessMismatch);
 
         GuardedChildRect rectangle;
         try
@@ -1446,6 +1425,7 @@ public static class ElementCommands
 
         var searchRoot = ResolveSearchRoot(mainWindow, @params, automation);
         var element = FindElementCascade(searchRoot, @params, automation);
+        const string descendantsSource = "TextDescendants";
 
         // Strategy 1: ValuePattern
         try
@@ -1454,7 +1434,7 @@ public static class ElementCommands
             {
                 var val = element.Patterns.Value.Pattern.Value.ValueOrDefault;
                 if (!string.IsNullOrEmpty(val))
-                    return new JsonObject { ["text"] = val, ["source"] = "ValuePattern" };
+                    return TextResult(val, "ValuePattern");
             }
         }
         catch { /* fall through */ }
@@ -1466,7 +1446,7 @@ public static class ElementCommands
             {
                 var text = element.Patterns.Text.Pattern.DocumentRange.GetText(-1);
                 if (!string.IsNullOrEmpty(text))
-                    return new JsonObject { ["text"] = text, ["source"] = "TextPattern" };
+                    return TextResult(text, "TextPattern");
             }
         }
         catch { /* fall through */ }
@@ -1482,9 +1462,9 @@ public static class ElementCommands
                 {
                     var descendantText = GetVisibleDescendantText(element, automation);
                     if (!string.IsNullOrEmpty(descendantText))
-                        return new JsonObject { ["text"] = descendantText, ["source"] = "TextDescendants" };
+                        return TextResult(descendantText, descendantsSource);
                 }
-                return new JsonObject { ["text"] = elName, ["source"] = "Name" };
+                return TextResult(elName, "Name");
             }
         }
         catch { /* fall through */ }
@@ -1496,11 +1476,11 @@ public static class ElementCommands
             {
                 var legacyName = element.Patterns.LegacyIAccessible.Pattern.Name.ValueOrDefault;
                 if (!string.IsNullOrEmpty(legacyName))
-                    return new JsonObject { ["text"] = legacyName, ["source"] = "LegacyIAccessible.Name" };
+                    return TextResult(legacyName, "LegacyIAccessible.Name");
 
                 var legacyValue = element.Patterns.LegacyIAccessible.Pattern.Value.ValueOrDefault;
                 if (!string.IsNullOrEmpty(legacyValue))
-                    return new JsonObject { ["text"] = legacyValue, ["source"] = "LegacyIAccessible.Value" };
+                    return TextResult(legacyValue, "LegacyIAccessible.Value");
             }
         }
         catch { /* fall through */ }
@@ -1508,10 +1488,16 @@ public static class ElementCommands
         // Strategy 5: Visible text descendants
         var descText = GetVisibleDescendantText(element, automation);
         if (!string.IsNullOrEmpty(descText))
-            return new JsonObject { ["text"] = descText, ["source"] = "TextDescendants" };
+            return TextResult(descText, descendantsSource);
 
-        return new JsonObject { ["text"] = "", ["source"] = "None" };
+        return TextResult("", "None");
     }
+
+    private static JsonObject TextResult(string text, string source) => new()
+    {
+        ["text"] = text,
+        ["source"] = source,
+    };
 
     // ── Scoring helpers ─────────────────────────────────────────────
 
@@ -1546,11 +1532,11 @@ public static class ElementCommands
         }
         catch { /* ignore */ }
 
-        // Enabled bonus
-        try { if (element.IsEnabled) score += 10; } catch { }
+        // Enabled bonus (an unreadable property is not evidence of enabled state)
+        if (SafeIsEnabled(element)) score += 10;
 
-        // Visible bonus
-        try { if (!element.IsOffscreen) score += 10; } catch { }
+        // Visible bonus (an unreadable property is not evidence of visibility)
+        if (!SafeIsOffscreen(element)) score += 10;
 
         return score;
     }
@@ -1638,7 +1624,7 @@ public static class ElementCommands
 
     // ── Private helpers ──────────────────────────────────────────────
 
-    private static JsonNode BuildTree(AutomationElement element, int maxDepth, int maxChildren, int currentDepth)
+    private static JsonObject BuildTree(AutomationElement element, int maxDepth, int maxChildren, int currentDepth)
     {
         // Skip expensive GetSupportedPatterns in tree walk — only root gets patterns
         var node = BuildElementInfo(element, includePatterns: currentDepth == 0);
