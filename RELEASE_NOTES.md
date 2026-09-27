@@ -1,3 +1,23 @@
+# netcoredbg-mcp v0.23.12
+
+Prepared: 2026-09-27
+
+## Summary
+
+`v0.23.12` is a PATCH release for physical numeric-keypad input in the existing Windows UI tools. The published Python server remains the default; the tool catalog stays at 135 tools, 8 prompts, and 4 resources.
+
+## Fixed behavior
+
+- `ui_send_keys`, `ui_send_keys_focused`, and `ui_send_keys_batch` accept `{NUMPAD0}`–`{NUMPAD9}`, `{NUMPADADD}`, `{NUMPADSUBTRACT}`, `{NUMPADMULTIPLY}`, `{NUMPADDIVIDE}`, `{NUMPADDECIMAL}`, `{NUMPADENTER}`, and `{NUMLOCK}` on both Windows FlaUI and pywinauto send paths. The FlaUI-only scoped `ui_key_sequence` accepts the same names without braces in its list.
+- These names produce physical keypad key-down/key-up events rather than ordinary text or top-row digits. Keypad Enter and Divide use extended-key events; NumLock uses VK 0x90 / scan 0x45 without the extended flag.
+- NumLock is pressed and released, not set to a chosen state. The resulting digit characters depend on the existing NumLock state. Consumer verification restores its original state after an intentional NumLock press.
+
+## Compatibility
+
+There are no new tool arguments or response shapes, and the Python backend selection remains unchanged. The scoped sequence still requires FlaUI; the opt-in source-only .NET preview is unchanged.
+
+---
+
 # netcoredbg-mcp v0.23.11
 
 Prepared: 2026-08-30

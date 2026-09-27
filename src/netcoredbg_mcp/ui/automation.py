@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from ctypes import wintypes
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -53,73 +55,57 @@ def _runner_input_extra_info() -> int:
     return RUNNER_INPUT_SIGNATURE
 
 
+class _KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", wintypes.WORD),
+        ("wScan", wintypes.WORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", wintypes.LONG),
+        ("dy", wintypes.LONG),
+        ("mouseData", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class _InputUnion(ctypes.Union):
+    _fields_ = [("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT)]
+
+
+class _INPUT(ctypes.Structure):
+    _fields_ = [("type", wintypes.DWORD), ("_input", _InputUnion)]
+
+
+def _send_keyboard_input(vk: int, flags: int = 0, scan: int = 0) -> None:
+    inp = _INPUT()
+    inp.type = 1
+    inp._input.ki.wVk = vk
+    inp._input.ki.wScan = scan
+    inp._input.ki.dwFlags = flags
+    inp._input.ki.dwExtraInfo = _runner_input_extra_info()
+    if ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT)) != 1:
+        error = ctypes.windll.kernel32.GetLastError()
+        raise OSError(
+            error, f"SendInput failed for keyboard event (vk={vk}, scan={scan}, flags={flags})"
+        )
+
+
 def _press(vk: int) -> None:
     """Press a virtual key using SendInput."""
-    import ctypes
-    import ctypes.wintypes as wintypes
-
-    user32 = ctypes.windll.user32
-    input_keyboard = 1
-
-    class KEYBDINPUT(ctypes.Structure):
-        _fields_ = [
-            ("wVk", wintypes.WORD),
-            ("wScan", wintypes.WORD),
-            ("dwFlags", wintypes.DWORD),
-            ("time", wintypes.DWORD),
-            ("dwExtraInfo", ctypes.c_size_t),
-        ]
-
-    class INPUT(ctypes.Structure):
-        class _INPUT(ctypes.Union):
-            _fields_ = [("ki", KEYBDINPUT)]
-
-        _fields_ = [
-            ("type", wintypes.DWORD),
-            ("_input", _INPUT),
-        ]
-
-    inp = INPUT()
-    inp.type = input_keyboard
-    inp._input.ki.wVk = vk
-    inp._input.ki.dwFlags = 0
-    inp._input.ki.dwExtraInfo = _runner_input_extra_info()
-    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+    _send_keyboard_input(vk)
 
 
 def _release(vk: int) -> None:
     """Release a virtual key using SendInput."""
-    import ctypes
-    import ctypes.wintypes as wintypes
-
-    user32 = ctypes.windll.user32
-    input_keyboard = 1
-    keyeventf_keyup = 0x0002
-
-    class KEYBDINPUT(ctypes.Structure):
-        _fields_ = [
-            ("wVk", wintypes.WORD),
-            ("wScan", wintypes.WORD),
-            ("dwFlags", wintypes.DWORD),
-            ("time", wintypes.DWORD),
-            ("dwExtraInfo", ctypes.c_size_t),
-        ]
-
-    class INPUT(ctypes.Structure):
-        class _INPUT(ctypes.Union):
-            _fields_ = [("ki", KEYBDINPUT)]
-
-        _fields_ = [
-            ("type", wintypes.DWORD),
-            ("_input", _INPUT),
-        ]
-
-    inp = INPUT()
-    inp.type = input_keyboard
-    inp._input.ki.wVk = vk
-    inp._input.ki.dwFlags = keyeventf_keyup
-    inp._input.ki.dwExtraInfo = _runner_input_extra_info()
-    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+    _send_keyboard_input(vk, flags=0x0002)
 
 
 def _tap(vk: int) -> None:
@@ -210,8 +196,6 @@ def _send_keys_via_input(keys: str) -> None:
     This replaces pywinauto.keyboard.send_keys() which uses WM_KEYDOWN
     and fails for WPF InputBindings (e.g., Alt+Z).
     """
-    import ctypes
-    import ctypes.wintypes as wintypes
     import time
 
     user32 = ctypes.windll.user32
@@ -268,40 +252,11 @@ def _send_keys_via_input(keys: str) -> None:
         "~": "~",
     }
 
-    # ── KEYBDINPUT / INPUT structs for SendInput ──
-
-    class KEYBDINPUT(ctypes.Structure):
-        _fields_ = [
-            ("wVk", wintypes.WORD),
-            ("wScan", wintypes.WORD),
-            ("dwFlags", wintypes.DWORD),
-            ("time", wintypes.DWORD),
-            ("dwExtraInfo", ctypes.c_size_t),
-        ]
-
-    class INPUT(ctypes.Structure):
-        class _INPUT(ctypes.Union):
-            _fields_ = [("ki", KEYBDINPUT)]
-
-        _fields_ = [
-            ("type", wintypes.DWORD),
-            ("_input", _INPUT),
-        ]
-
     def _tap_keypad(key_name: str) -> None:
         scan, extended = _KEYPAD_KEYS[key_name]
         for key_up in (False, True):
-            inp = INPUT()
-            inp.type = 1
-            inp._input.ki.wVk = 0
-            inp._input.ki.wScan = scan
-            inp._input.ki.dwFlags = 0x0008 | (0x0001 if extended else 0) | (0x0002 if key_up else 0)
-            inp._input.ki.dwExtraInfo = _runner_input_extra_info()
-            if user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT)) != 1:
-                raise OSError(
-                    f"SendInput failed for {key_name} {'up' if key_up else 'down'}: "
-                    f"Win32 error {ctypes.get_last_error()}"
-                )
+            flags = 0x0008 | (0x0001 if extended else 0) | (0x0002 if key_up else 0)
+            _send_keyboard_input(0, flags=flags, scan=scan)
 
     def _char_to_vk(ch: str) -> tuple[int, bool, bool, bool]:
         """Convert a character to (vk_code, needs_shift, needs_ctrl, needs_alt) via VkKeyScanW."""
@@ -326,13 +281,17 @@ def _send_keys_via_input(keys: str) -> None:
             extra_mods.append(VK_CONTROL)
         if needs_alt and VK_MENU not in held_modifiers:
             extra_mods.append(VK_MENU)
-        for m in extra_mods:
-            _press(m)
-            time.sleep(0.01)
-        _tap(vk)
-        for m in reversed(extra_mods):
-            _release(m)
-            time.sleep(0.01)
+        pressed_mods: list[int] = []
+        try:
+            for m in extra_mods:
+                _press(m)
+                pressed_mods.append(m)
+                time.sleep(0.01)
+            _tap(vk)
+        finally:
+            for m in reversed(pressed_mods):
+                _release(m)
+                time.sleep(0.01)
 
     i = 0
     length = len(keys)
@@ -355,15 +314,17 @@ def _send_keys_via_input(keys: str) -> None:
             if close == -1:
                 raise ValueError(f"Unclosed parenthesis in key sequence at position {i}")
             group_chars = keys[i + 1 : close]
-            for mod_vk in held_modifiers:
-                _press(mod_vk)
-                time.sleep(0.01)
+            pressed_modifiers: list[int] = []
             try:
+                for mod_vk in held_modifiers:
+                    _press(mod_vk)
+                    pressed_modifiers.append(mod_vk)
+                    time.sleep(0.01)
                 for gch in group_chars:
                     _type_char(gch, held_modifiers)
                     time.sleep(0.02)
             finally:
-                for mod_vk in reversed(held_modifiers):
+                for mod_vk in reversed(pressed_modifiers):
                     _release(mod_vk)
                     time.sleep(0.01)
             i = close + 1
@@ -371,11 +332,12 @@ def _send_keys_via_input(keys: str) -> None:
             continue
 
         # Press held modifiers
-        for mod_vk in held_modifiers:
-            _press(mod_vk)
-            time.sleep(0.01)
-
+        pressed_modifiers = []
         try:
+            for mod_vk in held_modifiers:
+                _press(mod_vk)
+                pressed_modifiers.append(mod_vk)
+                time.sleep(0.01)
             if ch == "{":
                 # Special key in braces: {ENTER}, {F4}, etc.
                 if keys.startswith("{}}", i):
@@ -405,7 +367,7 @@ def _send_keys_via_input(keys: str) -> None:
                 i += 1
         finally:
             # Release held modifiers in reverse order
-            for mod_vk in reversed(held_modifiers):
+            for mod_vk in reversed(pressed_modifiers):
                 _release(mod_vk)
                 time.sleep(0.01)
 

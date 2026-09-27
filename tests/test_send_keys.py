@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -104,6 +105,22 @@ def test_keypad_tokens_emit_physical_down_and_up(send_keys, mock_user32, name, v
             assert bool(flags & 0x0001) is extended  # KEYEVENTF_EXTENDEDKEY (E0)
         assert bool(flags & 0x0002) is bool(index)  # KEYEVENTF_KEYUP
         assert not flags & 0x0004  # KEYEVENTF_UNICODE
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32" or ctypes.sizeof(ctypes.c_void_p) != 8,
+    reason="64-bit Windows SendInput layout",
+)
+def test_keypad_and_modifier_events_use_native_input_size(send_keys, mock_user32):
+    from netcoredbg_mcp.ui.automation import _press, _release
+
+    send_keys("{NUMPAD1}")
+    _press(0x11)
+    _release(0x11)
+
+    assert mock_user32.SendInput.call_count == 4
+    for call in mock_user32.SendInput.call_args_list:
+        assert call.args[2] == 40  # Win64 INPUT includes the 32-byte MOUSEINPUT union arm.
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")

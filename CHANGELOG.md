@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.12] - 2026-09-27
+
+### Fixed
+- The existing Windows keyboard-input tools send all 17 named numeric-keypad keys as physical events through FlaUI and pywinauto: ten digits, Add/Subtract/Multiply/Divide/Decimal, keypad Enter, and NumLock. Keypad Enter and Divide retain their extended-key distinction; NumLock uses the physical VK 0x90 / scan 0x45 nonextended event instead of an incorrectly resolved key.
+
+### Compatibility
+- No public tool arguments, response shapes, or backend defaults change. NumLock is a press/release, not a request to set the lock state; the scoped `ui_key_sequence` remains FlaUI-only, and the opt-in .NET preview remains unchanged.
+
 ## [0.23.11] - 2026-08-30
 
 ### Fixed
