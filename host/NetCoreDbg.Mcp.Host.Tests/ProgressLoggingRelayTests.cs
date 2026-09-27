@@ -28,6 +28,7 @@ namespace NetCoreDbg.Mcp.Host.Tests;
 /// use <see cref="SequentialOrderObserverTransport"/>, a test-only transport wrapper built the same way,
 /// to observe the downstream leg reliably.
 /// </summary>
+[Collection("SequentialRealPythonProcess")]
 public sealed class ProgressLoggingRelayTests
 {
     private const string SlowProbeToolName = "probe";

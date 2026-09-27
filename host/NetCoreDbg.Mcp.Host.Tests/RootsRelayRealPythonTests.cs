@@ -27,6 +27,7 @@ namespace NetCoreDbg.Mcp.Host.Tests;
 /// <c>NETCOREDBG_MCP_PYTHON_EXECUTABLE</c> pointing at this worktree's own environment, never
 /// a mock of RootsRelay/RelaySession/RelayComposition themselves.
 /// </summary>
+[Collection("SequentialRealPythonProcess")]
 public sealed class RootsRelayRealPythonTests
 {
     private const string MarkerSymbol = "RootsRelayMarkerProbe";
