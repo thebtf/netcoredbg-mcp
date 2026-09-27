@@ -116,8 +116,10 @@ python_test_paths=(
   tests/test_ui_grid_helpers.py
   tests/test_ui_new_tools.py
   tests/test_ui_screenshot.py
+  tests/test_sonarqube_exact_head_runner.py
+  tests/test_stateless_preview_artifact.py
 )
-coverage run --source=src/netcoredbg_mcp --data-file="$shell_python_data" -m pytest \
+coverage run --source=src/netcoredbg_mcp,scripts --data-file="$shell_python_data" -m pytest \
   --cache-clear -o "cache_dir=$python_cache_directory" "${python_test_paths[@]}"
 coverage xml --data-file="$shell_python_data" -o "$shell_python_report"
 

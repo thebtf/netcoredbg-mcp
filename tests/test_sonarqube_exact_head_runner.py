@@ -2532,6 +2532,70 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 parsed = runner.validate_python_cobertura(context, report)
             self.assertEqual(parsed["source_paths"], ["src/netcoredbg_mcp/module.py"])
 
+    def test_r05c_python_cobertura_accepts_only_the_two_release_scripts(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            runner_script = self._write_source(root, "scripts/run_sonarqube_exact_head.py")
+            artifact_script = self._write_source(root, "scripts/stateless_preview_artifact.py")
+            other_script = self._write_source(root, "scripts/other.py")
+            test_source = self._write_source(root, "tests/test_only.py")
+            report = root / "coverage.xml"
+            trusted = {runner_script, artifact_script, other_script, test_source}
+            with patch.object(
+                runner, "is_tracked", side_effect=lambda _root, _env, path: path in trusted
+            ):
+                report.write_text(
+                    self._cobertura(
+                        [
+                            "scripts/run_sonarqube_exact_head.py",
+                            "scripts/stateless_preview_artifact.py",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                self.assertEqual(
+                    runner.validate_python_cobertura(context, report)["source_paths"],
+                    [
+                        "scripts/run_sonarqube_exact_head.py",
+                        "scripts/stateless_preview_artifact.py",
+                    ],
+                )
+                for name, filename in (
+                    ("other-script", "scripts/other.py"),
+                    ("test-only", "tests/test_only.py"),
+                    ("escape", "scripts/../scripts/run_sonarqube_exact_head.py"),
+                    ("uri", "file:///scripts/run_sonarqube_exact_head.py"),
+                    ("absolute", str(runner_script.resolve())),
+                ):
+                    with self.subTest(name=name):
+                        report.write_text(self._cobertura([filename]), encoding="utf-8")
+                        with self.assertRaisesRegex(
+                            runner.RunnerError, "COVERAGE_SOURCE_MAPPING_INVALID"
+                        ):
+                            runner.validate_python_cobertura(context, report)
+
+            report.write_text(
+                self._cobertura(["scripts/stateless_preview_artifact.py"]), encoding="utf-8"
+            )
+            with patch.object(runner, "is_tracked", return_value=False):
+                with self.assertRaisesRegex(runner.RunnerError, "COVERAGE_SOURCE_MAPPING_INVALID"):
+                    runner.validate_python_cobertura(context, report)
+
+            original_metadata = runner._scanner_tree_metadata
+
+            def metadata(path):
+                if path == artifact_script:
+                    return SimpleNamespace(st_mode=stat.S_IFREG, st_file_attributes=0x0400)
+                return original_metadata(path)
+
+            with (
+                patch.object(runner, "is_tracked", return_value=True),
+                patch.object(runner, "_scanner_tree_metadata", side_effect=metadata),
+            ):
+                with self.assertRaisesRegex(runner.RunnerError, "COVERAGE_SOURCE_MAPPING_INVALID"):
+                    runner.validate_python_cobertura(context, report)
+
     def test_r05b_cobertura_source_roots_canonicalize_relative_and_absolute_inputs(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -3237,24 +3301,3 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     {"blocking_count": 0, "items": []},
                     {"blocking_count": 0, "items": []},
                 )
-
-    def test_python_coverage_workload_uses_curated_non_live_suite(self):
-        script = (RUNNER_PATH.parents[1] / "build" / "coverage.sh").read_text(encoding="utf-8")
-
-        self.assertIn("python_test_paths=(", script)
-        for path in (
-            "tests/test_client.py",
-            "tests/test_session.py",
-            "tests/test_runtime_smoke_runner.py",
-            "tests/test_stealth_mode.py",
-            "tests/test_ui_evidence.py",
-        ):
-            self.assertIn(path, script)
-        for excluded in (
-            "tests/critical",
-            "tests/test_wpf_runtime_workflow_fixture.py",
-            "tests/test_windows_process_owner.py",
-            "tests/test_sonarqube_exact_head_runner.py",
-            "tests/test_stateless_preview_artifact.py",
-        ):
-            self.assertNotIn(excluded, script)

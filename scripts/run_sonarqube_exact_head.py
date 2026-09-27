@@ -1960,10 +1960,17 @@ def _safe_coverage_source(
         )
     relative = matches[0].relative_to(context.repository_root).as_posix()
     if language == "python":
-        if not relative.startswith("src/netcoredbg_mcp/") or not relative.endswith(".py"):
+        if not relative.endswith(".py") or not (
+            relative.startswith("src/netcoredbg_mcp/")
+            or relative
+            in {
+                "scripts/run_sonarqube_exact_head.py",
+                "scripts/stateless_preview_artifact.py",
+            }
+        ):
             _coverage_failure(
                 "COVERAGE_SOURCE_MAPPING_INVALID",
-                "Python coverage source is outside src/netcoredbg_mcp",
+                "Python coverage source is outside the fixed production source set",
             )
     elif language == "dotnet":
         lowered = [part.casefold() for part in relative.split("/")]

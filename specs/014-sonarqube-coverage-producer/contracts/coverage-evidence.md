@@ -48,7 +48,7 @@ The final paths are slash-relative. Producers use absolute paths below the claim
 
 ## Admit Python evidence
 
-The runner accepts `python/coverage.xml` only when it has a `coverage` root, positive line and branch denominators, ordered counts, and a nonempty sorted unique source set. Every mapping must resolve exactly once to a tracked regular `.py` file below `src/netcoredbg_mcp`. URI, absolute, escape, missing, reparse, duplicate-normalized, and test-only paths fail closed.
+The runner accepts `python/coverage.xml` only when it has a `coverage` root, positive line and branch denominators, ordered counts, and a nonempty sorted unique source set. Every mapping must resolve exactly once to a tracked regular `.py` file under `src/netcoredbg_mcp` or exactly one of `scripts/run_sonarqube_exact_head.py` and `scripts/stateless_preview_artifact.py`. URI, absolute, escape, missing, reparse, duplicate-normalized, untracked, other-script, and test-only paths fail closed.
 
 ## Admit .NET inputs and normalize one final report
 
