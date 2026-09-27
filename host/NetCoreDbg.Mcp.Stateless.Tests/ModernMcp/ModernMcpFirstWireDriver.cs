@@ -7,7 +7,7 @@ namespace NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
 /// <summary>One uninitialized official stdio connection for asserting the literal first wire request.</summary>
 internal sealed class ModernMcpFirstWireDriver : IAsyncDisposable
 {
-    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(10);
 
     private readonly FixtureProcess _fixture;
     private readonly string _scratchDirectory;

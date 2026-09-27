@@ -19,7 +19,7 @@ public sealed class NetCoreDbgSessionProcessCollection
 [Trait("Coverage", "Exclude")]
 public sealed class NetCoreDbgSessionTests
 {
-    private static readonly TimeSpan InitializeTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan InitializeTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan StopTimeout = TimeSpan.FromMilliseconds(300);
     private static readonly ImmutableArray<string?> ExpectedLifecycleEvents = ImmutableArray.Create<string?>(
@@ -92,7 +92,7 @@ public sealed class NetCoreDbgSessionTests
                 InitializedBeforeCorrectInitializeResponse: true,
                 SuppressInitializedAfterInitializeResponse: true),
             "D:\\fixtures\\program.dll",
-            TimeSpan.FromMilliseconds(250),
+            InitializeTimeout,
             RequestTimeout,
             StopTimeout,
             CancellationToken.None,

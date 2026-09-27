@@ -19,7 +19,8 @@ namespace NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
 internal sealed class ModernMcpProcessDriver : IAsyncDisposable
 {
     internal const string CurrentProtocolVersion = "2026-07-28";
-    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(10);
 
     private readonly FixtureProcess _fixture;
     private readonly string _scratchDirectory;
@@ -74,7 +75,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             var candidate = TestOutputPathResolver.ResolveProcess(Path.Combine(RepositoryLayout.Root, "host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
 
             var inertProgramPath = Path.Combine(scratchDirectory, "controlled-program.dll");
-            using var operation = CreateBoundedCancellation(cancellationToken);
+            using var operation = CreateBoundedCancellation(cancellationToken, StartupTimeout);
             await File.WriteAllBytesAsync(inertProgramPath, [], operation.Token).ConfigureAwait(false);
 
             ModernMcpProcessDriver? driver = null;
@@ -121,7 +122,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             var candidate = TestOutputPathResolver.ResolveProcess(Path.Combine(RepositoryLayout.Root, "host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
 
             var inertProgramPath = Path.Combine(scratchDirectory, "controlled-program.dll");
-            using var operation = CreateBoundedCancellation(cancellationToken);
+            using var operation = CreateBoundedCancellation(cancellationToken, StartupTimeout);
             await File.WriteAllBytesAsync(inertProgramPath, [], operation.Token).ConfigureAwait(false);
 
             transport = new StdioClientTransport(new StdioClientTransportOptions

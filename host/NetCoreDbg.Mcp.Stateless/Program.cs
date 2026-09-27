@@ -249,7 +249,7 @@ internal static class Program
 
             if (string.IsNullOrWhiteSpace(_debuggerPath))
             {
-                return Error("debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
+                return NotFound();
             }
 
             NetCoreDbgSession? session = null;
@@ -285,7 +285,7 @@ internal static class Program
                     binding = null;
                     await _dispose(session).ConfigureAwait(false);
                     session = null;
-                    return Error("debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
+                    return NotFound();
                 }
 
                 registeredSlot = slot;
@@ -301,13 +301,7 @@ internal static class Program
             {
                 if (registeredSlot is not null)
                 {
-                    try
-                    {
-                        await registeredSlot.CloseAndDrainAsync().ConfigureAwait(false);
-                    }
-                    catch (Exception)
-                    {
-                    }
+                    await ObserveCloseAsync(registeredSlot).ConfigureAwait(false);
                 }
                 else
                 {
@@ -328,13 +322,7 @@ internal static class Program
             {
                 if (registeredSlot is not null)
                 {
-                    try
-                    {
-                        await registeredSlot.CloseAndDrainAsync().ConfigureAwait(false);
-                    }
-                    catch (Exception)
-                    {
-                    }
+                    await ObserveCloseAsync(registeredSlot).ConfigureAwait(false);
                 }
                 else
                 {
@@ -355,7 +343,7 @@ internal static class Program
                     }
                 }
 
-                return Error("debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
+                return NotFound();
             }
         }
 
@@ -384,13 +372,7 @@ internal static class Program
             {
                 if (_slots.TryGetValue(sessionId!, out var slot))
                 {
-                    try
-                    {
-                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
-                    }
-                    catch (Exception)
-                    {
-                    }
+                    await ObserveCloseAsync(slot).ConfigureAwait(false);
                 }
                 else if (_sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(sessionId!, session)))
                 {
@@ -465,13 +447,7 @@ internal static class Program
                 lease.Dispose();
                 if (closeAfterLease)
                 {
-                    try
-                    {
-                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
-                    }
-                    catch (Exception)
-                    {
-                    }
+                    await ObserveCloseAsync(slot).ConfigureAwait(false);
                 }
             }
         }
@@ -543,13 +519,7 @@ internal static class Program
                 lease.Dispose();
                 if (closeAfterLease)
                 {
-                    try
-                    {
-                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
-                    }
-                    catch (Exception)
-                    {
-                    }
+                    await ObserveCloseAsync(slot).ConfigureAwait(false);
                 }
             }
         }
@@ -807,13 +777,7 @@ internal static class Program
             {
                 if (_slots.TryGetValue(sessionId, out var slot))
                 {
-                    try
-                    {
-                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
-                    }
-                    catch (Exception)
-                    {
-                    }
+                    await ObserveCloseAsync(slot).ConfigureAwait(false);
                 }
                 else if (_sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(sessionId, session)))
                 {
@@ -884,7 +848,13 @@ internal static class Program
             }
 
             hasProgram = true;
-            if (element.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(program = element.GetString()))
+            if (element.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+
+            program = element.GetString();
+            if (string.IsNullOrWhiteSpace(program))
             {
                 return false;
             }
@@ -915,7 +885,13 @@ internal static class Program
             }
 
             hasSessionId = true;
-            if (element.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(sessionId = element.GetString()))
+            if (element.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+
+            sessionId = element.GetString();
+            if (string.IsNullOrWhiteSpace(sessionId))
             {
                 return false;
             }
