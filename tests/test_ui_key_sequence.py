@@ -61,6 +61,26 @@ def test_key_sequence_validation_normalizes_without_mutating_requested_inputs() 
 
 
 @pytest.mark.parametrize(
+    "name",
+    [
+        *(f"NUMPAD{digit}" for digit in range(10)),
+        "NUMPADADD",
+        "NUMPADSUBTRACT",
+        "NUMPADMULTIPLY",
+        "NUMPADDIVIDE",
+        "NUMPADDECIMAL",
+        "NUMPADENTER",
+        "NUMLOCK",
+    ],
+)
+def test_scoped_keypad_names_accept_braces_and_normalize_case(name: str) -> None:
+    assert validate_scoped_key_sequence([], [f"{{{name.lower()}}}", name.lower()]) == (
+        [],
+        [name, name],
+    )
+
+
+@pytest.mark.parametrize(
     ("modifiers", "keys", "expected"),
     [
         (

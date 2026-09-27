@@ -300,6 +300,14 @@ def test_wpf_submenu_parent_native_enter_rediscovers_popup_child_and_invokes_it(
     )
 
     bridge_output = tmp_path / "installed-wheel-bridge"
+    framework_dependent = os.environ.get("NETCOREDBG_MCP_TEST_BRIDGE_FRAMEWORK_DEPENDENT") == "1"
+    publish_mode = "framework-dependent BridgeTestHost" if framework_dependent else "self-contained"
+    print(f"Installed wheel bridge publish mode: {publish_mode}", flush=True)
+    publish_options = (
+        ["--self-contained", "false", "-p:BridgeTestHost=true"]
+        if framework_dependent
+        else ["--self-contained"]
+    )
     bridge_publish = subprocess.run(
         [
             "dotnet",
@@ -309,7 +317,7 @@ def test_wpf_submenu_parent_native_enter_rediscovers_popup_child_and_invokes_it(
             "Release",
             "-r",
             "win-x64",
-            "--self-contained",
+            *publish_options,
             "-o",
             str(bridge_output),
         ],
@@ -318,7 +326,9 @@ def test_wpf_submenu_parent_native_enter_rediscovers_popup_child_and_invokes_it(
         timeout=120,
         check=False,
     )
-    assert bridge_publish.returncode == 0, bridge_publish.stdout + bridge_publish.stderr
+    assert bridge_publish.returncode == 0, (
+        f"{publish_mode} bridge publish failed: {bridge_publish.stdout}{bridge_publish.stderr}"
+    )
     bridge_path = bridge_output / "FlaUIBridge.exe"
     assert bridge_path.is_file(), f"packaged bridge publish did not produce: {bridge_path}"
 

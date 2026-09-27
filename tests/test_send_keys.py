@@ -55,6 +55,96 @@ def send_keys(mock_user32):
                 ctypes.windll = original_windll
 
 
+def _keyboard_events(send_keys, mock_user32, sequence):
+    events = []
+
+    def capture(_count, input_pointer, _size):
+        event = input_pointer._obj
+        key = event._input.ki
+        events.append((event.type, key.wVk, key.wScan, key.dwFlags))
+        return 1
+
+    mock_user32.SendInput.side_effect = capture
+    send_keys(sequence)
+    return events
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
+@pytest.mark.parametrize(
+    ("name", "vk", "scan", "extended"),
+    [
+        *(
+            (f"NUMPAD{digit}", 0x60 + digit, code, False)
+            for digit, code in enumerate(
+                (0x52, 0x4F, 0x50, 0x51, 0x4B, 0x4C, 0x4D, 0x47, 0x48, 0x49)
+            )
+        ),
+        ("NUMPADADD", 0x6B, 0x4E, False),
+        ("NUMPADSUBTRACT", 0x6D, 0x4A, False),
+        ("NUMPADMULTIPLY", 0x6A, 0x37, False),
+        ("NUMPADDIVIDE", 0x6F, 0x35, True),
+        ("NUMPADDECIMAL", 0x6E, 0x53, False),
+        ("NUMPADENTER", 0x0D, 0x1C, True),
+        ("NUMLOCK", 0x90, 0x45, None),
+    ],
+)
+def test_keypad_tokens_emit_physical_down_and_up(send_keys, mock_user32, name, vk, scan, extended):
+    events = _keyboard_events(send_keys, mock_user32, f"{{{name}}}")
+
+    assert len(events) == 2
+    for index, (input_type, actual_vk, actual_scan, flags) in enumerate(events):
+        assert input_type == 1  # INPUT_KEYBOARD
+        if flags & 0x0008:  # KEYEVENTF_SCANCODE: wVk is ignored
+            assert actual_scan == scan
+            assert actual_vk in (0, vk)
+        else:
+            assert actual_vk == vk
+            assert name != "NUMPADENTER"  # VK_RETURN alone cannot distinguish the two Enter keys
+        if extended is not None:
+            assert bool(flags & 0x0001) is extended  # KEYEVENTF_EXTENDEDKEY (E0)
+        assert bool(flags & 0x0002) is bool(index)  # KEYEVENTF_KEYUP
+        assert not flags & 0x0004  # KEYEVENTF_UNICODE
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
+def test_keypad_events_differ_from_text_digit_and_standard_enter(send_keys, mock_user32):
+    keypad_digit = _keyboard_events(send_keys, mock_user32, "{NUMPAD1}")
+    top_row_digit = _keyboard_events(send_keys, mock_user32, "1")
+    keypad_enter = _keyboard_events(send_keys, mock_user32, "{NUMPADENTER}")
+    ordinary_enter = _keyboard_events(send_keys, mock_user32, "{ENTER}")
+
+    assert keypad_digit[0][1] in (0, 0x61)
+    assert top_row_digit[0][1] == 0x31
+    assert (top_row_digit[0][1], top_row_digit[0][2], top_row_digit[0][3] & 0x0009) != (
+        keypad_digit[0][1],
+        keypad_digit[0][2],
+        keypad_digit[0][3] & 0x0009,
+    )
+    assert keypad_enter[0][2] == 0x1C
+    assert keypad_enter[0][3] & 0x0009 == 0x0009
+    assert not ordinary_enter[0][3] & 0x0001
+    assert ordinary_enter[0][2:] != keypad_enter[0][2:]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
+def test_keypad_tokens_keep_modifier_and_concatenation_order(send_keys, mock_user32):
+    events = _keyboard_events(send_keys, mock_user32, "^{NUMPAD1}{NUMPAD2}")
+
+    assert [flags & 0x0002 for _, _, _, flags in events] == [0, 0, 2, 2, 0, 2]
+    assert [vk for _, vk, _, _ in (events[0], events[3])] == [0x11, 0x11]
+    assert [vk for _, vk, _, _ in (events[1], events[2])] in ([0x61, 0x61], [0, 0])
+    assert [vk for _, vk, _, _ in (events[4], events[5])] in ([0x62, 0x62], [0, 0])
+    assert all(scan == 0x4F or vk == 0x61 for _, vk, scan, _ in events[1:3])
+    assert all(scan == 0x50 or vk == 0x62 for _, vk, scan, _ in events[4:6])
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
+def test_unknown_keypad_name_fails_without_sending_an_event(send_keys, mock_user32):
+    with pytest.raises(ValueError, match="Unknown special key"):
+        _keyboard_events(send_keys, mock_user32, "{NUMPADNOTAKEY}")
+    mock_user32.SendInput.assert_not_called()
+
+
 class TestSendKeysParser:
     """Test key sequence parsing logic."""
 

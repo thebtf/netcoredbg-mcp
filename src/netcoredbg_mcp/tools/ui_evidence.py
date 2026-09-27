@@ -177,6 +177,11 @@ def register_ui_evidence_tools(
     ) -> dict:
         """Send keys while holding modifiers and report cleanup evidence.
 
+        ``keys`` accepts NUMPAD0 through NUMPAD9, NUMPADADD, NUMPADSUBTRACT,
+        NUMPADMULTIPLY, NUMPADDIVIDE, NUMPADDECIMAL, NUMPADENTER and NUMLOCK,
+        optionally enclosed in braces. NUMLOCK presses/releases the key; it does
+        not set a requested lock state. Physical delivery requires the FlaUI backend.
+
         For WPF top-level ``MenuItem`` headers, scope the native ``ENTER`` key to the
         parent, then rediscover the popup child after expansion and invoke its exact
         child through a separate ``ui_invoke``. Do not add a fixture-specific key

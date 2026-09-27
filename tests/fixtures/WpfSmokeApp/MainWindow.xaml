@@ -56,6 +56,10 @@
                          Text="{Binding StatusText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                          Margin="0,5" IsReadOnly="True"
                          AutomationProperties.AutomationId="txtOutput"/>
+                <TextBlock Text="{Binding KeyEventStatusText}" FontSize="9" MaxHeight="36"
+                           TextTrimming="CharacterEllipsis"
+                           AutomationProperties.Name="{Binding KeyEventStatusText}"
+                           AutomationProperties.AutomationId="keyEventStatus"/>
 
                 <!-- ComboBox for selection testing -->
                 <ComboBox x:Name="OptionsComboBox" Margin="0,5"

@@ -1057,6 +1057,50 @@ async def test_wpf_smoke_gallery():
         check("WPF smoke gallery", False, str(exc))
 
 
+async def test_wpf_physical_keypad_events():
+    """Observe actual WPF window key messages, not the bridge's send receipt."""
+    print("\nWPF PHYSICAL KEYPAD EVENTS")
+    if not WPF_GUI_ENABLED:
+        check("WPF keypad fixture built", True, "skipped: build tests/fixtures/WpfSmokeApp")
+        return
+
+    try:
+        async with _GuiSmokeGallery(program=WPF_DLL, cwd=os.path.dirname(WPF_DLL)) as gallery:
+            backend = gallery.backend
+            if backend is None:
+                raise RuntimeError("WPF keypad smoke did not create a backend")
+            for keys, scan, extended, vk in (
+                ("{NUMPAD1}", 0x4F, False, None),
+                ("1", 0x00, False, 0xE7),
+                ("{NUMPADENTER}", 0x1C, True, None),
+                ("{ENTER}", 0x1C, False, 0x0D),
+            ):
+                before = json.loads(
+                    (await backend.find_element(automation_id="keyEventStatus")).get("name") or "[]"
+                )
+                await backend.client.call("send_keys", {"keys": keys, "automationId": "txtOutput"})
+                after = json.loads(
+                    (await backend.find_element(automation_id="keyEventStatus"))["name"]
+                )
+                observed = after[-2:]
+                check(
+                    f"WPF key message {keys}",
+                    len(after) == min(32, len(before) + 2)
+                    and after != before
+                    and len(observed) == 2
+                    and all(
+                        event["scan"] == scan
+                        and event["extended"] is extended
+                        and (vk is None or event["vk"] == vk)
+                        and event["down"] is down
+                        for event, down in zip(observed, (True, False), strict=True)
+                    ),
+                    str(observed),
+                )
+    except Exception as exc:
+        check("WPF physical keypad events", False, str(exc))
+
+
 async def test_winforms_smoke_gallery():
     """Exercise the WinForms fixture's representative UIA paths in one process."""
     print("\n--- WinForms Smoke Gallery ---")
@@ -7461,6 +7505,7 @@ def _winforms_extended_scenarios() -> list[tuple[str, Callable[..., Any]]]:
 
 def _wpf_extended_scenarios() -> list[tuple[str, Callable[..., Any]]]:
     return [
+        ("WPF Physical Keypad Events", test_wpf_physical_keypad_events),
         ("Stealth Launch", test_stealth_launch),
         ("Stealth Click", test_stealth_click),
         ("Stealth Screenshot", test_stealth_screenshot),

@@ -23,6 +23,14 @@ _SUPPORTED_KEYS = {
     "pgdn",
     "space",
     *(f"f{i}" for i in range(1, 13)),
+    *(f"numpad{i}" for i in range(10)),
+    "numpadadd",
+    "numpadsubtract",
+    "numpadmultiply",
+    "numpaddivide",
+    "numpaddecimal",
+    "numpadenter",
+    "numlock",
 }
 _SUPPORTED_MODIFIERS = {"ctrl", "shift", "alt", "win"}
 

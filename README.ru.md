@@ -211,6 +211,25 @@ ui_click(automation_id="saveButton")
 # Trigger the breakpoint, then inspect state after it reports STOPPED.
 ```
 
+### Ввод с физического цифрового блока
+
+В стандартном Python-сервере на Windows с FlaUI вызов
+`ui_send_keys(keys="{NUMPAD1}", automation_id="myInput")` посылает физическую
+клавишу цифрового блока 1, а не текст `"1"` или клавишу верхнего ряда.
+`ui_send_keys_focused(keys="{NUMPADENTER}")` посылает Enter цифрового блока,
+отличный от `{ENTER}`. Вызов
+`ui_send_keys_batch(keys=["{NUMPAD1}", "{NUMPADADD}", "{NUMPADENTER}"], automation_id="myInput")`
+сохраняет порядок;
+`ui_key_sequence(keys=["NUMPAD1", "NUMPADENTER"], modifiers=[], automation_id="myInput")`
+принимает имена без фигурных скобок.
+
+Поддерживаются 17 физических клавиш: `{NUMPAD0}`–`{NUMPAD9}`, `{NUMPADADD}`,
+`{NUMPADSUBTRACT}`, `{NUMPADMULTIPLY}`, `{NUMPADDIVIDE}`, `{NUMPADDECIMAL}`,
+`{NUMPADENTER}` и `{NUMLOCK}`. `{NUMLOCK}` нажимает и отпускает клавишу, но
+не задаёт требуемое состояние Num Lock. Физическая доставка доступна только
+через Windows FlaUI backend, а не через альтернативный UI backend или
+опциональный .NET preview.
+
 ### Режимы screenshot
 
 `ui_take_screenshot()` возвращает WebP navigation preview с
