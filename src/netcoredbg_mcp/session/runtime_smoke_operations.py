@@ -893,6 +893,17 @@ def ui_operation_adapters(
         cancel_key = _drag_cancel_key(cancel)
         modifiers = [str(modifier) for modifier in args.get("modifiers") or []]
         speed_ms = _positive_int(args.get("duration_ms"), default=200)
+        for role, endpoint in (("source", source), ("target", drop)):
+            if str(endpoint.get("kind") or _endpoint_kind(endpoint) or "") != "row_index":
+                continue
+            row_index = _non_bool_int(endpoint.get("row_index"))
+            if row_index is None or row_index < 0:
+                return _drag_blocked(
+                    reason=f"drag {role} row index is invalid",
+                    requested={role: endpoint},
+                    accepted={"row_index": "non-negative integer row index"},
+                    next_step=f"Provide a valid {role} row index before dragging.",
+                )
         selected_payload_before: list[dict[str, Any]] = []
         selected_payload_selector = (
             _selector_from_endpoint(source)
@@ -2522,6 +2533,20 @@ async def _ensure_drag_row_endpoint_visible(
     return None, blocked
 
 
+def _visible_drag_row_by_index(rows: list[Any], row_index: int | None) -> dict[str, Any] | None:
+    if row_index is None or row_index < 0:
+        return None
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        raw_index = row.get("row_index")
+        if raw_index is None:
+            raw_index = row.get("index")
+        if _non_bool_int(raw_index) == row_index:
+            return dict(row)
+    return None
+
+
 def _row_from_drag_endpoint(
     snapshot: dict[str, Any],
     endpoint: dict[str, Any],
@@ -2540,29 +2565,9 @@ def _row_from_drag_endpoint(
         )
 
     if kind == "row_index":
-        try:
-            raw_row_index = endpoint.get("row_index")
-            if raw_row_index is None:
-                raise ValueError("missing row_index")
-            row_index = int(raw_row_index)
-        except (TypeError, ValueError):
-            row_index = -1
-        for row in rows:
-            if not isinstance(row, Mapping):
-                continue
-            try:
-                raw_visible_index = (
-                    row.get("row_index")
-                    if row.get("row_index") is not None
-                    else row.get("index")
-                )
-                if raw_visible_index is None:
-                    raise ValueError("missing row index")
-                visible_index = int(raw_visible_index)
-            except (TypeError, ValueError):
-                visible_index = -1
-            if visible_index == row_index:
-                return dict(row), None
+        row = _visible_drag_row_by_index(rows, _non_bool_int(endpoint.get("row_index")))
+        if row is not None:
+            return row, None
         return {}, _drag_blocked(
             reason=f"drag {role} row index not visible",
             requested={role: endpoint},
@@ -3189,8 +3194,11 @@ def _grid_selection_indices(value: Any) -> tuple[list[int], dict[str, Any] | Non
             )
         if isinstance(raw_index, int):
             index = raw_index
-        elif isinstance(raw_index, str) and raw_index.strip().isdigit():
-            index = int(raw_index)
+        elif isinstance(raw_index, str) and raw_index.strip().isdecimal():
+            try:
+                index = int(raw_index)
+            except ValueError:
+                index = -1
         else:
             return [], _adapter_blocked(
                 "ui.grid.select_indices",
@@ -3210,7 +3218,7 @@ def _contiguous_index_range(indices: list[int]) -> tuple[int, int] | None:
         return None
     start = min(indices)
     end = max(indices)
-    if sorted(indices) != list(range(start, end + 1)):
+    if end - start + 1 != len(indices) or len(set(indices)) != len(indices):
         return None
     return start, end
 
