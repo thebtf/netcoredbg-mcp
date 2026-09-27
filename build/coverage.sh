@@ -160,9 +160,6 @@ for index in "${!dotnet_ids[@]}"; do
     -p:CoverletOutputFormat=cobertura
     "-p:CoverletOutput=$output_prefix"
   )
-  if [[ "${dotnet_ids[$index]}" == "host" ]]; then
-    test_arguments+=("-p:Exclude=[NetCoreDbg.Mcp.Host]*")
-  fi
   if [[ "$include_directory" != "-" ]]; then
     test_arguments+=("-p:IncludeDirectory=$include_directory")
   fi
