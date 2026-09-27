@@ -309,9 +309,6 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     public ValueTask DisposeAsync() => new(EnsureCleanupAsync());
 
-    private Task StartProtocolAsync(string programPath, TimeSpan initializeTimeout, CancellationToken cancellationToken) =>
-        StartProtocolAsync(programPath, initializeTimeout, launchEnvironment: null, cancellationToken: cancellationToken);
-
     private async Task StartProtocolAsync(
         string programPath,
         TimeSpan initializeTimeout,
@@ -770,13 +767,6 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
-    private void UpdateState(Func<DapSessionState, DapSessionState> update)
-    {
-        lock (_stateGate)
-        {
-            _state = update(_state);
-        }
-    }
     private void HandleStoppedEvent(JsonElement body)
     {
         var allThreadsStopped = ReadOptionalBoolean(body, "allThreadsStopped");
@@ -923,7 +913,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             throw new InvalidDataException("DAP stack frame source must be an object.");
         }
 
-        if (!sourceElement.TryGetProperty("path", out var pathElement))
+        if (!sourceElement.TryGetProperty("path", out _))
         {
             return new DapStackFrame(id, name, null, 0, 0);
         }
@@ -1099,13 +1089,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
-    private async Task DrainStandardErrorAsync()
-    {
-        var buffer = new byte[8192];
-        while (await _error.ReadAsync(buffer).ConfigureAwait(false) != 0)
-        {
-        }
-    }
+    private Task DrainStandardErrorAsync() => _error.CopyToAsync(Stream.Null);
 
     private async Task<JsonDocument?> ReadFrameAsync(CancellationToken cancellationToken)
     {
@@ -1467,7 +1451,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 childError.Dispose();
                 childError = null;
 
-                if (!AssignProcessToJobObject(job.DangerousGetHandle(), processHandle))
+                if (!AssignProcessToJobObject(job, processHandle))
                 {
                     throw LastWin32Error("Could not assign the debugger process to its job object.");
                 }
@@ -1531,7 +1515,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         public void Terminate()
         {
-            if (!TerminateJobObject(_job.DangerousGetHandle(), 1))
+            if (!TerminateJobObject(_job, 1))
             {
                 throw LastWin32Error("Could not terminate the debugger process job object.");
             }
@@ -1555,7 +1539,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 },
             };
             if (!SetInformationJobObject(
-                    job.DangerousGetHandle(),
+                    job,
                     JobObjectExtendedLimitInformationClass,
                     ref limits,
                     (uint)Marshal.SizeOf<JobObjectExtendedLimitInformation>()))
@@ -1587,7 +1571,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             child = new SafeKernelHandle(parentReads ? write : read);
             try
             {
-                if (!SetHandleInformation(parent.DangerousGetHandle(), HandleFlagInherit, 0))
+                if (!SetHandleInformation(parent, HandleFlagInherit, 0))
                 {
                     throw LastWin32Error("Could not configure a debugger standard I/O pipe.");
                 }
@@ -1779,14 +1763,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool SetInformationJobObject(
-            IntPtr job,
+            SafeKernelHandle job,
             uint informationClass,
             ref JobObjectExtendedLimitInformation jobObjectInformation,
             uint jobObjectInformationLength);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+        private static extern bool AssignProcessToJobObject(SafeKernelHandle job, IntPtr process);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern uint ResumeThread(IntPtr thread);
@@ -1797,11 +1781,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+        private static extern bool TerminateJobObject(SafeKernelHandle job, uint exitCode);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
+        private static extern bool SetHandleInformation(SafeFileHandle handle, uint mask, uint flags);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]

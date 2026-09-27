@@ -227,7 +227,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                         && parameters[8].ParameterType == typeof(Task);
                 });
             Assert.NotNull(constructor);
-            var startProtocolAsync = RequireTaskMethod(sessionType, "StartProtocolAsync", typeof(string), typeof(TimeSpan), typeof(CancellationToken));
+            var startProtocolAsync = RequireTaskMethod(sessionType, "StartProtocolAsync", typeof(string), typeof(TimeSpan), typeof(IReadOnlyDictionary<string, string>), typeof(CancellationToken));
             var state = RequireProperty(sessionType, "State", stateType);
             var isUsable = RequireInternalProperty(sessionType, "IsUsable", typeof(bool));
             var readerTask = RequirePrivateTaskField(sessionType, "_readerTask");
@@ -264,7 +264,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                 gate.Reached,
                 gate.Release.Task,
             ]);
-            var started = startProtocolAsync.Invoke(session, [programPath, initializeTimeout, startupCancellation.Token]);
+            var started = startProtocolAsync.Invoke(session, [programPath, initializeTimeout, null, startupCancellation.Token]);
             await gate.Reached.Task.WaitAsync(startupCancellation.Token);
             fixture.ReleaseConfigurationDoneCapabilityDelta();
             while (!(bool)(supportsConfigurationDone.GetValue(session) ?? false))
