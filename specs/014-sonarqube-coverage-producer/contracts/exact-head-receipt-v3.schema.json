@@ -36,9 +36,14 @@
       ]
     },
     "release_intent": {
-      "enum": [
-        "none",
-        "v0.23.11"
+      "oneOf": [
+        {
+          "const": "none"
+        },
+        {
+          "type": "string",
+          "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+        }
       ]
     },
     "identity": {
@@ -151,7 +156,8 @@
             ]
           },
           "release_intent": {
-            "const": "v0.23.11"
+            "type": "string",
+            "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
           }
         }
       }

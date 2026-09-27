@@ -100,7 +100,7 @@ class GeneratedArtifactCleanupError(RunnerError):
         super().__init__(f"Generated artifact cleanup {operation} failed for {path}: {error_type}.")
 
 
-class CredentialsUnavailable(RunnerError):
+class CredentialsUnavailableError(RunnerError):
     """A credential-gate blocker that never includes a credential value."""
 
     def __init__(self, *input_names: str) -> None:
@@ -219,7 +219,7 @@ def credential_free_host(value: str) -> str:
         hostname = parsed.hostname
         port = parsed.port
     except ValueError as error:
-        raise CredentialsUnavailable("SONAR_HOST_URL") from error
+        raise CredentialsUnavailableError("SONAR_HOST_URL") from error
     if (
         parsed.scheme not in {"http", "https"}
         or not parsed.netloc
@@ -232,7 +232,7 @@ def credential_free_host(value: str) -> str:
         or port == 0
         or (parsed.netloc.endswith(":") and not parsed.netloc.endswith("]"))
     ):
-        raise CredentialsUnavailable("SONAR_HOST_URL")
+        raise CredentialsUnavailableError("SONAR_HOST_URL")
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
@@ -681,7 +681,7 @@ def read_verified_primary_dotenv(dotenv_path: Path) -> str:
     except FileNotFoundError:
         raise
     except (OSError, UnicodeError) as error:
-        raise CredentialsUnavailable(*REQUIRED_ENV) from error
+        raise CredentialsUnavailableError(*REQUIRED_ENV) from error
 
 
 def load_dotenv_credentials(
@@ -740,7 +740,7 @@ def load_credentials(
     }
     missing = [name for name, value in credentials.items() if not value]
     if missing:
-        raise CredentialsUnavailable(*missing)
+        raise CredentialsUnavailableError(*missing)
     credentials["SONAR_HOST_URL"] = credential_free_host(credentials["SONAR_HOST_URL"])
     return credentials
 
@@ -798,7 +798,7 @@ def run_process(
         if credential_input_names and re.search(
             r"\b(?:401|403|authenticat|authoriz|forbidden|token)\b", output, re.IGNORECASE
         ):
-            raise CredentialsUnavailable(*credential_input_names)
+            raise CredentialsUnavailableError(*credential_input_names)
         raise RunnerError(f"{label} failed with exit code {completed.returncode}.")
 
 
@@ -1029,6 +1029,32 @@ def git_blob_bytes(
     return completed.stdout
 
 
+def release_intent_at_head(repository_root: Path, environment: Mapping[str, str], head: str) -> str:
+    raw = git_blob_bytes(repository_root, environment, head, "pyproject.toml")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RunnerError(
+            "COVERAGE_RELEASE_INTENT_INVALID: tracked project metadata is not UTF-8."
+        ) from error
+    sections = re.findall(r"(?ms)^\[project\][ \t]*\r?\n(.*?)(?=^\[|\Z)", text)
+    if len(sections) != 1:
+        raise RunnerError(
+            "COVERAGE_RELEASE_INTENT_INVALID: tracked project section is missing or ambiguous."
+        )
+    names = re.findall(r'(?m)^name[ \t]*=[ \t]*"([^"]+)"[ \t]*\r?$', sections[0])
+    versions = re.findall(r'(?m)^version[ \t]*=[ \t]*"([^"]+)"[ \t]*\r?$', sections[0])
+    if (
+        names != ["netcoredbg-mcp"]
+        or len(versions) != 1
+        or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", versions[0])
+    ):
+        raise RunnerError(
+            "COVERAGE_RELEASE_INTENT_INVALID: tracked project identity or version is invalid."
+        )
+    return f"v{versions[0]}"
+
+
 def _git_is_ancestor(
     repository_root: Path, environment: Mapping[str, str], ancestor: str, descendant: str
 ) -> bool:
@@ -1087,9 +1113,8 @@ def _github_pull_request_evidence(
                 if response_origin(response.geturl()) != "https://api.github.com":
                     _wave2_unverified("first-party PR response has an unexpected origin")
                 payload = response.read()
-        except (OSError, urllib.error.HTTPError, urllib.error.URLError) as error:
+        except OSError:
             _wave2_unverified("first-party PR evidence is unavailable")
-            raise AssertionError("unreachable") from error
     else:
         gh = shutil.which("gh")
         if not gh:
@@ -1101,9 +1126,8 @@ def _github_pull_request_evidence(
                 capture_output=True,
                 check=False,
             )
-        except OSError as error:
+        except OSError:
             _wave2_unverified("first-party PR evidence is unavailable")
-            raise AssertionError("unreachable") from error
         if completed.returncode:
             _wave2_unverified("first-party PR evidence is unavailable")
         payload = completed.stdout
@@ -1485,10 +1509,7 @@ def preflight_coverage_toolchain(
         (project.get("id"), project.get("project"), FIXED_COVERAGE_PROJECTS[index][2])
         for index, project in enumerate(projects)
     ]
-    try:
-        validate_coverage_project_inventory(inventory)
-    except RunnerError:
-        raise
+    validate_coverage_project_inventory(inventory)
     for project in projects:
         if not isinstance(project, Mapping):
             raise RunnerError("COVERAGE_VSTEST_INCOMPATIBLE: invalid project evidence.")
@@ -2843,7 +2864,7 @@ def api_json(host: str, endpoint: str, parameters: Mapping[str, str], token: str
     except RunnerError:
         raise
     except (OSError, ValueError) as error:
-        raise CredentialsUnavailable("SONAR_HOST_URL") from error
+        raise CredentialsUnavailableError("SONAR_HOST_URL") from error
     try:
         decoded = json.loads(payload)
     except json.JSONDecodeError as error:
@@ -3192,10 +3213,18 @@ def windows_owner_is_alive(pid: int) -> bool | None:
     handle = kernel32.OpenProcess(synchronize, False, pid)
     if not handle:
         error = ctypes.get_last_error()
-        return True if error == 5 else False if error == 87 else None
+        if error == 5:
+            return True
+        if error == 87:
+            return False
+        return None
     try:
         result = kernel32.WaitForSingleObject(handle, 0)
-        return True if result == wait_timeout else False if result == wait_object_0 else None
+        if result == wait_timeout:
+            return True
+        if result == wait_object_0:
+            return False
+        return None
     finally:
         kernel32.CloseHandle(handle)
 
@@ -3268,7 +3297,7 @@ def project_lock(coordination_root: Path, role: str, head: str, run_id: str) -> 
             payload = json.loads(path.read_text(encoding="utf-8"))
             if payload.get("run_id") == run_id:
                 path.unlink()
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError):
             pass
 
 
@@ -3873,7 +3902,11 @@ def validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None:
         ):
             _v3_fail("diagnostic role has illegal outcome or release authority")
     elif role in {"candidate", "post-merge"}:
-        if outcome not in {"PASS", "BLOCKED"} or intent != "v0.23.11":
+        if (
+            outcome not in {"PASS", "BLOCKED"}
+            or not isinstance(intent, str)
+            or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", intent)
+        ):
             _v3_fail("release role has illegal outcome or intent")
     else:
         _v3_fail("receipt role is invalid")
@@ -4328,8 +4361,8 @@ def write_diagnostic_inventory(
     }
 
 
-def _release_intent_for_role(role: str) -> str:
-    return "none" if role == "diagnostic" else "v0.23.11"
+def _release_intent_for_role(role: str, release_intent: str) -> str:
+    return "none" if role == "diagnostic" else release_intent
 
 
 def _blocked_failure(stage: str, error: BaseException) -> dict[str, Any]:
@@ -4347,12 +4380,12 @@ def _blocked_failure(stage: str, error: BaseException) -> dict[str, Any]:
     }
 
 
-def receipt_base(context: GitContext, role: str, run_id: str) -> dict[str, Any]:
+def receipt_base(context: GitContext, role: str, release_intent: str) -> dict[str, Any]:
     return {
         "schema_version": EXACT_HEAD_RECEIPT_V3_SCHEMA_VERSION,
         "role": role,
         "outcome": "BLOCKED",
-        "release_intent": _release_intent_for_role(role),
+        "release_intent": _release_intent_for_role(role, release_intent),
         "identity": {
             "captured_head": context.head,
             "project_key": PROJECT_KEY,
@@ -4377,9 +4410,12 @@ def execute(role: str, scanner_override: str | None) -> Path:
     inherited_environment = process_environment()
     clean_environment = scrub_sonar_environment(inherited_environment)
     context = git_context(Path.cwd(), clean_environment)
+    release_intent = release_intent_at_head(
+        context.repository_root, clean_environment, context.head
+    )
     run_id = str(uuid.uuid4())
     target_receipt = receipt_path(context, role)
-    receipt = receipt_base(context, role, run_id)
+    receipt = receipt_base(context, role, release_intent)
     secrets = sonar_secret_values(inherited_environment)
     stage = "PLANNED"
     plan: CoveragePlan | None = None
@@ -4585,7 +4621,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 "schema_version": EXACT_HEAD_RECEIPT_V3_SCHEMA_VERSION,
                 "role": role,
                 "outcome": outcome,
-                "release_intent": _release_intent_for_role(role),
+                "release_intent": _release_intent_for_role(role, release_intent),
                 "identity": identity,
                 "coverage": coverage,
                 "analysis": analysis,
@@ -4614,7 +4650,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 "schema_version": EXACT_HEAD_RECEIPT_V3_SCHEMA_VERSION,
                 "role": role,
                 "outcome": "BLOCKED",
-                "release_intent": _release_intent_for_role(role),
+                "release_intent": _release_intent_for_role(role, release_intent),
                 "identity": receipt.get(
                     "identity",
                     {

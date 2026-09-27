@@ -27,7 +27,6 @@ _TRUSTED_BUILD_EVENT = "workflow_dispatch"
 _PREVIEW_EXECUTABLE = "netcoredbg-mcp-stateless-preview.exe"
 _EXACT_HEAD_RUNNER_PATH = Path(__file__).with_name("run_sonarqube_exact_head.py")
 _EXACT_HEAD_RECEIPT_SCHEMA_VERSION = 3
-_POST_MERGE_RELEASE_INTENT = "v0.23.11"
 
 _POLICY_AUTHORITY_PATHS = (
     "AGENTS.md",
@@ -1005,7 +1004,7 @@ def _load_json_object(raw: bytes, name: str) -> dict[str, Any]:
     return result
 
 
-def _load_exact_head_receipt_validator() -> Callable[[Mapping[str, Any]], None]:
+def _load_exact_head_receipt_validator() -> tuple[Callable[..., Any], Callable[..., Any]]:
     specification = importlib.util.spec_from_file_location(
         "_stateless_preview_exact_head_runner", _EXACT_HEAD_RUNNER_PATH
     )
@@ -1018,22 +1017,29 @@ def _load_exact_head_receipt_validator() -> Callable[[Mapping[str, Any]], None]:
     except Exception:
         _refuse("exact-head receipt authority is unavailable")
     validator = getattr(runner, "validate_exact_head_receipt_v3", None)
-    if not callable(validator):
+    release_intent = getattr(runner, "release_intent_at_head", None)
+    if not callable(validator) or not callable(release_intent):
         _refuse("exact-head receipt authority is unavailable")
-    return validator
+    return validator, release_intent
 
 
-def _validate_post_merge_scan_receipt(receipt: Mapping[str, Any], source_commit: str) -> None:
-    validator = _load_exact_head_receipt_validator()
+def _validate_post_merge_scan_receipt(
+    receipt: Mapping[str, Any], source_commit: str, repository_root: Path
+) -> None:
+    validator, release_intent_at_head = _load_exact_head_receipt_validator()
     try:
         validator(receipt)
+        clean_environment = {
+            key: value for key, value in os.environ.items() if not key.upper().startswith("SONAR_")
+        }
+        expected_intent = release_intent_at_head(repository_root, clean_environment, source_commit)
     except Exception:
         _refuse("post-merge exact-head scan receipt is not trusted")
     identity = receipt.get("identity")
     if (
         receipt.get("role") != "post-merge"
         or receipt.get("outcome") != "PASS"
-        or receipt.get("release_intent") != _POST_MERGE_RELEASE_INTENT
+        or receipt.get("release_intent") != expected_intent
         or not isinstance(identity, Mapping)
         or identity.get("captured_head") != source_commit
         or identity.get("project_key") != _SONAR_PROJECT_KEY
@@ -1064,7 +1070,7 @@ def produce_post_merge_exact_head_receipt(
     raw_receipt_path = _post_merge_scan_receipt_path(root, source["commit"])
     raw_receipt = _read_regular_bytes(raw_receipt_path, "post-merge scan receipt")
     _validate_post_merge_scan_receipt(
-        _load_json_object(raw_receipt, "post-merge scan receipt"), source["commit"]
+        _load_json_object(raw_receipt, "post-merge scan receipt"), source["commit"], root
     )
     record = {
         "receipt_schema_version": "1.0",
@@ -1258,7 +1264,7 @@ def seal_build_records(
         _post_merge_scan_receipt_path(root, source["commit"]), "post-merge scan receipt"
     )
     _validate_post_merge_scan_receipt(
-        _load_json_object(raw_scan_receipt, "post-merge scan receipt"), source["commit"]
+        _load_json_object(raw_scan_receipt, "post-merge scan receipt"), source["commit"], root
     )
     if receipt_record["source_runner"]["receipt_sha256"] != _sha256_bytes(raw_scan_receipt):
         _refuse("post-merge receipt does not bind the repository scan result")

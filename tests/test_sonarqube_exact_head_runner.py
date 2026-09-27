@@ -44,6 +44,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
         patches.enter_context(patch.object(runner, "resolve_wave2_entry", return_value={}))
         patches.enter_context(patch.object(runner, "verify_wave2_entry", return_value={}))
         patches.enter_context(patch.object(runner, "preflight_coverage_toolchain", return_value={}))
+        patches.enter_context(
+            patch.object(runner, "release_intent_at_head", return_value="v0.23.12")
+        )
         patches.enter_context(patch.object(runner, "derive_coverage_plan", return_value=plan))
         patches.enter_context(patch.object(runner, "coverage_scanner_properties", return_value=()))
         patches.enter_context(
@@ -263,12 +266,12 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 runner,
                 "read_verified_primary_dotenv",
                 create=True,
-                side_effect=runner.CredentialsUnavailable(*runner.REQUIRED_ENV),
+                side_effect=runner.CredentialsUnavailableError(*runner.REQUIRED_ENV),
             ) as verified_reader:
                 scanner_context = self.context(primary_root, scanner_root)
                 credentials = self.credentials()
                 with self.assertRaisesRegex(
-                    runner.CredentialsUnavailable, "SONAR_CREDENTIALS_UNAVAILABLE"
+                    runner.CredentialsUnavailableError, "SONAR_CREDENTIALS_UNAVAILABLE"
                 ):
                     runner.load_credentials(scanner_context, credentials)
 
@@ -325,7 +328,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     with reader:
                         scanner_context = self.context(primary_root, scanner_root)
                         with self.assertRaisesRegex(
-                            runner.CredentialsUnavailable, "SONAR_CREDENTIALS_UNAVAILABLE"
+                            runner.CredentialsUnavailableError, "SONAR_CREDENTIALS_UNAVAILABLE"
                         ):
                             runner.load_credentials(scanner_context, {})
 
@@ -397,7 +400,8 @@ class TestSonarqubeExactHeadRunner(TestCase):
             credentials = self.credentials()
             process_env = {**credentials, "SONAR_HOST_URL": "sonar.example.test"}
             with self.assertRaisesRegex(
-                runner.CredentialsUnavailable, r"^SONAR_CREDENTIALS_UNAVAILABLE: SONAR_HOST_URL\."
+                runner.CredentialsUnavailableError,
+                r"^SONAR_CREDENTIALS_UNAVAILABLE: SONAR_HOST_URL\.",
             ):
                 runner.load_credentials(scanner_context, process_env)
 
@@ -421,7 +425,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
             "https://sonar.example.test/path",
         ):
             with self.subTest(supplied=supplied):
-                with self.assertRaisesRegex(runner.CredentialsUnavailable, "SONAR_HOST_URL"):
+                with self.assertRaisesRegex(runner.CredentialsUnavailableError, "SONAR_HOST_URL"):
                     runner.credential_free_host(supplied)
 
     def test_scanner_auth_failure_is_a_named_credential_blocker(self):
@@ -432,7 +436,8 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 return_value=runner.subprocess.CompletedProcess([], 1, "HTTP 401 unauthorized"),
             ):
                 with self.assertRaisesRegex(
-                    runner.CredentialsUnavailable, r"^SONAR_CREDENTIALS_UNAVAILABLE: SONAR_TOKEN\."
+                    runner.CredentialsUnavailableError,
+                    r"^SONAR_CREDENTIALS_UNAVAILABLE: SONAR_TOKEN\.",
                 ):
                     runner.run_process(
                         ["scanner", "begin"],
@@ -1532,7 +1537,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
             def __init__(self):
                 self.closed_handles = []
 
-            def CloseHandle(self, handle):
+            def CloseHandle(self, handle):  # noqa: N802 - matches the Win32 API name
                 self.closed_handles.append(handle)
                 return True
 
@@ -1561,7 +1566,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 "a" * 40,
             )
             runner.write_receipt(
-                receipt_path, runner.receipt_base(context, "candidate", "new-run"), ()
+                receipt_path, runner.receipt_base(context, "candidate", "v0.23.12"), ()
             )
             replacement = json.loads(receipt_path.read_text(encoding="utf-8"))
 
@@ -1581,7 +1586,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
             context = runner.GitContext(root, root, root, root, "a" * 40)
             for invalid_code in (1, True):
                 with self.subTest(invalid_code=invalid_code):
-                    receipt = runner.receipt_base(context, "candidate", "new-run")
+                    receipt = runner.receipt_base(context, "candidate", "v0.23.12")
                     receipt["failure"]["code"] = invalid_code
                     with self.assertRaisesRegex(
                         runner.RunnerError, "EXACT_HEAD_RECEIPT_V3_INVALID"
@@ -2113,6 +2118,9 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             patches.enter_context(patch.object(runner, "process_environment", return_value={}))
             patches.enter_context(patch.object(runner, "scrub_sonar_environment", return_value={}))
             patches.enter_context(patch.object(runner, "git_context", return_value=context))
+            patches.enter_context(
+                patch.object(runner, "release_intent_at_head", return_value="v0.23.12")
+            )
             patches.enter_context(
                 patch.object(runner, "receipt_path", return_value=root / "receipt.json")
             )

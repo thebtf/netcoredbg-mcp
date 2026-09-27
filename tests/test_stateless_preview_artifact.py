@@ -120,7 +120,7 @@ def _git(root: Path, *arguments: str) -> str:
 
 
 def _create_authority_repository(
-    tmp_path: Path,
+    tmp_path: Path, *, release_version: str = "0.23.12"
 ) -> tuple[Path, str, list[dict[str, str]]]:
     origin = tmp_path / "origin.git"
     authority_root = tmp_path / "authority-root"
@@ -137,6 +137,12 @@ def _create_authority_repository(
         assert source.is_file(), f"missing authority source: {relative_path}"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(source.read_bytes())
+
+    project_metadata = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    (authority_root / "pyproject.toml").write_text(
+        project_metadata.replace('version = "0.23.12"', f'version = "{release_version}"', 1),
+        encoding="utf-8",
+    )
 
     _git(authority_root, "add", ".")
     _git(authority_root, "commit", "-m", "snapshot release authorities")
@@ -469,6 +475,7 @@ def _write_post_merge_scan_receipt(
     *,
     outcome: str = "PASS",
     captured_head: str | None = None,
+    release_intent: str = "v0.23.12",
 ) -> Path:
     path = (
         repository_root
@@ -484,14 +491,14 @@ def _write_post_merge_scan_receipt(
         _blocked_v3_exact_head_receipt(
             source_commit,
             role="post-merge",
-            release_intent="v0.23.11",
+            release_intent=release_intent,
         )
         if outcome == "BLOCKED"
         else _complete_v3_exact_head_receipt(
             source_commit,
             role="post-merge",
             outcome=outcome,
-            release_intent="v0.23.11",
+            release_intent=release_intent,
         )
     )
     if outcome != "BLOCKED":
@@ -684,6 +691,27 @@ def test_post_merge_receipt_producer_binds_the_trusted_scan_to_main(tmp_path: Pa
         },
     }
     assert re.fullmatch(r"[^\r\n]+Z", produced["recorded_at"])
+
+
+def test_post_merge_receipt_matches_historical_project_version(tmp_path: Path) -> None:
+    authority_root, source_commit, _ = _create_authority_repository(
+        tmp_path, release_version="0.23.11"
+    )
+    _write_post_merge_scan_receipt(authority_root, source_commit, release_intent="v0.23.11")
+
+    produced = produce_post_merge_exact_head_receipt(
+        authority_root, _build_environment(source_commit)
+    )
+
+    assert produced["scanned_commit"] == source_commit
+
+
+def test_post_merge_receipt_refuses_historical_intent_on_new_head(tmp_path: Path) -> None:
+    authority_root, source_commit, _ = _create_authority_repository(tmp_path)
+    _write_post_merge_scan_receipt(authority_root, source_commit, release_intent="v0.23.11")
+
+    with pytest.raises(ValueError, match="post-merge exact-head scan receipt is not trusted"):
+        produce_post_merge_exact_head_receipt(authority_root, _build_environment(source_commit))
 
 
 @pytest.mark.parametrize(
@@ -1710,7 +1738,7 @@ def _write_v3_post_merge_scan_receipt(repository_root: Path, source_commit: str)
                 source_commit,
                 role="post-merge",
                 outcome="PASS",
-                release_intent="v0.23.11",
+                release_intent="v0.23.12",
             )
         )
     )
@@ -1722,6 +1750,8 @@ def _write_v3_post_merge_scan_receipt(repository_root: Path, source_commit: str)
     [
         ("diagnostic", "DIAGNOSTIC_COMPLETE", "none"),
         ("candidate", "PASS", "v0.23.11"),
+        ("candidate", "PASS", "v0.23.12"),
+        ("post-merge", "PASS", "v0.23.12"),
         ("post-merge", "PASS", "v0.23.11"),
     ],
 )
