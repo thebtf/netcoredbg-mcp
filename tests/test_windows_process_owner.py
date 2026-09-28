@@ -111,6 +111,7 @@ class _FakeApi:
         self.accounting_ok = accounting_ok
         self.resume_ok = resume_ok
         self._active_counts = [1, 1, 0]
+        self.messages: list[tuple[int, int]] = [(6, 41)]
 
     def create_job(self) -> int:
         self.events.append("create-job")
@@ -118,6 +119,17 @@ class _FakeApi:
 
     def set_kill_on_close(self, _job: int) -> None:
         self.events.append("set-job-limits")
+
+    def create_completion_port(self) -> int:
+        self.events.append("create-port")
+        return 12
+
+    def attach_completion_port(self, _job: int, _port: int) -> None:
+        self.events.append("attach-port")
+
+    def job_messages(self, _port: int) -> tuple[tuple[int, int], ...]:
+        messages, self.messages = self.messages, []
+        return tuple(messages)
 
     def assign_process(self, _job: int, _process: int) -> None:
         self.events.append("assign")
@@ -133,6 +145,16 @@ class _FakeApi:
         if not self.accounting_ok:
             raise _Win32CallError(AdmissionStage.VERIFY, 6)
         return self._active_counts.pop(0) if self._active_counts else 0
+
+    def total_processes(self, _job: int) -> int:
+        return 1
+
+    def member_process_ids(self, _job: int) -> tuple[int, ...]:
+        self.events.append("list-members")
+        return (41,)
+
+    def open_job_member(self, _job: int, _pid: int) -> int | None:
+        raise AssertionError("fake root must use its retained process handle")
 
     def resume_thread(self, _thread: int) -> int:
         self.events.append("resume-thread")
@@ -155,6 +177,534 @@ class _FakeApi:
 
     def close_handle(self, handle: int) -> None:
         self.events.append(f"close:{handle}")
+
+
+@pytest.mark.asyncio
+async def test_zero_accounting_waits_for_exact_descendant_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unsignaled Job member cannot be reported drained after accounting reaches zero."""
+
+    class DelayedExitApi(_FakeApi):
+        child_exited = False
+
+        def total_processes(self, _job: int) -> int:
+            return 2
+
+        def member_process_ids(self, _job: int) -> tuple[int, ...]:
+            self.events.append("list-members")
+            return (41, 42) if not self.child_exited else ()
+
+        def open_job_member(self, _job: int, pid: int) -> int | None:
+            self.events.append(f"open-member:{pid}")
+            return 22 if pid == 42 else 21
+
+        def wait_for_process(self, process: int, _timeout_ms: int) -> bool:
+            self.events.append(f"wait:{process}")
+            return process != 22 or self.child_exited
+
+    events: list[str] = []
+    api = DelayedExitApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    api.messages.append((6, 42))
+    api._active_counts = [1, 0, 0, 0]
+
+    monkeypatch.setattr(windows_process_owner, "_ADMISSION_CLEANUP_TIMEOUT", 0.0)
+    first = await owner.force_and_drain(timeout=0.0)
+    assert first.status is DrainStatus.TIMED_OUT
+    assert first.active_processes == 0
+    assert "wait:22" in events
+    still_active = await owner.aclose()
+    assert still_active.status is DrainStatus.TIMED_OUT
+    assert owner._job_handle == 11
+    assert "close:22" not in events
+    api.child_exited = True
+    second = await owner.aclose()
+    assert second.status is DrainStatus.DRAINED
+    assert events.index("wait:22") < events.index("close:22")
+    assert owner._close_reaper is not None
+    await asyncio.wait_for(owner._close_reaper, timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_graceful_zero_refuses_historical_unseen_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnseenApi(_FakeApi):
+        def total_processes(self, _job: int) -> int:
+            return 2
+
+    events: list[str] = []
+    api = UnseenApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    api._active_counts = [0]
+
+    receipt = await owner.drain_after_grace(grace_timeout=0.0, force_timeout=0.0)
+
+    assert receipt.status is DrainStatus.FAILED
+    assert receipt.forced is True
+    closed = await owner.aclose()
+    assert closed.status is DrainStatus.FAILED
+    assert "close:11" not in events and "close:21" not in events
+
+
+@pytest.mark.asyncio
+async def test_member_born_during_force_gap_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class GapApi(_FakeApi):
+        forced = False
+
+        def total_processes(self, _job: int) -> int:
+            return 2 if self.forced else 1
+
+        def terminate_job(self, job: int) -> None:
+            self.forced = True
+            super().terminate_job(job)
+
+    events: list[str] = []
+    api = GapApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    api._active_counts = [1, 0]
+
+    receipt = await owner.force_and_drain(timeout=0.0)
+
+    assert receipt.status is DrainStatus.FAILED
+    assert receipt.failure_stage is AdmissionStage.DRAIN
+    retried = await owner.force_and_drain(timeout=0.0)
+    assert retried.status is DrainStatus.FAILED
+    assert events.count("terminate-job") == 2
+    closed = await owner.aclose()
+    assert closed.status is DrainStatus.FAILED
+    assert "close:11" not in events and "close:21" not in events
+    assert owner._close_reaper is not None
+
+
+@pytest.mark.asyncio
+async def test_short_lived_members_reconcile_without_reopening_historical_pids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class HistoricalApi(_FakeApi):
+        def total_processes(self, _job: int) -> int:
+            return 3
+
+        def member_process_ids(self, _job: int) -> tuple[int, ...]:
+            return ()
+
+        def open_job_member(self, _job: int, _pid: int) -> int | None:
+            raise AssertionError("retired PIDs must not be reopened")
+
+    events: list[str] = []
+    api = HistoricalApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    api.messages.extend(((6, 42), (7, 42), (6, 43), (7, 43)))
+    api._active_counts = [0]
+
+    receipt = await owner.drain_after_grace(grace_timeout=0.0, force_timeout=0.0)
+    assert receipt.status is DrainStatus.DRAINED
+    assert not receipt.forced
+    assert "terminate-job" not in events
+    assert (await owner.aclose()).status is DrainStatus.DRAINED
+
+
+@pytest.mark.asyncio
+async def test_reused_pid_counts_both_job_births_after_first_retirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ReusedPidApi(_FakeApi):
+        snapshots = 0
+
+        def total_processes(self, _job: int) -> int:
+            return 3
+
+        def member_process_ids(self, _job: int) -> tuple[int, ...]:
+            self.snapshots += 1
+            if self.snapshots == 1:
+                return (41, 42)
+            if self.snapshots == 2:
+                self.messages.extend(((7, 42), (6, 42), (7, 42)))
+            return ()
+
+        def open_job_member(self, _job: int, pid: int) -> int | None:
+            assert pid == 42
+            return 22
+
+    events: list[str] = []
+    api = ReusedPidApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    api.messages.append((6, 42))
+    api._active_counts = [1, 0]
+
+    receipt = await owner.drain_after_grace(grace_timeout=0.1, force_timeout=0.0)
+
+    assert receipt.status is DrainStatus.DRAINED
+    assert not receipt.forced
+    assert (await owner.aclose()).status is DrainStatus.DRAINED
+    assert events.count("close:22") == 1
+    assert "terminate-job" not in events
+
+
+@pytest.mark.parametrize("inject_at", ("snapshot", "open"))
+@pytest.mark.asyncio
+async def test_recycled_pid_notifications_arrive_between_snapshot_and_first_open(
+    monkeypatch: pytest.MonkeyPatch, inject_at: str
+) -> None:
+    class LateRecycledApi(_FakeApi):
+        forced = False
+        notified = False
+        opens = 0
+
+        def total_processes(self, _job: int) -> int:
+            return 3
+
+        def job_messages(self, port: int) -> tuple[tuple[int, int], ...]:
+            messages = super().job_messages(port)
+            if (7, 42) in messages and (6, 42) in messages:
+                self.events.append("observe:B")
+            return messages
+
+        def member_process_ids(self, _job: int) -> tuple[int, ...]:
+            if inject_at == "snapshot" and not self.notified:
+                self.notified = True
+                self.messages.extend(((7, 42), (6, 42)))
+            return (41, 42) if not self.forced else ()
+
+        def open_job_member(self, _job: int, pid: int) -> int | None:
+            assert pid == 42
+            self.events.append("open:B")
+            self.opens += 1
+            if inject_at == "open" and not self.notified:
+                self.notified = True
+                self.messages.extend(((7, 42), (6, 42)))
+            return 22 + self.opens
+
+        def wait_for_process(self, handle: int, _timeout_ms: int) -> bool:
+            if handle in (23, 24):
+                self.events.append("wait:B")
+                return self.forced
+            return True
+
+        def terminate_job(self, job: int) -> None:
+            self.forced = True
+            self.messages.append((7, 42))
+            super().terminate_job(job)
+
+    events: list[str] = []
+    api = LateRecycledApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    api.messages.append((6, 42))
+    api._active_counts = [1, 0]
+
+    receipt = await owner.drain_after_grace(grace_timeout=0.02, force_timeout=0.02)
+
+    assert receipt.status is DrainStatus.DRAINED
+    assert receipt.forced
+    assert (events.index("observe:B") < events.index("open:B")) == (inject_at == "snapshot")
+    assert api.opens == (1 if inject_at == "snapshot" else 2)
+    assert events.index("wait:B") < events.index("terminate-job")
+    assert not owner._unverified_membership
+    assert (await owner.aclose()).status is DrainStatus.DRAINED
+    assert events.count("close:23") == 1
+    assert events.count("close:24") == (inject_at == "open")
+
+
+@pytest.mark.asyncio
+async def test_reused_live_pid_replaces_retired_handle_before_claiming_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ReusedLiveApi(_FakeApi):
+        recycled = False
+        opens = 0
+        second_exited = False
+
+        def total_processes(self, _job: int) -> int:
+            return 3
+
+        def job_messages(self, port: int) -> tuple[tuple[int, int], ...]:
+            if self.opens == 1 and not self.recycled:
+                self.recycled = True
+                self.messages.extend(((7, 42), (6, 42)))
+            return super().job_messages(port)
+
+        def member_process_ids(self, _job: int) -> tuple[int, ...]:
+            return () if self.second_exited else (41, 42)
+
+        def open_job_member(self, _job: int, pid: int) -> int | None:
+            assert pid == 42
+            self.opens += 1
+            return 21 + self.opens
+
+        def wait_for_process(self, handle: int, _timeout_ms: int) -> bool:
+            self.events.append(f"wait:{handle}")
+            return handle != 23 or self.second_exited
+
+        def terminate_job(self, job: int) -> None:
+            self.second_exited = True
+            self.messages.append((7, 42))
+            super().terminate_job(job)
+
+    events: list[str] = []
+    api = ReusedLiveApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    api.messages.append((6, 42))
+    api._active_counts = [1, 0]
+
+    receipt = await owner.drain_after_grace(grace_timeout=0.02, force_timeout=0.02)
+
+    assert receipt.status is DrainStatus.DRAINED
+    assert receipt.forced
+    assert "wait:23" in events
+    assert api.opens == 2
+    assert (await owner.aclose()).status is DrainStatus.DRAINED
+    assert events.count("close:22") == events.count("close:23") == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_live_birth_refuses_drain_despite_matching_job_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class AmbiguousApi(_FakeApi):
+        def total_processes(self, _job: int) -> int:
+            return 2
+
+        def member_process_ids(self, _job: int) -> tuple[int, ...]:
+            return ()
+
+    events: list[str] = []
+    api = AmbiguousApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    api.messages.extend(((6, 42), (6, 42), (7, 42)))
+    api._active_counts = [0]
+
+    receipt = await owner.drain_after_grace(grace_timeout=0.0, force_timeout=0.0)
+
+    assert receipt.status is DrainStatus.FAILED
+    assert receipt.failure_stage is AdmissionStage.DRAIN
+    assert "close:11" not in events
+
+
+@pytest.mark.asyncio
+async def test_open_member_denial_never_prevents_job_force_or_same_owner_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DeniedApi(_FakeApi):
+        def total_processes(self, _job: int) -> int:
+            return 2
+
+        def member_process_ids(self, _job: int) -> tuple[int, ...]:
+            return (41, 42) if not self.messages_exited else ()
+
+        messages_exited = False
+
+        def open_job_member(self, _job: int, pid: int) -> int | None:
+            assert pid == 42
+            raise _Win32CallError(AdmissionStage.DRAIN, 5)
+
+        def terminate_job(self, job: int) -> None:
+            self.messages_exited = True
+            self.messages.extend(((6, 42), (7, 42)))
+            super().terminate_job(job)
+
+    events: list[str] = []
+    api = DeniedApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    api._active_counts = [0]
+
+    receipt = await owner.force_and_drain(timeout=0.0)
+    assert receipt.status is DrainStatus.DRAINED
+    assert receipt.forced
+    assert events.count("terminate-job") == 1
+    assert (await owner.aclose()).status is DrainStatus.DRAINED
+
+
+@pytest.mark.asyncio
+async def test_force_waits_through_denied_open_until_child_retirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DelayedNotificationApi(_FakeApi):
+        forced = False
+        observations = 0
+
+        def total_processes(self, _job: int) -> int:
+            return 2
+
+        def member_process_ids(self, _job: int) -> tuple[int, ...]:
+            return (41, 42) if self.observations < 3 else ()
+
+        def open_job_member(self, _job: int, _pid: int) -> int | None:
+            raise _Win32CallError(AdmissionStage.DRAIN, 5)
+
+        def terminate_job(self, job: int) -> None:
+            self.forced = True
+            super().terminate_job(job)
+
+        def job_messages(self, port: int) -> tuple[tuple[int, int], ...]:
+            if self.forced:
+                self.observations += 1
+                if self.observations == 3:
+                    self.messages.extend(((6, 42), (7, 42)))
+            return super().job_messages(port)
+
+    events: list[str] = []
+    api = DelayedNotificationApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    api._active_counts = [1, 1, 0]
+    receipt = await owner.force_and_drain(timeout=0.1)
+    assert receipt.status is DrainStatus.DRAINED
+    assert receipt.forced and api.observations >= 3
+    assert (await owner.aclose()).status is DrainStatus.DRAINED
+
+
+@pytest.mark.asyncio
+async def test_concurrent_close_releases_each_controlling_handle_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    api = _FakeApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    api._active_counts = [0]
+
+    first, second = await asyncio.gather(owner.aclose(), owner.aclose())
+
+    assert first is second and first.status is DrainStatus.DRAINED
+    assert events.count("close:11") == 1
+    assert events.count("close:12") == 1
+    assert events.count("close:21") == 1
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancelled_close_retains_worker_until_descendant_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class PendingApi(_FakeApi):
+        exited = False
+
+        def __init__(self, events: list[str]) -> None:
+            super().__init__(events)
+            self.forced = asyncio.Event()
+
+        def total_processes(self, _job: int) -> int:
+            return 2
+
+        def member_process_ids(self, _job: int) -> tuple[int, ...]:
+            return (41, 42) if not self.exited else ()
+
+        def open_job_member(self, _job: int, pid: int) -> int | None:
+            assert pid == 42
+            return 22
+
+        def wait_for_process(self, process: int, _timeout_ms: int) -> bool:
+            return process != 22 or self.exited
+
+        def terminate_job(self, job: int) -> None:
+            super().terminate_job(job)
+            self.forced.set()
+
+    events: list[str] = []
+    api = PendingApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    api.messages.append((6, 42))
+    api._active_counts = [0]
+    monkeypatch.setattr(windows_process_owner, "_ADMISSION_CLEANUP_TIMEOUT", 0.02)
+    monkeypatch.setattr(
+        windows_process_owner, "_FAILED_ADMISSION_REAPER_INITIAL_BACKOFF_SECONDS", 0.01
+    )
+
+    for _ in range(2):
+        caller = asyncio.create_task(owner.aclose())
+        await asyncio.wait_for(api.forced.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+
+    assert "close:22" not in events
+    await asyncio.sleep(0.05)
+    api.exited = True
+    api.messages.append((7, 42))
+    for _ in range(100):
+        if "close:11" in events:
+            break
+        await asyncio.sleep(0.01)
+
+    assert "close:11" in events
+    assert (await owner.aclose()).status is DrainStatus.DRAINED
+    assert events.count("close:22") == 1
+    assert events.count("close:11") == 1
+    assert events.count("close:12") == 1
+    assert events.count("close:21") == 1
+
+
+@pytest.mark.asyncio
+async def test_zero_waits_for_delayed_retirement_notification_within_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DelayedZeroApi(_FakeApi):
+        forced = False
+        observations = 0
+
+        def total_processes(self, _job: int) -> int:
+            return 2
+
+        def member_process_ids(self, _job: int) -> tuple[int, ...]:
+            return ()
+
+        def terminate_job(self, job: int) -> None:
+            self.forced = True
+            super().terminate_job(job)
+
+        def job_messages(self, port: int) -> tuple[tuple[int, int], ...]:
+            if self.forced:
+                self.observations += 1
+                if self.observations == 3:
+                    self.messages.extend(((6, 42), (7, 42)))
+            return super().job_messages(port)
+
+    events: list[str] = []
+    api = DelayedZeroApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    api._active_counts = [1, 0]
+    receipt = await owner.force_and_drain(timeout=0.1)
+    assert receipt.status is DrainStatus.DRAINED
+    assert api.observations >= 3
+    assert (await owner.aclose()).status is DrainStatus.DRAINED
+
+
+@pytest.mark.asyncio
+async def test_forced_zero_waits_for_async_child_termination_and_keeps_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class PendingApi(_FakeApi):
+        exited = False
+
+        def total_processes(self, _job: int) -> int:
+            return 2
+
+        def member_process_ids(self, _job: int) -> tuple[int, ...]:
+            return (41, 42) if not self.exited else ()
+
+        def open_job_member(self, _job: int, _pid: int) -> int | None:
+            return 22
+
+        def wait_for_process(self, process: int, _timeout_ms: int) -> bool:
+            return process != 22 or self.exited
+
+    events: list[str] = []
+    api = PendingApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    api.messages.append((6, 42))
+    api._active_counts = [1, 0, 0]
+    first = await owner.force_and_drain(timeout=0.0)
+    assert first.status is DrainStatus.TIMED_OUT
+    monkeypatch.setattr(windows_process_owner, "_ADMISSION_CLEANUP_TIMEOUT", 0.0)
+    assert (await owner.aclose()).status is DrainStatus.TIMED_OUT
+    assert owner._job_handle == 11
+    api.exited = True
+    api.messages.append((7, 42))
+    recovered = await owner.force_and_drain(timeout=0.0)
+    assert recovered.status is DrainStatus.DRAINED
+    assert recovered.owner == first.owner
+    assert (await owner.aclose()).status is DrainStatus.DRAINED
 
 
 class _FakePipes:
@@ -219,6 +769,8 @@ async def test_admission_orders_private_job_before_resume(monkeypatch: pytest.Mo
     required_order = [
         "create-job",
         "set-job-limits",
+        "create-port",
+        "attach-port",
         "create-suspended",
         "assign",
         "verify-membership",
@@ -312,6 +864,53 @@ def test_exit_code_fails_closed_when_liveness_probe_fails() -> None:
     assert raised.value is failure
     wait.assert_called_once_with(41, 0)
     get_exit_code.assert_not_called()
+
+
+def test_job_member_list_grows_before_claiming_complete_snapshot() -> None:
+    class MemberList(ctypes.Structure):
+        _fields_ = [
+            ("NumberOfAssignedProcesses", ctypes.c_uint32),
+            ("NumberOfProcessIdsInList", ctypes.c_uint32),
+            ("ProcessIdList", ctypes.c_size_t * 1),
+        ]
+
+    capacities: list[int] = []
+
+    def query(_job: int, _kind: int, buffer: Any, length: int, _returned: Any) -> bool:
+        capacity = (length - MemberList.ProcessIdList.offset) // ctypes.sizeof(ctypes.c_size_t)
+        capacities.append(capacity)
+        info = ctypes.cast(buffer, ctypes.POINTER(MemberList)).contents
+        info.NumberOfAssignedProcesses = 9
+        info.NumberOfProcessIdsInList = min(capacity, 9)
+        values = (ctypes.c_size_t * info.NumberOfProcessIdsInList).from_buffer(
+            buffer, MemberList.ProcessIdList.offset
+        )
+        for index in range(len(values)):
+            values[index] = 200 + index
+        return True
+
+    kernel32 = _Kernel32.__new__(_Kernel32)
+    kernel32._ctypes = ctypes
+    kernel32._basic_process_id_list = MemberList
+    kernel32._query_information = query
+
+    assert kernel32.member_process_ids(11) == tuple(range(200, 209))
+    assert capacities == [8, 16]
+
+
+def test_recycled_nonmember_handle_is_never_accepted_as_job_member() -> None:
+    kernel32 = _Kernel32.__new__(_Kernel32)
+    kernel32._open_process = MagicMock(return_value=22)
+    kernel32.is_process_in_job = MagicMock(return_value=False)
+    kernel32.wait_for_process = MagicMock(return_value=False)
+    kernel32.close_handle = MagicMock()
+
+    with pytest.raises(_Win32CallError) as raised:
+        kernel32.open_job_member(11, 42)
+
+    assert raised.value.stage is AdmissionStage.DRAIN
+    kernel32._open_process.assert_called_once_with(0x101000, False, 42)
+    kernel32.close_handle.assert_called_once_with(22)
 
 
 @pytest.mark.asyncio
@@ -535,6 +1134,7 @@ async def test_failed_admission_reaper_backs_off_and_logs_failures(
     reaper = _FailedAdmissionReaper(
         api=RetryApi(events),
         job_handle=11,
+        port_handle=None,
         process_handle=21,
         thread_handle=31,
         pipe_ends=None,

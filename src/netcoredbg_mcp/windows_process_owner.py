@@ -24,14 +24,22 @@ _ACCOUNTING_POLL_SECONDS = 0.01
 _FAILED_ADMISSION_REAPER_INITIAL_BACKOFF_SECONDS = 0.05
 _FAILED_ADMISSION_REAPER_MAX_BACKOFF_SECONDS = 1.0
 _INFINITE = 0xFFFFFFFF
-_WAIT_FAILED = 0xFFFFFFFF
 _WAIT_TIMEOUT = 258
 _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
+_JOB_OBJECT_ASSOCIATE_COMPLETION_PORT_INFORMATION = 7
+_JOB_OBJECT_MSG_NEW_PROCESS = 6
+_JOB_OBJECT_MSG_EXIT_PROCESS = 7
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _CREATE_SUSPENDED = 0x00000004
 _CREATE_UNICODE_ENVIRONMENT = 0x00000400
 _RESUME_FAILED = 0xFFFFFFFF
+_JOB_OBJECT_BASIC_PROCESS_ID_LIST = 3
+_ERROR_MORE_DATA = 234
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_SYNCHRONIZE = 0x100000
+_INVALID_HANDLE_VALUE = -1
+_MAX_JOB_MEMBERS = 65536
 
 
 logger = logging.getLogger(__name__)
@@ -63,7 +71,7 @@ class DrainStatus(str, Enum):
     """Truthful result of one owner-only drain attempt.
 
     ``STALE`` rejects a mismatched capability fence without an effect. The
-    other variants report retained-Job accounting.
+    other variants report Job accounting and retained member-handle liveness.
     """
 
     DRAINED = "drained"
@@ -159,12 +167,22 @@ class _WindowsApi(Protocol):
     def create_job(self) -> int: ...
 
     def set_kill_on_close(self, job_handle: int) -> None: ...
+    def create_completion_port(self) -> int: ...
+
+    def attach_completion_port(self, job_handle: int, port_handle: int) -> None: ...
+
+    def job_messages(self, port_handle: int) -> tuple[tuple[int, int], ...]: ...
 
     def assign_process(self, job_handle: int, process_handle: int) -> None: ...
 
     def is_process_in_job(self, process_handle: int, job_handle: int) -> bool: ...
 
     def active_processes(self, job_handle: int) -> int: ...
+    def total_processes(self, job_handle: int) -> int: ...
+
+    def member_process_ids(self, job_handle: int) -> tuple[int, ...]: ...
+
+    def open_job_member(self, job_handle: int, pid: int) -> int | None: ...
 
     def resume_thread(self, thread_handle: int) -> int: ...
 
@@ -239,8 +257,21 @@ class _Kernel32:
                 ("TotalTerminatedProcesses", dword),
             ]
 
+        class BasicProcessIdList(ctypes.Structure):
+            _fields_ = [
+                ("NumberOfAssignedProcesses", dword),
+                ("NumberOfProcessIdsInList", dword),
+                ("ProcessIdList", ctypes.c_size_t * 1),
+            ]
+
+        class AssociateCompletionPort(ctypes.Structure):
+            _fields_ = [("CompletionKey", void_p), ("CompletionPort", handle)]
+
         self._extended_limit_information = ExtendedLimitInformation
         self._basic_accounting_information = BasicAccountingInformation
+        self._basic_process_id_list = BasicProcessIdList
+        self._associate_completion_port = AssociateCompletionPort
+        self._completion_key: int | None = None
         self._create_job = kernel32.CreateJobObjectW
         self._create_job.argtypes = (void_p, wintypes.LPCWSTR)
         self._create_job.restype = handle
@@ -256,6 +287,21 @@ class _Kernel32:
         self._query_information = kernel32.QueryInformationJobObject
         self._query_information.argtypes = (handle, ctypes.c_int, void_p, dword, void_p)
         self._query_information.restype = bool_
+        self._open_process = kernel32.OpenProcess
+        self._open_process.argtypes = (dword, bool_, dword)
+        self._open_process.restype = handle
+        self._create_completion_port = kernel32.CreateIoCompletionPort
+        self._create_completion_port.argtypes = (handle, handle, ctypes.c_size_t, dword)
+        self._create_completion_port.restype = handle
+        self._get_queued_completion_status = kernel32.GetQueuedCompletionStatus
+        self._get_queued_completion_status.argtypes = (
+            handle,
+            ctypes.POINTER(dword),
+            ctypes.POINTER(ctypes.c_size_t),
+            ctypes.POINTER(void_p),
+            dword,
+        )
+        self._get_queued_completion_status.restype = bool_
         self._resume_thread = kernel32.ResumeThread
         self._resume_thread.argtypes = (handle,)
         self._resume_thread.restype = dword
@@ -283,6 +329,47 @@ class _Kernel32:
         if not handle:
             raise self._error(AdmissionStage.CREATE_JOB)
         return int(handle)
+
+    def create_completion_port(self) -> int:
+        port = self._create_completion_port(
+            self._ctypes.c_void_p(_INVALID_HANDLE_VALUE), None, 0, 1
+        )
+        if not port:
+            raise self._error(AdmissionStage.CREATE_JOB)
+        return int(port)
+
+    def attach_completion_port(self, job_handle: int, port_handle: int) -> None:
+        info = self._associate_completion_port(job_handle, port_handle)
+        if not self._set_information(
+            job_handle,
+            _JOB_OBJECT_ASSOCIATE_COMPLETION_PORT_INFORMATION,
+            self._ctypes.byref(info),
+            self._ctypes.sizeof(info),
+        ):
+            raise self._error(AdmissionStage.SET_LIMITS)
+        self._completion_key = job_handle
+
+    def job_messages(self, port_handle: int) -> tuple[tuple[int, int], ...]:
+        messages: list[tuple[int, int]] = []
+        for _ in range(_MAX_JOB_MEMBERS):
+            code = self._wintypes.DWORD()
+            key = self._ctypes.c_size_t()
+            pid = self._ctypes.c_void_p()
+            if not self._get_queued_completion_status(
+                port_handle,
+                self._ctypes.byref(code),
+                self._ctypes.byref(key),
+                self._ctypes.byref(pid),
+                0,
+            ):
+                error = self._ctypes.get_last_error()
+                if error == _WAIT_TIMEOUT:
+                    return tuple(messages)
+                raise _Win32CallError(AdmissionStage.DRAIN, error or None)
+            if key.value != self._completion_key:
+                raise _Win32CallError(AdmissionStage.DRAIN, None)
+            messages.append((code.value, pid.value or 0))
+        raise _Win32CallError(AdmissionStage.DRAIN, None)
 
     def set_kill_on_close(self, job_handle: int) -> None:
         info = self._extended_limit_information()
@@ -317,6 +404,66 @@ class _Kernel32:
             raise self._error(AdmissionStage.VERIFY)
         return int(info.ActiveProcesses)
 
+    def total_processes(self, job_handle: int) -> int:
+        info = self._basic_accounting_information()
+        if not self._query_information(
+            job_handle,
+            _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+            self._ctypes.byref(info),
+            self._ctypes.sizeof(info),
+            None,
+        ):
+            raise self._error(AdmissionStage.DRAIN)
+        return int(info.TotalProcesses)
+
+    def member_process_ids(self, job_handle: int) -> tuple[int, ...]:
+        capacity = 8
+        header = self._basic_process_id_list
+        while capacity <= _MAX_JOB_MEMBERS:
+            storage = self._ctypes.create_string_buffer(
+                header.ProcessIdList.offset + capacity * self._ctypes.sizeof(self._ctypes.c_size_t)
+            )
+            result = self._query_information(
+                job_handle,
+                _JOB_OBJECT_BASIC_PROCESS_ID_LIST,
+                storage,
+                self._ctypes.sizeof(storage),
+                None,
+            )
+            info = self._ctypes.cast(storage, self._ctypes.POINTER(header)).contents
+            if result and info.NumberOfAssignedProcesses <= capacity:
+                count = info.NumberOfProcessIdsInList
+                if count > capacity or count < info.NumberOfAssignedProcesses:
+                    raise self._error(AdmissionStage.DRAIN)
+                identifiers = (self._ctypes.c_size_t * count).from_buffer(
+                    storage, header.ProcessIdList.offset
+                )
+                return tuple(identifiers)
+            error = self._ctypes.get_last_error()
+            if not result and error != _ERROR_MORE_DATA:
+                raise _Win32CallError(AdmissionStage.DRAIN, error or None)
+            capacity = max(capacity * 2, info.NumberOfAssignedProcesses)
+        raise _Win32CallError(AdmissionStage.DRAIN, _ERROR_MORE_DATA)
+
+    def open_job_member(self, job_handle: int, pid: int) -> int | None:
+        handle = self._open_process(_SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            raise self._error(AdmissionStage.DRAIN)
+        process_handle = int(handle)
+        retained = False
+        try:
+            retained = self.is_process_in_job(process_handle, job_handle)
+            if retained:
+                return process_handle
+            if not self.wait_for_process(process_handle, 0):
+                raise _Win32CallError(AdmissionStage.DRAIN, None)
+            return None
+        except _Win32CallError as error:
+            raise _Win32CallError(AdmissionStage.DRAIN, error.winerror) from error
+        finally:
+            if not retained:
+                _close_ignoring_errors(self, process_handle)
+
     def resume_thread(self, thread_handle: int) -> int:
         result = int(self._resume_thread(thread_handle))
         if result == _RESUME_FAILED:
@@ -333,16 +480,16 @@ class _Kernel32:
 
     def wait_for_process(self, process_handle: int, timeout_ms: int) -> bool:
         result = int(self._wait_for_single_object(process_handle, timeout_ms))
-        if result == _WAIT_FAILED:
+        if result not in (0, _WAIT_TIMEOUT):
             raise self._error(AdmissionStage.DRAIN)
-        return result != _WAIT_TIMEOUT
+        return result == 0
 
     def exit_code(self, process_handle: int) -> int | None:
         wait_result = int(self._wait_for_single_object(process_handle, 0))
-        if wait_result == _WAIT_FAILED:
-            raise self._error(AdmissionStage.DRAIN)
         if wait_result == _WAIT_TIMEOUT:
             return None
+        if wait_result != 0:
+            raise self._error(AdmissionStage.DRAIN)
         value = self._wintypes.DWORD()
         if not self._get_exit_code(process_handle, self._ctypes.byref(value)):
             raise self._error(AdmissionStage.DRAIN)
@@ -526,6 +673,7 @@ class _FailedAdmissionReaper:
         job_handle: int | None,
         process_handle: int | None,
         thread_handle: int | None,
+        port_handle: int | None,
         pipe_ends: _PipeEnds | None,
         transports: tuple[asyncio.BaseTransport, ...],
         admitted: bool,
@@ -535,6 +683,7 @@ class _FailedAdmissionReaper:
         self._process_handle = process_handle
         self._thread_handle = thread_handle
         self._pipe_ends = pipe_ends
+        self._port_handle = port_handle
         self._transports = transports
         self._admitted = admitted
         self._closed = False
@@ -643,6 +792,9 @@ class _FailedAdmissionReaper:
         if self._job_handle is not None:
             _close_ignoring_errors(self._api, self._job_handle)
             self._job_handle = None
+        if self._port_handle is not None:
+            _close_ignoring_errors(self._api, self._port_handle)
+            self._port_handle = None
         self._closed = True
         self._completed.set()
 
@@ -748,6 +900,7 @@ class WindowsOwnedProcess:
         api: _WindowsApi,
         job_handle: int,
         process_handle: int,
+        port_handle: int,
         stdin: asyncio.StreamWriter | None,
         stdout: asyncio.StreamReader,
         stderr: asyncio.StreamReader,
@@ -756,6 +909,7 @@ class WindowsOwnedProcess:
         self.owner = owner
         self._api = api
         self._job_handle: int | None = job_handle
+        self._port_handle: int | None = port_handle
         self._process_handle: int | None = process_handle
         self.stdin = stdin
         self.stdout = stdout
@@ -764,6 +918,17 @@ class WindowsOwnedProcess:
         self._returncode: int | None = None
         self._drain_task: asyncio.Task[OwnerDrainReceipt] | None = None
         self._drain_receipt: OwnerDrainReceipt | None = None
+        self._member_handles: dict[int, int] = {}
+        self._birth_notifications = 0
+        self._root_birth_seen = False
+        self._live_births: set[int] = set()
+        self._birth_generations: dict[int, int] = {}
+        self._retired_members: set[int] = set()
+        self._unmatched_member_handles: list[int] = []
+        self._unverified_membership = False
+        self._close_task: asyncio.Task[OwnerDrainReceipt] | None = None
+        self._close_reaper: asyncio.Task[None] | None = None
+        self._close_lock = asyncio.Lock()
         self._closed = False
 
     @property
@@ -822,6 +987,7 @@ class WindowsOwnedProcess:
 
         owner_id = uuid.uuid4().hex
         job_handle: int | None = None
+        port_handle: int | None = None
         process_handle: int | None = None
         thread_handle: int | None = None
         endpoints = pipe_ends
@@ -831,6 +997,9 @@ class WindowsOwnedProcess:
             job_handle = api.create_job()
             _make_non_inheritable(job_handle, AdmissionStage.CREATE_JOB)
             api.set_kill_on_close(job_handle)
+            port_handle = api.create_completion_port()
+            _make_non_inheritable(port_handle, AdmissionStage.CREATE_JOB)
+            api.attach_completion_port(job_handle, port_handle)
             endpoints = endpoints or _PipeEnds.create(stdin_mode)
             process_handle, thread_handle, process_id = process_creator(
                 argv=argv,
@@ -864,6 +1033,7 @@ class WindowsOwnedProcess:
             return cls(
                 owner=owner,
                 api=api,
+                port_handle=port_handle,
                 job_handle=job_handle,
                 process_handle=process_handle,
                 stdin=stdin,
@@ -881,6 +1051,7 @@ class WindowsOwnedProcess:
                     job_handle=job_handle,
                     process_handle=process_handle,
                     thread_handle=thread_handle,
+                    port_handle=port_handle,
                     pipe_ends=endpoints,
                     transports=transports,
                     admitted=admitted,
@@ -898,6 +1069,7 @@ class WindowsOwnedProcess:
                     job_handle=job_handle,
                     process_handle=process_handle,
                     thread_handle=thread_handle,
+                    port_handle=port_handle,
                     pipe_ends=endpoints,
                     transports=transports,
                     admitted=admitted,
@@ -933,6 +1105,68 @@ class WindowsOwnedProcess:
             raise _Win32CallError(AdmissionStage.DRAIN, None)
         return self._api.active_processes(self._job_handle)
 
+    def _observe_job_messages(self) -> None:
+        if self._port_handle is None:
+            raise _Win32CallError(AdmissionStage.DRAIN, None)
+        for message, pid in self._api.job_messages(self._port_handle):
+            if message == _JOB_OBJECT_MSG_NEW_PROCESS:
+                if (
+                    not pid
+                    or pid in self._live_births
+                    or (pid == self.owner.root_pid and self._root_birth_seen)
+                    or self._birth_notifications >= _MAX_JOB_MEMBERS
+                ):
+                    self._unverified_membership = True
+                    continue
+                self._birth_notifications += 1
+                self._live_births.add(pid)
+                self._birth_generations[pid] = self._birth_notifications
+                self._retired_members.discard(pid)
+                if pid == self.owner.root_pid:
+                    self._root_birth_seen = True
+            elif message == _JOB_OBJECT_MSG_EXIT_PROCESS:
+                if pid not in self._live_births:
+                    self._unverified_membership = True
+                    continue
+                self._live_births.remove(pid)
+                if pid != self.owner.root_pid:
+                    self._retired_members.add(pid)
+                    handle = self._member_handles.pop(pid, None)
+                    if handle is not None:
+                        if self._api.wait_for_process(handle, 0):
+                            _close_ignoring_errors(self._api, handle)
+                        else:
+                            self._unmatched_member_handles.append(handle)
+
+    def _snapshot_members(self) -> None:
+        job_handle = self._job_handle
+        if job_handle is None:
+            raise _Win32CallError(AdmissionStage.DRAIN, None)
+        self._observe_job_messages()
+        member_pids = self._api.member_process_ids(job_handle)
+        self._observe_job_messages()
+        for pid in member_pids:
+            if pid == self.owner.root_pid or pid in self._member_handles:
+                continue
+            if pid not in self._live_births or pid in self._retired_members:
+                continue
+            birth = self._birth_generations[pid]
+            handle = self._api.open_job_member(job_handle, pid)
+            try:
+                self._observe_job_messages()
+            except _Win32CallError:
+                if handle is not None:
+                    self._unmatched_member_handles.append(handle)
+                raise
+            if handle is not None:
+                if pid in self._live_births and self._birth_generations[pid] == birth:
+                    self._member_handles[pid] = handle
+                else:
+                    self._unmatched_member_handles.append(handle)
+                    if self._api.wait_for_process(handle, 0):
+                        self._unmatched_member_handles.pop()
+                        _close_ignoring_errors(self._api, handle)
+
     def _root_is_active_before_force(self) -> bool | None:
         """Observe whether the retained root is still active before Job force."""
 
@@ -961,7 +1195,7 @@ class WindowsOwnedProcess:
         return await self._join_drain(grace_timeout, force_timeout)
 
     async def force_and_drain(self, *, timeout: float) -> OwnerDrainReceipt:
-        """Join one immediate Job-force accounting drain for this capability."""
+        """Join one immediate Job-force, handle-confirmed drain."""
 
         return await self._join_drain(0.0, timeout)
 
@@ -992,9 +1226,6 @@ class WindowsOwnedProcess:
         if graceful.status is DrainStatus.DRAINED:
             self._drain_receipt = graceful
             return graceful
-        if graceful.status is DrainStatus.FAILED:
-            self._drain_receipt = graceful
-            return graceful
         if self._job_handle is None:
             receipt = self._receipt(
                 status=DrainStatus.FAILED,
@@ -1006,6 +1237,11 @@ class WindowsOwnedProcess:
             self._drain_receipt = receipt
             return receipt
         root_was_forced = self._root_is_active_before_force()
+        try:
+            self._snapshot_members()
+        except _Win32CallError:
+            # A denied observation cannot veto termination of the retained Job.
+            pass
         try:
             self._api.terminate_job(self._job_handle)
         except _Win32CallError as error:
@@ -1036,7 +1272,28 @@ class WindowsOwnedProcess:
         deadline = time.monotonic() + max(timeout, 0.0)
         while True:
             try:
+                self._snapshot_members()
+            except _Win32CallError as error:
+                if not forced:
+                    return self._receipt(
+                        status=DrainStatus.FAILED,
+                        forced=False,
+                        active_processes=None,
+                        failure_stage=error.stage,
+                        winerror=error.winerror,
+                        root_was_forced=root_was_forced,
+                    )
+                # The Job is already terminating; the child's retirement message
+                # may still supply exact evidence without an OpenProcess handle.
+            try:
                 active_processes = self._query_active_processes()
+                signaled = self._process_handle is not None and self._api.wait_for_process(
+                    self._process_handle, 0
+                )
+                for handle in self._member_handles.values():
+                    signaled = self._api.wait_for_process(handle, 0) and signaled
+                for handle in self._unmatched_member_handles:
+                    signaled = self._api.wait_for_process(handle, 0) and signaled
             except _Win32CallError as error:
                 return self._receipt(
                     status=DrainStatus.FAILED,
@@ -1046,13 +1303,55 @@ class WindowsOwnedProcess:
                     winerror=error.winerror,
                     root_was_forced=root_was_forced,
                 )
-            if active_processes == 0:
+            if active_processes == 0 and signaled:
                 try:
                     await self.wait_root()
                 except (_Win32CallError, RuntimeError):
-                    pass
-                # Job accounting, not root exit or KILL_ON_JOB_CLOSE, is the
-                # success fact. A DRAINED receipt always records literal zero.
+                    return self._receipt(
+                        status=DrainStatus.FAILED,
+                        forced=forced,
+                        active_processes=0,
+                        failure_stage=AdmissionStage.DRAIN,
+                        winerror=None,
+                        root_was_forced=root_was_forced,
+                    )
+                try:
+                    job_handle = self._job_handle
+                    if job_handle is None:
+                        raise _Win32CallError(AdmissionStage.DRAIN, None)
+                    total = self._api.total_processes(job_handle)
+                    self._observe_job_messages()
+                except _Win32CallError as error:
+                    return self._receipt(
+                        status=DrainStatus.FAILED,
+                        forced=forced,
+                        active_processes=0,
+                        failure_stage=AdmissionStage.DRAIN,
+                        winerror=error.winerror,
+                        root_was_forced=root_was_forced,
+                    )
+                if (
+                    self._unverified_membership
+                    or total != self._birth_notifications
+                    or not self._root_birth_seen
+                    or any(
+                        pid not in self._member_handles
+                        for pid in self._live_births
+                        if pid != self.owner.root_pid
+                    )
+                ):
+                    remaining = deadline - time.monotonic()
+                    if not self._unverified_membership and remaining > 0:
+                        await asyncio.sleep(min(_ACCOUNTING_POLL_SECONDS, remaining))
+                        continue
+                    return self._receipt(
+                        status=DrainStatus.FAILED,
+                        forced=forced,
+                        active_processes=0,
+                        failure_stage=AdmissionStage.DRAIN,
+                        winerror=None,
+                        root_was_forced=root_was_forced,
+                    )
                 return self._receipt(
                     status=DrainStatus.DRAINED,
                     forced=forced,
@@ -1095,38 +1394,83 @@ class WindowsOwnedProcess:
         )
 
     async def aclose(self) -> OwnerDrainReceipt:
-        """Close resources and return the last truthful owner-drain receipt."""
+        """Join a retained close worker; caller cancellation cannot orphan cleanup."""
 
         if self._closed:
-            if self._drain_receipt is not None:
-                return self._drain_receipt
-            return self._receipt(
-                status=DrainStatus.FAILED,
-                forced=False,
-                active_processes=None,
-                failure_stage=AdmissionStage.DRAIN,
-                winerror=None,
+            assert self._drain_receipt is not None
+            return self._drain_receipt
+        task = self._close_task
+        if task is None or task.done():
+            task = asyncio.create_task(self._close_once())
+            self._close_task = task
+            task.add_done_callback(self._close_finished)
+        return await asyncio.shield(task)
+
+    def _close_finished(self, task: asyncio.Task[OwnerDrainReceipt]) -> None:
+        error = None if task.cancelled() else task.exception()
+        if error is not None:
+            logger.error(
+                "Owned Job close raised", exc_info=(type(error), error, error.__traceback__)
             )
-        receipt = self._drain_receipt
-        if (
-            receipt is None
-            or receipt.status is not DrainStatus.DRAINED
-            or receipt.active_processes != 0
-        ):
-            receipt = await self.force_and_drain(timeout=_ADMISSION_CLEANUP_TIMEOUT)
-        if self.stdin is not None:
-            self.stdin.close()
-        for transport in self._transports:
-            transport.close()
-        self._transports = ()
-        if self._process_handle is not None:
-            _close_ignoring_errors(self._api, self._process_handle)
-            self._process_handle = None
-        if self._job_handle is not None:
-            _close_ignoring_errors(self._api, self._job_handle)
-            self._job_handle = None
-        self._closed = True
-        return receipt
+        if (task.cancelled() or error is not None) and not self._closed:
+            if self._close_reaper is None or self._close_reaper.done():
+                self._close_reaper = asyncio.create_task(self._retry_close())
+
+    async def _close_once(self) -> OwnerDrainReceipt:
+        async with self._close_lock:
+            if self._closed:
+                assert self._drain_receipt is not None
+                return self._drain_receipt
+            receipt = self._drain_receipt
+            if (
+                receipt is None
+                or receipt.status is not DrainStatus.DRAINED
+                or receipt.active_processes != 0
+            ):
+                receipt = await self.force_and_drain(timeout=_ADMISSION_CLEANUP_TIMEOUT)
+            if receipt.status is not DrainStatus.DRAINED:
+                if self._close_reaper is None:
+                    self._close_reaper = asyncio.create_task(self._retry_close())
+                return receipt
+            for handle in self._member_handles.values():
+                _close_ignoring_errors(self._api, handle)
+            self._member_handles.clear()
+            for handle in self._unmatched_member_handles:
+                _close_ignoring_errors(self._api, handle)
+            self._unmatched_member_handles.clear()
+            if self.stdin is not None:
+                self.stdin.close()
+            for transport in self._transports:
+                transport.close()
+            self._transports = ()
+            if self._process_handle is not None:
+                _close_ignoring_errors(self._api, self._process_handle)
+                self._process_handle = None
+            if self._job_handle is not None:
+                _close_ignoring_errors(self._api, self._job_handle)
+                self._job_handle = None
+            if self._port_handle is not None:
+                _close_ignoring_errors(self._api, self._port_handle)
+                self._port_handle = None
+            self._closed = True
+            return receipt
+
+    async def _retry_close(self) -> None:
+        delay = _FAILED_ADMISSION_REAPER_INITIAL_BACKOFF_SECONDS
+        while not self._closed:
+            await asyncio.sleep(delay)
+            try:
+                receipt = await self.aclose()
+            except Exception:
+                logger.exception("Owned Job close retry raised")
+            else:
+                if receipt.status is not DrainStatus.DRAINED:
+                    logger.warning(
+                        "Owned Job close retry did not drain: status=%s active=%s",
+                        receipt.status.value,
+                        receipt.active_processes,
+                    )
+            delay = min(delay * 2, _FAILED_ADMISSION_REAPER_MAX_BACKOFF_SECONDS)
 
 
 async def _cleanup_failed_admission(
@@ -1136,6 +1480,7 @@ async def _cleanup_failed_admission(
     admission_stage: AdmissionStage | None,
     admission_winerror: int | None,
     job_handle: int | None,
+    port_handle: int | None,
     process_handle: int | None,
     thread_handle: int | None,
     pipe_ends: _PipeEnds | None,
@@ -1145,6 +1490,7 @@ async def _cleanup_failed_admission(
     """Transfer failed admission to one private retry owner before this frame unwinds."""
     reaper = _FailedAdmissionReaper(
         api=api,
+        port_handle=port_handle,
         job_handle=job_handle,
         process_handle=process_handle,
         thread_handle=thread_handle,

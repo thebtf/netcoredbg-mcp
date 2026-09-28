@@ -75,7 +75,7 @@ class WindowsOwnedProcess:
 | Precondition | Boundary action | Postcondition |
 |---|---|---|
 | Valid Windows executable, argv, working directory, and environment are supplied. | Build only private parent/child pipe handles and an explicit environment block. | No Job/process/thread handle is inheritable by the child. |
-| The host can create a private Job. | Use an unnamed non-inheritable Job and set `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. | The Job has no global name or shared owner map. |
+| The host can create a private Job. | Use an unnamed non-inheritable Job with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and an associated private completion port. | The Job and port have no global name or shared owner map; notifications are advisory, not proof of drain. |
 | A child has not executed. | Call `CreateProcessW` with `CREATE_SUSPENDED`; retain both returned process and primary-thread handles. | The state is `suspended_unadmitted`. |
 | The retained root handle is valid. | Call `AssignProcessToJobObject`, `IsProcessInJob`, and initial accounting query. | Only successful assignment, membership, and verification reach I/O setup. |
 | Parent I/O adapters are ready. | Use `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` so only standard input, output, and error child ends are inherited. | The Job/process/thread handles remain private. |
@@ -101,11 +101,11 @@ The boundary never invokes asyncio process launch as a Windows fallback. It neve
 1. `drain_after_grace()` permits the caller's graceful shutdown policy only for the configured grace bound.
 2. If the tree remains active after that bound, it calls `TerminateJobObject` once for this capability's Job.
 3. `force_and_drain()` may skip the grace wait only for a build-command cancellation or another explicit force policy that the caller already selected.
-4. A successful Windows receipt uses `status == DRAINED` and `active_processes == 0` from `JobObjectBasicAccountingInformation`.
+4. `DRAINED` requires `active_processes == 0`, a signaled retained root handle, and signaled handles for all retained members. Reconcile the Job's lifetime total against recorded member births; each member without a retained handle needs proven retirement. A Job-member retirement notification can prove that fact when a handle cannot be retained, but notifications alone never establish drain. Zero accounting or root exit alone is insufficient.
 5. `forced` records Job-wide escalation. `root_was_forced` records the root outcome separately: `False` means no Job force included the root, `True` means the root was observed active immediately before a successful Job force, and `None` is a legacy or unavailable observation. DAP terminal cleanup maps from this root fact, never from `forced` alone.
-6. A query failure returns `FAILED`. A deadline result returns `TIMED_OUT`. Neither permits a pre-build continuation.
-7. Repeated callers join an in-flight operation. Only a literal-zero `DRAINED` receipt memoizes completion; a later explicit force call may retry a non-drained outcome.
-8. `aclose() -> OwnerDrainReceipt` returns the last truthful receipt before closing resources. `KILL_ON_JOB_CLOSE` is crash protection, not a substitute for a drain receipt.
+6. A query, member observation, or lifetime-reconciliation failure returns `FAILED`; an unsignaled process at the deadline returns `TIMED_OUT`. Neither permits pre-build continuation, producer-terminal evidence, or run-root cleanup.
+7. Repeated callers join an in-flight operation. Only a proven `DRAINED` receipt memoizes completion; a later explicit force call may retry a non-drained outcome.
+8. `aclose() -> OwnerDrainReceipt` keeps the Job, port, and process/member handles on failed close and retries the same owner. It releases them only after proven drain. `KILL_ON_JOB_CLOSE` is crash protection, not a substitute for a drain receipt.
 
 ## Adapter and pre-build integration
 
@@ -123,9 +123,11 @@ result = await build_manager.pre_launch_build(
 | Variant | Meaning | Required BuildManager action |
 |---|---|---|
 | `NoOwnedAdapter` | No current admitted adapter capability exists. | Do not select or discover any process. Continue to restore/build according to ordinary policy. |
-| `OwnedAdapterCleanup` | A source client, current generation, and owner ref were captured. | Validate all three immediately before drain. Continue only after `DRAINED` with zero active processes. |
+| `OwnedAdapterCleanup` | A source client, current generation, and owner ref were captured. | Validate all three immediately before drain. Continue only after that owner's proven `DRAINED` receipt. |
 
 A mismatched source client, generation, or owner ref returns `STALE`. It performs no disconnect, termination, or build command.
+
+`BuildSession` retains a failed command owner and retries its drain before another command; `BuildManager` cannot discard that session while ownership remains. `DAPClient` retains a failed adapter owner and refuses a new adapter generation until same-owner stop recovery drains it. Neither path may turn a failed close into successful cleanup.
 
 ## Forbidden authority paths
 
@@ -136,7 +138,9 @@ The implementation must not add any of the following to launch, drain, retry, pr
 - a singleton, global map, or ProcessRegistry lookup that retrieves an owner;
 - direct `pywin32` use or a new dependency declaration;
 - `BREAKAWAY_OK`, `SILENT_BREAKAWAY_OK`, leaked Job/process/thread handles, or an unbounded inherited-handle set; or
-- a claim that a root PID, root exit, or Job-handle close proves the tree drained.
+- a claim that a root PID, root exit, zero Job accounting, an advisory completion-port notification, or Job-handle close proves the tree drained.
+
+The admitted Job may enumerate its own member PIDs to retain process handles. Those PIDs do not authorize a lookup or termination outside that Job.
 
 ## Observability and privacy
 

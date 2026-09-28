@@ -57,6 +57,7 @@ TEST_SDK_VERSION = "17.12.0"
 CODE_COVERAGE_VERSION = "17.14.1"
 COBERTURA_NORMALIZER = "cobertura-merge-normalize-v1"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_retained_collector_owners: list[Any] = []
 RELATIVE_PATH_RE = re.compile(r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._/-]+$")
 WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
 FIXED_COVERAGE_PROJECTS = (
@@ -5013,6 +5014,29 @@ async def _run_owned_vstest(
         stdin_mode="devnull",
     )
 
+    captured_members: dict[int, int] = {}
+
+    def retain_unnotified_members() -> None:
+        job_handle = owner._job_handle
+        if not job_handle:
+            return
+        try:
+            for pid in owner._api.member_process_ids(job_handle):
+                if pid == owner.pid:
+                    continue
+                known = owner._member_handles.get(pid)
+                if known is not None and not owner._api.wait_for_process(known, 0):
+                    continue
+                known = captured_members.get(pid)
+                if known is not None and not owner._api.wait_for_process(known, 0):
+                    continue
+                handle = owner._api.open_job_member(job_handle, pid)
+                if handle is not None:
+                    owner._unmatched_member_handles.append(handle)
+                    captured_members[pid] = handle
+        except owner_module._Win32CallError:
+            pass
+
     async def pump(stream: asyncio.StreamReader, destination: Any) -> None:
         while chunk := await stream.read(65536):
             destination.write(chunk.decode("utf-8", errors="replace"))
@@ -5022,8 +5046,12 @@ async def _run_owned_vstest(
         asyncio.create_task(pump(owner.stdout, sys.stdout)),
         asyncio.create_task(pump(owner.stderr, sys.stderr)),
     )
+    failed = False
+    captured_before_force = False
     try:
         result = await asyncio.wait_for(owner.wait_root(), timeout_seconds)
+        retain_unnotified_members()
+        captured_before_force = True
         receipt = await owner.drain_after_grace(grace_timeout=10, force_timeout=15)
         if receipt.status is not owner_module.DrainStatus.DRAINED or receipt.forced:
             _coverage_failure(
@@ -5032,24 +5060,112 @@ async def _run_owned_vstest(
             )
         await asyncio.wait_for(asyncio.gather(*pumps), timeout=10)
         return result
-    except BaseException as error:
-        receipt = await owner.force_and_drain(timeout=20)
-        if receipt.status is not owner_module.DrainStatus.DRAINED or receipt.active_processes != 0:
-            raise RunnerError(
-                "COVERAGE_PROCESS_TREE_NOT_DRAINED: collector owned tree did not terminate"
-            ) from error
+    except BaseException:
+        failed = True
         raise
     finally:
-        receipt = await owner.aclose()
-        for task in pumps:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*pumps, return_exceptions=True)
-        if receipt.status is not owner_module.DrainStatus.DRAINED or receipt.active_processes != 0:
-            _coverage_failure(
-                "COVERAGE_PROCESS_TREE_NOT_DRAINED",
-                "collector owner closed without a zero-process receipt",
-            )
+
+        async def finish_owned_cleanup():
+            close_error: Exception | None = None
+            try:
+                if failed:
+                    if not captured_before_force:
+                        retain_unnotified_members()
+                    await owner.force_and_drain(timeout=20)
+            finally:
+                try:
+                    for _ in range(2):
+                        try:
+                            receipt = await owner.aclose()
+                        except Exception as error:
+                            if close_error is None:
+                                close_error = error
+                        else:
+                            if (
+                                receipt.status is owner_module.DrainStatus.DRAINED
+                                and receipt.active_processes == 0
+                            ):
+                                break
+                    else:
+                        reaper = getattr(owner, "_close_reaper", None)
+                        if reaper is not None:
+                            reaper.cancel()
+                            await asyncio.gather(reaper, return_exceptions=True)
+                        async with owner._close_lock:
+                            if not owner._closed:
+                                job_handle = owner._job_handle
+                                if not job_handle:
+                                    _coverage_failure(
+                                        "COVERAGE_PROCESS_TREE_NOT_DRAINED",
+                                        "collector Job handle is unavailable",
+                                    )
+                                try:
+                                    owner._snapshot_members()
+                                except owner_module._Win32CallError:
+                                    pass
+                                retain_unnotified_members()
+                                try:
+                                    owner._api.close_handle(job_handle)
+                                except Exception as error:
+                                    _retained_collector_owners.append(owner)
+                                    if close_error is not None:
+                                        raise close_error from error
+                                    _coverage_failure(
+                                        "COVERAGE_PROCESS_TREE_NOT_DRAINED",
+                                        "collector Job close failed; exact Job retained until runner exit",
+                                    )
+                                owner._job_handle = None
+                                deadline = time.monotonic() + 20
+                                for handle in (
+                                    owner._process_handle,
+                                    *owner._member_handles.values(),
+                                    *owner._unmatched_member_handles,
+                                ):
+                                    if handle is not None:
+                                        remaining_ms = max(
+                                            0, int((deadline - time.monotonic()) * 1000)
+                                        )
+                                        if not handle or not await asyncio.to_thread(
+                                            owner._api.wait_for_process, handle, remaining_ms
+                                        ):
+                                            _coverage_failure(
+                                                "COVERAGE_PROCESS_TREE_NOT_DRAINED",
+                                                "collector Job close did not stop a known process",
+                                            )
+                                        owner._api.close_handle(handle)
+                                owner._process_handle = None
+                                owner._member_handles.clear()
+                                owner._unmatched_member_handles.clear()
+                                owner._api.close_handle(owner._port_handle)
+                                owner._port_handle = None
+                                if owner.stdin is not None:
+                                    owner.stdin.close()
+                                for transport in owner._transports:
+                                    transport.close()
+                                owner._closed = True
+                                if close_error is None:
+                                    _coverage_failure(
+                                        "COVERAGE_PROCESS_TREE_NOT_DRAINED",
+                                        "collector Job was closed without verified drain",
+                                    )
+                finally:
+                    for task in pumps:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*pumps, return_exceptions=True)
+            if close_error is not None:
+                raise close_error
+
+        cleanup = asyncio.create_task(finish_owned_cleanup())
+        cancelled_during_cleanup = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled_during_cleanup = True
+        await cleanup
+        if cancelled_during_cleanup and not failed:
+            raise asyncio.CancelledError
 
 
 def resolve_collector_attachment(results: Path, trx: ElementTree.Element, href: str) -> Path:

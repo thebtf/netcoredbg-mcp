@@ -247,6 +247,7 @@ class _DapRun:
     stderr_task: asyncio.Task[None] | None = None
     process_task: asyncio.Task[None] | None = None
     finalizer_task: asyncio.Task[DapTransportTerminal] | None = None
+    owner_retry_task: asyncio.Task[OwnerDrainReceipt] | None = None
     terminal: DapTransportTerminal | None = None
 
 
@@ -473,6 +474,18 @@ class DAPClient:
             The exact identity bound to the new adapter run.
         """
 
+        previous = self._run
+        if previous is not None and previous.owner is not None:
+            if previous.finalizer_task is not None and not previous.finalizer_task.done():
+                raise RuntimeError("Retained adapter owner finalization is still in progress")
+            receipt = previous.owner_drain_receipt
+            if (previous.phase is not _RunPhase.ACTIVE or not self.is_running) and not (
+                receipt is not None
+                and receipt.owner == previous.owner.owner
+                and receipt.status is DrainStatus.DRAINED
+                and receipt.active_processes == 0
+            ):
+                raise RuntimeError("Retained adapter owner did not drain before admission")
         if self.is_running and self._run is not None:
             return self._run.generation
 
@@ -546,6 +559,7 @@ class DAPClient:
             return None
 
         finalizer, _ = self._request_finalization(run, DapTerminalTrigger.EXPLICIT_STOP)
+        already_finalized = finalizer.done()
         await asyncio.shield(finalizer)
         logger.info("netcoredbg stopped")
         owner = run.owner
@@ -553,6 +567,28 @@ class DAPClient:
             return None
 
         receipt = run.owner_drain_receipt
+        if already_finalized and not (
+            receipt is not None
+            and receipt.owner == owner.owner
+            and receipt.status is DrainStatus.DRAINED
+            and receipt.active_processes == 0
+        ):
+            retry = run.owner_retry_task
+            if retry is None or retry.done():
+                retry = asyncio.create_task(owner.aclose())
+                run.owner_retry_task = retry
+            refreshed = await asyncio.shield(retry)
+            if self._run is run and owner.owner == refreshed.owner:
+                run.owner_drain_receipt = refreshed
+                receipt = refreshed
+            else:
+                return OwnerDrainReceipt(
+                    owner=owner.owner,
+                    status=DrainStatus.STALE,
+                    forced=False,
+                    root_returncode=None,
+                    active_processes=None,
+                )
         if receipt is not None:
             return receipt
         return OwnerDrainReceipt(
