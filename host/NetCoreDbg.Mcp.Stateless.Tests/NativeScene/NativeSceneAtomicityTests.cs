@@ -716,6 +716,16 @@ public sealed class NativeSceneAtomicityTests
         var result = ModernMcpProcessDriver.RequireResult(response);
         Assert.Equal("complete", Text(result["resultType"]));
         var isError = result["isError"]?.GetValue<bool>() ?? false;
+        if (result["structuredContent"] is not JsonObject)
+        {
+            var envelope = JsonSerializer.Serialize(response);
+            var root = RepositoryLayout.Root.Replace("\\", "\\\\", StringComparison.Ordinal);
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile).Replace("\\", "\\\\", StringComparison.Ordinal);
+            envelope = envelope.Replace(root, "<repo-root>", StringComparison.OrdinalIgnoreCase)
+                .Replace(home, "<user-home>", StringComparison.OrdinalIgnoreCase);
+            Assert.Fail($"{tool} requestId={requestId}: structuredContent is not an object; SDK envelope={envelope}");
+        }
+
         var content = Object(result["structuredContent"]);
         Assert.True(
             expectedError == isError,
