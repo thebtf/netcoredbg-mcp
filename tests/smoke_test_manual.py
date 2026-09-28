@@ -4760,6 +4760,7 @@ def _v2_text_probe_missing_selector_plan(
         "cleanup": {
             "steps": [
                 {"kind": "debug.stop"},
+                {"kind": "ui.disconnect"},
                 {"kind": "process.registry.assert_empty"},
             ]
         },
@@ -5371,6 +5372,7 @@ def _v2_visible_row_drag_plan(
         "cleanup": {
             "steps": [
                 {"kind": "debug.stop"},
+                {"kind": "ui.disconnect"},
                 {"kind": "process.registry.assert_empty"},
             ]
         },
@@ -5585,6 +5587,7 @@ def _v2_offscreen_row_target_drag_plan(
         "cleanup": {
             "steps": [
                 {"kind": "debug.stop"},
+                {"kind": "ui.disconnect"},
                 {"kind": "process.registry.assert_empty"},
             ]
         },
@@ -5845,6 +5848,7 @@ def _v2_edge_scroll_drag_plan(
         "cleanup": {
             "steps": [
                 {"kind": "debug.stop"},
+                {"kind": "ui.disconnect"},
                 {"kind": "process.registry.assert_empty"},
             ]
         },
@@ -6210,6 +6214,7 @@ def _v2_multi_row_drag_plan(
         "cleanup": {
             "steps": [
                 {"kind": "debug.stop"},
+                {"kind": "ui.disconnect"},
                 {"kind": "process.registry.assert_empty"},
             ]
         },
@@ -6418,6 +6423,7 @@ def _v2_negative_drag_plan(
         "cleanup": {
             "steps": [
                 {"kind": "debug.stop"},
+                {"kind": "ui.disconnect"},
                 {"kind": "process.registry.assert_empty"},
             ]
         },
