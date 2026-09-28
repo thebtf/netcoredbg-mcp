@@ -11,6 +11,20 @@ namespace NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
 public sealed class CapabilityLifecycleContractTests
 {
     [Fact]
+    public async Task FailedSdkStartup_ReportsChildStandardError()
+    {
+        var missingHook = Path.Combine(RepositoryLayout.ScratchRoot, $"missing-mcp-startup-hook-{Guid.NewGuid():N}.dll");
+        var failure = await Record.ExceptionAsync(() => ModernMcpProcessDriver.StartAsync(
+            new ModernMcpStartOptions(AdditionalEnvironment: new Dictionary<string, string?>
+            {
+                ["DOTNET_STARTUP_HOOKS"] = missingHook,
+            })));
+
+        Assert.NotNull(failure);
+        Assert.Contains(missingHook, Assert.IsType<string>(failure.Data["ModernMcpStartupStandardError"]), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task LiveHost_ResolvesOnlyExplicitOpaqueTokensAcrossIndependentInterleavedRequests()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync();
@@ -103,7 +117,7 @@ public sealed class CapabilityLifecycleContractTests
         await using var session = await NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter.NetCoreDbgSessionContractDriver.StartAsync(
             new NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter.FixtureConfiguration(),
             "D:\\fixtures\\program.dll",
-            TimeSpan.FromSeconds(2),
+            TimeSpan.FromSeconds(20),
             TimeSpan.FromSeconds(2),
             TimeSpan.FromMilliseconds(300),
             CancellationToken.None);

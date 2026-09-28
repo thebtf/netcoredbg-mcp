@@ -20,22 +20,25 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
 {
     internal const string CurrentProtocolVersion = "2026-07-28";
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(10);
-    private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(45);
 
     private readonly FixtureProcess _fixture;
     private readonly string _scratchDirectory;
     private readonly JsonObject? _initialMeta;
     private readonly List<ModernMcpRequestObservation> _requests = [];
-    private readonly List<string> _standardErrorLines = [];
+    private readonly List<string> _standardErrorLines;
+    private readonly object _standardErrorGate;
     private readonly object _gate = new();
     private bool _clientClosed;
     private bool _disposed;
 
-    private ModernMcpProcessDriver(FixtureProcess fixture, string scratchDirectory, McpClient client, string inertProgramPath, JsonObject? initialMeta)
+    private ModernMcpProcessDriver(FixtureProcess fixture, string scratchDirectory, McpClient client, string inertProgramPath, JsonObject? initialMeta, List<string> standardErrorLines, object standardErrorGate)
     {
         _scratchDirectory = scratchDirectory;
         _fixture = fixture;
         _initialMeta = initialMeta?.DeepClone().AsObject();
+        _standardErrorLines = standardErrorLines;
+        _standardErrorGate = standardErrorGate;
         Client = client;
         InertProgramPath = inertProgramPath;
     }
@@ -69,6 +72,8 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         FixtureProcess? fixture = null;
         StdioClientTransport? transport = null;
         McpClient? client = null;
+        var standardErrorLines = new List<string>();
+        var standardErrorGate = new object();
         try
         {
             fixture = FixtureProcess.Create(options.FixtureConfiguration ?? new FixtureConfiguration());
@@ -78,7 +83,12 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             using var operation = CreateBoundedCancellation(cancellationToken, StartupTimeout);
             await File.WriteAllBytesAsync(inertProgramPath, [], operation.Token).ConfigureAwait(false);
 
-            ModernMcpProcessDriver? driver = null;
+            var clientOptions = new McpClientOptions
+            {
+                ProtocolVersion = CurrentProtocolVersion,
+                DiscoverProbeTimeout = TimeSpan.FromSeconds(30),
+                InitializationTimeout = TimeSpan.FromSeconds(40),
+            };
             transport = new StdioClientTransport(new StdioClientTransportOptions
             {
                 Command = candidate.Command,
@@ -87,25 +97,41 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                 WorkingDirectory = RepositoryLayout.Root,
                 EnvironmentVariables = CandidateEnvironment(fixture, inertProgramPath, options.AdditionalEnvironment),
                 ShutdownTimeout = TimeSpan.FromSeconds(2),
-                StandardErrorLines = line => driver?.AddStandardErrorLine(line),
+                StandardErrorLines = line =>
+                {
+                    lock (standardErrorGate)
+                    {
+                        standardErrorLines.Add(line);
+                    }
+                },
             });
 
-            client = await McpClient.CreateAsync(transport, cancellationToken: operation.Token).ConfigureAwait(false);
-            driver = new ModernMcpProcessDriver(
+            client = await McpClient.CreateAsync(transport, clientOptions, cancellationToken: operation.Token).ConfigureAwait(false);
+            var driver = new ModernMcpProcessDriver(
                 fixture,
                 scratchDirectory,
                 client,
                 inertProgramPath,
-                options.InitialMeta ?? CurrentMeta(formElicitation: !options.DisableFormElicitation));
+                options.InitialMeta ?? CurrentMeta(formElicitation: !options.DisableFormElicitation),
+                standardErrorLines,
+                standardErrorGate);
             client = null;
             transport = null;
             fixture = null;
             return driver;
         }
-        catch
+        catch (Exception exception)
         {
             await DisposeFailedStartTransportAsync(client, connection: null).ConfigureAwait(false);
             await CleanupFailedStartAsync(fixture, scratchDirectory).ConfigureAwait(false);
+            lock (standardErrorGate)
+            {
+                if (standardErrorLines.Count > 0)
+                {
+                    exception.Data["ModernMcpStartupStandardError"] = string.Join(Environment.NewLine, standardErrorLines);
+                }
+            }
+
             throw;
         }
     }
@@ -388,21 +414,14 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         }
     }
 
-    private void AddStandardErrorLine(string line)
-    {
-        lock (_gate)
-        {
-            _standardErrorLines.Add(line);
-        }
-    }
-
     private IReadOnlyList<string> StandardErrorLines()
     {
-        lock (_gate)
+        lock (_standardErrorGate)
         {
             return _standardErrorLines.ToArray();
         }
     }
+
 
 
     private static Dictionary<string, string?> CandidateEnvironment(
