@@ -51,6 +51,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private DapSessionState _state = new(null, null, null);
     private Task? _cleanupTask;
+    private bool _forceCleanupDisposed;
     private Exception? _readerFailure;
     private NativeSceneTargetIdentity? _nativeSceneTargetIdentity;
     private readonly object _nativeSceneTargetIdentityGate = new();
@@ -194,7 +195,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             if (session is not null)
             {
-                session._forceCleanup.Cancel();
+                session.CancelCleanup();
                 await session.EnsureCleanupAsync().ConfigureAwait(false);
             }
             else if (windowsLaunch is not null)
@@ -219,7 +220,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            _forceCleanup.Cancel();
+            CancelCleanup();
             await cleanup.ConfigureAwait(false);
             throw;
         }
@@ -927,6 +928,17 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         return new DapStackFrame(id, name, path, line, column);
     }
 
+    private void CancelCleanup()
+    {
+        lock (_cleanupGate)
+        {
+            if (!_forceCleanupDisposed)
+            {
+                _forceCleanup.Cancel();
+            }
+        }
+    }
+
     private Task EnsureCleanupAsync()
     {
         lock (_cleanupGate)
@@ -1021,7 +1033,18 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                             }
                             finally
                             {
-                                _processTreeOwnership?.Dispose();
+                                try
+                                {
+                                    _processTreeOwnership?.Dispose();
+                                }
+                                finally
+                                {
+                                    lock (_cleanupGate)
+                                    {
+                                        _forceCleanup.Dispose();
+                                        _forceCleanupDisposed = true;
+                                    }
+                                }
                             }
                         }
                     }
@@ -1438,9 +1461,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 var processInformation = CreateProcessWithStandardHandles(
                     debuggerPath,
                     commandLine,
-                    childInput.DangerousGetHandle(),
-                    childOutput.DangerousGetHandle(),
-                    childError.DangerousGetHandle());
+                    childInput,
+                    childOutput,
+                    childError);
 
                 processHandle = processInformation.Process;
                 threadHandle = processInformation.Thread;
@@ -1587,15 +1610,25 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         private static ProcessInformation CreateProcessWithStandardHandles(
             string debuggerPath,
             StringBuilder commandLine,
-            IntPtr standardInput,
-            IntPtr standardOutput,
-            IntPtr standardError)
+            SafeKernelHandle standardInput,
+            SafeKernelHandle standardOutput,
+            SafeKernelHandle standardError)
         {
             IntPtr attributeList = IntPtr.Zero;
             IntPtr inheritedHandleList = IntPtr.Zero;
             var attributeListInitialized = false;
+            var inputReferenced = false;
+            var outputReferenced = false;
+            var errorReferenced = false;
             try
             {
+                standardInput.DangerousAddRef(ref inputReferenced);
+                standardOutput.DangerousAddRef(ref outputReferenced);
+                standardError.DangerousAddRef(ref errorReferenced);
+                var inputHandle = standardInput.HandleWhileReferenced;
+                var outputHandle = standardOutput.HandleWhileReferenced;
+                var errorHandle = standardError.HandleWhileReferenced;
+
                 var attributeListSize = IntPtr.Zero;
                 _ = InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeListSize);
                 if (attributeListSize == IntPtr.Zero)
@@ -1611,9 +1644,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
                 attributeListInitialized = true;
                 inheritedHandleList = Marshal.AllocHGlobal(IntPtr.Size * 3);
-                Marshal.WriteIntPtr(inheritedHandleList, 0, standardInput);
-                Marshal.WriteIntPtr(inheritedHandleList, IntPtr.Size, standardOutput);
-                Marshal.WriteIntPtr(inheritedHandleList, IntPtr.Size * 2, standardError);
+                Marshal.WriteIntPtr(inheritedHandleList, 0, inputHandle);
+                Marshal.WriteIntPtr(inheritedHandleList, IntPtr.Size, outputHandle);
+                Marshal.WriteIntPtr(inheritedHandleList, IntPtr.Size * 2, errorHandle);
                 if (!UpdateProcThreadAttribute(
                         attributeList,
                         0,
@@ -1632,9 +1665,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     {
                         Size = (uint)Marshal.SizeOf<StartupInfoEx>(),
                         Flags = StartfUseStdHandles,
-                        StandardInput = standardInput,
-                        StandardOutput = standardOutput,
-                        StandardError = standardError,
+                        StandardInput = inputHandle,
+                        StandardOutput = outputHandle,
+                        StandardError = errorHandle,
                     },
                     AttributeList = attributeList,
                 };
@@ -1670,6 +1703,21 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 if (attributeList != IntPtr.Zero)
                 {
                     Marshal.FreeHGlobal(attributeList);
+                }
+
+                if (errorReferenced)
+                {
+                    standardError.DangerousRelease();
+                }
+
+                if (outputReferenced)
+                {
+                    standardOutput.DangerousRelease();
+                }
+
+                if (inputReferenced)
+                {
+                    standardInput.DangerousRelease();
                 }
             }
         }
@@ -1879,6 +1927,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             public SafeKernelHandle(IntPtr handle)
                 : base(ownsHandle: true) => SetHandle(handle);
+
+            internal IntPtr HandleWhileReferenced => handle;
 
             protected override bool ReleaseHandle() => CloseHandle(handle);
         }

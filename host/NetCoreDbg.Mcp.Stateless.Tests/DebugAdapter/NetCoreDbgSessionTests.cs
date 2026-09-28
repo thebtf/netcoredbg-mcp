@@ -503,6 +503,24 @@ public sealed class NetCoreDbgSessionTests
     }
 
     [Fact]
+    public async Task StopAsync_CancellationDuringGracefulShutdown_SharesCleanupWithDisposeAsync()
+    {
+        await using var session = await StartAsync(new FixtureConfiguration(
+            SupportsTerminate: true,
+            BlockGracefulShutdown: true));
+        using var cancellation = new CancellationTokenSource();
+        var stop = session.StopAsync(cancellation.Token);
+        await WaitUntilAsync(
+            async () => (await session.Fixture.ReadTranscriptAsync()).Any(entry => entry.Command == "terminate"),
+            TimeSpan.FromSeconds(2));
+
+        cancellation.Cancel();
+        var dispose = session.DisposeSessionAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stop.WaitAsync(StopTimeout + TimeSpan.FromSeconds(2)));
+        await dispose.WaitAsync(StopTimeout + TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
     public async Task HostedStop_CancellationForcesTreeCleanupBeforeShutdownReturns()
     {
         await using var session = await StartAsync(new FixtureConfiguration(
