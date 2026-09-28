@@ -17,7 +17,6 @@ from datetime import datetime, timezone
 from os import PathLike
 from pathlib import Path
 from typing import Any, NoReturn
-from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 _CANONICAL_SOURCE_REF = "refs/heads/main"
@@ -27,6 +26,13 @@ _TRUSTED_BUILD_EVENT = "workflow_dispatch"
 _PREVIEW_EXECUTABLE = "netcoredbg-mcp-stateless-preview.exe"
 _EXACT_HEAD_RUNNER_PATH = Path(__file__).with_name("run_sonarqube_exact_head.py")
 _EXACT_HEAD_RECEIPT_SCHEMA_VERSION = 3
+_CANDIDATE_IDENTITY_LABEL = "candidate identity"
+_PREVIEW_MANIFEST_LABEL = "preview manifest"
+_POST_MERGE_RECEIPT_LABEL = "post-merge receipt"
+_POST_MERGE_SCAN_RECEIPT_LABEL = "post-merge scan receipt"
+_RELEASE_GATE_CATALOG_LABEL = "release gate catalog"
+_ARCHIVE_UNREADABLE = "archive is unreadable"
+_EXACT_HEAD_AUTHORITY_UNAVAILABLE = "exact-head receipt authority is unavailable"
 
 _POLICY_AUTHORITY_PATHS = (
     "AGENTS.md",
@@ -44,13 +50,14 @@ _AUTHORITY_RULES = (
 )
 _COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
-_GITHUB_IDENTIFIER_PATTERN = re.compile(r"^[1-9][0-9]*$")
+_GITHUB_IDENTIFIER_PATTERN = re.compile(r"^[1-9]\d*$", re.ASCII)
 _GITHUB_REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _SAFE_RELATIVE_PATH_PATTERN = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
 )
 _PREVIEW_VERSION_PATTERN = re.compile(
-    r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)-preview\.(?:[1-9][0-9]*)$"
+    r"^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)-preview\.[1-9]\d*$",
+    re.ASCII,
 )
 
 
@@ -281,7 +288,7 @@ def _validate_exact_reference(
 
 def _validate_candidate_identity(value: Any) -> dict[str, Any]:
     identity = _thaw(value)
-    root = _expect_mapping(identity, "candidate identity", ("schema_version", "candidate"))
+    root = _expect_mapping(identity, _CANDIDATE_IDENTITY_LABEL, ("schema_version", "candidate"))
     if root["schema_version"] != "1.0":
         _refuse("candidate identity schema_version is unsupported")
 
@@ -484,8 +491,8 @@ def _verify_archive_member(
                 _refuse("archive does not contain exactly one executable member")
             member = members[0]
             archive_member_bytes = archive.read(member)
-    except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile):
-        _refuse("archive is unreadable")
+    except (OSError, RuntimeError, zipfile.BadZipFile):
+        _refuse(_ARCHIVE_UNREADABLE)
     if member.file_size != len(executable_bytes) or archive_member_bytes != executable_bytes:
         _refuse("archive executable member does not match the verified executable")
 
@@ -589,8 +596,8 @@ def verify_and_extract_retained_artifact(
             if len(members) != 1 or members[0].is_dir():
                 _refuse("archive does not contain exactly one executable member")
             executable_bytes = archive.read(members[0])
-    except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile):
-        _refuse("archive is unreadable")
+    except (OSError, RuntimeError, zipfile.BadZipFile):
+        _refuse(_ARCHIVE_UNREADABLE)
     executable_path = destination / executable_name
     try:
         with executable_path.open("xb") as output:
@@ -885,8 +892,8 @@ def _read_exact_preview_archive_member(archive_bytes: bytes, executable_name: st
             if len(members) != 1 or members[0].is_dir() or members[0].filename != executable_name:
                 _refuse("archive does not contain one preview executable")
             return archive.read(members[0])
-    except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile):
-        _refuse("archive is unreadable")
+    except (OSError, RuntimeError, zipfile.BadZipFile):
+        _refuse(_ARCHIVE_UNREADABLE)
     raise AssertionError("unreachable")
 
 
@@ -947,9 +954,9 @@ def prepare_preview_payload(
         },
     }
     _validate_preview_manifest(manifest_contents, source["commit"])
-    manifest_bytes = _canonical_json_bytes(manifest_contents, "preview manifest")
+    manifest_bytes = _canonical_json_bytes(manifest_contents, _PREVIEW_MANIFEST_LABEL)
     manifest_path = payload_directory / manifest_name
-    _write_bytes_once(manifest_path, manifest_bytes, "preview manifest")
+    _write_bytes_once(manifest_path, manifest_bytes, _PREVIEW_MANIFEST_LABEL)
     manifest_file = {
         "name": manifest_name,
         "size_bytes": len(manifest_bytes),
@@ -1009,17 +1016,17 @@ def _load_exact_head_receipt_validator() -> tuple[Callable[..., Any], Callable[.
         "_stateless_preview_exact_head_runner", _EXACT_HEAD_RUNNER_PATH
     )
     if specification is None or specification.loader is None:
-        _refuse("exact-head receipt authority is unavailable")
+        _refuse(_EXACT_HEAD_AUTHORITY_UNAVAILABLE)
     runner = importlib.util.module_from_spec(specification)
     sys.modules[specification.name] = runner
     try:
         specification.loader.exec_module(runner)
     except Exception:
-        _refuse("exact-head receipt authority is unavailable")
+        _refuse(_EXACT_HEAD_AUTHORITY_UNAVAILABLE)
     validator = getattr(runner, "validate_exact_head_receipt_v3", None)
     release_intent = getattr(runner, "release_intent_at_head", None)
     if not callable(validator) or not callable(release_intent):
-        _refuse("exact-head receipt authority is unavailable")
+        _refuse(_EXACT_HEAD_AUTHORITY_UNAVAILABLE)
     return validator, release_intent
 
 
@@ -1068,9 +1075,9 @@ def produce_post_merge_exact_head_receipt(
     admission = admit_build(root, environment)
     source = admission["source"]
     raw_receipt_path = _post_merge_scan_receipt_path(root, source["commit"])
-    raw_receipt = _read_regular_bytes(raw_receipt_path, "post-merge scan receipt")
+    raw_receipt = _read_regular_bytes(raw_receipt_path, _POST_MERGE_SCAN_RECEIPT_LABEL)
     _validate_post_merge_scan_receipt(
-        _load_json_object(raw_receipt, "post-merge scan receipt"), source["commit"], root
+        _load_json_object(raw_receipt, _POST_MERGE_SCAN_RECEIPT_LABEL), source["commit"], root
     )
     record = {
         "receipt_schema_version": "1.0",
@@ -1095,8 +1102,8 @@ def produce_post_merge_exact_head_receipt(
         _refuse("post-merge receipt directory already exists")
     _write_bytes_once(
         receipt_directory / _POST_MERGE_RECEIPT_FILENAME,
-        _canonical_json_bytes(record, "post-merge receipt"),
-        "post-merge receipt",
+        _canonical_json_bytes(record, _POST_MERGE_RECEIPT_LABEL),
+        _POST_MERGE_RECEIPT_LABEL,
     )
     return _freeze(record)
 
@@ -1115,7 +1122,7 @@ def _read_github_artifact(repository: str, artifact_id: str, token: str) -> Mapp
     try:
         with urlopen(request, timeout=15) as response:
             raw = response.read()
-    except (HTTPError, URLError, OSError):
+    except OSError:
         _refuse("uploaded artifact metadata is unavailable")
     return _load_json_object(raw, "uploaded artifact metadata")
 
@@ -1229,7 +1236,7 @@ def seal_build_records(
     archive_path = payload_directory / archive_name
     manifest_path = payload_directory / manifest_name
     archive_bytes = _read_regular_bytes(archive_path, "preview archive")
-    manifest_bytes = _read_regular_bytes(manifest_path, "preview manifest")
+    manifest_bytes = _read_regular_bytes(manifest_path, _PREVIEW_MANIFEST_LABEL)
     manifest_contents = _load_manifest(manifest_bytes)
     _validate_preview_manifest(manifest_contents, source["commit"])
     if (
@@ -1257,14 +1264,14 @@ def seal_build_records(
     }
 
     receipt_path = _artifact_root(root) / "post-merge-receipt" / _POST_MERGE_RECEIPT_FILENAME
-    receipt_bytes = _read_regular_bytes(receipt_path, "post-merge receipt")
-    receipt_record = _load_json_object(receipt_bytes, "post-merge receipt")
+    receipt_bytes = _read_regular_bytes(receipt_path, _POST_MERGE_RECEIPT_LABEL)
+    receipt_record = _load_json_object(receipt_bytes, _POST_MERGE_RECEIPT_LABEL)
     _validate_produced_post_merge_record(receipt_record, source)
     raw_scan_receipt = _read_regular_bytes(
-        _post_merge_scan_receipt_path(root, source["commit"]), "post-merge scan receipt"
+        _post_merge_scan_receipt_path(root, source["commit"]), _POST_MERGE_SCAN_RECEIPT_LABEL
     )
     _validate_post_merge_scan_receipt(
-        _load_json_object(raw_scan_receipt, "post-merge scan receipt"), source["commit"], root
+        _load_json_object(raw_scan_receipt, _POST_MERGE_SCAN_RECEIPT_LABEL), source["commit"], root
     )
     if receipt_record["source_runner"]["receipt_sha256"] != _sha256_bytes(raw_scan_receipt):
         _refuse("post-merge receipt does not bind the repository scan result")
@@ -1345,13 +1352,13 @@ def seal_build_records(
         _refuse("sealed record directory already exists")
     _write_bytes_once(
         records_directory / _CANDIDATE_IDENTITY_FILENAME,
-        _canonical_json_bytes(candidate_identity, "candidate identity"),
-        "candidate identity",
+        _canonical_json_bytes(candidate_identity, _CANDIDATE_IDENTITY_LABEL),
+        _CANDIDATE_IDENTITY_LABEL,
     )
     _write_bytes_once(
         records_directory / _RELEASE_GATE_CATALOG_FILENAME,
-        _canonical_json_bytes(release_gate_catalog, "release gate catalog"),
-        "release gate catalog",
+        _canonical_json_bytes(release_gate_catalog, _RELEASE_GATE_CATALOG_LABEL),
+        _RELEASE_GATE_CATALOG_LABEL,
     )
     return _freeze(
         {
@@ -1365,7 +1372,7 @@ _CONSUMER_PROOF_SCHEMA_VERSION = "1.0"
 _CONSUMER_PROOF_CATALOG_ID = "a1-preview-inherited-matrix-v1"
 _SAFE_OPAQUE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CREDENTIAL_SHAPED_ID_PATTERN = re.compile(
-    r"^(?:gh[pousr]_|github_pat_|glpat-|AKIA|ASIA|xox[baprs]-|sk-[A-Za-z0-9]|Bearer[._-])",
+    r"^(?:gh[pousr]_|github_pat_|glpat-|AKIA|ASIA|xox[baprs]-|sk-[A-Z0-9]|Bearer[._-])",
     re.IGNORECASE,
 )
 _CONSUMER_PROOF_SCENARIOS: tuple[tuple[str, str, str], ...] = (
@@ -1464,7 +1471,7 @@ def _validate_release_gate_catalog_for_consumer_proof(
     value: Mapping[str, Any], candidate: Mapping[str, Any]
 ) -> Mapping[str, Any]:
     catalog_record = _expect_mapping(
-        value, "release gate catalog", ("catalog_schema_version", "catalog")
+        value, _RELEASE_GATE_CATALOG_LABEL, ("catalog_schema_version", "catalog")
     )
     if catalog_record["catalog_schema_version"] != "1.0":
         _refuse("release gate catalog schema version is invalid")
@@ -1791,7 +1798,7 @@ def seal_artifact_consumer_proof(
         _refuse("candidate identity bytes are unavailable")
     if _sha256_bytes(candidate_identity_bytes) != expected_identity_reference["sha256"]:
         _refuse("candidate identity bytes do not match the downloaded reference")
-    decoded_identity = _load_json_object(candidate_identity_bytes, "candidate identity")
+    decoded_identity = _load_json_object(candidate_identity_bytes, _CANDIDATE_IDENTITY_LABEL)
     validated_identity = _validate_candidate_identity(decoded_identity)
     if _thaw(validated_identity) != _thaw(_validate_candidate_identity(candidate_identity)):
         _refuse("candidate identity bytes do not match the supplied candidate")
