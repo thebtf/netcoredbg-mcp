@@ -116,20 +116,74 @@ public sealed class PreviewProcessContractTests
             new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = new JsonObject { ["name"] = " ", ["version"] = "1.0" }, [MetaKeys.ClientCapabilities] = new JsonObject() } },
             new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = new JsonObject { ["name"] = "client", ["version"] = " " }, [MetaKeys.ClientCapabilities] = new JsonObject() } },
         };
+        // Allow test-runner scheduling headroom; this is not a product response deadline.
+        var observationTimeout = TimeSpan.FromSeconds(10);
 
-        foreach (var parameters in malformedRequests)
+        for (var caseIndex = 0; caseIndex < malformedRequests.Length; caseIndex++)
         {
-            await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
-            await driver.SendRequestAsync("tools/list", parameters, new RequestId($"malformed-meta-{Guid.NewGuid():N}"));
-
-            var response = await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2));
-            if (response is null)
+            var parameters = malformedRequests[caseIndex];
+            var identity = $"malformed-meta-{caseIndex}: {parameters?.ToJsonString() ?? "<null>"}";
+            using var process = PreviewOutputPathResolver.StartDirect("--project", PreviewRepositoryLayout.FixtureRoot);
+            var stderr = process.StandardError.ReadToEndAsync();
+            var responseTimedOut = false;
+            var exitedBeforeCleanup = false;
+            string? responseLine = null;
+            try
             {
-                Assert.True(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
+                var request = new JsonRpcRequest
+                {
+                    Id = new RequestId($"malformed-meta-{caseIndex}"),
+                    Method = "tools/list",
+                    Params = parameters?.DeepClone(),
+                };
+                await process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(request, McpJsonUtilities.DefaultOptions));
+                await process.StandardInput.FlushAsync();
+                using var deadline = new CancellationTokenSource(observationTimeout);
+                try
+                {
+                    responseLine = await process.StandardOutput.ReadLineAsync(deadline.Token);
+                }
+                catch (OperationCanceledException) when (deadline.IsCancellationRequested)
+                {
+                    responseTimedOut = true;
+                }
+
+                if (responseLine is null && !responseTimedOut)
+                {
+                    try
+                    {
+                        await process.WaitForExitAsync().WaitAsync(observationTimeout);
+                        exitedBeforeCleanup = true;
+                    }
+                    catch (TimeoutException)
+                    {
+                        // Keep the pre-cleanup exit observation for the assertion.
+                    }
+                }
+            }
+            finally
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                    await process.WaitForExitAsync();
+                }
+            }
+
+            var remainingOutput = await process.StandardOutput.ReadToEndAsync();
+            Assert.False(responseTimedOut, $"{identity}; process {process.Id} emitted no complete response or EOF within 10s; remaining stdout={remainingOutput}; stderr={await stderr}");
+            if (responseLine is null)
+            {
+                Assert.True(exitedBeforeCleanup, $"{identity}; process {process.Id} closed stdout but did not exit within 10s with stdin open; stderr={await stderr}");
+                Assert.True(remainingOutput.Length == 0, $"{identity}; unexpected stdout after close: {remainingOutput}");
                 continue;
             }
 
-            Assert.IsType<JsonRpcError>(response);
+            var response = JsonNode.Parse(responseLine)!.AsObject();
+            Assert.Equal($"malformed-meta-{caseIndex}", response["id"]!.GetValue<string>());
+            Assert.True(response["error"] is JsonObject, $"{identity}; expected a JSON-RPC error or silent close, got: {responseLine}; stderr={await stderr}");
+            Assert.False(response.ContainsKey("result"), $"{identity}; request was dispatched: {responseLine}");
+            Assert.True(remainingOutput.Length == 0, $"{identity}; unexpected stdout after JSON-RPC error: {remainingOutput}");
         }
     }
 
