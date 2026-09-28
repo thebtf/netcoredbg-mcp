@@ -169,34 +169,47 @@ internal sealed class NativeScreenshotCaptureTransport : IScreenshotCaptureTrans
     public Bitmap CaptureBitBlt(IntPtr hwnd, int width, int height)
     {
         ScreenshotCommands.ValidateCaptureDimensions(width, height);
-        var sourceDc = GetWindowDC(hwnd);
-        if (sourceDc == IntPtr.Zero)
-            throw new InvalidOperationException(
-                $"GetWindowDC failed for HWND {hwnd.ToInt64()}: {Marshal.GetLastWin32Error()}");
-
-        using var bitmap = new Bitmap(width, height);
+        var bitmap = new Bitmap(width, height);
         try
         {
-            using (var graphics = Graphics.FromImage(bitmap))
+            var sourceDc = GetWindowDC(hwnd);
+            if (sourceDc == IntPtr.Zero)
+                throw new InvalidOperationException(
+                    $"GetWindowDC failed for HWND {hwnd.ToInt64()}: {Marshal.GetLastWin32Error()}");
+
+            var captured = false;
+            try
             {
-                var hdc = graphics.GetHdc();
-                try
+                using (var graphics = Graphics.FromImage(bitmap))
                 {
-                    if (!BitBlt(hdc, 0, 0, width, height, sourceDc, 0, 0, SrcCopy))
-                        throw new InvalidOperationException(
-                            $"BitBlt failed for HWND {hwnd.ToInt64()}: {Marshal.GetLastWin32Error()}");
+                    var hdc = graphics.GetHdc();
+                    try
+                    {
+                        if (!BitBlt(hdc, 0, 0, width, height, sourceDc, 0, 0, SrcCopy))
+                            throw new InvalidOperationException(
+                                $"BitBlt failed for HWND {hwnd.ToInt64()}: {Marshal.GetLastWin32Error()}");
+                    }
+                    finally
+                    {
+                        graphics.ReleaseHdc(hdc);
+                    }
                 }
-                finally
-                {
-                    graphics.ReleaseHdc(hdc);
-                }
+
+                captured = true;
+            }
+            finally
+            {
+                var released = ReleaseDC(hwnd, sourceDc);
+                if (captured && released == 0)
+                    throw new InvalidOperationException($"ReleaseDC failed for HWND {hwnd.ToInt64()}");
             }
 
-            return (Bitmap)bitmap.Clone();
+            return bitmap;
         }
-        finally
+        catch
         {
-            ReleaseDC(hwnd, sourceDc);
+            bitmap.Dispose();
+            throw;
         }
     }
 
