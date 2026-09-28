@@ -34,6 +34,9 @@ OperationAdapterMap = dict[str, Callable[..., Awaitable[dict[str, Any]]]]
 STATE_CHANGE_SETTLE_SECONDS = 0.5
 SELECTED_PAYLOAD_SETTLE_ATTEMPTS = 10
 SELECTED_PAYLOAD_SETTLE_INTERVAL_SECONDS = 0.1
+UNIQUE_VISIBLE_ELEMENT_SELECTOR = "unique visible element selector"
+SELECTOR_NOT_FOUND = "selector not found"
+SELECTED_ROW_EVIDENCE_UNAVAILABLE = "selected row evidence unavailable"
 
 
 def ui_operation_adapters(
@@ -2260,21 +2263,21 @@ async def _resolve_selector_endpoint(
         return {}, {}, _drag_blocked(
             reason=f"drag {role} selector lookup returned non-object result",
             requested={role: selector},
-            accepted={"selector": "unique visible element selector"},
+            accepted={"selector": UNIQUE_VISIBLE_ELEMENT_SELECTOR},
             next_step="Inspect the backend selector lookup response.",
         )
     if not _is_backend_success(result):
         return {}, {}, _drag_blocked(
             reason=str(result.get("reason") or f"drag {role} selector lookup failed"),
             requested={role: selector},
-            accepted={"selector": "unique visible element selector"},
+            accepted={"selector": UNIQUE_VISIBLE_ELEMENT_SELECTOR},
             next_step="Update the selector so it resolves successfully before dragging.",
         )
     if not result.get("found", True):
         return {}, {}, _drag_blocked(
             reason=f"drag {role} selector not found",
             requested={role: selector},
-            accepted={"selector": "unique visible element selector"},
+            accepted={"selector": UNIQUE_VISIBLE_ELEMENT_SELECTOR},
             next_step="Update the selector so it resolves to one visible element.",
         )
     bounds = _bounds_from_mapping(result)
@@ -2325,7 +2328,7 @@ async def _resolve_viewport_bounds(
             requested={role: selector},
             accepted={
                 "grid_snapshot": "PASS with grid_bounds or visible row bounds",
-                "selector": "unique visible element selector",
+                "selector": UNIQUE_VISIBLE_ELEMENT_SELECTOR,
             },
             next_step=(
                 "Update the UI backend so grid_snapshot returns grid_bounds, "
@@ -2352,7 +2355,7 @@ def _selector_lookup_miss_allows_grid_snapshot(blocked: Mapping[str, Any]) -> bo
     return any(
         marker in reason
         for marker in (
-            "selector not found",
+            SELECTOR_NOT_FOUND,
             "selector bounds unavailable",
         )
     )
@@ -2822,7 +2825,7 @@ async def _selected_viewport_rows_from_backend(
     grid_selected_rows = getattr(backend, "grid_selected_rows", None)
     if not callable(grid_selected_rows):
         return [], _viewport_blocked(
-            reason="selected row evidence unavailable",
+            reason=SELECTED_ROW_EVIDENCE_UNAVAILABLE,
             selector=selector,
         )
     result = await read_grid_selected_rows(
@@ -2834,12 +2837,12 @@ async def _selected_viewport_rows_from_backend(
         return [], {
             **dict(result),
             "status": "BLOCKED",
-            "reason": str(result.get("reason") or "selected row evidence unavailable"),
+            "reason": str(result.get("reason") or SELECTED_ROW_EVIDENCE_UNAVAILABLE),
         }
     selected_rows = result.get("selected_rows")
     if not isinstance(selected_rows, list):
         return [], _viewport_blocked(
-            reason="selected row evidence unavailable",
+            reason=SELECTED_ROW_EVIDENCE_UNAVAILABLE,
             selector=selector,
         )
     return [
@@ -3340,7 +3343,7 @@ def _is_selector_miss(result: Any) -> bool:
             "no element",
             "no such element",
             "no matching element",
-            "selector not found",
+            SELECTOR_NOT_FOUND,
             "unable to find",
         )
     )
@@ -3379,7 +3382,7 @@ def _selector_blocked(
 ) -> dict[str, Any]:
     return {
         "status": "BLOCKED",
-        "reason": "selector not found",
+        "reason": SELECTOR_NOT_FOUND,
         "requested": {"selector": selector},
         "accepted": {
             "selector_keys": [
