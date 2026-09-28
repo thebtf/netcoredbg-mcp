@@ -20,7 +20,7 @@ There are no new tool arguments or response shapes, and the Python backend selec
 ## Release gates and residual risks
 
 - Installed-wheel Windows keypad journeys passed: all 17 named keys reached the WPF target, the pywinauto path passed 6/6 manual checks, and the final keypad regression suite passed 82/82. The original NumLock state was restored.
-- The mandatory candidate SonarQube scan is **blocked**, not passed: the completed diagnostic at `44a8a19788acc224b99058663b8a189de0b0cf3a` reports 58.7% new-code coverage against 80% and 730 open findings, with no hotspots. This diagnostic predates the artifact-store safety correction and does not authorize merging or publication. The post-merge scan has not run. Do not merge, tag, or publish this release until both exact-head scans satisfy the release protocol; replace this status with final receipts before publication.
+- The mandatory candidate SonarQube scan is **blocked**, not passed: the completed diagnostic at `bc4a89fe2b2f47c6d07f8569aef80b396da00e1f` reports 58.9% new-code coverage against 80% and 726 open findings, with no hotspots. This diagnostic does not authorize merging or publication. The post-merge scan has not run. Do not merge, tag, or publish this release until both exact-head scans satisfy the release protocol; replace this status with final receipts before publication.
 
 ---
 
