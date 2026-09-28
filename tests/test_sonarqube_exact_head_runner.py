@@ -2841,6 +2841,81 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     ):
                         runner.project_stateless_collector(context, raw, root / "projected.xml")
 
+    def test_stateless_collector_full_run_maps_bridge_wpf_and_excludes_fixture_and_virtual_obj(
+        self,
+    ):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            stateless = self._write_source(root, "host/NetCoreDbg.Mcp.Stateless/Program.cs")
+            bridge = self._write_source(root, "bridge/Commands/NativeSceneEvidenceCommands.cs")
+            wpf = self._write_source(
+                root, "host/NetCoreDbg.Mcp.DesignProbe.Wpf/LocalProbeClient.cs"
+            )
+            fixture = self._write_source(
+                root, "host/NetCoreDbg.Mcp.Stateless.Tests/Fixtures/ControlledDapAdapter/Program.cs"
+            )
+            generated = root / (
+                "bridge/obj/Debug/net8.0-windows/win-x64/Microsoft.Interop.LibraryImportGenerator/"
+                "Microsoft.Interop.LibraryImportGenerator/LibraryImports.g.cs"
+            )
+            sources = (
+                (stateless, "NetCoreDbg.Mcp.Stateless.Program"),
+                (bridge, "FlaUIBridge.Commands.NativeSceneEvidenceCommands"),
+                (wpf, "NetCoreDbg.Mcp.DesignProbe.Wpf.LocalProbeClient"),
+                (fixture, "ControlledEvidenceWindow"),
+                (generated, "FlaUIBridge.Commands.ClickCommands"),
+            )
+            classes = "".join(
+                f'<class name="{name}" filename="{path}"><lines><line number="1" hits="1" '
+                'branch="true" condition-coverage="100% (1/1)"/></lines></class>'
+                for path, name in sources
+            )
+            raw = root / "full.xml"
+            full_xml = f"<coverage><packages><package><classes>{classes}</classes></package></packages></coverage>"
+            raw.write_text(full_xml, encoding="utf-8")
+            with patch.object(
+                runner, "is_tracked", side_effect=lambda _root, _env, path: path != generated
+            ):
+                parsed = runner.project_stateless_collector(context, raw, root / "projected.xml")
+            self.assertEqual(
+                parsed["source_paths"],
+                sorted(
+                    (
+                        "host/NetCoreDbg.Mcp.Stateless/Program.cs",
+                        "bridge/Commands/NativeSceneEvidenceCommands.cs",
+                        "host/NetCoreDbg.Mcp.DesignProbe.Wpf/LocalProbeClient.cs",
+                    )
+                ),
+            )
+            self.assertEqual((parsed["lines_covered"], parsed["branches_covered"]), (3, 3))
+            self.assertGreater(
+                sum(
+                    line["hits"]
+                    for source in parsed["facts"]
+                    if source["source_path"].startswith("bridge/")
+                    for line in source["lines"]
+                ),
+                0,
+            )
+            self.assertFalse(generated.exists())
+            raw.write_text(
+                full_xml.replace("LibraryImports.g.cs", "Injected.g.cs"), encoding="utf-8"
+            )
+            with patch.object(
+                runner, "is_tracked", side_effect=lambda _root, _env, path: path != generated
+            ):
+                with self.assertRaisesRegex(runner.RunnerError, "unrecognized generated"):
+                    runner.project_stateless_collector(context, raw, root / "projected.xml")
+            raw.write_text(full_xml, encoding="utf-8")
+            with patch.object(
+                runner,
+                "is_tracked",
+                side_effect=lambda _root, _env, path: path not in {generated, bridge},
+            ):
+                with self.assertRaisesRegex(runner.RunnerError, "collector source is untracked"):
+                    runner.project_stateless_collector(context, raw, root / "projected.xml")
+
     def test_stateless_collector_refuses_relative_escape_and_fixture_paths(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory) / "checkout"

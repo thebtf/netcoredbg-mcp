@@ -2080,30 +2080,65 @@ def project_stateless_collector(
                     "COVERAGE_SOURCE_MAPPING_INVALID", "collector source is outside checkout"
                 )
                 raise AssertionError("unreachable") from error
+            class_name = item.get("name", "")
+            if relative.startswith("bridge/obj/"):
+                if (
+                    relative
+                    != "bridge/obj/Debug/net8.0-windows/win-x64/Microsoft.Interop.LibraryImportGenerator/Microsoft.Interop.LibraryImportGenerator/LibraryImports.g.cs"
+                    or class_name
+                    not in {
+                        "FlaUIBridge.Commands.ClickCommands",
+                        "FlaUIBridge.Commands.ElementCommands",
+                        "FlaUIBridge.Commands.HoverCommands",
+                    }
+                    or is_tracked(context.repository_root, _coverage_environment(), candidate)
+                ):
+                    _coverage_failure(
+                        "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized generated collector source"
+                    )
+                classes.remove(item)
+                continue
             metadata = _scanner_tree_metadata(candidate)
             if (
                 not stat.S_ISREG(metadata.st_mode)
                 or int(getattr(metadata, "st_file_attributes", 0) or 0) & 0x0400
                 or candidate.resolve() != context.repository_root / relative
-                or not is_tracked(context.repository_root, _coverage_environment(), candidate)
             ):
                 _coverage_failure(
                     "COVERAGE_SOURCE_MAPPING_INVALID",
-                    "collector source is not tracked regular checkout source",
+                    "collector source is not regular checkout source",
                 )
-            if any(part.casefold() in {"fixture", "fixtures"} for part in relative.split("/")):
-                _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "fixture collector source")
+            tracked = is_tracked(context.repository_root, _coverage_environment(), candidate)
+            if not tracked:
+                _coverage_failure(
+                    "COVERAGE_SOURCE_MAPPING_INVALID", "collector source is untracked"
+                )
+            fixtures = "host/NetCoreDbg.Mcp.Stateless.Tests/Fixtures/"
+            if relative.startswith(fixtures):
+                if not relative.endswith(".cs") or not any(
+                    relative.startswith(fixtures + project + "/")
+                    for project in ("ControlledDapAdapter", "NativeSceneProbe.WpfFixture")
+                ):
+                    _coverage_failure(
+                        "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized fixture source"
+                    )
+                classes.remove(item)
+                continue
             if relative.startswith("host/NetCoreDbg.Mcp.Stateless.Tests/"):
-                if not item.get("name", "").startswith("NetCoreDbg.Mcp.Stateless.Tests."):
+                if not class_name.startswith("NetCoreDbg.Mcp.Stateless.Tests."):
                     _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized test class")
                 classes.remove(item)
                 continue
-            if not relative.startswith("host/NetCoreDbg.Mcp.Stateless/"):
+            production = (
+                ("host/NetCoreDbg.Mcp.Stateless/", "NetCoreDbg.Mcp.Stateless."),
+                ("host/NetCoreDbg.Mcp.DesignProbe.Wpf/", "NetCoreDbg.Mcp.DesignProbe.Wpf."),
+                ("bridge/", "FlaUIBridge."),
+            )
+            if not any(
+                relative.startswith(path) and class_name.startswith(namespace)
+                for path, namespace in production
+            ):
                 _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "foreign collector source")
-            if item.get("name", "").startswith("NetCoreDbg.Mcp.Stateless.Tests."):
-                _coverage_failure(
-                    "COVERAGE_SOURCE_MAPPING_INVALID", "test class mapped as production"
-                )
             _safe_coverage_source(context, relative, "dotnet", (context.repository_root,))
             if relative in names and names[relative] != raw_filename:
                 _coverage_failure(
