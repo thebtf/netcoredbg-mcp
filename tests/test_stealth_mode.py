@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import contextlib
+import ctypes
 import hashlib
 import io
 import json
@@ -96,6 +97,60 @@ def test_bridge_stealth_foreground_round_trip_contract() -> None:
     assert '@params?["hwnd"]?.GetValue<long>()' in command
     assert "SetForegroundWindow(hwnd)" in command
     assert '["restored"] = restored' in command
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows foreground APIs required")
+@pytest.mark.parametrize("activated", [True, False])
+def test_restore_foreground_window_reports_actual_64_bit_target(activated: bool) -> None:
+    from netcoredbg_mcp.ui.foreground import restore_foreground_window
+
+    previous_hwnd = 0x100000042
+    target_hwnd = 0x200000042
+    user32 = MagicMock()
+    user32.GetForegroundWindow.side_effect = [
+        previous_hwnd,
+        target_hwnd if activated else previous_hwnd,
+    ]
+    user32.GetWindowThreadProcessId.return_value = ctypes.windll.kernel32.GetCurrentThreadId()
+
+    with patch("ctypes.WinDLL", return_value=user32):
+        result = restore_foreground_window(target_hwnd)
+
+    assert result is activated
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows foreground APIs required")
+def test_get_foreground_window_preserves_64_bit_handle() -> None:
+    from netcoredbg_mcp.ui.foreground import get_foreground_window
+
+    hwnd = 0x100000042
+    user32 = MagicMock()
+    user32.GetForegroundWindow.return_value = hwnd
+
+    with patch("ctypes.WinDLL", return_value=user32):
+        result = get_foreground_window()
+
+    assert result == hwnd
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows foreground APIs required")
+def test_get_window_process_id_uses_complete_64_bit_handle() -> None:
+    from netcoredbg_mcp.ui.foreground import get_window_process_id
+
+    hwnd = 0x100000042
+    user32 = MagicMock()
+
+    def owner_of_window(window: int, pid_address: Any) -> int:
+        if window != hwnd:
+            return 0
+        ctypes.cast(pid_address, ctypes.POINTER(ctypes.c_ulong)).contents.value = 1234
+        return 1
+
+    user32.GetWindowThreadProcessId.side_effect = owner_of_window
+    with patch("ctypes.WinDLL", return_value=user32):
+        result = get_window_process_id(hwnd)
+
+    assert result == 1234
 
 
 def test_bridge_flash_focus_send_keys_contract() -> None:
