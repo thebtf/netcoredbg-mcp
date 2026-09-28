@@ -47,15 +47,9 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(root);
         ArgumentNullException.ThrowIfNull(timeProvider);
-        if (maximumArtifactCount <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(maximumArtifactCount));
-        }
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumArtifactCount);
 
-        if (maximumAggregateBytes <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(maximumAggregateBytes));
-        }
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumAggregateBytes);
 
         Directory.CreateDirectory(root);
         _timeProvider = timeProvider;
@@ -138,10 +132,7 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(debugSessionId);
         ArgumentException.ThrowIfNullOrWhiteSpace(artifactId);
-        if (offset < 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(offset));
-        }
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
 
         if (maxBytes is < 1 or > MaximumReadBytes)
         {
@@ -165,10 +156,7 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
                 return Unavailable;
             }
 
-            if (offset > artifact.Descriptor.ByteLength)
-            {
-                throw new ArgumentOutOfRangeException(nameof(offset));
-            }
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(offset, artifact.Descriptor.ByteLength);
 
             if (artifact.IsContained)
             {
