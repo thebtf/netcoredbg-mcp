@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -53,6 +54,7 @@ COVERAGE_PARENT_RELATIVE_PATH = ".tmp/sonarqube-coverage"
 COVERAGE_PY_VERSION = "7.15.4"
 COVERLET_MSBUILD_VERSION = "10.0.1"
 TEST_SDK_VERSION = "17.12.0"
+CODE_COVERAGE_VERSION = "17.14.1"
 COBERTURA_NORMALIZER = "cobertura-merge-normalize-v1"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 RELATIVE_PATH_RE = re.compile(r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._/-]+$")
@@ -1452,6 +1454,7 @@ def _runtime_coverage_toolchain(
         by_name = {str(package["include"]).casefold(): package for package in packages}
         coverlet = by_name.get("coverlet.msbuild")
         test_sdk = by_name.get("microsoft.net.test.sdk")
+        collector = by_name.get("microsoft.codecoverage")
         mtp_active = testing_platform_property in {"true", "1", "yes"} or any(
             "microsoft.testing.platform" in str(package["include"]).casefold()
             for package in packages
@@ -1464,6 +1467,8 @@ def _runtime_coverage_toolchain(
                 "coverlet_msbuild": coverlet["version"] if coverlet else None,
                 "coverlet_private_assets": coverlet["private_assets"] if coverlet else None,
                 "test_sdk": test_sdk["version"] if test_sdk else None,
+                "code_coverage": collector["version"] if collector else None,
+                "code_coverage_private_assets": collector["private_assets"] if collector else None,
                 "test_platform": "vstest",
                 "mtp_active": mtp_active,
             }
@@ -1476,7 +1481,7 @@ def preflight_coverage_toolchain(
     context: GitContext | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Validate the exact fixed VSTest/Coverlet tuple before scanner begin."""
+    """Validate the fixed VSTest producers before scanner begin."""
 
     if toolchain is None:
         if context is None:
@@ -1516,13 +1521,27 @@ def preflight_coverage_toolchain(
             raise RunnerError("COVERAGE_VSTEST_INCOMPATIBLE: invalid project evidence.")
         if project.get("mtp_active") is True:
             raise RunnerError(
-                "COVERAGE_MTP_INCOMPATIBLE: Microsoft Testing Platform is not supported "
-                "by coverlet.msbuild."
+                "COVERAGE_MTP_INCOMPATIBLE: Microsoft Testing Platform is unsupported."
+            )
+        if project.get("id") == "stateless":
+            if (
+                project.get("code_coverage") != CODE_COVERAGE_VERSION
+                or str(project.get("code_coverage_private_assets", "")).casefold() != "all"
+                or project.get("coverlet_msbuild") is not None
+            ):
+                raise RunnerError(
+                    "COVERAGE_VSTEST_INCOMPATIBLE: Stateless collector is not the sole pinned provider."
+                )
+        elif (
+            project.get("coverlet_msbuild") != COVERLET_MSBUILD_VERSION
+            or str(project.get("coverlet_private_assets", "")).casefold() != "all"
+            or project.get("code_coverage") is not None
+        ):
+            raise RunnerError(
+                "COVERAGE_VSTEST_INCOMPATIBLE: Coverlet project provider is not pinned."
             )
         if (
             project.get("target_framework") != "net8.0"
-            or project.get("coverlet_msbuild") != COVERLET_MSBUILD_VERSION
-            or str(project.get("coverlet_private_assets", "")).casefold() != "all"
             or project.get("test_sdk") != TEST_SDK_VERSION
             or str(project.get("test_platform", "")).casefold() != "vstest"
         ):
@@ -1641,6 +1660,7 @@ def _coverage_marker(plan: CoveragePlan, resolved_entry: Mapping[str, Any]) -> d
             "coverage_py": COVERAGE_PY_VERSION,
             "coverlet_msbuild": COVERLET_MSBUILD_VERSION,
             "test_sdk": TEST_SDK_VERSION,
+            "code_coverage": CODE_COVERAGE_VERSION,
         },
         "wave2_entry": resolved_copy,
         "final_reports": [
@@ -1663,6 +1683,9 @@ def _coverage_marker(plan: CoveragePlan, resolved_entry: Mapping[str, Any]) -> d
                 "project": spec.project.as_posix(),
                 "raw_cobertura_path": _coverage_relative(plan, spec.raw_cobertura_input),
                 "include_directory": spec.include_directory,
+                "provider": "microsoft.codecoverage"
+                if spec.id == "stateless"
+                else "coverlet.msbuild",
             }
             for spec in plan.dotnet_inputs
         ],
@@ -1687,6 +1710,7 @@ def validate_coverage_marker(plan: CoveragePlan, marker: Mapping[str, Any]) -> N
             spec.project.as_posix(),
             _coverage_relative(plan, spec.raw_cobertura_input),
             spec.include_directory,
+            "microsoft.codecoverage" if spec.id == "stateless" else "coverlet.msbuild",
         )
         for spec in plan.dotnet_inputs
     ]
@@ -1713,6 +1737,13 @@ def validate_coverage_marker(plan: CoveragePlan, marker: Mapping[str, Any]) -> N
         or marker.get("run_id") != plan.run_id
         or marker.get("captured_head") != plan.head
         or marker.get("project_key") != PROJECT_KEY
+        or marker.get("tool_versions")
+        != {
+            "coverage_py": COVERAGE_PY_VERSION,
+            "coverlet_msbuild": COVERLET_MSBUILD_VERSION,
+            "test_sdk": TEST_SDK_VERSION,
+            "code_coverage": CODE_COVERAGE_VERSION,
+        }
         or not isinstance(reports, list)
         or [
             (item.get("id"), item.get("language"), item.get("relative_path"))
@@ -1727,6 +1758,7 @@ def validate_coverage_marker(plan: CoveragePlan, marker: Mapping[str, Any]) -> N
                 item.get("project"),
                 item.get("raw_cobertura_path"),
                 item.get("include_directory"),
+                item.get("provider"),
             )
             for item in producers
             if isinstance(item, Mapping)
@@ -1788,6 +1820,30 @@ def dotnet_producer_commands(plan: CoveragePlan) -> list[list[str]]:
     for spec in plan.dotnet_inputs:
         project = plan.repository_root / spec.project
         commands.append(["dotnet", "restore", str(project), "-nr:false"])
+        if spec.id == "stateless":
+            commands.append(
+                [
+                    "dotnet",
+                    "build",
+                    str(project),
+                    "--configuration",
+                    "Debug",
+                    "--no-restore",
+                    "-nr:false",
+                ]
+            )
+            commands.append(
+                [
+                    "python",
+                    str(plan.repository_root / "scripts/run_sonarqube_exact_head.py"),
+                    "collector-stateless",
+                    str(plan.repository_root),
+                    str(project),
+                    str(spec.raw_cobertura_input),
+                    str(plan.repository_root / str(spec.include_directory)),
+                ]
+            )
+            continue
         command = [
             "dotnet",
             "test",
@@ -1800,12 +1856,6 @@ def dotnet_producer_commands(plan: CoveragePlan) -> list[list[str]]:
             "-p:CoverletOutputFormat=cobertura",
             f"-p:CoverletOutput={_cobertura_output_prefix(spec.raw_cobertura_input)}",
         ]
-        if spec.include_directory is not None:
-            command.append(
-                f"-p:IncludeDirectory={plan.repository_root / Path(spec.include_directory)}"
-            )
-        if spec.id == "stateless":
-            command.extend(["--filter", "Coverage!=Exclude"])
         commands.append(command)
     return commands
 
@@ -1986,6 +2036,119 @@ def _safe_coverage_source(
     else:
         _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "coverage language is unknown")
     return relative
+
+
+def project_stateless_collector(
+    context: GitContext, raw_report: Path, output: Path
+) -> dict[str, Any]:
+    """Project one attached collector XML, excluding only identified test classes."""
+    try:
+        tree = ElementTree.parse(raw_report)
+    except (OSError, ElementTree.ParseError) as error:
+        _coverage_failure("COVERAGE_REPORT_INVALID", "collector XML is unavailable or malformed")
+        raise AssertionError("unreachable") from error
+    root = tree.getroot()
+    packages = root.find("packages") if root.tag == "coverage" else None
+    if packages is None:
+        _coverage_failure("COVERAGE_REPORT_INVALID", "collector XML is not Cobertura")
+    names: dict[str, str] = {}
+    totals = [0, 0, 0, 0]
+    kept = 0
+    for package in list(packages):
+        classes = package.find("classes")
+        if classes is None:
+            _coverage_failure("COVERAGE_REPORT_INVALID", "collector package has no classes")
+        counts = [0, 0, 0, 0]
+        for item in list(classes):
+            if item.tag != "class":
+                _coverage_failure("COVERAGE_REPORT_INVALID", "collector class is malformed")
+            raw_filename = item.get("filename", "")
+            spelling = raw_filename.replace("\\", "/")
+            candidate = Path(spelling)
+            if (
+                not candidate.is_absolute()
+                or "://" in spelling
+                or any(part in {"", ".", ".."} for part in spelling.split("/")[1:])
+            ):
+                _coverage_failure(
+                    "COVERAGE_SOURCE_MAPPING_INVALID", "collector source is not an absolute path"
+                )
+            try:
+                relative = candidate.relative_to(context.repository_root).as_posix()
+            except ValueError as error:
+                _coverage_failure(
+                    "COVERAGE_SOURCE_MAPPING_INVALID", "collector source is outside checkout"
+                )
+                raise AssertionError("unreachable") from error
+            metadata = _scanner_tree_metadata(candidate)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or int(getattr(metadata, "st_file_attributes", 0) or 0) & 0x0400
+                or candidate.resolve() != context.repository_root / relative
+                or not is_tracked(context.repository_root, _coverage_environment(), candidate)
+            ):
+                _coverage_failure(
+                    "COVERAGE_SOURCE_MAPPING_INVALID",
+                    "collector source is not tracked regular checkout source",
+                )
+            if any(part.casefold() in {"fixture", "fixtures"} for part in relative.split("/")):
+                _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "fixture collector source")
+            if relative.startswith("host/NetCoreDbg.Mcp.Stateless.Tests/"):
+                if not item.get("name", "").startswith("NetCoreDbg.Mcp.Stateless.Tests."):
+                    _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized test class")
+                classes.remove(item)
+                continue
+            if not relative.startswith("host/NetCoreDbg.Mcp.Stateless/"):
+                _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "foreign collector source")
+            if item.get("name", "").startswith("NetCoreDbg.Mcp.Stateless.Tests."):
+                _coverage_failure(
+                    "COVERAGE_SOURCE_MAPPING_INVALID", "test class mapped as production"
+                )
+            _safe_coverage_source(context, relative, "dotnet", (context.repository_root,))
+            if relative in names and names[relative] != raw_filename:
+                _coverage_failure(
+                    "COVERAGE_SOURCE_MAPPING_INVALID", "duplicate normalized collector source"
+                )
+            names[relative] = raw_filename
+            item.set("filename", relative)
+            kept += 1
+            for line in item.iter("line"):
+                hits = _positive_int(
+                    line.get("hits"),
+                    "COVERAGE_REPORT_INVALID",
+                    "collector line hits",
+                    allow_zero=True,
+                )
+                covered, valid, _ = _condition_totals(line)
+                counts[0] += 1
+                counts[1] += int(hits > 0)
+                counts[2] += covered
+                counts[3] += valid
+        if not len(classes):
+            packages.remove(package)
+            continue
+        package.set("line-rate", str(counts[1] / counts[0]))
+        package.set("branch-rate", str(counts[2] / counts[3]) if counts[3] else "0")
+        totals = [a + b for a, b in zip(totals, counts)]
+    if not kept or not totals[0] or not totals[3]:
+        _coverage_failure("COVERAGE_DENOMINATOR_INVALID", "collector has no production coverage")
+    root.attrib.update(
+        zip(
+            ("lines-valid", "lines-covered", "branches-covered", "branches-valid"), map(str, totals)
+        )
+    )
+    root.set("line-rate", str(totals[1] / totals[0]))
+    root.set("branch-rate", str(totals[2] / totals[3]))
+    sources = ElementTree.Element("sources")
+    ElementTree.SubElement(sources, "source").text = "."
+    root.insert(0, sources)
+    tree.write(output, encoding="utf-8", xml_declaration=True)
+    parsed = _parse_cobertura(context, output, "dotnet", require_branches=True)
+    if not any(
+        path.startswith("host/NetCoreDbg.Mcp.Stateless/") for path in parsed["source_paths"]
+    ):
+        _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "collector has no Stateless source")
+    return parsed
 
 
 def _positive_int(value: Any, code: str, detail: str, *, allow_zero: bool = False) -> int:
@@ -2292,6 +2455,7 @@ def normalize_dotnet_cobertura(
     line_conditions: dict[tuple[str, int], dict[tuple[str, str], tuple[int, int]]] = {}
     line_definitions: dict[tuple[str, int], tuple[str, tuple[tuple[str, str, int], ...]]] = {}
     source_union: set[str] = set()
+    providers: dict[tuple[str, int], str] = {}
     for input_evidence in inputs:
         facts = input_evidence.get("facts")
         if not isinstance(facts, list):
@@ -2334,6 +2498,17 @@ def normalize_dotnet_cobertura(
                         "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated line fact is invalid"
                     )
                 key = (source_path, number)
+                provider = (
+                    "microsoft.codecoverage"
+                    if input_evidence["id"] == "stateless"
+                    else "coverlet.msbuild"
+                )
+                if key in providers and providers[key] != provider:
+                    _coverage_failure(
+                        "COVERAGE_DOTNET_NORMALIZATION_FAILED",
+                        "cross-provider condition identities cannot be unioned",
+                    )
+                providers[key] = provider
                 line_hits[key] = max(line_hits.get(key, 0), hits)
                 raw_conditions = line.get("conditions", [])
                 if not isinstance(raw_conditions, list):
@@ -4491,10 +4666,8 @@ def execute(role: str, scanner_override: str | None) -> Path:
                     label=f"Standalone project build ({project.name})",
                 )
             stateless_before = capture_stateless_binary_hashes(plan)
-            try:
-                run_coverage_producer(plan, inherited_environment)
-            finally:
-                producer_terminal = True
+            run_coverage_producer(plan, inherited_environment)
+            producer_terminal = True
             stage = "PRODUCING"
             if isinstance(plan, CoveragePlan):
                 dotnet_inputs = validate_dotnet_cobertura_inputs(context, plan)
@@ -4684,8 +4857,248 @@ def execute(role: str, scanner_override: str | None) -> Path:
     return target_receipt
 
 
+async def _run_owned_vstest(
+    command: Sequence[str], repository_root: Path, timeout_seconds: float = 2400
+) -> int:
+    """Wait for the exact Job-owned VSTest tree before returning or failing."""
+    if os.name != "nt":
+        _coverage_failure(
+            "COVERAGE_VSTEST_INCOMPATIBLE",
+            "Stateless collector requires Windows process-tree ownership",
+        )
+    sys.path.insert(0, str(repository_root / "src"))
+    from netcoredbg_mcp import windows_process_owner as owner_module
+
+    if (
+        Path(owner_module.__file__).resolve()
+        != repository_root / "src/netcoredbg_mcp/windows_process_owner.py"
+    ):
+        _coverage_failure(
+            "COVERAGE_VSTEST_INCOMPATIBLE", "process-tree owner is not the checkout source"
+        )
+    owner = await owner_module.WindowsOwnedProcess.launch(
+        generation=uuid.uuid4().hex,
+        argv=command,
+        cwd=str(repository_root),
+        env=scrub_sonar_environment(dict(os.environ)),
+        stdin_mode="devnull",
+    )
+
+    async def pump(stream: asyncio.StreamReader, destination: Any) -> None:
+        while chunk := await stream.read(65536):
+            destination.write(chunk.decode("utf-8", errors="replace"))
+            destination.flush()
+
+    pumps = (
+        asyncio.create_task(pump(owner.stdout, sys.stdout)),
+        asyncio.create_task(pump(owner.stderr, sys.stderr)),
+    )
+    try:
+        result = await asyncio.wait_for(owner.wait_root(), timeout_seconds)
+        receipt = await owner.drain_after_grace(grace_timeout=10, force_timeout=15)
+        if receipt.status is not owner_module.DrainStatus.DRAINED or receipt.forced:
+            _coverage_failure(
+                "COVERAGE_PROCESS_TREE_NOT_DRAINED",
+                "collector descendants survived VSTest completion",
+            )
+        await asyncio.wait_for(asyncio.gather(*pumps), timeout=10)
+        return result
+    except BaseException as error:
+        receipt = await owner.force_and_drain(timeout=20)
+        if receipt.status is not owner_module.DrainStatus.DRAINED or receipt.active_processes != 0:
+            raise RunnerError(
+                "COVERAGE_PROCESS_TREE_NOT_DRAINED: collector owned tree did not terminate"
+            ) from error
+        raise
+    finally:
+        receipt = await owner.aclose()
+        for task in pumps:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*pumps, return_exceptions=True)
+        if receipt.status is not owner_module.DrainStatus.DRAINED or receipt.active_processes != 0:
+            _coverage_failure(
+                "COVERAGE_PROCESS_TREE_NOT_DRAINED",
+                "collector owner closed without a zero-process receipt",
+            )
+
+
+def resolve_collector_attachment(results: Path, trx: ElementTree.Element, href: str) -> Path:
+    """Resolve the TRX's sole deployment copy, never a matching basename elsewhere."""
+    deployments = [item for item in trx.iter() if item.tag.rsplit("}", 1)[-1] == "Deployment"]
+    if len(deployments) != 1:
+        _coverage_failure("COVERAGE_REPORT_INVALID", "collector deployment is ambiguous")
+    deployment = deployments[0].get("runDeploymentRoot", "").replace("\\", "/")
+    attachment = href.replace("\\", "/")
+    if (
+        not deployment
+        or not attachment
+        or ":" in deployment
+        or ":" in attachment
+        or "://" in deployment
+        or "://" in attachment
+        or any(part in {"", ".", ".."} for part in (*deployment.split("/"), *attachment.split("/")))
+        or len(deployment.split("/")) != 1
+        or not attachment.endswith(".cobertura.xml")
+    ):
+        _coverage_failure("COVERAGE_REPORT_INVALID", "collector deployment path is unsafe")
+    root = results / deployment / "In"
+    parts = attachment.split("/")
+    report = root.joinpath(*parts)
+    for parent in (
+        results,
+        results / deployment,
+        root,
+        *(root.joinpath(*parts[:i]) for i in range(1, len(parts))),
+    ):
+        metadata = _scanner_tree_metadata(parent)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or int(getattr(metadata, "st_file_attributes", 0) or 0) & 0x0400
+        ):
+            _coverage_failure("COVERAGE_REPORT_INVALID", "collector deployment directory is unsafe")
+    metadata = _scanner_tree_metadata(report)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or int(getattr(metadata, "st_file_attributes", 0) or 0) & 0x0400
+    ):
+        _coverage_failure("COVERAGE_REPORT_INVALID", "collector attachment is nonregular")
+    return report
+
+
+def produce_stateless_collector(
+    repository_root: Path, project: Path, output: Path, include_directory: Path
+) -> dict[str, Any]:
+    """Run the full test assembly with one pinned process-tree collector."""
+    test_output = project.parent / "bin/Debug/net8.0"
+    production_output = repository_root / "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0"
+    if (
+        project != repository_root / FIXED_COVERAGE_PROJECTS[3][1]
+        or include_directory != production_output
+        or output.name != "coverage.cobertura.xml"
+        or output.parent.name != "stateless"
+    ):
+        _coverage_failure(
+            "COVERAGE_MARKER_INVALID", "Stateless collector paths differ from fixed plan"
+        )
+    package_root = Path(os.environ.get("NUGET_PACKAGES", str(Path.home() / ".nuget/packages")))
+    adapter = (
+        package_root / "microsoft.codecoverage" / CODE_COVERAGE_VERSION / "build/netstandard2.0"
+    )
+    collector_dll = adapter / "Microsoft.VisualStudio.TraceDataCollector.dll"
+    if not collector_dll.is_file() or collector_dll.is_symlink():
+        _coverage_failure("COVERAGE_VSTEST_INCOMPATIBLE", "pinned collector adapter is unavailable")
+    binaries = (
+        test_output / "NetCoreDbg.Mcp.Stateless.Tests.dll",
+        test_output / "NetCoreDbg.Mcp.Stateless.Tests.pdb",
+        production_output / "NetCoreDbg.Mcp.Stateless.dll",
+        production_output / "NetCoreDbg.Mcp.Stateless.pdb",
+    )
+    try:
+        before = tuple(_sha256_bytes(path.read_bytes()) for path in binaries)
+    except OSError as error:
+        _coverage_failure(
+            "COVERAGE_INSTRUMENTATION_NOT_RESTORED", "test or production DLL/PDB is unavailable"
+        )
+        raise AssertionError("unreachable") from error
+    results = output.parent / "collector-results"
+    results.mkdir(parents=True, exist_ok=False)
+    settings = output.parent / "collector.runsettings"
+    settings.write_text(
+        "<RunSettings><RunConfiguration><MaxCpuCount>1</MaxCpuCount></RunConfiguration>"
+        '<DataCollectionRunSettings><DataCollectors><DataCollector friendlyName="Code Coverage" '
+        'uri="datacollector://Microsoft/CodeCoverage/2.0"><Configuration><Format>cobertura</Format>'
+        "<CodeCoverage><CollectFromChildProcesses>True</CollectFromChildProcesses>"
+        "<EnableDynamicManagedInstrumentation>True</EnableDynamicManagedInstrumentation>"
+        "<EnableStaticManagedInstrumentation>False</EnableStaticManagedInstrumentation>"
+        "</CodeCoverage></Configuration></DataCollector></DataCollectors></DataCollectionRunSettings>"
+        "</RunSettings>",
+        encoding="utf-8",
+    )
+    command = [
+        "dotnet",
+        "vstest",
+        str(binaries[0]),
+        f"/TestAdapterPath:{adapter}",
+        f"/Settings:{settings}",
+        "/Collect:Code Coverage;Format=cobertura",
+        "/Logger:trx;LogFileName=collector.trx",
+        f"/ResultsDirectory:{results}",
+        f"/Diag:{output.parent / 'collector.diag.log'}",
+    ]
+    try:
+        returncode = asyncio.run(_run_owned_vstest(command, repository_root))
+    except TimeoutError as error:
+        _coverage_failure(
+            "COVERAGE_VSTEST_INCOMPATIBLE", "Stateless collector timed out after owned-tree drain"
+        )
+        raise AssertionError("unreachable") from error
+    try:
+        after = tuple(_sha256_bytes(path.read_bytes()) for path in binaries)
+    except OSError as error:
+        _coverage_failure(
+            "COVERAGE_INSTRUMENTATION_NOT_RESTORED", "test or production DLL/PDB disappeared"
+        )
+        raise AssertionError("unreachable") from error
+    if before != after or not all(_is_sha256(value) for value in before):
+        _coverage_failure(
+            "COVERAGE_INSTRUMENTATION_NOT_RESTORED",
+            "test or production DLL/PDB changed during collection",
+        )
+    if returncode:
+        _coverage_failure("COVERAGE_VSTEST_INCOMPATIBLE", "Stateless full test run failed")
+    try:
+        trx = ElementTree.parse(results / "collector.trx").getroot()
+        summary = next(item for item in trx if item.tag.rsplit("}", 1)[-1] == "ResultSummary")
+        counters = next(item for item in summary if item.tag.rsplit("}", 1)[-1] == "Counters")
+        collectors = [item for item in summary.iter() if item.tag.rsplit("}", 1)[-1] == "Collector"]
+        attachments = (
+            [item for item in collectors[0].iter() if item.tag.rsplit("}", 1)[-1] == "A"]
+            if len(collectors) == 1
+            else []
+        )
+        diagnostics = list(output.parent.glob("collector.diag.datacollector.*.log"))
+        diagnostic = (
+            diagnostics[0].read_text(encoding="utf-8", errors="replace")
+            if len(diagnostics) == 1
+            else ""
+        )
+    except (OSError, ElementTree.ParseError, StopIteration) as error:
+        _coverage_failure("COVERAGE_REPORT_INVALID", "collector TRX or diagnostic is missing")
+        raise AssertionError("unreachable") from error
+    loaded = f"Loading assembly '{collector_dll}'".replace("/", "\\").casefold()
+    if (
+        summary.get("outcome") != "Completed"
+        or not int(counters.get("total", "0"))
+        or counters.get("total") != counters.get("passed")
+        or len(attachments) != 1
+        or collectors[0].get("uri", "").casefold() != "datacollector://microsoft/codecoverage/2.0"
+        or loaded not in diagnostic.casefold()
+    ):
+        _coverage_failure(
+            "COVERAGE_REPORT_INVALID", "collector attachment or full passing run is unverified"
+        )
+    report = resolve_collector_attachment(results, trx, attachments[0].get("href", ""))
+    context = GitContext(
+        repository_root, repository_root, repository_root, repository_root, "0" * 40
+    )
+    return project_stateless_collector(context, report, output)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    arguments = parse_args(argv)
+    arguments_list = list(argv if argv is not None else sys.argv[1:])
+    if arguments_list and arguments_list[0] == "collector-stateless":
+        if len(arguments_list) != 5:
+            raise RunnerError(
+                "COVERAGE_MARKER_INVALID: Stateless collector requires four fixed paths"
+            )
+        try:
+            produce_stateless_collector(*(Path(item) for item in arguments_list[1:]))
+        except RunnerError as error:
+            print(f"PROJECT_RELEASE_PROTOCOL_BLOCKED: {error}", file=sys.stderr)
+            return 1
+        return 0
+    arguments = parse_args(arguments_list)
     try:
         written_receipt = execute(arguments.role, arguments.scanner)
     except RunnerError as error:

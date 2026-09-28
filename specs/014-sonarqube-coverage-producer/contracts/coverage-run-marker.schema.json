@@ -35,6 +35,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "schema_version",
         "source_kind",
         "tracked_relative_path",
         "source_sha256",
@@ -48,6 +49,9 @@
         "resolved_relative_path"
       ],
       "properties": {
+        "schema_version": {
+          "const": 1
+        },
         "source_kind": {
           "const": "pull_request_head"
         },
@@ -96,7 +100,8 @@
       "required": [
         "coverage_py",
         "coverlet_msbuild",
-        "test_sdk"
+        "test_sdk",
+        "code_coverage"
       ],
       "properties": {
         "coverage_py": {
@@ -107,6 +112,9 @@
         },
         "test_sdk": {
           "const": "17.12.0"
+        },
+        "code_coverage": {
+          "const": "17.14.1"
         }
       }
     },
@@ -284,7 +292,8 @@
         "id",
         "project",
         "raw_cobertura_path",
-        "include_directory"
+        "include_directory",
+        "provider"
       ],
       "properties": {
         "id": {
@@ -311,6 +320,12 @@
               "$ref": "#/$defs/relative_path"
             }
           ]
+        },
+        "provider": {
+          "enum": [
+            "coverlet.msbuild",
+            "microsoft.codecoverage"
+          ]
         }
       }
     },
@@ -332,6 +347,9 @@
             },
             "include_directory": {
               "type": "null"
+            },
+            "provider": {
+              "const": "coverlet.msbuild"
             }
           }
         }
@@ -355,6 +373,9 @@
             },
             "include_directory": {
               "type": "null"
+            },
+            "provider": {
+              "const": "coverlet.msbuild"
             }
           }
         }
@@ -378,6 +399,9 @@
             },
             "include_directory": {
               "type": "null"
+            },
+            "provider": {
+              "const": "coverlet.msbuild"
             }
           }
         }
@@ -401,6 +425,9 @@
             },
             "include_directory": {
               "const": "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0"
+            },
+            "provider": {
+              "const": "microsoft.codecoverage"
             }
           }
         }
@@ -424,6 +451,9 @@
             },
             "include_directory": {
               "type": "null"
+            },
+            "provider": {
+              "const": "coverlet.msbuild"
             }
           }
         }

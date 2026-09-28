@@ -13,7 +13,7 @@ Before the runner starts a scanner transaction, it must:
 5. Require the accepted candidate to be ancestor-or-equal to the actual PR head, require equal PR-head and merge trees, record their shared `integrated_tree_sha`, and require the tracked artifact blob to equal the PR-head artifact blob.
 6. Derive `artifact_commit_sha` from current path history. Require it to equal `merge_commit_sha` or be ancestor-or-equal to `observed_main_sha`, and require `merge_commit_sha` to be ancestor-or-equal to `observed_main_sha`.
 7. Resolve and version-check `uv`, `bash`, and `dotnet`.
-8. Evaluate each fixed project for `net8.0`, direct private `coverlet.msbuild` `10.0.1`, `Microsoft.NET.Test.Sdk` `17.12.0`, and VSTest selection.
+8. Evaluate each fixed project for `net8.0`, `Microsoft.NET.Test.Sdk` `17.12.0`, and VSTest selection. Require direct private `coverlet.msbuild` `10.0.1` in the four Coverlet projects and direct private `Microsoft.CodeCoverage` `17.14.1` in Stateless alone.
 9. Refuse MTP, including `TestingPlatformDotnetTestSupport` activation and Microsoft Testing Platform references.
 
 A failed entry or preflight emits a planned-stage failure. It has zero scanner-begin calls and zero run-root claims.
@@ -52,11 +52,13 @@ The runner accepts `python/coverage.xml` only when it has a `coverage` root, pos
 
 ## Admit .NET inputs and normalize one final report
 
-The producer runs exactly the five projects named in [architecture.md](../architecture.md#fixed-net-producer-inventory). Each project restores and tests without `--no-build`, filters, exclusions, thresholds, or merge switches. It emits a private Cobertura input at its planned input prefix.
+The producer runs exactly the five projects named in [architecture.md](../architecture.md#fixed-net-producer-inventory). Each project restores and tests without `--no-build`, filters, exclusions, thresholds, or merge switches. The four unchanged inputs use Coverlet; Stateless alone builds its test project then executes its complete VSTest DLL using the pinned `Microsoft.CodeCoverage` 17.14.1 adapter with managed dynamic instrumentation and child-process collection. It emits one private Cobertura input at its planned input prefix.
 
-The runner validates each private input before normalization. It requires a `coverage` root, a positive line denominator, ordered counts, at least one tracked production `.cs` mapping, and no unsafe path. The aggregate private input branch denominator must be positive. The Stateless input must map production Stateless source and preserve the selected DLL/PDB bytes.
+The Stateless producer admits one attached Cobertura report only after checking the installed pinned adapter, VSTest diagnostic loaded-assembly path, collector URI, the exact regular attachment referenced by the TRX deployment root and href, and a nonempty all-passing test run. A second same-basename collector source file is not a second attachment. The Windows Job owner must observe zero active processes before producer-terminal evidence or run-root cleanup; on timeout or interruption it force-drains the owned tree first. It hashes both the test and production DLL/PDB pairs immediately before and after VSTest and refuses changed bytes. Its projection maps only tracked regular production Stateless `.cs` paths inside the checkout; known Stateless test classes are omitted before counting, and any foreign, fixture, untracked, nonregular, escaping, or duplicate-normalized source is refused. Unprojected collector XML is not an input.
 
-The runner normalizes the five inputs in marker order. It canonicalizes source paths, unions coverage facts by canonical source path, line, and condition ordinal, and emits `.tmp/sonarqube-coverage/<run-id>/dotnet/coverage.xml` in deterministic lexical order. A fact is covered when any input covers it. The output must have positive line and branch denominators and a source set equal to the validated input union. The five inputs are not scanner report identities.
+The runner validates each private input before normalization. It requires a `coverage` root, a positive line denominator, ordered counts, at least one tracked production `.cs` mapping, and no unsafe path. The aggregate private input branch denominator must be positive. The Stateless input must map production Stateless source and preserve the selected production DLL/PDB bytes.
+
+The runner normalizes the five inputs in marker order. It canonicalizes source paths and unions coverage facts by canonical source path, line, and condition ordinal only within a provider; overlapping source-line identities across Coverlet and Microsoft.CodeCoverage fail closed because their branch condition ordinals are not interchangeable. A fact is covered when any compatible input covers it. The output must have positive line and branch denominators and a source set equal to the validated input union. The five inputs are not scanner report identities.
 
 ## Gate scanner end
 

@@ -1,8 +1,8 @@
 """Focused contracts for the dependency-free SonarQube exact-head runner."""
 
+import asyncio
 import importlib.util
 import json
-import re
 import stat
 import sys
 from contextlib import ExitStack, nullcontext
@@ -14,6 +14,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import TestCase
 from unittest.mock import patch
+
+from jsonschema import Draft202012Validator, FormatChecker
 
 RUNNER_PATH = Path(__file__).resolve().parents[1] / "scripts" / "run_sonarqube_exact_head.py"
 SPEC = importlib.util.spec_from_file_location("sonarqube_exact_head_runner", RUNNER_PATH)
@@ -2022,9 +2024,11 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     "id": project_id,
                     "project": project,
                     "target_framework": "net8.0",
-                    "coverlet_msbuild": "10.0.1",
-                    "coverlet_private_assets": "all",
+                    "coverlet_msbuild": None if project_id == "stateless" else "10.0.1",
+                    "coverlet_private_assets": None if project_id == "stateless" else "all",
                     "test_sdk": "17.12.0",
+                    "code_coverage": "17.14.1" if project_id == "stateless" else None,
+                    "code_coverage_private_assets": "all" if project_id == "stateless" else None,
                     "test_platform": "vstest",
                     "mtp_active": False,
                 }
@@ -2079,9 +2083,11 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         failing_step: str | None = None,
         producer_terminals: list[bool] | None = None,
         generated_cleanup_calls: list[str] | None = None,
+        real_cleanup: bool = False,
     ) -> None:
         context = self._context(root)
-        plan = SimpleNamespace()
+        plan = SimpleNamespace(repository_root=root, root=root / ".tmp/sonarqube-coverage/claimed")
+        cleanup_coverage_run = runner.cleanup_coverage_run
         claim = SimpleNamespace()
 
         def step(name, result=None):
@@ -2107,6 +2113,8 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         def cleanup(_plan, producer_terminal):
             if producer_terminals is not None:
                 producer_terminals.append(producer_terminal)
+            if real_cleanup:
+                return cleanup_coverage_run(_plan, producer_terminal)
             return {}
 
         def clear_generated(_context, _environment):
@@ -2323,6 +2331,11 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 (
                     "test-sdk",
                     lambda value: value["projects"][0].__setitem__("test_sdk", "17.11.0"),
+                    "COVERAGE_VSTEST_INCOMPATIBLE",
+                ),
+                (
+                    "collector",
+                    lambda value: value["projects"][3].__setitem__("code_coverage", "17.12.0"),
                     "COVERAGE_VSTEST_INCOMPATIBLE",
                 ),
                 (
@@ -2639,6 +2652,13 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             claim = runner.claim_coverage_run(context, plan, self._resolved_wave2_entry())
             marker_path = self._absolute(getattr(claim, "marker", plan.marker))
             marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            schema = json.loads(
+                (
+                    RUNNER_PATH.parents[1]
+                    / "specs/014-sonarqube-coverage-producer/contracts/coverage-run-marker.schema.json"
+                ).read_text(encoding="utf-8")
+            )
+            Draft202012Validator(schema, format_checker=FormatChecker()).validate(marker)
 
         self.assertEqual([report["id"] for report in marker["final_reports"]], ["python", "dotnet"])
         self.assertEqual(
@@ -2712,57 +2732,23 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             plan = self._plan(root)
             commands = runner.dotnet_producer_commands(plan)
             test_commands = [command for command in commands if command[:2] == ["dotnet", "test"]]
+            collector_commands = [
+                command for command in commands if "collector-stateless" in command
+            ]
 
-            self.assertEqual(len(test_commands), 5)
+            self.assertEqual(len(test_commands), 4)
+            self.assertEqual(len(collector_commands), 1)
+            self.assertEqual(
+                collector_commands[0][-1],
+                str(root / "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0"),
+            )
             for command in test_commands:
                 self.assertIn("--no-restore", command)
                 self.assertNotIn("--no-build", command)
                 self.assertIn("-p:CoverletOutputFormat=cobertura", command)
-            filtered = [command for command in test_commands if "--filter" in command]
-            self.assertEqual(len(filtered), 1)
-            self.assertTrue(
-                any("NetCoreDbg.Mcp.Stateless.Tests.csproj" in item for item in filtered[0])
-            )
-            filter_index = filtered[0].index("--filter")
-            self.assertEqual(filtered[0][filter_index + 1], "Coverage!=Exclude")
+                self.assertNotIn("--filter", command)
             with self.assertRaisesRegex(runner.RunnerError, "COVERAGE_REPORT_MISSING"):
                 runner.validate_dotnet_cobertura_inputs(context, plan)
-
-    def test_r09b_every_stateless_process_collection_class_is_excluded_from_coverlet(self):
-        tests_root = RUNNER_PATH.parents[1] / "host" / "NetCoreDbg.Mcp.Stateless.Tests"
-        process_collection = re.compile(
-            r"\[\s*Collection\s*\(\s*(?:(?:global::)?[A-Za-z_]\w*\.)*"
-            r"NetCoreDbgSessionProcessCollection\.Name\s*\)\s*\]"
-        )
-        coverage_exclusion = re.compile(r'\[\s*Trait\s*\(\s*"Coverage"\s*,\s*"Exclude"\s*\)\s*\]')
-        class_declaration = re.compile(
-            r"(?:public|internal)\s+(?:(?:sealed|abstract|partial)\s+)*class\s+"
-            r"(?P<name>[A-Za-z_]\w*)"
-        )
-        process_classes: list[str] = []
-        missing_traits: list[str] = []
-        for path in tests_root.rglob("*.cs"):
-            pending_attributes: list[str] = []
-            for line in path.read_text(encoding="utf-8").splitlines():
-                stripped = line.strip()
-                if stripped.startswith("[") and stripped.endswith("]"):
-                    pending_attributes.append(stripped)
-                    continue
-                declaration = class_declaration.search(stripped)
-                if declaration is not None:
-                    attributes = "\n".join(pending_attributes)
-                    if process_collection.search(attributes) is not None:
-                        class_identity = (
-                            f"{path.relative_to(tests_root).as_posix()}:{declaration['name']}"
-                        )
-                        process_classes.append(class_identity)
-                        if coverage_exclusion.search(attributes) is None:
-                            missing_traits.append(class_identity)
-                if stripped and not stripped.startswith("//"):
-                    pending_attributes.clear()
-
-        self.assertEqual(len(process_classes), 12)
-        self.assertEqual(missing_traits, [])
 
     def test_r10_only_stateless_gets_include_directory_and_restoration_and_mapping_are_required(
         self,
@@ -2772,19 +2758,19 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             context = self._context(root)
             plan = self._plan(root)
             commands = runner.dotnet_producer_commands(plan)
-            include_commands = [
-                command
-                for command in commands
-                if any("IncludeDirectory=" in argument for argument in command)
-            ]
-            self.assertEqual(len(include_commands), 1)
             self.assertTrue(
-                any("NetCoreDbg.Mcp.Stateless.Tests.csproj" in item for item in include_commands[0])
+                any(
+                    command[:2] == ["dotnet", "build"]
+                    and "NetCoreDbg.Mcp.Stateless.Tests.csproj" in command[2]
+                    for command in commands
+                )
             )
-            include_directory = str(
-                root / "host" / "NetCoreDbg.Mcp.Stateless" / "bin" / "Debug" / "net8.0"
+            self.assertEqual(
+                sum(
+                    "IncludeDirectory=" in argument for command in commands for argument in command
+                ),
+                0,
             )
-            self.assertTrue(any(item.endswith(include_directory) for item in include_commands[0]))
 
             stateless = plan.dotnet_inputs[3]
             report = self._absolute(stateless.raw_cobertura_input)
@@ -2802,6 +2788,226 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 runner.validate_stateless_restoration(
                     plan, {"dll_sha256": "0" * 64, "pdb_sha256": "0" * 64}
                 )
+
+    def test_stateless_collector_projects_absolute_production_and_excludes_test_classes(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            source = self._write_source(root, "host/NetCoreDbg.Mcp.Stateless/Program.cs")
+            test_source = self._write_source(
+                root, "host/NetCoreDbg.Mcp.Stateless.Tests/ProgramTests.cs"
+            )
+            raw = root / "raw.xml"
+            projected = root / "projected.xml"
+            line = (
+                '<line number="26" hits="1" branch="true" condition-coverage="50% (1/2)">'
+                '<conditions><condition number="0" type="jump" coverage="100%"/>'
+                '<condition number="1" type="jump" coverage="0%"/></conditions></line>'
+            )
+            raw.write_text(
+                '<coverage><packages><package name="source"><classes>'
+                f'<class name="NetCoreDbg.Mcp.Stateless.Program" filename="{source}"><lines>{line}</lines></class>'
+                f'<class name="NetCoreDbg.Mcp.Stateless.Tests.ProgramTests" filename="{test_source}"><lines>'
+                '<line number="1" hits="1"/></lines></class></classes></package></packages></coverage>',
+                encoding="utf-8",
+            )
+            with patch.object(runner, "is_tracked", return_value=True):
+                observed = runner.project_stateless_collector(context, raw, projected)
+            self.assertEqual(observed["source_paths"], ["host/NetCoreDbg.Mcp.Stateless/Program.cs"])
+            self.assertEqual((observed["branches_covered"], observed["branches_valid"]), (1, 2))
+            self.assertEqual(
+                runner.ElementTree.parse(projected).getroot().attrib["lines-valid"], "1"
+            )
+
+    def test_stateless_collector_refuses_foreign_and_duplicate_spellings(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            source = self._write_source(root, "host/NetCoreDbg.Mcp.Stateless/Program.cs")
+            foreign = self._write_source(root, "host/Fixture/Foreign.cs")
+            raw = root / "raw.xml"
+            line = '<lines><line number="1" hits="1" branch="true" condition-coverage="100% (1/1)"/></lines>'
+            with patch.object(runner, "is_tracked", return_value=True):
+                for other in (foreign, str(source).replace("\\", "/")):
+                    raw.write_text(
+                        "<coverage><packages><package><classes>"
+                        f'<class name="NetCoreDbg.Mcp.Stateless.Program" filename="{source}">{line}</class>'
+                        f'<class name="NetCoreDbg.Mcp.Stateless.Other" filename="{other}">{line}</class>'
+                        "</classes></package></packages></coverage>",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(
+                        runner.RunnerError, "COVERAGE_SOURCE_MAPPING_INVALID"
+                    ):
+                        runner.project_stateless_collector(context, raw, root / "projected.xml")
+
+    def test_stateless_collector_refuses_relative_escape_and_fixture_paths(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "checkout"
+            root.mkdir()
+            context = self._context(root)
+            foreign = self._write_source(root.parent, "outside/Foreign.cs")
+            fixture = self._write_source(
+                root, "host/NetCoreDbg.Mcp.Stateless.Tests/Fixtures/Fixture.cs"
+            )
+            raw = root / "raw.xml"
+            for filename in ("host/NetCoreDbg.Mcp.Stateless/Program.cs", foreign, fixture):
+                raw.write_text(
+                    "<coverage><packages><package><classes>"
+                    f'<class name="NetCoreDbg.Mcp.Stateless.Tests.Fixture" filename="{filename}">'
+                    '<lines><line number="1" hits="1" branch="true" '
+                    'condition-coverage="100% (1/1)"/></lines></class>'
+                    "</classes></package></packages></coverage>",
+                    encoding="utf-8",
+                )
+                with patch.object(runner, "is_tracked", return_value=True):
+                    with self.assertRaisesRegex(
+                        runner.RunnerError, "COVERAGE_SOURCE_MAPPING_INVALID"
+                    ):
+                        runner.project_stateless_collector(context, raw, root / "projected.xml")
+
+    def test_stateless_collector_trx_deployment_resolves_two_copy_layout(self):
+        with TemporaryDirectory() as temporary_directory:
+            results = Path(temporary_directory)
+            trx = runner.ElementTree.fromstring(
+                '<TestRun><TestSettings><Deployment runDeploymentRoot="deployment"/>'
+                "</TestSettings></TestRun>"
+            )
+            deployment_copy = results / "deployment/In/HOST/attached.cobertura.xml"
+            attachment_source = results / "1234/attached.cobertura.xml"
+            for path in (deployment_copy, attachment_source):
+                path.parent.mkdir(parents=True)
+                path.write_text("<coverage/>", encoding="utf-8")
+            self.assertEqual(
+                runner.resolve_collector_attachment(results, trx, "HOST\\attached.cobertura.xml"),
+                deployment_copy,
+            )
+            for href in ("../1234/attached.cobertura.xml", "HOST/../attached.cobertura.xml"):
+                with self.assertRaisesRegex(runner.RunnerError, "COVERAGE_REPORT_INVALID"):
+                    runner.resolve_collector_attachment(results, trx, href)
+
+    def test_stateless_collector_timeout_drains_owned_descendant(self):
+        if runner.os.name != "nt":
+            self.skipTest("Windows Job Object ownership only")
+        import psutil
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            pid_file = root / "descendant.pid"
+            child = root / "child.py"
+            child.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+            parent = root / "parent.py"
+            parent.write_text(
+                "import subprocess, sys, time\n"
+                f"child = subprocess.Popen([sys.executable, {str(child)!r}])\n"
+                f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+                "time.sleep(30)\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(TimeoutError):
+                asyncio.run(
+                    runner._run_owned_vstest(
+                        [sys.executable, str(parent)],
+                        RUNNER_PATH.parents[1],
+                        timeout_seconds=2,
+                    )
+                )
+            self.assertTrue(pid_file.is_file())
+            self.assertFalse(psutil.pid_exists(int(pid_file.read_text(encoding="utf-8"))))
+
+    def test_stateless_collector_interruption_drains_owned_descendant(self):
+        if runner.os.name != "nt":
+            self.skipTest("Windows Job Object ownership only")
+        import psutil
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            pid_file = root / "descendant.pid"
+            child = root / "child.py"
+            child.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+            parent = root / "parent.py"
+            parent.write_text(
+                "import subprocess, sys, time\n"
+                f"child = subprocess.Popen([sys.executable, {str(child)!r}])\n"
+                f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+                "time.sleep(30)\n",
+                encoding="utf-8",
+            )
+
+            async def interrupt() -> None:
+                task = asyncio.create_task(
+                    runner._run_owned_vstest(
+                        [sys.executable, str(parent)],
+                        RUNNER_PATH.parents[1],
+                        timeout_seconds=30,
+                    )
+                )
+                for _ in range(200):
+                    if pid_file.is_file():
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(pid_file.is_file())
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+            asyncio.run(interrupt())
+            self.assertFalse(psutil.pid_exists(int(pid_file.read_text(encoding="utf-8"))))
+
+    def test_stateless_collector_rejects_changed_test_pdb_before_accepting_attachment(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            project = root / runner.FIXED_COVERAGE_PROJECTS[3][1]
+            test_output = project.parent / "bin/Debug/net8.0"
+            production_output = root / "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0"
+            for directory, name in (
+                (test_output, "NetCoreDbg.Mcp.Stateless.Tests"),
+                (production_output, "NetCoreDbg.Mcp.Stateless"),
+            ):
+                directory.mkdir(parents=True)
+                for suffix in (".dll", ".pdb"):
+                    (directory / f"{name}{suffix}").write_bytes(b"before")
+            adapter = root / "microsoft.codecoverage/17.14.1/build/netstandard2.0"
+            adapter.mkdir(parents=True)
+            (adapter / "Microsoft.VisualStudio.TraceDataCollector.dll").write_bytes(b"collector")
+
+            async def mutate_binary(_command, _root):
+                (test_output / "NetCoreDbg.Mcp.Stateless.Tests.pdb").write_bytes(b"after")
+                return 0
+
+            with (
+                patch.dict(runner.os.environ, {"NUGET_PACKAGES": str(root)}),
+                patch.object(runner, "_run_owned_vstest", side_effect=mutate_binary),
+            ):
+                with self.assertRaisesRegex(
+                    runner.RunnerError, "COVERAGE_INSTRUMENTATION_NOT_RESTORED"
+                ):
+                    runner.produce_stateless_collector(
+                        root,
+                        project,
+                        root / "dotnet/inputs/stateless/coverage.cobertura.xml",
+                        production_output,
+                    )
+
+    def test_stateless_collector_never_unions_cross_provider_branch_ordinals(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            plan = self._plan(root)
+            for index, spec in enumerate(plan.dotnet_inputs):
+                source = (
+                    "host/NetCoreDbg.Mcp.Stateless/Program.cs"
+                    if spec.id in {"host", "stateless"}
+                    else f"host/Production{index}/Source.cs"
+                )
+                self._write_source(root, source)
+                report = self._absolute(spec.raw_cobertura_input)
+                report.parent.mkdir(parents=True)
+                report.write_text(self._cobertura([source]), encoding="utf-8")
+            with patch.object(runner, "is_tracked", return_value=True):
+                inputs = runner.validate_dotnet_cobertura_inputs(context, plan)
+            with self.assertRaisesRegex(runner.RunnerError, "cross-provider"):
+                runner.normalize_dotnet_cobertura(plan, inputs)
 
     def test_r11_private_dotnet_cobertura_inputs_require_safe_xml_sources_and_denominators(self):
         with TemporaryDirectory() as temporary_directory:
@@ -3073,18 +3279,24 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     self._transaction_events(Path(temporary_directory), events, failing_step)
                 self.assertNotIn("end", events)
 
-    def test_r13a_foreground_producer_failure_marks_terminal_before_cleanup(self):
+    def test_r13a_unproven_producer_failure_preserves_claimed_root(self):
         terminals: list[bool] = []
         with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            claimed_root = root / ".tmp/sonarqube-coverage/claimed"
+            claimed_root.mkdir(parents=True)
+            generated_file = claimed_root / "coverage-run.json"
+            generated_file.write_text("evidence", encoding="utf-8")
             with self.assertRaisesRegex(runner.RunnerError, "injected produce failure"):
                 self._transaction_events(
-                    Path(temporary_directory),
+                    root,
                     [],
                     failing_step="produce",
                     producer_terminals=terminals,
+                    real_cleanup=True,
                 )
-
-        self.assertEqual(terminals, [True])
+            self.assertEqual(terminals, [False])
+            self.assertEqual(generated_file.read_text(encoding="utf-8"), "evidence")
 
     def test_r13b_failure_after_venv_creation_runs_generated_cleanup(self):
         generated_cleanup_calls: list[str] = []

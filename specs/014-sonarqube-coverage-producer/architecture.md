@@ -119,7 +119,7 @@ The runner owns this exact tree. `<run-id>` is one UUID. Producers use absolute 
 | 1 | `codesearch-core` | `host/NetCoreDbg.Mcp.CodeSearch.Core.Tests/NetCoreDbg.Mcp.CodeSearch.Core.Tests.csproj` | `dotnet/inputs/codesearch-core/coverage.cobertura.xml` | None |
 | 2 | `host` | `host/NetCoreDbg.Mcp.Host.Tests/NetCoreDbg.Mcp.Host.Tests.csproj` | `dotnet/inputs/host/coverage.cobertura.xml` | None |
 | 3 | `stateless-preview` | `host/NetCoreDbg.Mcp.Stateless.Preview.Tests/NetCoreDbg.Mcp.Stateless.Preview.Tests.csproj` | `dotnet/inputs/stateless-preview/coverage.cobertura.xml` | None |
-| 4 | `stateless` | `host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj` | `dotnet/inputs/stateless/coverage.cobertura.xml` | `/p:IncludeDirectory=<absolute-repo>/host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0` |
+| 4 | `stateless` | `host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj` | `dotnet/inputs/stateless/coverage.cobertura.xml` | Absolute production `bin/Debug/net8.0` directory, used to verify DLL/PDB identity |
 | 5 | `host-prompts` | `tests/dotnet/NetCoreDbg.Mcp.Host.PromptTests/NetCoreDbg.Mcp.Host.PromptTests.csproj` | `dotnet/inputs/host-prompts/coverage.cobertura.xml` | None |
 
 The runner must not substitute its broader build `project_inventory()` for this list. Fixture projects and production projects are not coverage test producers.
@@ -172,7 +172,8 @@ ToolchainPreflight {
   uv: available
   bash: available
   dotnet: available
-  coverlet_msbuild: 10.0.1
+  coverlet_msbuild: 10.0.1 // four private Coverlet producers only
+  code_coverage: 17.14.1 // direct private Microsoft.CodeCoverage for Stateless only
   test_sdk: 17.12.0
   mtp_active: false
 }
@@ -213,9 +214,7 @@ uv run --project <repo> --isolated --locked --extra dev --with coverage==7.15.4 
   --dotnet-project <id> <absolute-csproj> <absolute-input-prefix> <absolute-include-or-dash>
 ```
 
-The final `--dotnet-project` group occurs exactly five times in fixed order. The shell uses foreground commands, `set -euo pipefail`, quoted paths, and no report discovery. Each .NET command restores and then runs:
-
-The Python producer runs a curated production-source unit/integration suite and does not nest customer-mode release gates inside coverage generation. `tests/critical/`, the installed-wheel WPF submenu journey, the exact runner/artifact contract suites, and the real Windows Job Object owner tests remain explicit independent gates. Excluding them from coverage generation never reinterprets their evidence as passing or optional.
+The final `--dotnet-project` group occurs exactly five times in fixed order. The shell uses foreground commands, `set -euo pipefail`, quoted paths, and no report discovery. The Python producer runs a curated production-source unit/integration suite and does not nest customer-mode release gates inside coverage generation. `tests/critical/`, the installed-wheel WPF submenu journey, the exact runner/artifact contract suites, and the real Windows Job Object owner tests remain explicit independent gates. Excluding them from Python coverage generation never reinterprets their evidence as passing or optional.
 
 ```text
 dotnet test <exact-test-csproj> --configuration Debug --no-restore -nr:false \
@@ -224,16 +223,16 @@ dotnet test <exact-test-csproj> --configuration Debug --no-restore -nr:false \
   -p:CoverletOutput=<absolute-input-prefix>
 ```
 
-The expected private file is `<absolute-input-prefix>.cobertura.xml`. No command may use `--no-build`, caller-supplied filters, `Include`, `Exclude`, `ExcludeByFile`, threshold switches, or a merge switch. The Stateless project alone receives the runner-owned exact filter `Coverage!=Exclude`; all 12 classes in `NetCoreDbgSessionProcessCollection` are explicitly trait-marked because Coverlet instrumentation changes live-process timing and ordering, and they remain separate integration gates.
+The expected four Coverlet private files are `<absolute-input-prefix>.cobertura.xml`. No command uses `--no-build`, caller-supplied filters, `Include`, `Exclude`, `ExcludeByFile`, threshold switches, or a merge switch. Stateless instead builds its test project, then runs the complete VSTest DLL without a filter through the pinned first-party `Microsoft.CodeCoverage` 17.14.1 adapter with managed dynamic and child-process collection. The runner validates the collector URI, loaded adapter path, full passing TRX, and the exact TRX deployment-root/In/href attachment, not a basename lookup. Its Windows Job owner observes zero live processes before producer-terminal evidence; timeouts and interruptions force-drain the owned tree. Test and production DLL/PDB hashes must match before and after VSTest. Identified test classes contribute neither facts nor denominator; fixture, foreign, and ambiguous source paths fail closed, as does cross-provider source-line overlap.
 
-The fixed Preview test project contains a real artifact-consumer journey and intentionally refuses repository `bin` output. Before the five test commands, the producer therefore publishes the Preview executable into the claimed run root, creates one deterministic local archive/manifest with `build/prepare_preview_fixture.py`, and passes its location only to that test process through `NETCOREDBG_PREVIEW_ARTIFACT_ROOT`. The default consumer-test path is unchanged. This local input is deleted with the claimed coverage root and has no release, tag, upload, or publication authority.
+The fixed Preview test project contains a real artifact-consumer journey and intentionally refuses repository `bin` output. Before the four Coverlet test commands and the Stateless collector run, the producer therefore publishes the Preview executable into the claimed run root, creates one deterministic local archive/manifest with `build/prepare_preview_fixture.py`, and passes its location only to that test process through `NETCOREDBG_PREVIEW_ARTIFACT_ROOT`. The default consumer-test path is unchanged. This local input is deleted with the claimed coverage root and has no release, tag, upload, or publication authority.
 
 ## Pre-begin toolchain gate
 
 The runner checks all of the following before scanner begin:
 
 1. `uv`, `bash`, and `dotnet` resolve to executable commands and return a version response without creating the run root.
-2. Each fixed project evaluates as `net8.0` VSTest with direct `coverlet.msbuild` `10.0.1`, direct `Microsoft.NET.Test.Sdk` `17.12.0`, and `PrivateAssets=all` for Coverlet.
+2. Each fixed project evaluates as `net8.0` VSTest with direct `Microsoft.NET.Test.Sdk` `17.12.0`; the four Coverlet producers pin direct private `coverlet.msbuild` `10.0.1`, while Stateless alone pins direct private `Microsoft.CodeCoverage` `17.14.1`.
 3. No evaluated project activates `TestingPlatformDotnetTestSupport`, references Microsoft Testing Platform, or otherwise selects MTP. The runner does not inject a property to change the platform.
 
 A missing executable is `COVERAGE_TOOL_UNAVAILABLE`. An invalid tuple is `COVERAGE_VSTEST_INCOMPATIBLE`. Active MTP is `COVERAGE_MTP_INCOMPATIBLE`. All three fail at `PLANNED` and make `begin` and `claim` unreachable.
