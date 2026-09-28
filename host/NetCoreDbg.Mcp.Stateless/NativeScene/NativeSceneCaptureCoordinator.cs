@@ -705,66 +705,92 @@ internal sealed class NativeSceneCaptureCoordinator
                 !TryReadLabel(node, "id", out var id) ||
                 !ids.Add(id) ||
                 node["identity"] is not JsonObject identity ||
-                node["geometry"] is not JsonObject geometry)
+                node["geometry"] is not JsonObject geometry ||
+                !TryMapGuardedNode(node, id, identity, geometry, out var mapped))
             {
                 return false;
             }
 
-            var relations = new JsonArray();
-            if (node["parentId"] is JsonValue parent && parent.TryGetValue<string>(out var parentId))
-            {
-                if (!IsLabel(parentId))
-                {
-                    return false;
-                }
-
-                relations.Add(new JsonObject { ["kind"] = "parent", ["targetNodeId"] = parentId });
-            }
-
-            var visibility = node["accessibility"] is JsonObject accessibility &&
-                             accessibility["isOffscreen"] is JsonValue offscreen &&
-                             offscreen.TryGetValue<bool>(out var isOffscreen)
-                ? isOffscreen ? "hidden" : "visible"
-                : "unobservable";
-            nodes.Add(new JsonObject
-            {
-                ["nodeId"] = id,
-                ["relations"] = relations,
-                ["identity"] = null,
-                ["accessibility"] = new JsonObject
-                {
-                    ["automationId"] = identity["automationId"]?.DeepClone(),
-                    ["name"] = identity["name"]?.DeepClone(),
-                    ["controlType"] = identity["controlType"]?.DeepClone(),
-                    ["visibility"] = visibility,
-                },
-                ["geometry"] = new JsonObject
-                {
-                    ["logicalBounds"] = geometry["logical"]?.DeepClone(),
-                    ["physicalBounds"] = geometry["physical"]?.DeepClone(),
-                    ["dpi"] = TryReadInt32(geometry, "dpi", out var dpi) && dpi > 0
-                        ? new JsonObject { ["x"] = dpi, ["y"] = dpi }
-                        : null,
-                    ["transform"] = null,
-                    ["clip"] = null,
-                },
-                ["adapterEvidence"] = new JsonArray
-                {
-                    new JsonObject
-                    {
-                        ["namespace"] = "netcoredbg.uia",
-                        ["schemaVersion"] = "1",
-                        ["authority"] = "uia_guarded",
-                        ["payload"] = new JsonObject
-                        {
-                            ["transform"] = node["transform"]?.DeepClone(),
-                            ["clip"] = node["clip"]?.DeepClone(),
-                        },
-                    },
-                },
-            });
+            nodes.Add(mapped);
         }
 
+        return HasValidGuardedParentGraph(nodes, rootId);
+    }
+
+    private static bool TryMapGuardedNode(
+        JsonObject node,
+        string id,
+        JsonObject identity,
+        JsonObject geometry,
+        out JsonObject mapped)
+    {
+        mapped = default!;
+        var relations = new JsonArray();
+        if (node["parentId"] is JsonValue parent && parent.TryGetValue<string>(out var parentId))
+        {
+            if (!IsLabel(parentId))
+            {
+                return false;
+            }
+
+            relations.Add(new JsonObject { ["kind"] = "parent", ["targetNodeId"] = parentId });
+        }
+
+        var visibility = ReadGuardedVisibility(node);
+        mapped = new JsonObject
+        {
+            ["nodeId"] = id,
+            ["relations"] = relations,
+            ["identity"] = null,
+            ["accessibility"] = new JsonObject
+            {
+                ["automationId"] = identity["automationId"]?.DeepClone(),
+                ["name"] = identity["name"]?.DeepClone(),
+                ["controlType"] = identity["controlType"]?.DeepClone(),
+                ["visibility"] = visibility,
+            },
+            ["geometry"] = new JsonObject
+            {
+                ["logicalBounds"] = geometry["logical"]?.DeepClone(),
+                ["physicalBounds"] = geometry["physical"]?.DeepClone(),
+                ["dpi"] = TryReadInt32(geometry, "dpi", out var dpi) && dpi > 0
+                    ? new JsonObject { ["x"] = dpi, ["y"] = dpi }
+                    : null,
+                ["transform"] = null,
+                ["clip"] = null,
+            },
+            ["adapterEvidence"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["namespace"] = "netcoredbg.uia",
+                    ["schemaVersion"] = "1",
+                    ["authority"] = "uia_guarded",
+                    ["payload"] = new JsonObject
+                    {
+                        ["transform"] = node["transform"]?.DeepClone(),
+                        ["clip"] = node["clip"]?.DeepClone(),
+                    },
+                },
+            },
+        };
+        return true;
+    }
+
+    private static string ReadGuardedVisibility(JsonObject node)
+    {
+        if (node["accessibility"] is JsonObject accessibility &&
+            accessibility["isOffscreen"] is JsonValue offscreen &&
+            offscreen.TryGetValue<bool>(out var isOffscreen))
+        {
+            return isOffscreen ? "hidden" : "visible";
+        }
+
+        return "unobservable";
+    }
+
+    private static bool HasValidGuardedParentGraph(JsonArray nodes, string rootId)
+    {
         var knownIds = new HashSet<string>(nodes.Select(static node => node!["nodeId"]!.GetValue<string>()), StringComparer.Ordinal);
         var parentByNodeId = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var node in nodes.OfType<JsonObject>())
@@ -785,6 +811,14 @@ internal sealed class NativeSceneCaptureCoordinator
             return false;
         }
 
+        return AllGuardedNodesReachRoot(knownIds, parentByNodeId, rootId);
+    }
+
+    private static bool AllGuardedNodesReachRoot(
+        HashSet<string> knownIds,
+        Dictionary<string, string> parentByNodeId,
+        string rootId)
+    {
         foreach (var nodeId in knownIds)
         {
             var visited = new HashSet<string>(StringComparer.Ordinal);
