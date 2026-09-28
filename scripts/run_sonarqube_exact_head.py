@@ -22,6 +22,7 @@ import xml.etree.ElementTree as ElementTree
 from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, NoReturn
@@ -2017,19 +2018,21 @@ def _condition_totals(line: ElementTree.Element) -> tuple[int, int, list[dict[st
     if not conditions or any(child.tag.rsplit("}", 1)[-1] != "condition" for child in conditions):
         _coverage_failure("COVERAGE_REPORT_INVALID", "branch conditions are malformed")
 
-    parsed: list[tuple[str, str, float]] = []
+    parsed: list[tuple[str, str, Decimal]] = []
     identities: set[tuple[str, str]] = set()
     for condition in conditions:
         raw_number = condition.attrib.get("number")
         condition_type = condition.attrib.get("type")
         coverage_match = re.fullmatch(r"(\d+(?:\.\d+)?)%", condition.attrib.get("coverage", ""))
+        percentage = Decimal(coverage_match.group(1)) if coverage_match else None
         if (
             not isinstance(raw_number, str)
             or re.fullmatch(r"\d+", raw_number) is None
             or not isinstance(condition_type, str)
             or not condition_type
             or coverage_match is None
-            or float(coverage_match.group(1)) > 100
+            or percentage is None
+            or percentage > 100
         ):
             _coverage_failure("COVERAGE_REPORT_INVALID", "branch condition identity is malformed")
         number = str(int(raw_number))
@@ -2039,7 +2042,7 @@ def _condition_totals(line: ElementTree.Element) -> tuple[int, int, list[dict[st
                 "COVERAGE_REPORT_INVALID", "branch condition identities are ambiguous"
             )
         identities.add(identity)
-        parsed.append((number, condition_type, float(coverage_match.group(1))))
+        parsed.append((number, condition_type, percentage))
 
     # Coverlet can collapse several switch/jump outcomes into one condition
     # element (for example 16/17 across six condition identities). Cobertura
@@ -2051,13 +2054,13 @@ def _condition_totals(line: ElementTree.Element) -> tuple[int, int, list[dict[st
 
     facts: list[dict[str, str | int]] = []
     for number, condition_type, percentage in parsed:
-        if percentage not in {0.0, 100.0}:
+        if percentage not in {Decimal(0), Decimal(100)}:
             _coverage_failure("COVERAGE_REPORT_INVALID", "branch condition coverage is not exact")
         facts.append(
             {
                 "number": number,
                 "type": condition_type,
-                "covered": int(percentage == 100.0),
+                "covered": int(percentage == Decimal(100)),
                 "valid": 1,
             }
         )

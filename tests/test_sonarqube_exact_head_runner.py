@@ -2903,6 +2903,38 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         self.assertEqual((line["branches_covered"], line["branches_valid"]), (16, 17))
         self.assertEqual(line["conditions"], [])
 
+    def test_dotnet_cobertura_rejects_rounded_up_condition_percentage(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            source_path = "host/NetCoreDbg.Mcp.Host/Program.cs"
+            source = self._write_source(root, source_path)
+            report = root / "input.xml"
+            report.write_text(
+                self._cobertura(
+                    [source_path],
+                    branches_valid=1,
+                    line_xml=(
+                        '<line number="1" hits="1" branch="true" '
+                        'condition-coverage="100% (1/1)"><conditions>'
+                        '<condition number="0" type="jump" '
+                        'coverage="99.999999999999999999999999999999999999999999999%"/>'
+                        "</conditions></line>"
+                    ),
+                ),
+                encoding="utf-8",
+            )
+            spec = SimpleNamespace(
+                id="host",
+                project="host/NetCoreDbg.Mcp.Host.Tests/NetCoreDbg.Mcp.Host.Tests.csproj",
+                include_directory=None,
+            )
+            with patch.object(
+                runner, "is_tracked", side_effect=lambda _root, _env, path: path == source
+            ):
+                with self.assertRaisesRegex(runner.RunnerError, "COVERAGE_REPORT_INVALID"):
+                    runner.validate_dotnet_cobertura_input(context, spec, report)
+
     def test_r12_dotnet_normalization_is_deterministic_and_final_output_must_equal_input_union(
         self,
     ):
