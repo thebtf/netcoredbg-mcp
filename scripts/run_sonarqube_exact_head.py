@@ -803,6 +803,107 @@ def run_process(
             r"\b(?:401|403|authenticat|authoriz|forbidden|token)\b", output, re.IGNORECASE
         ):
             raise CredentialsUnavailableError(*credential_input_names)
+        if label == "Coverage producer":
+            marker = "PROJECT_RELEASE_PROTOCOL_BLOCKED: COVERAGE_PROCESS_TREE_NOT_DRAINED: "
+            for line in reversed(output.splitlines()):
+                if not line.startswith(marker) or "owner_drain=" not in line or len(line) > 4096:
+                    continue
+                try:
+                    diagnostic = json.loads(line.split("owner_drain=", 1)[1])
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(diagnostic, dict) or set(diagnostic) != {
+                    "invariant",
+                    "first",
+                    "fallback_exact_handles_known",
+                    "fallback_exact_handles_signaled",
+                    "fallback_awaited_all_exact_handles",
+                }:
+                    continue
+                first = diagnostic["first"]
+                if not isinstance(first, dict) or set(first) != {
+                    "status",
+                    "forced",
+                    "root_was_forced",
+                    "active_processes",
+                    "total_processes",
+                    "birth_notifications",
+                    "exit_notifications",
+                    "unverified_membership",
+                    "root_birth_seen",
+                    "live_members_without_handle",
+                    "retained_exact_handles",
+                    "signaled_exact_handles",
+                    "handle_probe_failed",
+                    "failure_stage",
+                    "winerror",
+                }:
+                    continue
+                if (
+                    type(diagnostic["invariant"]) is not str
+                    or type(first["status"]) is not str
+                    or (
+                        first["failure_stage"] is not None
+                        and type(first["failure_stage"]) is not str
+                    )
+                    or diagnostic["invariant"]
+                    not in {
+                        "active_processes_nonzero",
+                        "exact_handle_exit_unverified",
+                        "membership_unverified",
+                        "root_birth_missing",
+                        "lifetime_notifications_missing",
+                        "lifetime_accounting_mismatch",
+                        "live_member_handle_missing",
+                        "owner_drain_unverified",
+                    }
+                    or first["status"] not in {"failed", "timed_out", "drained", "stale"}
+                    or first["failure_stage"]
+                    not in {
+                        None,
+                        "create_job",
+                        "set_limits",
+                        "create_process",
+                        "assign",
+                        "verify",
+                        "wire_io",
+                        "resume",
+                        "drain",
+                    }
+                    or any(
+                        type(first[key]) is not bool for key in ("forced", "handle_probe_failed")
+                    )
+                    or any(
+                        first[key] is not None and type(first[key]) is not bool
+                        for key in ("root_was_forced", "unverified_membership", "root_birth_seen")
+                    )
+                    or type(diagnostic["fallback_awaited_all_exact_handles"]) is not bool
+                    or any(
+                        value is not None and (type(value) is not int or value < 0)
+                        for value in (
+                            *(
+                                first[key]
+                                for key in (
+                                    "active_processes",
+                                    "total_processes",
+                                    "birth_notifications",
+                                    "exit_notifications",
+                                    "live_members_without_handle",
+                                    "retained_exact_handles",
+                                    "signaled_exact_handles",
+                                    "winerror",
+                                )
+                            ),
+                            diagnostic["fallback_exact_handles_known"],
+                            diagnostic["fallback_exact_handles_signaled"],
+                        )
+                    )
+                ):
+                    continue
+                raise RunnerError(
+                    "COVERAGE_PROCESS_TREE_NOT_DRAINED: collector drain is unverified; "
+                    f"owner_drain={json.dumps(diagnostic, sort_keys=True)}"
+                )
         raise RunnerError(f"{label} failed with exit code {completed.returncode}.")
 
 
@@ -5037,6 +5138,89 @@ async def _run_owned_vstest(
         except owner_module._Win32CallError:
             pass
 
+    def owner_drain_snapshot(receipt: Any) -> dict[str, Any]:
+        job_handle = owner._job_handle
+        try:
+            total = owner._api.total_processes(job_handle) if job_handle else None
+        except owner_module._Win32CallError:
+            total = None
+        handles = (
+            owner._process_handle,
+            *owner._member_handles.values(),
+            *owner._unmatched_member_handles,
+        )
+        retained = [handle for handle in handles if handle is not None]
+        signaled = 0
+        handle_probe_failed = False
+        for handle in retained:
+            try:
+                signaled += bool(owner._api.wait_for_process(handle, 0))
+            except owner_module._Win32CallError:
+                handle_probe_failed = True
+        births = getattr(owner, "_birth_notifications", None)
+        live = getattr(owner, "_live_births", ())
+        snapshot = {
+            "status": receipt.status.value,
+            "forced": bool(receipt.forced),
+            "root_was_forced": getattr(receipt, "root_was_forced", None),
+            "active_processes": receipt.active_processes,
+            "total_processes": total,
+            "birth_notifications": births,
+            "exit_notifications": births - len(live) if births is not None else None,
+            "unverified_membership": getattr(owner, "_unverified_membership", None),
+            "root_birth_seen": getattr(owner, "_root_birth_seen", None),
+            "live_members_without_handle": sum(
+                pid != owner.pid and pid not in owner._member_handles for pid in live
+            ),
+            "retained_exact_handles": len(retained),
+            "signaled_exact_handles": signaled,
+            "handle_probe_failed": handle_probe_failed,
+            "failure_stage": getattr(getattr(receipt, "failure_stage", None), "value", None),
+            "winerror": getattr(receipt, "winerror", None),
+        }
+        return snapshot
+
+    first_drain: dict[str, Any] | None = None
+    fallback_known: int | None = None
+    fallback_signaled = 0
+
+    def drain_failure(detail: str) -> NoReturn:
+        if first_drain is None:
+            _coverage_failure("COVERAGE_PROCESS_TREE_NOT_DRAINED", detail)
+        total = first_drain["total_processes"]
+        births = first_drain["birth_notifications"]
+        if first_drain["active_processes"] not in (0, None):
+            invariant = "active_processes_nonzero"
+        elif first_drain["handle_probe_failed"] or (
+            first_drain["retained_exact_handles"] != first_drain["signaled_exact_handles"]
+        ):
+            invariant = "exact_handle_exit_unverified"
+        elif first_drain["unverified_membership"]:
+            invariant = "membership_unverified"
+        elif first_drain["root_birth_seen"] is False:
+            invariant = "root_birth_missing"
+        elif total is not None and births is not None and total > births:
+            invariant = "lifetime_notifications_missing"
+        elif total is not None and births is not None and total < births:
+            invariant = "lifetime_accounting_mismatch"
+        elif first_drain["live_members_without_handle"]:
+            invariant = "live_member_handle_missing"
+        else:
+            invariant = "owner_drain_unverified"
+        diagnostic = {
+            "invariant": invariant,
+            "first": first_drain,
+            "fallback_exact_handles_known": fallback_known,
+            "fallback_exact_handles_signaled": fallback_signaled,
+            "fallback_awaited_all_exact_handles": (
+                fallback_known is not None and fallback_known == fallback_signaled
+            ),
+        }
+        _coverage_failure(
+            "COVERAGE_PROCESS_TREE_NOT_DRAINED",
+            f"{detail}; owner_drain={json.dumps(diagnostic, sort_keys=True)}",
+        )
+
     async def pump(stream: asyncio.StreamReader, destination: Any) -> None:
         while chunk := await stream.read(65536):
             destination.write(chunk.decode("utf-8", errors="replace"))
@@ -5054,10 +5238,9 @@ async def _run_owned_vstest(
         captured_before_force = True
         receipt = await owner.drain_after_grace(grace_timeout=10, force_timeout=15)
         if receipt.status is not owner_module.DrainStatus.DRAINED or receipt.forced:
-            _coverage_failure(
-                "COVERAGE_PROCESS_TREE_NOT_DRAINED",
-                "collector descendants survived VSTest completion",
-            )
+            first_drain = owner_drain_snapshot(receipt)
+        if first_drain is not None:
+            drain_failure("collector drain was not verified after VSTest completion")
         await asyncio.wait_for(asyncio.gather(*pumps), timeout=10)
         return result
     except BaseException:
@@ -5066,12 +5249,18 @@ async def _run_owned_vstest(
     finally:
 
         async def finish_owned_cleanup():
+            nonlocal first_drain, fallback_known, fallback_signaled
             close_error: Exception | None = None
             try:
                 if failed:
                     if not captured_before_force:
                         retain_unnotified_members()
-                    await owner.force_and_drain(timeout=20)
+                    forced_receipt = await owner.force_and_drain(timeout=20)
+                    if (
+                        first_drain is None
+                        and forced_receipt.status is not owner_module.DrainStatus.DRAINED
+                    ):
+                        first_drain = owner_drain_snapshot(forced_receipt)
             finally:
                 try:
                     for _ in range(2):
@@ -5086,6 +5275,11 @@ async def _run_owned_vstest(
                                 and receipt.active_processes == 0
                             ):
                                 break
+                            if (
+                                first_drain is None
+                                and receipt.status is not owner_module.DrainStatus.DRAINED
+                            ):
+                                first_drain = owner_drain_snapshot(receipt)
                     else:
                         reaper = getattr(owner, "_close_reaper", None)
                         if reaper is not None:
@@ -5095,10 +5289,7 @@ async def _run_owned_vstest(
                             if not owner._closed:
                                 job_handle = owner._job_handle
                                 if not job_handle:
-                                    _coverage_failure(
-                                        "COVERAGE_PROCESS_TREE_NOT_DRAINED",
-                                        "collector Job handle is unavailable",
-                                    )
+                                    drain_failure("collector Job handle is unavailable")
                                 try:
                                     owner._snapshot_members()
                                 except owner_module._Win32CallError:
@@ -5110,17 +5301,20 @@ async def _run_owned_vstest(
                                     _retained_collector_owners.append(owner)
                                     if close_error is not None:
                                         raise close_error from error
-                                    _coverage_failure(
-                                        "COVERAGE_PROCESS_TREE_NOT_DRAINED",
-                                        "collector Job close failed; exact Job retained until runner exit",
+                                    drain_failure(
+                                        "collector Job close failed; exact Job retained until runner exit"
                                     )
                                 owner._job_handle = None
                                 deadline = time.monotonic() + 20
-                                for handle in (
+                                fallback_handles = (
                                     owner._process_handle,
                                     *owner._member_handles.values(),
                                     *owner._unmatched_member_handles,
-                                ):
+                                )
+                                fallback_known = sum(
+                                    handle is not None for handle in fallback_handles
+                                )
+                                for handle in fallback_handles:
                                     if handle is not None:
                                         remaining_ms = max(
                                             0, int((deadline - time.monotonic()) * 1000)
@@ -5128,11 +5322,11 @@ async def _run_owned_vstest(
                                         if not handle or not await asyncio.to_thread(
                                             owner._api.wait_for_process, handle, remaining_ms
                                         ):
-                                            _coverage_failure(
-                                                "COVERAGE_PROCESS_TREE_NOT_DRAINED",
-                                                "collector Job close did not stop a known process",
+                                            drain_failure(
+                                                "collector Job close did not stop a known process"
                                             )
                                         owner._api.close_handle(handle)
+                                        fallback_signaled += 1
                                 owner._process_handle = None
                                 owner._member_handles.clear()
                                 owner._unmatched_member_handles.clear()
@@ -5143,11 +5337,9 @@ async def _run_owned_vstest(
                                 for transport in owner._transports:
                                     transport.close()
                                 owner._closed = True
-                                if close_error is None:
-                                    _coverage_failure(
-                                        "COVERAGE_PROCESS_TREE_NOT_DRAINED",
-                                        "collector Job was closed without verified drain",
-                                    )
+                                if close_error is not None:
+                                    raise close_error
+                                drain_failure("collector Job was closed without verified drain")
                 finally:
                     for task in pumps:
                         if not task.done():
