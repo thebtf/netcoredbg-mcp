@@ -8,10 +8,18 @@ using FlaUI.UIA3;
 
 namespace FlaUIBridge.Commands;
 
-public static class ElementCommands
+public static partial class ElementCommands
 {
     private const string IdentityUnavailable = "IDENTITY_UNAVAILABLE";
     private const string ProcessMismatch = "PROCESS_MISMATCH";
+    private const string AutomationIdKey = "automationId";
+    private const string NameKey = "name";
+    private const string ControlTypeKey = "controlType";
+    private const string FoundKey = "found";
+    private const string XPathKey = "xpath";
+    private const string NotConnected = "Not connected. Call 'connect' first.";
+    private const string InvalidRectangle = "RECTANGLE_INVALID";
+    private const string StatusKey = "status";
 
     public static JsonNode Connect(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
@@ -116,22 +124,22 @@ public static class ElementCommands
     public static JsonNode FindElement(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         if (mainWindow is null)
-            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+            throw new InvalidOperationException(NotConnected);
 
         var searchRoot = ResolveSearchRoot(mainWindow, @params, automation);
 
         var cf = new ConditionFactory(automation.PropertyLibrary);
         var conditions = new List<ConditionBase>();
 
-        var automationId = @params?["automationId"]?.GetValue<string>();
+        var automationId = @params?[AutomationIdKey]?.GetValue<string>();
         if (automationId is not null)
             conditions.Add(cf.ByAutomationId(automationId));
 
-        var name = @params?["name"]?.GetValue<string>();
+        var name = @params?[NameKey]?.GetValue<string>();
         if (name is not null)
             conditions.Add(cf.ByName(name));
 
-        var controlType = @params?["controlType"]?.GetValue<string>();
+        var controlType = @params?[ControlTypeKey]?.GetValue<string>();
         if (controlType is not null)
         {
             var ct = ParseControlType(controlType);
@@ -141,7 +149,7 @@ public static class ElementCommands
         if (conditions.Count == 0)
         {
             // If xpath provided without other criteria, delegate to XPath search
-            var xpath = @params?["xpath"]?.GetValue<string>();
+            var xpath = @params?[XPathKey]?.GetValue<string>();
             if (!string.IsNullOrWhiteSpace(xpath))
                 return FindByXPath(@params, automation, mainWindow);
             throw new ArgumentException("At least one search criterion required: automationId, name, controlType, or xpath");
@@ -155,7 +163,7 @@ public static class ElementCommands
         if (element is null)
             return new JsonObject
             {
-                ["found"] = false,
+                [FoundKey] = false,
                 ["searchRootName"] = SafeString(() => searchRoot.Name),
                 ["searchRootAutomationId"] = SafeString(() => searchRoot.AutomationId),
                 ["searchRootOffscreen"] = SafeIsOffscreen(searchRoot),
@@ -169,9 +177,9 @@ public static class ElementCommands
     public static JsonNode FindByXPath(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         if (mainWindow is null)
-            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+            throw new InvalidOperationException(NotConnected);
 
-        var xpath = @params?["xpath"]?.GetValue<string>()
+        var xpath = @params?[XPathKey]?.GetValue<string>()
             ?? throw new ArgumentException("Missing required parameter: xpath");
 
         var searchRoot = ResolveSearchRoot(mainWindow, @params, automation);
@@ -187,8 +195,8 @@ public static class ElementCommands
             if (element is null)
                 return new JsonObject
                 {
-                    ["found"] = false,
-                    ["xpath"] = xpath,
+                    [FoundKey] = false,
+                    [XPathKey] = xpath,
                     ["matchCount"] = 0
                 };
 
@@ -210,7 +218,7 @@ public static class ElementCommands
     public static JsonNode GetTree(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         if (mainWindow is null)
-            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+            throw new InvalidOperationException(NotConnected);
 
         var maxDepth = @params?["maxDepth"]?.GetValue<int>() ?? 3;
         var maxChildren = @params?["maxChildren"]?.GetValue<int>() ?? 25;
@@ -233,7 +241,7 @@ public static class ElementCommands
                 // One window failing must not hide the others.
                 windowsArray.Add(new JsonObject
                 {
-                    ["found"] = false,
+                    [FoundKey] = false,
                     ["error"] = ex.Message,
                 });
             }
@@ -344,46 +352,35 @@ public static class ElementCommands
         // Pass 1: check whether any top-level window itself matches by identity.
         // Collecting all matches first lets us warn on ambiguous names (common
         // with dialogs like "Error", "Warning", "Progress" that appear twice).
-        var windowMatches = new List<AutomationElement>();
-        foreach (var window in topLevel)
-        {
-            if (MatchesWindowIdentity(window, rootId))
-                windowMatches.Add(window);
-        }
+        var windowMatches = topLevel.Where(window => MatchesWindowIdentity(window, rootId)).ToList();
 
         if (windowMatches.Count == 1)
             return windowMatches[0];
 
         if (windowMatches.Count > 1)
         {
-            var titles = new List<string>();
-            foreach (var w in windowMatches)
-            {
-                string title;
-                try { title = w.Properties.Name.IsSupported ? w.Properties.Name.Value : ""; }
-                catch { title = ""; }
-                titles.Add($"'{title}'");
-            }
+            var titles = windowMatches.Select(w =>
+                $"'{SafeString(() => w.Properties.Name.IsSupported ? w.Properties.Name.Value : "")}'");
             throw new InvalidOperationException(
                 $"Ambiguous root '{rootId}': {windowMatches.Count} top-level windows match " +
                 $"({string.Join(", ", titles)}). Use set_active_window with a more specific " +
                 "criterion, or pass rootAutomationId as the unique AutomationId.");
         }
 
-        // Pass 2: no window-level match — descend into each window looking
-        // for a descendant with that AutomationId. Collect across all windows
-        // so an ambiguous rootId (same AutomationId present in two windows)
-        // fails loudly rather than silently resolving to whichever window
-        // happens to be enumerated first.
+        return ResolveDescendantSearchRoot(topLevel, cf, rootId);
+    }
+
+    private static AutomationElement ResolveDescendantSearchRoot(
+        List<AutomationElement> topLevel, ConditionFactory cf, string rootId)
+    {
+        // A repeated descendant AutomationId across sibling windows is ambiguous.
         var descendantMatches = new List<(AutomationElement Element, string WindowTitle)>();
         foreach (var window in topLevel)
         {
             var descendant = window.FindFirstDescendant(cf.ByAutomationId(rootId));
             if (descendant is not null)
             {
-                string title;
-                try { title = window.Properties.Name.IsSupported ? window.Properties.Name.Value : ""; }
-                catch { title = ""; }
+                var title = SafeString(() => window.Properties.Name.IsSupported ? window.Properties.Name.Value : "");
                 descendantMatches.Add((descendant, title));
             }
         }
@@ -436,10 +433,10 @@ public static class ElementCommands
     public static JsonNode SetActiveWindow(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         if (mainWindow is null)
-            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+            throw new InvalidOperationException(NotConnected);
 
-        var automationId = @params?["automationId"]?.GetValue<string>();
-        var name = @params?["name"]?.GetValue<string>();
+        var automationId = @params?[AutomationIdKey]?.GetValue<string>();
+        var name = @params?[NameKey]?.GetValue<string>();
 
         if (string.IsNullOrWhiteSpace(automationId) && string.IsNullOrWhiteSpace(name))
             throw new ArgumentException(
@@ -447,28 +444,11 @@ public static class ElementCommands
 
         var topLevel = GetProcessTopLevelWindows(mainWindow, automation);
 
-        // Two-pass scan so automationId universally wins over name across
-        // the full window list, not just within a single window iteration.
-        // Ambiguous matches (same automationId or same title on multiple
-        // top-level windows) throw an explicit error instead of silently
-        // returning the first — non-determinism on a stateful switch is the
-        // worst kind of bug for downstream agents.
-        var automationIdMatches = new List<AutomationElement>();
+        // AutomationId wins over name across the entire process, and duplicates fail closed.
+        AutomationElement? match = null;
         if (!string.IsNullOrWhiteSpace(automationId))
         {
-            foreach (var window in topLevel)
-            {
-                try
-                {
-                    if (window.Properties.AutomationId.IsSupported &&
-                        window.Properties.AutomationId.Value == automationId)
-                    {
-                        automationIdMatches.Add(window);
-                    }
-                }
-                catch { /* skip — unsupported on this window */ }
-            }
-
+            var automationIdMatches = FindTopLevelMatches(topLevel, automationId, byAutomationId: true);
             if (automationIdMatches.Count > 1)
             {
                 var titles = automationIdMatches.Select(w => $"'{SafeString(() => w.Name)}'");
@@ -477,26 +457,12 @@ public static class ElementCommands
                     $"{automationIdMatches.Count} windows match ({string.Join(", ", titles)}). " +
                     "AutomationId should uniquely identify a top-level window.");
             }
+            if (automationIdMatches.Count == 1)
+                match = automationIdMatches[0];
         }
-
-        AutomationElement? match = automationIdMatches.Count == 1 ? automationIdMatches[0] : null;
-
         if (match is null && !string.IsNullOrWhiteSpace(name))
         {
-            var nameMatches = new List<AutomationElement>();
-            foreach (var window in topLevel)
-            {
-                try
-                {
-                    if (window.Properties.Name.IsSupported &&
-                        window.Properties.Name.Value == name)
-                    {
-                        nameMatches.Add(window);
-                    }
-                }
-                catch { /* skip — unsupported on this window */ }
-            }
-
+            var nameMatches = FindTopLevelMatches(topLevel, name, byAutomationId: false);
             if (nameMatches.Count > 1)
             {
                 var ids = nameMatches.Select(w => $"automationId='{SafeString(() => w.AutomationId)}'");
@@ -526,8 +492,27 @@ public static class ElementCommands
         {
             ["switched"] = true,
             ["title"] = SafeString(() => match.Name),
-            ["automationId"] = SafeString(() => match.AutomationId),
+            [AutomationIdKey] = SafeString(() => match.AutomationId),
         };
+    }
+
+    private static List<AutomationElement> FindTopLevelMatches(
+        List<AutomationElement> windows, string value, bool byAutomationId)
+    {
+        var matches = new List<AutomationElement>();
+        foreach (var window in windows)
+        {
+            try
+            {
+                if (byAutomationId
+                    ? window.Properties.AutomationId.IsSupported && window.Properties.AutomationId.Value == value
+                    : window.Properties.Name.IsSupported && window.Properties.Name.Value == value)
+                    matches.Add(window);
+            }
+            catch { /* skip — unsupported on this window */ }
+        }
+
+        return matches;
     }
 
     /// <summary>
@@ -543,7 +528,7 @@ public static class ElementCommands
         var cf = new ConditionFactory(automation.PropertyLibrary);
 
         // Priority 1: AutomationId
-        var automationId = @params?["automationId"]?.GetValue<string>();
+        var automationId = @params?[AutomationIdKey]?.GetValue<string>();
         if (!string.IsNullOrWhiteSpace(automationId))
         {
             var element = root.FindFirstDescendant(cf.ByAutomationId(automationId));
@@ -557,7 +542,7 @@ public static class ElementCommands
         }
 
         // Priority 2: XPath
-        var xpath = @params?["xpath"]?.GetValue<string>();
+        var xpath = @params?[XPathKey]?.GetValue<string>();
         if (!string.IsNullOrWhiteSpace(xpath))
         {
             var element = root.FindFirstByXPath(xpath);
@@ -565,34 +550,29 @@ public static class ElementCommands
                 return element;
         }
 
-        // Priority 3: Name + ControlType
-        var name = @params?["name"]?.GetValue<string>();
-        var controlType = @params?["controlType"]?.GetValue<string>();
-
-        if (!string.IsNullOrWhiteSpace(name) || !string.IsNullOrWhiteSpace(controlType))
-        {
-            var conditions = new List<ConditionBase>();
-            if (!string.IsNullOrWhiteSpace(name))
-                conditions.Add(cf.ByName(name));
-            if (!string.IsNullOrWhiteSpace(controlType))
-            {
-                var ct = ParseControlType(controlType);
-                conditions.Add(cf.ByControlType(ct));
-            }
-
-            if (conditions.Count > 0)
-            {
-                var condition = conditions.Count == 1
-                    ? conditions[0]
-                    : new AndCondition(conditions.ToArray());
-                var element = root.FindFirstDescendant(condition);
-                if (element is not null)
-                    return element;
-            }
-        }
+        var match = FindByNameAndControlType(root, @params, cf);
+        if (match is not null)
+            return match;
 
         throw new InvalidOperationException(
             $"Element not found. Search: {DescribeSearch(@params)}");
+    }
+
+    private static AutomationElement? FindByNameAndControlType(
+        AutomationElement root, JsonNode? @params, ConditionFactory cf)
+    {
+        var name = @params?[NameKey]?.GetValue<string>();
+        var controlType = @params?[ControlTypeKey]?.GetValue<string>();
+        ConditionBase? condition = null;
+        if (!string.IsNullOrWhiteSpace(name))
+            condition = cf.ByName(name);
+        if (!string.IsNullOrWhiteSpace(controlType))
+        {
+            var typeCondition = cf.ByControlType(ParseControlType(controlType));
+            condition = condition is null ? typeCondition : new AndCondition(new[] { condition, typeCondition });
+        }
+
+        return condition is null ? null : root.FindFirstDescendant(condition);
     }
 
     /// <summary>
@@ -605,7 +585,7 @@ public static class ElementCommands
         AutomationElement? mainWindow)
     {
         if (mainWindow is null)
-            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+            throw new InvalidOperationException(NotConnected);
 
         var request = ReadGuardedChildRequest(@params);
         var parentSelector = ReadGuardedSelectorCriteria(request.Parent);
@@ -721,9 +701,9 @@ public static class ElementCommands
 
     private static GuardedSelectorCriteria ReadGuardedSelectorCriteria(JsonObject selector)
     {
-        var automationId = ReadGuardedSelectorText(selector, "automationId");
-        var name = ReadGuardedSelectorText(selector, "name");
-        var controlTypeText = ReadGuardedSelectorText(selector, "controlType");
+        var automationId = ReadGuardedSelectorText(selector, AutomationIdKey);
+        var name = ReadGuardedSelectorText(selector, NameKey);
+        var controlTypeText = ReadGuardedSelectorText(selector, ControlTypeKey);
         if (automationId is null && name is null && controlTypeText is null)
             throw new InvalidDataException("A guarded selector requires automationId, name, or controlType.");
 
@@ -803,14 +783,24 @@ public static class ElementCommands
             if (includeRoots)
             {
                 if (!TryEnqueueGuardedElement(queue, root, ref discovered, maximumNodes))
-                    return GuardedChildResolution.IdentityUnavailable(0);
+                    return GuardedChildResolution.ForIdentityUnavailable(0);
             }
             else if (!TryEnqueueGuardedChildren(queue, root, ref discovered, maximumNodes))
             {
-                return GuardedChildResolution.IdentityUnavailable(0);
+                return GuardedChildResolution.ForIdentityUnavailable(0);
             }
         }
 
+        return ScanGuardedQueue(queue, selector, boundProcessId, ref discovered, maximumNodes);
+    }
+
+    private static GuardedChildResolution ScanGuardedQueue(
+        Queue<AutomationElement> queue,
+        GuardedSelectorCriteria selector,
+        int boundProcessId,
+        ref int discovered,
+        int maximumNodes)
+    {
         AutomationElement? match = null;
         var matchCount = 0;
         while (queue.Count > 0)
@@ -818,12 +808,12 @@ public static class ElementCommands
             var element = queue.Dequeue();
             var processId = TryReadProcessId(element);
             if (processId is null)
-                return GuardedChildResolution.IdentityUnavailable(matchCount);
+                return GuardedChildResolution.ForIdentityUnavailable(matchCount);
             if (processId != boundProcessId)
-                return GuardedChildResolution.ProcessMismatch(matchCount);
+                return GuardedChildResolution.ForProcessMismatch(matchCount);
             var isMatch = false;
             if (!TryMatchesGuardedSelector(element, selector, out isMatch))
-                return GuardedChildResolution.IdentityUnavailable(matchCount);
+                return GuardedChildResolution.ForIdentityUnavailable(matchCount);
 
             if (isMatch)
             {
@@ -834,7 +824,7 @@ public static class ElementCommands
             }
 
             if (!TryEnqueueGuardedChildren(queue, element, ref discovered, maximumNodes))
-                return GuardedChildResolution.IdentityUnavailable(matchCount);
+                return GuardedChildResolution.ForIdentityUnavailable(matchCount);
         }
 
         return matchCount switch
@@ -953,13 +943,13 @@ public static class ElementCommands
         }
         catch
         {
-            return GuardedChildSnapshotRead.Failure("RECTANGLE_INVALID");
+            return GuardedChildSnapshotRead.Failure(InvalidRectangle);
         }
 
         if (!rectangle.IsPositive)
-            return GuardedChildSnapshotRead.Failure("RECTANGLE_INVALID");
+            return GuardedChildSnapshotRead.Failure(InvalidRectangle);
         if (!TryReadScreenClientRectangle(hwnd, out var clientRectangle))
-            return GuardedChildSnapshotRead.Failure("RECTANGLE_INVALID");
+            return GuardedChildSnapshotRead.Failure(InvalidRectangle);
         if (!IsFullyContained(clientRectangle, rectangle))
             return GuardedChildSnapshotRead.Failure("CONTAINMENT_FAILURE");
 
@@ -1043,12 +1033,12 @@ public static class ElementCommands
 
     private static JsonObject GuardedChildAdmitted(GuardedChildSnapshot snapshot) => new()
     {
-        ["status"] = "ADMITTED",
+        [StatusKey] = "ADMITTED",
         ["match_count"] = 1,
         ["target"] = new JsonObject
         {
             ["automation_id"] = snapshot.AutomationId,
-            ["name"] = snapshot.Name,
+            [NameKey] = snapshot.Name,
             ["control_type"] = snapshot.ControlType,
             ["process_id"] = snapshot.ProcessId,
             ["hwnd"] = snapshot.Hwnd,
@@ -1084,19 +1074,21 @@ public static class ElementCommands
 
     private static JsonObject GuardedChildBlocked(string reason, int matchCount) => new()
     {
-        ["status"] = "BLOCKED",
+        [StatusKey] = "BLOCKED",
         ["reason"] = reason,
         ["match_count"] = matchCount,
     };
 
-    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
-    private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+    [System.Runtime.InteropServices.LibraryImport("user32.dll", SetLastError = true)]
+    private static partial uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
 
-    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
-    private static extern bool GetClientRect(IntPtr hwnd, out NativeRect rect);
+    [System.Runtime.InteropServices.LibraryImport("user32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static partial bool GetClientRect(IntPtr hwnd, out NativeRect rect);
 
-    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
-    private static extern bool ClientToScreen(IntPtr hwnd, ref NativePoint point);
+    [System.Runtime.InteropServices.LibraryImport("user32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static partial bool ClientToScreen(IntPtr hwnd, ref NativePoint point);
 
     [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
     private struct NativePoint
@@ -1147,10 +1139,10 @@ public static class ElementCommands
         internal static GuardedChildResolution Ambiguous(int matchCount) =>
             new(GuardedChildResolutionOutcome.Ambiguous, null, matchCount);
 
-        internal static GuardedChildResolution IdentityUnavailable(int matchCount) =>
+        internal static GuardedChildResolution ForIdentityUnavailable(int matchCount) =>
             new(GuardedChildResolutionOutcome.IdentityUnavailable, null, matchCount);
 
-        internal static GuardedChildResolution ProcessMismatch(int matchCount) =>
+        internal static GuardedChildResolution ForProcessMismatch(int matchCount) =>
             new(GuardedChildResolutionOutcome.ProcessMismatch, null, matchCount);
     }
 
@@ -1188,13 +1180,7 @@ public static class ElementCommands
         if (maximumNodes is < 1 or > 4_096)
             throw new ArgumentOutOfRangeException(nameof(maximumNodes));
 
-        var automationId = ReadGuardedSelectorText(selector, "automationId");
-        var name = ReadGuardedSelectorText(selector, "name");
-        var controlTypeText = ReadGuardedSelectorText(selector, "controlType");
-        if (automationId is null && name is null && controlTypeText is null)
-            throw new InvalidDataException("A guarded selector requires automationId, name, or controlType.");
-
-        var controlType = controlTypeText is null ? (ControlType?)null : ParseControlType(controlTypeText);
+        var criteria = ReadGuardedSelectorCriteria(selector);
         var queue = new Queue<AutomationElement>();
         queue.Enqueue(root);
         var visited = 0;
@@ -1215,7 +1201,7 @@ public static class ElementCommands
 
             if (processId == boundProcessId)
             {
-                if (MatchesGuardedSelector(element, automationId, name, controlType))
+                if (MatchesGuardedSelector(element, criteria.AutomationId, criteria.Name, criteria.ControlType))
                 {
                     matches.Add(element);
                     if (matches.Count == 2)
@@ -1226,28 +1212,10 @@ public static class ElementCommands
                     }
                 }
 
-                AutomationElement[] children;
-                try
-                {
-                    children = element.FindAllChildren();
-                }
-                catch (Exception ex)
-                {
+                var childFailure = EnqueueBoundChildren(element, queue, visited, maximumNodes, ref truncated);
+                if (childFailure is not null)
                     return new GuardedSelectorResolution(
-                        GuardedSelectorOutcome.Unobservable, null, matches.Count,
-                        $"UIA child enumeration failed: {ex.GetType().Name}.");
-                }
-
-                foreach (var child in children)
-                {
-                    if (visited + queue.Count >= maximumNodes)
-                    {
-                        truncated = true;
-                        break;
-                    }
-
-                    queue.Enqueue(child);
-                }
+                        GuardedSelectorOutcome.Unobservable, null, matches.Count, childFailure);
             }
         }
 
@@ -1269,13 +1237,40 @@ public static class ElementCommands
         };
     }
 
+    private static string? EnqueueBoundChildren(
+        AutomationElement element, Queue<AutomationElement> queue,
+        int visited, int maximumNodes, ref bool truncated)
+    {
+        AutomationElement[] children;
+        try
+        {
+            children = element.FindAllChildren();
+        }
+        catch (Exception ex)
+        {
+            return $"UIA child enumeration failed: {ex.GetType().Name}.";
+        }
+
+        foreach (var child in children)
+        {
+            if (visited + queue.Count >= maximumNodes)
+            {
+                truncated = true;
+                break;
+            }
+
+            queue.Enqueue(child);
+        }
+
+        return null;
+    }
+
     private static string? ReadGuardedSelectorText(JsonObject selector, string key)
     {
-        foreach (var property in selector)
-        {
-            if (property.Key is not ("automationId" or "name" or "controlType"))
-                throw new InvalidDataException($"Unsupported guarded selector property: {property.Key}.");
-        }
+        var unsupported = selector.FirstOrDefault(property =>
+            property.Key is not (AutomationIdKey or NameKey or ControlTypeKey));
+        if (unsupported.Key is not null)
+            throw new InvalidDataException($"Unsupported guarded selector property: {unsupported.Key}.");
 
         if (!selector.TryGetPropertyValue(key, out var node) || node is null)
             return null;
@@ -1324,13 +1319,13 @@ public static class ElementCommands
     internal static string DescribeSearch(JsonNode? @params)
     {
         var parts = new List<string>();
-        var aid = @params?["automationId"]?.GetValue<string>();
+        var aid = @params?[AutomationIdKey]?.GetValue<string>();
         if (aid is not null) parts.Add($"automationId='{aid}'");
-        var xpath = @params?["xpath"]?.GetValue<string>();
+        var xpath = @params?[XPathKey]?.GetValue<string>();
         if (xpath is not null) parts.Add($"xpath='{xpath}'");
-        var name = @params?["name"]?.GetValue<string>();
+        var name = @params?[NameKey]?.GetValue<string>();
         if (name is not null) parts.Add($"name='{name}'");
-        var ct = @params?["controlType"]?.GetValue<string>();
+        var ct = @params?[ControlTypeKey]?.GetValue<string>();
         if (ct is not null) parts.Add($"controlType='{ct}'");
         return parts.Count > 0 ? string.Join(", ", parts) : "(no criteria)";
     }
@@ -1348,15 +1343,15 @@ public static class ElementCommands
     public static JsonNode FindAllCascade(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         if (mainWindow is null)
-            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+            throw new InvalidOperationException(NotConnected);
 
         var searchRoot = ResolveSearchRoot(mainWindow, @params, automation);
         var maxResults = @params?["maxResults"]?.GetValue<int>() ?? 10;
         var cf = new ConditionFactory(automation.PropertyLibrary);
 
         // Build condition from name + controlType (ranking only applies to ambiguous searches)
-        var name = @params?["name"]?.GetValue<string>();
-        var controlType = @params?["controlType"]?.GetValue<string>();
+        var name = @params?[NameKey]?.GetValue<string>();
+        var controlType = @params?[ControlTypeKey]?.GetValue<string>();
 
         if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(controlType))
             throw new ArgumentException("find_all_cascade requires at least name or controlType");
@@ -1421,7 +1416,7 @@ public static class ElementCommands
     public static JsonNode ExtractText(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         if (mainWindow is null)
-            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+            throw new InvalidOperationException(NotConnected);
 
         var searchRoot = ResolveSearchRoot(mainWindow, @params, automation);
         var element = FindElementCascade(searchRoot, @params, automation);
@@ -1451,39 +1446,15 @@ public static class ElementCommands
         }
         catch { /* fall through */ }
 
-        // Strategy 3: Name property
-        try
-        {
-            var elName = element.Name;
-            if (!string.IsNullOrEmpty(elName))
-            {
-                // Check for CLR type name pattern
-                if (IsLikelyCLRTypeName(elName))
-                {
-                    var descendantText = GetVisibleDescendantText(element, automation);
-                    if (!string.IsNullOrEmpty(descendantText))
-                        return TextResult(descendantText, descendantsSource);
-                }
-                return TextResult(elName, "Name");
-            }
-        }
-        catch { /* fall through */ }
+        // Strategy 3: Name, preferring visible descendants for CLR type names.
+        var namedText = ReadNameText(element, automation);
+        if (namedText is not null)
+            return namedText;
 
         // Strategy 4: LegacyIAccessible
-        try
-        {
-            if (element.Patterns.LegacyIAccessible.IsSupported)
-            {
-                var legacyName = element.Patterns.LegacyIAccessible.Pattern.Name.ValueOrDefault;
-                if (!string.IsNullOrEmpty(legacyName))
-                    return TextResult(legacyName, "LegacyIAccessible.Name");
-
-                var legacyValue = element.Patterns.LegacyIAccessible.Pattern.Value.ValueOrDefault;
-                if (!string.IsNullOrEmpty(legacyValue))
-                    return TextResult(legacyValue, "LegacyIAccessible.Value");
-            }
-        }
-        catch { /* fall through */ }
+        var legacyText = ReadLegacyText(element);
+        if (legacyText is not null)
+            return legacyText;
 
         // Strategy 5: Visible text descendants
         var descText = GetVisibleDescendantText(element, automation);
@@ -1491,6 +1462,39 @@ public static class ElementCommands
             return TextResult(descText, descendantsSource);
 
         return TextResult("", "None");
+    }
+
+    private static JsonObject? ReadNameText(AutomationElement element, UIA3Automation automation)
+    {
+        try
+        {
+            var name = element.Name;
+            if (string.IsNullOrEmpty(name))
+                return null;
+            if (IsLikelyCLRTypeName(name))
+            {
+                var descendants = GetVisibleDescendantText(element, automation);
+                if (!string.IsNullOrEmpty(descendants))
+                    return TextResult(descendants, "TextDescendants");
+            }
+            return TextResult(name, "Name");
+        }
+        catch { return null; }
+    }
+
+    private static JsonObject? ReadLegacyText(AutomationElement element)
+    {
+        try
+        {
+            if (!element.Patterns.LegacyIAccessible.IsSupported)
+                return null;
+            var name = element.Patterns.LegacyIAccessible.Pattern.Name.ValueOrDefault;
+            if (!string.IsNullOrEmpty(name))
+                return TextResult(name, "LegacyIAccessible.Name");
+            var value = element.Patterns.LegacyIAccessible.Pattern.Value.ValueOrDefault;
+            return string.IsNullOrEmpty(value) ? null : TextResult(value, "LegacyIAccessible.Value");
+        }
+        catch { return null; }
     }
 
     private static JsonObject TextResult(string text, string source) => new()
@@ -1606,20 +1610,17 @@ public static class ElementCommands
                 new ConditionFactory(automation.PropertyLibrary)
                     .ByControlType(ControlType.Text));
 
-            var texts = new List<string>();
-            foreach (var child in textChildren)
-            {
-                try
-                {
-                    var childName = child.Name;
-                    if (!string.IsNullOrEmpty(childName))
-                        texts.Add(childName);
-                }
-                catch { /* skip */ }
-            }
-            return texts.Count > 0 ? string.Join(" ", texts) : "";
+            return string.Join(" ", textChildren
+                .Select(ReadVisibleTextName)
+                .Where(name => !string.IsNullOrEmpty(name)));
         }
         catch { return ""; }
+    }
+
+    private static string? ReadVisibleTextName(AutomationElement element)
+    {
+        try { return element.Name; }
+        catch { return null; }
     }
 
     // ── Private helpers ──────────────────────────────────────────────
@@ -1657,10 +1658,10 @@ public static class ElementCommands
         // WPF modal dialogs in particular are known to lack ClassName (#30012).
         var result = new JsonObject
         {
-            ["found"] = true,
-            ["automationId"] = SafeString(() => element.AutomationId),
-            ["name"] = SafeString(() => element.Name),
-            ["controlType"] = SafeString(() => element.ControlType.ToString()),
+            [FoundKey] = true,
+            [AutomationIdKey] = SafeString(() => element.AutomationId),
+            [NameKey] = SafeString(() => element.Name),
+            [ControlTypeKey] = SafeString(() => element.ControlType.ToString()),
             ["className"] = SafeString(() => element.ClassName),
             ["rect"] = SafeRect(element),
         };
@@ -1719,16 +1720,16 @@ public static class ElementCommands
     {
         var requested = new JsonObject
         {
-            ["automationId"] = ParamString(@params, "automationId"),
-            ["name"] = ParamString(@params, "name"),
-            ["controlType"] = ParamString(@params, "controlType"),
+            [AutomationIdKey] = ParamString(@params, AutomationIdKey),
+            [NameKey] = ParamString(@params, NameKey),
+            [ControlTypeKey] = ParamString(@params, ControlTypeKey),
             ["rootAutomationId"] = ParamString(@params, "rootAutomationId"),
-            ["xpath"] = ParamString(@params, "xpath"),
+            [XPathKey] = ParamString(@params, XPathKey),
         };
 
         return new JsonObject
         {
-            ["status"] = "BLOCKED",
+            [StatusKey] = "BLOCKED",
             ["reason"] = "selector result did not match exact automation_id",
             ["requested"] = requested,
             ["accepted"] = new JsonObject
