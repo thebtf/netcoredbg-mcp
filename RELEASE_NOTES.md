@@ -11,6 +11,7 @@ Prepared: 2026-09-27
 - `ui_send_keys`, `ui_send_keys_focused`, and `ui_send_keys_batch` accept `{NUMPAD0}`–`{NUMPAD9}`, `{NUMPADADD}`, `{NUMPADSUBTRACT}`, `{NUMPADMULTIPLY}`, `{NUMPADDIVIDE}`, `{NUMPADDECIMAL}`, `{NUMPADENTER}`, and `{NUMLOCK}` on both Windows FlaUI and pywinauto send paths. The FlaUI-only scoped `ui_key_sequence` accepts the same names without braces in its list.
 - These names produce physical keypad key-down/key-up events rather than ordinary text or top-row digits. Keypad Enter and Divide use extended-key events; NumLock uses VK 0x90 / scan 0x45 without the extended flag.
 - NumLock is pressed and released, not set to a chosen state. The resulting digit characters depend on the existing NumLock state. Consumer verification restores its original state after an intentional NumLock press.
+- The opt-in native scene artifact store retains its capacity charge when expiry cannot delete a locked artifact; it retries cleanup on a later store operation. A failed commit no longer deletes an existing destination that the store did not create.
 
 ## Compatibility
 
@@ -19,7 +20,7 @@ There are no new tool arguments or response shapes, and the Python backend selec
 ## Release gates and residual risks
 
 - Installed-wheel Windows keypad journeys passed: all 17 named keys reached the WPF target, the pywinauto path passed 6/6 manual checks, and the final keypad regression suite passed 82/82. The original NumLock state was restored.
-- The mandatory candidate SonarQube scan is **blocked**, not passed: analysis of `38de1d59e4de28df3346974b600c3b42731b364f` returned an analysis-bound `ERROR` quality gate (22.5% new-code coverage against 80%; 866 open issues; no hotspots). The post-merge scan has not run. Do not merge, tag, or publish this release until both exact-head scans satisfy the release protocol; replace this status with final receipts before publication.
+- The mandatory candidate SonarQube scan is **blocked**, not passed: the completed diagnostic at `44a8a19788acc224b99058663b8a189de0b0cf3a` reports 58.7% new-code coverage against 80% and 730 open findings, with no hotspots. This diagnostic predates the artifact-store safety correction and does not authorize merging or publication. The post-merge scan has not run. Do not merge, tag, or publish this release until both exact-head scans satisfy the release protocol; replace this status with final receipts before publication.
 
 ---
 
