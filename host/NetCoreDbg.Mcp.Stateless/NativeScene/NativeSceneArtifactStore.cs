@@ -726,6 +726,7 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
                 }
 
                 _pendingDeletes.Remove(path);
+                retained.Session.PendingDeleteCount--;
                 _aggregateBytes -= retained.ByteLength;
                 RemoveEmptySession(retained.Session);
             }
@@ -758,17 +759,11 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
 
     private void RemoveEmptySession(ArtifactSession session)
     {
-        if (session.StagedArtifactIds.Count != 0 || session.CommittedArtifactIds.Count != 0)
+        if (session.StagedArtifactIds.Count != 0 ||
+            session.CommittedArtifactIds.Count != 0 ||
+            session.PendingDeleteCount != 0)
         {
             return;
-        }
-
-        foreach (var pending in _pendingDeletes.Values)
-        {
-            if (ReferenceEquals(pending.Session, session))
-            {
-                return;
-            }
         }
 
         if (_sessions.TryGetValue(session.DebugSessionId, out var current) && ReferenceEquals(current, session))
@@ -797,21 +792,18 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
             return;
         }
 
-        var remainingBytes = maximumBytes;
+        long remainingBytes;
         try
         {
             remainingBytes = new FileInfo(path).Length;
         }
-        catch (IOException)
-        {
-            remainingBytes = maximumBytes;
-        }
-        catch (UnauthorizedAccessException)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             remainingBytes = maximumBytes;
         }
 
         _pendingDeletes.Add(path, (session, remainingBytes));
+        session.PendingDeleteCount++;
         _aggregateBytes += remainingBytes - chargedBytes;
     }
 
@@ -838,13 +830,9 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
         {
             Directory.Delete(path, recursive);
         }
-        catch (IOException)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
-            return;
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return;
+            // A missing, nonempty, or locked directory is safe to leave after its artifacts are untracked.
         }
     }
 
@@ -869,6 +857,7 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
         internal HashSet<string> StagedArtifactIds { get; } = new(StringComparer.Ordinal);
 
         internal HashSet<string> CommittedArtifactIds { get; } = new(StringComparer.Ordinal);
+        internal int PendingDeleteCount { get; set; }
     }
 
     private sealed class CommittedArtifact
