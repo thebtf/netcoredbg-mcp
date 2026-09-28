@@ -16,13 +16,18 @@ internal static class NativeSceneContractCatalog
     private const string ManifestPrefix = "NetCoreDbg.Mcp.Stateless.NativeScene.";
     private const string ActiveProtocolVersion = "native-scene-probe/1";
     private const string ActiveSchemaVersion = "native-scene-probe.schema/1";
+    private const string InvalidToolArguments = "INVALID_TOOL_ARGUMENTS";
+    private const string ProbeSchemaFileName = "native-scene-probe.schema.json";
+    private const string ArtifactSchemaFileName = "native-scene-artifact.schema.json";
+    private const string CorpusFileName = "parity-corpus.json";
+    private const string SchemaRejection = "schema_rejection";
 
     private static readonly NativeSceneValidationResult Valid = new(true, null, null);
-    private static readonly NativeSceneValidationResult InvalidRequest = new(false, "INVALID_TOOL_ARGUMENTS", "Native scene request is invalid.");
-    private static readonly NativeSceneValidationResult InvalidResult = new(false, "INVALID_TOOL_ARGUMENTS", "Native scene result is invalid.");
-    private static readonly NativeSceneValidationResult InvalidVersion = new(false, "INVALID_TOOL_ARGUMENTS", "Native scene version syntax is invalid.");
+    private static readonly NativeSceneValidationResult InvalidRequest = new(false, InvalidToolArguments, "Native scene request is invalid.");
+    private static readonly NativeSceneValidationResult InvalidResult = new(false, InvalidToolArguments, "Native scene result is invalid.");
+    private static readonly NativeSceneValidationResult InvalidVersion = new(false, InvalidToolArguments, "Native scene version syntax is invalid.");
     private static readonly NativeSceneValidationResult UnsupportedVersion = new(false, "UNSUPPORTED_PROTOCOL", "Native scene version is unsupported.");
-    private static readonly NativeSceneValidationResult InvalidCorpus = new(false, "INVALID_TOOL_ARGUMENTS", "Native scene corpus is invalid.");
+    private static readonly NativeSceneValidationResult InvalidCorpus = new(false, InvalidToolArguments, "Native scene corpus is invalid.");
     private static readonly ContractState State = LoadState();
 
     internal static ReadOnlyMemory<byte> GetArtifactBytes(string fileName) => State.Artifacts.TryGetValue(fileName, out var artifact)
@@ -103,14 +108,14 @@ internal static class NativeSceneContractCatalog
     {
         var artifacts = new Dictionary<string, ContractArtifact>(StringComparer.Ordinal)
         {
-            ["native-scene-probe.schema.json"] = LoadArtifact("native-scene-probe.schema.json", "f446166f9a1062d3e1a2190327d06c04905e76a1c1f81af16c87572394f90022"),
-            ["native-scene-artifact.schema.json"] = LoadArtifact("native-scene-artifact.schema.json", "07c257c9b5f75c01aa4f4141968c789b045d7c831575343df429075c732f7668"),
-            ["parity-corpus.json"] = LoadArtifact("parity-corpus.json", "90c24f8f9706c207ca3ecf8dee93d1937c16a6be45feac65d812e48853bc4621"),
+            [ProbeSchemaFileName] = LoadArtifact(ProbeSchemaFileName, "f446166f9a1062d3e1a2190327d06c04905e76a1c1f81af16c87572394f90022"),
+            [ArtifactSchemaFileName] = LoadArtifact(ArtifactSchemaFileName, "07c257c9b5f75c01aa4f4141968c789b045d7c831575343df429075c732f7668"),
+            [CorpusFileName] = LoadArtifact(CorpusFileName, "90c24f8f9706c207ca3ecf8dee93d1937c16a6be45feac65d812e48853bc4621"),
         };
 
-        var probeSchema = ParseObject(artifacts["native-scene-probe.schema.json"].Bytes, "native-scene-probe.schema.json");
-        var artifactSchema = ParseObject(artifacts["native-scene-artifact.schema.json"].Bytes, "native-scene-artifact.schema.json");
-        var corpus = ParseObject(artifacts["parity-corpus.json"].Bytes, "parity-corpus.json");
+        var probeSchema = ParseObject(artifacts[ProbeSchemaFileName].Bytes, ProbeSchemaFileName);
+        var artifactSchema = ParseObject(artifacts[ArtifactSchemaFileName].Bytes, ArtifactSchemaFileName);
+        var corpus = ParseObject(artifacts[CorpusFileName].Bytes, CorpusFileName);
         var probeDefinitions = RequiredObject(probeSchema["definitions"]);
         var artifactDefinitions = RequiredObject(artifactSchema["definitions"]);
 
@@ -376,7 +381,7 @@ internal static class NativeSceneContractCatalog
                     !TryGetString(variant["name"], out _) ||
                     !TryGetObject(variant["expected"], out var variantExpected) ||
                     !TryGetString(variantExpected["classification"], out var variantClassification) ||
-                    !StringComparer.Ordinal.Equals(variantClassification, "schema_rejection") ||
+                    !StringComparer.Ordinal.Equals(variantClassification, SchemaRejection) ||
                     !ValidateCorpusResponse(state, variant, variant["responseSchema"] ?? caseEntry["responseSchema"], variant["response"]))
                 {
                     return false;
@@ -401,7 +406,7 @@ internal static class NativeSceneContractCatalog
         }
 
         var valid = new SchemaValidator(state.ProbeDefinitions).Validate(response, definition);
-        return StringComparer.Ordinal.Equals(classification, "schema_rejection") ? !valid : valid;
+        return StringComparer.Ordinal.Equals(classification, SchemaRejection) ? !valid : valid;
     }
 
     private static bool ValidatesRequestShape(ContractState state, string tool, JsonNode instance) =>
@@ -519,7 +524,7 @@ internal static class NativeSceneContractCatalog
         StringComparer.Ordinal.Equals(value, "capability_declaration") ||
         StringComparer.Ordinal.Equals(value, "complete_observation") ||
         StringComparer.Ordinal.Equals(value, "qualified_observation") ||
-        StringComparer.Ordinal.Equals(value, "schema_rejection") ||
+        StringComparer.Ordinal.Equals(value, SchemaRejection) ||
         StringComparer.Ordinal.Equals(value, "typed_error");
 
     private static bool TryGetObject(JsonNode? node, out JsonObject value)
@@ -583,13 +588,11 @@ internal static class NativeSceneContractCatalog
                 return false;
             }
 
-            if (schema.TryGetPropertyValue("$ref", out var referenceNode))
+            if (schema.TryGetPropertyValue("$ref", out var referenceNode) &&
+                (!TryGetString(referenceNode, out var reference) || !TryResolveDefinition(_definitions, reference, out var referenceSchema) ||
+                 !Validate(instance, referenceSchema)))
             {
-                if (!TryGetString(referenceNode, out var reference) || !TryResolveDefinition(_definitions, reference, out var referenceSchema) ||
-                    !Validate(instance, referenceSchema))
-                {
-                    return false;
-                }
+                return false;
             }
 
             if (schema.TryGetPropertyValue("type", out var typeNode) && !MatchesType(instance, typeNode))
@@ -597,12 +600,10 @@ internal static class NativeSceneContractCatalog
                 return false;
             }
 
-            if (schema.TryGetPropertyValue("enum", out var enumNode))
+            if (schema.TryGetPropertyValue("enum", out var enumNode) &&
+                (!TryGetArray(enumNode, out var values) || !MatchesEnum(instance, values)))
             {
-                if (!TryGetArray(enumNode, out var values) || !MatchesEnum(instance, values))
-                {
-                    return false;
-                }
+                return false;
             }
 
             if (schema.TryGetPropertyValue("const", out var constant) && !JsonNode.DeepEquals(instance, constant))
@@ -670,21 +671,16 @@ internal static class NativeSceneContractCatalog
             }
 
             JsonObject? properties = null;
-            if (schema.TryGetPropertyValue("properties", out var propertiesNode))
+            if (schema.TryGetPropertyValue("properties", out var propertiesNode) && !TryGetObject(propertiesNode, out properties))
             {
-                if (!TryGetObject(propertiesNode, out properties))
-                {
-                    return false;
-                }
+                return false;
             }
 
             JsonObject? patternProperties = null;
-            if (schema.TryGetPropertyValue("patternProperties", out var patternPropertiesNode))
+            if (schema.TryGetPropertyValue("patternProperties", out var patternPropertiesNode) &&
+                !TryGetObject(patternPropertiesNode, out patternProperties))
             {
-                if (!TryGetObject(patternPropertiesNode, out patternProperties))
-                {
-                    return false;
-                }
+                return false;
             }
 
             var additionalPropertiesFalse = schema.TryGetPropertyValue("additionalProperties", out var additionalProperties) &&
@@ -793,7 +789,7 @@ internal static class NativeSceneContractCatalog
             }
         }
 
-        private bool ValidateString(string value, JsonObject schema)
+        private static bool ValidateString(string value, JsonObject schema)
         {
             var length = ScalarLength(value);
             if (schema.TryGetPropertyValue("minLength", out var minLength) &&
@@ -872,12 +868,10 @@ internal static class NativeSceneContractCatalog
                 }
             }
 
-            if (schema.TryGetPropertyValue("anyOf", out var anyOfNode))
+            if (schema.TryGetPropertyValue("anyOf", out var anyOfNode) &&
+                (!TryGetArray(anyOfNode, out var anyOf) || !anyOf.Any(branch => branch is JsonObject branchSchema && Validate(instance, branchSchema))))
             {
-                if (!TryGetArray(anyOfNode, out var anyOf) || !anyOf.Any(branch => branch is JsonObject branchSchema && Validate(instance, branchSchema)))
-                {
-                    return false;
-                }
+                return false;
             }
 
             if (schema.TryGetPropertyValue("oneOf", out var oneOfNode))
@@ -1023,8 +1017,14 @@ internal static class NativeSceneContractCatalog
         private static bool TryGetWholeNumber(JsonNode? node, out int value)
         {
             value = 0;
-            return TryGetNumber(node, out var number) && decimal.Truncate(number) == number &&
-                   number is >= int.MinValue and <= int.MaxValue && (value = decimal.ToInt32(number)) == number;
+            if (!TryGetNumber(node, out var number) || decimal.Truncate(number) != number ||
+                number is < int.MinValue or > int.MaxValue)
+            {
+                return false;
+            }
+
+            value = decimal.ToInt32(number);
+            return true;
         }
     }
 }
