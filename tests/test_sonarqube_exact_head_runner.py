@@ -7,6 +7,7 @@ import stat
 import sys
 from contextlib import ExitStack, nullcontext
 from copy import deepcopy
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -2995,6 +2996,27 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             self.skipTest("Windows Job Object ownership only")
         import psutil
 
+        sys.path.insert(0, str(RUNNER_PATH.parents[1] / "src"))
+        owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
+
+        receipts = []
+        original_force = owner_module.WindowsOwnedProcess.force_and_drain
+        original_close = owner_module.WindowsOwnedProcess.aclose
+
+        async def record_force(owner, *, timeout):
+            receipt = await original_force(owner, timeout=timeout)
+            receipts.append(
+                ("force", receipt.status.value, receipt.active_processes, receipt.forced)
+            )
+            return receipt
+
+        async def record_close(owner):
+            receipt = await original_close(owner)
+            receipts.append(
+                ("close", receipt.status.value, receipt.active_processes, receipt.forced)
+            )
+            return receipt
+
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             pid_file = root / "descendant.pid"
@@ -3009,6 +3031,8 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 encoding="utf-8",
             )
 
+            identity = {}
+
             async def interrupt() -> None:
                 task = asyncio.create_task(
                     runner._run_owned_vstest(
@@ -3018,16 +3042,37 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     )
                 )
                 for _ in range(200):
-                    if pid_file.is_file():
+                    if pid_file.is_file() and pid_file.read_text(encoding="utf-8").strip():
                         break
                     await asyncio.sleep(0.01)
                 self.assertTrue(pid_file.is_file())
+                identity["pid"] = int(pid_file.read_text(encoding="utf-8"))
+                identity["process"] = psutil.Process(identity["pid"])
+                identity["born"] = identity["process"].create_time()
+                identity["before_status"] = identity["process"].status()
                 task.cancel()
                 with self.assertRaises(asyncio.CancelledError):
                     await task
 
-            asyncio.run(interrupt())
-            self.assertFalse(psutil.pid_exists(int(pid_file.read_text(encoding="utf-8"))))
+            with (
+                patch.object(owner_module.WindowsOwnedProcess, "force_and_drain", record_force),
+                patch.object(owner_module.WindowsOwnedProcess, "aclose", record_close),
+            ):
+                asyncio.run(interrupt())
+            pid = identity["pid"]
+            original_child_alive = identity["process"].is_running()
+            try:
+                process = psutil.Process(pid)
+                observed = (process.create_time(), process.status(), process.is_running())
+            except psutil.NoSuchProcess:
+                observed = None
+            self.assertIn(("force", "drained", 0, True), receipts)
+            self.assertIn(("close", "drained", 0, True), receipts)
+            self.assertFalse(
+                original_child_alive,
+                f"original child remains active: pid={pid} born={identity['born']} "
+                f"before={identity['before_status']} after={observed} job={receipts}",
+            )
 
     def test_stateless_collector_rejects_changed_test_pdb_before_accepting_attachment(self):
         with TemporaryDirectory() as temporary_directory:
@@ -3215,6 +3260,98 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             ):
                 with self.assertRaisesRegex(runner.RunnerError, "COVERAGE_REPORT_INVALID"):
                     runner.validate_dotnet_cobertura_input(context, spec, report)
+
+    def test_stateless_collector_class_summary_preserves_independent_same_line_branches(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            source = self._write_source(root, "host/NetCoreDbg.Mcp.Stateless/Program.cs")
+            raw = root / "first-party.xml"
+            projected = root / "projected.xml"
+
+            def branch(valid: int, identities: int) -> str:
+                conditions = "".join(
+                    f'<condition number="{index}" type="jump" coverage="0%"/>'
+                    for index in range(identities)
+                )
+                return (
+                    f'<line number="1" hits="0" branch="true" '
+                    f'condition-coverage="0% (0/{valid})"><conditions>{conditions}'
+                    "</conditions></line>"
+                )
+
+            raw.write_text(
+                "<coverage><packages><package><classes>"
+                f'<class name="NetCoreDbg.Mcp.Stateless.Program" filename="{source}">'
+                f'<methods><method name="lambda1"><lines>{branch(6, 3)}</lines></method>'
+                f'<method name="lambda2"><lines>{branch(2, 1)}</lines></method></methods>'
+                f"<lines>{branch(8, 4)}</lines></class>"
+                "</classes></package></packages></coverage>",
+                encoding="utf-8",
+            )
+            with patch.object(runner, "is_tracked", return_value=True):
+                parsed = runner.project_stateless_collector(context, raw, projected)
+            plan = self._plan(root)
+            spec = plan.dotnet_inputs[3]
+            isolated = replace(plan, dotnet_inputs=(spec,))
+            runner.normalize_dotnet_cobertura(
+                isolated, [runner._dotnet_input_evidence(isolated, spec, parsed)]
+            )
+            self.assertEqual((parsed["lines_valid"], parsed["branches_valid"]), (1, 8))
+            self.assertEqual(
+                runner.ElementTree.parse(isolated.dotnet_report).getroot().get("branches-valid"),
+                "8",
+            )
+            raw.write_text(
+                raw.read_text(encoding="utf-8").replace("0% (0/8)", "0% (0/7)"), encoding="utf-8"
+            )
+            with patch.object(runner, "is_tracked", return_value=True):
+                with self.assertRaisesRegex(
+                    runner.RunnerError, "class summary disagrees with methods"
+                ):
+                    runner.project_stateless_collector(context, raw, projected)
+
+    def test_stateless_collector_distinct_classes_same_line_keep_both_branch_sets(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            source = self._write_source(root, "bridge/Commands/ClickCommands.cs")
+            stateless = self._write_source(root, "host/NetCoreDbg.Mcp.Stateless/Program.cs")
+            branch = (
+                '<lines><line number="521" hits="0" branch="true" '
+                'condition-coverage="0% (0/2)"><conditions>'
+                '<condition number="0" type="jump" coverage="0%"/>'
+                "</conditions></line></lines>"
+            )
+            classes = "".join(
+                f'<class name="{name}" filename="{source}">{branch}</class>'
+                for name in (
+                    "FlaUIBridge.Commands.ClickCommands",
+                    "FlaUIBridge.Commands.ClickCommands.&lt;&gt;c__DisplayClass41_0",
+                )
+            )
+            classes += (
+                f'<class name="NetCoreDbg.Mcp.Stateless.Program" filename="{stateless}">'
+                '<lines><line number="1" hits="1"/></lines></class>'
+            )
+            raw = root / "collector.xml"
+            raw.write_text(
+                f"<coverage><packages><package><classes>{classes}</classes></package></packages></coverage>",
+                encoding="utf-8",
+            )
+            with patch.object(runner, "is_tracked", return_value=True):
+                parsed = runner.project_stateless_collector(context, raw, root / "projected.xml")
+            plan = self._plan(root)
+            spec = plan.dotnet_inputs[3]
+            isolated = replace(plan, dotnet_inputs=(spec,))
+            runner.normalize_dotnet_cobertura(
+                isolated, [runner._dotnet_input_evidence(isolated, spec, parsed)]
+            )
+            self.assertEqual(parsed["branches_valid"], 4)
+            self.assertEqual(
+                runner.ElementTree.parse(isolated.dotnet_report).getroot().get("branches-valid"),
+                "4",
+            )
 
     def test_r12_dotnet_normalization_is_deterministic_and_final_output_must_equal_input_union(
         self,

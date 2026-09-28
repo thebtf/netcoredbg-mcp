@@ -2146,8 +2146,38 @@ def project_stateless_collector(
                 )
             names[relative] = raw_filename
             item.set("filename", relative)
+            methods = item.find("methods")
+            method_totals: dict[int, list[int]] = {}
+            if methods is not None:
+                if any(method.tag != "method" for method in methods):
+                    _coverage_failure("COVERAGE_REPORT_INVALID", "collector methods are malformed")
+                for method in methods:
+                    for line in method.findall("./lines/line"):
+                        number = _positive_int(
+                            line.get("number"), "COVERAGE_REPORT_INVALID", "collector method line"
+                        )
+                        hits = _positive_int(
+                            line.get("hits"),
+                            "COVERAGE_REPORT_INVALID",
+                            "collector method hits",
+                            allow_zero=True,
+                        )
+                        covered, valid, _ = _condition_totals(line)
+                        totals_for_line = method_totals.setdefault(number, [0, 0, 0])
+                        totals_for_line[0] = max(totals_for_line[0], int(hits > 0))
+                        totals_for_line[1] += covered
+                        totals_for_line[2] += valid
             kept += 1
-            for line in item.iter("line"):
+            seen_numbers: set[int] = set()
+            for line in item.findall("./lines/line"):
+                number = _positive_int(
+                    line.get("number"), "COVERAGE_REPORT_INVALID", "collector class line"
+                )
+                if number in seen_numbers:
+                    _coverage_failure(
+                        "COVERAGE_REPORT_INVALID", "collector class summary repeats a line"
+                    )
+                seen_numbers.add(number)
                 hits = _positive_int(
                     line.get("hits"),
                     "COVERAGE_REPORT_INVALID",
@@ -2155,10 +2185,25 @@ def project_stateless_collector(
                     allow_zero=True,
                 )
                 covered, valid, _ = _condition_totals(line)
+                method_observation = method_totals.pop(number, None)
+                if method_observation is not None and method_observation != [
+                    int(hits > 0),
+                    covered,
+                    valid,
+                ]:
+                    _coverage_failure(
+                        "COVERAGE_REPORT_INVALID", "collector class summary disagrees with methods"
+                    )
                 counts[0] += 1
                 counts[1] += int(hits > 0)
                 counts[2] += covered
                 counts[3] += valid
+            if method_totals:
+                _coverage_failure(
+                    "COVERAGE_REPORT_INVALID", "collector method line is absent from class summary"
+                )
+            if methods is not None:
+                item.remove(methods)
         if not len(classes):
             packages.remove(package)
             continue
@@ -2356,7 +2401,13 @@ def _parse_cobertura(
                     "conditions": conditions,
                 }
             )
-        facts.append({"source_path": source_path, "lines": line_facts})
+        facts.append(
+            {
+                "source_path": source_path,
+                "class_name": class_element.get("name"),
+                "lines": line_facts,
+            }
+        )
     if not source_paths:
         _coverage_failure(
             "COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura report has no mapped source"
@@ -2491,6 +2542,42 @@ def normalize_dotnet_cobertura(
     line_definitions: dict[tuple[str, int], tuple[str, tuple[tuple[str, str, int], ...]]] = {}
     source_union: set[str] = set()
     providers: dict[tuple[str, int], str] = {}
+    collector_branch_owners: dict[tuple[str, int], set[str]] = {}
+    for input_evidence in inputs:
+        if input_evidence.get("id") != "stateless":
+            continue
+        collector_facts = input_evidence.get("facts")
+        if not isinstance(collector_facts, list):
+            _coverage_failure(
+                "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated input facts are absent"
+            )
+        for source in collector_facts:
+            if not isinstance(source, Mapping) or not isinstance(source.get("source_path"), str):
+                _coverage_failure(
+                    "COVERAGE_DOTNET_NORMALIZATION_FAILED", "collector class facts are malformed"
+                )
+            class_name = source.get("class_name")
+            if (
+                not isinstance(class_name, str)
+                or not class_name
+                or not isinstance(source.get("lines"), list)
+            ):
+                _coverage_failure(
+                    "COVERAGE_DOTNET_NORMALIZATION_FAILED", "collector class identity is absent"
+                )
+            for line in source["lines"]:
+                if (
+                    isinstance(line, Mapping)
+                    and type(line.get("number")) is int
+                    and type(line.get("branches_valid")) is int
+                    and line["branches_valid"] > 0
+                ):
+                    collector_branch_owners.setdefault(
+                        (source["source_path"], line["number"]), set()
+                    ).add(class_name)
+    multi_class_branches = {
+        key for key, owners in collector_branch_owners.items() if len(owners) > 1
+    }
     for input_evidence in inputs:
         facts = input_evidence.get("facts")
         if not isinstance(facts, list):
@@ -2597,9 +2684,16 @@ def normalize_dotnet_cobertura(
                 else:
                     parsed_conditions = {("aggregate", "0"): (branch_valid, branch_covered)}
                     mode = "aggregate"
+                if provider == "microsoft.codecoverage" and key in multi_class_branches:
+                    parsed_conditions = {
+                        ("class", source["class_name"]): (branch_valid, branch_covered)
+                    }
+                    mode = "multi-class"
                 definition = (
                     mode,
-                    tuple(
+                    ()
+                    if mode == "multi-class"
+                    else tuple(
                         sorted(
                             (condition_type, condition_number, valid)
                             for (condition_type, condition_number), (
