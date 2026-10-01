@@ -225,6 +225,22 @@ def _remove_session(path: Path) -> None:
     shutil.rmtree(path)
 
 
+def _try_owner_lease(owner: Path) -> int | None:
+    if not _OWNER_NAME.fullmatch(owner.name):
+        return None
+    try:
+        return _lease(owner)
+    except OSError:
+        return None
+
+
+def _remove_stale_session(path: Path, cutoff: float) -> bool:
+    if _safe_metadata(path, directory=True).st_mtime >= cutoff:
+        return False
+    _remove_session(path)
+    return True
+
+
 def _collect_stale(max_age_hours: float = 4.0) -> tuple[int, bool]:
     root = _namespace()
     if not root.exists():
@@ -233,21 +249,16 @@ def _collect_stale(max_age_hours: float = 4.0) -> tuple[int, bool]:
     removed = 0
     complete = True
     for owner in root.iterdir():
-        if not _OWNER_NAME.fullmatch(owner.name):
-            continue
-        try:
-            descriptor = _lease(owner)
-        except OSError:
+        descriptor = _try_owner_lease(owner)
+        if descriptor is None:
             continue
         try:
             for session in owner.iterdir():
                 if not _SESSION_NAME.fullmatch(session.name):
                     continue
                 try:
-                    if _safe_metadata(session, directory=True).st_mtime >= cutoff:
-                        continue
-                    _remove_session(session)
-                    removed += 1
+                    if _remove_stale_session(session, cutoff):
+                        removed += 1
                 except OSError as error:
                     complete = False
                     logger.warning("Stale artifact preserved: %s", error)
@@ -347,30 +358,36 @@ class SessionTempManager:
             files: list[tuple[Path, bytes]] = [(session_dir / raw_safe_name, raw_data)]
             if crop_data is not None and crop_safe_name is not None:
                 files.append((session_dir / crop_safe_name, crop_data))
-            if any(path.exists() for path, _data in files):
-                logger.warning("Evidence bundle destination already exists")
-                return None
+            return self._write_screenshot_bundle(session_dir, files)
 
-            staged: list[tuple[Path, Path]] = []
-            written: list[Path] = []
-            try:
-                for destination, data in files:
-                    temporary = session_dir / f".{destination.name}.{uuid.uuid4().hex}.tmp"
-                    staged.append((temporary, destination))
-                    temporary.write_bytes(data)
-                for temporary, destination in staged:
-                    temporary.replace(destination)
-                    written.append(destination)
-            except OSError as error:
-                for temporary, _destination in staged:
-                    temporary.unlink(missing_ok=True)
-                for destination in written:
-                    destination.unlink(missing_ok=True)
-                logger.warning("Failed to save screenshot evidence bundle: %s", error)
-                return None
+    @staticmethod
+    def _write_screenshot_bundle(
+        session_dir: Path, files: list[tuple[Path, bytes]]
+    ) -> tuple[Path, Path | None] | None:
+        if any(path.exists() for path, _data in files):
+            logger.warning("Evidence bundle destination already exists")
+            return None
 
-            crop_path = files[1][0] if len(files) == 2 else None
-            return files[0][0], crop_path
+        staged: list[tuple[Path, Path]] = []
+        written: list[Path] = []
+        try:
+            for destination, data in files:
+                temporary = session_dir / f".{destination.name}.{uuid.uuid4().hex}.tmp"
+                staged.append((temporary, destination))
+                temporary.write_bytes(data)
+            for temporary, destination in staged:
+                temporary.replace(destination)
+                written.append(destination)
+        except OSError as error:
+            for temporary, _destination in staged:
+                temporary.unlink(missing_ok=True)
+            for destination in written:
+                destination.unlink(missing_ok=True)
+            logger.warning("Failed to save screenshot evidence bundle: %s", error)
+            return None
+
+        crop_path = files[1][0] if len(files) == 2 else None
+        return files[0][0], crop_path
 
     def save_screenshot(self, session_id: str, data: bytes, name: str) -> Path | None:
         """Save screenshot data to the session temp directory.
@@ -457,6 +474,43 @@ async def _join_gc_task(task):
     return task.result()
 
 
+async def _read_gc_output(stream):
+    saved = bytearray()
+    while chunk := await stream.read(4096):
+        saved.extend(chunk[: max(0, 4096 - len(saved))])
+    return bytes(saved)
+
+
+async def _close_gc_worker(process, drain_status_type):
+    if os.name == "nt":
+        receipt = await process.aclose()
+        facts = process.drain_snapshot(receipt)
+        facts["root_pid"] = process.pid
+        logger.info("GC worker drain receipt=%s", json.dumps(facts, sort_keys=True))
+        if (
+            receipt.owner != process.owner
+            or receipt.status is not drain_status_type.DRAINED
+            or receipt.active_processes != 0
+        ):
+            raise RuntimeError("GC worker owner drain failed")
+    else:
+        if process.returncode is None:
+            process.kill()
+        await asyncio.wait_for(process.wait(), _GC_CLOSE_SECONDS)
+        logger.info("GC worker drain pid=%s status=drained active=0", process.pid)
+
+
+def _report_gc_result(process, completed: bool, output: bytes) -> None:
+    if completed:
+        summary = json.loads(output)
+        if summary.get("complete") is True:
+            logger.info("Stale artifact sweep complete: removed=%s", summary["removed"])
+        else:
+            logger.warning("Stale artifact sweep incomplete: deletion failure")
+    elif process.returncode is not None:
+        logger.warning("Stale artifact sweep incomplete: worker exit=%s", process.returncode)
+
+
 async def _gc_worker_supervisor() -> None:
     from ..windows_process_owner import DrainStatus, WindowsOwnedProcess
 
@@ -473,30 +527,6 @@ async def _gc_worker_supervisor() -> None:
             stderr=asyncio.subprocess.PIPE,
         )
 
-    async def read_bounded(stream):
-        saved = bytearray()
-        while chunk := await stream.read(4096):
-            saved.extend(chunk[: max(0, 4096 - len(saved))])
-        return bytes(saved)
-
-    async def close(process):
-        if os.name == "nt":
-            receipt = await process.aclose()
-            facts = process.drain_snapshot(receipt)
-            facts["root_pid"] = process.pid
-            logger.info("GC worker drain receipt=%s", json.dumps(facts, sort_keys=True))
-            if (
-                receipt.owner != process.owner
-                or receipt.status is not DrainStatus.DRAINED
-                or receipt.active_processes != 0
-            ):
-                raise RuntimeError("GC worker owner drain failed")
-        else:
-            if process.returncode is None:
-                process.kill()
-            await asyncio.wait_for(process.wait(), _GC_CLOSE_SECONDS)
-            logger.info("GC worker drain pid=%s status=drained active=0", process.pid)
-
     admission = asyncio.create_task(launch())
     process = None
     readers = []
@@ -504,7 +534,8 @@ async def _gc_worker_supervisor() -> None:
     try:
         process = await asyncio.shield(admission)
         readers = [
-            asyncio.create_task(read_bounded(stream)) for stream in (process.stdout, process.stderr)
+            asyncio.create_task(_read_gc_output(stream))
+            for stream in (process.stdout, process.stderr)
         ]
         deadline = time.monotonic() + _GC_WORK_SECONDS
         while process.returncode is None:
@@ -522,21 +553,12 @@ async def _gc_worker_supervisor() -> None:
         try:
             if process is None:
                 process = await _join_gc_task(admission)
-            await _join_gc_task(asyncio.create_task(close(process)))
+            await _join_gc_task(asyncio.create_task(_close_gc_worker(process, DrainStatus)))
             if readers:
                 output, _errors = await _join_gc_task(
                     asyncio.ensure_future(asyncio.gather(*readers))
                 )
-                if completed:
-                    summary = json.loads(output)
-                    if summary.get("complete") is True:
-                        logger.info("Stale artifact sweep complete: removed=%s", summary["removed"])
-                    else:
-                        logger.warning("Stale artifact sweep incomplete: deletion failure")
-                elif process.returncode is not None:
-                    logger.warning(
-                        "Stale artifact sweep incomplete: worker exit=%s", process.returncode
-                    )
+                _report_gc_result(process, completed, output)
         finally:
             for reader in readers:
                 if not reader.done():

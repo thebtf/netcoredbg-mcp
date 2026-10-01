@@ -117,6 +117,7 @@ python_test_paths=(
   tests/test_ui_new_tools.py
   tests/test_ui_screenshot.py
   tests/test_temp_manager.py
+  tests/test_ui_hover.py
   tests/test_sonarqube_exact_head_runner.py
   tests/test_stateless_preview_artifact.py
 )
