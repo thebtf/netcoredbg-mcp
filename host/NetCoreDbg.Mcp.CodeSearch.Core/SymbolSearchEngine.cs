@@ -188,7 +188,7 @@ public sealed class SymbolSearchEngine
 
     private SearchOperation StartOperation(string tool, CancellationToken cancellationToken)
     {
-        var operation = new SearchOperation(_settings, tool, cancellationToken, _timestamp);
+        var operation = new SearchOperation(_settings, tool, _timestamp, cancellationToken);
         if (_settings.Strict)
         {
             operation.Check();
@@ -744,7 +744,8 @@ public sealed class SymbolSearchEngine
         strictOperation?.Check();
         var lines = new List<string>();
         var start = 0;
-        for (var index = 0; index < text.Length; index++)
+        var index = 0;
+        while (index < text.Length)
         {
             if ((index & 0x3fff) == 0)
             {
@@ -756,6 +757,7 @@ public sealed class SymbolSearchEngine
                 or '\u001c' or '\u001d' or '\u001e' or '\u0085' or '\u2028' or '\u2029';
             if (!isLineBreak)
             {
+                index++;
                 continue;
             }
 
@@ -764,7 +766,7 @@ public sealed class SymbolSearchEngine
             {
                 index++;
             }
-            start = index + 1;
+            start = ++index;
         }
 
         if (start < text.Length)
@@ -982,7 +984,8 @@ public sealed class SymbolSearchEngine
     private static Regex CreateGlobRegex(string pattern, SearchOperation? operation = null)
     {
         var expression = new StringBuilder("^");
-        for (var index = 0; index < pattern.Length; index++)
+        var index = 0;
+        while (index < pattern.Length)
         {
             if ((index & 0x3fff) == 0)
             {
@@ -1015,6 +1018,7 @@ public sealed class SymbolSearchEngine
                     expression.Append(Regex.Escape(pattern[index].ToString()));
                     break;
             }
+            index++;
         }
 
         operation?.Check();
@@ -1050,17 +1054,6 @@ public sealed class SymbolSearchEngine
         return _settings.MaximumContextScalars is int maximumContextScalars
             ? TruncateToScalars(value, maximumContextScalars)
             : value;
-    }
-
-    private static int CountScalars(string value)
-    {
-        var count = 0;
-        foreach (var _ in value.EnumerateRunes())
-        {
-            count++;
-        }
-
-        return count;
     }
 
     private static string TruncateToScalars(string value, int maximumScalars)
@@ -1174,10 +1167,12 @@ public sealed class SymbolSearchEngine
 
         internal void Validate(SearchOperation operation)
         {
-            for (var index = 0; index < Pattern.Length; index++)
+            var index = 0;
+            while (index < Pattern.Length)
             {
                 if (Pattern[index] != '[')
                 {
+                    index++;
                     continue;
                 }
 
@@ -1190,6 +1185,7 @@ public sealed class SymbolSearchEngine
                 {
                     index = closing;
                 }
+                index++;
             }
 
             CreateGlobRegex(Pattern, operation);
@@ -1241,8 +1237,8 @@ public sealed class SymbolSearchEngine
         internal SearchOperation(
             SearchPolicySettings settings,
             string tool,
-            CancellationToken cancellationToken,
-            Func<long>? timestamp)
+            Func<long>? timestamp,
+            CancellationToken cancellationToken)
         {
             _settings = settings;
             Tool = tool;
