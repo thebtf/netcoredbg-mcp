@@ -179,22 +179,105 @@ class TestHeartbeat:
 
 
 class TestExecuteAndWaitProgress:
-    """Tests for _execute_and_wait progress reporting."""
+    """Execution reports its observations even when optional progress delivery fails."""
 
     @pytest.mark.asyncio
-    async def test_progress_phases_reported(self):
-        """_execute_and_wait reports progress phases."""
-        # Verify server.py has progress in _execute_and_wait
-        import inspect
+    @pytest.mark.parametrize("timed_out", [False, True])
+    @pytest.mark.parametrize("progress_fails", [False, True])
+    async def test_progress_phases_preserve_stopped_and_running_results(
+        self, timed_out, progress_fails
+    ):
+        from netcoredbg_mcp.resource_updates import ResourceSubscriptions
+        from netcoredbg_mcp.server import _execute_and_wait
+        from netcoredbg_mcp.session.state import DebugState, StoppedSnapshot
 
-        from netcoredbg_mcp.server import create_server
+        snapshot = StoppedSnapshot(
+            state=DebugState.RUNNING if timed_out else DebugState.STOPPED,
+            stop_reason=None if timed_out else "breakpoint",
+            timed_out=timed_out,
+            description="Paused at entry" if not timed_out else None,
+        )
+        session = MagicMock()
+        session.state.state = snapshot.state
+        ctx = MagicMock()
+        ctx.report_progress = AsyncMock(
+            side_effect=ConnectionError("client disconnected") if progress_fails else None
+        )
 
-        # Just verify the function exists and has ctx parameter
-        # (full integration test requires running server)
-        source = inspect.getsource(create_server)
-        assert "report_progress" in source
-        assert "Waiting for stop event" in source
-        assert "Still waiting" in source
+        async def wait_for_stopped(*, timeout, heartbeat_callback):
+            await heartbeat_callback(5.0)
+            return snapshot
+
+        session.wait_for_stopped = wait_for_stopped
+        action = AsyncMock()
+        response = await _execute_and_wait(
+            ctx,
+            action(),
+            "continue_execution",
+            session=session,
+            subscriptions=ResourceSubscriptions(),
+        )
+
+        assert response == {
+            "state": "running" if timed_out else "stopped",
+            "reason": None if timed_out else "breakpoint",
+            "thread_id": None,
+            "timed_out": timed_out,
+            "message": (
+                "Program is still running after timeout. Breakpoint may not have been reached."
+                if timed_out
+                else "Program is PAUSED (reason: breakpoint). Inspect state, then resume."
+            ),
+            "next_actions": (
+                ["get_output", "pause_execution", "get_debug_state", "stop_debug"]
+                if timed_out
+                else [
+                    "get_call_stack",
+                    "get_variables",
+                    "evaluate_expression",
+                    "step_over",
+                    "step_into",
+                    "step_out",
+                    "continue_execution",
+                ]
+            ),
+            "description": "" if timed_out else "Paused at entry",
+            "text": "",
+        }
+        assert [call.kwargs for call in ctx.report_progress.await_args_list] == [
+            {"progress": 0, "total": 100, "message": "continue_execution..."},
+            {"progress": 30, "total": 100, "message": "Waiting for stop event..."},
+            {"progress": 30, "total": 100, "message": "Still waiting... (5s)"},
+            {
+                "progress": 100,
+                "total": 100,
+                "message": (
+                    "Timed out waiting (30s) — program still running"
+                    if timed_out
+                    else "Program stopped: breakpoint"
+                ),
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_cancellation_during_wait_propagates(self):
+        from netcoredbg_mcp.resource_updates import ResourceSubscriptions
+        from netcoredbg_mcp.server import _execute_and_wait
+
+        session = MagicMock()
+        session.wait_for_stopped = AsyncMock(side_effect=asyncio.CancelledError())
+        ctx = MagicMock()
+        ctx.report_progress = AsyncMock()
+        action = AsyncMock()
+
+        with pytest.raises(asyncio.CancelledError):
+            await _execute_and_wait(
+                ctx,
+                action(),
+                "step_over",
+                session=session,
+                subscriptions=ResourceSubscriptions(),
+            )
 
 
 class TestCallbackPlumbing:

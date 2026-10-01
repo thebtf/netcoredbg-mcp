@@ -5,15 +5,26 @@ from __future__ import annotations
 import json
 import logging
 import os
+from functools import partial
 from pathlib import Path
 
 from mcp.server.fastmcp import Context, FastMCP
 
+from .resource_updates import (
+    BREAKPOINTS_URI,
+    OUTPUT_URI,
+    STATE_URI,
+    THREADS_URI,
+    ResourceSubscriptions,
+    notify_resource_updated,
+    notify_resources_updated,
+    register_resource_subscription_handlers,
+)
 from .response import build_error_response
 from .session import SessionManager
 from .session.state import DebugState, StoppedSnapshot
-from .utils.project import get_project_root
 from .ui.temp_manager import temp_gc_lifespan
+from .utils.project import get_project_root
 from .utils.source import read_source_context
 
 logger = logging.getLogger(__name__)
@@ -83,20 +94,18 @@ def create_server(project_path: str | None = None) -> FastMCP:
     _initial_project_path = project_path
     mcp = FastMCP("netcoredbg-mcp", lifespan=temp_gc_lifespan)
     session = get_session()
+    _register_tools(mcp, session)
+    _register_resources(mcp, session)
+    logger.info("NetCoreDbg MCP Server initialized")
+    return mcp
+
+
+def _register_tools(mcp: FastMCP, session: SessionManager) -> None:
+    """Bind tool callbacks and subscription authority to this server's session."""
 
     # Resource subscription tracking + update notifications (FD-006, Engram #393). See
     # resource_updates.py for why subscribe/unsubscribe requires the low-level Server escape
     # hatch and why the negotiated capability needs a post-hoc correction in __main__.py.
-    from .resource_updates import (
-        BREAKPOINTS_URI,
-        OUTPUT_URI,
-        STATE_URI,
-        THREADS_URI,
-        ResourceSubscriptions,
-        notify_resource_updated,
-        notify_resources_updated,
-        register_resource_subscription_handlers,
-    )
 
     def _resource_update_token(uri: str) -> object:
         revision = session.resource_update_revision(uri)
@@ -172,139 +181,6 @@ def create_server(project_path: str | None = None) -> FastMCP:
         session_id = get_mux_session_id(ctx)
         return _ownership.check_access(session_id)
 
-    # ============== Shared Helpers ==============
-
-    def _build_stopped_response(
-        snapshot: StoppedSnapshot,
-        action_name: str,
-    ) -> dict:
-        """Build a rich response from a StoppedSnapshot for execution tools."""
-        state_value = snapshot.state.value
-
-        if snapshot.timed_out:
-            next_actions = ["get_output", "pause_execution", "get_debug_state", "stop_debug"]
-            message = (
-                "Program is still running after timeout. Breakpoint may not have been reached."
-            )
-        elif state_value == "stopped":
-            next_actions = [
-                "get_call_stack",
-                "get_variables",
-                "evaluate_expression",
-                "step_over",
-                "step_into",
-                "step_out",
-                "continue_execution",
-            ]
-            reason = snapshot.stop_reason or "unknown"
-            message = f"Program is PAUSED (reason: {reason}). Inspect state, then resume."
-        elif state_value == "terminated":
-            next_actions = ["get_output", "stop_debug"]
-            exit_code = snapshot.exit_code
-            message = f"Program terminated (exit code: {exit_code})."
-        else:
-            next_actions = ["get_debug_state", "stop_debug"]
-            message = f"Unexpected state: {state_value}."
-
-        result: dict = {
-            "state": state_value,
-            "reason": snapshot.stop_reason,
-            "thread_id": snapshot.thread_id,
-            "timed_out": snapshot.timed_out,
-            "message": message,
-            "next_actions": next_actions,
-        }
-
-        if snapshot.exit_code is not None:
-            result["exit_code"] = snapshot.exit_code
-        if snapshot.exception_info:
-            result["exception_info"] = snapshot.exception_info
-
-        # Surface stopped event description/text (FR-6)
-        result["description"] = snapshot.description or ""
-        result["text"] = snapshot.text or ""
-
-        return result
-
-    async def _execute_and_wait(
-        ctx: Context,
-        action_coro,
-        action_name: str,
-        timeout: float = 30.0,
-    ) -> dict:
-        """Execute an action (continue/step), wait for stopped, return rich response."""
-        try:
-            # Phase 1: Report resuming
-            try:
-                await ctx.report_progress(progress=0, total=100, message=f"{action_name}...")
-            except Exception:
-                pass
-
-            session.prepare_for_execution()
-            await action_coro
-
-            # Phase 2: Report waiting
-            try:
-                await ctx.report_progress(
-                    progress=30,
-                    total=100,
-                    message="Waiting for stop event...",
-                )
-            except Exception:
-                pass
-
-            # Heartbeat callback — fires every ~5s while waiting
-            async def heartbeat(elapsed: float) -> None:
-                try:
-                    await ctx.report_progress(
-                        progress=30,
-                        total=100,
-                        message=f"Still waiting... ({elapsed:.0f}s)",
-                    )
-                except Exception:
-                    pass
-
-            snapshot = await session.wait_for_stopped(timeout=timeout, heartbeat_callback=heartbeat)
-
-            # Phase 3: Report result
-            try:
-                if snapshot.timed_out:
-                    msg = f"Timed out waiting ({timeout:.0f}s) — program still running"
-                elif snapshot.state == DebugState.TERMINATED:
-                    msg = f"Program terminated (exit code: {snapshot.exit_code})"
-                else:
-                    reason = snapshot.stop_reason or "unknown"
-                    msg = f"Program stopped: {reason}"
-                await ctx.report_progress(progress=100, total=100, message=msg)
-            except Exception:
-                pass
-
-            response = _build_stopped_response(snapshot, action_name)
-
-            # Add source context if stopped at a known location
-            if snapshot.state == DebugState.STOPPED and snapshot.thread_id:
-                try:
-                    frames = await session.get_stack_trace(snapshot.thread_id, 0, 1)
-                    if frames:
-                        response["location"] = {
-                            "file": frames[0].source,
-                            "line": frames[0].line,
-                            "function": frames[0].name,
-                            "source_context": read_source_context(
-                                frames[0].source,
-                                frames[0].line,
-                            ),
-                        }
-                except Exception:
-                    logger.debug("Failed to get source context", exc_info=True)
-
-            await notify_state_changed(ctx)
-            await notify_threads_changed(ctx)
-            await notify_output_changed(ctx)
-            return response
-        except Exception as e:
-            return build_error_response(str(e), state=session.state.state)
-
     # ============== Register Tool Modules ==============
 
     from .prompts import register_prompts
@@ -328,7 +204,9 @@ def create_server(project_path: str | None = None) -> FastMCP:
         notify_threads_changed=notify_threads_changed,
         notify_output_changed=notify_output_changed,
         check_session_access=_check_session_access,
-        execute_and_wait=_execute_and_wait,
+        execute_and_wait=partial(
+            _execute_and_wait, session=session, subscriptions=_resource_subscriptions
+        ),
         resolve_project_root=resolve_project_root,
         resolve_project_root_readonly=resolve_project_root_readonly,
     )
@@ -400,7 +278,9 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
     register_prompts(mcp)
 
-    # ============== Resources ==============
+
+def _register_resources(mcp: FastMCP, session: SessionManager) -> None:
+    """Register resources against the same session captured by the tool callbacks."""
 
     @mcp.resource("debug://state", mime_type="application/json")
     async def debug_state_resource() -> str:
@@ -452,5 +332,116 @@ def create_server(project_path: str | None = None) -> FastMCP:
         threads = await session.get_threads()
         return json.dumps([{"id": t.id, "name": t.name} for t in threads], indent=2)
 
-    logger.info("NetCoreDbg MCP Server initialized")
-    return mcp
+
+def _build_stopped_response(snapshot: StoppedSnapshot) -> dict:
+    """Build a rich response from a StoppedSnapshot for execution tools."""
+    state_value = snapshot.state.value
+
+    if snapshot.timed_out:
+        next_actions = ["get_output", "pause_execution", "get_debug_state", "stop_debug"]
+        message = "Program is still running after timeout. Breakpoint may not have been reached."
+    elif state_value == "stopped":
+        next_actions = [
+            "get_call_stack",
+            "get_variables",
+            "evaluate_expression",
+            "step_over",
+            "step_into",
+            "step_out",
+            "continue_execution",
+        ]
+        reason = snapshot.stop_reason or "unknown"
+        message = f"Program is PAUSED (reason: {reason}). Inspect state, then resume."
+    elif state_value == "terminated":
+        next_actions = ["get_output", "stop_debug"]
+        exit_code = snapshot.exit_code
+        message = f"Program terminated (exit code: {exit_code})."
+    else:
+        next_actions = ["get_debug_state", "stop_debug"]
+        message = f"Unexpected state: {state_value}."
+
+    result: dict = {
+        "state": state_value,
+        "reason": snapshot.stop_reason,
+        "thread_id": snapshot.thread_id,
+        "timed_out": snapshot.timed_out,
+        "message": message,
+        "next_actions": next_actions,
+    }
+
+    if snapshot.exit_code is not None:
+        result["exit_code"] = snapshot.exit_code
+    if snapshot.exception_info:
+        result["exception_info"] = snapshot.exception_info
+
+    # Surface stopped event description/text (FR-6)
+    result["description"] = snapshot.description or ""
+    result["text"] = snapshot.text or ""
+    return result
+
+
+async def _report_execution_progress(ctx: Context, progress: int, message: str) -> None:
+    """Keep optional progress delivery failures from interrupting execution."""
+    try:
+        await ctx.report_progress(progress=progress, total=100, message=message)
+    except Exception:
+        pass
+
+
+async def _add_stopped_source_context(
+    session: SessionManager, snapshot: StoppedSnapshot, response: dict
+) -> None:
+    """Enrich a stopped response without making source lookup mandatory."""
+    if snapshot.state != DebugState.STOPPED or not snapshot.thread_id:
+        return
+    try:
+        frames = await session.get_stack_trace(snapshot.thread_id, 0, 1)
+        if frames:
+            response["location"] = {
+                "file": frames[0].source,
+                "line": frames[0].line,
+                "function": frames[0].name,
+                "source_context": read_source_context(frames[0].source, frames[0].line),
+            }
+    except Exception:
+        logger.debug("Failed to get source context", exc_info=True)
+
+
+async def _execute_and_wait(
+    ctx: Context,
+    action_coro,
+    action_name: str,
+    timeout: float = 30.0,
+    *,
+    session: SessionManager,
+    subscriptions: ResourceSubscriptions,
+) -> dict:
+    """Execute an action, observe its stop deadline, and publish the resulting state."""
+    try:
+        await _report_execution_progress(ctx, 0, f"{action_name}...")
+        session.prepare_for_execution()
+        await action_coro
+        await _report_execution_progress(ctx, 30, "Waiting for stop event...")
+
+        async def heartbeat(elapsed: float) -> None:
+            await _report_execution_progress(ctx, 30, f"Still waiting... ({elapsed:.0f}s)")
+
+        snapshot = await session.wait_for_stopped(timeout=timeout, heartbeat_callback=heartbeat)
+
+        if snapshot.timed_out:
+            msg = f"Timed out waiting ({timeout:.0f}s) — program still running"
+        elif snapshot.state == DebugState.TERMINATED:
+            msg = f"Program terminated (exit code: {snapshot.exit_code})"
+        else:
+            reason = snapshot.stop_reason or "unknown"
+            msg = f"Program stopped: {reason}"
+        await _report_execution_progress(ctx, 100, msg)
+
+        response = _build_stopped_response(snapshot)
+        await _add_stopped_source_context(session, snapshot, response)
+        await notify_resource_updated(STATE_URI, subscriptions)
+        await notify_resource_updated(THREADS_URI, subscriptions)
+        await notify_resource_updated(OUTPUT_URI, subscriptions)
+        return response
+    except Exception as e:
+        return build_error_response(str(e), state=session.state.state)
