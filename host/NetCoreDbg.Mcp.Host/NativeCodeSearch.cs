@@ -353,53 +353,11 @@ internal static class PythonJson
         switch (element.ValueKind)
         {
             case JsonValueKind.Object:
-                var properties = element.EnumerateObject().ToArray();
-                output.Append('{');
-                if (properties.Length == 0)
-                {
-                    output.Append('}');
-                    return;
-                }
-
-                output.Append('\n');
-                for (var index = 0; index < properties.Length; index++)
-                {
-                    Indent(output, depth + 1);
-                    WriteString(properties[index].Name, output);
-                    output.Append(": ");
-                    Write(properties[index].Value, output, depth + 1);
-                    if (index + 1 < properties.Length)
-                    {
-                        output.Append(',');
-                    }
-                    output.Append('\n');
-                }
-                Indent(output, depth);
-                output.Append('}');
+                WriteObject(element, output, depth);
                 return;
 
             case JsonValueKind.Array:
-                var values = element.EnumerateArray().ToArray();
-                output.Append('[');
-                if (values.Length == 0)
-                {
-                    output.Append(']');
-                    return;
-                }
-
-                output.Append('\n');
-                for (var index = 0; index < values.Length; index++)
-                {
-                    Indent(output, depth + 1);
-                    Write(values[index], output, depth + 1);
-                    if (index + 1 < values.Length)
-                    {
-                        output.Append(',');
-                    }
-                    output.Append('\n');
-                }
-                Indent(output, depth);
-                output.Append(']');
+                WriteArray(element, output, depth);
                 return;
 
             case JsonValueKind.String:
@@ -420,6 +378,54 @@ internal static class PythonJson
             default:
                 throw new InvalidOperationException($"Unsupported JSON value kind: {element.ValueKind}");
         }
+    }
+
+    private static void WriteObject(JsonElement element, StringBuilder output, int depth)
+    {
+        output.Append('{');
+        var first = true;
+        foreach (var property in element.EnumerateObject())
+        {
+            if (!first)
+            {
+                output.Append(',');
+            }
+            output.Append('\n');
+            Indent(output, depth + 1);
+            WriteString(property.Name, output);
+            output.Append(": ");
+            Write(property.Value, output, depth + 1);
+            first = false;
+        }
+        if (!first)
+        {
+            output.Append('\n');
+            Indent(output, depth);
+        }
+        output.Append('}');
+    }
+
+    private static void WriteArray(JsonElement element, StringBuilder output, int depth)
+    {
+        output.Append('[');
+        var first = true;
+        foreach (var value in element.EnumerateArray())
+        {
+            if (!first)
+            {
+                output.Append(',');
+            }
+            output.Append('\n');
+            Indent(output, depth + 1);
+            Write(value, output, depth + 1);
+            first = false;
+        }
+        if (!first)
+        {
+            output.Append('\n');
+            Indent(output, depth);
+        }
+        output.Append(']');
     }
 
     private static void Indent(StringBuilder output, int depth) => output.Append(' ', depth * 2);
