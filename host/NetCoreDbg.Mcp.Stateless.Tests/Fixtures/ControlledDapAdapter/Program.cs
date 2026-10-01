@@ -342,6 +342,7 @@ internal sealed class ControlledDapAdapter
     private static readonly TimeSpan LifecycleEventsCompletionTimeout = TimeSpan.FromSeconds(1);
     private Task<DapFrame?>? _nextRequest;
     private int _outgoingSequence = 1;
+    private string _startupStage = "adapter-handler";
 
     public ControlledDapAdapter(AdapterOptions options, string transcriptPath, string[] processArguments)
     {
@@ -373,6 +374,31 @@ internal sealed class ControlledDapAdapter
                     request.Document.Dispose();
                 }
             }
+        }
+        catch (Exception exception)
+        {
+            if (Environment.GetEnvironmentVariable("NETCOREDBG_MCP_PRIVATE_START_DIAGNOSTICS") is { Length: > 0 })
+            {
+                try
+                {
+                    await RecordAsync(new
+                    {
+                        kind = "private-start-failure",
+                        stage = _startupStage,
+                        exceptionClass = ExceptionClass(exception),
+                        baseExceptionClass = ExceptionClass(exception.GetBaseException()),
+                        hresult = exception.HResult,
+                        descendantExited = _descendant?.HasExited,
+                        descendantExitCode = _descendant is { HasExited: true } exited ? exited.ExitCode : (int?)null,
+                    }, CancellationToken.None);
+                }
+                catch (Exception)
+                {
+                    // Diagnostic failure must not replace the controlled adapter failure.
+                }
+            }
+
+            throw;
         }
         finally
         {
@@ -434,6 +460,19 @@ internal sealed class ControlledDapAdapter
         }
     }
 
+    private static string ExceptionClass(Exception exception) => exception switch
+    {
+        OperationCanceledException => nameof(OperationCanceledException),
+        TimeoutException => nameof(TimeoutException),
+        System.ComponentModel.Win32Exception => "Win32Exception",
+        InvalidDataException => nameof(InvalidDataException),
+        IOException => nameof(IOException),
+        UnauthorizedAccessException => nameof(UnauthorizedAccessException),
+        ArgumentException => nameof(ArgumentException),
+        InvalidOperationException => nameof(InvalidOperationException),
+        _ => "OtherException",
+    };
+
     private async Task<bool> HandleRequestAsync(DapFrame request, CancellationToken cancellationToken)
     {
         var root = request.Document.RootElement;
@@ -457,6 +496,7 @@ internal sealed class ControlledDapAdapter
         switch (command)
         {
             case "initialize":
+                _startupStage = "initialize";
                 if (!_options.EnableTerminateAfterInitialization)
                 {
                     await WriteEventAsync(
@@ -526,6 +566,7 @@ internal sealed class ControlledDapAdapter
                 await ProcessDeferredRequestsAsync(cancellationToken);
                 return false;
             case "launch":
+                _startupStage = "launch";
                 SetLaunchEnvironment(root);
                 _pendingLaunch = request.Detach();
                 await RecordAsync(new { kind = "launch-gated", sequence }, cancellationToken);
@@ -535,6 +576,7 @@ internal sealed class ControlledDapAdapter
                 }
                 return false;
             case "configurationDone":
+                _startupStage = "configuration-done";
                 await WriteResponseAsync(sequence, command, body: null, cancellationToken);
                 await RecordAsync(new { kind = "configuration-done", sequence }, cancellationToken);
                 await CompleteLaunchAsync(cancellationToken);
@@ -578,11 +620,13 @@ internal sealed class ControlledDapAdapter
         _pendingLaunch = null;
         if (_options.SpawnDescendant && _descendant is null)
         {
+            _startupStage = "descendant-start";
             _descendant = StartDescendant(_options.SpawnWindowedDescendant);
             await RecordAsync(new { kind = "descendant", processId = _descendant.Id }, cancellationToken);
             if (OperatingSystem.IsWindows() && _options.SpawnWindowedDescendant &&
                 !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE")))
             {
+                _startupStage = "window-readiness";
                 await WaitForWindowedDescendantReadyAsync(_descendant, cancellationToken);
             }
         }
@@ -592,8 +636,10 @@ internal sealed class ControlledDapAdapter
             await Task.Delay(TimeSpan.FromMilliseconds(1100), cancellationToken);
         }
 
+        _startupStage = "launch-response";
         await WriteResponseAsync(launch.Document.RootElement.GetProperty("seq").GetInt32(), "launch", body: null, cancellationToken);
         await RecordAsync(new { kind = "launch-released" }, cancellationToken);
+        _startupStage = "running";
         if (_options.ExitAfterLaunchResponse)
         {
             await RecordAsync(new { kind = "unexpected-root-exit" }, cancellationToken);

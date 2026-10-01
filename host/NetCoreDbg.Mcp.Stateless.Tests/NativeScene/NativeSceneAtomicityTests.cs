@@ -12,6 +12,7 @@ using NJsonSchema;
 using NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter;
 using NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace NetCoreDbg.Mcp.Stateless.Tests.NativeScene;
 
@@ -22,7 +23,7 @@ namespace NetCoreDbg.Mcp.Stateless.Tests.NativeScene;
 /// </summary>
 [Collection(NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter.NetCoreDbgSessionProcessCollection.Name)]
 [Trait("Coverage", "Exclude")]
-public sealed class NativeSceneAtomicityTests
+public sealed class NativeSceneAtomicityTests : IDisposable
 {
     private const string ActiveProtocolVersion = "native-scene-probe/1";
     private const string ActiveSchemaVersion = "native-scene-probe.schema/1";
@@ -38,6 +39,11 @@ public sealed class NativeSceneAtomicityTests
         "in_process_framework_probe",
         "uia_guarded",
         "adapter_reported");
+    private readonly Action<string>? _previousStartupDiagnosticOutput = FixtureProcess.StartupDiagnosticOutput.Value;
+
+    public NativeSceneAtomicityTests(ITestOutputHelper output) => FixtureProcess.StartupDiagnosticOutput.Value = output.WriteLine;
+
+    public void Dispose() => FixtureProcess.StartupDiagnosticOutput.Value = _previousStartupDiagnosticOutput;
 
     [Fact]
     public async Task StableFixture_UniqueElementCapture_ReturnsACompleteOneNodeObservedFactsArtifact()

@@ -883,6 +883,9 @@ internal sealed record FixtureConfiguration(
 
 internal sealed class FixtureProcess : IAsyncDisposable
 {
+    internal static readonly AsyncLocal<Action<string>?> StartupDiagnosticOutput = new();
+
+    private readonly Action<string>? _startupDiagnosticOutput = StartupDiagnosticOutput.Value;
     private readonly string _scratchDirectory;
     private readonly string _transcriptPath;
     private readonly string _releasePath;
@@ -1112,6 +1115,8 @@ internal sealed class FixtureProcess : IAsyncDisposable
         }
         finally
         {
+            RetainStartupDiagnostics();
+
             try
             {
                 await DeleteScratchDirectoryAsync();
@@ -1138,6 +1143,80 @@ internal sealed class FixtureProcess : IAsyncDisposable
         {
             throw cleanupFailure;
         }
+    }
+
+    private void RetainStartupDiagnostics()
+    {
+        if (Environment.GetEnvironmentVariable("NETCOREDBG_MCP_PRIVATE_START_DIAGNOSTICS") is not { Length: > 0 } root)
+        {
+            return;
+        }
+
+        try
+        {
+            var fixtureId = Path.GetFileName(_scratchDirectory);
+            var fixtureCorrelation = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(_transcriptPath)));
+            var fixtureLines = ReadTranscriptLinesSnapshot().Select(SafeStartupRecord).OfType<string>().ToArray();
+            var records = new List<string>(fixtureLines);
+            if (Directory.Exists(root))
+            {
+                foreach (var path in Directory.EnumerateFiles(root, $"host-start-{fixtureCorrelation}-*.json"))
+                {
+                    if (SafeStartupRecord(File.ReadAllText(path)) is { } record)
+                    {
+                        records.Add(record);
+                    }
+                }
+            }
+
+            try
+            {
+                if (records.Count > 0)
+                {
+                    _startupDiagnosticOutput?.Invoke($"Startup diagnostics ({fixtureId}):{Environment.NewLine}{string.Join(Environment.NewLine, records)}");
+                }
+            }
+            catch (Exception)
+            {
+                // Test output is diagnostic-only; scratch and process cleanup still run.
+            }
+
+            Directory.CreateDirectory(root);
+            File.WriteAllLines(Path.Combine(root, $"{fixtureId}.jsonl"), fixtureLines);
+        }
+        catch (Exception)
+        {
+            // Retention failure must not replace the test failure or prevent scratch deletion.
+        }
+    }
+
+    private static string? SafeStartupRecord(string line)
+    {
+        using var document = JsonDocument.Parse(line);
+        var root = document.RootElement;
+        if (!root.TryGetProperty("kind", out var kind) || kind.GetString() is not
+            ("startup" or "request" or "initialize-response" or "initialized-event" or "launch-gated"
+            or "configuration-done" or "descendant" or "launch-released" or "private-start-failure" or "host-start-failure"))
+        {
+            return null;
+        }
+
+        return JsonSerializer.Serialize(root.EnumerateObject().Where(static property => property.Name switch
+        {
+            "kind" or "stage" or "reason" or "command" or "exceptionClass" or "baseExceptionClass" =>
+                property.Value.ValueKind == JsonValueKind.Null || property.Value.ValueKind == JsonValueKind.String &&
+                property.Value.GetString() is ("startup" or "request" or "initialize-response" or "initialized-event" or "launch-gated"
+                or "configuration-done" or "descendant" or "launch-released" or "private-start-failure" or "host-start-failure"
+                or "adapter-handler" or "initialize" or "launch" or "configurationDone" or "descendant-start" or "window-readiness"
+                or "launch-response" or "running" or "configuration" or "registered" or "session-started" or "adapter-start" or "binding-create"
+                or "debugger-unconfigured" or "registration-conflict" or "startup-cancelled" or "startup-exception"
+                or "OperationCanceledException" or "TimeoutException" or "Win32Exception" or "InvalidDataException" or "IOException"
+                or "UnauthorizedAccessException" or "ArgumentException" or "InvalidOperationException" or "OtherException"),
+            "sequence" or "processId" or "hresult" or "descendantExitCode" =>
+                property.Value.ValueKind == JsonValueKind.Null || property.Value.ValueKind == JsonValueKind.Number && property.Value.TryGetInt32(out _),
+            "descendantExited" => property.Value.ValueKind is JsonValueKind.Null or JsonValueKind.True or JsonValueKind.False,
+            _ => false,
+        }).ToDictionary(static property => property.Name, static property => property.Value.Clone()));
     }
 
     private async Task KillRecordedAdapterTreeAsync()

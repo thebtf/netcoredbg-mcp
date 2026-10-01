@@ -249,6 +249,7 @@ internal static class Program
 
             if (string.IsNullOrWhiteSpace(_debuggerPath))
             {
+                RecordStartDiagnostic("debugger-unconfigured", "configuration");
                 return NotFound();
             }
 
@@ -278,6 +279,7 @@ internal static class Program
                     || !_slots.TryAdd(token, slot)
                     || !_nativeSceneBindings.TryAdd(token, binding))
                 {
+                    RecordStartDiagnostic("registration-conflict", "session-started");
                     _slots.TryRemove(new KeyValuePair<string, SessionSlot>(token, slot));
                     _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(token, session));
                     _nativeSceneBindings.TryRemove(new KeyValuePair<string, NativeSceneSessionBinding>(token, binding));
@@ -297,8 +299,9 @@ internal static class Program
 
                 return Success("start_debug_success", token, session.State);
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
             {
+                RecordStartDiagnostic("startup-cancelled", StartStage(binding, session, registeredSlot), exception);
                 if (registeredSlot is not null)
                 {
                     await ObserveCloseAsync(registeredSlot).ConfigureAwait(false);
@@ -318,8 +321,9 @@ internal static class Program
 
                 throw;
             }
-            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
             {
+                RecordStartDiagnostic("startup-exception", StartStage(binding, session, registeredSlot), exception);
                 if (registeredSlot is not null)
                 {
                     await ObserveCloseAsync(registeredSlot).ConfigureAwait(false);
@@ -344,6 +348,58 @@ internal static class Program
                 }
 
                 return NotFound();
+            }
+        }
+
+        private static string StartStage(NativeSceneSessionBinding? binding, NetCoreDbgSession? session, SessionSlot? slot) =>
+            slot is not null ? "registered" : session is not null ? "session-started" : binding is not null ? "adapter-start" : "binding-create";
+
+        private static string ExceptionClass(Exception exception) => exception switch
+        {
+            OperationCanceledException => nameof(OperationCanceledException),
+            TimeoutException => nameof(TimeoutException),
+            System.ComponentModel.Win32Exception => "Win32Exception",
+            InvalidDataException => nameof(InvalidDataException),
+            IOException => nameof(IOException),
+            UnauthorizedAccessException => nameof(UnauthorizedAccessException),
+            ArgumentException => nameof(ArgumentException),
+            InvalidOperationException => nameof(InvalidOperationException),
+            _ => "OtherException",
+        };
+
+        private static void RecordStartDiagnostic(string reason, string stage, Exception? exception = null)
+        {
+            if (Environment.GetEnvironmentVariable("NETCOREDBG_MCP_PRIVATE_START_DIAGNOSTICS") is not { Length: > 0 } root)
+            {
+                return;
+            }
+
+            try
+            {
+                var transcript = Environment.GetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT");
+                var fixtureCorrelation = transcript is null ? "unbound" : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(transcript)));
+
+                Directory.CreateDirectory(root);
+                using var stream = new FileStream(Path.Combine(root, $"host-start-{fixtureCorrelation}-{Environment.ProcessId}-{Guid.NewGuid():N}.json"), FileMode.CreateNew);
+                JsonSerializer.Serialize(stream, new
+                {
+                    kind = "host-start-failure",
+                    utc = DateTimeOffset.UtcNow,
+                    processId = Environment.ProcessId,
+                    fixtureCorrelation,
+                    reason,
+                    stage,
+                    exceptionClass = exception is null ? null : ExceptionClass(exception),
+                    baseExceptionClass = exception is null ? null : ExceptionClass(exception.GetBaseException()),
+                    hresult = exception?.HResult,
+                    frames = exception is null ? null : new StackTrace(exception, false).GetFrames()?
+                        .Where(static frame => frame.GetMethod()?.DeclaringType?.Assembly == typeof(Program).Assembly)
+                        .Take(12).Select(static frame => $"{frame.GetMethod()?.DeclaringType?.FullName}.{frame.GetMethod()?.Name}").ToArray(),
+                });
+            }
+            catch (Exception)
+            {
+                // Opt-in diagnostics must not alter startup results or cleanup.
             }
         }
 
