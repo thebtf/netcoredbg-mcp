@@ -400,7 +400,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
             return stability;
         }
 
-        return await ObserveUnobservableStabilityAsync(default, cancellationToken).ConfigureAwait(false);
+        return await ObserveUnobservableStabilityAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<JsonObject?> CaptureGuardedAsync(
@@ -711,7 +711,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
         };
     }
 
-    private static Task<JsonObject> ObserveUnobservableStabilityAsync(JsonElement _, CancellationToken cancellationToken)
+    private static Task<JsonObject> ObserveUnobservableStabilityAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         return Task.FromResult(new JsonObject
