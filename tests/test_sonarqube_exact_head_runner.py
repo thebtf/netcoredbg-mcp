@@ -2974,117 +2974,119 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 with self.assertRaisesRegex(runner.RunnerError, "COVERAGE_REPORT_INVALID"):
                     runner.resolve_collector_attachment(results, trx, href)
 
-    def test_stateless_collector_missing_notification_fails_without_retrying_forever(self):
+    def test_stateless_collector_failed_cleanup_retains_same_owner_without_private_bypass(self):
         if runner.os.name != "nt":
             self.skipTest("Windows Job Object ownership only")
         sys.path.insert(0, str(RUNNER_PATH.parents[1] / "src"))
         owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
-        status = owner_module.DrainStatus
-        release = False
-        close_calls = 0
-        closed_handles = []
-        close_fails = False
-        owners = []
-
-        def close_handle(handle):
-            if close_fails and handle == 123:
-                raise RuntimeError("injected Job close failure")
-            closed_handles.append(handle)
 
         class Owner:
-            _job_handle = 123
-            _process_handle = 456
-            _port_handle = 789
-            _member_handles = {}
-            _transports = ()
-            pid = 42
-            stdin = None
-
-            def __init__(self):
+            def __init__(self, wait_error, close_error, force_error):
+                self.wait_error = wait_error
+                self.close_error = close_error
+                self.force_error = force_error
+                self.close_calls = 0
+                self.force_calls = 0
                 self.stdout = asyncio.StreamReader()
                 self.stdout.feed_eof()
                 self.stderr = asyncio.StreamReader()
                 self.stderr.feed_eof()
-                self._close_lock = asyncio.Lock()
-                self._closed = False
-                self._unmatched_member_handles = []
-                self._api = SimpleNamespace(
-                    close_handle=close_handle,
-                    wait_for_process=lambda handle, timeout: True,
-                    member_process_ids=lambda _job: (),
-                    total_processes=lambda _job: 2,
-                )
 
-            def _snapshot_members(self):
-                return None
+            def __getattr__(self, name):
+                raise AssertionError(f"collector bypassed owner interface: {name}")
 
             async def wait_root(self):
+                if self.wait_error is not None:
+                    raise self.wait_error
                 return 0
 
             async def drain_after_grace(self, **_kwargs):
-                return SimpleNamespace(status=status.FAILED, forced=True, active_processes=0)
+                return SimpleNamespace(
+                    status=owner_module.DrainStatus.FAILED, forced=False, active_processes=0
+                )
+
+            def drain_snapshot(self, receipt):
+                return {
+                    "status": receipt.status.value,
+                    "forced": receipt.forced,
+                    "root_was_forced": False,
+                    "active_processes": receipt.active_processes,
+                    "total_processes": 2,
+                    "birth_notifications": 2,
+                    "exit_notifications": 1,
+                    "unverified_membership": False,
+                    "root_birth_seen": True,
+                    "live_members_without_handle": 0,
+                    "retained_exact_handles": 1,
+                    "signaled_exact_handles": 1,
+                    "handle_probe_failed": False,
+                    "failure_stage": "drain",
+                    "winerror": None,
+                }
 
             async def force_and_drain(self, **_kwargs):
-                return SimpleNamespace(status=status.FAILED, active_processes=0)
+                self.force_calls += 1
+                if self.force_error:
+                    raise RuntimeError("private force detail")
+                return await self.drain_after_grace()
 
             async def aclose(self):
-                nonlocal close_calls
-                close_calls += 1
-                return SimpleNamespace(
-                    status=status.DRAINED if release else status.FAILED,
-                    active_processes=0,
-                )
+                self.close_calls += 1
+                if self.close_error is not None:
+                    raise self.close_error
+                return await self.drain_after_grace()
 
-        async def exercise(process_handle=456):
-            nonlocal release
-            owner = Owner()
-            owner._process_handle = process_handle
-            owners.append(owner)
-            with patch.object(owner_module.WindowsOwnedProcess, "launch", return_value=owner):
-                task = asyncio.create_task(
-                    runner._run_owned_vstest(["collector"], RUNNER_PATH.parents[1])
-                )
-                try:
-                    await asyncio.wait_for(asyncio.shield(task), 1)
-                except TimeoutError:
-                    release = True
-                    with self.assertRaises(runner.RunnerError):
-                        await task
-                    self.fail("irreconcilable owner kept collector cleanup pending")
-                except runner.RunnerError as error:
-                    if close_fails:
-                        raise
-                    self.assertIn("COVERAGE_PROCESS_TREE_NOT_DRAINED", str(error))
-                    if process_handle == 0:
-                        self.assertIn("known process", str(error))
-                        fallback = json.loads(str(error).split("owner_drain=", 1)[1])
-                        self.assertFalse(fallback["fallback_awaited_all_exact_handles"])
-                        self.assertEqual(fallback["fallback_exact_handles_signaled"], 0)
-                finally:
-                    release = True
+        for wait_error, close_error, force_error in (
+            (None, None, False),
+            (None, RuntimeError("private cleanup detail"), False),
+            (asyncio.CancelledError(), None, False),
+            (TimeoutError(), None, False),
+            (TimeoutError(), RuntimeError("private cleanup detail"), True),
+        ):
+            with self.subTest(wait=type(wait_error).__name__, force_error=force_error):
 
-        asyncio.run(exercise())
+                async def exercise():
+                    owner = Owner(wait_error, close_error, force_error)
+                    with patch.object(
+                        owner_module.WindowsOwnedProcess, "launch", return_value=owner
+                    ):
+                        with self.assertRaisesRegex(
+                            runner.RunnerError, "COVERAGE_PROCESS_TREE_NOT_DRAINED"
+                        ) as raised:
+                            await asyncio.wait_for(
+                                runner._run_owned_vstest(["collector"], RUNNER_PATH.parents[1]), 2
+                            )
+                    return owner, raised.exception
 
-        self.assertLessEqual(close_calls, 2)
-        self.assertIn(123, closed_handles)
-        release = False
-        asyncio.run(exercise(0))
-        self.assertEqual(closed_handles.count(123), 2)
-        release = False
-        close_fails = True
-        try:
-            with self.assertRaisesRegex(
-                runner.RunnerError, "COVERAGE_PROCESS_TREE_NOT_DRAINED.*exact Job retained"
-            ):
-                asyncio.run(exercise())
-            self.assertIs(runner._retained_collector_owners[-1], owners[-1])
-            self.assertEqual(owners[-1]._job_handle, 123)
-        finally:
-            if (
-                runner._retained_collector_owners
-                and runner._retained_collector_owners[-1] is owners[-1]
-            ):
-                runner._retained_collector_owners.pop()
+                with patch.object(runner, "_retained_collector_owners", []):
+                    owner, observed = asyncio.run(exercise())
+                    self.assertEqual(runner._retained_collector_owners, [owner])
+                self.assertEqual((owner.force_calls, owner.close_calls), (1, 2))
+                self.assertNotIn("private cleanup detail", str(observed))
+                self.assertNotIn("private force detail", str(observed))
+                if force_error:
+                    with patch.object(
+                        runner.subprocess,
+                        "run",
+                        return_value=SimpleNamespace(
+                            returncode=1,
+                            stdout=f"PROJECT_RELEASE_PROTOCOL_BLOCKED: {observed}\n",
+                        ),
+                    ):
+                        with self.assertRaisesRegex(
+                            runner.RunnerError, "COVERAGE_PROCESS_TREE_NOT_DRAINED"
+                        ):
+                            runner.run_process(
+                                ["coverage-producer"],
+                                cwd=RUNNER_PATH.parents[1],
+                                environment={},
+                                secrets=(),
+                                label="Coverage producer",
+                            )
+                else:
+                    diagnostic = json.loads(str(observed).split("owner_drain=", 1)[1])
+                    self.assertEqual(diagnostic["first"]["total_processes"], 2)
+                    self.assertEqual(diagnostic["first"]["retained_exact_handles"], 1)
 
     def test_stateless_collector_lifetime_reconciliation_failure_keeps_first_owner_evidence(self):
         if runner.os.name != "nt":
@@ -3094,37 +3096,14 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         secret_path = r"C:\private\scan-token\test.dll"
 
         class Owner:
-            pid = 42
-            _job_handle = 123
-            _process_handle = 456
-            _port_handle = 789
-            _transports = ()
-            stdin = None
-            _birth_notifications = 2
-            _root_birth_seen = True
-            _live_births = set()
-            _unverified_membership = False
-            _close_reaper = None
-
             def __init__(self):
-                self._member_handles = {77: 777}
-                self._unmatched_member_handles = []
-                self._close_lock = asyncio.Lock()
-                self._closed = False
+                self.births = 2
+                self.close_calls = 0
                 self.stdout = asyncio.StreamReader()
                 self.stdout.feed_eof()
                 self.stderr = asyncio.StreamReader()
                 self.stderr.feed_eof()
                 self.secret_path = secret_path
-                self._api = SimpleNamespace(
-                    member_process_ids=lambda _job: (),
-                    total_processes=lambda _job: 3 if self._job_handle else 0,
-                    wait_for_process=lambda _handle, _timeout: True,
-                    close_handle=lambda _handle: None,
-                )
-
-            def _snapshot_members(self):
-                return None
 
             async def wait_root(self):
                 return 0
@@ -3133,28 +3112,51 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 return SimpleNamespace(
                     status=owner_module.DrainStatus.FAILED,
                     forced=True,
-                    root_was_forced=False,
                     active_processes=0,
-                    failure_stage=owner_module.AdmissionStage.DRAIN,
-                    winerror=None,
                 )
 
+            def drain_snapshot(self, receipt):
+                return {
+                    "status": receipt.status.value,
+                    "forced": receipt.forced,
+                    "root_was_forced": False,
+                    "active_processes": receipt.active_processes,
+                    "total_processes": 3,
+                    "birth_notifications": self.births,
+                    "exit_notifications": self.births,
+                    "unverified_membership": False,
+                    "root_birth_seen": True,
+                    "live_members_without_handle": 0,
+                    "retained_exact_handles": 2,
+                    "signaled_exact_handles": 2,
+                    "handle_probe_failed": False,
+                    "failure_stage": "drain",
+                    "winerror": None,
+                }
+
             async def force_and_drain(self, **_kwargs):
-                self._birth_notifications = 0
-                return SimpleNamespace(status=owner_module.DrainStatus.FAILED, active_processes=0)
+                self.births = 0
+                return await self.drain_after_grace()
 
             async def aclose(self):
-                return SimpleNamespace(status=owner_module.DrainStatus.FAILED, active_processes=0)
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    raise RuntimeError("later cleanup failure")
+                return SimpleNamespace(status=owner_module.DrainStatus.DRAINED, active_processes=0)
 
-        with patch.object(
-            owner_module.WindowsOwnedProcess, "launch", side_effect=lambda **_: Owner()
+        with (
+            patch.object(runner, "_retained_collector_owners", []),
+            patch.object(
+                owner_module.WindowsOwnedProcess, "launch", side_effect=lambda **_: Owner()
+            ),
         ):
             with self.assertRaises(runner.RunnerError) as raised:
                 asyncio.run(runner._run_owned_vstest(["collector"], RUNNER_PATH.parents[1]))
         message = str(raised.exception)
         self.assertIn("COVERAGE_PROCESS_TREE_NOT_DRAINED", message)
+        self.assertNotIn("later cleanup failure", message)
         diagnostics = json.loads(message.split("owner_drain=", 1)[1])
-        self.assertEqual(diagnostics["invariant"], "lifetime_notifications_missing")
+        self.assertEqual(diagnostics["invariant"], "lifetime_accounting_mismatch")
         self.assertEqual(diagnostics["first"]["status"], "failed")
         self.assertEqual(diagnostics["first"]["total_processes"], 3)
         self.assertEqual(diagnostics["first"]["birth_notifications"], 2)
@@ -3166,33 +3168,25 @@ class TestWave3CoverageProducerRedContracts(TestCase):
 
         class ActiveOwner(Owner):
             async def drain_after_grace(self, **_kwargs):
-                receipt = await super().drain_after_grace(**_kwargs)
                 return SimpleNamespace(
-                    status=owner_module.DrainStatus.TIMED_OUT,
-                    forced=receipt.forced,
-                    root_was_forced=receipt.root_was_forced,
-                    active_processes=1,
-                    failure_stage=None,
-                    winerror=None,
+                    status=owner_module.DrainStatus.TIMED_OUT, forced=True, active_processes=1
                 )
 
-        with patch.object(
-            owner_module.WindowsOwnedProcess, "launch", side_effect=lambda **_: ActiveOwner()
+        with (
+            patch.object(runner, "_retained_collector_owners", []),
+            patch.object(
+                owner_module.WindowsOwnedProcess, "launch", side_effect=lambda **_: ActiveOwner()
+            ),
         ):
             with self.assertRaises(runner.RunnerError) as active:
                 asyncio.run(runner._run_owned_vstest(["collector"], RUNNER_PATH.parents[1]))
         live_diagnostic = json.loads(str(active.exception).split("owner_drain=", 1)[1])
         self.assertEqual(live_diagnostic["invariant"], "active_processes_nonzero")
         self.assertEqual(live_diagnostic["first"]["active_processes"], 1)
-
-        self.assertTrue(diagnostics["fallback_awaited_all_exact_handles"])
         self.assertNotIn(secret_path, message)
-        self.assertNotIn("777", message)
         self.assertTrue(diagnostics["first"]["forced"])
         self.assertFalse(diagnostics["first"]["root_was_forced"])
         self.assertIsNone(diagnostics["first"]["winerror"])
-        self.assertEqual(diagnostics["fallback_exact_handles_known"], 2)
-        self.assertEqual(diagnostics["fallback_exact_handles_signaled"], 2)
         with patch.object(
             runner.subprocess,
             "run",
@@ -3209,7 +3203,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     secrets=(),
                     label="Coverage producer",
                 )
-        self.assertIn("lifetime_notifications_missing", str(producer.exception))
+        self.assertIn("lifetime_accounting_mismatch", str(producer.exception))
         self.assertNotIn(secret_path, str(producer.exception))
 
         for key, value in (("winerror", secret_path), ("root_pid", 4242)):
@@ -3260,238 +3254,77 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         self.assertEqual(blocked["outcome"], "BLOCKED")
         self.assertEqual(blocked["failure"]["code"], "COVERAGE_PROCESS_TREE_NOT_DRAINED")
         self.assertEqual(blocked["cleanup"]["status"], "FAILED")
-        self.assertIn("lifetime_notifications_missing", blocked["failure"]["safe_message"])
+        self.assertFalse(blocked["cleanup"]["producer_terminal"])
+        self.assertEqual(blocked["cleanup"]["claimed_root"], ".tmp/sonarqube-coverage/claimed")
+        self.assertIn("lifetime_accounting_mismatch", blocked["failure"]["safe_message"])
         self.assertNotIn(secret_path, json.dumps(blocked))
 
-    def test_stateless_collector_late_unnotified_birth_joins_exact_handle(self):
+    def test_stateless_collector_direct_capture_returns_only_after_owner_close(self):
         if runner.os.name != "nt":
             self.skipTest("Windows Job Object ownership only")
-        from threading import Event
-
         sys.path.insert(0, str(RUNNER_PATH.parents[1] / "src"))
         owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
-        child_waiting = Event()
-        release_child = Event()
-        job_closed = Event()
-        opened = []
-        closed = []
 
         class Owner:
-            pid = 1
-            _job_handle = 2
-            _process_handle = 3
-            _port_handle = 4
-            _member_handles = {}
-            _transports = ()
-            stdin = None
-
             def __init__(self):
-                self._unmatched_member_handles = []
-                self._close_lock = asyncio.Lock()
-                self._closed = False
-                self.born = False
                 self.stdout = asyncio.StreamReader()
                 self.stdout.feed_eof()
                 self.stderr = asyncio.StreamReader()
                 self.stderr.feed_eof()
-                self._api = SimpleNamespace(
-                    member_process_ids=lambda _job: (1, 77) if self.born else (1,),
-                    total_processes=lambda _job: 2,
-                    open_job_member=self.open_member,
-                    wait_for_process=self.wait_process,
-                    close_handle=self.close_handle,
-                )
-
-            def open_member(self, job, pid):
-                opened.append((job, pid))
-                return 900
-
-            def wait_process(self, handle, timeout_ms):
-                if handle != 900:
-                    return True
-                if timeout_ms == 0:
-                    return release_child.is_set()
-                child_waiting.set()
-                return release_child.wait(timeout_ms / 1000)
-
-            def close_handle(self, handle):
-                closed.append(handle)
-                if handle == 2:
-                    job_closed.set()
-
-            def _snapshot_members(self):
-                return None
+                self.close_entered = asyncio.Event()
+                self.resume_close = asyncio.Event()
+                self.closed = False
 
             async def wait_root(self):
-                return 0
+                return 7
 
             async def drain_after_grace(self, **_kwargs):
                 return SimpleNamespace(
-                    status=owner_module.DrainStatus.FAILED, forced=True, active_processes=0
+                    status=owner_module.DrainStatus.DRAINED, forced=False, active_processes=0
                 )
 
-            async def force_and_drain(self, **_kwargs):
-                self.born = True
-                return SimpleNamespace(status=owner_module.DrainStatus.FAILED, active_processes=1)
-
             async def aclose(self):
-                return SimpleNamespace(status=owner_module.DrainStatus.FAILED, active_processes=1)
+                self.close_entered.set()
+                await self.resume_close.wait()
+                self.closed = True
+                return await self.drain_after_grace()
 
-        async def exercise():
+        async def exercise(cancel):
             owner = Owner()
-            with patch.object(owner_module.WindowsOwnedProcess, "launch", return_value=owner):
+
+            async def launch(*, capture_process_handles, env, **_kwargs):
+                self.assertTrue(capture_process_handles)
+                self.assertFalse(any(runner.is_sonar_environment_name(name) for name in env))
+                return owner
+
+            with (
+                patch.dict(runner.os.environ, {"SONAR_TOKEN": "not-for-the-child"}),
+                patch.object(owner_module.WindowsOwnedProcess, "launch", launch),
+            ):
                 task = asyncio.create_task(
                     runner._run_owned_vstest(["collector"], RUNNER_PATH.parents[1])
                 )
                 try:
-                    self.assertTrue(await asyncio.to_thread(child_waiting.wait, 2))
-                    self.assertTrue(job_closed.is_set())
-                    self.assertFalse(
-                        task.done(), "Job closed before exact late-born child signaled"
-                    )
-                    self.assertEqual(opened, [(2, 77)])
-                    release_child.set()
-                    with self.assertRaisesRegex(
-                        runner.RunnerError, "COVERAGE_PROCESS_TREE_NOT_DRAINED"
-                    ):
-                        await asyncio.wait_for(task, 2)
+                    await asyncio.wait_for(owner.close_entered.wait(), 2)
+                    self.assertFalse(task.done(), "collector returned before owner close completed")
+                    if cancel:
+                        task.cancel()
+                        await asyncio.sleep(0)
+                        self.assertFalse(task.done(), "cleanup cancellation escaped its join")
+                    owner.resume_close.set()
+                    if cancel:
+                        with self.assertRaises(asyncio.CancelledError):
+                            await asyncio.wait_for(task, 2)
+                    else:
+                        self.assertEqual(await asyncio.wait_for(task, 2), 7)
+                    self.assertTrue(owner.closed)
                 finally:
-                    release_child.set()
+                    owner.resume_close.set()
                     await asyncio.gather(task, return_exceptions=True)
 
-        asyncio.run(exercise())
-        self.assertIn(900, closed)
-
-    def test_stateless_collector_missing_notification_closes_real_job(self):
-        if runner.os.name != "nt":
-            self.skipTest("Windows Job Object ownership only")
-        import _winapi
-
-        import psutil
-
-        sys.path.insert(0, str(RUNNER_PATH.parents[1] / "src"))
-        owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
-        original_launch = owner_module.WindowsOwnedProcess.launch
-        original_wait = owner_module.WindowsOwnedProcess._wait_for_zero
-        owners = []
-        identity = {}
-        job_closes = []
-
-        async def record_launch(**kwargs):
-            owner = await original_launch(**kwargs)
-            owners.append(owner)
-            original_close = owner._api.close_handle
-            job_handle = owner._job_handle
-
-            def record_close(handle):
-                if handle == job_handle:
-                    child_handle = identity.get("handle")
-                    before = (
-                        owner._api.active_processes(job_handle),
-                        owner._api.wait_for_process(child_handle, 0) if child_handle else None,
-                        tuple(owner._member_handles),
-                        tuple(owner._unmatched_member_handles),
-                    )
-                    original_close(handle)
-                    job_closes.append((job_handle, before, "closed"))
-                else:
-                    original_close(handle)
-
-            owner._api.close_handle = record_close
-            return owner
-
-        async def bounded_wait(owner, timeout, **kwargs):
-            return await original_wait(owner, 0, **kwargs)
-
-        with TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            pid_file = root / "descendant.pid"
-            child = root / "child.py"
-            child.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
-            parent = root / "parent.py"
-            parent.write_text(
-                "import subprocess, sys, time\n"
-                f"child = subprocess.Popen([sys.executable, {str(child)!r}])\n"
-                f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
-                "time.sleep(30)\n",
-                encoding="utf-8",
-            )
-            try:
-                with (
-                    patch.object(owner_module.WindowsOwnedProcess, "launch", record_launch),
-                    patch.object(owner_module.WindowsOwnedProcess, "_observe_job_messages"),
-                    patch.object(owner_module.WindowsOwnedProcess, "_wait_for_zero", bounded_wait),
-                ):
-
-                    async def interrupt_after_child_start():
-                        task = asyncio.create_task(
-                            runner._run_owned_vstest(
-                                [sys.executable, str(parent)],
-                                RUNNER_PATH.parents[1],
-                                timeout_seconds=30,
-                            )
-                        )
-                        try:
-                            for _ in range(500):
-                                if pid_file.is_file() and pid_file.read_text(encoding="utf-8"):
-                                    break
-                                if task.done():
-                                    await task
-                                await asyncio.sleep(0.01)
-                            self.assertTrue(pid_file.is_file())
-                            pid = int(pid_file.read_text(encoding="utf-8"))
-                            identity["pid"] = pid
-                            identity["born"] = psutil.Process(pid).create_time()
-                            identity["handle"] = _winapi.OpenProcess(0x101001, False, pid)
-                            self.assertNotEqual(identity["handle"], 0)
-                            identity["member"] = owners[0]._api.is_process_in_job(
-                                identity["handle"], owners[0]._job_handle
-                            )
-                            self.assertTrue(identity["member"])
-                            self.assertEqual(
-                                _winapi.WaitForSingleObject(identity["handle"], 0), 258
-                            )
-                            task.cancel()
-                            with self.assertRaisesRegex(
-                                runner.RunnerError, "COVERAGE_PROCESS_TREE_NOT_DRAINED"
-                            ):
-                                await asyncio.wait_for(task, 10)
-                        finally:
-                            if not task.done():
-                                task.cancel()
-                                await asyncio.gather(task, return_exceptions=True)
-
-                    asyncio.run(interrupt_after_child_start())
-                self.assertTrue(pid_file.is_file())
-                try:
-                    observed_born = psutil.Process(identity["pid"]).create_time()
-                except psutil.NoSuchProcess:
-                    observed_born = None
-                self.assertEqual(
-                    _winapi.WaitForSingleObject(identity["handle"], 0),
-                    0,
-                    f"owned child survived Job close: before={identity} after_born={observed_born} "
-                    f"job_closes={job_closes}",
-                )
-                self.assertEqual(len(job_closes), 1)
-                self.assertTrue(
-                    job_closes[0][1][3], f"child handle missing before Job close: {job_closes}"
-                )
-                self.assertIsNone(owners[0]._job_handle)
-                self.assertIsNone(owners[0]._process_handle)
-                self.assertTrue(owners[0]._closed)
-            finally:
-                if owners and owners[0]._job_handle is not None:
-                    owners[0]._api.terminate_job(owners[0]._job_handle)
-                if "handle" in identity:
-                    try:
-                        if _winapi.WaitForSingleObject(identity["handle"], 0) == 258:
-                            _winapi.TerminateProcess(identity["handle"], 1)
-                            self.assertEqual(
-                                _winapi.WaitForSingleObject(identity["handle"], 7000), 0
-                            )
-                    finally:
-                        _winapi.CloseHandle(identity["handle"])
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel):
+                asyncio.run(exercise(cancel))
 
     def test_stateless_collector_cancellation_preserves_cancelled_error(self):
         if runner.os.name != "nt":
@@ -3500,8 +3333,6 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
 
         class Owner:
-            _job_handle = None
-
             def __init__(self):
                 self.stdout = asyncio.StreamReader()
                 self.stdout.feed_eof()
@@ -3543,8 +3374,6 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
 
         class Owner:
-            _job_handle = None
-
             def __init__(self, wait_error, close_error):
                 self.wait_error = wait_error
                 self.close_error = close_error
@@ -3572,6 +3401,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             (asyncio.CancelledError(), None),
             (TimeoutError(), None),
             (asyncio.CancelledError(), RuntimeError("owned close failure")),
+            (TimeoutError(), RuntimeError("owned close failure")),
         ):
             with self.subTest(wait=type(wait_error).__name__, close=close_error is not None):
 
@@ -3630,13 +3460,6 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         receipts = []
         membership = []
         owners = []
-        creation_flags = []
-        original_create = _winapi.CreateProcess
-
-        def record_create(*args):
-            creation_flags.append(args[5])
-            return original_create(*args)
-
         original_launch = owner_module.WindowsOwnedProcess.launch
 
         async def record_launch(**kwargs):
@@ -3668,8 +3491,11 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             snapshot("before_force")
             receipt = await original_force(owner, timeout=timeout)
             snapshot("after_force")
-            self.assertIn(identity["pid"], owner._member_handles)
-            self.assertTrue(owner._api.wait_for_process(owner._member_handles[identity["pid"]], 0))
+            diagnostic = owner.drain_snapshot(receipt)
+            self.assertGreaterEqual(diagnostic["retained_exact_handles"], 2)
+            self.assertEqual(
+                diagnostic["retained_exact_handles"], diagnostic["signaled_exact_handles"]
+            )
             receipts.append(
                 ("force", receipt.status.value, receipt.active_processes, receipt.forced)
             )
@@ -3730,7 +3556,6 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     patch.object(owner_module.WindowsOwnedProcess, "launch", record_launch),
                     patch.object(owner_module.WindowsOwnedProcess, "force_and_drain", record_force),
                     patch.object(owner_module.WindowsOwnedProcess, "aclose", record_close),
-                    patch.object(_winapi, "CreateProcess", record_create),
                 ):
                     asyncio.run(interrupt())
                 pid = identity["pid"]
@@ -3740,7 +3565,6 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     observed = (process.create_time(), process.status(), process.is_running())
                 except psutil.NoSuchProcess:
                     observed = None
-                self.assertEqual(creation_flags, [0x404])
                 self.assertEqual(
                     [item[0] for item in membership],
                     ["before_cancel", "before_force", "after_force", "before_close"],
@@ -3774,141 +3598,71 @@ class TestWave3CoverageProducerRedContracts(TestCase):
     def test_stateless_collector_repeated_cancellation_joins_owned_close(self):
         if runner.os.name != "nt":
             self.skipTest("Windows Job Object ownership only")
-        import _winapi
-
         sys.path.insert(0, str(RUNNER_PATH.parents[1] / "src"))
         owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
-        original_launch = owner_module.WindowsOwnedProcess.launch
-        original_force = owner_module.WindowsOwnedProcess.force_and_drain
-        original_close = owner_module.WindowsOwnedProcess.aclose
-        owners = []
 
-        with TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            pid_file = root / "child.pid"
-            child = root / "child.py"
-            child.write_text("import time\ntime.sleep(12)\n", encoding="utf-8")
-            parent = root / "parent.py"
-            parent.write_text(
-                "import subprocess, sys, time\n"
-                f"child = subprocess.Popen([sys.executable, {str(child)!r}])\n"
-                f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
-                "time.sleep(12)\n",
-                encoding="utf-8",
-            )
-            child_handle = None
+        class Owner:
+            def __init__(self):
+                self.stdout = asyncio.StreamReader()
+                self.stdout.feed_eof()
+                self.stderr = asyncio.StreamReader()
+                self.stderr.feed_eof()
+                self.wait_entered = asyncio.Event()
+                self.force_entered = asyncio.Event()
+                self.resume_force = asyncio.Event()
+                self.close_entered = asyncio.Event()
+                self.resume_close = asyncio.Event()
+                self.force_calls = 0
+                self.close_calls = 0
+                self.closed = False
 
-            async def exercise():
-                nonlocal child_handle
-                force_entered = asyncio.Event()
-                resume_force = asyncio.Event()
-                close_entered = asyncio.Event()
-                resume_close = asyncio.Event()
-                force_calls = 0
-                close_calls = 0
+            async def wait_root(self):
+                self.wait_entered.set()
+                await asyncio.Event().wait()
 
-                async def record_launch(**kwargs):
-                    owner = await original_launch(**kwargs)
-                    owners.append(owner)
-                    return owner
+            async def force_and_drain(self, **_kwargs):
+                self.force_calls += 1
+                self.force_entered.set()
+                await self.resume_force.wait()
+                return SimpleNamespace(status=owner_module.DrainStatus.DRAINED, active_processes=0)
 
-                async def delayed_force(owner, *, timeout):
-                    nonlocal force_calls
-                    force_calls += 1
-                    if force_calls == 1:
-                        force_entered.set()
-                        await resume_force.wait()
-                        active = owner._query_active_processes()
-                        self.assertGreater(active, 0)
-                        return owner_module.OwnerDrainReceipt(
-                            owner=owner.owner,
-                            status=owner_module.DrainStatus.TIMED_OUT,
-                            forced=False,
-                            root_returncode=owner.returncode,
-                            active_processes=active,
-                        )
-                    return await original_force(owner, timeout=timeout)
+            async def aclose(self):
+                self.close_calls += 1
+                self.close_entered.set()
+                await self.resume_close.wait()
+                self.closed = True
+                return SimpleNamespace(status=owner_module.DrainStatus.DRAINED, active_processes=0)
 
-                async def delayed_close(owner):
-                    nonlocal close_calls
-                    close_calls += 1
-                    if close_calls == 1:
-                        close_entered.set()
-                        await resume_close.wait()
-                        active = owner._query_active_processes()
-                        self.assertGreater(active, 0)
-                        return owner_module.OwnerDrainReceipt(
-                            owner=owner.owner,
-                            status=owner_module.DrainStatus.TIMED_OUT,
-                            forced=False,
-                            root_returncode=owner.returncode,
-                            active_processes=active,
-                        )
-                    if close_calls == 2:
-                        raise RuntimeError("owned close failure")
-                    return await original_close(owner)
+        async def exercise():
+            owner = Owner()
+            with patch.object(owner_module.WindowsOwnedProcess, "launch", return_value=owner):
+                task = asyncio.create_task(
+                    runner._run_owned_vstest(["collector"], RUNNER_PATH.parents[1])
+                )
+                try:
+                    await asyncio.wait_for(owner.wait_entered.wait(), 2)
+                    task.cancel()
+                    await asyncio.wait_for(owner.force_entered.wait(), 2)
+                    task.cancel()
+                    await asyncio.sleep(0)
+                    self.assertFalse(task.done(), "second cancel escaped owned force")
+                    owner.resume_force.set()
+                    await asyncio.wait_for(owner.close_entered.wait(), 2)
+                    task.cancel()
+                    await asyncio.sleep(0)
+                    self.assertFalse(task.done(), "close cancellation lost the owner join")
+                    self.assertFalse(owner.closed)
+                    owner.resume_close.set()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await asyncio.wait_for(task, 2)
+                    self.assertTrue(owner.closed)
+                    self.assertEqual((owner.force_calls, owner.close_calls), (1, 1))
+                finally:
+                    owner.resume_force.set()
+                    owner.resume_close.set()
+                    await asyncio.gather(task, return_exceptions=True)
 
-                with (
-                    patch.object(owner_module.WindowsOwnedProcess, "launch", record_launch),
-                    patch.object(
-                        owner_module.WindowsOwnedProcess, "force_and_drain", delayed_force
-                    ),
-                    patch.object(owner_module.WindowsOwnedProcess, "aclose", delayed_close),
-                ):
-                    task = asyncio.create_task(
-                        runner._run_owned_vstest(
-                            [sys.executable, str(parent)],
-                            RUNNER_PATH.parents[1],
-                            timeout_seconds=30,
-                        )
-                    )
-                    try:
-                        for _ in range(500):
-                            if pid_file.is_file() and pid_file.read_text(encoding="utf-8").strip():
-                                break
-                            await asyncio.sleep(0.01)
-                        self.assertTrue(pid_file.is_file())
-                        child_handle = _winapi.OpenProcess(
-                            0x101001, False, int(pid_file.read_text())
-                        )
-                        self.assertNotEqual(child_handle, 0)
-                        self.assertEqual(_winapi.WaitForSingleObject(child_handle, 0), 258)
-                        self.assertTrue(
-                            owners[0]._api.is_process_in_job(child_handle, owners[0]._job_handle)
-                        )
-
-                        task.cancel()
-                        await asyncio.wait_for(force_entered.wait(), 5)
-                        task.cancel()
-                        self.assertFalse(task.done(), "second cancel escaped owned force")
-                        resume_force.set()
-                        await asyncio.wait_for(close_entered.wait(), 5)
-                        self.assertEqual(_winapi.WaitForSingleObject(child_handle, 0), 258)
-                        task.cancel()
-                        await asyncio.sleep(0)
-                        self.assertFalse(task.done(), "close cancellation lost the owner join")
-                        resume_close.set()
-                        with self.assertRaisesRegex(RuntimeError, "owned close failure"):
-                            await asyncio.wait_for(task, 10)
-                        self.assertEqual(_winapi.WaitForSingleObject(child_handle, 0), 0)
-                        self.assertIsNone(owners[0]._job_handle)
-                        self.assertTrue(owners[0]._closed)
-                        self.assertEqual(force_calls, 1)
-                        self.assertLessEqual(close_calls, 3)
-                    finally:
-                        resume_force.set()
-                        resume_close.set()
-
-            try:
-                asyncio.run(exercise())
-            finally:
-                if owners and owners[0]._job_handle is not None:
-                    owners[0]._api.terminate_job(owners[0]._job_handle)
-                if child_handle is not None:
-                    try:
-                        self.assertEqual(_winapi.WaitForSingleObject(child_handle, 15000), 0)
-                    finally:
-                        _winapi.CloseHandle(child_handle)
+        asyncio.run(exercise())
 
     def test_stateless_collector_rejects_changed_test_pdb_before_accepting_attachment(self):
         with TemporaryDirectory() as temporary_directory:

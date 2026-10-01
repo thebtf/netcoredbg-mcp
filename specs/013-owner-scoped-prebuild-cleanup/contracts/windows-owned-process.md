@@ -108,6 +108,63 @@ The boundary never invokes asyncio process launch as a Windows fallback. It neve
 7. Repeated callers join an in-flight operation. Only a proven `DRAINED` receipt memoizes completion; a later explicit force call may retry a non-drained outcome.
 8. `aclose() -> OwnerDrainReceipt` keeps the Job, port, and process/member handles on failed close and retries the same owner. It releases them only after proven drain. `KILL_ON_JOB_CLOSE` is crash protection, not a substitute for a drain receipt.
 
+### Collector-only synchronous process-capability capture
+
+`WindowsOwnedProcess.launch(capture_process_handles=True)` is an opt-in for the
+outer first-party coverage collector only. The default is `False`; adapter,
+build-command, and nested owners retain their existing launch behavior. The
+receipt and public MCP contracts do not change.
+
+One owner thread performs `CreateProcess`, `WaitForDebugEvent`, and
+`ContinueDebugEvent`. The collector adds `DEBUG_PROCESS`, not
+`DEBUG_ONLY_THIS_PROCESS`, while preserving suspended admission, private Job
+containment, restricted handle inheritance, and I/O-before-resume ordering.
+Before continuing a process-creation event, duplicate its process handle as a
+private capability and positively verify membership in this exact Job. Count
+distinct process objects, not PIDs or handle values; the root is counted once.
+Retain every lifetime capability until final exit proof. Close image/DLL file
+handles and respect the system-owned debug process/thread handle lifecycle.
+
+Let `C` be the distinct membership-qualified process-capability count and `T`
+the final raw Job lifetime total. Collector-mode `DRAINED` requires `C == T`,
+zero active processes, a signaled root and every retained member handle, and
+no unresolved admission, capture, identity, or native API failure. Serialize
+the final ledger/accounting observation. `T` can include failed associations;
+equality is a conservative sufficient condition, not a theorem that every
+increment represents an admitted member. A discrepancy, counter ambiguity,
+capacity violation, or broken descendant debug chain remains non-drained.
+Never subtract `TotalTerminatedProcesses` or forgive an unexplained gap.
+
+In this mode, completion-port birth/retirement packets remain diagnostics,
+not the authoritative capability ledger. Missing packets cannot override
+complete direct-handle proof, and received packets cannot fill a missing
+capability. Clause 4's notification reconciliation remains unchanged for the
+default mode, including both ordinary and abnormal retirement handling.
+
+Continue an exit debug event before waiting for its retained process handle.
+Keep the pump operational through root exit, Job termination, cancellation,
+and final handle waits. Forward application exceptions with
+`DBG_EXCEPTION_NOT_HANDLED`; handle only identified debugger-initialization
+events. Do not swallow failures, detach, disable debugger kill-on-thread-exit,
+stop the pump before proven drain, or let the collector close private Job or
+pump resources. Failed cleanup retains the owner and first causal error;
+producer-terminal evidence, scanner completion, and run-root deletion stay
+closed. Debugger/Job crash protection is not an exit receipt.
+
+`drain_snapshot(receipt)` returns a serialized, bounded, secret-free diagnostic
+value in either mode; it returns no handles and never independently admits
+drain. The collector uses owner operations for cleanup rather than private
+field manipulation.
+
+Acceptance exercises the existing nested-Job fixture without its cooperative
+barrier, delayed event consumption, exact-identity deduplication, missing
+capabilities/count gaps, native capture/continue failures, suspended-child
+termination, and cancellation joins. Adoption also requires the pinned
+first-party provider's filtered compatibility replay and complete unfiltered
+collection with unchanged DLL/PDB bytes and proven whole-tree drainage.
+Spec 014's coverage scope, producer-terminal ordering, and strict Sonar policy
+remain unchanged.
+
 ## Adapter and pre-build integration
 
 ```python

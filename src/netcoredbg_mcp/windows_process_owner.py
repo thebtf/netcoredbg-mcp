@@ -13,9 +13,11 @@ import os
 import shutil
 import subprocess
 import time
+import threading
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from concurrent.futures import Future
 from enum import Enum
 from typing import Any, Literal, Protocol
 
@@ -34,6 +36,16 @@ _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _CREATE_SUSPENDED = 0x00000004
 _CREATE_UNICODE_ENVIRONMENT = 0x00000400
+_DEBUG_PROCESS = 0x00000001
+_DBG_CONTINUE = 0x00010002
+_DBG_EXCEPTION_NOT_HANDLED = 0x80010001
+_EXCEPTION_DEBUG_EVENT = 1
+_CREATE_PROCESS_DEBUG_EVENT = 3
+_EXIT_PROCESS_DEBUG_EVENT = 5
+_LOAD_DLL_DEBUG_EVENT = 6
+_RIP_EVENT = 9
+_EXCEPTION_BREAKPOINT = 0x80000003
+_DEBUG_WAIT_MS = 50
 _RESUME_FAILED = 0xFFFFFFFF
 _JOB_OBJECT_BASIC_PROCESS_ID_LIST = 3
 _ERROR_MORE_DATA = 234
@@ -196,6 +208,14 @@ class _WindowsApi(Protocol):
     def exit_code(self, process_handle: int) -> int | None: ...
 
     def close_handle(self, handle: int) -> None: ...
+
+    def enable_debug_capture(self) -> None: ...
+    def wait_debug_event(self, timeout_ms: int) -> Any | None: ...
+    def continue_debug_event(self, event: Any, status: int) -> None: ...
+    def duplicate_process(self, handle: int) -> int: ...
+    def same_process(self, first: int, second: int) -> bool: ...
+    def process_id(self, handle: int) -> int: ...
+    def is_startup_breakpoint(self, event: Any) -> bool: ...
 
 
 class _Kernel32:
@@ -500,6 +520,145 @@ class _Kernel32:
         if not self._close_handle(handle):
             raise self._error(AdmissionStage.DRAIN)
 
+    def enable_debug_capture(self) -> None:
+        """Bind debug interop only for the collector's opt-in native debug chain."""
+        ctypes, wintypes = self._ctypes, self._wintypes
+        handle, dword, pointer = wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID
+
+        class ExceptionRecord(ctypes.Structure):
+            _fields_ = [
+                ("ExceptionCode", dword),
+                ("ExceptionFlags", dword),
+                ("ExceptionRecord", pointer),
+                ("ExceptionAddress", pointer),
+                ("NumberParameters", dword),
+                ("ExceptionInformation", ctypes.c_size_t * 15),
+            ]
+
+        class ExceptionInfo(ctypes.Structure):
+            _fields_ = [("ExceptionRecord", ExceptionRecord), ("dwFirstChance", dword)]
+
+        class CreateProcessInfo(ctypes.Structure):
+            _fields_ = [
+                ("hFile", handle),
+                ("hProcess", handle),
+                ("hThread", handle),
+                ("lpBaseOfImage", pointer),
+                ("dwDebugInfoFileOffset", dword),
+                ("nDebugInfoSize", dword),
+                ("lpThreadLocalBase", pointer),
+                ("lpStartAddress", pointer),
+                ("lpImageName", pointer),
+                ("fUnicode", wintypes.WORD),
+            ]
+
+        class LoadDllInfo(ctypes.Structure):
+            _fields_ = [
+                ("hFile", handle),
+                ("lpBaseOfDll", pointer),
+                ("dwDebugInfoFileOffset", dword),
+                ("nDebugInfoSize", dword),
+                ("lpImageName", pointer),
+                ("fUnicode", wintypes.WORD),
+            ]
+
+        class DebugInfo(ctypes.Union):
+            _fields_ = [
+                ("Exception", ExceptionInfo),
+                ("CreateProcessInfo", CreateProcessInfo),
+                ("LoadDll", LoadDllInfo),
+            ]
+
+        class DebugEvent(ctypes.Structure):
+            _fields_ = [
+                ("dwDebugEventCode", dword),
+                ("dwProcessId", dword),
+                ("dwThreadId", dword),
+                ("u", DebugInfo),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._debug_event = DebugEvent
+        self._wait_debug_event = kernel32.WaitForDebugEventEx
+        self._wait_debug_event.argtypes = (ctypes.POINTER(DebugEvent), dword)
+        self._wait_debug_event.restype = wintypes.BOOL
+        self._continue_debug_event = kernel32.ContinueDebugEvent
+        self._continue_debug_event.argtypes = (dword, dword, dword)
+        self._continue_debug_event.restype = wintypes.BOOL
+        self._duplicate_handle = kernel32.DuplicateHandle
+        self._duplicate_handle.argtypes = (
+            handle,
+            handle,
+            handle,
+            ctypes.POINTER(handle),
+            dword,
+            wintypes.BOOL,
+            dword,
+        )
+        self._duplicate_handle.restype = wintypes.BOOL
+        self._compare_handles = ctypes.WinDLL(
+            "kernelbase", use_last_error=True
+        ).CompareObjectHandles
+        self._compare_handles.argtypes = (handle, handle)
+        self._compare_handles.restype = wintypes.BOOL
+        self._get_process_id = kernel32.GetProcessId
+        self._get_process_id.argtypes = (handle,)
+        self._get_process_id.restype = dword
+        ntdll = ctypes.WinDLL("ntdll")
+        self._startup_breakpoint = ctypes.cast(ntdll.DbgBreakPoint, pointer).value
+
+    def wait_debug_event(self, timeout_ms: int) -> Any | None:
+        event = self._debug_event()
+        if self._wait_debug_event(self._ctypes.byref(event), timeout_ms):
+            return event
+        error = self._ctypes.get_last_error()
+        if error == 121:  # ERROR_SEM_TIMEOUT, not an IOCP WAIT_TIMEOUT.
+            return None
+        raise _Win32CallError(AdmissionStage.DRAIN, error or None)
+
+    def continue_debug_event(self, event: Any, status: int) -> None:
+        if not self._continue_debug_event(event.dwProcessId, event.dwThreadId, status):
+            raise self._error(AdmissionStage.DRAIN)
+
+    def duplicate_process(self, handle: int) -> int:
+        duplicate = self._wintypes.HANDLE()
+        current = self._ctypes.c_void_p(-1)
+        if not handle or not self._duplicate_handle(
+            current,
+            handle,
+            current,
+            self._ctypes.byref(duplicate),
+            _SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION,
+            False,
+            0,
+        ):
+            raise self._error(AdmissionStage.DRAIN)
+        if duplicate.value is None:
+            raise _Win32CallError(AdmissionStage.DRAIN, None)
+        return int(duplicate.value)
+
+    def same_process(self, first: int, second: int) -> bool:
+        self._ctypes.set_last_error(0)
+        result = bool(self._compare_handles(first, second))
+        error = self._ctypes.get_last_error()
+        if not result and error not in (0, 1656):  # ERROR_NOT_SAME_OBJECT.
+            raise _Win32CallError(AdmissionStage.DRAIN, error)
+        return result
+
+    def process_id(self, handle: int) -> int:
+        pid = int(self._get_process_id(handle))
+        if not pid:
+            raise self._error(AdmissionStage.DRAIN)
+        return pid
+
+    def is_startup_breakpoint(self, event: Any) -> bool:
+        info = event.u.Exception
+        return (
+            info.dwFirstChance == 1
+            and info.ExceptionRecord.ExceptionCode == _EXCEPTION_BREAKPOINT
+            and info.ExceptionRecord.ExceptionAddress == self._startup_breakpoint
+        )
+
 
 class _WritePipeProtocol(asyncio.streams.FlowControlMixin):
     """The stdlib flow-control protocol needed by an IOCP StreamWriter."""
@@ -664,6 +823,237 @@ class _PipeEnds:
             raise
 
 
+class _DebugCapture:
+    """One creator/debugger thread owns the chain; duplicates belong to this owner.
+
+    OS debug process/thread handles are never closed here. Private duplicates
+    survive retirement; only a joined, kernel-exited chain permits their release.
+    The lock serializes capture/continuation with final accounting and signaling.
+    """
+
+    def __init__(self, api: _WindowsApi, job_handle: int) -> None:
+        self.api = api
+        self.job_handle = job_handle
+        self.lock = threading.RLock()
+        self.created: Future[tuple[int, int, int]] = Future()
+        self.started: Future[None] = Future()
+        self._activated = threading.Event()
+        self._stop = threading.Event()
+        self._resume = False
+        self._thread: threading.Thread | None = None
+        self.root_handle: int | None = None
+        self.root_pid: int | None = None
+        self.root_seen = False
+        self.root_exit_continued = False
+        self.handles: dict[int, list[int]] = {}
+        self._qualified_count = 0
+        self._extra_process_handles: list[int] = []
+        self._image_files: set[int] = set()
+        self._launch_thread_handle: int | None = None
+        self.live: set[int] = set()
+        self._startup_pending: set[int] = set()
+        self._pending: Any | None = None
+        self.failure: _Win32CallError | None = None
+
+    async def create(self, creator: Any, **kwargs: Any) -> tuple[int, int, int]:
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(creator, kwargs),
+            name="WindowsOwnedProcess-debug",
+            daemon=True,
+        )
+        self._thread.start()
+        return await asyncio.wrap_future(self.created)
+
+    def activate(self, *, resume: bool) -> None:
+        with self.lock:
+            if not self._activated.is_set():
+                self._resume = resume
+                self._activated.set()
+
+    def record_failure(self, error: _Win32CallError) -> None:
+        with self.lock:
+            if self.failure is None:
+                self.failure = error
+
+    def _run(self, creator: Any, kwargs: dict[str, Any]) -> None:
+        try:
+            self.api.enable_debug_capture()
+            process, thread, pid = creator(**kwargs, capture_process_handles=True)
+        except BaseException as error:
+            self.created.set_exception(error)
+            return
+        self.root_handle, self.root_pid = process, pid
+        self._launch_thread_handle = thread
+        self.created.set_result((process, thread, pid))
+        self._activated.wait()
+        try:
+            if self._resume:
+                self.api.resume_thread(thread)
+        except BaseException as error:
+            failure = (
+                error
+                if isinstance(error, _Win32CallError)
+                else _Win32CallError(
+                    AdmissionStage.RESUME,
+                    getattr(error, "winerror", None),
+                )
+            )
+            self.record_failure(failure)
+            self.started.set_exception(failure)
+        else:
+            self.started.set_result(None)
+        finally:
+            try:
+                self.api.close_handle(thread)
+            except _Win32CallError as error:
+                self.record_failure(error)
+            else:
+                self._launch_thread_handle = None
+        # Never exit a broken pump or disable debugger kill-on-thread-exit.
+        # Retry a pending continuation without capturing the same event twice.
+        pending = None
+        status = _DBG_CONTINUE
+        while not self._stop.is_set():
+            try:
+                if pending is None:
+                    pending = self.api.wait_debug_event(_DEBUG_WAIT_MS)
+                    if pending is None:
+                        continue
+                    with self.lock:
+                        self._pending = pending
+                        status = self._capture_event(pending)
+                with self.lock:
+                    self.api.continue_debug_event(pending, status)
+                    if pending.dwDebugEventCode == _EXIT_PROCESS_DEBUG_EVENT:
+                        pid = pending.dwProcessId
+                        self.live.discard(pid)
+                        self._startup_pending.discard(pid)
+                        if pid == self.root_pid:
+                            self.root_exit_continued = True
+                    self._pending = None
+                    pending = None
+            except BaseException as error:
+                self.record_failure(
+                    error
+                    if isinstance(error, _Win32CallError)
+                    else _Win32CallError(AdmissionStage.DRAIN, getattr(error, "winerror", None))
+                )
+                # A capture failure still must continue the outstanding event.
+                # Its first causal error is permanent even if cleanup later exits.
+                if pending is not None and pending.dwDebugEventCode == _EXCEPTION_DEBUG_EVENT:
+                    status = _DBG_EXCEPTION_NOT_HANDLED
+                time.sleep(_DEBUG_WAIT_MS / 1000)
+
+    def _capture_event(self, event: Any) -> int:
+        code, pid = event.dwDebugEventCode, event.dwProcessId
+        if code == _CREATE_PROCESS_DEBUG_EVENT:
+            self._startup_pending.add(pid)
+            info = event.u.CreateProcessInfo
+            try:
+                self._retain_process(pid, info.hProcess)
+            except _Win32CallError as error:
+                self.record_failure(error)
+                raise
+            finally:
+                self.live.add(pid)
+                if info.hFile:
+                    self._close_image_file(info.hFile)
+        elif code == _LOAD_DLL_DEBUG_EVENT:
+            if event.u.LoadDll.hFile:
+                self._close_image_file(event.u.LoadDll.hFile)
+        elif code == _EXCEPTION_DEBUG_EVENT:
+            if pid in self._startup_pending and self.api.is_startup_breakpoint(event):
+                self._startup_pending.remove(pid)
+                return _DBG_CONTINUE
+            return _DBG_EXCEPTION_NOT_HANDLED
+        elif code == _EXIT_PROCESS_DEBUG_EVENT:
+            if pid not in self.live:
+                raise _Win32CallError(AdmissionStage.DRAIN, None)
+        elif code == _RIP_EVENT or pid not in self.live:
+            raise _Win32CallError(AdmissionStage.DRAIN, None)
+        return _DBG_CONTINUE
+
+    def _retain_process(self, pid: int, event_handle: int) -> None:
+        duplicate = self.api.duplicate_process(event_handle)
+        self._extra_process_handles.append(duplicate)
+        retained = False
+        try:
+            _make_non_inheritable(duplicate, AdmissionStage.DRAIN)
+            if self.api.process_id(duplicate) != pid or not self.api.is_process_in_job(
+                duplicate,
+                self.job_handle,
+            ):
+                raise _Win32CallError(AdmissionStage.DRAIN, None)
+            # PIDs only partition comparisons; kernel objects decide identity.
+            for existing in self.handles.get(pid, ()):
+                if self.api.same_process(existing, duplicate):
+                    return
+            if pid in self.live:
+                raise _Win32CallError(AdmissionStage.DRAIN, None)
+            if self._qualified_count >= _MAX_JOB_MEMBERS:
+                raise _Win32CallError(AdmissionStage.DRAIN, _ERROR_MORE_DATA)
+            if pid == self.root_pid:
+                if self.root_handle is None or not self.api.same_process(
+                    self.root_handle, duplicate
+                ):
+                    raise _Win32CallError(AdmissionStage.DRAIN, None)
+                self.root_seen = True
+                self.handles[pid] = [self.root_handle]
+                self._qualified_count += 1
+                return
+            self.handles.setdefault(pid, []).append(duplicate)
+            self._qualified_count += 1
+            retained = True
+            self._extra_process_handles.remove(duplicate)
+        except _Win32CallError as error:
+            self.record_failure(error)
+            raise
+        finally:
+            if not retained:
+                self.api.close_handle(duplicate)
+                self._extra_process_handles.remove(duplicate)
+
+    def _close_image_file(self, handle: int) -> None:
+        self._image_files.add(handle)
+        self.api.close_handle(handle)
+        self._image_files.remove(handle)
+
+    def retained_handles(self) -> tuple[int, ...]:
+        return tuple(handle for group in self.handles.values() for handle in group)
+
+    async def join_exited(self, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while True:
+            with self.lock:
+                if self.root_exit_continued and not self.live and self._pending is None:
+                    self._stop.set()
+                    break
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(_ACCOUNTING_POLL_SECONDS)
+        assert self._thread is not None
+        await asyncio.to_thread(self._thread.join)
+        return True
+
+    def release_duplicates(self) -> None:
+        for group in self.handles.values():
+            for handle in tuple(group):
+                if handle != self.root_handle:
+                    self.api.close_handle(handle)
+                    group.remove(handle)
+        while self._extra_process_handles:
+            self.api.close_handle(self._extra_process_handles[-1])
+            self._extra_process_handles.pop()
+        for handle in tuple(self._image_files):
+            self.api.close_handle(handle)
+            self._image_files.remove(handle)
+        if self._launch_thread_handle is not None:
+            self.api.close_handle(self._launch_thread_handle)
+            self._launch_thread_handle = None
+        self.handles.clear()
+
+
 class _FailedAdmissionReaper:
     """Retain failed-admission handles until a root-exit observation permits closure."""
 
@@ -678,6 +1068,7 @@ class _FailedAdmissionReaper:
         pipe_ends: _PipeEnds | None,
         transports: tuple[asyncio.BaseTransport, ...],
         admitted: bool,
+        debug_capture: _DebugCapture | None = None,
     ) -> None:
         self._api = api
         self._job_handle = job_handle
@@ -687,6 +1078,7 @@ class _FailedAdmissionReaper:
         self._port_handle = port_handle
         self._transports = transports
         self._admitted = admitted
+        self._debug_capture = debug_capture
         self._closed = False
         self._io_closed = False
         self._completed = asyncio.Event()
@@ -735,8 +1127,14 @@ class _FailedAdmissionReaper:
 
     async def _attempt_cleanup(self) -> _Win32CallError | None:
         self._close_io()
+        capture = self._debug_capture
+        if capture is not None:
+            capture.activate(resume=False)
+            self._thread_handle = None  # Launch-thread handle stays creator-owned.
         process_handle = self._process_handle
         if process_handle is None:
+            if capture is not None and capture._thread is not None:
+                await asyncio.to_thread(capture._thread.join)
             self._close_after_root_exit()
             return None
 
@@ -766,6 +1164,30 @@ class _FailedAdmissionReaper:
         except _Win32CallError as error:
             return error
         if root_exited:
+            if capture is not None:
+                with capture.lock:
+                    signaled = all(
+                        self._api.wait_for_process(handle, 0)
+                        for handle in (
+                            *capture.retained_handles(),
+                            *capture._extra_process_handles,
+                        )
+                    )
+                    complete = not capture._resume or (
+                        self._job_handle is not None
+                        and self._api.active_processes(self._job_handle) == 0
+                        and self._api.total_processes(self._job_handle)
+                        == len(capture.retained_handles())
+                    )
+                if (
+                    not signaled
+                    or not complete
+                    or not await capture.join_exited(
+                        _ADMISSION_CLEANUP_TIMEOUT,
+                    )
+                ):
+                    return capture.failure or _Win32CallError(AdmissionStage.DRAIN, None)
+                capture.release_duplicates()
             self._close_after_root_exit()
             return None
         return job_failure or process_failure or _Win32CallError(AdmissionStage.DRAIN, None)
@@ -855,6 +1277,7 @@ def _create_suspended_process(
     cwd: str | None,
     env: Mapping[str, str] | None,
     pipe_ends: _PipeEnds,
+    capture_process_handles: bool = False,
 ) -> tuple[int, int, int]:
     import _winapi
 
@@ -876,7 +1299,9 @@ def _create_suspended_process(
             None,
             None,
             True,
-            _CREATE_SUSPENDED | _CREATE_UNICODE_ENVIRONMENT,
+            _CREATE_SUSPENDED
+            | _CREATE_UNICODE_ENVIRONMENT
+            | (_DEBUG_PROCESS if capture_process_handles else 0),
             environment,
             cwd,
             startup_info,
@@ -906,6 +1331,7 @@ class WindowsOwnedProcess:
         stdout: asyncio.StreamReader,
         stderr: asyncio.StreamReader,
         transports: tuple[asyncio.BaseTransport, ...],
+        debug_capture: _DebugCapture | None = None,
     ) -> None:
         self.owner = owner
         self._api = api
@@ -927,6 +1353,9 @@ class WindowsOwnedProcess:
         self._retired_members: set[int] = set()
         self._unmatched_member_handles: list[int] = []
         self._unverified_membership = False
+        self._debug_capture = debug_capture
+        self._exit_notifications = 0
+        self._final_snapshot: dict[str, object] | None = None
         self._close_task: asyncio.Task[OwnerDrainReceipt] | None = None
         self._close_reaper: asyncio.Task[None] | None = None
         self._close_lock = asyncio.Lock()
@@ -955,6 +1384,7 @@ class WindowsOwnedProcess:
         cwd: str | None,
         env: Mapping[str, str] | None,
         stdin_mode: Literal["pipe", "devnull"],
+        capture_process_handles: bool = False,
     ) -> WindowsOwnedProcess:
         """Create a suspended child and return only after Job admission succeeds."""
 
@@ -969,6 +1399,7 @@ class WindowsOwnedProcess:
             api=_Kernel32(),
             pipe_ends=None,
             process_creator=_create_suspended_process,
+            capture_process_handles=capture_process_handles,
         )
 
     @classmethod
@@ -983,9 +1414,57 @@ class WindowsOwnedProcess:
         api: _WindowsApi,
         pipe_ends: _PipeEnds | None,
         process_creator: Any,
+        capture_process_handles: bool = False,
     ) -> WindowsOwnedProcess:
         """Private injection seam for deterministic admission-order coverage."""
+        admission = cls._admit_with(
+            generation=generation,
+            argv=argv,
+            cwd=cwd,
+            env=env,
+            stdin_mode=stdin_mode,
+            api=api,
+            pipe_ends=pipe_ends,
+            process_creator=process_creator,
+            capture_process_handles=capture_process_handles,
+        )
+        if not capture_process_handles:
+            return await admission
+        task = asyncio.create_task(admission)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Admission owns CreateProcess even if its caller goes away. Join it
+            # and the owner-only close, including repeated caller cancellation.
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    pass
+            owner = task.result()
+            cleanup = asyncio.create_task(owner.aclose())
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    pass
+            cleanup.result()
+            raise
 
+    @classmethod
+    async def _admit_with(
+        cls,
+        *,
+        generation: object,
+        argv: Sequence[str],
+        cwd: str | None,
+        env: Mapping[str, str] | None,
+        stdin_mode: Literal["pipe", "devnull"],
+        api: _WindowsApi,
+        pipe_ends: _PipeEnds | None,
+        process_creator: Any,
+        capture_process_handles: bool,
+    ) -> WindowsOwnedProcess:
         owner_id = uuid.uuid4().hex
         job_handle: int | None = None
         port_handle: int | None = None
@@ -994,6 +1473,7 @@ class WindowsOwnedProcess:
         endpoints = pipe_ends
         admitted = False
         transports: tuple[asyncio.BaseTransport, ...] = ()
+        capture: _DebugCapture | None = None
         try:
             job_handle = api.create_job()
             _make_non_inheritable(job_handle, AdmissionStage.CREATE_JOB)
@@ -1002,12 +1482,22 @@ class WindowsOwnedProcess:
             _make_non_inheritable(port_handle, AdmissionStage.CREATE_JOB)
             api.attach_completion_port(job_handle, port_handle)
             endpoints = endpoints or _PipeEnds.create(stdin_mode)
-            process_handle, thread_handle, process_id = process_creator(
-                argv=argv,
-                cwd=cwd,
-                env=env,
-                pipe_ends=endpoints,
-            )
+            if capture_process_handles:
+                capture = _DebugCapture(api, job_handle)
+                process_handle, thread_handle, process_id = await capture.create(
+                    process_creator,
+                    argv=argv,
+                    cwd=cwd,
+                    env=env,
+                    pipe_ends=endpoints,
+                )
+            else:
+                process_handle, thread_handle, process_id = process_creator(
+                    argv=argv,
+                    cwd=cwd,
+                    env=env,
+                    pipe_ends=endpoints,
+                )
             _make_non_inheritable(process_handle, AdmissionStage.CREATE_PROCESS)
             _make_non_inheritable(thread_handle, AdmissionStage.CREATE_PROCESS)
             endpoints.close_child_ends(api)
@@ -1027,9 +1517,14 @@ class WindowsOwnedProcess:
                 ) from error
             # Resume is last.  Every capability-defining fact above is true
             # before any adapter code can execute in the child process.
-            api.resume_thread(thread_handle)
-            _close_ignoring_errors(api, thread_handle)
-            thread_handle = None
+            if capture is not None:
+                capture.activate(resume=True)
+                thread_handle = None  # The creator thread closes its launch handle.
+                await asyncio.wrap_future(capture.started)
+            else:
+                api.resume_thread(thread_handle)
+                _close_ignoring_errors(api, thread_handle)
+                thread_handle = None
             owner = OwnedProcessRef(owner_id=owner_id, generation=generation, root_pid=process_id)
             return cls(
                 owner=owner,
@@ -1041,6 +1536,7 @@ class WindowsOwnedProcess:
                 stdout=stdout,
                 stderr=stderr,
                 transports=transports,
+                debug_capture=capture,
             )
         except _Win32CallError as error:
             try:
@@ -1056,6 +1552,7 @@ class WindowsOwnedProcess:
                     pipe_ends=endpoints,
                     transports=transports,
                     admitted=admitted,
+                    debug_capture=capture,
                 )
             except AdmissionCleanupError as cleanup_error:
                 raise cleanup_error from error
@@ -1074,6 +1571,7 @@ class WindowsOwnedProcess:
                     pipe_ends=endpoints,
                     transports=transports,
                     admitted=admitted,
+                    debug_capture=capture,
                 )
             except AdmissionCleanupError as cleanup_error:
                 raise cleanup_error from error
@@ -1110,6 +1608,20 @@ class WindowsOwnedProcess:
         if self._port_handle is None:
             raise _Win32CallError(AdmissionStage.DRAIN, None)
         for message, pid in self._api.job_messages(self._port_handle):
+            if self._debug_capture is not None:
+                # Raw IOCP traffic is diagnostic, not capability admission.
+                if message == _JOB_OBJECT_MSG_NEW_PROCESS:
+                    self._birth_notifications += 1
+                    self._live_births.add(pid)
+                    if pid == self.pid:
+                        self._root_birth_seen = True
+                elif message in (
+                    _JOB_OBJECT_MSG_EXIT_PROCESS,
+                    _JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS,
+                ):
+                    self._exit_notifications += 1
+                    self._live_births.discard(pid)
+                continue
             if message == _JOB_OBJECT_MSG_NEW_PROCESS:
                 if (
                     not pid
@@ -1126,6 +1638,7 @@ class WindowsOwnedProcess:
                 if pid == self.owner.root_pid:
                     self._root_birth_seen = True
             elif message in (_JOB_OBJECT_MSG_EXIT_PROCESS, _JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS):
+                self._exit_notifications += 1
                 if pid not in self._live_births:
                     self._unverified_membership = True
                     continue
@@ -1144,6 +1657,8 @@ class WindowsOwnedProcess:
         if job_handle is None:
             raise _Win32CallError(AdmissionStage.DRAIN, None)
         self._observe_job_messages()
+        if self._debug_capture is not None:
+            return
         member_pids = self._api.member_process_ids(job_handle)
         self._observe_job_messages()
         for pid in member_pids:
@@ -1240,12 +1755,17 @@ class WindowsOwnedProcess:
         root_was_forced = self._root_is_active_before_force()
         try:
             self._snapshot_members()
-        except _Win32CallError:
+        except _Win32CallError as error:
             # A denied observation cannot veto termination of the retained Job.
-            pass
+            if self._debug_capture is not None:
+                self._debug_capture.record_failure(error)
         try:
             self._api.terminate_job(self._job_handle)
         except _Win32CallError as error:
+            if self._debug_capture is not None:
+                self._debug_capture.record_failure(error)
+                error = self._debug_capture.failure
+                assert error is not None
             receipt = self._receipt(
                 status=DrainStatus.FAILED,
                 forced=True,
@@ -1270,6 +1790,12 @@ class WindowsOwnedProcess:
         forced: bool,
         root_was_forced: bool | None = None,
     ) -> OwnerDrainReceipt:
+        if self._debug_capture is not None:
+            return await self._wait_for_captured(
+                timeout,
+                forced=forced,
+                root_was_forced=root_was_forced,
+            )
         deadline = time.monotonic() + max(timeout, 0.0)
         while True:
             try:
@@ -1373,6 +1899,145 @@ class WindowsOwnedProcess:
                 )
             await asyncio.sleep(min(_ACCOUNTING_POLL_SECONDS, remaining))
 
+    async def _wait_for_captured(
+        self,
+        timeout: float,
+        *,
+        forced: bool,
+        root_was_forced: bool | None,
+    ) -> OwnerDrainReceipt:
+        capture = self._debug_capture
+        assert capture is not None
+        deadline = time.monotonic() + max(timeout, 0.0)
+        while True:
+            active: int | None = None
+            with capture.lock:
+                try:
+                    self._observe_job_messages()
+                    job, root = self._job_handle, self._process_handle
+                    if job is None or root is None:
+                        raise _Win32CallError(AdmissionStage.DRAIN, None)
+                    active = self._api.active_processes(job)
+                    total = self._api.total_processes(job)
+                    handles = capture.retained_handles()
+                    signaled = self._api.wait_for_process(root, 0)
+                    for handle in handles:
+                        signaled = self._api.wait_for_process(handle, 0) and signaled
+                    complete = (
+                        capture.root_seen
+                        and capture.root_exit_continued
+                        and not capture.live
+                        and capture._pending is None
+                        and 0 < total == len(handles) <= _MAX_JOB_MEMBERS
+                    )
+                    if active == 0 and signaled and complete:
+                        self._returncode = self._api.exit_code(root)
+                        if self._returncode is None:
+                            raise _Win32CallError(AdmissionStage.DRAIN, None)
+                except _Win32CallError as error:
+                    capture.record_failure(error)
+                    signaled = complete = False
+                if capture.failure is not None:
+                    return self._receipt(
+                        status=DrainStatus.FAILED,
+                        forced=forced,
+                        active_processes=active,
+                        failure_stage=capture.failure.stage,
+                        winerror=capture.failure.winerror,
+                        root_was_forced=root_was_forced,
+                    )
+                if active == 0 and signaled and complete:
+                    return self._receipt(
+                        status=DrainStatus.DRAINED,
+                        forced=forced,
+                        active_processes=0,
+                        failure_stage=None,
+                        winerror=None,
+                        root_was_forced=root_was_forced,
+                    )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return self._receipt(
+                    status=DrainStatus.FAILED
+                    if active == 0 and signaled
+                    else DrainStatus.TIMED_OUT,
+                    forced=forced,
+                    active_processes=active,
+                    failure_stage=AdmissionStage.DRAIN if active == 0 and signaled else None,
+                    winerror=None,
+                    root_was_forced=root_was_forced,
+                )
+            await asyncio.sleep(min(_ACCOUNTING_POLL_SECONDS, remaining))
+
+    def drain_snapshot(self, receipt: OwnerDrainReceipt) -> dict[str, object]:
+        """Return safe diagnostics, never an independent drain admission oracle."""
+        if receipt.owner != self.owner:
+            raise ValueError("drain receipt belongs to a different owner")
+        capture = self._debug_capture
+        if capture is not None:
+            with capture.lock:
+                return self._drain_snapshot(receipt)
+        return self._drain_snapshot(receipt)
+
+    def _drain_snapshot(self, receipt: OwnerDrainReceipt) -> dict[str, object]:
+        if self._closed and self._final_snapshot is not None:
+            snapshot = dict(self._final_snapshot)
+        else:
+            capture = self._debug_capture
+            handles = (
+                capture.retained_handles()
+                if capture is not None
+                else tuple(
+                    handle
+                    for handle in (
+                        self._process_handle,
+                        *self._member_handles.values(),
+                        *self._unmatched_member_handles,
+                    )
+                    if handle is not None
+                )
+            )
+            total = None
+            if self._job_handle is not None:
+                try:
+                    total = self._api.total_processes(self._job_handle)
+                except _Win32CallError:
+                    pass
+            signaled = 0
+            probe_failed = False
+            for handle in handles:
+                try:
+                    signaled += bool(self._api.wait_for_process(handle, 0))
+                except _Win32CallError:
+                    probe_failed = True
+            snapshot = {
+                "total_processes": total,
+                "birth_notifications": self._birth_notifications,
+                "exit_notifications": self._exit_notifications,
+                "unverified_membership": self._unverified_membership
+                or (capture is not None and capture.failure is not None),
+                "root_birth_seen": capture.root_seen if capture else self._root_birth_seen,
+                "live_members_without_handle": sum(
+                    pid != self.pid
+                    and pid not in (capture.handles if capture else self._member_handles)
+                    for pid in self._live_births
+                ),
+                "retained_exact_handles": len(handles),
+                "signaled_exact_handles": signaled,
+                "handle_probe_failed": probe_failed,
+            }
+        snapshot.update(
+            {
+                "status": receipt.status.value,
+                "forced": receipt.forced,
+                "root_was_forced": receipt.root_was_forced,
+                "active_processes": receipt.active_processes,
+                "failure_stage": receipt.failure_stage.value if receipt.failure_stage else None,
+                "winerror": receipt.winerror,
+            }
+        )
+        return snapshot
+
     def _receipt(
         self,
         *,
@@ -1433,6 +2098,38 @@ class WindowsOwnedProcess:
                 if self._close_reaper is None:
                     self._close_reaper = asyncio.create_task(self._retry_close())
                 return receipt
+            capture = self._debug_capture
+            if capture is not None and not await capture.join_exited(_ADMISSION_CLEANUP_TIMEOUT):
+                failure = self._receipt(
+                    status=DrainStatus.FAILED,
+                    forced=receipt.forced,
+                    active_processes=0,
+                    failure_stage=AdmissionStage.DRAIN,
+                    winerror=None,
+                    root_was_forced=receipt.root_was_forced,
+                )
+                self._drain_receipt = failure
+                if self._close_reaper is None:
+                    self._close_reaper = asyncio.create_task(self._retry_close())
+                return failure
+            self._final_snapshot = self.drain_snapshot(receipt)
+            if capture is not None:
+                try:
+                    capture.release_duplicates()
+                except _Win32CallError as error:
+                    capture.record_failure(error)
+                    failure = self._receipt(
+                        status=DrainStatus.FAILED,
+                        forced=receipt.forced,
+                        active_processes=0,
+                        failure_stage=error.stage,
+                        winerror=error.winerror,
+                        root_was_forced=receipt.root_was_forced,
+                    )
+                    self._drain_receipt = failure
+                    if self._close_reaper is None:
+                        self._close_reaper = asyncio.create_task(self._retry_close())
+                    return failure
             for handle in self._member_handles.values():
                 _close_ignoring_errors(self._api, handle)
             self._member_handles.clear()
@@ -1487,6 +2184,7 @@ async def _cleanup_failed_admission(
     pipe_ends: _PipeEnds | None,
     transports: tuple[asyncio.BaseTransport, ...],
     admitted: bool,
+    debug_capture: _DebugCapture | None = None,
 ) -> None:
     """Transfer failed admission to one private retry owner before this frame unwinds."""
     reaper = _FailedAdmissionReaper(
@@ -1498,6 +2196,7 @@ async def _cleanup_failed_admission(
         pipe_ends=pipe_ends,
         transports=transports,
         admitted=admitted,
+        debug_capture=debug_capture,
     )
     try:
         failure = await reaper._attempt_cleanup()

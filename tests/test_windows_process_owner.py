@@ -7,9 +7,12 @@ import ctypes
 import json
 import logging
 import os
+import queue
 import shutil
 import subprocess
 import sys
+import time
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -800,6 +803,41 @@ async def _launch(
         pipe_ends=_FakePipes(events),
         process_creator=_creator(events),
     )
+
+
+@pytest.mark.asyncio
+async def test_owner_drain_snapshot_preserves_closed_receipt_without_private_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    api = _FakeApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    api._active_counts = [0]
+    receipt = await owner.drain_after_grace(grace_timeout=0.1, force_timeout=0.1)
+    before = owner.drain_snapshot(receipt)
+    assert before["status"] == "drained"
+    assert before["retained_exact_handles"] == before["signaled_exact_handles"] == 1
+    assert before["total_processes"] == before["birth_notifications"] == 1
+    assert set(before) == {
+        "status",
+        "forced",
+        "root_was_forced",
+        "active_processes",
+        "total_processes",
+        "birth_notifications",
+        "exit_notifications",
+        "unverified_membership",
+        "root_birth_seen",
+        "live_members_without_handle",
+        "retained_exact_handles",
+        "signaled_exact_handles",
+        "handle_probe_failed",
+        "failure_stage",
+        "winerror",
+    }
+    await owner.aclose()
+    assert owner.drain_snapshot(receipt) == before
+    json.dumps(before)
 
 
 @pytest.mark.asyncio
@@ -1622,3 +1660,523 @@ async def test_real_prebuild_drains_only_captured_owner(
         for pid in (sentinel_child, child_b):
             if pid is not None and psutil.pid_exists(pid):
                 psutil.Process(pid).kill()
+
+
+def _native_python() -> tuple[str, dict[str, str]]:
+    """Keep controlled process counts independent of Windows venv redirectors."""
+    executable = Path(sys._base_executable).resolve()
+    assert executable.is_file(), executable
+    module_path = windows_process_owner.__file__
+    assert module_path is not None
+    environment = dict(os.environ)
+    environment["PATH"] = str(executable.parent) + os.pathsep + environment.get("PATH", "")
+    environment["PYTHONPATH"] = str(Path(module_path).resolve().parents[1])
+    return str(executable), environment
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows direct process capability proof")
+@pytest.mark.asyncio
+async def test_direct_capture_drains_nested_jobs_without_cooperation_despite_delayed_pump(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    native_wait = _Kernel32.wait_debug_event
+
+    def delayed_wait(api, timeout_ms):
+        event = native_wait(api, timeout_ms)
+        if event is not None and event.dwDebugEventCode == 3:
+            time.sleep(0.03)
+        return event
+
+    monkeypatch.setattr(_Kernel32, "wait_debug_event", delayed_wait)
+    python, environment = _native_python()
+    member_code = f"""
+import subprocess, time
+children = [subprocess.Popen(
+    [{python!r}, '-c', 'import time;time.sleep(30)'],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+) for _ in range(3)]
+print('ready', flush=True)
+time.sleep(30)
+"""
+    child_code = f"""
+import asyncio
+from netcoredbg_mcp.windows_process_owner import WindowsOwnedProcess, DrainStatus
+async def run():
+    for index in range(8):
+        inner = await WindowsOwnedProcess.launch(
+            generation=index, argv=({python!r}, '-c', {member_code!r}),
+            cwd=None, env=None, stdin_mode='devnull',
+        )
+        try:
+            assert (await asyncio.wait_for(inner.stdout.readline(), 10)).strip() == b'ready'
+            receipt = await inner.force_and_drain(timeout=10)
+            assert receipt.status is DrainStatus.DRAINED, inner.drain_snapshot(receipt)
+            facts = inner.drain_snapshot(receipt)
+            assert facts['retained_exact_handles'] == facts['signaled_exact_handles'] == 4, facts
+            print(index, flush=True)
+        finally:
+            assert (await inner.aclose()).status is DrainStatus.DRAINED
+asyncio.run(run())
+"""
+    owner = await WindowsOwnedProcess.launch(
+        generation="nested-direct-no-barrier",
+        argv=(python, "-c", child_code),
+        cwd=str(Path(windows_process_owner.__file__).resolve().parents[2]),
+        env=environment,
+        stdin_mode="devnull",
+        capture_process_handles=True,
+    )
+    stdout = asyncio.create_task(owner.stdout.read())
+    stderr = asyncio.create_task(owner.stderr.read())
+    try:
+        returncode = await asyncio.wait_for(owner.wait_root(), 120)
+        receipt = await owner.drain_after_grace(grace_timeout=5, force_timeout=5)
+        facts = owner.drain_snapshot(receipt)
+        (tmp_path / "nested-direct-receipt.json").write_text(json.dumps(facts), encoding="utf-8")
+        assert returncode == 0, (await stderr).decode(errors="replace")
+        assert (await stdout).splitlines() == [str(index).encode() for index in range(8)]
+        assert receipt.status is DrainStatus.DRAINED, facts
+        assert not receipt.forced and not receipt.root_was_forced
+        assert facts["active_processes"] == 0
+        assert facts["total_processes"] == facts["retained_exact_handles"] == 33
+        assert facts["signaled_exact_handles"] == 33
+        assert facts["birth_notifications"] == 33 and facts["exit_notifications"] == 1
+        assert not facts["unverified_membership"] and not facts["handle_probe_failed"]
+    finally:
+        closed = await owner.aclose()
+        assert closed.status is DrainStatus.DRAINED, owner.drain_snapshot(closed)
+        await asyncio.gather(stdout, stderr)
+
+
+def _debug_event(code: int, pid: int = 41, handle: int = 101, *, startup=False):
+    return SimpleNamespace(
+        dwDebugEventCode=code,
+        dwProcessId=pid,
+        dwThreadId=51,
+        startup=startup,
+        u=SimpleNamespace(
+            CreateProcessInfo=SimpleNamespace(hProcess=handle, hFile=0),
+            LoadDll=SimpleNamespace(hFile=0),
+        ),
+    )
+
+
+class _DebugApi(_FakeApi):
+    """Controlled process objects and OS-owned events, with real pump threading."""
+
+    def __init__(self, events: list[str], *, total=1, error=None):
+        super().__init__(events)
+        self.total = total
+        self.error = error
+        self.objects = {21: (1, 41), 101: (1, 41), 102: (2, 42), 103: (3, 42)}
+        self.live_objects = {1}
+        self.current_objects = {41: 1}
+        self.debug_events = queue.Queue()
+        self.debug_events.put(_debug_event(3))
+        self.debug_threads: list[threading.Thread] = []
+        self.continued: list[tuple[int, int, int]] = []
+        self.root_exited = threading.Event()
+        self.root_exit_queued = False
+        self.exit_received = threading.Event()
+        self.release_exit = threading.Event()
+        self.hold_exit = False
+        self.duplicate_count = 0
+        self.continue_failed = False
+
+    def enable_debug_capture(self):
+        self.debug_threads.append(threading.current_thread())
+
+    def wait_debug_event(self, timeout_ms):
+        self.debug_threads.append(threading.current_thread())
+        try:
+            event = self.debug_events.get(timeout=timeout_ms / 1000)
+        except queue.Empty:
+            return None
+        if self.hold_exit and event.dwDebugEventCode == 5:
+            self.exit_received.set()
+            assert self.release_exit.wait(2)
+        return event
+
+    def continue_debug_event(self, event, status):
+        self.debug_threads.append(threading.current_thread())
+        if self.error == "continue" and not self.continue_failed:
+            self.continue_failed = True
+            raise _Win32CallError(AdmissionStage.DRAIN, 56)
+        self.continued.append((event.dwDebugEventCode, event.dwProcessId, status))
+        if event.dwDebugEventCode == 3:
+            identity, pid = self.objects.get(
+                event.u.CreateProcessInfo.hProcess,
+                (2, event.dwProcessId),
+            )
+            self.current_objects[pid] = identity
+            self.live_objects.add(identity)
+        elif event.dwDebugEventCode == 5:
+            self.live_objects.discard(self.current_objects[event.dwProcessId])
+            if event.dwProcessId == 41:
+                self.root_exited.set()
+
+    def duplicate_process(self, handle):
+        if not handle or (self.error == "duplicate" and handle == 102):
+            raise _Win32CallError(AdmissionStage.DRAIN, 55)
+        self.duplicate_count += 1
+        duplicate = 1000 + self.duplicate_count
+        self.objects[duplicate] = self.objects[handle]
+        return duplicate
+
+    def same_process(self, first, second):
+        return self.objects[first][0] == self.objects[second][0]
+
+    def process_id(self, handle):
+        return (
+            99
+            if self.error == "identity" and self.objects[handle][0] == 2
+            else self.objects[handle][1]
+        )
+
+    def is_process_in_job(self, process, job):
+        if not self.assign_ok or (self.error == "membership" and self.objects[process][0] == 2):
+            return False
+        return super().is_process_in_job(process, job)
+
+    def is_startup_breakpoint(self, event):
+        return event.startup
+
+    def active_processes(self, job):
+        return len(self.live_objects)
+
+    def total_processes(self, job):
+        return self.total
+
+    def wait_for_process(self, process, timeout_ms):
+        if process == 21 and timeout_ms:
+            return self.root_exited.wait(None if timeout_ms == 0xFFFFFFFF else timeout_ms / 1000)
+        return self.objects[process][0] not in self.live_objects
+
+    def exit_code(self, process):
+        return 0 if self.wait_for_process(process, 0) else None
+
+    def terminate_job(self, job):
+        super().terminate_job(job)
+        self._queue_root_exit()
+
+    def terminate_process(self, process):
+        super().terminate_process(process)
+        self._queue_root_exit()
+
+    def _queue_root_exit(self):
+        if not self.root_exited.is_set() and not self.root_exit_queued:
+            self.root_exit_queued = True
+            self.debug_events.put(_debug_event(5))
+
+    def member_process_ids(self, job):
+        raise AssertionError("direct capture must not discover capabilities from PIDs")
+
+
+async def _launch_debug(monkeypatch, api, events, *, pipes=None):
+    monkeypatch.setattr(os, "set_handle_inheritable", lambda *_args: None, raising=False)
+    ordinary_creator = _creator(events)
+
+    def creator(*, capture_process_handles, **kwargs):
+        assert capture_process_handles
+        api.debug_threads.append(threading.current_thread())
+        return ordinary_creator(**kwargs)
+
+    return await WindowsOwnedProcess._launch_with(
+        generation="direct-fake",
+        argv=("fixture.exe", "--interpreter=vscode"),
+        cwd=None,
+        env=None,
+        stdin_mode="pipe",
+        api=api,
+        pipe_ends=pipes or _FakePipes(events),
+        process_creator=creator,
+        capture_process_handles=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_direct_capture_counts_distinct_objects_not_reused_pids_or_debug_handles(monkeypatch):
+    events = []
+    api = _DebugApi(events, total=3)
+    for event in (
+        _debug_event(3),
+        _debug_event(3, 42, 102),
+        _debug_event(3, 42, 102),
+        _debug_event(5, 42),
+        _debug_event(3, 42, 103),
+        _debug_event(5, 42),
+        _debug_event(5),
+    ):
+        api.debug_events.put(event)
+    owner = await _launch_debug(monkeypatch, api, events)
+    receipt = await owner.drain_after_grace(grace_timeout=1, force_timeout=1)
+    facts = owner.drain_snapshot(receipt)
+    assert receipt.status is DrainStatus.DRAINED and not receipt.forced, facts
+    assert facts["total_processes"] == facts["retained_exact_handles"] == 3
+    assert facts["signaled_exact_handles"] == 3
+    assert facts["birth_notifications"] == 1  # Diagnostic omissions cannot manufacture or veto C.
+    assert len(set(api.debug_threads)) == 1
+    assert api.debug_threads[0] is not threading.current_thread()
+    assert (await owner.aclose()).status is DrainStatus.DRAINED
+    assert not api.debug_threads[0].is_alive()
+    for handle in (11, 12, 21, 31, 1001, 1002, 1003, 1004, 1005):
+        assert events.count(f"close:{handle}") == 1
+
+
+@pytest.mark.parametrize("total", (2, 65537))
+@pytest.mark.asyncio
+async def test_direct_capture_never_repairs_raw_lifetime_count_gaps(monkeypatch, total):
+    events = []
+    api = _DebugApi(events, total=total)
+    api.debug_events.put(_debug_event(5))
+    owner = await _launch_debug(monkeypatch, api, events)
+    await asyncio.wait_for(owner.wait_root(), 2)
+    receipt = await owner.drain_after_grace(grace_timeout=0, force_timeout=0)
+    facts = owner.drain_snapshot(receipt)
+    assert receipt.status is DrainStatus.FAILED and facts["active_processes"] == 0
+    assert facts["retained_exact_handles"] == facts["signaled_exact_handles"] == 1
+    assert facts["total_processes"] == api.total
+    assert "close:11" not in events and "close:21" not in events
+    capture = owner._debug_capture
+    assert capture is not None and capture._thread.is_alive()
+    # The simulator has no native capabilities; join only after asserting
+    # production failed closed and retained its controlling handles.
+    assert await capture.join_exited(1)
+
+
+@pytest.mark.parametrize("error", ("duplicate", "membership", "identity", "null", "continue"))
+@pytest.mark.asyncio
+async def test_direct_capture_api_identity_and_continue_failures_remain_causal(monkeypatch, error):
+    events = []
+    api = _DebugApi(events, total=2, error=error)
+    api.debug_events.put(_debug_event(3, 42, 0 if error == "null" else 102))
+    api.debug_events.put(_debug_event(5, 42))
+    api.debug_events.put(_debug_event(5))
+    owner = await _launch_debug(monkeypatch, api, events)
+    await asyncio.wait_for(owner.wait_root(), 2)
+    first = await owner.drain_after_grace(grace_timeout=0, force_timeout=0)
+    second = await owner.force_and_drain(timeout=0)
+    assert first.status is second.status is DrainStatus.FAILED
+    assert (
+        first.winerror
+        == second.winerror
+        == (56 if error == "continue" else 55 if error in ("duplicate", "null") else None)
+    )
+    assert "close:11" not in events and "close:21" not in events
+    capture = owner._debug_capture
+    assert capture.failure is not None and capture._thread.is_alive()
+    assert await capture.join_exited(1)
+
+
+@pytest.mark.asyncio
+async def test_direct_capture_exception_forwarding_only_handles_identified_startup(monkeypatch):
+    events = []
+    api = _DebugApi(events)
+    root_event = api.debug_events.get_nowait()
+    root_event.u.CreateProcessInfo.hFile = 70
+    api.debug_events.put(root_event)
+    dll_event = _debug_event(6)
+    dll_event.u.LoadDll.hFile = 71
+    api.debug_events.put(dll_event)
+    for event in (
+        _debug_event(1, startup=True),
+        _debug_event(1, startup=True),
+        _debug_event(1),
+        _debug_event(5),
+    ):
+        api.debug_events.put(event)
+    owner = await _launch_debug(monkeypatch, api, events)
+    receipt = await owner.drain_after_grace(grace_timeout=1, force_timeout=1)
+    assert receipt.status is DrainStatus.DRAINED
+    assert [status for code, pid, status in api.continued if code == 1] == [
+        0x00010002,
+        0x80010001,
+        0x80010001,
+    ]
+    await owner.aclose()
+    assert events.count("close:70") == events.count("close:71") == 1
+    assert "close:101" not in events  # The OS, not the owner, releases debug handles.
+
+
+@pytest.mark.asyncio
+async def test_direct_capture_repeated_launch_cancellation_joins_admission_and_cleanup(monkeypatch):
+    events = []
+    api = _DebugApi(events)
+    wire_entered, release_wire = asyncio.Event(), asyncio.Event()
+
+    class PausedPipes(_FakePipes):
+        async def wire(self, loop):
+            wire_entered.set()
+            await release_wire.wait()
+            return await super().wire(loop)
+
+    caller = asyncio.create_task(_launch_debug(monkeypatch, api, events, pipes=PausedPipes(events)))
+    await asyncio.wait_for(wire_entered.wait(), 1)
+    for _ in range(2):
+        caller.cancel()
+        await asyncio.sleep(0)
+    assert not caller.done() and "resume-thread" not in events
+    release_wire.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(caller, 2)
+    assert not api.debug_threads[0].is_alive()
+    for handle in (11, 12, 21, 31):
+        assert events.count(f"close:{handle}") == 1
+
+
+@pytest.mark.asyncio
+async def test_direct_capture_cancelled_close_pumps_exit_before_signaling_and_join(monkeypatch):
+    events = []
+    api = _DebugApi(events)
+    api.hold_exit = True
+    owner = await _launch_debug(monkeypatch, api, events)
+    caller = asyncio.create_task(owner.aclose())
+    assert await asyncio.to_thread(api.exit_received.wait, 1)
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    second = asyncio.create_task(owner.aclose())
+    await asyncio.sleep(0)
+    second.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await second
+    assert "close:11" not in events and "close:21" not in events
+    assert not api.wait_for_process(21, 0)
+    api.release_exit.set()
+    receipt = await asyncio.wait_for(owner.aclose(), 2)
+    assert receipt.status is DrainStatus.DRAINED
+    assert not api.debug_threads[0].is_alive()
+    assert events.count("terminate-job") == 1
+    assert events.count("close:21") == events.count("close:11") == 1
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows suspended-child and exception proof")
+@pytest.mark.parametrize(
+    "code, expected, total",
+    (
+        (
+            "import subprocess; child=subprocess.Popen([python,'-c','raise SystemExit(77)'],creationflags=4,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); child.terminate(); child.wait()",
+            0,
+            2,
+        ),
+        ("import ctypes; ctypes.windll.kernel32.DebugBreak()", 0x80000003, 1),
+    ),
+)
+@pytest.mark.asyncio
+async def test_direct_capture_native_suspended_termination_and_app_breakpoint(
+    code, expected, total
+):
+    python, environment = _native_python()
+    owner = await WindowsOwnedProcess.launch(
+        generation="native-capture-edge",
+        argv=(python, "-c", f"python = {python!r}\n{code}"),
+        cwd=None,
+        env=environment,
+        stdin_mode="devnull",
+        capture_process_handles=True,
+    )
+    output = asyncio.create_task(owner.stdout.read())
+    error = asyncio.create_task(owner.stderr.read())
+    try:
+        assert await asyncio.wait_for(owner.wait_root(), 10) == expected
+        receipt = await owner.drain_after_grace(grace_timeout=1, force_timeout=1)
+        facts = owner.drain_snapshot(receipt)
+        assert receipt.status is DrainStatus.DRAINED and not receipt.forced, facts
+        assert facts["total_processes"] == facts["retained_exact_handles"] == total
+        assert facts["signaled_exact_handles"] == total
+    finally:
+        assert (await owner.aclose()).status is DrainStatus.DRAINED
+        await asyncio.gather(output, error)
+
+
+@pytest.mark.parametrize(
+    "stage", (AdmissionStage.ASSIGN, AdmissionStage.WIRE_IO, AdmissionStage.RESUME)
+)
+@pytest.mark.asyncio
+async def test_direct_capture_failed_admission_joins_creator_before_releasing_caps(
+    monkeypatch, stage
+):
+    events = []
+    api = _DebugApi(events)
+    api.assign_ok = stage is not AdmissionStage.ASSIGN
+    api.resume_ok = stage is not AdmissionStage.RESUME
+
+    class FailingPipes(_FakePipes):
+        async def wire(self, loop):
+            if stage is AdmissionStage.WIRE_IO:
+                raise OSError("controlled wiring failure")
+            return await super().wire(loop)
+
+    with pytest.raises(ProcessAdmissionError) as raised:
+        await _launch_debug(monkeypatch, api, events, pipes=FailingPipes(events))
+    assert raised.value.stage is stage
+    assert raised.value.winerror == (
+        5 if stage is AdmissionStage.ASSIGN else 7 if stage is AdmissionStage.RESUME else None
+    )
+    if stage is AdmissionStage.ASSIGN:
+        assert "terminate-job" not in events
+    assert events.count("terminate-process") == 1
+    assert api.root_exited.is_set()
+    assert not api.debug_threads[0].is_alive()
+    if stage is not AdmissionStage.RESUME:
+        assert "resume-thread" not in events
+    for handle in (11, 12, 21, 31):
+        assert events.count(f"close:{handle}") == 1
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows descendant-created debug chain proof")
+def test_direct_capture_native_new_debug_chain_stays_failed_with_zero_accounting(tmp_path):
+    # Isolate a deliberately retained failed owner. Its exact handles and live
+    # pump remain owned until the probe process's last consumer has recorded them.
+    python, environment = _native_python()
+    inner_code = f"""
+import asyncio, json
+from netcoredbg_mcp.windows_process_owner import WindowsOwnedProcess, DrainStatus
+async def run():
+    owner = await WindowsOwnedProcess.launch(
+        generation='independent-chain', argv=({python!r}, '-c', 'pass'),
+        cwd=None, env=None, stdin_mode='devnull', capture_process_handles=True,
+    )
+    await owner.wait_root()
+    receipt = await owner.drain_after_grace(grace_timeout=1, force_timeout=1)
+    assert receipt.status is DrainStatus.DRAINED
+    print(json.dumps(owner.drain_snapshot(receipt)), flush=True)
+    assert (await owner.aclose()).status is DrainStatus.DRAINED
+asyncio.run(run())
+"""
+    probe_code = f"""
+import asyncio, json
+from netcoredbg_mcp.windows_process_owner import WindowsOwnedProcess, DrainStatus
+async def run():
+    owner = await WindowsOwnedProcess.launch(
+        generation='chain-ancestor', argv=({python!r}, '-c', {inner_code!r}),
+        cwd=None, env=None, stdin_mode='devnull', capture_process_handles=True,
+    )
+    out = asyncio.create_task(owner.stdout.read())
+    err = asyncio.create_task(owner.stderr.read())
+    assert await asyncio.wait_for(owner.wait_root(), 10) == 0, (await err).decode()
+    receipt = await owner.drain_after_grace(grace_timeout=0.1, force_timeout=0.1)
+    facts = owner.drain_snapshot(receipt)
+    assert receipt.status is DrainStatus.FAILED, facts
+    assert facts['total_processes'] == 2 and facts['retained_exact_handles'] == 1, facts
+    assert facts['signaled_exact_handles'] == 1 and facts['active_processes'] == 0, facts
+    assert owner._job_handle is not None and owner._process_handle is not None
+    assert owner._debug_capture._thread.is_alive()
+    print(json.dumps({{'ancestor': facts, 'inner': json.loads(await out)}}), flush=True)
+asyncio.run(run())
+"""
+    probe = subprocess.run(
+        (python, "-c", probe_code),
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert probe.returncode == 0, probe.stdout + probe.stderr
+    facts = json.loads(probe.stdout)
+    (tmp_path / "split-chain-receipt.json").write_text(json.dumps(facts), encoding="utf-8")
+    assert facts["ancestor"]["status"] == "failed"
+    assert facts["inner"]["status"] == "drained"
+    assert facts["ancestor"]["total_processes"] == 2
+    assert facts["ancestor"]["retained_exact_handles"] == 1
