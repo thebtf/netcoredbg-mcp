@@ -354,6 +354,119 @@ def _read_posix_verified_primary_dotenv(dotenv_path: Path) -> str:
         os.close(descriptor)
 
 
+def _validate_windows_dotenv_file(
+    ctypes: Any, kernel32: Any, handle: Any, attribute_tag_type: Any, require: Any
+) -> None:
+    file_type_disk = 0x0001
+    file_attribute_tag_info = 9
+    file_attribute_reparse_point = 0x00000400
+    file_attribute_directory = 0x00000010
+    if kernel32.GetFileType(handle) != file_type_disk:
+        raise OSError("The primary .env is not a disk file.")
+    attribute_tag = attribute_tag_type()
+    require(
+        kernel32.GetFileInformationByHandleEx(
+            handle,
+            file_attribute_tag_info,
+            ctypes.byref(attribute_tag),
+            ctypes.sizeof(attribute_tag),
+        )
+    )
+    if attribute_tag.file_attributes & (file_attribute_reparse_point | file_attribute_directory):
+        raise OSError("The primary .env is not a regular non-reparse file.")
+
+
+def _validate_windows_dotenv_descriptor(
+    ctypes: Any,
+    wintypes: Any,
+    advapi32: Any,
+    owner_sid: Any,
+    dacl: Any,
+    security_descriptor: Any,
+    user_sid: Any,
+    require: Any,
+) -> None:
+    se_dacl_protected = 0x1000
+    if (
+        not owner_sid.value
+        or not advapi32.IsValidSid(owner_sid)
+        or not advapi32.EqualSid(owner_sid, user_sid)
+    ):
+        raise PermissionError("The primary .env owner does not match the current token user.")
+    dacl_present = wintypes.BOOL()
+    dacl_defaulted = wintypes.BOOL()
+    descriptor_dacl = ctypes.c_void_p()
+    require(
+        advapi32.GetSecurityDescriptorDacl(
+            security_descriptor,
+            ctypes.byref(dacl_present),
+            ctypes.byref(descriptor_dacl),
+            ctypes.byref(dacl_defaulted),
+        )
+    )
+    if not dacl_present.value or not dacl.value or dacl.value != descriptor_dacl.value:
+        raise PermissionError("The primary .env has no explicit DACL.")
+    control = wintypes.WORD()
+    revision = wintypes.DWORD()
+    require(
+        advapi32.GetSecurityDescriptorControl(
+            security_descriptor,
+            ctypes.byref(control),
+            ctypes.byref(revision),
+        )
+    )
+    if not control.value & se_dacl_protected:
+        raise PermissionError("The primary .env DACL is not protected from inherited access.")
+
+
+def _validate_windows_dotenv_aces(
+    ctypes: Any,
+    advapi32: Any,
+    dacl: Any,
+    user_sid: Any,
+    acl_size_information_type: Any,
+    ace_header_type: Any,
+    sid_offset: int,
+    access_denied_ace_types: Collection[int],
+    require: Any,
+) -> None:
+    access_allowed_ace_type = 0
+    inherited_ace = 0x10
+    acl_size_information = 2
+    acl_information = acl_size_information_type()
+    require(
+        advapi32.GetAclInformation(
+            dacl,
+            ctypes.byref(acl_information),
+            ctypes.sizeof(acl_information),
+            acl_size_information,
+        )
+    )
+    for index in range(acl_information.ace_count):
+        ace = ctypes.c_void_p()
+        require(advapi32.GetAce(dacl, index, ctypes.byref(ace)))
+        ace_address = ace.value
+        if ace_address is None:
+            raise OSError("The primary .env DACL has a null ACE pointer.")
+        header = ctypes.cast(ace, ctypes.POINTER(ace_header_type)).contents
+        if header.ace_type in access_denied_ace_types:
+            continue
+        if (
+            header.ace_type != access_allowed_ace_type
+            or header.ace_flags & inherited_ace
+            or header.ace_size < sid_offset
+        ):
+            raise PermissionError("The primary .env has an unsupported effective DACL ACE.")
+        ace_sid = ctypes.c_void_p(ace_address + sid_offset)
+        if not advapi32.IsValidSid(ace_sid):
+            raise OSError("The primary .env DACL has an invalid allow ACE SID.")
+        sid_length = advapi32.GetLengthSid(ace_sid)
+        if not sid_length or header.ace_size < sid_offset + sid_length:
+            raise OSError("The primary .env DACL allow ACE is malformed.")
+        if not advapi32.EqualSid(ace_sid, user_sid):
+            raise PermissionError("The primary .env grants access outside the current token user.")
+
+
 def _read_windows_verified_primary_dotenv(dotenv_path: Path) -> str:
     import ctypes
     import msvcrt
@@ -390,21 +503,13 @@ def _read_windows_verified_primary_dotenv(dotenv_path: Path) -> str:
     file_share_read = 0x00000001
     open_existing = 3
     file_flag_open_reparse_point = 0x00200000
-    file_attribute_reparse_point = 0x00000400
-    file_attribute_directory = 0x00000010
-    file_type_disk = 0x0001
-    file_attribute_tag_info = 9
     owner_security_information = 0x00000001
     dacl_security_information = 0x00000004
     se_file_object = 1
-    se_dacl_protected = 0x1000
     token_query = 0x0008
     token_user = 1
     error_insufficient_buffer = 122
-    access_allowed_ace_type = 0
     access_denied_ace_types = {1, 6, 10, 12}
-    inherited_ace = 0x10
-    acl_size_information = 2
     sid_offset = ctypes.sizeof(AceHeader) + ctypes.sizeof(wintypes.DWORD)
 
     kernel32.CreateFileW.argtypes = [
@@ -539,21 +644,7 @@ def _read_windows_verified_primary_dotenv(dotenv_path: Path) -> str:
             normalize_windows_handle_for_crt(handle, invalid_handle_value)
         except ValueError as error:
             raise ctypes.WinError(ctypes.get_last_error()) from error
-        if kernel32.GetFileType(handle) != file_type_disk:
-            raise OSError("The primary .env is not a disk file.")
-        attribute_tag = FileAttributeTagInfo()
-        require(
-            kernel32.GetFileInformationByHandleEx(
-                handle,
-                file_attribute_tag_info,
-                ctypes.byref(attribute_tag),
-                ctypes.sizeof(attribute_tag),
-            )
-        )
-        if attribute_tag.file_attributes & (
-            file_attribute_reparse_point | file_attribute_directory
-        ):
-            raise OSError("The primary .env is not a regular non-reparse file.")
+        _validate_windows_dotenv_file(ctypes, kernel32, handle, FileAttributeTagInfo, require)
         owner_sid = ctypes.c_void_p()
         dacl = ctypes.c_void_p()
         security_descriptor = ctypes.c_void_p()
@@ -571,74 +662,20 @@ def _read_windows_verified_primary_dotenv(dotenv_path: Path) -> str:
             raise ctypes.WinError(result)
         try:
             user_sid, user_sid_buffer = current_user_sid()
-            if (
-                not owner_sid.value
-                or not advapi32.IsValidSid(owner_sid)
-                or not advapi32.EqualSid(owner_sid, user_sid)
-            ):
-                raise PermissionError(
-                    "The primary .env owner does not match the current token user."
-                )
-            dacl_present = wintypes.BOOL()
-            dacl_defaulted = wintypes.BOOL()
-            descriptor_dacl = ctypes.c_void_p()
-            require(
-                advapi32.GetSecurityDescriptorDacl(
-                    security_descriptor,
-                    ctypes.byref(dacl_present),
-                    ctypes.byref(descriptor_dacl),
-                    ctypes.byref(dacl_defaulted),
-                )
+            _validate_windows_dotenv_descriptor(
+                ctypes, wintypes, advapi32, owner_sid, dacl, security_descriptor, user_sid, require
             )
-            if not dacl_present.value or not dacl.value or dacl.value != descriptor_dacl.value:
-                raise PermissionError("The primary .env has no explicit DACL.")
-            control = wintypes.WORD()
-            revision = wintypes.DWORD()
-            require(
-                advapi32.GetSecurityDescriptorControl(
-                    security_descriptor,
-                    ctypes.byref(control),
-                    ctypes.byref(revision),
-                )
+            _validate_windows_dotenv_aces(
+                ctypes,
+                advapi32,
+                dacl,
+                user_sid,
+                AclSizeInformation,
+                AceHeader,
+                sid_offset,
+                access_denied_ace_types,
+                require,
             )
-            if not control.value & se_dacl_protected:
-                raise PermissionError(
-                    "The primary .env DACL is not protected from inherited access."
-                )
-            acl_information = AclSizeInformation()
-            require(
-                advapi32.GetAclInformation(
-                    dacl,
-                    ctypes.byref(acl_information),
-                    ctypes.sizeof(acl_information),
-                    acl_size_information,
-                )
-            )
-            for index in range(acl_information.ace_count):
-                ace = ctypes.c_void_p()
-                require(advapi32.GetAce(dacl, index, ctypes.byref(ace)))
-                ace_address = ace.value
-                if ace_address is None:
-                    raise OSError("The primary .env DACL has a null ACE pointer.")
-                header = ctypes.cast(ace, ctypes.POINTER(AceHeader)).contents
-                if header.ace_type in access_denied_ace_types:
-                    continue
-                if (
-                    header.ace_type != access_allowed_ace_type
-                    or header.ace_flags & inherited_ace
-                    or header.ace_size < sid_offset
-                ):
-                    raise PermissionError("The primary .env has an unsupported effective DACL ACE.")
-                ace_sid = ctypes.c_void_p(ace_address + sid_offset)
-                if not advapi32.IsValidSid(ace_sid):
-                    raise OSError("The primary .env DACL has an invalid allow ACE SID.")
-                sid_length = advapi32.GetLengthSid(ace_sid)
-                if not sid_length or header.ace_size < sid_offset + sid_length:
-                    raise OSError("The primary .env DACL allow ACE is malformed.")
-                if not advapi32.EqualSid(ace_sid, user_sid):
-                    raise PermissionError(
-                        "The primary .env grants access outside the current token user."
-                    )
             del user_sid_buffer
         finally:
             if security_descriptor.value:
@@ -781,6 +818,121 @@ def redact(text: str, secrets: Collection[str]) -> str:
     return text
 
 
+def _valid_coverage_drain_state(diagnostic: Mapping[str, Any], first: Mapping[str, Any]) -> bool:
+    return not (
+        type(diagnostic["invariant"]) is not str
+        or type(first["status"]) is not str
+        or (first["failure_stage"] is not None and type(first["failure_stage"]) is not str)
+        or diagnostic["invariant"]
+        not in {
+            "active_processes_nonzero",
+            "exact_handle_exit_unverified",
+            "membership_unverified",
+            "root_birth_missing",
+            "lifetime_notifications_missing",
+            "lifetime_accounting_mismatch",
+            "live_member_handle_missing",
+            "owner_drain_unverified",
+        }
+        or first["status"] not in {"failed", "timed_out", "drained", "stale"}
+        or first["failure_stage"]
+        not in {
+            None,
+            "create_job",
+            "set_limits",
+            "create_process",
+            "assign",
+            "verify",
+            "wire_io",
+            "resume",
+            "drain",
+        }
+        or any(type(first[key]) is not bool for key in ("forced", "handle_probe_failed"))
+        or any(
+            first[key] is not None and type(first[key]) is not bool
+            for key in ("root_was_forced", "unverified_membership", "root_birth_seen")
+        )
+        or type(diagnostic["fallback_awaited_all_exact_handles"]) is not bool
+    )
+
+
+def _valid_coverage_drain_counts(diagnostic: Mapping[str, Any], first: Mapping[str, Any]) -> bool:
+    return not any(
+        value is not None and (type(value) is not int or value < 0)
+        for value in (
+            *(
+                first[key]
+                for key in (
+                    "active_processes",
+                    "total_processes",
+                    "birth_notifications",
+                    "exit_notifications",
+                    "live_members_without_handle",
+                    "retained_exact_handles",
+                    "signaled_exact_handles",
+                    "winerror",
+                )
+            ),
+            diagnostic["fallback_exact_handles_known"],
+            diagnostic["fallback_exact_handles_signaled"],
+        )
+    )
+
+
+def _coverage_drain_diagnostic(line: str, marker: str) -> dict[str, Any] | None:
+    if not line.startswith(marker) or "owner_drain=" not in line or len(line) > 4096:
+        return None
+    try:
+        diagnostic = json.loads(line.split("owner_drain=", 1)[1])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(diagnostic, dict) or set(diagnostic) != {
+        "invariant",
+        "first",
+        "fallback_exact_handles_known",
+        "fallback_exact_handles_signaled",
+        "fallback_awaited_all_exact_handles",
+    }:
+        return None
+    first = diagnostic["first"]
+    if not isinstance(first, dict) or set(first) != {
+        "status",
+        "forced",
+        "root_was_forced",
+        "active_processes",
+        "total_processes",
+        "birth_notifications",
+        "exit_notifications",
+        "unverified_membership",
+        "root_birth_seen",
+        "live_members_without_handle",
+        "retained_exact_handles",
+        "signaled_exact_handles",
+        "handle_probe_failed",
+        "failure_stage",
+        "winerror",
+    }:
+        return None
+    if not _valid_coverage_drain_state(diagnostic, first) or not _valid_coverage_drain_counts(
+        diagnostic, first
+    ):
+        return None
+    return diagnostic
+
+
+def _raise_coverage_process_tree_failure(output: str) -> None:
+    marker = "PROJECT_RELEASE_PROTOCOL_BLOCKED: COVERAGE_PROCESS_TREE_NOT_DRAINED: "
+    for line in reversed(output.splitlines()):
+        if line == (marker + "collector cleanup is unverified; owner retained until runner exit"):
+            raise RunnerError(line.removeprefix("PROJECT_RELEASE_PROTOCOL_BLOCKED: "))
+        diagnostic = _coverage_drain_diagnostic(line, marker)
+        if diagnostic is not None:
+            raise RunnerError(
+                "COVERAGE_PROCESS_TREE_NOT_DRAINED: collector drain is unverified; "
+                f"owner_drain={json.dumps(diagnostic, sort_keys=True)}"
+            )
+
+
 def run_process(
     command: Sequence[str],
     *,
@@ -816,110 +968,7 @@ def run_process(
         ):
             raise CredentialsUnavailableError(*credential_input_names)
         if label == "Coverage producer":
-            marker = "PROJECT_RELEASE_PROTOCOL_BLOCKED: COVERAGE_PROCESS_TREE_NOT_DRAINED: "
-            for line in reversed(output.splitlines()):
-                if line == (
-                    marker + "collector cleanup is unverified; owner retained until runner exit"
-                ):
-                    raise RunnerError(line.removeprefix("PROJECT_RELEASE_PROTOCOL_BLOCKED: "))
-                if not line.startswith(marker) or "owner_drain=" not in line or len(line) > 4096:
-                    continue
-                try:
-                    diagnostic = json.loads(line.split("owner_drain=", 1)[1])
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(diagnostic, dict) or set(diagnostic) != {
-                    "invariant",
-                    "first",
-                    "fallback_exact_handles_known",
-                    "fallback_exact_handles_signaled",
-                    "fallback_awaited_all_exact_handles",
-                }:
-                    continue
-                first = diagnostic["first"]
-                if not isinstance(first, dict) or set(first) != {
-                    "status",
-                    "forced",
-                    "root_was_forced",
-                    "active_processes",
-                    "total_processes",
-                    "birth_notifications",
-                    "exit_notifications",
-                    "unverified_membership",
-                    "root_birth_seen",
-                    "live_members_without_handle",
-                    "retained_exact_handles",
-                    "signaled_exact_handles",
-                    "handle_probe_failed",
-                    "failure_stage",
-                    "winerror",
-                }:
-                    continue
-                if (
-                    type(diagnostic["invariant"]) is not str
-                    or type(first["status"]) is not str
-                    or (
-                        first["failure_stage"] is not None
-                        and type(first["failure_stage"]) is not str
-                    )
-                    or diagnostic["invariant"]
-                    not in {
-                        "active_processes_nonzero",
-                        "exact_handle_exit_unverified",
-                        "membership_unverified",
-                        "root_birth_missing",
-                        "lifetime_notifications_missing",
-                        "lifetime_accounting_mismatch",
-                        "live_member_handle_missing",
-                        "owner_drain_unverified",
-                    }
-                    or first["status"] not in {"failed", "timed_out", "drained", "stale"}
-                    or first["failure_stage"]
-                    not in {
-                        None,
-                        "create_job",
-                        "set_limits",
-                        "create_process",
-                        "assign",
-                        "verify",
-                        "wire_io",
-                        "resume",
-                        "drain",
-                    }
-                    or any(
-                        type(first[key]) is not bool for key in ("forced", "handle_probe_failed")
-                    )
-                    or any(
-                        first[key] is not None and type(first[key]) is not bool
-                        for key in ("root_was_forced", "unverified_membership", "root_birth_seen")
-                    )
-                    or type(diagnostic["fallback_awaited_all_exact_handles"]) is not bool
-                    or any(
-                        value is not None and (type(value) is not int or value < 0)
-                        for value in (
-                            *(
-                                first[key]
-                                for key in (
-                                    "active_processes",
-                                    "total_processes",
-                                    "birth_notifications",
-                                    "exit_notifications",
-                                    "live_members_without_handle",
-                                    "retained_exact_handles",
-                                    "signaled_exact_handles",
-                                    "winerror",
-                                )
-                            ),
-                            diagnostic["fallback_exact_handles_known"],
-                            diagnostic["fallback_exact_handles_signaled"],
-                        )
-                    )
-                ):
-                    continue
-                raise RunnerError(
-                    "COVERAGE_PROCESS_TREE_NOT_DRAINED: collector drain is unverified; "
-                    f"owner_drain={json.dumps(diagnostic, sort_keys=True)}"
-                )
+            _raise_coverage_process_tree_failure(output)
         raise RunnerError(f"{label} failed with exit code {completed.returncode}.")
 
 
@@ -1021,6 +1070,36 @@ def normalized_repository_relative_path(context: GitContext, path: Path) -> str:
         raise RunnerError("Generated artifact path escapes the scanner worktree.") from error
 
 
+def _remove_generated_artifact(
+    context: GitContext,
+    environment: Mapping[str, str],
+    candidate: Path,
+    relative_path: str,
+    removed: list[str],
+) -> None:
+    if not candidate.exists():
+        return
+    if candidate.is_symlink():
+        raise RunnerError("Refusing to remove generated artifacts through a symbolic link.")
+    try:
+        candidate.resolve().relative_to(context.repository_root)
+    except ValueError as error:
+        raise RunnerError("Generated artifact path escapes the scanner worktree.") from error
+    if is_tracked(context.repository_root, environment, candidate):
+        raise RunnerError("Refusing to remove a tracked path as generated scanner output.")
+    operation = "rmtree" if candidate.is_dir() else "unlink"
+    try:
+        if operation == "rmtree":
+            shutil.rmtree(candidate)
+        else:
+            candidate.unlink()
+    except OSError as error:
+        raise GeneratedArtifactCleanupError(
+            relative_path, operation, error.__class__.__name__, removed
+        ) from None
+    removed.append(relative_path)
+
+
 def clear_generated_artifacts(context: GitContext, environment: Mapping[str, str]) -> list[str]:
     """Delete only known ignored scanner/build output from the disposable worktree."""
     candidates = [context.repository_root / name for name in GENERATED_ROOT_NAMES]
@@ -1040,27 +1119,7 @@ def clear_generated_artifacts(context: GitContext, environment: Mapping[str, str
         candidate_paths,
         key=lambda item: (-len(item[1].split("/")), item[1].casefold(), item[1]),
     ):
-        if not candidate.exists():
-            continue
-        if candidate.is_symlink():
-            raise RunnerError("Refusing to remove generated artifacts through a symbolic link.")
-        try:
-            candidate.resolve().relative_to(context.repository_root)
-        except ValueError as error:
-            raise RunnerError("Generated artifact path escapes the scanner worktree.") from error
-        if is_tracked(context.repository_root, environment, candidate):
-            raise RunnerError("Refusing to remove a tracked path as generated scanner output.")
-        operation = "rmtree" if candidate.is_dir() else "unlink"
-        try:
-            if operation == "rmtree":
-                shutil.rmtree(candidate)
-            else:
-                candidate.unlink()
-        except OSError as error:
-            raise GeneratedArtifactCleanupError(
-                relative_path, operation, error.__class__.__name__, removed
-            ) from None
-        removed.append(relative_path)
+        _remove_generated_artifact(context, environment, candidate, relative_path, removed)
     return removed
 
 
