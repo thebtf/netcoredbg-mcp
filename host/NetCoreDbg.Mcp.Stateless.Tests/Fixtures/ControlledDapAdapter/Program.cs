@@ -581,6 +581,11 @@ internal sealed class ControlledDapAdapter
         {
             _descendant = StartDescendant(_options.SpawnWindowedDescendant);
             await RecordAsync(new { kind = "descendant", processId = _descendant.Id }, cancellationToken);
+            if (OperatingSystem.IsWindows() && _options.SpawnWindowedDescendant &&
+                !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE")))
+            {
+                await WaitForWindowedDescendantReadyAsync(_descendant, cancellationToken);
+            }
         }
 
         if (_options.DelayLaunchResponseForStartupTimeout)
@@ -610,6 +615,28 @@ internal sealed class ControlledDapAdapter
         }
 
         launch.Document.Dispose();
+    }
+
+    private static async Task WaitForWindowedDescendantReadyAsync(Process descendant, CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(2));
+        while (true)
+        {
+            timeout.Token.ThrowIfCancellationRequested();
+            descendant.Refresh();
+            if (descendant.HasExited)
+            {
+                throw new InvalidOperationException("Configured windowed descendant exited before loader/window readiness.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(descendant.MainModule?.FileName) && descendant.MainWindowHandle != IntPtr.Zero)
+            {
+                return;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(25), timeout.Token);
+        }
     }
 
     private async Task EmitLifecycleEventsAsync(CancellationToken cancellationToken)

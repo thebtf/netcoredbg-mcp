@@ -56,7 +56,7 @@ internal static class NativeSceneToolDispatcher
 
         if (!binding.TryGetCandidate(out var candidate))
         {
-            return ToolError(tool, UnsupportedCapability, "Native scene capability is unsupported because debuggee identity is unavailable.");
+            return ToolError(tool, CandidateMismatch, "Debuggee identity is unavailable.");
         }
 
         if (request.TryGetProperty("sceneRequest", out var sceneRequest) &&

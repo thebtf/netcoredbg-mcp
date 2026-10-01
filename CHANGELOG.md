@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Windows-owned adapter and build commands no longer treat zero Job accounting alone as a drained process tree. Completion reconciles Job-lifetime members with signaled process handles or proven retirement; failed close retains the owner for same-owner recovery before new work.
 - Windows-owned commands and coverage collectors now reconcile abnormal Job-member exits as well as ordinary exits, preventing phantom live members and false duplicate births when Windows recycles a process ID. Missing lifetime evidence still refuses drain.
+- The source-only native scene tools return the schema-valid `CANDIDATE_MISMATCH` error when debuggee identity is unavailable instead of collapsing into a generic SDK invocation failure. Controlled WPF fixture launches establish loader/window readiness before publishing process identity; large-response channel checks retain their original completeness and size requirements.
 
 ## [0.23.12] - 2026-09-27
 

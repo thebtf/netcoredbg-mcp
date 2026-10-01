@@ -508,6 +508,8 @@ public sealed class NativeSceneAtomicityTests
             requireNativeSceneSchema: false);
         Assert.Equal("start_debug_success", Text(started["kind"]));
         var debugSessionId = Text(started["debugSessionId"]);
+        var processId = await driver.ReadDescendantProcessIdAsync();
+        await WaitForMainWindowAsync(processId);
 
         var declaration = await CallCaptureAsync(
             driver,
@@ -516,7 +518,7 @@ public sealed class NativeSceneAtomicityTests
             $"{requestId}-capabilities",
             expectedError: false);
         var candidate = Object(declaration["candidate"]);
-        Assert.Equal(await driver.ReadDescendantProcessIdAsync(), Integer(candidate["processId"]));
+        Assert.Equal(processId, Integer(candidate["processId"]));
         return new BoundFixtureSession(debugSessionId, candidate);
     }
 
@@ -718,7 +720,8 @@ public sealed class NativeSceneAtomicityTests
         var isError = result["isError"]?.GetValue<bool>() ?? false;
         if (result["structuredContent"] is not JsonObject)
         {
-            var envelope = JsonSerializer.Serialize(response);
+            var closure = await driver.WaitForTransportClosureAsync(TimeSpan.Zero);
+            var envelope = JsonSerializer.Serialize(new { response, hostTransport = closure });
             var root = RepositoryLayout.Root.Replace("\\", "\\\\", StringComparison.Ordinal);
             var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile).Replace("\\", "\\\\", StringComparison.Ordinal);
             envelope = envelope.Replace(root, "<repo-root>", StringComparison.OrdinalIgnoreCase)
@@ -765,7 +768,9 @@ public sealed class NativeSceneAtomicityTests
         Assert.Equal("native_scene_capture", Text(manifest["kind"]));
         if (expectedStatus is not null)
         {
-            Assert.Equal(expectedStatus, Text(manifest["status"]));
+            Assert.True(
+                StringComparer.Ordinal.Equals(expectedStatus, Text(manifest["status"])),
+                $"Expected native-scene status {expectedStatus}, actual {Text(manifest["status"])}; issues={manifest["issues"]?.ToJsonString()}; stability={manifest["stability"]?.ToJsonString()}; atomicity={manifest["atomicity"]?.ToJsonString()}.");
         }
 
         Assert.True(JsonNode.DeepEquals(request["sceneRequest"], manifest["sceneRequest"]));

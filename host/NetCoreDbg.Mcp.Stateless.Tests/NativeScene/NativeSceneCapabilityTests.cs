@@ -194,6 +194,33 @@ public sealed class NativeSceneCapabilityTests
     }
 
     [Fact]
+    public async Task MissingCandidateIdentity_ReturnsSchemaValidCandidateMismatchWithoutSdkInvocationFailure()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(
+            new ModernMcpStartOptions(
+                FixtureConfiguration: new FixtureConfiguration(SpawnDescendant: true, SuppressLifecycleEvents: true)));
+        var debugSessionId = await StartDebugAsync(driver, "missing-candidate-start");
+        var response = await AssertNoNativeActionsAsync(
+            driver,
+            () => driver.CallToolRawAsync(
+                "get_ui_probe_capabilities",
+                CapabilityArguments(debugSessionId),
+                ModernMcpProcessDriver.CurrentMeta(),
+                new RequestId("missing-candidate-capabilities")));
+
+        var error = CompleteContent(response, isError: true);
+        Assert.Equal("tool_error", Text(error["kind"]));
+        Assert.Equal("get_ui_probe_capabilities", Text(error["tool"]));
+        Assert.Equal("CANDIDATE_MISMATCH", Text(error["code"]));
+        var result = ModernMcpProcessDriver.RequireResult(response);
+        var textBlock = Object(Assert.Single(Array(result["content"])));
+        var text = Text(textBlock["text"]);
+        var validation = NativeSceneContractCatalogDriver.Load().ValidateResult("get_ui_probe_capabilities", text);
+        Assert.True(validation.IsValid, $"Missing candidate error failed its frozen wire contract: {validation.Message}.");
+        Assert.True(JsonNode.DeepEquals(error, JsonNode.Parse(text)));
+    }
+
+    [Fact]
     public async Task MissingAndUnknownSessions_AreRejectedBeforeNativeTargetDiscovery()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync();
