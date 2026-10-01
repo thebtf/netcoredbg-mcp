@@ -41,6 +41,14 @@ _GRID_SELECT_INDICES_ADAPTER = "ui.grid.select_indices"
 _GRID_SELECT_IDENTITIES_ADAPTER = "ui.grid.select_identities"
 _GET_PROPERTY_ADAPTER = "ui.get_property"
 _UI_BACKEND_DIAGNOSTICS_NEXT_STEP = "Inspect UI backend or bridge transport diagnostics."
+_HOVER_ADAPTER = "ui.hover"
+_DRAG_ADAPTER = "ui.drag"
+_DEBUG_EVALUATE_ADAPTER = "debug.evaluate"
+_DEBUG_STOP_ADAPTER = "debug.stop"
+_PROCESS_REGISTRY_COUNT_ADAPTER = "process.registry.count"
+_FIXTURE_RESTORE_ADAPTER = "fixture.restore"
+_DEBUG_TRACEPOINT_ADAPTER = "debug.tracepoint"
+_GRID_SELECTION_INDEX_GUIDANCE = "indices must be non-negative integers"
 
 
 def ui_operation_adapters(
@@ -665,7 +673,7 @@ def ui_operation_adapters(
             return {
                 "status": "BLOCKED",
                 "reason": "selector-scoped pointer hover backend capability unavailable",
-                "requested": {"adapter": "ui.hover", "selector": selector},
+                "requested": {"adapter": _HOVER_ADAPTER, "selector": selector},
                 "accepted": {"backend": "FlaUI hover_element"},
                 "next_step": "Use a FlaUI backend that implements selector-scoped pointer hover.",
             }
@@ -675,9 +683,9 @@ def ui_operation_adapters(
                 timeout_ms=args.get("timeout_ms", 5000),
             )
         except Exception as exc:
-            return _adapter_blocked("ui.hover", str(exc))
+            return _adapter_blocked(_HOVER_ADAPTER, str(exc))
         if not isinstance(result, dict):
-            return _adapter_blocked("ui.hover", "hover backend returned non-object result")
+            return _adapter_blocked(_HOVER_ADAPTER, "hover backend returned non-object result")
         return result
 
     async def set_focus(**args: Any) -> dict[str, Any]:
@@ -1024,7 +1032,7 @@ def ui_operation_adapters(
             else:
                 backend_drag = getattr(backend, "drag", None)
                 if not callable(backend_drag):
-                    return _adapter_blocked("ui.drag", "drag backend unavailable")
+                    return _adapter_blocked(_DRAG_ADAPTER, "drag backend unavailable")
                 result = await backend_drag(
                     route["from_x"],
                     route["from_y"],
@@ -1034,7 +1042,7 @@ def ui_operation_adapters(
                     hold_modifiers=modifiers,
                 )
         except Exception as exc:
-            return _adapter_blocked("ui.drag", str(exc))
+            return _adapter_blocked(_DRAG_ADAPTER, str(exc))
         if not isinstance(result, dict):
             return {
                 "status": "FAIL",
@@ -1085,11 +1093,11 @@ def ui_operation_adapters(
         "ui.right_click": right_click,
         "ui.double_click": double_click,
         "ui.find_element": find_element,
-        "ui.hover": hover,
+        _HOVER_ADAPTER: hover,
         "ui.set_focus": set_focus,
         "ui.send_keys_focused": send_keys_focused,
         "ui.invoke": invoke,
-        "ui.drag": drag,
+        _DRAG_ADAPTER: drag,
     }
     if session is not None:
         adapters.update(_session_operation_adapters(session))
@@ -1135,13 +1143,13 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
                 evaluate = getattr(session, "evaluate", None)
                 if evaluate is None:
                     return _adapter_blocked(
-                        "debug.evaluate",
+                        _DEBUG_EVALUATE_ADAPTER,
                         "debug evaluation service unavailable",
                     )
                 result = await evaluate(expression)
         except Exception as exc:
             return {
-                **_adapter_blocked("debug.evaluate", str(exc)),
+                **_adapter_blocked(_DEBUG_EVALUATE_ADAPTER, str(exc)),
                 "value": None,
             }
         if not isinstance(result, dict):
@@ -1165,10 +1173,10 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
     async def debug_stop(**args: Any) -> dict[str, Any]:
         mode = str(args.get("mode") or "graceful")
         if mode != "graceful":
-            return _adapter_blocked("debug.stop", f"unsupported debug.stop mode: {mode}")
+            return _adapter_blocked(_DEBUG_STOP_ADAPTER, f"unsupported debug.stop mode: {mode}")
         stop = getattr(session, "stop", None)
         if stop is None:
-            return _adapter_blocked("debug.stop", "debug stop service unavailable")
+            return _adapter_blocked(_DEBUG_STOP_ADAPTER, "debug stop service unavailable")
         try:
             result = stop()
             if asyncio.iscoroutine(result) or isinstance(result, Awaitable):
@@ -1183,25 +1191,25 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
         registry = getattr(session, "process_registry", None)
         if registry is None:
             return _adapter_blocked(
-                "process.registry.count",
+                _PROCESS_REGISTRY_COUNT_ADAPTER,
                 "process registry service unavailable",
             )
         try:
             registry.reap_stale()
             status = registry.status()
         except Exception as exc:
-            return _adapter_blocked("process.registry.count", str(exc))
+            return _adapter_blocked(_PROCESS_REGISTRY_COUNT_ADAPTER, str(exc))
         alive = [entry for entry in status if bool(entry.get("alive"))]
         return {"status": "PASS", "count": len(alive), "alive": alive}
 
     async def fixture_restore(**args: Any) -> dict[str, Any]:
         validate_path = getattr(session, "validate_path", None)
         if validate_path is None:
-            return _adapter_blocked("fixture.restore", "path validation service unavailable")
+            return _adapter_blocked(_FIXTURE_RESTORE_ADAPTER, "path validation service unavailable")
         try:
             target_path = str(validate_path(str(args.get("path") or ""), must_exist=False))
         except ValueError as exc:
-            return _adapter_blocked("fixture.restore", str(exc))
+            return _adapter_blocked(_FIXTURE_RESTORE_ADAPTER, str(exc))
         baseline_file = args.get("baseline_file")
         content = args.get("baseline_text")
         source = "baseline_text"
@@ -1209,7 +1217,7 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
             source = "baseline_file"
             if not baseline_file:
                 return _adapter_blocked(
-                    "fixture.restore",
+                    _FIXTURE_RESTORE_ADAPTER,
                     "fixture restore requires baseline_text or baseline_file",
                 )
             try:
@@ -1217,22 +1225,24 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
                 content = Path(source_path).read_text(encoding="utf-8")
             except (OSError, UnicodeError, ValueError) as exc:
                 return _adapter_blocked(
-                    "fixture.restore",
+                    _FIXTURE_RESTORE_ADAPTER,
                     f"fixture baseline read failed: {exc}",
                 )
         if not isinstance(content, str):
-            return _adapter_blocked("fixture.restore", "fixture restore content must be text")
+            return _adapter_blocked(
+                _FIXTURE_RESTORE_ADAPTER, "fixture restore content must be text"
+            )
         target = Path(target_path)
         if not target.parent.is_dir():
             return _adapter_blocked(
-                "fixture.restore",
+                _FIXTURE_RESTORE_ADAPTER,
                 f"restore parent directory does not exist: {target.parent}",
             )
         try:
             target.write_text(content, encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             return _adapter_blocked(
-                "fixture.restore",
+                _FIXTURE_RESTORE_ADAPTER,
                 f"fixture restore write failed: {exc}",
             )
         return {
@@ -1269,14 +1279,14 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
         expression = str(args.get("expression") or "")
         if not file or line is None:
             return _adapter_blocked(
-                "debug.tracepoint",
+                _DEBUG_TRACEPOINT_ADAPTER,
                 "debug.tracepoint requires file and integer line",
             )
         policy_error = tracepoint_expression_policy_error(expression)
         if policy_error is not None:
             return {
                 "status": "FAIL",
-                "operation": "debug.tracepoint",
+                "operation": _DEBUG_TRACEPOINT_ADAPTER,
                 "classification": "UNSAFE_EXPRESSION",
                 "reason": "unsafe tracepoint expression",
                 "file": file,
@@ -1285,7 +1295,7 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
         manager = _session_tracepoint_manager(session, create=True)
         if manager is None:
             return _adapter_blocked(
-                "debug.tracepoint",
+                _DEBUG_TRACEPOINT_ADAPTER,
                 "tracepoint manager service unavailable",
             )
 
@@ -1302,7 +1312,7 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
             ):
                 return {
                     "status": "BLOCKED",
-                    "operation": "debug.tracepoint",
+                    "operation": _DEBUG_TRACEPOINT_ADAPTER,
                     "classification": "TRACEPOINT_POLICY_CONFLICT",
                     "reason": "existing tracepoint expression conflicts with requested expression",
                     "file": file,
@@ -1326,7 +1336,7 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
                 manager.remove(tracepoint.id)
             return {
                 **_adapter_blocked(
-                    "debug.tracepoint",
+                    _DEBUG_TRACEPOINT_ADAPTER,
                     f"debug.tracepoint breakpoint arming failed: {exc}",
                 ),
                 "file": file,
@@ -1398,14 +1408,14 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
 
     return {
         "launch": launch,
-        "debug.evaluate": debug_evaluate,
-        "debug.tracepoint": debug_tracepoint,
+        _DEBUG_EVALUATE_ADAPTER: debug_evaluate,
+        _DEBUG_TRACEPOINT_ADAPTER: debug_tracepoint,
         "debug.tracepoint.remove": debug_tracepoint_remove,
         "debug.trace_log.clear": debug_trace_log_clear,
         "debug_hygiene_preflight": debug_hygiene_preflight,
-        "debug.stop": debug_stop,
-        "process.registry.count": process_registry_count,
-        "fixture.restore": fixture_restore,
+        _DEBUG_STOP_ADAPTER: debug_stop,
+        _PROCESS_REGISTRY_COUNT_ADAPTER: process_registry_count,
+        _FIXTURE_RESTORE_ADAPTER: fixture_restore,
         "runtime.input_monitor.check": runtime_input_monitor_check,
     }
 
@@ -3232,7 +3242,7 @@ def _grid_selection_indices(value: Any) -> tuple[list[int], dict[str, Any] | Non
         if isinstance(raw_index, bool):
             return [], _adapter_blocked(
                 _GRID_SELECT_INDICES_ADAPTER,
-                "indices must be non-negative integers",
+                _GRID_SELECTION_INDEX_GUIDANCE,
             )
         if isinstance(raw_index, int):
             index = raw_index
@@ -3244,12 +3254,12 @@ def _grid_selection_indices(value: Any) -> tuple[list[int], dict[str, Any] | Non
         else:
             return [], _adapter_blocked(
                 _GRID_SELECT_INDICES_ADAPTER,
-                "indices must be non-negative integers",
+                _GRID_SELECTION_INDEX_GUIDANCE,
             )
         if index < 0:
             return [], _adapter_blocked(
                 _GRID_SELECT_INDICES_ADAPTER,
-                "indices must be non-negative integers",
+                _GRID_SELECTION_INDEX_GUIDANCE,
             )
         indices.append(index)
     return indices, None
@@ -3286,7 +3296,7 @@ def _path_drag_blocked(reason: str) -> dict[str, Any]:
         "status": "BLOCKED",
         "reason": reason,
         "requested": {
-            "adapter": "ui.drag",
+            "adapter": _DRAG_ADAPTER,
             "capability": "path-aware drag",
         },
         "accepted": {
@@ -3302,7 +3312,7 @@ def _drag_backend_exception_blocked(operation: str, exc: Exception) -> dict[str,
         "status": "BLOCKED",
         "reason": f"{operation} raised exception",
         "requested": {
-            "adapter": "ui.drag",
+            "adapter": _DRAG_ADAPTER,
             "operation": operation,
         },
         "accepted": {
