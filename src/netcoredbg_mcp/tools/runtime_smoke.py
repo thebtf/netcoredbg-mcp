@@ -1231,16 +1231,7 @@ async def _runtime_smoke_evidence_bundle(
     if tail.get("final") and not result.get("final"):
         result = await registry.get_result(run_id)
     final = bool(result.get("final"))
-    if result.get("contaminated") is True:
-        next_actions = _runtime_smoke_lifecycle_next_actions(result)
-    else:
-        next_actions = [
-            "runtime_smoke_wait_for_result",
-            "runtime_smoke_evidence_bundle",
-            "runtime_smoke_tail_events",
-            "runtime_smoke_get_result",
-        ]
-        next_actions.append("runtime_smoke_run_plan" if final else "runtime_smoke_stop")
+    next_actions = _runtime_smoke_evidence_next_actions(result, final=final)
     diagnostic_launch = result.get("diagnostic_launch")
     event_cursor = _runtime_smoke_event_cursor(
         after_cursor=max(0, int(after_cursor)),
@@ -1269,6 +1260,40 @@ async def _runtime_smoke_evidence_bundle(
         "cleanup": compact_value(result.get("cleanup")),
         "next_actions": next_actions,
     }
+    _runtime_smoke_attach_evidence_pack_manifest(registry, run_id, result, bundle)
+    if isinstance(diagnostic_launch, dict):
+        bundle["diagnostic_launch"] = compact_value(diagnostic_launch)
+    if result.get("contaminated") is True:
+        bundle["contaminated"] = True
+        cleanup_contract = result.get("cleanup_contract")
+        if isinstance(cleanup_contract, dict):
+            bundle["cleanup_contract"] = compact_value(cleanup_contract)
+    return bundle
+
+
+def _runtime_smoke_evidence_next_actions(
+    result: dict[str, Any],
+    *,
+    final: bool,
+) -> list[str]:
+    if result.get("contaminated") is True:
+        return _runtime_smoke_lifecycle_next_actions(result)
+    next_actions = [
+        "runtime_smoke_wait_for_result",
+        "runtime_smoke_evidence_bundle",
+        "runtime_smoke_tail_events",
+        "runtime_smoke_get_result",
+    ]
+    next_actions.append("runtime_smoke_run_plan" if final else "runtime_smoke_stop")
+    return next_actions
+
+
+def _runtime_smoke_attach_evidence_pack_manifest(
+    registry: Any,
+    run_id: str,
+    result: dict[str, Any],
+    bundle: dict[str, Any],
+) -> None:
     pack_manifest = _runtime_smoke_merge_pack_manifest(
         actual=_runtime_smoke_pack_manifest(result),
         remembered=_runtime_smoke_remembered_pack_manifest(registry, run_id),
@@ -1282,14 +1307,6 @@ async def _runtime_smoke_evidence_bundle(
         bundle["pack_manifest"] = pack_manifest
         if isinstance(bundle.get("result"), dict):
             bundle["result"]["pack_manifest"] = pack_manifest
-    if isinstance(diagnostic_launch, dict):
-        bundle["diagnostic_launch"] = compact_value(diagnostic_launch)
-    if result.get("contaminated") is True:
-        bundle["contaminated"] = True
-        cleanup_contract = result.get("cleanup_contract")
-        if isinstance(cleanup_contract, dict):
-            bundle["cleanup_contract"] = compact_value(cleanup_contract)
-    return bundle
 
 
 async def _runtime_smoke_wait_for_result(
@@ -1464,33 +1481,12 @@ async def _runtime_smoke_mark_event_cursor(
     if include_trace_source:
         _runtime_smoke_attach_trace_source_cursor(cursor, tracepoint_manager)
     if include_app_diagnostics:
-        if bool(tail.get("final")):
-            result = await registry.get_result(run_id)
-            if not _runtime_smoke_run_missing(result):
-                _runtime_smoke_attach_app_diagnostics_cursor(
-                    cursor,
-                    result,
-                    from_start=True,
-                )
-        else:
-            live_cursor_reader = getattr(
-                registry,
-                "get_app_diagnostics_source_cursor",
-                None,
-            )
-            live_cursor = await live_cursor_reader(run_id) if callable(live_cursor_reader) else None
-            if live_cursor is not None:
-                sources = dict(cursor.get("sources") or {})
-                sources["app_diagnostics"] = live_cursor
-                cursor["sources"] = sources
-            else:
-                result = await registry.get_result(run_id)
-                if not _runtime_smoke_run_missing(result):
-                    _runtime_smoke_attach_app_diagnostics_cursor(
-                        cursor,
-                        result,
-                        from_start=False,
-                    )
+        await _runtime_smoke_mark_app_diagnostics_cursor(
+            registry,
+            run_id,
+            cursor,
+            final=bool(tail.get("final")),
+        )
     return {
         "status": "PASS",
         "reason": "runtime smoke event cursor marked",
@@ -1503,6 +1499,32 @@ async def _runtime_smoke_mark_event_cursor(
             "runtime_smoke_tail_events",
         ],
     }
+
+
+async def _runtime_smoke_mark_app_diagnostics_cursor(
+    registry: Any,
+    run_id: str,
+    cursor: dict[str, Any],
+    *,
+    final: bool,
+) -> None:
+    if final:
+        result = await registry.get_result(run_id)
+        if not _runtime_smoke_run_missing(result):
+            _runtime_smoke_attach_app_diagnostics_cursor(cursor, result, from_start=True)
+        return
+
+    live_cursor_reader = getattr(registry, "get_app_diagnostics_source_cursor", None)
+    live_cursor = await live_cursor_reader(run_id) if callable(live_cursor_reader) else None
+    if live_cursor is not None:
+        sources = dict(cursor.get("sources") or {})
+        sources["app_diagnostics"] = live_cursor
+        cursor["sources"] = sources
+        return
+
+    result = await registry.get_result(run_id)
+    if not _runtime_smoke_run_missing(result):
+        _runtime_smoke_attach_app_diagnostics_cursor(cursor, result, from_start=False)
 
 
 async def _runtime_smoke_get_event_delta(

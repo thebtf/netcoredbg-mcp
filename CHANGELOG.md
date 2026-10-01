@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prompt-parity test baseline cleanup now drains child processes and stdio after failed initialization, preserves the primary timeout and stderr, and tolerates partial collection cleanup; this is a test-harness repair, not a fix for the underlying Python startup failure.
 - Private schema/search validation helpers are split into focused internal functions while preserving error mappings, validation order, reference limits, path checks, and evaluation budgets.
 - Fixed progress checks replace source-text assertions for server registration/execution and UI evidence grading; public wire/error behavior, retention, and cancellation semantics remain unchanged.
+- Runtime adapter and facade constants keep dispatch and error identifiers exact; all 359 behavior checks passed. No measured closure claim is made.
 ### Fixed
 - UI evidence-grade classification now reuses the diagnostic constant and removes obsolete diagnostic constants without changing public evidence grades or diagnostics.
 - The Python coverage inputs now include the in-process `ui_hover` behavior tests, which were previously omitted. This updates the selected test inputs without claiming a measured coverage increase.
