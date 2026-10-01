@@ -29,6 +29,13 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 PROJECT_KEY = "thebtf_netcoredbg_mcp"
+SONAR_PROJECT_KEY_PROPERTY = "sonar.projectKey"
+ISSUES_SEARCH_ENDPOINT = "/api/issues/search"
+MALFORMED_GATE_CONDITIONS = "Analysis-bound quality-gate conditions are malformed."
+PR_EVIDENCE_UNAVAILABLE = "first-party PR evidence is unavailable"
+SONAR_METADATA_DIRECTORY = ".sonarqube"
+PYTHON_ENV_DIRECTORY = ".venv"
+AGENT_DIRECTORY = ".agent"
 REQUIRED_ENV = ("SONAR_HOST_URL", "SONAR_TOKEN", "SONAR_READ_TOKEN")
 SONAR_ENV = (*REQUIRED_ENV, "SONAR_ADMIN_TOKEN")
 SIMPLE_DOTENV_ASSIGNMENT_RE = re.compile(r"(?P<name>[A-Z_][A-Z0-9_]*)=(?P<value>[^\r\n]*)\Z")
@@ -46,16 +53,21 @@ SOLUTION_PROJECT_RE = re.compile(
 )
 ISSUE_STATUSES = "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED,FIXED,IN_SANDBOX"
 GENERATED_DIRECTORY_NAMES = {"__pycache__", "bin", "obj"}
-GENERATED_ROOT_NAMES = {".sonarqube", ".scannerwork", ".venv"}
+GENERATED_ROOT_NAMES = {SONAR_METADATA_DIRECTORY, ".scannerwork", PYTHON_ENV_DIRECTORY}
 
 WAVE2_ENTRY_RELATIVE_PATH = "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json"
 WAVE2_RECEIPT_RELATIVE_PATH = "specs/013-owner-scoped-prebuild-cleanup/acceptance-receipt.md"
 COVERAGE_PARENT_RELATIVE_PATH = ".tmp/sonarqube-coverage"
 COVERAGE_PY_VERSION = "7.15.4"
+COVERLET_MSBUILD_PACKAGE = "coverlet.msbuild"
 COVERLET_MSBUILD_VERSION = "10.0.1"
 TEST_SDK_VERSION = "17.12.0"
+CODE_COVERAGE_PACKAGE = "microsoft.codecoverage"
 CODE_COVERAGE_VERSION = "17.14.1"
 COBERTURA_NORMALIZER = "cobertura-merge-normalize-v1"
+DISABLE_MSBUILD_NODE_REUSE = "-nr:false"
+STATELESS_SOURCE_PREFIX = "host/NetCoreDbg.Mcp.Stateless/"
+STATELESS_BINARY_DIRECTORY = "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _retained_collector_owners: list[Any] = []
 RELATIVE_PATH_RE = re.compile(r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._/-]+$")
@@ -79,7 +91,7 @@ FIXED_COVERAGE_PROJECTS = (
     (
         "stateless",
         "host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj",
-        "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0",
+        STATELESS_BINARY_DIRECTORY,
     ),
     (
         "host-prompts",
@@ -1059,7 +1071,9 @@ def prepare_worktree_python_environment(
 ) -> None:
     child_environment = scrub_sonar_environment(environment)
     child_environment.pop("VIRTUAL_ENV", None)
-    child_environment["UV_PROJECT_ENVIRONMENT"] = str(context.repository_root / ".venv")
+    child_environment["UV_PROJECT_ENVIRONMENT"] = str(
+        context.repository_root / PYTHON_ENV_DIRECTORY
+    )
     run_process(
         ["uv", "sync", "--locked", "--extra", "dev"],
         cwd=context.repository_root,
@@ -1223,11 +1237,11 @@ def _github_pull_request_evidence(
                     _wave2_unverified("first-party PR response has an unexpected origin")
                 payload = response.read()
         except OSError:
-            _wave2_unverified("first-party PR evidence is unavailable")
+            _wave2_unverified(PR_EVIDENCE_UNAVAILABLE)
     else:
         gh = shutil.which("gh")
         if not gh:
-            _wave2_unverified("first-party PR evidence is unavailable")
+            _wave2_unverified(PR_EVIDENCE_UNAVAILABLE)
         try:
             completed = subprocess.run(
                 [gh, "api", endpoint],
@@ -1236,9 +1250,9 @@ def _github_pull_request_evidence(
                 check=False,
             )
         except OSError:
-            _wave2_unverified("first-party PR evidence is unavailable")
+            _wave2_unverified(PR_EVIDENCE_UNAVAILABLE)
         if completed.returncode:
-            _wave2_unverified("first-party PR evidence is unavailable")
+            _wave2_unverified(PR_EVIDENCE_UNAVAILABLE)
         payload = completed.stdout
     try:
         response = _load_json_object(payload, "first-party pull-request evidence")
@@ -1558,9 +1572,9 @@ def _runtime_coverage_toolchain(
             if element.tag.rsplit("}", 1)[-1] == "PackageReference"
         ]
         by_name = {str(package["include"]).casefold(): package for package in packages}
-        coverlet = by_name.get("coverlet.msbuild")
+        coverlet = by_name.get(COVERLET_MSBUILD_PACKAGE)
         test_sdk = by_name.get("microsoft.net.test.sdk")
-        collector = by_name.get("microsoft.codecoverage")
+        collector = by_name.get(CODE_COVERAGE_PACKAGE)
         mtp_active = testing_platform_property in {"true", "1", "yes"} or any(
             "microsoft.testing.platform" in str(package["include"]).casefold()
             for package in packages
@@ -1789,9 +1803,9 @@ def _coverage_marker(plan: CoveragePlan, resolved_entry: Mapping[str, Any]) -> d
                 "project": spec.project.as_posix(),
                 "raw_cobertura_path": _coverage_relative(plan, spec.raw_cobertura_input),
                 "include_directory": spec.include_directory,
-                "provider": "microsoft.codecoverage"
+                "provider": CODE_COVERAGE_PACKAGE
                 if spec.id == "stateless"
-                else "coverlet.msbuild",
+                else COVERLET_MSBUILD_PACKAGE,
             }
             for spec in plan.dotnet_inputs
         ],
@@ -1816,7 +1830,7 @@ def validate_coverage_marker(plan: CoveragePlan, marker: Mapping[str, Any]) -> N
             spec.project.as_posix(),
             _coverage_relative(plan, spec.raw_cobertura_input),
             spec.include_directory,
-            "microsoft.codecoverage" if spec.id == "stateless" else "coverlet.msbuild",
+            CODE_COVERAGE_PACKAGE if spec.id == "stateless" else COVERLET_MSBUILD_PACKAGE,
         )
         for spec in plan.dotnet_inputs
     ]
@@ -1925,7 +1939,7 @@ def dotnet_producer_commands(plan: CoveragePlan) -> list[list[str]]:
     commands: list[list[str]] = []
     for spec in plan.dotnet_inputs:
         project = plan.repository_root / spec.project
-        commands.append(["dotnet", "restore", str(project), "-nr:false"])
+        commands.append(["dotnet", "restore", str(project), DISABLE_MSBUILD_NODE_REUSE])
         if spec.id == "stateless":
             commands.append(
                 [
@@ -1935,7 +1949,7 @@ def dotnet_producer_commands(plan: CoveragePlan) -> list[list[str]]:
                     "--configuration",
                     "Debug",
                     "--no-restore",
-                    "-nr:false",
+                    DISABLE_MSBUILD_NODE_REUSE,
                 ]
             )
             commands.append(
@@ -1957,7 +1971,7 @@ def dotnet_producer_commands(plan: CoveragePlan) -> list[list[str]]:
             "--configuration",
             "Debug",
             "--no-restore",
-            "-nr:false",
+            DISABLE_MSBUILD_NODE_REUSE,
             "-p:CollectCoverage=true",
             "-p:CoverletOutputFormat=cobertura",
             f"-p:CoverletOutput={_cobertura_output_prefix(spec.raw_cobertura_input)}",
@@ -2255,7 +2269,7 @@ def project_stateless_collector(
                 classes.remove(item)
                 continue
             production = (
-                ("host/NetCoreDbg.Mcp.Stateless/", "NetCoreDbg.Mcp.Stateless."),
+                (STATELESS_SOURCE_PREFIX, "NetCoreDbg.Mcp.Stateless."),
                 ("host/NetCoreDbg.Mcp.DesignProbe.Wpf/", "NetCoreDbg.Mcp.DesignProbe.Wpf."),
                 ("bridge/", "FlaUIBridge."),
             )
@@ -2349,9 +2363,7 @@ def project_stateless_collector(
     root.insert(0, sources)
     tree.write(output, encoding="utf-8", xml_declaration=True)
     parsed = _parse_cobertura(context, output, "dotnet", require_branches=True)
-    if not any(
-        path.startswith("host/NetCoreDbg.Mcp.Stateless/") for path in parsed["source_paths"]
-    ):
+    if not any(path.startswith(STATELESS_SOURCE_PREFIX) for path in parsed["source_paths"]):
         _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "collector has no Stateless source")
     return parsed
 
@@ -2587,7 +2599,7 @@ def validate_dotnet_cobertura_input(
 ) -> dict[str, Any]:
     parsed = _parse_cobertura(context, report, "dotnet", require_branches=False)
     if getattr(spec, "id", None) == "stateless" and not any(
-        path.startswith("host/NetCoreDbg.Mcp.Stateless/") for path in parsed["source_paths"]
+        path.startswith(STATELESS_SOURCE_PREFIX) for path in parsed["source_paths"]
     ):
         _coverage_failure(
             "COVERAGE_SOURCE_MAPPING_INVALID",
@@ -2746,9 +2758,9 @@ def normalize_dotnet_cobertura(
                     )
                 key = (source_path, number)
                 provider = (
-                    "microsoft.codecoverage"
+                    CODE_COVERAGE_PACKAGE
                     if input_evidence["id"] == "stateless"
-                    else "coverlet.msbuild"
+                    else COVERLET_MSBUILD_PACKAGE
                 )
                 if key in providers and providers[key] != provider:
                     _coverage_failure(
@@ -2809,7 +2821,7 @@ def normalize_dotnet_cobertura(
                 else:
                     parsed_conditions = {("aggregate", "0"): (branch_valid, branch_covered)}
                     mode = "aggregate"
-                if provider == "microsoft.codecoverage" and key in multi_class_branches:
+                if provider == CODE_COVERAGE_PACKAGE and key in multi_class_branches:
                     parsed_conditions = {
                         ("class", source["class_name"]): (branch_valid, branch_covered)
                     }
@@ -2964,7 +2976,7 @@ def validate_final_dotnet_cobertura(
 
 
 def capture_stateless_binary_hashes(plan: CoveragePlan) -> dict[str, str]:
-    directory = plan.repository_root / "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0"
+    directory = plan.repository_root / STATELESS_BINARY_DIRECTORY
     dll = directory / "NetCoreDbg.Mcp.Stateless.dll"
     pdb = directory / "NetCoreDbg.Mcp.Stateless.pdb"
     try:
@@ -3093,7 +3105,7 @@ def project_key_from_xml(path: Path) -> str:
         for element in root.iter()
         if element.tag.rsplit("}", 1)[-1] == "Property"
     ]
-    keys = [value for name, value in properties if name == "sonar.projectKey" and value]
+    keys = [value for name, value in properties if name == SONAR_PROJECT_KEY_PROPERTY and value]
     if keys != [PROJECT_KEY]:
         raise RunnerError("SonarQube.Analysis.xml does not contain the fixed project key.")
     if any(
@@ -3167,9 +3179,9 @@ def project_inventory(repository_root: Path) -> tuple[Path, list[Path], list[Pat
         raise RunnerError("Solution project inventory is incomplete.")
     excluded_parts = {
         ".git",
-        ".agent",
-        ".sonarqube",
-        ".venv",
+        AGENT_DIRECTORY,
+        SONAR_METADATA_DIRECTORY,
+        PYTHON_ENV_DIRECTORY,
         "bin",
         "obj",
         "fixtures",
@@ -3199,10 +3211,13 @@ def project_inventory(repository_root: Path) -> tuple[Path, list[Path], list[Pat
 
 
 def scanner_metadata(repository_root: Path, expected_head: str) -> dict[str, Any]:
-    metadata_root = repository_root / ".sonarqube"
+    metadata_root = repository_root / SONAR_METADATA_DIRECTORY
     if not metadata_root.is_dir():
         raise RunnerError("SonarScanner did not create metadata.")
-    found: dict[str, list[tuple[str, str]]] = {"sonar.projectKey": [], "sonar.scm.revision": []}
+    found: dict[str, list[tuple[str, str]]] = {
+        SONAR_PROJECT_KEY_PROPERTY: [],
+        "sonar.scm.revision": [],
+    }
     for path in iter_scanner_tree(metadata_root, "*"):
         if (
             not path.is_file()
@@ -3223,7 +3238,7 @@ def scanner_metadata(repository_root: Path, expected_head: str) -> dict[str, Any
                     if name in found and element.text:
                         found[name].append((relative, element.text.strip()))
                     if element.tag.rsplit("}", 1)[-1] == "SonarProjectKey" and element.text:
-                        found["sonar.projectKey"].append((relative, element.text.strip()))
+                        found[SONAR_PROJECT_KEY_PROPERTY].append((relative, element.text.strip()))
             else:
                 for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
                     name, separator, value = line.partition("=")
@@ -3231,7 +3246,7 @@ def scanner_metadata(repository_root: Path, expected_head: str) -> dict[str, Any
                         found[name.strip()].append((relative, value.strip()))
         except (OSError, ElementTree.ParseError) as error:
             raise RunnerError("SonarScanner metadata could not be parsed.") from error
-    observed_project_keys = {value for _, value in found["sonar.projectKey"]}
+    observed_project_keys = {value for _, value in found[SONAR_PROJECT_KEY_PROPERTY]}
     observed_revisions = {value for _, value in found["sonar.scm.revision"]}
     if observed_project_keys != {PROJECT_KEY} or observed_revisions != {expected_head}:
         raise RunnerError(
@@ -3246,7 +3261,7 @@ def scanner_metadata(repository_root: Path, expected_head: str) -> dict[str, Any
 
 
 def report_task(repository_root: Path, expected_host: str) -> dict[str, Any]:
-    path = repository_root / ".sonarqube" / "out" / ".sonar" / "report-task.txt"
+    path = repository_root / SONAR_METADATA_DIRECTORY / "out" / ".sonar" / "report-task.txt"
     if not path.is_file():
         raise RunnerError("SonarScanner did not create report-task metadata.")
     values: dict[str, str] = {}
@@ -3397,11 +3412,11 @@ def analysis_quality_gate(host: str, analysis_id: str, token: str) -> dict[str, 
         raise RunnerError("Analysis-bound quality-gate response is malformed.")
     conditions = project_status.get("conditions")
     if not isinstance(conditions, list):
-        raise RunnerError("Analysis-bound quality-gate conditions are malformed.")
+        raise RunnerError(MALFORMED_GATE_CONDITIONS)
     validated_conditions: list[dict[str, str]] = []
     for condition in conditions:
         if not isinstance(condition, dict):
-            raise RunnerError("Analysis-bound quality-gate conditions are malformed.")
+            raise RunnerError(MALFORMED_GATE_CONDITIONS)
         metric_key = condition.get("metricKey")
         condition_status = condition.get("status")
         comparator = condition.get("comparator")
@@ -3411,7 +3426,7 @@ def analysis_quality_gate(host: str, analysis_id: str, token: str) -> dict[str, 
             or condition_status not in {"OK", "WARN", "ERROR", "NONE"}
             or comparator not in {"GT", "LT", "EQ", "NE"}
         ):
-            raise RunnerError("Analysis-bound quality-gate conditions are malformed.")
+            raise RunnerError(MALFORMED_GATE_CONDITIONS)
         validated_condition = {
             "metricKey": metric_key,
             "status": condition_status,
@@ -3421,7 +3436,7 @@ def analysis_quality_gate(host: str, analysis_id: str, token: str) -> dict[str, 
             if key in condition:
                 value = condition[key]
                 if not isinstance(value, str):
-                    raise RunnerError("Analysis-bound quality-gate conditions are malformed.")
+                    raise RunnerError(MALFORMED_GATE_CONDITIONS)
                 validated_condition[key] = value
         validated_conditions.append(validated_condition)
     return {
@@ -3520,7 +3535,7 @@ def paginated_inventory(
 def issue_inventory(host: str, token: str) -> dict[str, Any]:
     return paginated_inventory(
         host,
-        "/api/issues/search",
+        ISSUES_SEARCH_ENDPOINT,
         "issues",
         {"components": PROJECT_KEY, "issueStatuses": ISSUE_STATUSES},
         token,
@@ -3542,7 +3557,7 @@ def issue_inventory(host: str, token: str) -> dict[str, Any]:
 def new_code_issue_inventory(host: str, token: str) -> dict[str, Any]:
     return paginated_inventory(
         host,
-        "/api/issues/search",
+        ISSUES_SEARCH_ENDPOINT,
         "issues",
         {
             "components": PROJECT_KEY,
@@ -3628,7 +3643,7 @@ def hotspot_dispositions(inventory: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def lock_path(coordination_root: Path) -> Path:
-    return coordination_root / ".agent" / "e" / "sonarqube" / PROJECT_KEY / ".scan.lock"
+    return coordination_root / AGENT_DIRECTORY / "e" / "sonarqube" / PROJECT_KEY / ".scan.lock"
 
 
 def configure_windows_process_api(kernel32: Any, wintypes: Any) -> None:
@@ -3743,7 +3758,7 @@ def project_lock(coordination_root: Path, role: str, head: str, run_id: str) -> 
 def receipt_path(context: GitContext, role: str) -> Path:
     return (
         context.coordination_root
-        / ".agent"
+        / AGENT_DIRECTORY
         / "e"
         / "sonarqube"
         / PROJECT_KEY
@@ -4060,17 +4075,17 @@ def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
             )
     validate_inventory(
         receipt["pre_scan_issues"],
-        "/api/issues/search",
+        ISSUES_SEARCH_ENDPOINT,
         {"components": PROJECT_KEY, "issueStatuses": ISSUE_STATUSES},
     )
     validate_inventory(
         receipt["post_scan_issues"],
-        "/api/issues/search",
+        ISSUES_SEARCH_ENDPOINT,
         {"components": PROJECT_KEY, "issueStatuses": ISSUE_STATUSES},
     )
     validate_inventory(
         receipt["new_code_issues"],
-        "/api/issues/search",
+        ISSUES_SEARCH_ENDPOINT,
         {
             "components": PROJECT_KEY,
             "issueStatuses": ISSUE_STATUSES,
@@ -4905,7 +4920,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
             prepare_worktree_python_environment(context, inherited_environment, secrets)
             solution, _, standalone_projects = project_inventory(context.repository_root)
             run_process(
-                ["dotnet", "build", str(solution), "-nr:false"],
+                ["dotnet", "build", str(solution), DISABLE_MSBUILD_NODE_REUSE],
                 cwd=context.repository_root,
                 environment=clean_environment,
                 secrets=secrets,
@@ -4913,7 +4928,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
             )
             for project in standalone_projects:
                 run_process(
-                    ["dotnet", "build", str(project), "-nr:false"],
+                    ["dotnet", "build", str(project), DISABLE_MSBUILD_NODE_REUSE],
                     cwd=context.repository_root,
                     environment=clean_environment,
                     secrets=secrets,
@@ -5307,7 +5322,7 @@ def produce_stateless_collector(
 ) -> dict[str, Any]:
     """Run the full test assembly with one pinned process-tree collector."""
     test_output = project.parent / "bin/Debug/net8.0"
-    production_output = repository_root / "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0"
+    production_output = repository_root / STATELESS_BINARY_DIRECTORY
     if (
         project != repository_root / FIXED_COVERAGE_PROJECTS[3][1]
         or include_directory != production_output
@@ -5318,9 +5333,7 @@ def produce_stateless_collector(
             "COVERAGE_MARKER_INVALID", "Stateless collector paths differ from fixed plan"
         )
     package_root = Path(os.environ.get("NUGET_PACKAGES", str(Path.home() / ".nuget/packages")))
-    adapter = (
-        package_root / "microsoft.codecoverage" / CODE_COVERAGE_VERSION / "build/netstandard2.0"
-    )
+    adapter = package_root / CODE_COVERAGE_PACKAGE / CODE_COVERAGE_VERSION / "build/netstandard2.0"
     collector_dll = adapter / "Microsoft.VisualStudio.TraceDataCollector.dll"
     if not collector_dll.is_file() or collector_dll.is_symlink():
         _coverage_failure("COVERAGE_VSTEST_INCOMPATIBLE", "pinned collector adapter is unavailable")

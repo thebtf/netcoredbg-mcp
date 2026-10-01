@@ -2108,19 +2108,22 @@ def _runtime_smoke_debug_output_delta(
     stale_cursor = (
         current_trimmed_before > max(after_sequence, trimmed_before) or cleared_gap or retained_gap
     )
-    dropped_count = max(0, current_trimmed_before - max(after_sequence, trimmed_before))
-    if cleared_gap:
-        dropped_count = max(dropped_count, current_sequence - after_sequence)
-    if retained_gap and first_retained_sequence is not None:
-        dropped_count = max(dropped_count, first_retained_sequence - after_sequence - 1)
-    if bounded_entries:
-        next_after_sequence = max(
-            int(getattr(entry, "sequence", 0) or 0) for entry in bounded_entries
-        )
-    elif available == 0 and not stale_cursor:
-        next_after_sequence = current_sequence
-    else:
-        next_after_sequence = after_sequence
+    dropped_count = _runtime_smoke_debug_output_dropped_count(
+        current_trimmed_before=current_trimmed_before,
+        after_sequence=after_sequence,
+        trimmed_before=trimmed_before,
+        cleared_gap=cleared_gap,
+        retained_gap=retained_gap,
+        current_sequence=current_sequence,
+        first_retained_sequence=first_retained_sequence,
+    )
+    next_after_sequence = _runtime_smoke_debug_output_next_sequence(
+        bounded_entries,
+        available=available,
+        stale_cursor=stale_cursor,
+        current_sequence=current_sequence,
+        after_sequence=after_sequence,
+    )
     return (
         {
             "entries": [_runtime_smoke_output_entry_to_dict(entry) for entry in bounded_entries],
@@ -2135,6 +2138,39 @@ def _runtime_smoke_debug_output_delta(
             "trimmed_before": current_trimmed_before,
         },
     )
+
+
+def _runtime_smoke_debug_output_dropped_count(
+    *,
+    current_trimmed_before: int,
+    after_sequence: int,
+    trimmed_before: int,
+    cleared_gap: bool,
+    retained_gap: bool,
+    current_sequence: int,
+    first_retained_sequence: int | None,
+) -> int:
+    dropped_count = max(0, current_trimmed_before - max(after_sequence, trimmed_before))
+    if cleared_gap:
+        dropped_count = max(dropped_count, current_sequence - after_sequence)
+    if retained_gap and first_retained_sequence is not None:
+        dropped_count = max(dropped_count, first_retained_sequence - after_sequence - 1)
+    return dropped_count
+
+
+def _runtime_smoke_debug_output_next_sequence(
+    bounded_entries: list[Any],
+    *,
+    available: int,
+    stale_cursor: bool,
+    current_sequence: int,
+    after_sequence: int,
+) -> int:
+    if bounded_entries:
+        return max(int(getattr(entry, "sequence", 0) or 0) for entry in bounded_entries)
+    if available == 0 and not stale_cursor:
+        return current_sequence
+    return after_sequence
 
 
 def _runtime_smoke_trace_source_delta(
@@ -2233,34 +2269,64 @@ def _runtime_smoke_extract_app_diagnostics_entries(
         transitions = case.get("transitions")
         if not isinstance(transitions, list):
             continue
-        for transition_index, transition in enumerate(transitions):
-            if not isinstance(transition, dict):
-                continue
-            probes = transition.get("probes")
-            if not isinstance(probes, dict):
-                continue
-            for phase in ("before", "after"):
-                phase_probes = probes.get(phase, [])
-                if not isinstance(phase_probes, list):
-                    continue
-                for probe in phase_probes:
-                    if not isinstance(probe, dict) or probe.get("kind") != "app_diagnostics":
-                        continue
-                    entry: dict[str, Any] = {
-                        "case_id": case_id,
-                        "transition_index": transition_index,
-                        "phase": phase,
-                        "probe": str(probe.get("name") or probe.get("kind") or ""),
-                        "status": probe.get("status"),
-                    }
-                    if "reason" in probe:
-                        entry["reason"] = probe.get("reason")
-                    if "value" in probe:
-                        entry["value"] = compact_value(probe.get("value"))
-                    if "evidence_ref" in probe:
-                        entry["evidence_ref"] = probe.get("evidence_ref")
-                    entries.append(compact_value(entry))
+        _runtime_smoke_append_case_app_diagnostics_entries(
+            entries,
+            transitions,
+            case_id=case_id,
+        )
     return entries
+
+
+def _runtime_smoke_append_case_app_diagnostics_entries(
+    entries: list[dict[str, Any]],
+    transitions: list[Any],
+    *,
+    case_id: Any,
+) -> None:
+    for transition_index, transition in enumerate(transitions):
+        if not isinstance(transition, dict):
+            continue
+        probes = transition.get("probes")
+        if not isinstance(probes, dict):
+            continue
+        for phase in ("before", "after"):
+            phase_probes = probes.get(phase, [])
+            if not isinstance(phase_probes, list):
+                continue
+            _runtime_smoke_append_phase_app_diagnostics_entries(
+                entries,
+                phase_probes,
+                case_id=case_id,
+                transition_index=transition_index,
+                phase=phase,
+            )
+
+
+def _runtime_smoke_append_phase_app_diagnostics_entries(
+    entries: list[dict[str, Any]],
+    phase_probes: list[Any],
+    *,
+    case_id: Any,
+    transition_index: int,
+    phase: str,
+) -> None:
+    for probe in phase_probes:
+        if not isinstance(probe, dict) or probe.get("kind") != "app_diagnostics":
+            continue
+        entry: dict[str, Any] = {
+            "case_id": case_id,
+            "transition_index": transition_index,
+            "phase": phase,
+            "probe": str(probe.get("name") or probe.get("kind") or ""),
+            "status": probe.get("status"),
+        }
+        if "reason" in probe:
+            entry["reason"] = probe.get("reason")
+        if "value" in probe:
+            entry["value"] = compact_value(probe.get("value"))
+        if "evidence_ref" in probe:
+            entry["evidence_ref"] = probe.get("evidence_ref")
+        entries.append(compact_value(entry))
 
 
 def _runtime_smoke_pack_manifest(data: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -2753,6 +2819,28 @@ def _apply_runtime_smoke_agent_mode(
     data: dict[str, Any],
     primary_next_action: str,
 ) -> dict[str, Any]:
+    if _runtime_smoke_apply_agent_recovery(data, primary_next_action):
+        return data
+
+    cursor = _runtime_smoke_agent_cursor(data)
+    run_id = _runtime_smoke_agent_run_id(data)
+    next_request = _runtime_smoke_agent_next_request(primary_next_action, run_id, cursor)
+    if next_request is None:
+        primary_next_action = "runtime_smoke_run_plan"
+
+    data["agent_mode"] = _runtime_smoke_agent_mode_payload(
+        primary_next_action,
+        next_request=next_request,
+        cursor=cursor,
+        metrics=_runtime_smoke_agent_metrics(data),
+    )
+    return data
+
+
+def _runtime_smoke_apply_agent_recovery(
+    data: dict[str, Any],
+    primary_next_action: str,
+) -> bool:
     if (
         primary_next_action == "runtime_smoke_get_event_delta"
         and data.get("status") == "INVALID_SETUP"
@@ -2770,7 +2858,7 @@ def _apply_runtime_smoke_agent_mode(
             },
             metrics=_runtime_smoke_agent_metrics(data),
         )
-        return data
+        return True
     if (
         data.get("contaminated") is True
         and data.get("final") is True
@@ -2786,68 +2874,61 @@ def _apply_runtime_smoke_agent_mode(
             cursor=_runtime_smoke_agent_cursor(data),
             metrics=_runtime_smoke_agent_metrics(data),
         )
-        return data
+        return True
     if _runtime_smoke_agent_fail_closed(data):
         data["agent_mode"] = _runtime_smoke_agent_mode_payload(
             "runtime_smoke_run_plan",
             metrics=_runtime_smoke_agent_metrics(data),
         )
-        return data
+        return True
+    return False
 
-    cursor = _runtime_smoke_agent_cursor(data)
-    run_id = _runtime_smoke_agent_run_id(data)
-    next_request: dict[str, Any] | None = None
+
+def _runtime_smoke_agent_next_request(
+    primary_next_action: str,
+    run_id: str,
+    cursor: dict[str, Any] | None,
+) -> dict[str, Any] | None:
     if primary_next_action == "runtime_smoke_get_event_delta":
         if cursor:
-            next_request = {
+            return {
                 "tool": primary_next_action,
                 "arguments": _runtime_smoke_agent_next_arguments(
                     primary_next_action,
                     {"cursor": cursor, "agent_mode": True},
                 ),
             }
-        else:
-            primary_next_action = "runtime_smoke_run_plan"
-    elif primary_next_action == "runtime_smoke_wait_for_result":
-        if run_id:
-            arguments: dict[str, Any] = {"run_id": run_id, "agent_mode": True}
-            if cursor:
-                arguments["after_cursor"] = _runtime_smoke_tail_next_cursor(
-                    cursor,
-                    cursor.get("after_cursor", 0),
-                )
-            next_request = {
-                "tool": primary_next_action,
-                "arguments": _runtime_smoke_agent_next_arguments(
-                    primary_next_action,
-                    arguments,
-                ),
-            }
-        else:
-            primary_next_action = "runtime_smoke_run_plan"
-    elif primary_next_action == "runtime_smoke_cleanup_contract":
-        next_request = {
+        return None
+    if primary_next_action == "runtime_smoke_wait_for_result":
+        if not run_id:
+            return None
+        arguments: dict[str, Any] = {"run_id": run_id, "agent_mode": True}
+        if cursor:
+            arguments["after_cursor"] = _runtime_smoke_tail_next_cursor(
+                cursor,
+                cursor.get("after_cursor", 0),
+            )
+        return {
+            "tool": primary_next_action,
+            "arguments": _runtime_smoke_agent_next_arguments(
+                primary_next_action,
+                arguments,
+            ),
+        }
+    if primary_next_action == "runtime_smoke_cleanup_contract":
+        return {
             "tool": primary_next_action,
             "arguments": {},
         }
-    elif run_id:
-        next_request = {
+    if run_id:
+        return {
             "tool": primary_next_action,
             "arguments": _runtime_smoke_agent_next_arguments(
                 primary_next_action,
                 {"run_id": run_id, "agent_mode": True},
             ),
         }
-    else:
-        primary_next_action = "runtime_smoke_run_plan"
-
-    data["agent_mode"] = _runtime_smoke_agent_mode_payload(
-        primary_next_action,
-        next_request=next_request,
-        cursor=cursor,
-        metrics=_runtime_smoke_agent_metrics(data),
-    )
-    return data
+    return None
 
 
 def _runtime_smoke_run_probe_agent_next_action(
