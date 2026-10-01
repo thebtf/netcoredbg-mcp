@@ -360,6 +360,37 @@ Expected result:
 WinForms `dragList` primitive smoke is not a substitute for WPF DataGrid CR-001
 acceptance.
 
+#### Escape during an active mouse drag
+
+Pending regression/customer-test checklist. The inability to send Escape during
+an emulated mouse drag is operator-reported and unreproduced here. Concurrent
+interruption is not supported/proven by this checklist and is not part of any
+already-`PASS` release claim. Source inspection identifies a FlaUI limitation:
+client serialization and synchronous bridge execution queue `ui_send_keys`
+behind `ui_drag`. This is source-bound evidence, not a live reproduction or fix.
+
+- [ ] Start a real drag through public MCP `ui_drag` on the WPF DataGrid stand.
+  Observe the left button held and ongoing movement or a fixture drag-active
+  signal before submitting public `ui_send_keys` Escape from a concurrent client
+  call. Keep the drag call in flight.
+- [ ] Observe Escape received **before mouse-up** and cancellation without a
+  drop or reorder. Verify stable row identities, row count, and selection.
+- [ ] Verify the left button and temporary modifiers are released on
+  cancellation and on error. Verify the next click, keystroke, and session work.
+- [ ] Capture real observable event ordering or fixture diagnostics for button
+  down, drag activity, Escape receipt, cancellation, and mouse-up. Sleeps,
+  queued-key completion after the drag, private-helper calls, and source-text
+  checks do not prove interruption. If ordering cannot be observed, retain
+  pending evidence and name the missing diagnostic capability.
+- [ ] Record FlaUI and pywinauto results separately, including backend version,
+  public-call outcomes, event evidence, and cleanup evidence. Both results are
+  pending; do not infer either backend's result from the other.
+
+Existing `drag_path` internal `cancel_no_drop` injects Escape at the path end.
+It does not prove that a concurrent public `ui_send_keys` call can interrupt an
+active drag. This entry adds no runnable regression function and reports no
+test execution. Existing release commands remain unchanged.
+
 ### 8. Supporting Runtime-Smoke Diagnostic Schema Contract
 
 Contract sources:
