@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -647,13 +648,13 @@ internal sealed class ControlledDapAdapter
         if (_options.SpawnDescendant && _descendant is null)
         {
             _startupStage = "descendant-start";
-            _descendant = StartDescendant(_options.SpawnWindowedDescendant);
+            using var readiness = CreateWindowedDescendantReadinessPipe(_options.SpawnWindowedDescendant, out var readinessPipeName);
+            _descendant = StartDescendant(_options.SpawnWindowedDescendant, readinessPipeName);
             await RecordAsync(new { kind = "descendant", processId = _descendant.Id }, cancellationToken);
-            if (OperatingSystem.IsWindows() && _options.SpawnWindowedDescendant &&
-                !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE")))
+            if (readiness is not null)
             {
                 _startupStage = "window-readiness";
-                await WaitForWindowedDescendantReadyAsync(_descendant, cancellationToken);
+                await WaitForWindowedDescendantReadyAsync(_descendant, readiness, cancellationToken);
             }
         }
 
@@ -688,25 +689,65 @@ internal sealed class ControlledDapAdapter
         launch.Document.Dispose();
     }
 
-    private static async Task WaitForWindowedDescendantReadyAsync(Process descendant, CancellationToken cancellationToken)
+    private static NamedPipeServerStream? CreateWindowedDescendantReadinessPipe(bool windowed, out string? pipeName)
     {
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromSeconds(2));
-        while (true)
+        pipeName = null;
+        if (!OperatingSystem.IsWindows() || !windowed ||
+            string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE")))
         {
-            timeout.Token.ThrowIfCancellationRequested();
+            return null;
+        }
+
+        pipeName = $"controlled-dap-window-ready-{Guid.NewGuid():N}";
+        return new NamedPipeServerStream(pipeName, PipeDirection.In,
+            1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+    }
+
+    private static async Task WaitForWindowedDescendantReadyAsync(Process descendant, NamedPipeServerStream readiness, CancellationToken cancellationToken)
+    {
+        using var wait = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var exited = descendant.WaitForExitAsync(wait.Token);
+        var ready = ReadReadyWindowAsync(readiness, wait.Token);
+        try
+        {
+            if (await Task.WhenAny(ready, exited) == exited)
+            {
+                await exited;
+                throw new InvalidOperationException("Configured windowed descendant exited before loader/window readiness.");
+            }
+
+            var window = await ready;
+            cancellationToken.ThrowIfCancellationRequested();
             descendant.Refresh();
             if (descendant.HasExited)
             {
                 throw new InvalidOperationException("Configured windowed descendant exited before loader/window readiness.");
             }
 
-            if (!string.IsNullOrWhiteSpace(descendant.MainModule?.FileName) && descendant.MainWindowHandle != IntPtr.Zero)
+            if (window == 0 || descendant.MainWindowHandle.ToInt64() != window || string.IsNullOrWhiteSpace(descendant.MainModule?.FileName))
             {
-                return;
+                throw new InvalidDataException("Configured windowed descendant reported an unusable ready window.");
             }
+        }
+        finally
+        {
+            wait.Cancel();
+            try
+            {
+                await Task.WhenAll(ready, exited);
+            }
+            catch (Exception) when (wait.IsCancellationRequested)
+            {
+                // Both waits are observed; preserve the readiness/exit/cancellation outcome selected above.
+            }
+        }
 
-            await Task.Delay(TimeSpan.FromMilliseconds(25), timeout.Token);
+        static async Task<long> ReadReadyWindowAsync(NamedPipeServerStream pipe, CancellationToken token)
+        {
+            await pipe.WaitForConnectionAsync(token);
+            var handle = new byte[sizeof(long)];
+            await pipe.ReadExactlyAsync(handle, token);
+            return System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(handle);
         }
     }
 
@@ -729,7 +770,12 @@ internal sealed class ControlledDapAdapter
         if (_options.PublishSecondWindowedDescendantAfterRelease)
         {
             await WaitForSecondWindowedDescendantReleaseAsync(cancellationToken);
-            _secondDescendant = StartDescendant(windowed: true);
+            using var readiness = CreateWindowedDescendantReadinessPipe(windowed: true, out var readinessPipeName);
+            _secondDescendant = StartDescendant(windowed: true, readinessPipeName);
+            if (readiness is not null)
+            {
+                await WaitForWindowedDescendantReadyAsync(_secondDescendant, readiness, cancellationToken);
+            }
             await WriteEventAsync(
                 "process",
                 new
@@ -848,7 +894,7 @@ internal sealed class ControlledDapAdapter
         await RecordAsync(new { kind = "continued-event" }, cancellationToken);
     }
 
-    private Process StartDescendant(bool windowed)
+    private Process StartDescendant(bool windowed, string? readinessPipeName = null)
     {
         var configuredExecutable = windowed
             ? Environment.GetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE")
@@ -865,6 +911,11 @@ internal sealed class ControlledDapAdapter
         {
             startInfo.Environment[name] = value;
         }
+        if (readinessPipeName is not null)
+        {
+            startInfo.Environment["CONTROLLED_DAP_WINDOWED_DESCENDANT_READINESS_PIPE"] = readinessPipeName;
+        }
+
 
 
         if (string.IsNullOrWhiteSpace(configuredExecutable))
