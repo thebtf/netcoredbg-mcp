@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Source-only .NET startup diagnostics opt in through `NETCOREDBG_MCP_PRIVATE_START_DIAGNOSTICS=<directory>`. Failed starts retain allowlisted branch/exception classifications and controlled launch-stage transcripts; native-scene test failure output receives them before fixture scratch deletion. No exception messages, user arguments, public response changes, or cleanup bypasses are introduced.
 - Native probe shutdown now ends connection waits on expected terminal cancellation or disposal, cleans up sessions that never connected, and removes an unused private dispatcher helper.
 - Search-source traversal cleanup preserves CRLF handling and glob-bracket behavior while removing an unused scalar helper; the stability fallback drops an unused input without changing callback or wire schemas.
+- Project-root selection now continues through eligible downstream root arguments when earlier candidates are unusable, then follows the established operator, client, and startup-CWD precedence. Existing path-security checks remain in force; public interfaces and fallback behavior are unchanged.
 - Host prompts and playbooks now reuse shared constants, preserving exact prompt content and ordering; startup diagnostic stage classification uses explicit ordered branches with unchanged errors and lifecycle behavior.
 
 ## [0.23.12] - 2026-09-27
