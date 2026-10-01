@@ -1272,14 +1272,7 @@ def _ensure_git_object(
         _wave2_unverified("required first-party PR Git object is unavailable locally")
 
 
-def _github_pull_request_evidence(
-    entry: Mapping[str, Any], environment: Mapping[str, str]
-) -> dict[str, Any]:
-    integration = entry.get("integration")
-    number = integration.get("pull_request") if isinstance(integration, Mapping) else None
-    if type(number) is not int or number <= 0:
-        _wave2_unverified("source does not name a valid pull request")
-    endpoint = f"repos/thebtf/netcoredbg-mcp/pulls/{number}"
+def _github_pull_request_payload(endpoint: str, environment: Mapping[str, str]) -> bytes:
     token = environment.get("GITHUB_TOKEN")
     if token:
         request = urllib.request.Request(
@@ -1313,6 +1306,18 @@ def _github_pull_request_evidence(
         if completed.returncode:
             _wave2_unverified(PR_EVIDENCE_UNAVAILABLE)
         payload = completed.stdout
+    return payload
+
+
+def _github_pull_request_evidence(
+    entry: Mapping[str, Any], environment: Mapping[str, str]
+) -> dict[str, Any]:
+    integration = entry.get("integration")
+    number = integration.get("pull_request") if isinstance(integration, Mapping) else None
+    if type(number) is not int or number <= 0:
+        _wave2_unverified("source does not name a valid pull request")
+    endpoint = f"repos/thebtf/netcoredbg-mcp/pulls/{number}"
+    payload = _github_pull_request_payload(endpoint, environment)
     try:
         response = _load_json_object(payload, "first-party pull-request evidence")
         head = response["head"]
@@ -1432,6 +1437,33 @@ def _runtime_wave2_evidence(
     }
 
 
+def _resolve_wave2_evidence(
+    entry: Mapping[str, Any],
+    evidence_or_context: Mapping[str, Any] | GitContext,
+    environment: Mapping[str, str] | None,
+) -> Mapping[str, Any]:
+    if isinstance(evidence_or_context, GitContext):
+        runtime_environment = (
+            dict(environment)
+            if environment is not None
+            else scrub_sonar_environment(process_environment())
+        )
+        try:
+            evidence: Mapping[str, Any] = _runtime_wave2_evidence(
+                entry, evidence_or_context, runtime_environment
+            )
+        except RunnerError as error:
+            if str(error).startswith("WAVE2_CLOSURE_UNVERIFIED:"):
+                raise
+            _wave2_unverified(str(error))
+            raise AssertionError("unreachable") from error
+    elif isinstance(evidence_or_context, Mapping):
+        evidence = evidence_or_context
+    else:
+        _wave2_unverified("closure evidence is unavailable")
+    return evidence
+
+
 def verify_wave2_entry(
     entry: Mapping[str, Any],
     evidence_or_context: Mapping[str, Any] | GitContext,
@@ -1476,25 +1508,7 @@ def verify_wave2_entry(
         or integration.get("head_sha") != entry.get("accepted_candidate_sha")
     ):
         _wave2_unverified("closure entry source schema or reviewed-head binding is invalid")
-    if isinstance(evidence_or_context, GitContext):
-        runtime_environment = (
-            dict(environment)
-            if environment is not None
-            else scrub_sonar_environment(process_environment())
-        )
-        try:
-            evidence: Mapping[str, Any] = _runtime_wave2_evidence(
-                entry, evidence_or_context, runtime_environment
-            )
-        except RunnerError as error:
-            if str(error).startswith("WAVE2_CLOSURE_UNVERIFIED:"):
-                raise
-            _wave2_unverified(str(error))
-            raise AssertionError("unreachable") from error
-    elif isinstance(evidence_or_context, Mapping):
-        evidence = evidence_or_context
-    else:
-        _wave2_unverified("closure evidence is unavailable")
+    evidence = _resolve_wave2_evidence(entry, evidence_or_context, environment)
     source_blob = evidence.get("source_blob")
     receipt_blob = evidence.get("closure_receipt_blob")
     pull_request = evidence.get("first_party_pull_request")
@@ -1573,6 +1587,62 @@ def _coverage_executable(name: str) -> str | None:
     return shutil.which(name)
 
 
+def _coverage_project_toolchain(
+    context: GitContext, identifier: str, project_relative: str
+) -> dict[str, Any]:
+    project = context.repository_root / project_relative
+    try:
+        root = ElementTree.parse(project).getroot()
+    except (OSError, ElementTree.ParseError) as error:
+        raise RunnerError(
+            "COVERAGE_VSTEST_INCOMPATIBLE: project evaluation is unavailable."
+        ) from error
+    target_framework = next(
+        (
+            element.text.strip()
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "TargetFramework" and element.text
+        ),
+        None,
+    )
+    testing_platform_property = next(
+        (
+            (element.text or "").strip().casefold()
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "TestingPlatformDotnetTestSupport"
+        ),
+        "",
+    )
+    packages = [
+        {
+            "include": element.attrib.get("Include", ""),
+            "version": element.attrib.get("Version", ""),
+            "private_assets": element.attrib.get("PrivateAssets", ""),
+        }
+        for element in root.iter()
+        if element.tag.rsplit("}", 1)[-1] == "PackageReference"
+    ]
+    by_name = {str(package["include"]).casefold(): package for package in packages}
+    coverlet = by_name.get(COVERLET_MSBUILD_PACKAGE)
+    test_sdk = by_name.get("microsoft.net.test.sdk")
+    collector = by_name.get(CODE_COVERAGE_PACKAGE)
+    mtp_active = testing_platform_property in {"true", "1", "yes"} or any(
+        "microsoft.testing.platform" in str(package["include"]).casefold() for package in packages
+    )
+    return {
+        "id": identifier,
+        "project": project_relative,
+        "target_framework": target_framework,
+        "coverlet_msbuild": coverlet["version"] if coverlet else None,
+        "coverlet_private_assets": coverlet["private_assets"] if coverlet else None,
+        "test_sdk": test_sdk["version"] if test_sdk else None,
+        "code_coverage": collector["version"] if collector else None,
+        "code_coverage_private_assets": collector["private_assets"] if collector else None,
+        "test_platform": "vstest",
+        "mtp_active": mtp_active,
+    }
+
+
 def _runtime_coverage_toolchain(
     context: GitContext, environment: Mapping[str, str]
 ) -> dict[str, Any]:
@@ -1598,60 +1668,7 @@ def _runtime_coverage_toolchain(
             executables[name] = None
     projects: list[dict[str, Any]] = []
     for identifier, project_relative, _ in FIXED_COVERAGE_PROJECTS:
-        project = context.repository_root / project_relative
-        try:
-            root = ElementTree.parse(project).getroot()
-        except (OSError, ElementTree.ParseError) as error:
-            raise RunnerError(
-                "COVERAGE_VSTEST_INCOMPATIBLE: project evaluation is unavailable."
-            ) from error
-        target_framework = next(
-            (
-                element.text.strip()
-                for element in root.iter()
-                if element.tag.rsplit("}", 1)[-1] == "TargetFramework" and element.text
-            ),
-            None,
-        )
-        testing_platform_property = next(
-            (
-                (element.text or "").strip().casefold()
-                for element in root.iter()
-                if element.tag.rsplit("}", 1)[-1] == "TestingPlatformDotnetTestSupport"
-            ),
-            "",
-        )
-        packages = [
-            {
-                "include": element.attrib.get("Include", ""),
-                "version": element.attrib.get("Version", ""),
-                "private_assets": element.attrib.get("PrivateAssets", ""),
-            }
-            for element in root.iter()
-            if element.tag.rsplit("}", 1)[-1] == "PackageReference"
-        ]
-        by_name = {str(package["include"]).casefold(): package for package in packages}
-        coverlet = by_name.get(COVERLET_MSBUILD_PACKAGE)
-        test_sdk = by_name.get("microsoft.net.test.sdk")
-        collector = by_name.get(CODE_COVERAGE_PACKAGE)
-        mtp_active = testing_platform_property in {"true", "1", "yes"} or any(
-            "microsoft.testing.platform" in str(package["include"]).casefold()
-            for package in packages
-        )
-        projects.append(
-            {
-                "id": identifier,
-                "project": project_relative,
-                "target_framework": target_framework,
-                "coverlet_msbuild": coverlet["version"] if coverlet else None,
-                "coverlet_private_assets": coverlet["private_assets"] if coverlet else None,
-                "test_sdk": test_sdk["version"] if test_sdk else None,
-                "code_coverage": collector["version"] if collector else None,
-                "code_coverage_private_assets": collector["private_assets"] if collector else None,
-                "test_platform": "vstest",
-                "mtp_active": mtp_active,
-            }
-        )
+        projects.append(_coverage_project_toolchain(context, identifier, project_relative))
     return {"executables": executables, "projects": projects}
 
 
