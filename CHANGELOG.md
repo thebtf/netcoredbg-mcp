@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Windows-owned commands and coverage collectors now reconcile abnormal Job-member exits as well as ordinary exits, preventing phantom live members and false duplicate births when Windows recycles a process ID. Missing lifetime evidence still refuses drain.
 - The source-only native scene tools return the schema-valid `CANDIDATE_MISMATCH` error when debuggee identity is unavailable instead of collapsing into a generic SDK invocation failure. Controlled WPF fixture launches establish loader/window readiness before publishing process identity; large-response channel checks retain their original completeness and size requirements.
 - Windows coverage collection opts into synchronous native process-creation handle capture, so nested Job termination cannot erase the collector's only member-exit evidence. Completion still requires distinct membership-qualified capability coverage of the raw lifetime total and signaled handles for every member; ordinary adapter and build launches are unchanged.
+- The source-only native scene staging-invalidation regression now synchronizes on actual post-stage revalidation instead of a pre-dispatch polling timer, proving no artifact persistence after identity change and a later hash-verified lossless capture.
 
 ## [0.23.12] - 2026-09-27
 

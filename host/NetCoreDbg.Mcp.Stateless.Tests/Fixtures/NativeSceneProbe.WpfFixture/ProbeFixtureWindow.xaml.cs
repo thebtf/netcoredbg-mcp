@@ -35,6 +35,14 @@ public partial class ProbeFixtureWindow : Window, IWpfProbeSnapshotSource
 
         UpdateLayout();
         var materializationCount = checked(++_materializationCount);
+        var barrierName = Environment.GetEnvironmentVariable("NETCOREDBG_NATIVE_SCENE_PROBE_FIXTURE_REVALIDATION_BARRIER");
+        if (materializationCount == 1 && !string.IsNullOrWhiteSpace(barrierName))
+        {
+            using var started = EventWaitHandle.OpenExisting(barrierName + "-started");
+            using var release = EventWaitHandle.OpenExisting(barrierName + "-release");
+            started.Set();
+            release.WaitOne();
+        }
         var revisionBefore = _revision;
         if (_mode == ProbeFixtureMode.ChangedBeforeMaterialization)
         {

@@ -338,7 +338,6 @@ internal sealed class ControlledDapAdapter
     private static readonly TimeSpan InitializeGateWindow = TimeSpan.FromMilliseconds(75);
     private static readonly TimeSpan GracefulReleaseTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ConfigurationDoneCapabilityDeltaReleaseTimeout = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan SecondWindowedDescendantReleaseTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DescendantCleanupTimeout = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan LifecycleEventsCompletionTimeout = TimeSpan.FromSeconds(1);
     private Task<DapFrame?>? _nextRequest;
@@ -970,11 +969,9 @@ internal sealed class ControlledDapAdapter
             throw new InvalidOperationException("CONTROLLED_DAP_SECOND_WINDOWED_DESCENDANT_RELEASE is required when the second windowed descendant is held.");
         }
 
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(SecondWindowedDescendantReleaseTimeout);
         while (!File.Exists(_secondWindowedDescendantReleasePath))
         {
-            await Task.Delay(TimeSpan.FromMilliseconds(25), timeout.Token);
+            await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken);
         }
     }
 
