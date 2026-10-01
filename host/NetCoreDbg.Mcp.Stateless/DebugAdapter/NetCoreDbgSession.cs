@@ -1342,7 +1342,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
-    private interface IProcessTreeOwnership : IDisposable
+    internal interface IProcessTreeOwnership : IDisposable
     {
         void Terminate();
     }
@@ -1420,7 +1420,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private sealed record UnixProcessGroupLaunch(Process Process, UnixProcessGroupOwnership Ownership);
 
-    private sealed class WindowsProcessTreeOwnership : IProcessTreeOwnership
+    internal sealed class WindowsProcessTreeOwnership : IProcessTreeOwnership
     {
         private const uint CreateNoWindow = 0x08000000;
         private const uint CreateSuspended = 0x00000004;
@@ -1544,9 +1544,173 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             }
         }
 
-        private static SafeKernelHandle CreateKillOnCloseJob()
+        internal sealed class WindowsBridgeProcess
         {
-            var job = new SafeKernelHandle(CreateJobObject(IntPtr.Zero, null));
+            private readonly SafeKernelHandle _job;
+            private readonly SafeKernelHandle _processHandle;
+
+            private WindowsBridgeProcess(Process process, SafeKernelHandle job, SafeKernelHandle processHandle)
+            {
+                Process = process;
+                _job = job;
+                _processHandle = processHandle;
+            }
+
+            internal Process Process { get; }
+
+            internal static WindowsBridgeProcess Start(ProcessStartInfo startInfo)
+            {
+                if (!OperatingSystem.IsWindows())
+                {
+                    throw new PlatformNotSupportedException("Native-scene bridge containment requires Windows.");
+                }
+
+                var job = CreateKillOnCloseJob();
+                SafeKernelHandle? processHandle = null;
+                Process? process = null;
+                try
+                {
+                    var information = CreateBridgeProcess(startInfo, job);
+                    processHandle = new SafeKernelHandle(information.Process);
+                    using (var thread = new SafeKernelHandle(information.Thread))
+                    {
+                        process = Process.GetProcessById(checked((int)information.ProcessId));
+                        _ = process.SafeHandle;
+                    }
+
+                    return new WindowsBridgeProcess(process, job, processHandle);
+                }
+                catch (Exception primary)
+                {
+                    var handedToKernel = false;
+                    Exception? cleanupFailure = null;
+                    try
+                    {
+                        job.CloseChecked();
+                        handedToKernel = true;
+                    }
+                    catch (Exception exception)
+                    {
+                        cleanupFailure = exception;
+                        primary.Data["NativeSceneBridgeTerminationOwner"] = job;
+                        if (processHandle is not null)
+                        {
+                            primary.Data["NativeSceneBridgeProcessHandle"] = processHandle;
+                        }
+                    }
+
+                    if (handedToKernel)
+                    {
+                        try
+                        {
+                            process?.Dispose();
+                        }
+                        catch (Exception exception)
+                        {
+                            cleanupFailure = exception;
+                        }
+
+                        try
+                        {
+                            processHandle?.CloseChecked();
+                        }
+                        catch (Exception exception)
+                        {
+                            cleanupFailure = cleanupFailure is null ? exception : new AggregateException(cleanupFailure, exception);
+                        }
+                    }
+
+                    if (cleanupFailure is not null)
+                    {
+                        primary.Data["NativeSceneBridgeCleanupFailure"] = cleanupFailure;
+                    }
+
+                    throw;
+                }
+            }
+
+            internal void CloseJob() => _job.CloseChecked();
+            internal void CloseProcessHandle() => _processHandle.CloseChecked();
+
+            private static ProcessInformation CreateBridgeProcess(ProcessStartInfo startInfo, SafeKernelHandle job)
+            {
+                var commandLine = new StringBuilder(QuoteCommandLineArgument(startInfo.FileName));
+                foreach (var argument in startInfo.ArgumentList)
+                {
+                    commandLine.Append(' ').Append(QuoteCommandLineArgument(argument));
+                }
+
+                IntPtr attributeList = IntPtr.Zero;
+                IntPtr jobList = IntPtr.Zero;
+                var initialized = false;
+                var referenced = false;
+                try
+                {
+                    job.DangerousAddRef(ref referenced);
+                    var size = IntPtr.Zero;
+                    _ = InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
+                    if (size == IntPtr.Zero)
+                    {
+                        throw LastWin32Error("Could not allocate bridge job attributes.");
+                    }
+
+                    attributeList = Marshal.AllocHGlobal(size);
+                    if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref size))
+                    {
+                        throw LastWin32Error("Could not initialize bridge job attributes.");
+                    }
+
+                    initialized = true;
+                    jobList = Marshal.AllocHGlobal(IntPtr.Size);
+                    Marshal.WriteIntPtr(jobList, job.HandleWhileReferenced);
+                    if (!UpdateProcThreadAttribute(attributeList, 0, new UIntPtr(0x0002000D), jobList,
+                            new UIntPtr((uint)IntPtr.Size), IntPtr.Zero, IntPtr.Zero))
+                    {
+                        throw LastWin32Error("Could not configure creation-time bridge containment.");
+                    }
+
+                    var startupInfo = new StartupInfoEx
+                    {
+                        StartupInfo = new StartupInfo { Size = (uint)Marshal.SizeOf<StartupInfoEx>() },
+                        AttributeList = attributeList,
+                    };
+                    if (!CreateProcess(null, commandLine, IntPtr.Zero, IntPtr.Zero, inheritHandles: false,
+                            CreateNoWindow | ExtendedStartupInfoPresent, IntPtr.Zero, currentDirectory: null,
+                            ref startupInfo, out var information))
+                    {
+                        throw LastWin32Error("Could not create the contained native-scene bridge.");
+                    }
+
+                    return information;
+                }
+                finally
+                {
+                    if (initialized)
+                    {
+                        DeleteProcThreadAttributeList(attributeList);
+                    }
+
+                    if (jobList != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(jobList);
+                    }
+
+                    if (attributeList != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(attributeList);
+                    }
+
+                    if (referenced)
+                    {
+                        job.DangerousRelease();
+                    }
+                }
+            }
+        }
+
+        private static SafeKernelHandle CreateKillOnCloseJob(string? jobName = null)
+        {
+            var job = new SafeKernelHandle(CreateJobObject(IntPtr.Zero, jobName));
             if (job.IsInvalid)
             {
                 var error = Marshal.GetLastWin32Error();
@@ -1763,7 +1927,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool CreateProcess(
-            string applicationName,
+            string? applicationName,
             StringBuilder commandLine,
             IntPtr processAttributes,
             IntPtr threadAttributes,
@@ -1930,11 +2094,38 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
             internal IntPtr HandleWhileReferenced => handle;
 
+            internal void CloseChecked()
+            {
+                if (IsClosed)
+                {
+                    return;
+                }
+
+                var referenced = false;
+                try
+                {
+                    DangerousAddRef(ref referenced);
+                    if (!CloseHandle(handle))
+                    {
+                        throw LastWin32Error("Could not release the native bridge ownership handle.");
+                    }
+
+                    SetHandleAsInvalid();
+                }
+                finally
+                {
+                    if (referenced)
+                    {
+                        DangerousRelease();
+                    }
+                }
+            }
+
             protected override bool ReleaseHandle() => CloseHandle(handle);
         }
     }
 
-    private sealed class WindowsProcessTreeLaunch(
+    internal sealed class WindowsProcessTreeLaunch(
         Process process,
         Stream input,
         Stream output,

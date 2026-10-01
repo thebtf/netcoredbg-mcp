@@ -7,6 +7,32 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Unicode;
 
+if (args.Length == 2 && string.Equals(args[0], "--controlled-bridge-tree", StringComparison.Ordinal))
+{
+    var childInfo = new ProcessStartInfo
+    {
+        FileName = Environment.ProcessPath ?? throw new InvalidOperationException("Process path is unavailable."),
+        UseShellExecute = false,
+        CreateNoWindow = true,
+    };
+    if (string.Equals(Path.GetFileNameWithoutExtension(childInfo.FileName), "dotnet", StringComparison.OrdinalIgnoreCase))
+    {
+        childInfo.ArgumentList.Add(System.Reflection.Assembly.GetExecutingAssembly().Location);
+    }
+
+    childInfo.ArgumentList.Add("--controlled-dap-descendant");
+    using var child = Process.Start(childInfo) ?? throw new InvalidOperationException("Controlled bridge child did not start.");
+    using var ready = new System.IO.Pipes.NamedPipeServerStream(args[1], System.IO.Pipes.PipeDirection.Out,
+        1, System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+    await ready.WaitForConnectionAsync();
+    var pid = new byte[sizeof(int)];
+    System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(pid, child.Id);
+    await ready.WriteAsync(pid);
+    await ready.FlushAsync();
+    await Task.Delay(Timeout.InfiniteTimeSpan);
+    return;
+}
+
 if (args.Length == 1 && string.Equals(args[0], "--controlled-dap-descendant", StringComparison.Ordinal))
 {
     await Task.Delay(Timeout.InfiniteTimeSpan);

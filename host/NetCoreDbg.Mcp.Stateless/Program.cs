@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Collections.Concurrent;
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -283,9 +284,8 @@ internal static class Program
                     _slots.TryRemove(new KeyValuePair<string, SessionSlot>(token, slot));
                     _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(token, session));
                     _nativeSceneBindings.TryRemove(new KeyValuePair<string, NativeSceneSessionBinding>(token, binding));
-                    await binding.DisposeAsync().ConfigureAwait(false);
+                    await DisposeUnregisteredResourcesAsync(binding, session).ConfigureAwait(false);
                     binding = null;
-                    await _dispose(session).ConfigureAwait(false);
                     session = null;
                     return NotFound();
                 }
@@ -308,15 +308,7 @@ internal static class Program
                 }
                 else
                 {
-                    if (binding is not null)
-                    {
-                        await binding.DisposeAsync().ConfigureAwait(false);
-                    }
-
-                    if (session is not null)
-                    {
-                        await _dispose(session).ConfigureAwait(false);
-                    }
+                    await DisposeUnregisteredResourcesAsync(binding, session).ConfigureAwait(false);
                 }
 
                 throw;
@@ -330,21 +322,7 @@ internal static class Program
                 }
                 else
                 {
-                    if (binding is not null)
-                    {
-                        await binding.DisposeAsync().ConfigureAwait(false);
-                    }
-
-                    if (session is not null)
-                    {
-                        try
-                        {
-                            await _dispose(session).ConfigureAwait(false);
-                        }
-                        catch (Exception)
-                        {
-                        }
-                    }
+                    await DisposeUnregisteredResourcesAsync(binding, session).ConfigureAwait(false);
                 }
 
                 return NotFound();
@@ -629,19 +607,42 @@ internal static class Program
 
         public async ValueTask DisposeAsync(CancellationToken cancellationToken)
         {
+            Exception? failure = null;
             var slots = _slots.Values.ToArray();
             try
             {
                 await Task.WhenAll(slots.Select(slot => slot.CloseAndDrainAsync(cancellationToken))).ConfigureAwait(false);
             }
-            finally
+            catch (Exception exception)
             {
-                var sessions = _sessions.ToArray();
-                _sessions.Clear();
-                var bindings = _nativeSceneBindings.ToArray();
-                _nativeSceneBindings.Clear();
+                failure = exception;
+            }
+
+            var sessions = _sessions.ToArray();
+            _sessions.Clear();
+            var bindings = _nativeSceneBindings.ToArray();
+            _nativeSceneBindings.Clear();
+            try
+            {
                 await Task.WhenAll(bindings.Select(static binding => binding.Value.DisposeAsync().AsTask())).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                failure ??= exception;
+            }
+
+            try
+            {
                 await Task.WhenAll(sessions.Select(session => DisposeRemovedSessionAsync(session.Value, cancellationToken))).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                failure ??= exception;
+            }
+
+            if (failure is not null)
+            {
+                ExceptionDispatchInfo.Capture(failure).Throw();
             }
         }
 
@@ -681,13 +682,55 @@ internal static class Program
             NetCoreDbgSession session,
             NativeSceneSessionBinding binding)
         {
+            Exception? failure = null;
             try
             {
                 await binding.DisposeAsync().ConfigureAwait(false);
             }
-            finally
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+
+            try
             {
                 await _dispose(session).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                failure ??= exception;
+            }
+
+            if (failure is not null)
+            {
+                ExceptionDispatchInfo.Capture(failure).Throw();
+            }
+        }
+
+        private async ValueTask DisposeUnregisteredResourcesAsync(NativeSceneSessionBinding? binding, NetCoreDbgSession? session)
+        {
+            try
+            {
+                if (binding is not null)
+                {
+                    await binding.DisposeAsync().ConfigureAwait(false);
+                }
+            }
+            catch (Exception)
+            {
+                // Startup retains its primary exception or not-found result.
+            }
+
+            if (session is not null)
+            {
+                try
+                {
+                    await _dispose(session).ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    // Session cleanup cannot replace the established startup result.
+                }
             }
         }
 
@@ -851,7 +894,14 @@ internal static class Program
         {
             if (_nativeSceneBindings.TryRemove(sessionId, out var binding))
             {
-                await binding.DisposeAsync().ConfigureAwait(false);
+                try
+                {
+                    await binding.DisposeAsync().ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    // Removal preserves the existing not-found/stop mapping and independent session cleanup.
+                }
             }
         }
 
