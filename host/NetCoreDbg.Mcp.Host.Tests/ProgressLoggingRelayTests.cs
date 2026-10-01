@@ -833,7 +833,7 @@ public sealed class ProgressLoggingRelayTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => slowCall.AsTask());
         using (var cancellationObserved = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
         {
-            while (state.IsAuthorized(queuedAuthorization))
+            while (ProgressLoggingRelay.NotificationState.IsAuthorized(queuedAuthorization))
             {
                 await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationObserved.Token);
             }
