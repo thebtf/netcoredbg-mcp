@@ -204,20 +204,7 @@ internal static class NativeSceneContractCatalog
         switch (node)
         {
             case JsonObject objectNode:
-                if (depth > MaxJsonNesting || objectNode.Count > MaxContainerMembers)
-                {
-                    return false;
-                }
-
-                foreach (var property in objectNode)
-                {
-                    if (!HasRuntimeBounds(property.Value, depth + 1))
-                    {
-                        return false;
-                    }
-                }
-
-                return true;
+                return HasObjectRuntimeBounds(objectNode, depth);
             case JsonArray arrayNode:
                 if (depth > MaxJsonNesting || arrayNode.Count > MaxContainerMembers)
                 {
@@ -238,26 +225,30 @@ internal static class NativeSceneContractCatalog
         }
     }
 
+    private static bool HasObjectRuntimeBounds(JsonObject node, int depth)
+    {
+        if (depth > MaxJsonNesting || node.Count > MaxContainerMembers)
+        {
+            return false;
+        }
+
+        foreach (var property in node)
+        {
+            if (!HasRuntimeBounds(property.Value, depth + 1))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static bool HasBoundedStateValues(JsonNode? node)
     {
         switch (node)
         {
             case JsonObject objectNode:
-                foreach (var property in objectNode)
-                {
-                    if ((StringComparer.Ordinal.Equals(property.Key, "selectedState") || StringComparer.Ordinal.Equals(property.Key, "currentState")) &&
-                        property.Value is not null && Encoding.UTF8.GetByteCount(property.Value.ToJsonString()) > MaxInputUtf8Bytes)
-                    {
-                        return false;
-                    }
-
-                    if (!HasBoundedStateValues(property.Value))
-                    {
-                        return false;
-                    }
-                }
-
-                return true;
+                return HasBoundedObjectStateValues(objectNode);
             case JsonArray arrayNode:
                 foreach (var item in arrayNode)
                 {
@@ -271,6 +262,25 @@ internal static class NativeSceneContractCatalog
             default:
                 return true;
         }
+    }
+
+    private static bool HasBoundedObjectStateValues(JsonObject node)
+    {
+        foreach (var property in node)
+        {
+            if ((StringComparer.Ordinal.Equals(property.Key, "selectedState") || StringComparer.Ordinal.Equals(property.Key, "currentState")) &&
+                property.Value is not null && Encoding.UTF8.GetByteCount(property.Value.ToJsonString()) > MaxInputUtf8Bytes)
+            {
+                return false;
+            }
+
+            if (!HasBoundedStateValues(property.Value))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool HasPositiveVersion(string? value, string prefix)
@@ -368,24 +378,31 @@ internal static class NativeSceneContractCatalog
             return false;
         }
 
-        if (caseEntry.TryGetPropertyValue("schemaInvalidVariants", out var variantsNode))
+        return HasApprovedInvalidVariants(state, caseEntry);
+    }
+
+    private static bool HasApprovedInvalidVariants(ContractState state, JsonObject caseEntry)
+    {
+        if (!caseEntry.TryGetPropertyValue("schemaInvalidVariants", out var variantsNode))
         {
-            if (!TryGetArray(variantsNode, out var variants) || variants.Count == 0)
+            return true;
+        }
+
+        if (!TryGetArray(variantsNode, out var variants) || variants.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var variantNode in variants)
+        {
+            if (!TryGetObject(variantNode, out var variant) ||
+                !TryGetString(variant["name"], out _) ||
+                !TryGetObject(variant["expected"], out var variantExpected) ||
+                !TryGetString(variantExpected["classification"], out var variantClassification) ||
+                !StringComparer.Ordinal.Equals(variantClassification, SchemaRejection) ||
+                !ValidateCorpusResponse(state, variant, variant["responseSchema"] ?? caseEntry["responseSchema"], variant["response"]))
             {
                 return false;
-            }
-
-            foreach (var variantNode in variants)
-            {
-                if (!TryGetObject(variantNode, out var variant) ||
-                    !TryGetString(variant["name"], out _) ||
-                    !TryGetObject(variant["expected"], out var variantExpected) ||
-                    !TryGetString(variantExpected["classification"], out var variantClassification) ||
-                    !StringComparer.Ordinal.Equals(variantClassification, SchemaRejection) ||
-                    !ValidateCorpusResponse(state, variant, variant["responseSchema"] ?? caseEntry["responseSchema"], variant["response"]))
-                {
-                    return false;
-                }
             }
         }
 
@@ -425,21 +442,7 @@ internal static class NativeSceneContractCatalog
         switch (node)
         {
             case JsonObject objectNode:
-                if (objectNode.TryGetPropertyValue("$ref", out var referenceNode) &&
-                    (!TryGetString(referenceNode, out var reference) || !TryResolveDefinition(definitions, reference, out _)))
-                {
-                    return false;
-                }
-
-                foreach (var property in objectNode)
-                {
-                    if (!HasResolvedLocalReferences(property.Value, definitions))
-                    {
-                        return false;
-                    }
-                }
-
-                return true;
+                return HasResolvedObjectReferences(objectNode, definitions);
             case JsonArray arrayNode:
                 foreach (var item in arrayNode)
                 {
@@ -453,6 +456,25 @@ internal static class NativeSceneContractCatalog
             default:
                 return true;
         }
+    }
+
+    private static bool HasResolvedObjectReferences(JsonObject node, JsonObject definitions)
+    {
+        if (node.TryGetPropertyValue("$ref", out var referenceNode) &&
+            (!TryGetString(referenceNode, out var reference) || !TryResolveDefinition(definitions, reference, out _)))
+        {
+            return false;
+        }
+
+        foreach (var property in node)
+        {
+            if (!HasResolvedLocalReferences(property.Value, definitions))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool TryResolveDefinition(JsonObject definitions, string reference, out JsonObject definition)
