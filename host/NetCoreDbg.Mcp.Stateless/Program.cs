@@ -329,8 +329,25 @@ internal static class Program
             }
         }
 
-        private static string StartStage(NativeSceneSessionBinding? binding, NetCoreDbgSession? session, SessionSlot? slot) =>
-            slot is not null ? "registered" : session is not null ? "session-started" : binding is not null ? "adapter-start" : "binding-create";
+        private static string StartStage(NativeSceneSessionBinding? binding, NetCoreDbgSession? session, SessionSlot? slot)
+        {
+            if (slot is not null)
+            {
+                return "registered";
+            }
+
+            if (session is not null)
+            {
+                return "session-started";
+            }
+
+            if (binding is not null)
+            {
+                return "adapter-start";
+            }
+
+            return "binding-create";
+        }
 
         private static string ExceptionClass(Exception exception) => exception switch
         {
