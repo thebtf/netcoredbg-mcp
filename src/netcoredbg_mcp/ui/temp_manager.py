@@ -6,17 +6,254 @@ cleanup on session end, server exit, and stale directory GC.
 
 from __future__ import annotations
 
+import asyncio
+import ctypes
+import hashlib
+import json
 import logging
+import os
+import re
 import shutil
+import stat
+import sys
 import tempfile
 import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-TEMP_PREFIX = "mcp-netcoredbg-"
+_LEASE_NAME = "owner-v1.lease"
+_LEASE_MARKER = b"netcoredbg-mcp-session-owner-v1\n"
+_OWNER_NAME = re.compile(r"owner-[0-9a-f]{32}\Z")
+_SESSION_NAME = re.compile(r"session-[0-9a-f]{32}\Z")
+_GC_WORK_SECONDS = 5.0
+_GC_CLOSE_SECONDS = 5.0
+
+
+def _windows_identity() -> str:
+    from ctypes import wintypes
+
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    advapi.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    advapi.GetTokenInformation.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    token = wintypes.HANDLE()
+    if not advapi.OpenProcessToken(kernel.GetCurrentProcess(), 8, ctypes.byref(token)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        size = wintypes.DWORD()
+        advapi.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))
+        data = ctypes.create_string_buffer(size.value)
+        if not advapi.GetTokenInformation(token, 1, data, size, ctypes.byref(size)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        sid = ctypes.cast(data, ctypes.POINTER(ctypes.c_void_p))[0]
+        text = wintypes.LPWSTR()
+        if not advapi.ConvertSidToStringSidW(sid, ctypes.byref(text)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return text.value
+        finally:
+            kernel.LocalFree(text)
+    finally:
+        kernel.CloseHandle(token)
+
+
+def _windows_private_root(path: Path, sid: str, create: bool) -> None:
+    from ctypes import wintypes
+
+    class SecurityAttributes(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.DWORD),
+            ("descriptor", ctypes.c_void_p),
+            ("inherit", wintypes.BOOL),
+        ]
+
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+    ]
+    advapi.GetNamedSecurityInfoW.argtypes = [
+        wintypes.LPCWSTR,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.LPWSTR),
+        ctypes.c_void_p,
+    ]
+    kernel.CreateDirectoryW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(SecurityAttributes)]
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    expected = f"O:{sid}D:P(A;OICI;FA;;;{sid})"
+    descriptor = ctypes.c_void_p()
+    if create:
+        if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            expected, 1, ctypes.byref(descriptor), None
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            attributes = SecurityAttributes(ctypes.sizeof(SecurityAttributes), descriptor, False)
+            if not kernel.CreateDirectoryW(str(path), ctypes.byref(attributes)):
+                error = ctypes.get_last_error()
+                if error != 183:
+                    raise ctypes.WinError(error)
+        finally:
+            kernel.LocalFree(descriptor)
+    error = advapi.GetNamedSecurityInfoW(
+        str(path), 1, 5, None, None, None, None, ctypes.byref(descriptor)
+    )
+    if error:
+        raise ctypes.WinError(error)
+    text = wintypes.LPWSTR()
+    try:
+        if not advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor, 1, 5, ctypes.byref(text), None
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if text.value != expected:
+            raise OSError("Artifact namespace is not private to the current user")
+    finally:
+        if text:
+            kernel.LocalFree(text)
+        kernel.LocalFree(descriptor)
+
+
+def _safe_metadata(path: Path, *, directory: bool) -> os.stat_result:
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & 0x400:
+        raise OSError("Artifact path is a link or reparse point")
+    if not (stat.S_ISDIR(metadata.st_mode) if directory else stat.S_ISREG(metadata.st_mode)):
+        raise OSError("Unexpected artifact path type")
+    if not directory and metadata.st_nlink != 1:
+        raise OSError("Artifact path is multiply linked")
+    if os.name != "nt" and (
+        metadata.st_uid != os.getuid() or (directory and metadata.st_mode & 0o077)
+    ):
+        raise OSError("Artifact path is not private to the current user")
+    return metadata
+
+
+def _namespace(*, create: bool = False) -> Path:
+    identity = _windows_identity() if os.name == "nt" else str(os.getuid())
+    suffix = hashlib.sha256(identity.encode()).hexdigest()[:16]
+    root = Path(tempfile.gettempdir()).absolute() / f"netcoredbg-mcp-sessions-{suffix}"
+    for parent in root.parents:
+        metadata = parent.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & 0x400:
+            raise OSError("Artifact namespace has a link or reparse ancestor")
+    if os.name == "nt":
+        if not create and not root.exists():
+            return root
+        _windows_private_root(root, identity, create)
+    elif create:
+        root.mkdir(mode=0o700, exist_ok=True)
+    if create or root.exists():
+        _safe_metadata(root, directory=True)
+    return root
+
+
+def _lease(owner: Path, *, create: bool = False) -> int:
+    _safe_metadata(owner, directory=True)
+    path = owner / _LEASE_NAME
+    before = None if create else _safe_metadata(path, directory=False)
+    if before is not None and os.name != "nt" and before.st_mode & 0o077:
+        raise OSError("Artifact lease is not private")
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(path, flags | (os.O_CREAT | os.O_EXCL if create else 0), 0o600)
+    try:
+        opened = os.fstat(descriptor)
+        after = _safe_metadata(path, directory=False)
+        if (opened.st_dev, opened.st_ino) != (after.st_dev, after.st_ino) or (
+            before is not None and (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+        ):
+            raise OSError("Artifact lease changed during open")
+        if create:
+            os.write(descriptor, _LEASE_MARKER)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        if os.read(descriptor, len(_LEASE_MARKER) + 1) != _LEASE_MARKER:
+            raise OSError("Unrecognized artifact owner")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _remove_session(path: Path) -> None:
+    _safe_metadata(path, directory=True)
+    for directory, directories, files in os.walk(path, followlinks=False):
+        for name in directories:
+            _safe_metadata(Path(directory) / name, directory=True)
+        for name in files:
+            _safe_metadata(Path(directory) / name, directory=False)
+    shutil.rmtree(path)
+
+
+def _collect_stale(max_age_hours: float = 4.0) -> tuple[int, bool]:
+    root = _namespace()
+    if not root.exists():
+        return 0, True
+    cutoff = time.time() - max_age_hours * 3600
+    removed = 0
+    complete = True
+    for owner in root.iterdir():
+        if not _OWNER_NAME.fullmatch(owner.name):
+            continue
+        try:
+            descriptor = _lease(owner)
+        except OSError:
+            continue
+        try:
+            for session in owner.iterdir():
+                if not _SESSION_NAME.fullmatch(session.name):
+                    continue
+                try:
+                    if _safe_metadata(session, directory=True).st_mtime >= cutoff:
+                        continue
+                    _remove_session(session)
+                    removed += 1
+                except OSError as error:
+                    complete = False
+                    logger.warning("Stale artifact preserved: %s", error)
+        finally:
+            os.close(descriptor)
+    return removed, complete
 
 
 class SessionTempManager:
@@ -30,6 +267,8 @@ class SessionTempManager:
         self._sessions: dict[str, Path] = {}
         self._closed_sessions: set[str] = set()
         self._lock = threading.Lock()
+        self._owner_dir: Path | None = None
+        self._owner_lease: int | None = None
 
     def _get_session_dir_locked(self, session_id: str) -> Path | None:
         if session_id in self._closed_sessions:
@@ -41,7 +280,14 @@ class SessionTempManager:
             return existing
 
         try:
-            dir_path = Path(tempfile.mkdtemp(prefix=f"{TEMP_PREFIX}{session_id}-"))
+            if self._owner_dir is None:
+                root = _namespace(create=True)
+                owner = root / f"owner-{uuid.uuid4().hex}"
+                owner.mkdir(mode=0o700)
+                descriptor = _lease(owner, create=True)
+                self._owner_dir, self._owner_lease = owner, descriptor
+            dir_path = self._owner_dir / f"session-{uuid.uuid4().hex}"
+            dir_path.mkdir(mode=0o700)
             self._sessions[session_id] = dir_path
             logger.info("Created session temp dir: %s", dir_path)
             return dir_path
@@ -163,8 +409,10 @@ class SessionTempManager:
             self._closed_sessions.add(session_id)
             dir_path = self._sessions.pop(session_id, None)
             if dir_path is not None:
-                shutil.rmtree(dir_path, ignore_errors=True)
-                logger.info("Cleaned up session temp dir: %s", dir_path)
+                try:
+                    _remove_session(dir_path)
+                except OSError as error:
+                    logger.warning("Session artifact cleanup incomplete: %s", error)
 
     def cleanup_all(self) -> None:
         with self._lock:
@@ -173,47 +421,151 @@ class SessionTempManager:
             self._sessions.clear()
 
             for session_id, dir_path in sessions_copy.items():
-                shutil.rmtree(dir_path, ignore_errors=True)
-                logger.debug("Cleaned up temp dir for session %s", session_id)
+                try:
+                    _remove_session(dir_path)
+                except OSError as error:
+                    logger.warning("Session artifact cleanup incomplete: %s", error)
+            if self._owner_lease is not None:
+                os.close(self._owner_lease)
+                self._owner_lease = None
+            self._owner_dir = None
 
         if sessions_copy:
             logger.info("Cleaned up %d session temp directories", len(sessions_copy))
 
     @staticmethod
     def gc_stale(max_age_hours: float = 4.0) -> int:
-        """Remove stale temp directories from previous crashed sessions.
+        """Reclaim abandoned, recognized sessions strictly older than the cutoff.
 
-        Scans the system temp directory for dirs matching the prefix
-        that are older than max_age_hours. Default 4h to avoid removing
-        dirs from concurrent server instances or long debug sessions.
-
-        Args:
-            max_age_hours: Maximum age in hours before a dir is considered stale.
-
-        Returns:
-            Number of stale directories removed.
+        A live OS lease always protects an owner, regardless of artifact age.
+        Discovery is confined to the private namespace: unmarked legacy flat
+        TEMP directories are preserved, never scanned, adopted or migrated.
+        Four hours is eligibility for a later opportunistic startup pass, not
+        a deletion deadline. Return only the number of successful removals.
         """
-        temp_root = Path(tempfile.gettempdir())
-        max_age_seconds = max_age_hours * 3600
-        now = time.time()
-        removed = 0
-
-        try:
-            for entry in temp_root.iterdir():
-                if not entry.name.startswith(TEMP_PREFIX) or not entry.is_dir():
-                    continue
-
-                try:
-                    mtime = entry.stat().st_mtime
-                    if (now - mtime) > max_age_seconds:
-                        shutil.rmtree(entry, ignore_errors=True)
-                        logger.info(
-                            "Removed stale temp dir: %s (age: %.1fh)", entry, (now - mtime) / 3600
-                        )
-                        removed += 1
-                except OSError:
-                    continue
-        except OSError as e:
-            logger.warning("Failed to scan temp directory for stale dirs: %s", e)
-
+        removed, _complete = _collect_stale(max_age_hours)
         return removed
+
+
+async def _join_gc_task(task):
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+    return task.result()
+
+
+async def _gc_worker_supervisor() -> None:
+    from ..windows_process_owner import DrainStatus, WindowsOwnedProcess
+
+    async def launch():
+        argv = [sys.executable, "-m", "netcoredbg_mcp.ui.temp_manager", "--gc-worker"]
+        if os.name == "nt":
+            return await WindowsOwnedProcess.launch(
+                generation=object(), argv=argv, cwd=None, env=None, stdin_mode="devnull"
+            )
+        return await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+    async def read_bounded(stream):
+        saved = bytearray()
+        while chunk := await stream.read(4096):
+            saved.extend(chunk[: max(0, 4096 - len(saved))])
+        return bytes(saved)
+
+    async def close(process):
+        if os.name == "nt":
+            receipt = await process.aclose()
+            facts = process.drain_snapshot(receipt)
+            facts["root_pid"] = process.pid
+            logger.info("GC worker drain receipt=%s", json.dumps(facts, sort_keys=True))
+            if (
+                receipt.owner != process.owner
+                or receipt.status is not DrainStatus.DRAINED
+                or receipt.active_processes != 0
+            ):
+                raise RuntimeError("GC worker owner drain failed")
+        else:
+            if process.returncode is None:
+                process.kill()
+            await asyncio.wait_for(process.wait(), _GC_CLOSE_SECONDS)
+            logger.info("GC worker drain pid=%s status=drained active=0", process.pid)
+
+    admission = asyncio.create_task(launch())
+    process = None
+    readers = []
+    completed = False
+    try:
+        process = await asyncio.shield(admission)
+        readers = [
+            asyncio.create_task(read_bounded(stream)) for stream in (process.stdout, process.stderr)
+        ]
+        deadline = time.monotonic() + _GC_WORK_SECONDS
+        while process.returncode is None:
+            if time.monotonic() >= deadline:
+                logger.warning("Stale artifact sweep incomplete: useful-work timeout")
+                break
+            await asyncio.sleep(0.01)
+        completed = process.returncode == 0
+    except asyncio.CancelledError:
+        logger.info("Stale artifact sweep incomplete: lifespan cancelled")
+        raise
+    except Exception:
+        logger.exception("Stale artifact sweep incomplete: worker failure")
+    finally:
+        try:
+            if process is None:
+                process = await _join_gc_task(admission)
+            await _join_gc_task(asyncio.create_task(close(process)))
+            if readers:
+                output, _errors = await _join_gc_task(
+                    asyncio.ensure_future(asyncio.gather(*readers))
+                )
+                if completed:
+                    summary = json.loads(output)
+                    if summary.get("complete") is True:
+                        logger.info("Stale artifact sweep complete: removed=%s", summary["removed"])
+                    else:
+                        logger.warning("Stale artifact sweep incomplete: deletion failure")
+                elif process.returncode is not None:
+                    logger.warning(
+                        "Stale artifact sweep incomplete: worker exit=%s", process.returncode
+                    )
+        finally:
+            for reader in readers:
+                if not reader.done():
+                    reader.cancel()
+
+
+@asynccontextmanager
+async def temp_gc_lifespan(_server):
+    worker = asyncio.create_task(_gc_worker_supervisor())
+    try:
+        yield {}
+    finally:
+        if not worker.done():
+            worker.cancel()
+        try:
+            await _join_gc_task(worker)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Stale artifact sweep incomplete: owner/lifecycle failure")
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] != ["--gc-worker"]:
+        raise SystemExit(2)
+    try:
+        removed, complete = _collect_stale()
+        print(json.dumps({"removed": removed, "complete": complete}))
+        raise SystemExit(0 if complete else 1)
+    except OSError as error:
+        print(f"Stale artifact sweep incomplete: {error}", file=sys.stderr)
+        raise SystemExit(1) from error

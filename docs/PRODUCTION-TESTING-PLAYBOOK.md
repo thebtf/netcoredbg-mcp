@@ -134,6 +134,22 @@ Supporting contract check; this source-tree test is mandatory but does not produ
 uv run --locked --extra dev pytest tests/critical/test_release_critical.py -m critical
 ```
 
+#### 2.1 Verify nonblocking artifact maintenance
+
+Confine this verification to a dedicated repository `.agent/tmp` fixture. Set `TEMP`, `TMP`, and `TMPDIR` for every server, GC worker, and fixture process to that exact isolated directory. Do not enumerate or clean actual OS TEMP. On POSIX, use an already-authorized repository filesystem that supports private current-user directories and real OS locks. If the available filesystem cannot enforce privacy, record that capability gap rather than bypassing the guard.
+
+1. Launch the installed console entry point outside repository import paths. Use a test-only injector that traps global-root enumeration and blocks enumeration of the canonical artifact namespace inside the actual GC child. Record the child barrier before sending requests.
+2. While the child remains blocked, complete `initialize`, `tools/list`, and `ping` within five seconds. Verify the tools capability, `x-mux.sharing=isolated`, and consumer-critical tools. Keep child output separate from MCP stdout.
+3. Close stdin before initialization and after initialization in separate runs. Observe termination and successful drain of the exact owned child within the five-second close budget plus a stated harness allowance. A cancelled task or absent PID alone does not prove drain. Separately exercise useful-work expiry and repeated cancellation around admission and running ownership.
+4. In a second fixture process, persist raw and crop artifacts under the real retained OS lease and backdate their session directory beyond four hours. A GC pass must preserve their bytes while the lease is held. After that process exits without cleanup, a subsequent pass must remove the stale session while preserving a fresh abandoned sibling. Preserve legacy flat-directory and outside-link sentinels. Count only successful removals.
+5. Through the public `ui_take_screenshot` and `stop_debug` calls, verify raw and optional crop bytes against returned hashes, then verify owning-session cleanup and refusal of a late write. Record staged-bundle failure separately. Do not replace this consumer proof with a private manager call.
+
+Supporting Windows checks reuse `tests/test_temp_gc_startup.py` and `tests/test_temp_manager.py` with an isolated `--basetemp` and `TEMP_GC_TEST_PYTHON`/`TEMP_GC_TEST_CLI` pointing to the installed environment. Source-only checks and stdlib subprocess checks do not prove the installed MCP journey. Report POSIX runtime, lock, private-filesystem, and installed-client evidence separately. Missing dependencies or private filesystem support mean that route remains unproven, not cross-platform success.
+
+Python retention remains `stop_cleanup_or_stale_gc_after_4h`. For newly owned artifacts, session stop and normal manager disposal retain exact-session cleanup. Otherwise, an abandoned session directory becomes eligible for a later bounded startup sweep only when strictly older than four hours. Active OS leases override age. An interrupted, failed, or timed-out sweep is incomplete maintenance, not successful cleanup or an initialization failure.
+
+The accepted compatibility exception preserves unmarked legacy flat `mcp-netcoredbg-*` directories without scanning, migration, adoption, or automatic deletion. Such data may remain indefinitely. An old manager can still clean its own exact mapped directory. Returned real artifact paths, hashes, atomic raw/crop persistence, and closed-session fencing retain their contract. The separate native scene capability's session-stop or 14,400-second expiry remains unchanged.
+
 ### 3. Supporting Protocol Check — Launch Environment Metadata Safety
 
 Command:

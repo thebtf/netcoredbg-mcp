@@ -13,6 +13,7 @@ from .response import build_error_response
 from .session import SessionManager
 from .session.state import DebugState, StoppedSnapshot
 from .utils.project import get_project_root
+from .ui.temp_manager import temp_gc_lifespan
 from .utils.source import read_source_context
 
 logger = logging.getLogger(__name__)
@@ -35,8 +36,6 @@ def get_session() -> SessionManager:
         _session = SessionManager(netcoredbg_path, _initial_project_path)
         # Register temp dir cleanup on server exit
         atexit.register(_session.temp_manager.cleanup_all)
-        # GC stale temp dirs from previous crashed sessions
-        _session.temp_manager.gc_stale()
     return _session
 
 
@@ -82,7 +81,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
     """
     global _initial_project_path
     _initial_project_path = project_path
-    mcp = FastMCP("netcoredbg-mcp")
+    mcp = FastMCP("netcoredbg-mcp", lifespan=temp_gc_lifespan)
     session = get_session()
 
     # Resource subscription tracking + update notifications (FD-006, Engram #393). See
@@ -110,8 +109,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
                     (
                         file_path,
                         tuple(
-                            (bp.line, bp.dap_line, bp.condition, bp.verified)
-                            for bp in breakpoints
+                            (bp.line, bp.dap_line, bp.condition, bp.verified) for bp in breakpoints
                         ),
                     )
                     for file_path, breakpoints in sorted(session.breakpoints.get_all().items())

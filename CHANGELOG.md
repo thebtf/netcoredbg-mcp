@@ -29,9 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - The existing Windows keyboard-input tools send all 17 named numeric-keypad keys as physical events through FlaUI and pywinauto: ten digits, Add/Subtract/Multiply/Divide/Decimal, keypad Enter, and NumLock. Keypad Enter and Divide retain their extended-key distinction; NumLock uses the physical VK 0x90 / scan 0x45 nonextended event instead of an incorrectly resolved key.
+- Python startup artifact GC now runs once in a lifespan-owned subprocess instead of blocking server construction. A five-second useful-work budget and bounded owner drain isolate incomplete maintenance from MCP initialization. New artifacts use a private current-user namespace and a retained OS lease; active owners remain protected regardless of age.
 
 ### Compatibility
 - No public tool arguments, response shapes, or backend defaults change. NumLock is a press/release, not a request to set the lock state; the scoped `ui_key_sequence` remains FlaUI-only, and the opt-in .NET preview remains unchanged.
+- Bounded artifact-retention compatibility exception: existing unmarked flat `mcp-netcoredbg-*` directories are preserved, not scanned, migrated, adopted, or automatically reclaimed, and may remain indefinitely. For new Python artifacts, the unchanged `stop_cleanup_or_stale_gc_after_4h` value means owning-session cleanup or eligibility for a later startup sweep after abandonment and strictly more than four hours. It is not a deletion deadline or an active-session expiry. Session-stop cleanup and the native scene capability's earlier-of-stop-or-14,400-seconds expiry remain unchanged.
 
 ## [0.23.11] - 2026-08-30
 
