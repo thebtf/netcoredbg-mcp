@@ -29,6 +29,7 @@ _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
 _JOB_OBJECT_ASSOCIATE_COMPLETION_PORT_INFORMATION = 7
 _JOB_OBJECT_MSG_NEW_PROCESS = 6
 _JOB_OBJECT_MSG_EXIT_PROCESS = 7
+_JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS = 8
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _CREATE_SUSPENDED = 0x00000004
@@ -1124,7 +1125,7 @@ class WindowsOwnedProcess:
                 self._retired_members.discard(pid)
                 if pid == self.owner.root_pid:
                     self._root_birth_seen = True
-            elif message == _JOB_OBJECT_MSG_EXIT_PROCESS:
+            elif message in (_JOB_OBJECT_MSG_EXIT_PROCESS, _JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS):
                 if pid not in self._live_births:
                     self._unverified_membership = True
                     continue

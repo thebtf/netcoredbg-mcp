@@ -308,8 +308,47 @@ async def test_short_lived_members_reconcile_without_reopening_historical_pids(
 
 
 @pytest.mark.asyncio
-async def test_reused_pid_counts_both_job_births_after_first_retirement(
+async def test_high_churn_abnormal_exits_reconcile_every_birth_without_reopening_pids(
     monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class HighChurnApi(_FakeApi):
+        def total_processes(self, _job: int) -> int:
+            return 736
+
+        def member_process_ids(self, _job: int) -> tuple[int, ...]:
+            return ()
+
+        def open_job_member(self, _job: int, _pid: int) -> int | None:
+            raise AssertionError("short-lived historical PIDs must not be reopened")
+
+    events: list[str] = []
+    api = HighChurnApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    api.messages.append((7, 41))
+    for pid in range(1000, 1524):
+        api.messages.extend(((6, pid), (7, pid)))
+    for pid in range(2000, 2202):
+        api.messages.extend(((6, pid), (8, pid)))
+    for pid in range(2000, 2009):
+        api.messages.extend(((6, pid), (8, pid)))
+    api._active_counts = [0]
+
+    receipt = await owner.drain_after_grace(grace_timeout=0.0, force_timeout=0.0)
+
+    assert receipt.status is DrainStatus.DRAINED, {
+        "births": owner._birth_notifications,
+        "live_without_handle": len(owner._live_births - owner._member_handles.keys()),
+        "unverified_membership": owner._unverified_membership,
+    }
+    assert not receipt.forced
+    assert (await owner.aclose()).status is DrainStatus.DRAINED
+    assert "terminate-job" not in events
+
+
+@pytest.mark.parametrize("exit_message", (7, 8))
+@pytest.mark.asyncio
+async def test_reused_pid_counts_both_job_births_after_first_retirement(
+    monkeypatch: pytest.MonkeyPatch, exit_message: int
 ) -> None:
     class ReusedPidApi(_FakeApi):
         snapshots = 0
@@ -322,7 +361,7 @@ async def test_reused_pid_counts_both_job_births_after_first_retirement(
             if self.snapshots == 1:
                 return (41, 42)
             if self.snapshots == 2:
-                self.messages.extend(((7, 42), (6, 42), (7, 42)))
+                self.messages.extend(((exit_message, 42), (6, 42), (exit_message, 42)))
             return ()
 
         def open_job_member(self, _job: int, pid: int) -> int | None:
@@ -344,10 +383,11 @@ async def test_reused_pid_counts_both_job_births_after_first_retirement(
     assert "terminate-job" not in events
 
 
+@pytest.mark.parametrize("exit_message", (7, 8))
 @pytest.mark.parametrize("inject_at", ("snapshot", "open"))
 @pytest.mark.asyncio
 async def test_recycled_pid_notifications_arrive_between_snapshot_and_first_open(
-    monkeypatch: pytest.MonkeyPatch, inject_at: str
+    monkeypatch: pytest.MonkeyPatch, inject_at: str, exit_message: int
 ) -> None:
     class LateRecycledApi(_FakeApi):
         forced = False
@@ -359,14 +399,14 @@ async def test_recycled_pid_notifications_arrive_between_snapshot_and_first_open
 
         def job_messages(self, port: int) -> tuple[tuple[int, int], ...]:
             messages = super().job_messages(port)
-            if (7, 42) in messages and (6, 42) in messages:
+            if (exit_message, 42) in messages and (6, 42) in messages:
                 self.events.append("observe:B")
             return messages
 
         def member_process_ids(self, _job: int) -> tuple[int, ...]:
             if inject_at == "snapshot" and not self.notified:
                 self.notified = True
-                self.messages.extend(((7, 42), (6, 42)))
+                self.messages.extend(((exit_message, 42), (6, 42)))
             return (41, 42) if not self.forced else ()
 
         def open_job_member(self, _job: int, pid: int) -> int | None:
@@ -375,7 +415,7 @@ async def test_recycled_pid_notifications_arrive_between_snapshot_and_first_open
             self.opens += 1
             if inject_at == "open" and not self.notified:
                 self.notified = True
-                self.messages.extend(((7, 42), (6, 42)))
+                self.messages.extend(((exit_message, 42), (6, 42)))
             return 22 + self.opens
 
         def wait_for_process(self, handle: int, _timeout_ms: int) -> bool:
@@ -386,7 +426,7 @@ async def test_recycled_pid_notifications_arrive_between_snapshot_and_first_open
 
         def terminate_job(self, job: int) -> None:
             self.forced = True
-            self.messages.append((7, 42))
+            self.messages.append((exit_message, 42))
             super().terminate_job(job)
 
     events: list[str] = []
@@ -408,9 +448,10 @@ async def test_recycled_pid_notifications_arrive_between_snapshot_and_first_open
     assert events.count("close:24") == (inject_at == "open")
 
 
+@pytest.mark.parametrize("exit_message", (7, 8))
 @pytest.mark.asyncio
 async def test_reused_live_pid_replaces_retired_handle_before_claiming_drain(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, exit_message: int
 ) -> None:
     class ReusedLiveApi(_FakeApi):
         recycled = False
@@ -423,7 +464,7 @@ async def test_reused_live_pid_replaces_retired_handle_before_claiming_drain(
         def job_messages(self, port: int) -> tuple[tuple[int, int], ...]:
             if self.opens == 1 and not self.recycled:
                 self.recycled = True
-                self.messages.extend(((7, 42), (6, 42)))
+                self.messages.extend(((exit_message, 42), (6, 42)))
             return super().job_messages(port)
 
         def member_process_ids(self, _job: int) -> tuple[int, ...]:
@@ -440,7 +481,7 @@ async def test_reused_live_pid_replaces_retired_handle_before_claiming_drain(
 
         def terminate_job(self, job: int) -> None:
             self.second_exited = True
-            self.messages.append((7, 42))
+            self.messages.append((exit_message, 42))
             super().terminate_job(job)
 
     events: list[str] = []
