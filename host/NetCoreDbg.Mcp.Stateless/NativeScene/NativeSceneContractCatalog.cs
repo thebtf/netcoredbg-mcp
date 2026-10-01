@@ -633,6 +633,21 @@ internal static class NativeSceneContractCatalog
                 return false;
             }
 
+            if (!ValidateInstance(instance, schema))
+            {
+                return false;
+            }
+
+            if (!ValidateCombinators(instance, schema))
+            {
+                return false;
+            }
+
+            return ValidateConditional(instance, schema);
+        }
+
+        private bool ValidateInstance(JsonNode? instance, JsonObject schema)
+        {
             if (instance is JsonObject objectNode && !ValidateObject(objectNode, schema))
             {
                 return false;
@@ -654,12 +669,7 @@ internal static class NativeSceneContractCatalog
                 return false;
             }
 
-            if (!ValidateCombinators(instance, schema))
-            {
-                return false;
-            }
-
-            return ValidateConditional(instance, schema);
+            return true;
         }
 
         private bool ValidateObject(JsonObject instance, JsonObject schema)
@@ -676,20 +686,9 @@ internal static class NativeSceneContractCatalog
                 return false;
             }
 
-            if (schema.TryGetPropertyValue("required", out var requiredNode))
+            if (schema.TryGetPropertyValue("required", out var requiredNode) && !HasRequiredProperties(instance, requiredNode))
             {
-                if (!TryGetArray(requiredNode, out var required))
-                {
-                    return false;
-                }
-
-                foreach (var requiredName in required)
-                {
-                    if (!TryGetString(requiredName, out var name) || !instance.ContainsKey(name))
-                    {
-                        return false;
-                    }
-                }
+                return false;
             }
 
             JsonObject? properties = null;
@@ -708,6 +707,29 @@ internal static class NativeSceneContractCatalog
             var additionalPropertiesFalse = schema.TryGetPropertyValue("additionalProperties", out var additionalProperties) &&
                                             TryGetBoolean(additionalProperties, out var additionalAllowed) && !additionalAllowed;
 
+            return ValidateObjectProperties(instance, properties, patternProperties, additionalPropertiesFalse);
+        }
+
+        private static bool HasRequiredProperties(JsonObject instance, JsonNode? requiredNode)
+        {
+            if (!TryGetArray(requiredNode, out var required))
+            {
+                return false;
+            }
+
+            foreach (var requiredName in required)
+            {
+                if (!TryGetString(requiredName, out var name) || !instance.ContainsKey(name))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private bool ValidateObjectProperties(JsonObject instance, JsonObject? properties, JsonObject? patternProperties, bool additionalPropertiesFalse)
+        {
             foreach (var property in instance)
             {
                 var matched = false;
@@ -721,28 +743,35 @@ internal static class NativeSceneContractCatalog
                     matched = true;
                 }
 
-                if (patternProperties is not null)
+                if (patternProperties is not null && !ValidatePatternProperties(property.Key, property.Value, patternProperties, ref matched))
                 {
-                    foreach (var patternProperty in patternProperties)
-                    {
-                        if (!Regex.IsMatch(property.Key, patternProperty.Key, RegexOptions.CultureInvariant))
-                        {
-                            continue;
-                        }
-
-                        if (patternProperty.Value is not JsonObject patternSchema || !Validate(property.Value, patternSchema))
-                        {
-                            return false;
-                        }
-
-                        matched = true;
-                    }
+                    return false;
                 }
 
                 if (!matched && additionalPropertiesFalse)
                 {
                     return false;
                 }
+            }
+
+            return true;
+        }
+
+        private bool ValidatePatternProperties(string name, JsonNode? value, JsonObject patternProperties, ref bool matched)
+        {
+            foreach (var patternProperty in patternProperties)
+            {
+                if (!Regex.IsMatch(name, patternProperty.Key, RegexOptions.CultureInvariant))
+                {
+                    continue;
+                }
+
+                if (patternProperty.Value is not JsonObject patternSchema || !Validate(value, patternSchema))
+                {
+                    return false;
+                }
+
+                matched = true;
             }
 
             return true;
@@ -874,20 +903,10 @@ internal static class NativeSceneContractCatalog
 
         private bool ValidateCombinators(JsonNode? instance, JsonObject schema)
         {
-            if (schema.TryGetPropertyValue("allOf", out var allOfNode))
+            if (schema.TryGetPropertyValue("allOf", out var allOfNode) &&
+                (!TryGetArray(allOfNode, out var allOf) || !ValidateAllOf(instance, allOf)))
             {
-                if (!TryGetArray(allOfNode, out var allOf))
-                {
-                    return false;
-                }
-
-                foreach (var branch in allOf)
-                {
-                    if (branch is not JsonObject branchSchema || !Validate(instance, branchSchema))
-                    {
-                        return false;
-                    }
-                }
+                return false;
             }
 
             if (schema.TryGetPropertyValue("anyOf", out var anyOfNode) &&
@@ -896,29 +915,35 @@ internal static class NativeSceneContractCatalog
                 return false;
             }
 
-            if (schema.TryGetPropertyValue("oneOf", out var oneOfNode))
+            return !schema.TryGetPropertyValue("oneOf", out var oneOfNode) ||
+                   (TryGetArray(oneOfNode, out var oneOf) && ValidateOneOf(instance, oneOf));
+        }
+
+        private bool ValidateAllOf(JsonNode? instance, JsonArray branches)
+        {
+            foreach (var branch in branches)
             {
-                if (!TryGetArray(oneOfNode, out var oneOf))
-                {
-                    return false;
-                }
-
-                var matches = 0;
-                foreach (var branch in oneOf)
-                {
-                    if (branch is JsonObject branchSchema && Validate(instance, branchSchema))
-                    {
-                        matches++;
-                    }
-                }
-
-                if (matches != 1)
+                if (branch is not JsonObject branchSchema || !Validate(instance, branchSchema))
                 {
                     return false;
                 }
             }
 
             return true;
+        }
+
+        private bool ValidateOneOf(JsonNode? instance, JsonArray branches)
+        {
+            var matches = 0;
+            foreach (var branch in branches)
+            {
+                if (branch is JsonObject branchSchema && Validate(instance, branchSchema))
+                {
+                    matches++;
+                }
+            }
+
+            return matches == 1;
         }
 
         private bool ValidateConditional(JsonNode? instance, JsonObject schema)

@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Private schema/search validation helpers are decomposed while preserving frozen error and schema behavior, reference-limit ordering, path checks, and evaluation budget; no behavior change or analyzer closure is claimed.
 ### Fixed
 - Source-only native scene bridges now launch inside dedicated Windows kill-on-close Jobs. Client, kill, or wait failures still release bridge descendants without terminating the debugger/debuggee; independent probe, artifact, and session cleanup preserves the established primary exception and response mappings.
 - Windows-owned adapter and build commands no longer treat zero Job accounting alone as a drained process tree. Completion reconciles Job-lifetime members with signaled process handles or proven retirement; failed close retains the owner for same-owner recovery before new work.

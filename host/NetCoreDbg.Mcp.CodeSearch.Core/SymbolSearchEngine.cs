@@ -122,31 +122,9 @@ public sealed class SymbolSearchEngine
 
         foreach (var path in SourceFiles(null, rules, operation))
         {
-            var relativeFile = RelativePath(path);
-            var lines = ReadLines(path, operation);
-            for (var index = 0; index < lines.Length; index++)
+            if (CollectFileReferences(path, referencePattern, results, maxResults, limit, policyCeiling, operation))
             {
-                operation.Check();
-                if (!referencePattern.IsMatch(lines[index], _settings.Strict ? operation : null))
-                {
-                    continue;
-                }
-
-                if (_settings.Strict && results.Count == policyCeiling)
-                {
-                    ThrowFailure(SearchFailure.PreviewSearchBudgetExceeded(operation.Tool));
-                }
-
-                results.Add(new ReferenceMatch(relativeFile, index + 1, FormatContext(lines[index])));
-                if (!_settings.Strict && results.Count >= limit)
-                {
-                    return results;
-                }
-                if (_settings.Strict && maxResults < policyCeiling && results.Count == maxResults)
-                {
-                    results.Sort(ReferenceMatchComparer.Instance);
-                    return results;
-                }
+                return results;
             }
         }
 
@@ -156,6 +134,59 @@ public sealed class SymbolSearchEngine
         }
 
         return results;
+    }
+
+    private bool CollectFileReferences(
+        string path,
+        SearchPattern referencePattern,
+        List<ReferenceMatch> results,
+        int maxResults,
+        int limit,
+        int policyCeiling,
+        SearchOperation operation)
+    {
+        var relativeFile = RelativePath(path);
+        var lines = ReadLines(path, operation);
+        for (var index = 0; index < lines.Length; index++)
+        {
+            operation.Check();
+            if (!referencePattern.IsMatch(lines[index], _settings.Strict ? operation : null))
+            {
+                continue;
+            }
+
+            if (_settings.Strict && results.Count == policyCeiling)
+            {
+                ThrowFailure(SearchFailure.PreviewSearchBudgetExceeded(operation.Tool));
+            }
+
+            results.Add(new ReferenceMatch(relativeFile, index + 1, FormatContext(lines[index])));
+            if (ReferenceLimitReached(results, maxResults, limit, policyCeiling))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool ReferenceLimitReached(
+        List<ReferenceMatch> results,
+        int maxResults,
+        int limit,
+        int policyCeiling)
+    {
+        if (!_settings.Strict && results.Count >= limit)
+        {
+            return true;
+        }
+        if (_settings.Strict && maxResults < policyCeiling && results.Count == maxResults)
+        {
+            results.Sort(ReferenceMatchComparer.Instance);
+            return true;
+        }
+
+        return false;
     }
 
     public SourceContext GetSourceContext(
@@ -463,25 +494,40 @@ public sealed class SymbolSearchEngine
             throw new ArgumentException($"Path is outside project root: {rawPath}");
         }
 
+        if (TryResolveDirectProjectFile(candidate, rawPath, rules, operation))
+        {
+            return candidate;
+        }
+
+        if (IsBasenameOnly(rawPath))
+        {
+            return ResolveUniqueBasename(Path.GetFileName(rawPath), rules, operation);
+        }
+
+        ThrowFileNotFoundOrFailure(rawPath, operation.Tool);
+        throw new InvalidOperationException("Unreachable");
+    }
+
+    private bool TryResolveDirectProjectFile(
+        string candidate,
+        string rawPath,
+        IReadOnlyList<GitIgnoreRule> rules,
+        SearchOperation operation)
+    {
         if (_settings.Strict)
         {
             VerifyStrictParentDirectories(candidate, operation);
             var candidateInfo = InspectStrictPath(candidate, expectedDirectory: false, operation);
-            if (candidateInfo.Exists)
+            if (!candidateInfo.Exists)
             {
-                if (candidateInfo.IsDirectory)
-                {
-                    ThrowFailure(SearchFailure.PreviewPathRefused(operation.Tool));
-                }
-
-                VerifyStrictFile(new FileInfo(candidate), operation);
-                if (IsSourceFile(new FileInfo(candidate), rules, operation))
-                {
-                    return candidate;
-                }
-
-                ThrowFileNotFoundOrFailure(rawPath, operation.Tool);
+                return false;
             }
+            if (candidateInfo.IsDirectory)
+            {
+                ThrowFailure(SearchFailure.PreviewPathRefused(operation.Tool));
+            }
+
+            VerifyStrictFile(new FileInfo(candidate), operation);
         }
         else
         {
@@ -489,21 +535,15 @@ public sealed class SymbolSearchEngine
             {
                 throw new IOException($"Path is not a file: {rawPath}");
             }
-            if (File.Exists(candidate))
+            if (!File.Exists(candidate))
             {
-                var file = new FileInfo(candidate);
-                if (IsSourceFile(file, rules, operation))
-                {
-                    return candidate;
-                }
-
-                ThrowFileNotFoundOrFailure(rawPath, operation.Tool);
+                return false;
             }
         }
 
-        if (IsBasenameOnly(rawPath))
+        if (IsSourceFile(new FileInfo(candidate), rules, operation))
         {
-            return ResolveUniqueBasename(Path.GetFileName(rawPath), rules, operation);
+            return true;
         }
 
         ThrowFileNotFoundOrFailure(rawPath, operation.Tool);
