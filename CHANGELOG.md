@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Windows collector timeout regression now separates bounded fixture readiness from its unchanged two-second execution timeout. A controlled delayed-startup case reproduces expiry before descendant creation; the synchronized case proves real Job membership, exact-handle termination, and fully reconciled owned-tree drain without changing production ownership rules.
 - Source-only .NET startup diagnostics opt in through `NETCOREDBG_MCP_PRIVATE_START_DIAGNOSTICS=<directory>`. Failed starts retain allowlisted branch/exception classifications and controlled launch-stage transcripts; native-scene test failure output receives them before fixture scratch deletion. No exception messages, user arguments, public response changes, or cleanup bypasses are introduced.
 - Native probe shutdown now ends connection waits on expected terminal cancellation or disposal, cleans up sessions that never connected, and removes an unused private dispatcher helper.
+- Search-source traversal cleanup preserves CRLF handling and glob-bracket behavior while removing an unused scalar helper; the stability fallback drops an unused input without changing callback or wire schemas.
 
 ## [0.23.12] - 2026-09-27
 
