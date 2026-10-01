@@ -298,6 +298,25 @@ public sealed class NativeSceneAtomicityTests : IDisposable
         await probe.AssertChannelClosedWithoutSecondRequestAsync();
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DisposeBeforeConnection_DrainsPendingCaptureAndKeepsTheChannelTerminal(bool captureBeforeDisposal)
+    {
+        await using var probe = NativeSceneAtomicityReflection.CreateRawProbeChannel();
+        var capture = captureBeforeDisposal ? probe.CaptureAsync(CancellationToken.None) : null;
+
+        await probe.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+
+        if (capture is not null)
+        {
+            Assert.Null(await capture.WaitAsync(TimeSpan.FromSeconds(1)));
+        }
+
+        Assert.Null(await probe.CaptureAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(1)));
+        await probe.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(1));
+    }
+
     [Fact]
     public async Task PostConnectCallerCancellation_TerminalizesProbeAndRejectsStaleResponseWithoutSendingASecondRequest()
     {

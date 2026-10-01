@@ -468,9 +468,6 @@ internal static class NativeSceneToolDispatcher
             return limits;
         }
 
-        private static string ReadConst(JsonElement definition) => definition.GetProperty("const").GetString()
-            ?? throw new InvalidOperationException("Frozen native scene version is invalid.");
-
         private static string ReadSingleEnum(JsonElement definition)
         {
             var values = definition.GetProperty("enum");

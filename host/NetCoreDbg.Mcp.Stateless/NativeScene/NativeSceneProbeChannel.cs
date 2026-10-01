@@ -315,9 +315,11 @@ internal sealed class NativeSceneProbeChannel : IAsyncDisposable
         }
         catch (OperationCanceledException) when (_stopping.IsCancellationRequested)
         {
+            return;
         }
         catch (ObjectDisposedException) when (IsTerminal)
         {
+            return;
         }
     }
 
