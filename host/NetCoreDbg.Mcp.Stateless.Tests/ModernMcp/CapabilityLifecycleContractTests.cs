@@ -1,3 +1,4 @@
+using ModelContextProtocol.Client;
 using System.Text.Json.Nodes;
 using System.Text.Json;
 using ModelContextProtocol.Protocol;
@@ -13,15 +14,20 @@ public sealed class CapabilityLifecycleContractTests
     [Fact]
     public async Task FailedSdkStartup_ReportsChildStandardError()
     {
-        var missingHook = Path.Combine(RepositoryLayout.ScratchRoot, $"missing-mcp-startup-hook-{Guid.NewGuid():N}.dll");
-        var failure = await Record.ExceptionAsync(() => ModernMcpProcessDriver.StartAsync(
+        var marker = $"controlled-mcp-startup-error-{Guid.NewGuid():N}";
+        var failure = await Assert.ThrowsAsync<ClientTransportClosedException>(() => ModernMcpProcessDriver.StartAsync(
             new ModernMcpStartOptions(AdditionalEnvironment: new Dictionary<string, string?>
             {
-                ["DOTNET_STARTUP_HOOKS"] = missingHook,
+                [StartupHook.ErrorMarkerEnvironmentVariable] = marker,
+                ["DOTNET_STARTUP_HOOKS"] = typeof(StartupHook).Assembly.Location,
             })));
 
-        Assert.NotNull(failure);
-        Assert.Contains(missingHook, Assert.IsType<string>(failure.Data["ModernMcpStartupStandardError"]), StringComparison.OrdinalIgnoreCase);
+        var completion = Assert.IsType<StdioClientCompletionDetails>(failure.Details);
+        Assert.True(completion.ProcessId is > 0);
+        Assert.True(completion.ExitCode is not null and not 0);
+        Assert.NotNull(completion.StandardErrorTail);
+        Assert.Contains(completion.StandardErrorTail, line => line.Contains(marker, StringComparison.Ordinal));
+        Assert.Contains(marker, Assert.IsType<string>(failure.Data["ModernMcpStartupStandardError"]), StringComparison.Ordinal);
     }
 
     [Fact]
