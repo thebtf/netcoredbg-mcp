@@ -2157,6 +2157,9 @@ def project_stateless_collector(
     packages = root.find("packages") if root.tag == "coverage" else None
     if packages is None:
         _coverage_failure("COVERAGE_REPORT_INVALID", "collector XML is not Cobertura")
+    test_project = Path(FIXED_COVERAGE_PROJECTS[3][1])
+    test_source_root = test_project.parent.as_posix() + "/"
+    startup_hook_source = test_source_root + "ModernMcp/StartupHook.cs"
     names: dict[str, str] = {}
     totals = [0, 0, 0, 0]
     kept = 0
@@ -2219,6 +2222,16 @@ def project_stateless_collector(
                 _coverage_failure(
                     "COVERAGE_SOURCE_MAPPING_INVALID", "collector source is untracked"
                 )
+            # The CLR requires a global StartupHook; bind it to its source and test module.
+            global_test_hook = class_name == "StartupHook"
+            if (global_test_hook or relative == startup_hook_source) and (
+                not global_test_hook
+                or relative != startup_hook_source
+                or package.get("name") != test_project.stem
+            ):
+                _coverage_failure(
+                    "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized test startup hook origin"
+                )
             fixtures = "host/NetCoreDbg.Mcp.Stateless.Tests/Fixtures/"
             if relative.startswith(fixtures):
                 if not relative.endswith(".cs") or not any(
@@ -2230,9 +2243,15 @@ def project_stateless_collector(
                     )
                 classes.remove(item)
                 continue
-            if relative.startswith("host/NetCoreDbg.Mcp.Stateless.Tests/"):
-                if not class_name.startswith("NetCoreDbg.Mcp.Stateless.Tests."):
-                    _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized test class")
+            if relative.startswith(test_source_root):
+                if (
+                    not relative.endswith(".cs")
+                    or package.get("name") != test_project.stem
+                    or not (class_name.startswith(test_project.stem + ".") or global_test_hook)
+                ):
+                    _coverage_failure(
+                        "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized test class origin"
+                    )
                 classes.remove(item)
                 continue
             production = (

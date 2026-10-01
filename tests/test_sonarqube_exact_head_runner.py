@@ -2818,8 +2818,9 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 '<condition number="1" type="jump" coverage="0%"/></conditions></line>'
             )
             raw.write_text(
-                '<coverage><packages><package name="source"><classes>'
+                '<coverage><packages><package name="NetCoreDbg.Mcp.Stateless"><classes>'
                 f'<class name="NetCoreDbg.Mcp.Stateless.Program" filename="{source}"><lines>{line}</lines></class>'
+                '</classes></package><package name="NetCoreDbg.Mcp.Stateless.Tests"><classes>'
                 f'<class name="NetCoreDbg.Mcp.Stateless.Tests.ProgramTests" filename="{test_source}"><lines>'
                 '<line number="1" hits="1"/></lines></class></classes></package></packages></coverage>',
                 encoding="utf-8",
@@ -2831,6 +2832,108 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             self.assertEqual(
                 runner.ElementTree.parse(projected).getroot().attrib["lines-valid"], "1"
             )
+
+    def test_stateless_collector_global_startup_hook_is_test_source_not_production(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            source = self._write_source(root, "host/NetCoreDbg.Mcp.Stateless/Program.cs")
+            hook = self._write_source(
+                root, "host/NetCoreDbg.Mcp.Stateless.Tests/ModernMcp/StartupHook.cs"
+            )
+            hook.write_text(
+                "internal static class StartupHook { public static void Initialize() {} }\n",
+                encoding="utf-8",
+            )
+            raw = root / "raw.xml"
+            projected = root / "projected.xml"
+            raw.write_text(
+                '<coverage><packages><package name="NetCoreDbg.Mcp.Stateless"><classes>'
+                f'<class name="NetCoreDbg.Mcp.Stateless.Program" filename="{source}"><lines>'
+                '<line number="26" hits="0" branch="true" condition-coverage="0% (0/2)"/>'
+                "</lines></class></classes></package>"
+                '<package name="NetCoreDbg.Mcp.Stateless.Tests"><classes>'
+                f'<class name="StartupHook" filename="{hook}"><lines>'
+                '<line number="1" hits="1" branch="true" condition-coverage="100% (2/2)"/>'
+                "</lines></class></classes></package></packages></coverage>",
+                encoding="utf-8",
+            )
+            with patch.object(runner, "is_tracked", return_value=True):
+                parsed = runner.project_stateless_collector(context, raw, projected)
+                plan = replace(self._plan(root), dotnet_inputs=(self._plan(root).dotnet_inputs[3],))
+                inputs = [runner._dotnet_input_evidence(plan, plan.dotnet_inputs[0], parsed)]
+                normalization = runner.normalize_dotnet_cobertura(plan, inputs)
+                final = runner.validate_final_dotnet_cobertura(context, plan, inputs, normalization)
+            self.assertEqual(final["source_paths"], ["host/NetCoreDbg.Mcp.Stateless/Program.cs"])
+            self.assertEqual(
+                tuple(
+                    final[key]
+                    for key in (
+                        "lines_valid",
+                        "lines_covered",
+                        "branches_valid",
+                        "branches_covered",
+                    )
+                ),
+                (1, 0, 2, 0),
+            )
+            self.assertEqual(final["sha256"], sha256(plan.dotnet_report.read_bytes()).hexdigest())
+
+    def test_stateless_collector_test_origin_requires_source_and_module_identity(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            source = self._write_source(root, "host/NetCoreDbg.Mcp.Stateless/Program.cs")
+            hook = "host/NetCoreDbg.Mcp.Stateless.Tests/ModernMcp/StartupHook.cs"
+            test_source = "host/NetCoreDbg.Mcp.Stateless.Tests/ProgramTests.cs"
+            module = "NetCoreDbg.Mcp.Stateless.Tests"
+            raw = root / "raw.xml"
+            cases = (
+                ("wrong-module", hook, "StartupHook", "NetCoreDbg.Mcp.Stateless"),
+                ("foreign-module", hook, "StartupHook", "Foreign.Tests"),
+                ("missing-module", hook, "StartupHook", ""),
+                ("other-test-source", test_source, "StartupHook", module),
+                (
+                    "production-source",
+                    "host/NetCoreDbg.Mcp.Stateless/StartupHook.cs",
+                    "StartupHook",
+                    module,
+                ),
+                ("foreign-source", "host/Foreign/StartupHook.cs", "StartupHook", module),
+                (
+                    "fixture-source",
+                    "host/NetCoreDbg.Mcp.Stateless.Tests/Fixtures/ControlledDapAdapter/StartupHook.cs",
+                    "StartupHook",
+                    "ControlledDapAdapter",
+                ),
+                ("misreported-hook", hook, module + ".ProgramTests", module),
+                ("production-class", test_source, "NetCoreDbg.Mcp.Stateless.Program", module),
+                ("foreign-class", test_source, "Foreign.Tests.ProgramTests", module),
+                (
+                    "namespaced-wrong-module",
+                    test_source,
+                    module + ".ProgramTests",
+                    "NetCoreDbg.Mcp.Stateless",
+                ),
+            )
+            with patch.object(runner, "is_tracked", return_value=True):
+                for name, relative, class_name, package in cases:
+                    with self.subTest(name=name):
+                        reported_source = self._write_source(root, relative)
+                        raw.write_text(
+                            '<coverage><packages><package name="NetCoreDbg.Mcp.Stateless"><classes>'
+                            f'<class name="NetCoreDbg.Mcp.Stateless.Program" filename="{source}"><lines>'
+                            '<line number="26" hits="0" branch="true" condition-coverage="0% (0/2)"/>'
+                            "</lines></class></classes></package>"
+                            f'<package name="{package}"><classes><class name="{class_name}" '
+                            f'filename="{reported_source}"><lines><line number="1" hits="1"/>'
+                            "</lines></class></classes></package></packages></coverage>",
+                            encoding="utf-8",
+                        )
+                        with self.assertRaisesRegex(
+                            runner.RunnerError, "COVERAGE_SOURCE_MAPPING_INVALID"
+                        ):
+                            runner.project_stateless_collector(context, raw, root / "projected.xml")
 
     def test_stateless_collector_refuses_foreign_and_duplicate_spellings(self):
         with TemporaryDirectory() as temporary_directory:
