@@ -3525,31 +3525,130 @@ class TestWave3CoverageProducerRedContracts(TestCase):
     def test_stateless_collector_timeout_drains_owned_descendant(self):
         if runner.os.name != "nt":
             self.skipTest("Windows Job Object ownership only")
+        import _winapi
         import psutil
 
-        with TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            pid_file = root / "descendant.pid"
-            child = root / "child.py"
-            child.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
-            parent = root / "parent.py"
-            parent.write_text(
-                "import subprocess, sys, time\n"
-                f"child = subprocess.Popen([sys.executable, {str(child)!r}])\n"
-                f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
-                "time.sleep(30)\n",
-                encoding="utf-8",
-            )
-            with self.assertRaises(TimeoutError):
-                asyncio.run(
-                    runner._run_owned_vstest(
-                        [sys.executable, str(parent)],
-                        RUNNER_PATH.parents[1],
-                        timeout_seconds=2,
-                    )
+        sys.path.insert(0, str(RUNNER_PATH.parents[1] / "src"))
+        owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
+        original_launch = owner_module.WindowsOwnedProcess.launch
+        original_force = owner_module.WindowsOwnedProcess.force_and_drain
+
+        for synchronize in (False, True):
+            with self.subTest(readiness=synchronize), TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                pid_file = root / "descendant.pid"
+                startup_gate = root / "startup.release"
+                child = root / "child.py"
+                child.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+                parent = root / "parent.py"
+                parent.write_text(
+                    "import subprocess, sys, time\n"
+                    "from pathlib import Path\n"
+                    "print('starting', flush=True)\n"
+                    f"while not Path({str(startup_gate)!r}).is_file(): time.sleep(0.01)\n"
+                    f"child = subprocess.Popen([sys.executable, {str(child)!r}], creationflags=0)\n"
+                    f"Path({str(pid_file)!r}).write_text(str(child.pid), encoding='utf-8')\n"
+                    "print('ready', flush=True)\n"
+                    "time.sleep(30)\n",
+                    encoding="utf-8",
                 )
-            self.assertTrue(pid_file.is_file())
-            self.assertFalse(psutil.pid_exists(int(pid_file.read_text(encoding="utf-8"))))
+                identity = {}
+                receipts = []
+
+                async def ready_launch(**kwargs):
+                    owner = await original_launch(**kwargs)
+                    identity["owner"] = owner
+                    try:
+                        self.assertEqual(
+                            (await asyncio.wait_for(owner.stdout.readline(), 10)).strip(),
+                            b"starting",
+                        )
+                        # Job admission is not descendant readiness; hold startup past expiry
+                        # or release it and observe the spawn before starting the same 2s wait.
+                        if synchronize:
+                            startup_gate.touch()
+                            self.assertEqual(
+                                (await asyncio.wait_for(owner.stdout.readline(), 10)).strip(),
+                                b"ready",
+                            )
+                            self.assertTrue(pid_file.is_file())
+                            identity["pid"] = int(pid_file.read_text(encoding="utf-8"))
+                            identity["handle"] = _winapi.OpenProcess(
+                                0x101001, False, identity["pid"]
+                            )
+                            self.assertTrue(
+                                owner._api.is_process_in_job(identity["handle"], owner._job_handle)
+                            )
+                            self.assertFalse(owner._api.wait_for_process(identity["handle"], 0))
+                            self.assertTrue(psutil.pid_exists(identity["pid"]))
+                        self.assertTrue(
+                            owner._api.is_process_in_job(owner._process_handle, owner._job_handle)
+                        )
+                        self.assertFalse(owner._api.wait_for_process(owner._process_handle, 0))
+                        return owner
+                    except BaseException:
+                        await owner.aclose()
+                        raise
+
+                async def record_force(owner, *, timeout):
+                    receipt = await original_force(owner, timeout=timeout)
+                    receipts.append(owner.drain_snapshot(receipt))
+                    return receipt
+
+                async def exercise():
+                    try:
+                        with (
+                            patch.object(owner_module.WindowsOwnedProcess, "launch", ready_launch),
+                            patch.object(
+                                owner_module.WindowsOwnedProcess, "force_and_drain", record_force
+                            ),
+                            self.assertRaises(TimeoutError) as raised,
+                        ):
+                            await runner._run_owned_vstest(
+                                [sys.executable, str(parent)],
+                                RUNNER_PATH.parents[1],
+                                timeout_seconds=2,
+                            )
+                        self.assertIs(type(raised.exception), TimeoutError)
+                    finally:
+                        if "owner" in identity:
+                            closed = await identity["owner"].aclose()
+                            self.assertIs(closed.status, owner_module.DrainStatus.DRAINED)
+
+                try:
+                    asyncio.run(exercise())
+                    if synchronize:
+                        self.assertTrue(pid_file.is_file())
+                        self.assertEqual(_winapi.WaitForSingleObject(identity["handle"], 0), 0)
+                        self.assertFalse(psutil.pid_exists(identity["pid"]))
+                    else:
+                        self.assertFalse(pid_file.is_file(), "startup was held until timeout")
+                    self.assertEqual(len(receipts), 1)
+                    facts = receipts[0]
+                    self.assertEqual(facts["status"], "drained", facts)
+                    self.assertTrue(facts["forced"], facts)
+                    self.assertEqual(facts["active_processes"], 0, facts)
+                    self.assertGreaterEqual(
+                        facts["total_processes"], 2 if synchronize else 1, facts
+                    )
+                    self.assertEqual(
+                        facts["total_processes"], facts["retained_exact_handles"], facts
+                    )
+                    self.assertEqual(
+                        facts["retained_exact_handles"], facts["signaled_exact_handles"], facts
+                    )
+                    self.assertTrue(facts["root_birth_seen"], facts)
+                    self.assertFalse(facts["unverified_membership"], facts)
+                    self.assertFalse(facts["handle_probe_failed"], facts)
+                    self.assertEqual(facts["live_members_without_handle"], 0, facts)
+                    print(
+                        f"collector timeout readiness={synchronize} root={identity['owner'].pid} "
+                        f"child={identity.get('pid')} marker={pid_file.is_file()} "
+                        f"drain={json.dumps(facts, sort_keys=True)}"
+                    )
+                finally:
+                    if "handle" in identity:
+                        _winapi.CloseHandle(identity["handle"])
 
     def test_stateless_collector_interruption_drains_owned_descendant(self):
         if runner.os.name != "nt":

@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The source-only native scene staging-invalidation regression now synchronizes on actual post-stage revalidation instead of a pre-dispatch polling timer, proving no artifact persistence after identity change and a later hash-verified lossless capture.
 - Failed-SDK-startup diagnostics coverage now uses a scoped BCL startup hook that emits and flushes stderr before failing, rather than assuming a missing CLR hook always produces diagnostics. Quiet failures retain truthful nullable stderr.
 - Coverage mapping accepts the CLR-required global `StartupHook` only when exact test source/module identity matches, preserving production coverage while failing closed for foreign origins.
+- The Windows collector timeout regression now separates bounded fixture readiness from its unchanged two-second execution timeout. A controlled delayed-startup case reproduces expiry before descendant creation; the synchronized case proves real Job membership, exact-handle termination, and fully reconciled owned-tree drain without changing production ownership rules.
 
 ## [0.23.12] - 2026-09-27
 
