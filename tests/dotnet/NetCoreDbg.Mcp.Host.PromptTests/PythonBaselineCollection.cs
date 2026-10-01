@@ -13,9 +13,17 @@ public sealed class PythonBaselineFixture : IAsyncLifetime
 {
     public PythonBaselineServer Server { get; private set; } = null!;
 
-    public async Task InitializeAsync() => Server = await PythonBaselineServer.StartAsync();
+    public Task InitializeAsync() => InitializeAsync(PythonBaselineServer.StartAsync());
 
-    public async Task DisposeAsync() => await Server.DisposeAsync();
+    internal async Task InitializeAsync(Task<PythonBaselineServer> startup) => Server = await startup;
+
+    public async Task DisposeAsync()
+    {
+        if (Server is not null)
+        {
+            await Server.DisposeAsync();
+        }
+    }
 }
 
 [CollectionDefinition(Name)]

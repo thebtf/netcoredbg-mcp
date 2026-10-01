@@ -16,10 +16,12 @@ namespace NetCoreDbg.Mcp.Host.PromptTests;
 public sealed class PythonBaselineServer : IAsyncDisposable
 {
     private readonly Process _process;
+    private readonly Task<string> _standardError;
 
-    private PythonBaselineServer(Process process, McpClient client)
+    private PythonBaselineServer(Process process, McpClient client, Task<string> standardError)
     {
         _process = process;
+        _standardError = standardError;
         Client = client;
     }
 
@@ -41,23 +43,68 @@ public sealed class PythonBaselineServer : IAsyncDisposable
 
         var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException("Failed to start the direct Python baseline server.");
-        _ = process.StandardError.ReadToEndAsync();
+        return await StartAsync(process);
+    }
 
-        var transport = new StreamClientTransport(process.StandardInput.BaseStream, process.StandardOutput.BaseStream);
-        var client = await McpClient.CreateAsync(transport);
-
-        return new PythonBaselineServer(process, client);
+    internal static async Task<PythonBaselineServer> StartAsync(Process process, McpClientOptions? clientOptions = null)
+    {
+        var standardError = process.StandardError.ReadToEndAsync();
+        var processId = process.Id.ToString();
+        var executable = process.StartInfo.FileName;
+        var workingDirectory = string.IsNullOrEmpty(process.StartInfo.WorkingDirectory)
+            ? Environment.CurrentDirectory
+            : process.StartInfo.WorkingDirectory;
+        try
+        {
+            var transport = new StreamClientTransport(process.StandardInput.BaseStream, process.StandardOutput.BaseStream);
+            var client = await McpClient.CreateAsync(transport, clientOptions);
+            return new PythonBaselineServer(process, client, standardError);
+        }
+        catch (Exception primary)
+        {
+            primary.Data["PythonBaseline.ProcessId"] = processId;
+            primary.Data["PythonBaseline.Executable"] = executable;
+            primary.Data["PythonBaseline.WorkingDirectory"] = workingDirectory;
+            try
+            {
+                primary.Data["PythonBaseline.StandardError"] = await StopProcessAsync(process, standardError);
+            }
+            catch (Exception cleanup)
+            {
+                primary.Data["PythonBaseline.CleanupFailure"] = cleanup.ToString();
+            }
+            Console.Error.WriteLine($"Direct Python baseline initialization failed: {primary.GetType().Name}: {primary.Message}; executable={executable}; cwd={workingDirectory}; pid={processId}\n{primary.Data["PythonBaseline.StandardError"]}\n{primary.Data["PythonBaseline.CleanupFailure"]}");
+            throw;
+        }
     }
 
     public async ValueTask DisposeAsync()
     {
-        await Client.DisposeAsync();
-        _process.StandardInput.Close();
-        if (!_process.WaitForExit(5000))
+        try
         {
-            _process.Kill(entireProcessTree: true);
+            await Client.DisposeAsync();
         }
+        finally
+        {
+            await StopProcessAsync(_process, _standardError);
+        }
+    }
 
-        _process.Dispose();
+    private static async Task<string> StopProcessAsync(Process process, Task<string> standardError)
+    {
+        try
+        {
+            process.StandardInput.Close();
+            if (!process.WaitForExit(5000))
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+            return await standardError;
+        }
+        finally
+        {
+            process.Dispose();
+        }
     }
 }
