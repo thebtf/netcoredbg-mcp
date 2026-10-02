@@ -109,7 +109,7 @@ def _authority_paths() -> tuple[str, ...]:
 
 def _git(root: Path, *arguments: str) -> str:
     result = subprocess.run(
-        ["git", *arguments],
+        ["git", "-c", "core.longpaths=true", *arguments],
         cwd=root,
         capture_output=True,
         check=False,
@@ -125,8 +125,11 @@ def _create_authority_repository(
     origin = tmp_path / "origin.git"
     authority_root = tmp_path / "authority-root"
     _git(tmp_path, "init", "--bare", str(origin))
+    # Local receive-pack drops command-scoped config; keep it in both owned repositories.
+    _git(origin, "config", "--local", "core.longpaths", "true")
     authority_root.mkdir()
     _git(authority_root, "init")
+    _git(authority_root, "config", "--local", "core.longpaths", "true")
     _git(authority_root, "config", "user.email", "artifact-tests@example.test")
     _git(authority_root, "config", "user.name", "Artifact Tests")
     _git(authority_root, "checkout", "-b", "main")
