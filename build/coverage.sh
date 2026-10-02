@@ -122,6 +122,7 @@ python_test_paths=(
   tests/test_ui_hover.py
   tests/test_sonarqube_exact_head_runner.py
   tests/test_stateless_preview_artifact.py
+  tests/test_windows_process_owner.py
 )
 coverage run --source=src/netcoredbg_mcp,scripts --data-file="$shell_python_data" -m pytest \
   --basetemp="$python_base_temp" --cache-clear -o "cache_dir=$python_cache_directory" "${python_test_paths[@]}"
