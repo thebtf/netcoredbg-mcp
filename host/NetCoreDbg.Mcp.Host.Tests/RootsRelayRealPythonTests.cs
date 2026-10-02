@@ -6,6 +6,7 @@ using ModelContextProtocol;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace NetCoreDbg.Mcp.Host.Tests;
 
@@ -28,7 +29,7 @@ namespace NetCoreDbg.Mcp.Host.Tests;
 /// a mock of RootsRelay/RelaySession/RelayComposition themselves.
 /// </summary>
 [Collection("SequentialRealPythonProcess")]
-public sealed class RootsRelayRealPythonTests
+public sealed class RootsRelayRealPythonTests(ITestOutputHelper output)
 {
     private const string MarkerSymbol = "RootsRelayMarkerProbe";
     private const string ToolName = "find_code_symbol";
@@ -37,6 +38,9 @@ public sealed class RootsRelayRealPythonTests
     private static readonly string RepoRoot = LocateRepoRoot();
     private static readonly string PythonExecutable = Path.Combine(RepoRoot, ".venv", "Scripts", "python.exe");
     private static readonly ImmutableArray<string> ProjectFromCurrentDirectoryArguments = ImmutableArray.Create("--project-from-cwd");
+    private static readonly string ScratchRoot =
+        Environment.GetEnvironmentVariable("NETCOREDBG_TEST_SCRATCH_ROOT")
+        ?? Path.Combine(RepoRoot, ".tmp", "roots-relay-tests");
 
     private static string LocateRepoRoot()
     {
@@ -52,8 +56,43 @@ public sealed class RootsRelayRealPythonTests
             $"Could not locate the repository root (pyproject.toml) above {AppContext.BaseDirectory}.");
     }
 
+    private static string CreateFixtureDirectory(string prefix)
+    {
+        Assert.True(Path.IsPathFullyQualified(ScratchRoot));
+        Assert.StartsWith(
+            Path.Combine(RepoRoot, ".tmp") + Path.DirectorySeparatorChar,
+            Path.GetFullPath(ScratchRoot), StringComparison.OrdinalIgnoreCase);
+        var directory = Path.Combine(ScratchRoot, prefix + Guid.NewGuid().ToString("N"));
+        Assert.False(Path.Exists(directory), $"refusing to adopt existing fixture scratch: {directory}");
+        Directory.CreateDirectory(directory);
+        return directory;
+    }
+
+    private PythonBackendProcess StartRealPython(IReadOnlyList<string> pythonArgs, string tempRoot)
+    {
+        var originalEnvironment = new[] { "TEMP", "TMP", "TMPDIR" }
+            .ToDictionary(name => name, Environment.GetEnvironmentVariable);
+        try
+        {
+            foreach (var name in originalEnvironment.Keys)
+            {
+                Environment.SetEnvironmentVariable(name, tempRoot);
+            }
+            output.WriteLine($"Python launch: cwd={Environment.CurrentDirectory}; TEMP/TMP/TMPDIR={tempRoot}");
+            return PythonBackendProcess.Start(pythonArgs);
+        }
+        finally
+        {
+            foreach (var (name, value) in originalEnvironment)
+            {
+                Environment.SetEnvironmentVariable(name, value);
+            }
+        }
+    }
+
     private static void WriteMarkerCSharpFile(string directory)
     {
+        AssertSameDirectory(ScratchRoot, Path.GetDirectoryName(directory)!);
         Directory.CreateDirectory(directory);
         File.WriteAllText(
             Path.Combine(directory, "Marker.cs"),
@@ -65,12 +104,12 @@ public sealed class RootsRelayRealPythonTests
     /// real <see cref="RelaySession"/>/<see cref="RelayComposition.Build"/>) plus this
     /// module's own registration - the integration hook reported with this change.
     /// </summary>
-    private static (RelaySession Session, PythonBackendProcess Python, DuplexChannel Downstream)
-        StartRelayedRealPython(IReadOnlyList<string> pythonArgs)
+    private (RelaySession Session, PythonBackendProcess Python, DuplexChannel Downstream)
+        StartRelayedRealPython(IReadOnlyList<string> pythonArgs, string tempRoot)
     {
         Assert.True(File.Exists(PythonExecutable), $"expected the worktree venv interpreter at {PythonExecutable}");
         Environment.SetEnvironmentVariable("NETCOREDBG_MCP_PYTHON_EXECUTABLE", PythonExecutable);
-        var python = PythonBackendProcess.Start(pythonArgs);
+        var python = StartRealPython(pythonArgs, tempRoot);
 
         var downstreamChannel = new DuplexChannel();
         var rootsRelay = new RootsRelay();
@@ -98,7 +137,7 @@ public sealed class RootsRelayRealPythonTests
         python.Dispose();
     }
 
-    private static async Task<JsonDocument> CallFindMarkerAsync(McpClient client)
+    private async Task<JsonDocument> CallFindMarkerAsync(McpClient client)
     {
         var result = await client.CallToolAsync(
             ToolName,
@@ -109,6 +148,7 @@ public sealed class RootsRelayRealPythonTests
             Assert.Fail(DescribeResult(result));
         }
         var text = Assert.IsType<TextContentBlock>(result.Content[0]);
+        output.WriteLine($"Real Python find_code_symbol: {text.Text}");
         return JsonDocument.Parse(text.Text);
     }
 
@@ -121,10 +161,10 @@ public sealed class RootsRelayRealPythonTests
     [Fact]
     public async Task DownstreamRoot_DifferentFromHostCwd_ReachesRealPythonScopedTool()
     {
-        var downstreamRoot = Path.Combine(Path.GetTempPath(), "roots-relay-" + Guid.NewGuid().ToString("N"));
+        var downstreamRoot = CreateFixtureDirectory("roots-relay-");
         WriteMarkerCSharpFile(downstreamRoot);
 
-        var (session, python, downstreamChannel) = StartRelayedRealPython(Array.Empty<string>());
+        var (session, python, downstreamChannel) = StartRelayedRealPython(Array.Empty<string>(), downstreamRoot);
         try
         {
             await using var downstreamClient = await McpClient.CreateAsync(
@@ -169,11 +209,11 @@ public sealed class RootsRelayRealPythonTests
         // Python backend's own stdio transport. With no operator pin configured, client
         // MCP roots remain a valid local fallback over process CWD - this module only
         // makes that fallback reachable through the host, it does not invent it.
-        var rootsRoot = Path.Combine(Path.GetTempPath(), "roots-relay-direct-" + Guid.NewGuid().ToString("N"));
+        var rootsRoot = CreateFixtureDirectory("roots-relay-direct-");
         WriteMarkerCSharpFile(rootsRoot);
 
         Environment.SetEnvironmentVariable("NETCOREDBG_MCP_PYTHON_EXECUTABLE", PythonExecutable);
-        var python = PythonBackendProcess.Start(Array.Empty<string>());
+        var python = StartRealPython(Array.Empty<string>(), rootsRoot);
         try
         {
             await using var directClient = await McpClient.CreateAsync(
@@ -209,10 +249,10 @@ public sealed class RootsRelayRealPythonTests
     [Fact]
     public async Task ExplicitProjectFlag_PrecedenceUnchanged_WhenDownstreamHasNoRootsCapability()
     {
-        var projectRoot = Path.Combine(Path.GetTempPath(), "roots-relay-explicit-" + Guid.NewGuid().ToString("N"));
+        var projectRoot = CreateFixtureDirectory("roots-relay-explicit-");
         WriteMarkerCSharpFile(projectRoot);
 
-        var (session, python, downstreamChannel) = StartRelayedRealPython(new[] { "--project", projectRoot });
+        var (session, python, downstreamChannel) = StartRelayedRealPython(new[] { "--project", projectRoot }, projectRoot);
         try
         {
             // No Roots capability at all - a real client that genuinely does not support
@@ -237,20 +277,18 @@ public sealed class RootsRelayRealPythonTests
     [Fact]
     public async Task ProjectFromCwdFlag_PrecedenceUnchanged_WhenDownstreamHasNoRootsCapability()
     {
-        var projectRoot = Path.Combine(Path.GetTempPath(), "roots-relay-cwd-" + Guid.NewGuid().ToString("N"));
+        var projectRoot = CreateFixtureDirectory("roots-relay-cwd-");
         WriteMarkerCSharpFile(projectRoot);
-        // find_dotnet_project_root's marker search would otherwise walk up from this
-        // process's own cwd into the repository's own .sln/.git; a project marker placed
-        // directly in the temp cwd itself is matched on the very first ancestor check, so
-        // the resolved root is deterministic regardless of the surrounding repository.
-        File.WriteAllText(Path.Combine(projectRoot, "Fixture.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        // Solution markers are searched across all ancestors before project markers.
+        // A local .sln prevents the repository's solution from capturing this owned cwd.
+        File.WriteAllText(Path.Combine(projectRoot, "Fixture.sln"), "");
 
         var originalCwd = Environment.CurrentDirectory;
         (RelaySession Session, PythonBackendProcess Python, DuplexChannel Downstream) started;
         Environment.CurrentDirectory = projectRoot;
         try
         {
-            started = StartRelayedRealPython(ProjectFromCurrentDirectoryArguments);
+            started = StartRelayedRealPython(ProjectFromCurrentDirectoryArguments, projectRoot);
         }
         finally
         {
@@ -280,7 +318,7 @@ public sealed class RootsRelayRealPythonTests
     [Fact]
     public async Task ProjectRootEnvironmentVariable_PrecedenceUnchanged_WhenDownstreamHasNoRootsCapability()
     {
-        var projectRoot = Path.Combine(Path.GetTempPath(), "roots-relay-envvar-" + Guid.NewGuid().ToString("N"));
+        var projectRoot = CreateFixtureDirectory("roots-relay-envvar-");
         WriteMarkerCSharpFile(projectRoot);
 
         // NETCOREDBG_PROJECT_ROOT is read once by the child Python process at its own
@@ -288,7 +326,7 @@ public sealed class RootsRelayRealPythonTests
         // inside StartRelayedRealPython), so restoring it immediately afterward cannot
         // affect the already-started child.
         Environment.SetEnvironmentVariable(ProjectRootEnvironmentVariable, projectRoot);
-        var (session, python, downstreamChannel) = StartRelayedRealPython(Array.Empty<string>());
+        var (session, python, downstreamChannel) = StartRelayedRealPython(Array.Empty<string>(), projectRoot);
         Environment.SetEnvironmentVariable(ProjectRootEnvironmentVariable, null);
 
         try
@@ -312,10 +350,10 @@ public sealed class RootsRelayRealPythonTests
     [Fact]
     public async Task EmptyRootsList_FallsThroughToExplicitProject_RealPython()
     {
-        var projectRoot = Path.Combine(Path.GetTempPath(), "roots-relay-empty-" + Guid.NewGuid().ToString("N"));
+        var projectRoot = CreateFixtureDirectory("roots-relay-empty-");
         WriteMarkerCSharpFile(projectRoot);
 
-        var (session, python, downstreamChannel) = StartRelayedRealPython(new[] { "--project", projectRoot });
+        var (session, python, downstreamChannel) = StartRelayedRealPython(new[] { "--project", projectRoot }, projectRoot);
         try
         {
             // Declares Roots (so this module correctly wires/advertises it) but returns
@@ -352,12 +390,11 @@ public sealed class RootsRelayRealPythonTests
         // Operator --project plus a non-empty hostile client root through the real relay:
         // marker lives only under the pinned path so a roots-first regression would yield
         // count=0 (or the wrong project_root) instead of a silent false green.
-        var projectRoot = Path.Combine(Path.GetTempPath(), "roots-relay-pinned-" + Guid.NewGuid().ToString("N"));
-        var hostileRoot = Path.Combine(Path.GetTempPath(), "roots-relay-hostile-" + Guid.NewGuid().ToString("N"));
+        var projectRoot = CreateFixtureDirectory("roots-relay-pinned-");
+        var hostileRoot = CreateFixtureDirectory("roots-relay-hostile-");
         WriteMarkerCSharpFile(projectRoot);
-        Directory.CreateDirectory(hostileRoot);
 
-        var (session, python, downstreamChannel) = StartRelayedRealPython(new[] { "--project", projectRoot });
+        var (session, python, downstreamChannel) = StartRelayedRealPython(new[] { "--project", projectRoot }, projectRoot);
         try
         {
             await using var downstreamClient = await McpClient.CreateAsync(

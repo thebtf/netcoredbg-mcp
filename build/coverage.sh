@@ -177,6 +177,10 @@ for index in "${!dotnet_ids[@]}"; do
   fi
   if [[ "${dotnet_ids[$index]}" == "stateless-preview" ]]; then
     NETCOREDBG_PREVIEW_ARTIFACT_ROOT="$preview_artifact_directory" dotnet test "${test_arguments[@]}"
+  elif [[ "${dotnet_ids[$index]}" == "host" ]]; then
+    # RootsRelay real-Python fixtures allocate fresh children below this claimed input root.
+    # Their child TEMP/TMP/TMPDIR inherit each owned fixture, never global OS TEMP.
+    NETCOREDBG_TEST_SCRATCH_ROOT="$(dirname "$output_prefix")/scratch" dotnet test "${test_arguments[@]}"
   else
     dotnet test "${test_arguments[@]}"
   fi
