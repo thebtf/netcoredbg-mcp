@@ -3930,6 +3930,15 @@ def api_json(host: str, endpoint: str, parameters: Mapping[str, str], token: str
     return decoded
 
 
+def _validate_ce_task_response(response: Mapping[str, Any], task_id: str) -> dict[str, Any]:
+    task = response.get("task")
+    if not isinstance(task, dict) or not isinstance(task.get("status"), str):
+        raise RunnerError("Submitted Compute Engine task response is malformed.")
+    if task.get("id") != task_id:
+        raise RunnerError("Compute Engine response does not match the submitted task ID.")
+    return task
+
+
 def wait_for_ce_task(host: str, task_id: str, token: str, receipt: dict[str, Any]) -> str:
     deadline = time.monotonic() + CE_TIMEOUT_SECONDS
     deadline_at = datetime.now(timezone.utc) + timedelta(seconds=CE_TIMEOUT_SECONDS)
@@ -3944,11 +3953,7 @@ def wait_for_ce_task(host: str, task_id: str, token: str, receipt: dict[str, Any
     }
     while True:
         response = api_json(host, "/api/ce/task", {"id": task_id}, token)
-        task = response.get("task")
-        if not isinstance(task, dict) or not isinstance(task.get("status"), str):
-            raise RunnerError("Submitted Compute Engine task response is malformed.")
-        if task.get("id") != task_id:
-            raise RunnerError("Compute Engine response does not match the submitted task ID.")
+        task = _validate_ce_task_response(response, task_id)
         receipt["compute_engine"]["returned_task_id"] = task["id"]
         status = task["status"]
         receipt["compute_engine"]["states"].append({"at": utc_now(), "status": status})
@@ -3999,6 +4004,33 @@ def current_analysis_binding(host: str, analysis_id: str, head: str, token: str)
     }
 
 
+def _validated_quality_gate_condition(condition: Any) -> dict[str, str]:
+    if not isinstance(condition, dict):
+        raise RunnerError(MALFORMED_GATE_CONDITIONS)
+    metric_key = condition.get("metricKey")
+    condition_status = condition.get("status")
+    comparator = condition.get("comparator")
+    if (
+        not isinstance(metric_key, str)
+        or not metric_key.strip()
+        or condition_status not in {"OK", "WARN", "ERROR", "NONE"}
+        or comparator not in {"GT", "LT", "EQ", "NE"}
+    ):
+        raise RunnerError(MALFORMED_GATE_CONDITIONS)
+    validated_condition = {
+        "metricKey": metric_key,
+        "status": condition_status,
+        "comparator": comparator,
+    }
+    for key in ("warningThreshold", "errorThreshold", "actualValue"):
+        if key in condition:
+            value = condition[key]
+            if not isinstance(value, str):
+                raise RunnerError(MALFORMED_GATE_CONDITIONS)
+            validated_condition[key] = value
+    return validated_condition
+
+
 def analysis_quality_gate(host: str, analysis_id: str, token: str) -> dict[str, Any]:
     response = api_json(
         host,
@@ -4017,30 +4049,7 @@ def analysis_quality_gate(host: str, analysis_id: str, token: str) -> dict[str, 
         raise RunnerError(MALFORMED_GATE_CONDITIONS)
     validated_conditions: list[dict[str, str]] = []
     for condition in conditions:
-        if not isinstance(condition, dict):
-            raise RunnerError(MALFORMED_GATE_CONDITIONS)
-        metric_key = condition.get("metricKey")
-        condition_status = condition.get("status")
-        comparator = condition.get("comparator")
-        if (
-            not isinstance(metric_key, str)
-            or not metric_key.strip()
-            or condition_status not in {"OK", "WARN", "ERROR", "NONE"}
-            or comparator not in {"GT", "LT", "EQ", "NE"}
-        ):
-            raise RunnerError(MALFORMED_GATE_CONDITIONS)
-        validated_condition = {
-            "metricKey": metric_key,
-            "status": condition_status,
-            "comparator": comparator,
-        }
-        for key in ("warningThreshold", "errorThreshold", "actualValue"):
-            if key in condition:
-                value = condition[key]
-                if not isinstance(value, str):
-                    raise RunnerError(MALFORMED_GATE_CONDITIONS)
-                validated_condition[key] = value
-        validated_conditions.append(validated_condition)
+        validated_conditions.append(_validated_quality_gate_condition(condition))
     return {
         "analysis_id": analysis_id,
         "status": status,
