@@ -5,12 +5,21 @@ using System.Text.Json.Nodes;
 using NetCoreDbg.Mcp.CodeSearch.Core;
 using ModelContextProtocol.Protocol;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace NetCoreDbg.Mcp.Stateless.Preview.Tests;
 
 public sealed class PreviewProcessContractTests
 {
     private const string ToolName = "find_code_symbol";
+    private static readonly TimeSpan StartupObservationTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan PostValidationExitTimeout = TimeSpan.FromSeconds(2);
+    private readonly ITestOutputHelper _output;
+
+    public PreviewProcessContractTests(ITestOutputHelper output)
+    {
+        _output = output;
+    }
 
     [Fact]
     public async Task Discover_IsSupportedAsTheLiteralFirstFreshProcessRequest()
@@ -117,7 +126,7 @@ public sealed class PreviewProcessContractTests
             new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = new JsonObject { ["name"] = "client", ["version"] = " " }, [MetaKeys.ClientCapabilities] = new JsonObject() } },
         };
         // Allow test-runner scheduling headroom; this is not a product response deadline.
-        var observationTimeout = TimeSpan.FromSeconds(10);
+        var observationTimeout = StartupObservationTimeout;
 
         for (var caseIndex = 0; caseIndex < malformedRequests.Length; caseIndex++)
         {
@@ -821,14 +830,116 @@ public sealed class PreviewProcessContractTests
             arguments = ["--project", arguments[0]];
         }
 
-        using var process = PreviewOutputPathResolver.StartDirect(arguments);
-        var standardOutput = process.StandardOutput.ReadToEndAsync();
-        var standardError = process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        await AssertInvalidLaunchAsync(PreviewRepositoryLayout.Root, arguments);
+    }
 
-        Assert.Equal(64, process.ExitCode);
-        Assert.Equal("", await standardOutput);
-        Assert.Equal("PREVIEW_ROOT_INVALID\n", await standardError);
+    [Theory]
+    [InlineData("--project")]
+    [InlineData("--project", ".")]
+    public async Task InvalidLaunchBeforeValidationBeyondTwoSecondsPreservesTheClosedRefusal(params string[] arguments)
+    {
+        var barrierName = $"Local\\preview-startup-{Guid.NewGuid():N}";
+        using var started = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-started");
+        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-release");
+        using var process = PreviewOutputPathResolver.StartDirectIn(
+            PreviewRepositoryLayout.FixtureRoot,
+            new Dictionary<string, string?>
+            {
+                ["DOTNET_STARTUP_HOOKS"] = typeof(StartupHook).Assembly.Location,
+                [StartupHook.StartupBarrierEnvironmentVariable] = barrierName,
+            },
+            arguments);
+        _ = process.SafeHandle;
+        var observation = AssertInvalidLaunchAsync(process);
+        try
+        {
+            Assert.True(started.WaitOne(StartupObservationTimeout), "CLR child did not enter its pre-Main barrier.");
+            await Task.Delay(TimeSpan.FromMilliseconds(2500));
+            var exitedBeforeValidation = process.HasExited;
+            release.Set();
+            await observation;
+
+            Assert.False(exitedBeforeValidation);
+            Assert.True(process.HasExited);
+            _output.WriteLine($"process {process.Id}: pre-Main held 2500ms; exit=64; exact stderr; zero stdout; retained handle signaled.");
+        }
+        finally
+        {
+            release.Set();
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+        }
+    }
+
+    [Fact]
+    public async Task InvalidLaunchAfterValidationStillTimesOutAndCleansUpTheActualChild()
+    {
+        var barrierName = $"Local\\preview-exit-{Guid.NewGuid():N}";
+        using var started = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-started");
+        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-release");
+        using var process = PreviewOutputPathResolver.StartDirectIn(
+            PreviewRepositoryLayout.Root,
+            new Dictionary<string, string?>
+            {
+                ["DOTNET_STARTUP_HOOKS"] = typeof(StartupHook).Assembly.Location,
+                [StartupHook.ExitBarrierEnvironmentVariable] = barrierName,
+            },
+            "--project");
+        _ = process.SafeHandle;
+        var observation = AssertInvalidLaunchAsync(process);
+        try
+        {
+            Assert.True(started.WaitOne(StartupObservationTimeout), "CLR child did not reach ProcessExit after validation.");
+            await Assert.ThrowsAsync<TimeoutException>(() => observation);
+            Assert.True(process.HasExited);
+            _output.WriteLine($"process {process.Id}: actual validation emitted; held ProcessExit refused by 2s exit observation; retained handle signaled after tree kill.");
+        }
+        finally
+        {
+            release.Set();
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+        }
+    }
+
+    [Fact]
+    public async Task InvalidLaunchWithoutValidationStillTimesOutAndCleansUpTheActualChild()
+    {
+        var barrierName = $"Local\\preview-no-validation-{Guid.NewGuid():N}";
+        using var started = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-started");
+        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-release");
+        using var process = PreviewOutputPathResolver.StartDirectIn(
+            PreviewRepositoryLayout.Root,
+            new Dictionary<string, string?>
+            {
+                ["DOTNET_STARTUP_HOOKS"] = typeof(StartupHook).Assembly.Location,
+                [StartupHook.StartupBarrierEnvironmentVariable] = barrierName,
+            },
+            "--project");
+        _ = process.SafeHandle;
+        var observation = AssertInvalidLaunchAsync(process);
+        try
+        {
+            Assert.True(started.WaitOne(StartupObservationTimeout), "CLR child did not enter its pre-Main barrier.");
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => observation);
+            Assert.True(process.HasExited);
+            _output.WriteLine($"process {process.Id}: no validation within 10s startup observation; retained handle signaled after tree kill.");
+        }
+        finally
+        {
+            release.Set();
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+        }
     }
 
     [Fact]
@@ -1076,12 +1187,27 @@ public sealed class PreviewProcessContractTests
 
     private static async Task AssertInvalidLaunchAsync(string workingDirectory, params string[] arguments)
     {
-        using var process = PreviewOutputPathResolver.StartDirectIn(workingDirectory, arguments);
+        using var process = PreviewOutputPathResolver.StartDirectIn(workingDirectory, null, arguments);
+        await AssertInvalidLaunchAsync(process);
+    }
+
+    private static async Task AssertInvalidLaunchAsync(System.Diagnostics.Process process)
+    {
         var standardOutput = process.StandardOutput.ReadToEndAsync();
-        var standardError = process.StandardError.ReadToEndAsync();
+        var expectedValidation = "PREVIEW_ROOT_INVALID\n"u8.ToArray();
+        var observedValidation = new byte[expectedValidation.Length];
         try
         {
-            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(2));
+            using (var startupObservation = new CancellationTokenSource(StartupObservationTimeout))
+            {
+                await process.StandardError.BaseStream.ReadExactlyAsync(observedValidation, startupObservation.Token);
+            }
+            Assert.Equal(expectedValidation, observedValidation);
+            await process.WaitForExitAsync().WaitAsync(PostValidationExitTimeout);
+
+            Assert.Equal(64, process.ExitCode);
+            Assert.Equal("", await standardOutput);
+            Assert.Equal("", await process.StandardError.ReadToEndAsync());
         }
         finally
         {
@@ -1091,10 +1217,6 @@ public sealed class PreviewProcessContractTests
                 await process.WaitForExitAsync();
             }
         }
-
-        Assert.Equal(64, process.ExitCode);
-        Assert.Equal("", await standardOutput);
-        Assert.Equal("PREVIEW_ROOT_INVALID\n", await standardError);
     }
 
     private static bool TryCreateSymbolicLink(Action create)

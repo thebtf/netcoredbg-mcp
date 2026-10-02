@@ -262,9 +262,12 @@ internal static class PreviewOutputPathResolver
             : new PreviewOutputProcess("dotnet", [targetPath]);
     }
 
-    internal static Process StartDirect(params string[] arguments) => StartDirectIn(null, arguments);
+    internal static Process StartDirect(params string[] arguments) => StartDirectIn(null, null, arguments);
 
-    internal static Process StartDirectIn(string? workingDirectory, params string[] arguments)
+    internal static Process StartDirectIn(
+        string? workingDirectory,
+        IReadOnlyDictionary<string, string?>? environment,
+        params string[] arguments)
     {
         var candidate = ResolveProcess();
         var start = new ProcessStartInfo(candidate.Command)
@@ -279,6 +282,13 @@ internal static class PreviewOutputPathResolver
         foreach (var argument in candidate.Arguments.Concat(arguments))
         {
             start.ArgumentList.Add(argument);
+        }
+        if (environment is not null)
+        {
+            foreach (var (name, value) in environment)
+            {
+                start.Environment[name] = value;
+            }
         }
 
         return Process.Start(start) ?? throw new InvalidOperationException("Preview process did not start.");

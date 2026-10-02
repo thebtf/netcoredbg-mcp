@@ -78,6 +78,49 @@ sys.modules[_validator_spec.name] = preview_validator
 _validator_spec.loader.exec_module(preview_validator)
 
 
+@pytest.mark.parametrize(
+    ("before_validation", "after_validation"),
+    [(2.5, 0), (0, 30)],
+)
+def test_launch_refusal_separates_startup_observation_from_exit_and_drains_child(
+    monkeypatch: pytest.MonkeyPatch, before_validation: float, after_validation: float
+) -> None:
+    original_popen = subprocess.Popen
+    children: list[subprocess.Popen[bytes]] = []
+
+    def start(_command: Any, **options: Any) -> subprocess.Popen[bytes]:
+        child = original_popen(
+            [
+                sys.executable,
+                "-c",
+                f"import sys,time; time.sleep({before_validation}); "
+                "sys.stderr.buffer.write(b'PREVIEW_ROOT_INVALID\\n'); sys.stderr.flush(); "
+                f"time.sleep({after_validation}); sys.exit(64)",
+            ],
+            **options,
+        )
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(preview_validator.subprocess, "Popen", start)
+    try:
+        if after_validation:
+            with pytest.raises(ValueError, match="invalid launch case did not complete"):
+                preview_validator._run_launch_refusal(Path(sys.executable), ["--project"])
+            assert children[0].poll() is not None, "timed-out actual child was not drained"
+        else:
+            preview_validator._run_launch_refusal(Path(sys.executable), ["--project"])
+            assert children[0].poll() == 64
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=2)
+            for stream in (child.stdin, child.stdout, child.stderr):
+                if stream is not None:
+                    stream.close()
+
+
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
