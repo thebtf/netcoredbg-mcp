@@ -2278,6 +2278,189 @@ def _safe_coverage_source(
     return relative
 
 
+def _collector_source_relative(context: GitContext, item: ElementTree.Element) -> str | None:
+    if item.tag != "class":
+        _coverage_failure("COVERAGE_REPORT_INVALID", "collector class is malformed")
+    raw_filename = item.get("filename", "")
+    spelling = raw_filename.replace("\\", "/")
+    candidate = Path(spelling)
+    if (
+        not candidate.is_absolute()
+        or "://" in spelling
+        or any(part in {"", ".", ".."} for part in spelling.split("/")[1:])
+    ):
+        _coverage_failure(
+            "COVERAGE_SOURCE_MAPPING_INVALID", "collector source is not an absolute path"
+        )
+    try:
+        relative = candidate.relative_to(context.repository_root).as_posix()
+    except ValueError as error:
+        _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "collector source is outside checkout")
+        raise AssertionError("unreachable") from error
+    class_name = item.get("name", "")
+    if relative.startswith("bridge/obj/"):
+        if (
+            relative
+            != "bridge/obj/Debug/net8.0-windows/win-x64/Microsoft.Interop.LibraryImportGenerator/Microsoft.Interop.LibraryImportGenerator/LibraryImports.g.cs"
+            or class_name
+            not in {
+                "FlaUIBridge.Commands.ClickCommands",
+                "FlaUIBridge.Commands.ElementCommands",
+                "FlaUIBridge.Commands.HoverCommands",
+            }
+            or is_tracked(context.repository_root, _coverage_environment(), candidate)
+        ):
+            _coverage_failure(
+                "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized generated collector source"
+            )
+        return None
+    metadata = _scanner_tree_metadata(candidate)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or int(getattr(metadata, "st_file_attributes", 0) or 0) & 0x0400
+        or candidate.resolve() != context.repository_root / relative
+    ):
+        _coverage_failure(
+            "COVERAGE_SOURCE_MAPPING_INVALID",
+            "collector source is not regular checkout source",
+        )
+    tracked = is_tracked(context.repository_root, _coverage_environment(), candidate)
+    if not tracked:
+        _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "collector source is untracked")
+    return relative
+
+
+def _collector_test_source(
+    package: ElementTree.Element,
+    class_name: str,
+    relative: str,
+    test_project: Path,
+    test_source_root: str,
+    startup_hook_source: str,
+) -> bool:
+    # The CLR requires a global StartupHook; bind it to its source and test module.
+    global_test_hook = class_name == "StartupHook"
+    if (global_test_hook or relative == startup_hook_source) and (
+        not global_test_hook
+        or relative != startup_hook_source
+        or package.get("name") != test_project.stem
+    ):
+        _coverage_failure(
+            "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized test startup hook origin"
+        )
+    fixtures = "host/NetCoreDbg.Mcp.Stateless.Tests/Fixtures/"
+    if relative.startswith(fixtures):
+        if not relative.endswith(".cs") or not any(
+            relative.startswith(fixtures + project + "/")
+            for project in ("ControlledDapAdapter", "NativeSceneProbe.WpfFixture")
+        ):
+            _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized fixture source")
+        return True
+    if relative.startswith(test_source_root):
+        if (
+            not relative.endswith(".cs")
+            or package.get("name") != test_project.stem
+            or not (class_name.startswith(test_project.stem + ".") or global_test_hook)
+        ):
+            _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized test class origin")
+        return True
+    return False
+
+
+def _collector_method_totals(methods: ElementTree.Element | None) -> dict[int, list[int]]:
+    method_totals: dict[int, list[int]] = {}
+    if methods is not None:
+        if any(method.tag != "method" for method in methods):
+            _coverage_failure("COVERAGE_REPORT_INVALID", "collector methods are malformed")
+        for method in methods:
+            for line in method.findall("./lines/line"):
+                number = _positive_int(
+                    line.get("number"), "COVERAGE_REPORT_INVALID", "collector method line"
+                )
+                hits = _positive_int(
+                    line.get("hits"),
+                    "COVERAGE_REPORT_INVALID",
+                    "collector method hits",
+                    allow_zero=True,
+                )
+                covered, valid, _ = _condition_totals(line)
+                totals_for_line = method_totals.setdefault(number, [0, 0, 0])
+                totals_for_line[0] = max(totals_for_line[0], int(hits > 0))
+                totals_for_line[1] += covered
+                totals_for_line[2] += valid
+    return method_totals
+
+
+def _validate_collector_class_summary(
+    item: ElementTree.Element, method_totals: dict[int, list[int]], counts: list[int]
+) -> None:
+    seen_numbers: set[int] = set()
+    for line in item.findall("./lines/line"):
+        number = _positive_int(
+            line.get("number"), "COVERAGE_REPORT_INVALID", "collector class line"
+        )
+        if number in seen_numbers:
+            _coverage_failure("COVERAGE_REPORT_INVALID", "collector class summary repeats a line")
+        seen_numbers.add(number)
+        hits = _positive_int(
+            line.get("hits"),
+            "COVERAGE_REPORT_INVALID",
+            "collector line hits",
+            allow_zero=True,
+        )
+        covered, valid, _ = _condition_totals(line)
+        method_observation = method_totals.pop(number, None)
+        if method_observation is not None and method_observation != [
+            int(hits > 0),
+            covered,
+            valid,
+        ]:
+            _coverage_failure(
+                "COVERAGE_REPORT_INVALID", "collector class summary disagrees with methods"
+            )
+        counts[0] += 1
+        counts[1] += int(hits > 0)
+        counts[2] += covered
+        counts[3] += valid
+    if method_totals:
+        _coverage_failure(
+            "COVERAGE_REPORT_INVALID", "collector method line is absent from class summary"
+        )
+
+
+def _project_collector_class(
+    context: GitContext,
+    item: ElementTree.Element,
+    relative: str,
+    names: dict[str, str],
+    counts: list[int],
+) -> None:
+    raw_filename = item.get("filename", "")
+    class_name = item.get("name", "")
+    production = (
+        (STATELESS_SOURCE_PREFIX, "NetCoreDbg.Mcp.Stateless."),
+        ("host/NetCoreDbg.Mcp.DesignProbe.Wpf/", "NetCoreDbg.Mcp.DesignProbe.Wpf."),
+        ("bridge/", "FlaUIBridge."),
+    )
+    if not any(
+        relative.startswith(path) and class_name.startswith(namespace)
+        for path, namespace in production
+    ):
+        _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "foreign collector source")
+    _safe_coverage_source(context, relative, "dotnet", (context.repository_root,))
+    if relative in names and names[relative] != raw_filename:
+        _coverage_failure(
+            "COVERAGE_SOURCE_MAPPING_INVALID", "duplicate normalized collector source"
+        )
+    names[relative] = raw_filename
+    item.set("filename", relative)
+    methods = item.find("methods")
+    method_totals = _collector_method_totals(methods)
+    _validate_collector_class_summary(item, method_totals, counts)
+    if methods is not None:
+        item.remove(methods)
+
+
 def project_stateless_collector(
     context: GitContext, raw_report: Path, output: Path
 ) -> dict[str, Any]:
@@ -2303,166 +2486,19 @@ def project_stateless_collector(
             _coverage_failure("COVERAGE_REPORT_INVALID", "collector package has no classes")
         counts = [0, 0, 0, 0]
         for item in list(classes):
-            if item.tag != "class":
-                _coverage_failure("COVERAGE_REPORT_INVALID", "collector class is malformed")
-            raw_filename = item.get("filename", "")
-            spelling = raw_filename.replace("\\", "/")
-            candidate = Path(spelling)
-            if (
-                not candidate.is_absolute()
-                or "://" in spelling
-                or any(part in {"", ".", ".."} for part in spelling.split("/")[1:])
+            relative = _collector_source_relative(context, item)
+            if relative is None or _collector_test_source(
+                package,
+                item.get("name", ""),
+                relative,
+                test_project,
+                test_source_root,
+                startup_hook_source,
             ):
-                _coverage_failure(
-                    "COVERAGE_SOURCE_MAPPING_INVALID", "collector source is not an absolute path"
-                )
-            try:
-                relative = candidate.relative_to(context.repository_root).as_posix()
-            except ValueError as error:
-                _coverage_failure(
-                    "COVERAGE_SOURCE_MAPPING_INVALID", "collector source is outside checkout"
-                )
-                raise AssertionError("unreachable") from error
-            class_name = item.get("name", "")
-            if relative.startswith("bridge/obj/"):
-                if (
-                    relative
-                    != "bridge/obj/Debug/net8.0-windows/win-x64/Microsoft.Interop.LibraryImportGenerator/Microsoft.Interop.LibraryImportGenerator/LibraryImports.g.cs"
-                    or class_name
-                    not in {
-                        "FlaUIBridge.Commands.ClickCommands",
-                        "FlaUIBridge.Commands.ElementCommands",
-                        "FlaUIBridge.Commands.HoverCommands",
-                    }
-                    or is_tracked(context.repository_root, _coverage_environment(), candidate)
-                ):
-                    _coverage_failure(
-                        "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized generated collector source"
-                    )
                 classes.remove(item)
                 continue
-            metadata = _scanner_tree_metadata(candidate)
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or int(getattr(metadata, "st_file_attributes", 0) or 0) & 0x0400
-                or candidate.resolve() != context.repository_root / relative
-            ):
-                _coverage_failure(
-                    "COVERAGE_SOURCE_MAPPING_INVALID",
-                    "collector source is not regular checkout source",
-                )
-            tracked = is_tracked(context.repository_root, _coverage_environment(), candidate)
-            if not tracked:
-                _coverage_failure(
-                    "COVERAGE_SOURCE_MAPPING_INVALID", "collector source is untracked"
-                )
-            # The CLR requires a global StartupHook; bind it to its source and test module.
-            global_test_hook = class_name == "StartupHook"
-            if (global_test_hook or relative == startup_hook_source) and (
-                not global_test_hook
-                or relative != startup_hook_source
-                or package.get("name") != test_project.stem
-            ):
-                _coverage_failure(
-                    "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized test startup hook origin"
-                )
-            fixtures = "host/NetCoreDbg.Mcp.Stateless.Tests/Fixtures/"
-            if relative.startswith(fixtures):
-                if not relative.endswith(".cs") or not any(
-                    relative.startswith(fixtures + project + "/")
-                    for project in ("ControlledDapAdapter", "NativeSceneProbe.WpfFixture")
-                ):
-                    _coverage_failure(
-                        "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized fixture source"
-                    )
-                classes.remove(item)
-                continue
-            if relative.startswith(test_source_root):
-                if (
-                    not relative.endswith(".cs")
-                    or package.get("name") != test_project.stem
-                    or not (class_name.startswith(test_project.stem + ".") or global_test_hook)
-                ):
-                    _coverage_failure(
-                        "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized test class origin"
-                    )
-                classes.remove(item)
-                continue
-            production = (
-                (STATELESS_SOURCE_PREFIX, "NetCoreDbg.Mcp.Stateless."),
-                ("host/NetCoreDbg.Mcp.DesignProbe.Wpf/", "NetCoreDbg.Mcp.DesignProbe.Wpf."),
-                ("bridge/", "FlaUIBridge."),
-            )
-            if not any(
-                relative.startswith(path) and class_name.startswith(namespace)
-                for path, namespace in production
-            ):
-                _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "foreign collector source")
-            _safe_coverage_source(context, relative, "dotnet", (context.repository_root,))
-            if relative in names and names[relative] != raw_filename:
-                _coverage_failure(
-                    "COVERAGE_SOURCE_MAPPING_INVALID", "duplicate normalized collector source"
-                )
-            names[relative] = raw_filename
-            item.set("filename", relative)
-            methods = item.find("methods")
-            method_totals: dict[int, list[int]] = {}
-            if methods is not None:
-                if any(method.tag != "method" for method in methods):
-                    _coverage_failure("COVERAGE_REPORT_INVALID", "collector methods are malformed")
-                for method in methods:
-                    for line in method.findall("./lines/line"):
-                        number = _positive_int(
-                            line.get("number"), "COVERAGE_REPORT_INVALID", "collector method line"
-                        )
-                        hits = _positive_int(
-                            line.get("hits"),
-                            "COVERAGE_REPORT_INVALID",
-                            "collector method hits",
-                            allow_zero=True,
-                        )
-                        covered, valid, _ = _condition_totals(line)
-                        totals_for_line = method_totals.setdefault(number, [0, 0, 0])
-                        totals_for_line[0] = max(totals_for_line[0], int(hits > 0))
-                        totals_for_line[1] += covered
-                        totals_for_line[2] += valid
+            _project_collector_class(context, item, relative, names, counts)
             kept += 1
-            seen_numbers: set[int] = set()
-            for line in item.findall("./lines/line"):
-                number = _positive_int(
-                    line.get("number"), "COVERAGE_REPORT_INVALID", "collector class line"
-                )
-                if number in seen_numbers:
-                    _coverage_failure(
-                        "COVERAGE_REPORT_INVALID", "collector class summary repeats a line"
-                    )
-                seen_numbers.add(number)
-                hits = _positive_int(
-                    line.get("hits"),
-                    "COVERAGE_REPORT_INVALID",
-                    "collector line hits",
-                    allow_zero=True,
-                )
-                covered, valid, _ = _condition_totals(line)
-                method_observation = method_totals.pop(number, None)
-                if method_observation is not None and method_observation != [
-                    int(hits > 0),
-                    covered,
-                    valid,
-                ]:
-                    _coverage_failure(
-                        "COVERAGE_REPORT_INVALID", "collector class summary disagrees with methods"
-                    )
-                counts[0] += 1
-                counts[1] += int(hits > 0)
-                counts[2] += covered
-                counts[3] += valid
-            if method_totals:
-                _coverage_failure(
-                    "COVERAGE_REPORT_INVALID", "collector method line is absent from class summary"
-                )
-            if methods is not None:
-                item.remove(methods)
         if not len(classes):
             packages.remove(package)
             continue
@@ -2499,25 +2535,9 @@ def _positive_int(value: Any, code: str, detail: str, *, allow_zero: bool = Fals
     return number
 
 
-def _condition_totals(line: ElementTree.Element) -> tuple[int, int, list[dict[str, str | int]]]:
-    if str(line.attrib.get("branch", "")).casefold() != "true":
-        return 0, 0, []
-    coverage = line.attrib.get("condition-coverage")
-    match = re.search(r"\((\d+)\s*/\s*(\d+)\)", coverage or "")
-    if match is None:
-        _coverage_failure("COVERAGE_REPORT_INVALID", "branch line lacks condition coverage")
-    covered, valid = int(match.group(1)), int(match.group(2))
-    if valid <= 0 or covered < 0 or covered > valid:
-        _coverage_failure("COVERAGE_REPORT_INVALID", "branch condition denominator is invalid")
-    containers = [child for child in line if child.tag.rsplit("}", 1)[-1] == "conditions"]
-    if not containers:
-        return covered, valid, []
-    if len(containers) != 1:
-        _coverage_failure("COVERAGE_REPORT_INVALID", "branch line has ambiguous conditions")
-    conditions = list(containers[0])
-    if not conditions or any(child.tag.rsplit("}", 1)[-1] != "condition" for child in conditions):
-        _coverage_failure("COVERAGE_REPORT_INVALID", "branch conditions are malformed")
-
+def _branch_condition_facts(
+    conditions: Sequence[ElementTree.Element], covered: int, valid: int
+) -> tuple[int, int, list[dict[str, str | int]]]:
     parsed: list[tuple[str, str, Decimal]] = []
     identities: set[tuple[str, str]] = set()
     for condition in conditions:
@@ -2571,31 +2591,30 @@ def _condition_totals(line: ElementTree.Element) -> tuple[int, int, list[dict[st
     return covered, valid, facts
 
 
-def _parse_cobertura(
-    context: GitContext,
-    report: Path,
-    language: str,
-    *,
-    require_branches: bool,
+def _condition_totals(line: ElementTree.Element) -> tuple[int, int, list[dict[str, str | int]]]:
+    if str(line.attrib.get("branch", "")).casefold() != "true":
+        return 0, 0, []
+    coverage = line.attrib.get("condition-coverage")
+    match = re.search(r"\((\d+)\s*/\s*(\d+)\)", coverage or "")
+    if match is None:
+        _coverage_failure("COVERAGE_REPORT_INVALID", "branch line lacks condition coverage")
+    covered, valid = int(match.group(1)), int(match.group(2))
+    if valid <= 0 or covered < 0 or covered > valid:
+        _coverage_failure("COVERAGE_REPORT_INVALID", "branch condition denominator is invalid")
+    containers = [child for child in line if child.tag.rsplit("}", 1)[-1] == "conditions"]
+    if not containers:
+        return covered, valid, []
+    if len(containers) != 1:
+        _coverage_failure("COVERAGE_REPORT_INVALID", "branch line has ambiguous conditions")
+    conditions = list(containers[0])
+    if not conditions or any(child.tag.rsplit("}", 1)[-1] != "condition" for child in conditions):
+        _coverage_failure("COVERAGE_REPORT_INVALID", "branch conditions are malformed")
+    return _branch_condition_facts(conditions, covered, valid)
+
+
+def _cobertura_root_evidence(
+    root: ElementTree.Element, raw: bytes, require_branches: bool
 ) -> dict[str, Any]:
-    if not report.exists():
-        _coverage_failure("COVERAGE_REPORT_MISSING", "Cobertura report is missing")
-    try:
-        metadata = _scanner_tree_metadata(report)
-        if not stat.S_ISREG(getattr(metadata, "st_mode", 0)):
-            _coverage_failure("COVERAGE_REPORT_INVALID", "Cobertura report is not a regular file")
-        raw = report.read_bytes()
-    except FileNotFoundError as error:
-        _coverage_failure("COVERAGE_REPORT_MISSING", "Cobertura report is missing")
-        raise AssertionError("unreachable") from error
-    except (OSError, RunnerError) as error:
-        _coverage_failure("COVERAGE_REPORT_INVALID", str(error))
-        raise AssertionError("unreachable") from error
-    try:
-        root = ElementTree.fromstring(raw)
-    except ElementTree.ParseError as error:
-        _coverage_failure("COVERAGE_REPORT_INVALID", "Cobertura report is malformed XML")
-        raise AssertionError("unreachable") from error
     if root.tag.rsplit("}", 1)[-1] != "coverage":
         _coverage_failure("COVERAGE_REPORT_INVALID", "Cobertura root must be coverage")
     lines_valid = _positive_int(
@@ -2621,55 +2640,6 @@ def _parse_cobertura(
     )
     if lines_covered > lines_valid or branches_covered > branches_valid:
         _coverage_failure("COVERAGE_REPORT_INVALID", "Cobertura covered counts exceed denominators")
-    source_roots = _cobertura_source_roots(context, root)
-    source_paths: list[str] = []
-    facts: list[dict[str, Any]] = []
-    for class_element in root.iter():
-        if class_element.tag.rsplit("}", 1)[-1] != "class":
-            continue
-        source_path = _safe_coverage_source(
-            context,
-            class_element.attrib.get("filename"),
-            language,
-            source_roots,
-        )
-        if source_path not in source_paths:
-            source_paths.append(source_path)
-        line_facts: list[dict[str, Any]] = []
-        for line in class_element.iter():
-            if line.tag.rsplit("}", 1)[-1] != "line":
-                continue
-            number = _positive_int(
-                line.attrib.get("number"), "COVERAGE_REPORT_INVALID", "line number is invalid"
-            )
-            hits = _positive_int(
-                line.attrib.get("hits"),
-                "COVERAGE_REPORT_INVALID",
-                "line hits are invalid",
-                allow_zero=True,
-            )
-            branch_covered, branch_valid, conditions = _condition_totals(line)
-            line_facts.append(
-                {
-                    "number": number,
-                    "hits": hits,
-                    "branches_covered": branch_covered,
-                    "branches_valid": branch_valid,
-                    "conditions": conditions,
-                }
-            )
-        facts.append(
-            {
-                "source_path": source_path,
-                "class_name": class_element.get("name"),
-                "lines": line_facts,
-            }
-        )
-    if not source_paths:
-        _coverage_failure(
-            "COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura report has no mapped source"
-        )
-    source_paths.sort()
     return {
         "sha256": _sha256_bytes(raw),
         "bytes": len(raw),
@@ -2678,10 +2648,98 @@ def _parse_cobertura(
         "lines_covered": lines_covered,
         "branches_valid": branches_valid,
         "branches_covered": branches_covered,
-        "source_paths": source_paths,
-        "source_set_sha256": _sha256_json(source_paths),
-        "facts": facts,
     }
+
+
+def _cobertura_class_facts(
+    context: GitContext,
+    class_element: ElementTree.Element,
+    language: str,
+    source_roots: Sequence[Path],
+    source_paths: list[str],
+) -> dict[str, Any]:
+    source_path = _safe_coverage_source(
+        context,
+        class_element.attrib.get("filename"),
+        language,
+        source_roots,
+    )
+    if source_path not in source_paths:
+        source_paths.append(source_path)
+    line_facts: list[dict[str, Any]] = []
+    for line in class_element.iter():
+        if line.tag.rsplit("}", 1)[-1] != "line":
+            continue
+        number = _positive_int(
+            line.attrib.get("number"), "COVERAGE_REPORT_INVALID", "line number is invalid"
+        )
+        hits = _positive_int(
+            line.attrib.get("hits"),
+            "COVERAGE_REPORT_INVALID",
+            "line hits are invalid",
+            allow_zero=True,
+        )
+        branch_covered, branch_valid, conditions = _condition_totals(line)
+        line_facts.append(
+            {
+                "number": number,
+                "hits": hits,
+                "branches_covered": branch_covered,
+                "branches_valid": branch_valid,
+                "conditions": conditions,
+            }
+        )
+    return {
+        "source_path": source_path,
+        "class_name": class_element.get("name"),
+        "lines": line_facts,
+    }
+
+
+def _parse_cobertura(
+    context: GitContext,
+    report: Path,
+    language: str,
+    *,
+    require_branches: bool,
+) -> dict[str, Any]:
+    if not report.exists():
+        _coverage_failure("COVERAGE_REPORT_MISSING", "Cobertura report is missing")
+    try:
+        metadata = _scanner_tree_metadata(report)
+        if not stat.S_ISREG(getattr(metadata, "st_mode", 0)):
+            _coverage_failure("COVERAGE_REPORT_INVALID", "Cobertura report is not a regular file")
+        raw = report.read_bytes()
+    except FileNotFoundError as error:
+        _coverage_failure("COVERAGE_REPORT_MISSING", "Cobertura report is missing")
+        raise AssertionError("unreachable") from error
+    except (OSError, RunnerError) as error:
+        _coverage_failure("COVERAGE_REPORT_INVALID", str(error))
+        raise AssertionError("unreachable") from error
+    try:
+        root = ElementTree.fromstring(raw)
+    except ElementTree.ParseError as error:
+        _coverage_failure("COVERAGE_REPORT_INVALID", "Cobertura report is malformed XML")
+        raise AssertionError("unreachable") from error
+    parsed = _cobertura_root_evidence(root, raw, require_branches)
+    source_roots = _cobertura_source_roots(context, root)
+    source_paths: list[str] = []
+    facts: list[dict[str, Any]] = []
+    for class_element in root.iter():
+        if class_element.tag.rsplit("}", 1)[-1] != "class":
+            continue
+        facts.append(
+            _cobertura_class_facts(context, class_element, language, source_roots, source_paths)
+        )
+    if not source_paths:
+        _coverage_failure(
+            "COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura report has no mapped source"
+        )
+    source_paths.sort()
+    parsed["source_paths"] = source_paths
+    parsed["source_set_sha256"] = _sha256_json(source_paths)
+    parsed["facts"] = facts
+    return parsed
 
 
 def _final_report_evidence(
