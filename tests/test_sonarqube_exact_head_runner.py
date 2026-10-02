@@ -2081,6 +2081,40 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         object_id = result.stdout.decode().strip()
         return scratch / ".git" / "objects" / object_id[:2] / object_id[2:]
 
+    def test_terminal_claim_cleanup_enumerates_same_volume_root_and_children(self):
+        if runner.os.name != "nt":
+            self.skipTest("Windows native directory enumeration")
+        configured_scratch = runner.os.environ.get("NETCOREDBG_TEST_SCRATCH_ROOT")
+        if configured_scratch:
+            scratch_root = Path(configured_scratch).resolve(strict=True)
+        else:
+            common = runner.resolve_git_path(
+                RUNNER_PATH.parents[1],
+                runner.git_output(
+                    RUNNER_PATH.parents[1], runner.os.environ, "rev-parse", "--git-common-dir"
+                ),
+            )
+            scratch_root = common.parent / ".agent" / "tmp"
+            scratch_root.mkdir(parents=True, exist_ok=True)
+            scratch_root = scratch_root.resolve(strict=True)
+        with TemporaryDirectory(dir=scratch_root) as temporary:
+            repository = Path(temporary).resolve()
+            plan = self._plan(repository)
+            claim = runner.claim_coverage_run(
+                self._context(repository), plan, self._resolved_wave2_entry()
+            )
+            child = plan.root / "owned-child"
+            child.mkdir()
+            (child / "value").write_bytes(b"owned value")
+            external = repository / "external-value"
+            external.write_bytes(b"preserved")
+            cleanup = runner.cleanup_coverage_run(plan, True, claim)
+            print("SAME_VOLUME_ROOT_ENUMERATION", cleanup)
+            self.assertEqual(external.read_bytes(), b"preserved")
+            self.assertEqual(cleanup["status"], "OK", cleanup)
+            self.assertFalse(plan.root.exists())
+            self.assertTrue(cleanup["parent_removed_if_empty"])
+
     def test_terminal_claim_cleanup_removes_pytest_links_and_readonly_git_objects(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

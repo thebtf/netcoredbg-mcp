@@ -3532,6 +3532,8 @@ def _delete_windows_coverage_run(
         sharing: int,
         parent: Any = None,
     ) -> Any:
+        if parent is not None and access & 1:  # FILE_LIST_DIRECTORY
+            access |= 0x100000  # SYNCHRONIZE for directory queries that complete asynchronously.
         operation = "CreateFileW" if parent is None else "NtCreateFile"
         with boundary(operation, "OPEN", path):
             if parent is None:
