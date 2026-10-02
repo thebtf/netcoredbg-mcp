@@ -5,7 +5,7 @@ using System.Text.RegularExpressions;
 namespace NetCoreDbg.Mcp.CodeSearch.Core;
 
 /// <summary>Deterministic, project-bounded source traversal and C# symbol matching.</summary>
-public sealed partial class SymbolSearchEngine
+public sealed class SymbolSearchEngine
 {
     private static readonly HashSet<string> AlwaysIgnoredDirectories = new(StringComparer.Ordinal)
     {
@@ -765,13 +765,34 @@ public sealed partial class SymbolSearchEngine
         return new SearchPattern(pattern, strictRegexMatch);
     }
 
-    [GeneratedRegex("^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.CultureInvariant)]
-    private static partial Regex IdentifierRegex();
+    private static bool IsAsciiIdentifier(string name)
+    {
+        if (name.Length == 0 || (!char.IsAsciiLetter(name[0]) && name[0] != '_'))
+        {
+            return false;
+        }
+
+        var length = name.Length;
+        // The original '$' anchor also accepts one final LF.
+        if (name[length - 1] == '\n')
+        {
+            length--;
+        }
+        for (var index = 1; index < length; index++)
+        {
+            if (!char.IsAsciiLetterOrDigit(name[index]) && name[index] != '_')
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     private static SearchPattern CreateReferencePattern(string name, Func<Regex, string, bool>? strictRegexMatch)
     {
         var escaped = Regex.Escape(name);
-        var pattern = IdentifierRegex().IsMatch(name)
+        var pattern = IsAsciiIdentifier(name)
             ? $@"(?<![A-Za-z0-9_]){escaped}(?![A-Za-z0-9_])"
             : escaped;
         return new SearchPattern(pattern, strictRegexMatch);
@@ -1068,7 +1089,7 @@ public sealed partial class SymbolSearchEngine
         expression.Append('$');
         var source = expression.ToString();
         var regex = operation is null
-            ? new Regex(source, RegexOptions.CultureInvariant)
+            ? new Regex(source, RegexOptions.CultureInvariant, SearchPattern.LegacyMatchTimeout)
             : new Regex(source, RegexOptions.CultureInvariant, operation.GetMatchTimeout());
         operation?.Check();
         return regex;
@@ -1120,6 +1141,7 @@ public sealed partial class SymbolSearchEngine
     private sealed class SearchPattern
     {
         private static readonly TimeSpan StrictMatchSlice = TimeSpan.FromMilliseconds(100);
+        internal static readonly TimeSpan LegacyMatchTimeout = GetLegacyMatchTimeout();
 
         private readonly string _pattern;
         private readonly Regex _legacyRegex;
@@ -1130,8 +1152,17 @@ public sealed partial class SymbolSearchEngine
         internal SearchPattern(string pattern, Func<Regex, string, bool>? strictRegexMatch)
         {
             _pattern = pattern;
-            _legacyRegex = new Regex(pattern, RegexOptions.CultureInvariant);
+            _legacyRegex = new Regex(pattern, RegexOptions.CultureInvariant, LegacyMatchTimeout);
             _strictRegexMatch = strictRegexMatch;
+        }
+
+        private static TimeSpan GetLegacyMatchTimeout()
+        {
+            // Observe Regex's initialized default, not mutable AppDomain data; no match is performed.
+            var inheritedTimeout = new Regex(string.Empty, RegexOptions.NonBacktracking).MatchTimeout;
+            return inheritedTimeout > TimeSpan.Zero && inheritedTimeout < StrictMatchSlice
+                ? inheritedTimeout
+                : StrictMatchSlice;
         }
 
         internal bool IsMatch(string value, SearchOperation? operation)
