@@ -968,57 +968,68 @@ class DAPClient:
                     future.set_result(message)
 
             elif isinstance(message, DAPEvent):
-                event_name = sanitize_terminal_text(message.event, TERMINAL_EVENT_NAME_LIMIT)
-                body_json = json.dumps(
-                    _sanitize_terminal_value(message.body),
-                    default=str,
-                    separators=(",", ":"),
-                )
-                body_preview = _bounded_text(body_json)
-                logger.debug("<<< Event %s: %s", event_name, body_preview)
-                if run is not None:
-                    event_seq = (
-                        message.seq
-                        if type(message.seq) is int and 0 <= message.seq <= TERMINAL_EVENT_SEQ_MAX
-                        else None
-                    )
-                    run.last_dap_event = (event_seq, event_name)
-                    run.last_dap_event_body_preview = body_preview
-                    if message.event == "terminated":
-                        run.protocol_terminated = True
-                    elif message.event == "exited":
-                        exit_code = message.body.get("exitCode")
-                        if type(exit_code) is int:
-                            run.debuggee_exit_code = exit_code
-
-                if run is not None and run is not self._run:
-                    # A former reader may finish after `start` installs a newer
-                    # run. Retain its local terminal facts above, but never call
-                    # handlers: manager callbacks have no generation argument,
-                    # so they would otherwise let old transport state mutate the
-                    # current session solely because the client object matches.
-                    return
-
-                handlers = (
-                    self._event_handlers.get(message.event, [])
-                    if isinstance(message.event, str)
-                    else []
-                )
-                if not handlers:
-                    logger.warning(
-                        "Unhandled DAP event '%s' dropped: body_size=%d body_preview=%s",
-                        event_name,
-                        len(body_json.encode("utf-8")),
-                        body_preview,
-                    )
-                for handler in handlers:
-                    try:
-                        handler(message)
-                    except Exception:
-                        logger.exception("Event handler error")
+                self._handle_event(message, run)
 
         except Exception:
             logger.exception("Error handling message, data: %s", data)
+
+    def _handle_event(self, message: DAPEvent, run: _DapRun | None) -> None:
+        """Retain bounded event facts before dispatching current-generation callbacks."""
+
+        event_name = sanitize_terminal_text(message.event, TERMINAL_EVENT_NAME_LIMIT)
+        body_json = json.dumps(
+            _sanitize_terminal_value(message.body),
+            default=str,
+            separators=(",", ":"),
+        )
+        body_preview = _bounded_text(body_json)
+        logger.debug("<<< Event %s: %s", event_name, body_preview)
+        if run is not None:
+            self._retain_terminal_event_facts(run, message, event_name, body_preview)
+
+        if run is not None and run is not self._run:
+            # A former reader may finish after `start` installs a newer
+            # run. Retain its local terminal facts above, but never call
+            # handlers: manager callbacks have no generation argument,
+            # so they would otherwise let old transport state mutate the
+            # current session solely because the client object matches.
+            return
+
+        handlers = (
+            self._event_handlers.get(message.event, []) if isinstance(message.event, str) else []
+        )
+        if not handlers:
+            logger.warning(
+                "Unhandled DAP event '%s' dropped: body_size=%d body_preview=%s",
+                event_name,
+                len(body_json.encode("utf-8")),
+                body_preview,
+            )
+        for handler in handlers:
+            try:
+                handler(message)
+            except Exception:
+                logger.exception("Event handler error")
+
+    @staticmethod
+    def _retain_terminal_event_facts(
+        run: _DapRun, message: DAPEvent, event_name: str, body_preview: str
+    ) -> None:
+        """Retain protocol metadata on its originating adapter run."""
+
+        event_seq = (
+            message.seq
+            if type(message.seq) is int and 0 <= message.seq <= TERMINAL_EVENT_SEQ_MAX
+            else None
+        )
+        run.last_dap_event = (event_seq, event_name)
+        run.last_dap_event_body_preview = body_preview
+        if message.event == "terminated":
+            run.protocol_terminated = True
+        elif message.event == "exited":
+            exit_code = message.body.get("exitCode")
+            if type(exit_code) is int:
+                run.debuggee_exit_code = exit_code
 
     # High-level DAP commands
 
