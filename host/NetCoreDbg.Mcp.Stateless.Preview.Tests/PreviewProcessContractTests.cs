@@ -199,7 +199,16 @@ public sealed class PreviewProcessContractTests
     [Fact]
     public async Task MissingMetadataPrecedesMalformedToolArguments()
     {
-        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+        var readyName = $"Local\\preview-metadata-ready-{Guid.NewGuid():N}";
+        using var ready = new EventWaitHandle(false, EventResetMode.ManualReset, readyName);
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(
+            PreviewRepositoryLayout.FixtureRoot,
+            environment: new Dictionary<string, string?>
+            {
+                ["DOTNET_STARTUP_HOOKS"] = typeof(StartupHook).Assembly.Location,
+                [StartupHook.HostReadyEnvironmentVariable] = readyName,
+            });
+        Assert.True(ready.WaitOne(StartupObservationTimeout), "Generic host did not finish startup before the literal-first request.");
         await driver.SendRequestAsync(
             "tools/call",
             new JsonObject { ["name"] = ToolName, ["arguments"] = new JsonObject() },
@@ -207,6 +216,87 @@ public sealed class PreviewProcessContractTests
 
         Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2)));
         Assert.True(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public async Task ColdStartBeyondClosureDeadlinePreservesMissingMetadataRefusal()
+    {
+        var barrierName = $"Local\\preview-cold-closure-{Guid.NewGuid():N}";
+        using var started = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-started");
+        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-release");
+        using var ready = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-ready");
+        var connection = PreviewMcpProcessDriver.StartRawAsync(
+            PreviewRepositoryLayout.FixtureRoot,
+            environment: new Dictionary<string, string?>
+            {
+                ["DOTNET_STARTUP_HOOKS"] = typeof(StartupHook).Assembly.Location,
+                [StartupHook.StartupBarrierEnvironmentVariable] = barrierName,
+                [StartupHook.HostReadyEnvironmentVariable] = barrierName + "-ready",
+            });
+        try
+        {
+            Assert.True(started.WaitOne(StartupObservationTimeout), "CLR child did not enter its pre-Main barrier.");
+            await using var driver = await connection.WaitAsync(StartupObservationTimeout);
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            await Task.Delay(TimeSpan.FromMilliseconds(4500));
+            Assert.False(ready.WaitOne(TimeSpan.Zero), "Host-ready observation completed while Main was held.");
+            Assert.False(release.WaitOne(TimeSpan.Zero));
+            _output.WriteLine($"{clock.ElapsedMilliseconds}ms: Main still held beyond the old 2s+2s observation; no wire request sent before host readiness.");
+
+            release.Set();
+            Assert.True(ready.WaitOne(StartupObservationTimeout), "Generic host did not finish startup after pre-Main release.");
+            await driver.SendRequestAsync(
+                "tools/call",
+                new JsonObject { ["name"] = ToolName, ["arguments"] = new JsonObject() },
+                new RequestId("missing-meta-invalid-arguments"));
+            Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2)));
+            Assert.True(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
+            _output.WriteLine($"{clock.ElapsedMilliseconds}ms: after actual host readiness, literal-first missing-metadata request silently closed at unchanged 2s checks.");
+        }
+        finally
+        {
+            release.Set();
+        }
+    }
+
+    [Fact]
+    public async Task MissingMetadataClosureDeadlineAfterHostReadinessStillRefusesAHeldExit()
+    {
+        var barrierName = $"Local\\preview-metadata-exit-{Guid.NewGuid():N}";
+        using var ready = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-ready");
+        using var started = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-started");
+        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-release");
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(
+            PreviewRepositoryLayout.FixtureRoot,
+            environment: new Dictionary<string, string?>
+            {
+                ["DOTNET_STARTUP_HOOKS"] = typeof(StartupHook).Assembly.Location,
+                [StartupHook.HostReadyEnvironmentVariable] = barrierName + "-ready",
+                [StartupHook.ExitBarrierEnvironmentVariable] = barrierName,
+            });
+        try
+        {
+            Assert.True(ready.WaitOne(StartupObservationTimeout), "Generic host did not finish startup before the literal-first request.");
+            await driver.SendRequestAsync(
+                "tools/call",
+                new JsonObject { ["name"] = ToolName, ["arguments"] = new JsonObject() },
+                new RequestId("missing-meta-invalid-arguments"));
+            Assert.True(started.WaitOne(StartupObservationTimeout), "Refused request did not reach the controlled ProcessExit hold.");
+            Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2)));
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            Assert.False(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
+            Assert.False(release.WaitOne(TimeSpan.Zero));
+            Assert.True(clock.Elapsed < StartupObservationTimeout, "Closure wait inherited the startup observation budget.");
+            _output.WriteLine($"{clock.ElapsedMilliseconds}ms: after host readiness, held ProcessExit still fails the unchanged 2s closure observation.");
+
+            release.Set();
+            Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2)));
+            Assert.True(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
+        }
+        finally
+        {
+            release.Set();
+        }
     }
 
     [Fact]
