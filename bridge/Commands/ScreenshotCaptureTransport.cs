@@ -177,7 +177,7 @@ internal sealed class NativeScreenshotCaptureTransport : IScreenshotCaptureTrans
                 throw new InvalidOperationException(
                     $"GetWindowDC failed for HWND {hwnd.ToInt64()}: {Marshal.GetLastWin32Error()}");
 
-            var captured = false;
+            int released;
             try
             {
                 using (var graphics = Graphics.FromImage(bitmap))
@@ -194,15 +194,14 @@ internal sealed class NativeScreenshotCaptureTransport : IScreenshotCaptureTrans
                         graphics.ReleaseHdc(hdc);
                     }
                 }
-
-                captured = true;
             }
             finally
             {
-                var released = ReleaseDC(hwnd, sourceDc);
-                if (captured && released == 0)
-                    throw new InvalidOperationException($"ReleaseDC failed for HWND {hwnd.ToInt64()}");
+                released = ReleaseDC(hwnd, sourceDc);
             }
+
+            if (released == 0)
+                throw new InvalidOperationException($"ReleaseDC failed for HWND {hwnd.ToInt64()}");
 
             return bitmap;
         }
