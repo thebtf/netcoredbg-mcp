@@ -83,6 +83,8 @@ done
 cd "$shell_repo_root"
 mkdir -p "$(dirname "$shell_python_data")" "$(dirname "$shell_python_report")"
 python_cache_directory="$(dirname "$shell_python_data")/.pytest_cache"
+# pytest clears --basetemp; reserve only a fresh child of the claimed Python root.
+python_base_temp="$(mktemp -d "$(dirname "$shell_python_data")/pytest.XXXXXXXX")"
 python_test_paths=(
   tests/test_app_type.py
   tests/test_backends.py
@@ -122,7 +124,7 @@ python_test_paths=(
   tests/test_stateless_preview_artifact.py
 )
 coverage run --source=src/netcoredbg_mcp,scripts --data-file="$shell_python_data" -m pytest \
-  --cache-clear -o "cache_dir=$python_cache_directory" "${python_test_paths[@]}"
+  --basetemp="$python_base_temp" --cache-clear -o "cache_dir=$python_cache_directory" "${python_test_paths[@]}"
 coverage xml --data-file="$shell_python_data" -o "$shell_python_report"
 
 coverage_root="$(dirname "$(dirname "$shell_python_data")")"
