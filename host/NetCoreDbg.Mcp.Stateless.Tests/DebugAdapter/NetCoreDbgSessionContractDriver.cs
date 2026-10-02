@@ -199,10 +199,16 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         TimeSpan initializeTimeout,
         TimeSpan requestTimeout,
         TimeSpan stopTimeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ICollection<FixtureTranscriptEntry>? failedTranscript = null,
+        TimeProvider? startupTimeProvider = null,
+        Action? initializeResponseReady = null)
     {
-        Assert.True(configuration.EnableConfigurationDoneAfterInitialization);
-        Assert.True(configuration.HoldConfigurationDoneCapabilityDeltaUntilRelease);
+        if (!configuration.SuppressInitializedAfterInitializeResponse)
+        {
+            Assert.True(configuration.EnableConfigurationDoneAfterInitialization);
+            Assert.True(configuration.HoldConfigurationDoneCapabilityDeltaUntilRelease);
+        }
 
         var fixture = FixtureProcess.Create(configuration);
         object? session = null;
@@ -241,8 +247,10 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             RequireStateShape(stateType);
             fixture.MarkAdapterStartAttempted();
 
-            using var startupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            startupCancellation.CancelAfter(initializeTimeout + requestTimeout + TimeSpan.FromMilliseconds(500));
+            using var startupDeadline = new CancellationTokenSource(
+                initializeTimeout + requestTimeout + TimeSpan.FromMilliseconds(500),
+                startupTimeProvider ?? TimeProvider.System);
+            using var startupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, startupDeadline.Token);
             var startInfo = new ProcessStartInfo(fixture.ExecutablePath)
             {
                 UseShellExecute = false,
@@ -266,14 +274,29 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             ]);
             var started = startProtocolAsync.Invoke(session, [programPath, initializeTimeout, null, startupCancellation.Token]);
             await gate.Reached.Task.WaitAsync(startupCancellation.Token);
-            fixture.ReleaseConfigurationDoneCapabilityDelta();
-            while (!(bool)(supportsConfigurationDone.GetValue(session) ?? false))
+            if (configuration.SuppressInitializedAfterInitializeResponse)
             {
-                await Task.Delay(TimeSpan.FromMilliseconds(10), startupCancellation.Token);
+                while (!(await fixture.ReadTranscriptAsync()).Any(static entry => entry.Kind == "initialize-gate" && entry.Stage == "before-initialized-event"))
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(10), startupCancellation.Token);
+                }
+                var initialized = Assert.IsType<TaskCompletionSource<bool>>(
+                    RequirePrivateField(sessionType, "_initialized", typeof(TaskCompletionSource<bool>)).GetValue(session));
+                Assert.False(initialized.Task.IsCompleted, "The early initialized event must not satisfy the post-response wait.");
+                startupDeadline.CancelAfter(Timeout.InfiniteTimeSpan);
+                initializeResponseReady?.Invoke();
+            }
+            else
+            {
+                fixture.ReleaseConfigurationDoneCapabilityDelta();
+                while (!(bool)(supportsConfigurationDone.GetValue(session) ?? false))
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(10), startupCancellation.Token);
+                }
             }
 
             gate.Release.TrySetResult(true);
-            await AwaitAsyncResult(started, "StartProtocolAsync", startupCancellation.Token);
+            await AwaitAsyncResult(started, "StartProtocolAsync", CancellationToken.None);
             var activeReaderTask = readerTask.GetValue(session) as Task
                 ?? throw new InvalidOperationException("NetCoreDbgSession._readerTask returned null.");
             var activeWriteGate = Assert.IsType<SemaphoreSlim>(writeGate.GetValue(session));
@@ -283,6 +306,13 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         catch
         {
             gate.Release.TrySetResult(true);
+            if (failedTranscript is not null)
+            {
+                foreach (var entry in await fixture.ReadTranscriptAsync())
+                {
+                    failedTranscript.Add(entry);
+                }
+            }
             if (session is not null)
             {
                 try
