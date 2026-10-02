@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Windows process capture now separates its persistent debug-event pump into one private helper, preserving launch ordering, pending-event retries, exception forwarding, first causal failures, exact Job-qualified capability ownership, and drain/close accounting. No Sonar closure or new scan-pass claim is made.
 - Native grid literal-key reuse and session path-cache/stop-context helpers preserve exact wire keys and ordering, cache identity, and existing error and cancellation behavior. Source/test literal proof is not a runtime grid-path verification claim; no Sonar closure claim is made.
 - Native scene evidence operations now reuse named constants without changing exact wire values. Screenshot `ReleaseDC` failure is reported only after successful capture; the existing `finally` cleanup remains unchanged for capture failures. No speculative masking-bug claim is made.
 ### Fixed

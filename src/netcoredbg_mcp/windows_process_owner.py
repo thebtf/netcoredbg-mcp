@@ -910,6 +910,9 @@ class _DebugCapture:
                 self.record_failure(error)
             else:
                 self._launch_thread_handle = None
+        self._pump_debug_events()
+
+    def _pump_debug_events(self) -> None:
         # Never exit a broken pump or disable debugger kill-on-thread-exit.
         # Retry a pending continuation without capturing the same event twice.
         pending = None
