@@ -102,3 +102,19 @@ inventory, and analysis facts, then re-raises the exact original interruption.
 No interrupted deletion is retried by transaction finalization. A cleanup block
 uses the v3 `INCOMPLETE` analysis shape with null unobserved after/final bookends;
 it cannot satisfy the unchanged all-true completion/PASS contract.
+
+Cleanup failures retain `COVERAGE_CLEANUP_FAILED` and the original exception
+class. When a native or filesystem operation supplies an `OSError`, the optional
+`cleanup.failure.native` discriminator records only its allowlisted operation,
+cleanup stage, claim-relative entry, numeric `winerror`/`errno` (null when absent).
+The entry is `.` for the claim root, `@parent` for its empty-parent cleanup, or
+`@ancestor/N` for a pinned ancestor N lexical components above the claim. No
+absolute ancestor names, exception text/filenames, report bodies, credentials,
+or provider content are copied into the discriminator. The existing secret-free
+receipt writer still refuses credential-bearing values.
+
+Attribution preserves the first error even when disposition cancellation or
+handle closing also fails; it never retries deletion or relaxes `BLOCKED`.
+Receipts predating this discriminator identify only the exception class: their
+historical native operation/error/entry remain unknown. This is diagnostic
+preservation, not a fix or retrospective cause claim for a retained cleanup run.

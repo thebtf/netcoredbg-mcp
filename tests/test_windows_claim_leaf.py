@@ -3,6 +3,7 @@
 import ast
 import ctypes
 import importlib.util
+import json
 import struct
 import subprocess
 import sys
@@ -256,17 +257,127 @@ class TestWindowsClaimLeaf(unittest.TestCase):
         finally:
             self.assertTrue(self.kernel.CloseHandle(handle))
 
+    def test_native_cleanup_failure_receipt_retains_redacted_discriminator(self):
+        secret = "controlled-provider-secret"
+        calls = []
+
+        def set_info(handle, kind, data, size):
+            if kind == 21 and self.native_paths[handle] == self.leaf:
+                flags = ctypes.cast(data, ctypes.POINTER(wintypes.DWORD))[0]
+                calls.append(flags)
+                if flags:
+                    error = ctypes.WinError(5)
+                    error.strerror = f"{secret}: {self.repository}"
+                    error.filename = str(self.repository / secret)
+                    raise error
+                ctypes.set_last_error(87)
+                return 0
+            return self.kernel.SetFileInformationByHandle(handle, kind, data, size)
+
+        with (
+            patch.object(
+                ctypes, "WinDLL", return_value=self.proxy(SetFileInformationByHandle=set_info)
+            ),
+            patch.object(Path, "chmod", side_effect=AssertionError("pathname chmod forbidden")),
+        ):
+            outcome = runner.cleanup_coverage_run(self.plan, True, self.claim)
+        self.assertEqual(calls, [0x11, 0])
+        self.assertEqual(outcome["status"], "FAILED")
+        self.assertEqual(outcome["failure"]["code"], "COVERAGE_CLEANUP_FAILED")
+        self.assertEqual(outcome["failure"]["message"], "PermissionError")
+        self.assertEqual(self.native_opened, set())
+        self.assertEqual(self.leaf.read_bytes(), self.original)
+        self.assertEqual(self.leaf.stat(follow_symlinks=False).st_file_attributes, self.attributes)
+        self.assert_external_preserved()
+        self.assertEqual(
+            outcome["failure"].get("native"),
+            {
+                "operation": "SetFileInformationByHandle(FileDispositionInfoEx)",
+                "stage": "DISPOSITION",
+                "entry": self.leaf.relative_to(self.plan.root).as_posix(),
+                "winerror": 5,
+                "errno": 13,
+            },
+        )
+        receipt = {
+            "schema_version": runner.EXACT_HEAD_RECEIPT_V3_SCHEMA_VERSION,
+            "role": "diagnostic",
+            "outcome": "BLOCKED",
+            "release_intent": "none",
+            "identity": {
+                "captured_head": "a" * 40,
+                "project_key": runner.PROJECT_KEY,
+                "analysis_id": None,
+            },
+            "coverage": None,
+            "analysis": None,
+            "global_inventory": None,
+            "release_gate": None,
+            "cleanup": outcome,
+            "failure": runner._blocked_failure(
+                "ANALYSIS_BOUND",
+                runner.RunnerError("COVERAGE_CLEANUP_FAILED: claimed run cleanup failed."),
+            ),
+        }
+        runner.validate_exact_head_receipt_v3(receipt)
+        receipt_path = self.repository / "receipt.json"
+        runner.write_receipt(receipt_path, receipt, (secret,))
+        raw = receipt_path.read_text(encoding="utf-8")
+        self.assertEqual(json.loads(raw), receipt)
+        self.assertNotIn(secret, raw)
+        self.assertNotIn(str(self.repository), raw)
+        self.assertNotIn(self.repository.as_posix(), raw)
+        print(
+            "NATIVE_FAILURE_DISCRIMINATOR",
+            outcome["failure"],
+            "OPEN_HANDLES",
+            len(self.native_opened),
+        )
+
     def test_real_git_readonly_cleanup_without_path_chmod(self):
         ast.parse(RUNNER_PATH.read_text(encoding="utf-8"), feature_version=(3, 10))
-        with self.assertRaises(PermissionError):
+        with self.assertRaises(PermissionError) as denied:
             self.leaf.unlink()
+        self.assertEqual(denied.exception.winerror, 5)
         (self.plan.root / "directory-link").symlink_to(self.external, target_is_directory=True)
         (self.plan.root / "file-link").symlink_to(self.sentinel)
-        with patch.object(Path, "chmod", side_effect=NotImplementedError("no path chmod")):
+        junction = self.plan.root / "directory-junction"
+        junction.mkdir()
+        self.set_junction(junction)
+        closed = []
+
+        def close(handle):
+            path = self.native_paths[handle]
+            result = self.kernel.CloseHandle(handle)
+            if result:
+                entry = (
+                    path.relative_to(self.plan.root).as_posix()
+                    if path.is_relative_to(self.plan.root)
+                    else "@ancestor"
+                )
+                closed.append((handle, entry))
+            return result
+
+        with (
+            patch.object(Path, "chmod", side_effect=NotImplementedError("no path chmod")),
+            patch.object(ctypes, "WinDLL", return_value=self.proxy(CloseHandle=close)),
+        ):
             outcome = runner.cleanup_coverage_run(self.plan, True, self.claim)
         self.assertEqual(outcome["status"], "OK", outcome)
         self.assertFalse(self.plan.root.exists())
         self.assert_external_preserved()
+        self.assertEqual(self.native_opened, set())
+        self.assertEqual(self.native_paths, {})
+        print(
+            "NATIVE_CLEANUP_SMOKE",
+            outcome["status"],
+            "UNLINK_WINERROR",
+            denied.exception.winerror,
+            "CLOSED_EXACT_HANDLES",
+            closed,
+            "EXTERNAL_BYTES_ATTRIBUTES",
+            "PRESERVED",
+        )
 
     def test_claim_and_ancestors_are_pinned_before_validation_through_final_delete(self):
         validate = runner.validate_coverage_marker

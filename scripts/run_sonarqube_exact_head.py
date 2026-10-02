@@ -3424,28 +3424,68 @@ def _delete_windows_coverage_run(
     delete_access = 0x10000
     open_flags = 0x00200000 | 0x02000000
 
-    def require(success: Any) -> None:
-        if not success:
-            raise ctypes.WinError(ctypes.get_last_error())
+    @contextmanager
+    def boundary(operation: str, stage: str, path: Path) -> Iterator[None]:
+        try:
+            yield
+        except (OSError, RunnerError) as error:
+            native_error = error if isinstance(error, OSError) else error.__cause__
+            if isinstance(native_error, OSError) and not hasattr(error, "_coverage_cleanup_native"):
+                entry = None
+                if path == plan.root.parent:
+                    entry = "@parent"
+                elif path.is_relative_to(plan.root):
+                    entry = path.relative_to(plan.root).as_posix()
+                elif plan.root.is_relative_to(path):
+                    entry = f"@ancestor/{len(plan.root.relative_to(path).parts)}"
+                setattr(
+                    error,
+                    "_coverage_cleanup_native",
+                    {
+                        "operation": operation,
+                        "stage": stage,
+                        "entry": entry,
+                        "winerror": getattr(native_error, "winerror", None),
+                        "errno": native_error.errno,
+                    },
+                )
+            raise
 
-    def close(handle: Any) -> None:
+    def require(operation: str, stage: str, path: Path, function: Any, *args: Any) -> None:
+        with boundary(operation, stage, path):
+            if not function(*args):
+                raise ctypes.WinError(ctypes.get_last_error())
+
+    def close(handle: Any, path: Path) -> None:
         original = sys.exc_info()[1]
         try:
-            require(kernel32.CloseHandle(handle))
+            require("CloseHandle", "CLOSE", path, kernel32.CloseHandle, handle)
         except BaseException:
             if original is None:
                 raise
 
-    def information(handle: Any, metadata: Any) -> None:
+    def information(handle: Any, metadata: Any, path: Path) -> None:
         if kernel32.GetFileType(handle) != 1:
             raise RunnerError("COVERAGE_MARKER_INVALID: cleanup handle is not a disk file.")
         info = FileInformation()
-        require(kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)))
+        require(
+            "GetFileInformationByHandle",
+            "IDENTITY",
+            path,
+            kernel32.GetFileInformationByHandle,
+            handle,
+            ctypes.byref(info),
+        )
         file_id = FileIdInformation()
         require(
-            kernel32.GetFileInformationByHandleEx(
-                handle, 18, ctypes.byref(file_id), ctypes.sizeof(file_id)
-            )
+            "GetFileInformationByHandleEx(FileIdInfo)",
+            "IDENTITY",
+            path,
+            kernel32.GetFileInformationByHandleEx,
+            handle,
+            18,
+            ctypes.byref(file_id),
+            ctypes.sizeof(file_id),
         )
         if sys.version_info >= (3, 12):
             identity = (file_id.volume, (file_id.index_high << 64) | file_id.index_low)
@@ -3469,9 +3509,14 @@ def _delete_windows_coverage_run(
         if reparse:
             tag = (wintypes.DWORD * 2)()
             require(
-                kernel32.GetFileInformationByHandleEx(
-                    handle, 9, ctypes.byref(tag), ctypes.sizeof(tag)
-                )
+                "GetFileInformationByHandleEx(FileAttributeTagInfo)",
+                "IDENTITY",
+                path,
+                kernel32.GetFileInformationByHandleEx,
+                handle,
+                9,
+                ctypes.byref(tag),
+                ctypes.sizeof(tag),
             )
             if tag[1] != metadata.st_reparse_tag or tag[1] not in {
                 stat.IO_REPARSE_TAG_SYMLINK,
@@ -3487,48 +3532,53 @@ def _delete_windows_coverage_run(
         sharing: int,
         parent: Any = None,
     ) -> Any:
-        if parent is None:
-            handle = kernel32.CreateFileW(str(path), access, sharing, None, 3, open_flags, None)
-            if handle in (None, invalid_handle):
-                raise ctypes.WinError(ctypes.get_last_error())
-        else:
-            name_buffer = ctypes.create_unicode_buffer(path.name)
-            length = len(path.name.encode("utf-16-le"))
-            name = UnicodeString(length, length + 2, ctypes.cast(name_buffer, wintypes.LPWSTR))
-            attributes = ObjectAttributes(
-                ctypes.sizeof(ObjectAttributes), parent, ctypes.pointer(name), 0x40, None, None
-            )
-            result = wintypes.HANDLE()
-            status = IoStatusBlock()
-            code = ntdll.NtCreateFile(
-                ctypes.byref(result),
-                access,
-                ctypes.byref(attributes),
-                ctypes.byref(status),
-                None,
-                0,
-                sharing,
-                1,
-                0x00204000,
-                None,
-                0,
-            )
-            if code < 0:
-                raise ctypes.WinError(ntdll.RtlNtStatusToDosError(code))
-            handle = result.value
-        stack.callback(close, handle)
-        information(handle, metadata)
+        operation = "CreateFileW" if parent is None else "NtCreateFile"
+        with boundary(operation, "OPEN", path):
+            if parent is None:
+                handle = kernel32.CreateFileW(str(path), access, sharing, None, 3, open_flags, None)
+                if handle in (None, invalid_handle):
+                    raise ctypes.WinError(ctypes.get_last_error())
+            else:
+                name_buffer = ctypes.create_unicode_buffer(path.name)
+                length = len(path.name.encode("utf-16-le"))
+                name = UnicodeString(length, length + 2, ctypes.cast(name_buffer, wintypes.LPWSTR))
+                attributes = ObjectAttributes(
+                    ctypes.sizeof(ObjectAttributes), parent, ctypes.pointer(name), 0x40, None, None
+                )
+                result = wintypes.HANDLE()
+                status = IoStatusBlock()
+                code = ntdll.NtCreateFile(
+                    ctypes.byref(result),
+                    access,
+                    ctypes.byref(attributes),
+                    ctypes.byref(status),
+                    None,
+                    0,
+                    sharing,
+                    1,
+                    0x00204000,
+                    None,
+                    0,
+                )
+                if code < 0:
+                    raise ctypes.WinError(ntdll.RtlNtStatusToDosError(code))
+                handle = result.value
+        stack.callback(close, handle, path)
+        information(handle, metadata, path)
         return handle
 
-    def children(handle: Any, metadata: Any) -> Iterator[tuple[str, Any]]:
+    def children(handle: Any, metadata: Any, path: Path) -> Iterator[tuple[str, Any]]:
         buffer = ctypes.create_string_buffer(65536)
         kind = 20  # FileIdExtdDirectoryRestartInfo; subsequent pages continue this handle.
         while True:
-            if not kernel32.GetFileInformationByHandleEx(handle, kind, buffer, len(buffer)):
-                error = ctypes.get_last_error()
-                if error == 18:  # ERROR_NO_MORE_FILES
-                    return
-                raise ctypes.WinError(error)
+            with boundary(
+                "GetFileInformationByHandleEx(FileIdExtdDirectoryInfo)", "ENUMERATE", path
+            ):
+                if not kernel32.GetFileInformationByHandleEx(handle, kind, buffer, len(buffer)):
+                    error = ctypes.get_last_error()
+                    if error == 18:  # ERROR_NO_MORE_FILES
+                        return
+                    raise ctypes.WinError(error)
             kind = 19
             offset = 0
             while True:
@@ -3561,23 +3611,33 @@ def _delete_windows_coverage_run(
                     break
                 offset += info.next
 
-    def dispose(handle: Any, metadata: Any) -> None:
-        information(handle, metadata)
+    def dispose(handle: Any, metadata: Any, path: Path) -> None:
+        information(handle, metadata, path)
         # DELETE | IGNORE_READONLY_ATTRIBUTE never changes a shared file record's attributes.
         disposition = FileDispositionInformationEx(0x11)
         try:
             require(
-                kernel32.SetFileInformationByHandle(
-                    handle, 21, ctypes.byref(disposition), ctypes.sizeof(disposition)
-                )
+                "SetFileInformationByHandle(FileDispositionInfoEx)",
+                "DISPOSITION",
+                path,
+                kernel32.SetFileInformationByHandle,
+                handle,
+                21,
+                ctypes.byref(disposition),
+                ctypes.sizeof(disposition),
             )
         except BaseException:
             disposition.flags = 0
             try:
                 require(
-                    kernel32.SetFileInformationByHandle(
-                        handle, 21, ctypes.byref(disposition), ctypes.sizeof(disposition)
-                    )
+                    "SetFileInformationByHandle(FileDispositionInfoEx)",
+                    "DISPOSITION",
+                    path,
+                    kernel32.SetFileInformationByHandle,
+                    handle,
+                    21,
+                    ctypes.byref(disposition),
+                    ctypes.sizeof(disposition),
                 )
             except BaseException:
                 pass
@@ -3586,7 +3646,7 @@ def _delete_windows_coverage_run(
     def descend(path: Path, handle: Any, metadata: Any) -> None:
         if not metadata.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
             if stat.S_ISDIR(metadata.st_mode):
-                for name, child_metadata in children(handle, metadata):
+                for name, child_metadata in children(handle, metadata, path):
                     child = path / name
                     directory = stat.S_ISDIR(child_metadata.st_mode)
                     with ExitStack() as child_pins:
@@ -3599,7 +3659,7 @@ def _delete_windows_coverage_run(
                             handle,
                         )
                         descend(child, child_handle, child_metadata)
-        dispose(handle, metadata)
+        dispose(handle, metadata, path)
 
     with ExitStack() as ancestors:
         current = Path(plan.root.anchor)
@@ -3608,7 +3668,8 @@ def _delete_windows_coverage_run(
         for component in (None, *plan.root.parent.relative_to(current).parts):
             if component is not None:
                 current /= component
-            metadata = _scanner_tree_metadata(current)
+            with boundary("Path.stat", "METADATA", current):
+                metadata = _scanner_tree_metadata(current)
             if not stat.S_ISDIR(metadata.st_mode):
                 raise RunnerError("COVERAGE_MARKER_INVALID: cleanup ancestor is not a directory.")
             access = read_attributes | (delete_access | 1 if current == plan.root.parent else 0)
@@ -3617,7 +3678,8 @@ def _delete_windows_coverage_run(
             if current == plan.root.parent:
                 parent_handle, parent_metadata = handle, metadata
         with ExitStack() as root_pin:
-            metadata = _scanner_tree_metadata(plan.root)
+            with boundary("Path.stat", "METADATA", plan.root):
+                metadata = _scanner_tree_metadata(plan.root)
             root_handle = pin(
                 root_pin, plan.root, metadata, read_attributes | delete_access | 1, 1, parent_handle
             )
@@ -3631,26 +3693,25 @@ def _delete_windows_coverage_run(
                 raise RunnerError("COVERAGE_MARKER_INVALID: cleanup claim identity does not match.")
             with ExitStack() as marker_pins:
                 for path in (plan.marker, plan.resolved_wave2_entry):
-                    file_metadata = _scanner_tree_metadata(path)
+                    with boundary("Path.stat", "METADATA", path):
+                        file_metadata = _scanner_tree_metadata(path)
                     if not stat.S_ISREG(file_metadata.st_mode):
                         raise RunnerError("COVERAGE_MARKER_INVALID: cleanup marker is not regular.")
                     pin(marker_pins, path, file_metadata, 0x80000000 | read_attributes, 1)
-                raw_marker = plan.marker.read_bytes()
+                with boundary("Path.read_bytes", "MARKER_READ", plan.marker):
+                    raw_marker = plan.marker.read_bytes()
                 if _sha256_bytes(raw_marker) != claim.marker_sha256:
                     raise RunnerError("COVERAGE_MARKER_INVALID: cleanup marker identity changed.")
                 marker = _load_json_object(raw_marker, "coverage marker")
                 validate_coverage_marker(plan, marker)
-                if (
-                    _load_json_object(
-                        plan.resolved_wave2_entry.read_bytes(), "resolved Wave-2 entry"
-                    )
-                    != marker["wave2_entry"]
-                ):
+                with boundary("Path.read_bytes", "MARKER_READ", plan.resolved_wave2_entry):
+                    raw_entry = plan.resolved_wave2_entry.read_bytes()
+                if _load_json_object(raw_entry, "resolved Wave-2 entry") != marker["wave2_entry"]:
                     raise RunnerError("COVERAGE_MARKER_INVALID: resolved cleanup entry changed.")
             descend(plan.root, root_handle, metadata)
         cleanup["removed_paths"] = [_coverage_relative(plan, plan.root)]
-        if next(children(parent_handle, parent_metadata), None) is None:
-            dispose(parent_handle, parent_metadata)
+        if next(children(parent_handle, parent_metadata, plan.root.parent), None) is None:
+            dispose(parent_handle, parent_metadata, plan.root.parent)
             cleanup["parent_removed_if_empty"] = True
 
 
@@ -3684,6 +3745,9 @@ def cleanup_coverage_run(
             "code": "COVERAGE_CLEANUP_FAILED",
             "message": error.__class__.__name__,
         }
+        native = getattr(error, "_coverage_cleanup_native", None)
+        if native is not None:
+            cleanup["failure"]["native"] = native
         if not isinstance(error, (OSError, RunnerError, NotImplementedError)):
             raise
     return cleanup
@@ -5135,6 +5199,53 @@ def validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None:
             or not failure["safe_message"]
         ):
             _v3_fail("blocked receipt lacks typed failure")
+        cleanup = receipt.get("cleanup")
+        cleanup_failure = cleanup.get("failure") if isinstance(cleanup, Mapping) else None
+        if isinstance(cleanup_failure, Mapping) and "native" in cleanup_failure:
+            native = cleanup_failure["native"]
+            if (
+                not isinstance(native, Mapping)
+                or set(native) != {"operation", "stage", "entry", "winerror", "errno"}
+                or not isinstance(native.get("operation"), str)
+                or native.get("operation")
+                not in {
+                    "CreateFileW",
+                    "NtCreateFile",
+                    "CloseHandle",
+                    "GetFileInformationByHandle",
+                    "GetFileInformationByHandleEx(FileIdInfo)",
+                    "GetFileInformationByHandleEx(FileAttributeTagInfo)",
+                    "GetFileInformationByHandleEx(FileIdExtdDirectoryInfo)",
+                    "SetFileInformationByHandle(FileDispositionInfoEx)",
+                    "Path.stat",
+                    "Path.read_bytes",
+                }
+                or not isinstance(native.get("stage"), str)
+                or native.get("stage")
+                not in {
+                    "OPEN",
+                    "IDENTITY",
+                    "ENUMERATE",
+                    "DISPOSITION",
+                    "CLOSE",
+                    "METADATA",
+                    "MARKER_READ",
+                }
+                or any(
+                    native.get(field) is not None and type(native[field]) is not int
+                    for field in ("winerror", "errno")
+                )
+                or (
+                    native.get("entry") is not None
+                    and (
+                        not isinstance(native["entry"], str)
+                        or not re.fullmatch(
+                            r"(?!/)(?!.*(?:^|/)\.\.(?:/|$))[^:\\\x00-\x1f]+", native["entry"]
+                        )
+                    )
+                )
+            ):
+                _v3_fail("cleanup native failure discriminator is invalid")
         analysis = receipt.get("analysis")
         if analysis is not None:
             if identity.get("analysis_id") is None:

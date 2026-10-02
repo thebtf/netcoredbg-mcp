@@ -1132,6 +1132,66 @@
         "message": {
           "type": "string",
           "minLength": 1
+        },
+        "native": {
+          "$ref": "#/$defs/cleanup_native_failure"
+        }
+      }
+    },
+    "cleanup_native_failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "stage",
+        "entry",
+        "winerror",
+        "errno"
+      ],
+      "properties": {
+        "operation": {
+          "enum": [
+            "CreateFileW",
+            "NtCreateFile",
+            "CloseHandle",
+            "GetFileInformationByHandle",
+            "GetFileInformationByHandleEx(FileIdInfo)",
+            "GetFileInformationByHandleEx(FileAttributeTagInfo)",
+            "GetFileInformationByHandleEx(FileIdExtdDirectoryInfo)",
+            "SetFileInformationByHandle(FileDispositionInfoEx)",
+            "Path.stat",
+            "Path.read_bytes"
+          ]
+        },
+        "stage": {
+          "enum": [
+            "OPEN",
+            "IDENTITY",
+            "ENUMERATE",
+            "DISPOSITION",
+            "CLOSE",
+            "METADATA",
+            "MARKER_READ"
+          ]
+        },
+        "entry": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^:\\\\\\u0000-\\u001f]+$"
+        },
+        "winerror": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "errno": {
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       }
     },

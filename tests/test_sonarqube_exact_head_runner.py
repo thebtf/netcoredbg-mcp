@@ -2395,6 +2395,65 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             self.assertEqual(result["removed_paths"], [])
             self.assertEqual(plan.marker.read_bytes(), marker)
 
+    def test_cleanup_native_failure_schema_and_consumer_preserve_blocked_status(self):
+        from tests.test_stateless_preview_artifact import _complete_v3_exact_head_receipt
+
+        schema_path = (
+            RUNNER_PATH.parents[1]
+            / "specs/014-sonarqube-coverage-producer/contracts/exact-head-receipt-v3.schema.json"
+        )
+        schema = Draft202012Validator(json.loads(schema_path.read_bytes()))
+        receipt = _complete_v3_exact_head_receipt(
+            self.HEAD, role="diagnostic", outcome="DIAGNOSTIC_COMPLETE", release_intent="none"
+        )
+        receipt["outcome"] = "BLOCKED"
+        receipt["failure"] = runner._blocked_failure(
+            "ANALYSIS_BOUND", runner.RunnerError("COVERAGE_CLEANUP_FAILED: controlled failure")
+        )
+        receipt["cleanup"]["status"] = "FAILED"
+        receipt["cleanup"]["removed_paths"] = []
+        native = {
+            "operation": "SetFileInformationByHandle(FileDispositionInfoEx)",
+            "stage": "DISPOSITION",
+            "entry": "python/pytest/real-git/.git/objects/ab/object",
+            "winerror": 5,
+            "errno": 13,
+        }
+        receipt["cleanup"]["failure"] = {
+            "code": "COVERAGE_CLEANUP_FAILED",
+            "message": "PermissionError",
+            "native": native,
+        }
+        for entry in (native["entry"], ".", "@parent", "@ancestor/3", None):
+            with self.subTest(entry=entry):
+                native["entry"] = entry
+                schema.validate(receipt)
+                runner.validate_exact_head_receipt_v3(receipt)
+        for field, value in (
+            ("entry", "D:/private/provider-secret"),
+            ("entry", "/private/provider-secret"),
+            ("entry", "../external"),
+            ("entry", "python\\provider-secret"),
+            ("entry", "python\nprovider-secret"),
+            ("operation", "unknown-provider-content"),
+            ("operation", []),
+            ("stage", []),
+            ("winerror", True),
+            ("errno", "13"),
+            ("unexpected", "provider-secret"),
+        ):
+            with self.subTest(field=field, value=value):
+                invalid = deepcopy(receipt)
+                invalid["cleanup"]["failure"]["native"][field] = value
+                self.assertFalse(schema.is_valid(invalid))
+                with self.assertRaises(runner.RunnerError):
+                    runner.validate_exact_head_receipt_v3(invalid)
+        receipt["outcome"] = "DIAGNOSTIC_COMPLETE"
+        receipt["failure"] = None
+        self.assertFalse(schema.is_valid(receipt))
+        with self.assertRaises(runner.RunnerError):
+            runner.validate_exact_head_receipt_v3(receipt)
+
     def test_incomplete_analysis_is_typed_and_cannot_authorize_completion(self):
         from tests.test_stateless_preview_artifact import _complete_v3_exact_head_receipt
 
