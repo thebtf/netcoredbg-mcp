@@ -4077,6 +4077,31 @@ def indexed_api_json(
             time.sleep(POLL_SECONDS)
 
 
+def _validate_inventory_paging(
+    page_index: Any, page_size: Any, page_total: Any, page: int, endpoint: str
+) -> None:
+    if (
+        not isinstance(page_index, int)
+        or not isinstance(page_size, int)
+        or not isinstance(page_total, int)
+        or page_index != page
+        or page_size <= 0
+        or page_total < 0
+    ):
+        raise RunnerError(f"{endpoint} pagination metadata is invalid.")
+    if page_total >= RESULT_CAP:
+        raise RunnerError(f"{endpoint} reached its possible server result cap.")
+
+
+def _append_inventory_records(
+    raw_records: list[Any], fields: Sequence[str], endpoint: str, records: list[dict[str, Any]]
+) -> None:
+    for raw_record in raw_records:
+        if not isinstance(raw_record, dict) or not isinstance(raw_record.get("key"), str):
+            raise RunnerError(f"{endpoint} returned an invalid record.")
+        records.append({field: raw_record.get(field) for field in fields})
+
+
 def paginated_inventory(
     host: str,
     endpoint: str,
@@ -4101,17 +4126,7 @@ def paginated_inventory(
             paging.get("pageSize"),
             paging.get("total"),
         )
-        if (
-            not isinstance(page_index, int)
-            or not isinstance(page_size, int)
-            or not isinstance(page_total, int)
-            or page_index != page
-            or page_size <= 0
-            or page_total < 0
-        ):
-            raise RunnerError(f"{endpoint} pagination metadata is invalid.")
-        if page_total >= RESULT_CAP:
-            raise RunnerError(f"{endpoint} reached its possible server result cap.")
+        _validate_inventory_paging(page_index, page_size, page_total, page, endpoint)
         if total is None:
             total = page_total
         elif total != page_total:
@@ -4119,10 +4134,7 @@ def paginated_inventory(
         if page_index * page_size < total and not raw_records:
             raise RunnerError(f"{endpoint} returned an empty nonterminal page.")
         pages.append({"page_index": page_index, "page_size": page_size, "total": page_total})
-        for raw_record in raw_records:
-            if not isinstance(raw_record, dict) or not isinstance(raw_record.get("key"), str):
-                raise RunnerError(f"{endpoint} returned an invalid record.")
-            records.append({field: raw_record.get(field) for field in fields})
+        _append_inventory_records(raw_records, fields, endpoint, records)
         if page_index * page_size >= total:
             break
         page += 1
@@ -4531,50 +4543,7 @@ def validate_hotspot_dispositions(inventory: Mapping[str, Any], dispositions: An
         raise RunnerError("PASS receipt hotspot blocking count does not match observed hotspots.")
 
 
-def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
-    required = (
-        "run_id",
-        "role",
-        "project_key",
-        "analysis_xml_project_key",
-        "captured_head",
-        "completed_at",
-        "worktree",
-        "cleanliness",
-        "scanner_metadata",
-        "task_report",
-        "compute_engine",
-        "analysis_current_before_issues",
-        "analysis_current_after_issues",
-        "analysis_current_final",
-        "quality_gate",
-        "pre_scan_issues",
-        "post_scan_issues",
-        "new_code_issues",
-        "issue_dispositions",
-        "hotspots",
-        "hotspot_dispositions",
-        "cleanup",
-        "post_scan_head",
-    )
-    if (
-        receipt.get("schema_version") != RECEIPT_SCHEMA_VERSION
-        or receipt.get("outcome") != "PASS"
-        or receipt.get("project_key") != PROJECT_KEY
-        or receipt.get("analysis_xml_project_key") != PROJECT_KEY
-        or receipt.get("role") not in {"candidate", "post-merge"}
-        or not isinstance(receipt.get("captured_head"), str)
-        or not SHA_RE.fullmatch(receipt["captured_head"])
-        or not isinstance(receipt.get("completed_at"), str)
-        or not receipt["completed_at"]
-        or any(key not in receipt for key in required)
-    ):
-        raise RunnerError("PASS receipt does not satisfy the exact-head evidence schema.")
-    worktree = receipt["worktree"]
-    cleanliness = receipt["cleanliness"]
-    scanner = receipt["scanner_metadata"]
-    task_report = receipt["task_report"]
-    compute_engine = receipt["compute_engine"]
+def _validate_pass_receipt_worktree(worktree: Any, cleanliness: Any) -> None:
     if (
         not isinstance(worktree, dict)
         or not worktree.get("detached")
@@ -4591,31 +4560,11 @@ def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
         or cleanliness.get("post", {}).get("status") != "clean"
     ):
         raise RunnerError("PASS receipt lacks clean-worktree evidence.")
-    cleanup = receipt["cleanup"]
-    if (
-        not isinstance(cleanup, dict)
-        or cleanup.get("status") != "PASS"
-        or not isinstance(cleanup.get("removed"), list)
-        or any(not isinstance(path, str) or not path for path in cleanup["removed"])
-    ):
-        raise RunnerError("PASS receipt lacks successful generated-artifact cleanup evidence.")
-    removed = cleanup["removed"]
-    if (
-        any(
-            "\\" in path
-            or path.startswith("/")
-            or re.match(r"^[A-Za-z]:", path)
-            or any(part in {"", ".", ".."} for part in path.split("/"))
-            for path in removed
-        )
-        or len(set(removed)) != len(removed)
-        or removed
-        != sorted(
-            removed,
-            key=lambda path: (-len(path.split("/")), path.casefold(), path),
-        )
-    ):
-        raise RunnerError("PASS receipt has invalid generated-artifact cleanup removals.")
+
+
+def _validate_pass_receipt_analysis(
+    receipt: Mapping[str, Any], scanner: Any, task_report: Any, compute_engine: Any
+) -> None:
     if (
         not isinstance(scanner, dict)
         or not scanner.get("observed")
@@ -4684,6 +4633,79 @@ def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
             raise RunnerError(
                 "PASS receipt lacks current fixed-project exact-head analysis binding evidence."
             )
+
+
+def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
+    required = (
+        "run_id",
+        "role",
+        "project_key",
+        "analysis_xml_project_key",
+        "captured_head",
+        "completed_at",
+        "worktree",
+        "cleanliness",
+        "scanner_metadata",
+        "task_report",
+        "compute_engine",
+        "analysis_current_before_issues",
+        "analysis_current_after_issues",
+        "analysis_current_final",
+        "quality_gate",
+        "pre_scan_issues",
+        "post_scan_issues",
+        "new_code_issues",
+        "issue_dispositions",
+        "hotspots",
+        "hotspot_dispositions",
+        "cleanup",
+        "post_scan_head",
+    )
+    if (
+        receipt.get("schema_version") != RECEIPT_SCHEMA_VERSION
+        or receipt.get("outcome") != "PASS"
+        or receipt.get("project_key") != PROJECT_KEY
+        or receipt.get("analysis_xml_project_key") != PROJECT_KEY
+        or receipt.get("role") not in {"candidate", "post-merge"}
+        or not isinstance(receipt.get("captured_head"), str)
+        or not SHA_RE.fullmatch(receipt["captured_head"])
+        or not isinstance(receipt.get("completed_at"), str)
+        or not receipt["completed_at"]
+        or any(key not in receipt for key in required)
+    ):
+        raise RunnerError("PASS receipt does not satisfy the exact-head evidence schema.")
+    worktree = receipt["worktree"]
+    cleanliness = receipt["cleanliness"]
+    scanner = receipt["scanner_metadata"]
+    task_report = receipt["task_report"]
+    compute_engine = receipt["compute_engine"]
+    _validate_pass_receipt_worktree(worktree, cleanliness)
+    cleanup = receipt["cleanup"]
+    if (
+        not isinstance(cleanup, dict)
+        or cleanup.get("status") != "PASS"
+        or not isinstance(cleanup.get("removed"), list)
+        or any(not isinstance(path, str) or not path for path in cleanup["removed"])
+    ):
+        raise RunnerError("PASS receipt lacks successful generated-artifact cleanup evidence.")
+    removed = cleanup["removed"]
+    if (
+        any(
+            "\\" in path
+            or path.startswith("/")
+            or re.match(r"^[A-Za-z]:", path)
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            for path in removed
+        )
+        or len(set(removed)) != len(removed)
+        or removed
+        != sorted(
+            removed,
+            key=lambda path: (-len(path.split("/")), path.casefold(), path),
+        )
+    ):
+        raise RunnerError("PASS receipt has invalid generated-artifact cleanup removals.")
+    _validate_pass_receipt_analysis(receipt, scanner, task_report, compute_engine)
     validate_inventory(
         receipt["pre_scan_issues"],
         ISSUES_SEARCH_ENDPOINT,
