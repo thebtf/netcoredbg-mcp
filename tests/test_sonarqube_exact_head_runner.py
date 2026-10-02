@@ -4330,9 +4330,51 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         async def record_launch(**kwargs):
             owner = await original_launch(**kwargs)
             owners.append(owner)
+            identity["root_handle"] = _winapi.OpenProcess(0x101001, False, owner.pid)
+            self.assertEqual(
+                (await asyncio.wait_for(owner.stdout.readline(), 10)).strip(), b"starting"
+            )
+            loop = asyncio.get_running_loop()
+            held_since = loop.time()
+            await asyncio.sleep(2)
+            self.assertFalse(pid_file.is_file(), "startup is still held past the old 2s assumption")
+            identity["startup_hold_seconds"] = loop.time() - held_since
+            startup_gate.touch()
+            readiness = (await asyncio.wait_for(owner.stdout.readline(), 10)).split()
+            self.assertEqual(len(readiness), 2)
+            self.assertEqual(readiness[0], b"ready")
+            identity["interpreter_pid"] = int(readiness[1])
+            identity["interpreter_handle"] = _winapi.OpenProcess(
+                0x101001, False, identity["interpreter_pid"]
+            )
+            self.assertTrue(pid_file.is_file())
+            identity["marker_before_cancel"] = pid_file.read_text(encoding="utf-8")
+            identity["pid"] = int(identity["marker_before_cancel"])
+            identity["process"] = psutil.Process(identity["pid"])
+            identity["born"] = identity["process"].create_time()
+            identity["before_status"] = identity["process"].status()
+            identity["root_born"] = psutil.Process(owner.pid).create_time()
+            identity["child_parent"] = identity["process"].ppid()
+            identity["handle"] = _winapi.OpenProcess(0x101001, False, identity["pid"])
+            self.assertEqual(psutil.Process(identity["pid"]).create_time(), identity["born"])
+            self.assertEqual(identity["child_parent"], identity["interpreter_pid"])
+            identity["known_pids"] = {owner.pid, identity["interpreter_pid"], identity["pid"]}
+            for key in ("root_handle", "interpreter_handle", "handle"):
+                self.assertTrue(owner._api.is_process_in_job(identity[key], owner._job_handle))
+                self.assertEqual(_winapi.WaitForSingleObject(identity[key], 0), 258)
+            snapshot("before_cancel")
+            print(
+                f"collector ready root={owner.pid} interpreter={identity['interpreter_pid']} "
+                f"child={identity['pid']} startup_hold_seconds={identity['startup_hold_seconds']:.3f} "
+                f"marker_before_cancel={identity['marker_before_cancel']} "
+                f"exact_processes_live={len(identity['known_pids'])}"
+            )
+            loop.call_soon(asyncio.current_task().cancel)
             return owner
 
         def snapshot(label):
+            if "handle" not in identity:
+                return
             owner = owners[0]
             child_handle = identity["handle"]
             membership.append(
@@ -4357,33 +4399,30 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             receipt = await original_force(owner, timeout=timeout)
             snapshot("after_force")
             diagnostic = owner.drain_snapshot(receipt)
-            self.assertGreaterEqual(diagnostic["retained_exact_handles"], 2)
-            self.assertEqual(
-                diagnostic["retained_exact_handles"], diagnostic["signaled_exact_handles"]
-            )
-            receipts.append(
-                ("force", receipt.status.value, receipt.active_processes, receipt.forced)
-            )
+            receipts.append(("force", diagnostic))
             return receipt
 
         async def record_close(owner):
             snapshot("before_close")
             receipt = await original_close(owner)
-            receipts.append(
-                ("close", receipt.status.value, receipt.active_processes, receipt.forced)
-            )
+            receipts.append(("close", owner.drain_snapshot(receipt)))
             return receipt
 
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             pid_file = root / "descendant.pid"
+            startup_gate = root / "startup.release"
             child = root / "child.py"
             child.write_text("import time\ntime.sleep(40)\n", encoding="utf-8")
             parent = root / "parent.py"
             parent.write_text(
-                "import subprocess, sys, time\n"
+                "import os, subprocess, sys, time\n"
+                "from pathlib import Path\n"
+                "print('starting', flush=True)\n"
+                f"while not Path({str(startup_gate)!r}).is_file(): time.sleep(0.01)\n"
                 f"child = subprocess.Popen([sys.executable, {str(child)!r}], creationflags=0)\n"
-                f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+                f"Path({str(pid_file)!r}).write_text(str(child.pid), encoding='utf-8')\n"
+                "print(f'ready {os.getpid()}', flush=True)\n"
                 "time.sleep(30)\n",
                 encoding="utf-8",
             )
@@ -4398,23 +4437,43 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                         timeout_seconds=30,
                     )
                 )
-                for _ in range(200):
-                    if pid_file.is_file() and pid_file.read_text(encoding="utf-8").strip():
-                        break
-                    await asyncio.sleep(0.01)
-                self.assertTrue(pid_file.is_file())
-                identity["pid"] = int(pid_file.read_text(encoding="utf-8"))
-                identity["process"] = psutil.Process(identity["pid"])
-                identity["born"] = identity["process"].create_time()
-                identity["before_status"] = identity["process"].status()
-                identity["root_born"] = psutil.Process(owners[0].pid).create_time()
-                identity["child_parent"] = identity["process"].ppid()
-                identity["handle"] = _winapi.OpenProcess(0x101001, False, identity["pid"])
-                self.assertEqual(psutil.Process(identity["pid"]).create_time(), identity["born"])
-                snapshot("before_cancel")
-                task.cancel()
-                with self.assertRaises(asyncio.CancelledError):
-                    await task
+                try:
+                    with self.assertRaises(asyncio.CancelledError) as raised:
+                        await task
+                    self.assertIs(type(raised.exception), asyncio.CancelledError)
+                finally:
+                    first_failure = sys.exc_info()[1]
+                    if not task.done():
+                        task.cancel()
+                    outcome = (await asyncio.gather(task, return_exceptions=True))[0]
+                    try:
+                        if owners:
+                            closed = await original_close(owners[0])
+                            self.assertIs(closed.status, owner_module.DrainStatus.DRAINED)
+                            self.assertEqual(closed.active_processes, 0)
+                            self.assertTrue(owners[0]._closed)
+                            for key in ("root_handle", "interpreter_handle", "handle"):
+                                if key in identity:
+                                    self.assertEqual(
+                                        _winapi.WaitForSingleObject(identity[key], 0), 0
+                                    )
+                            print(
+                                "collector fixture joined before asyncio shutdown "
+                                f"root={owners[0].pid} interpreter={identity.get('interpreter_pid')} "
+                                f"marker={pid_file.is_file()} "
+                                f"drain={json.dumps(owners[0].drain_snapshot(closed), sort_keys=True)}"
+                            )
+                        if (
+                            isinstance(outcome, BaseException)
+                            and not isinstance(outcome, asyncio.CancelledError)
+                            and outcome is not first_failure
+                        ):
+                            raise outcome
+                    except BaseException as cleanup_error:
+                        if first_failure is None:
+                            raise
+                        if hasattr(first_failure, "add_note"):
+                            first_failure.add_note(f"fixture cleanup: {cleanup_error!r}")
 
             try:
                 with (
@@ -4423,6 +4482,11 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     patch.object(owner_module.WindowsOwnedProcess, "aclose", record_close),
                 ):
                     asyncio.run(interrupt())
+                self.assertEqual(
+                    pid_file.read_text(encoding="utf-8"), identity["marker_before_cancel"]
+                )
+                self.assertEqual([label for label, _ in receipts], ["force", "close"])
+                self.assertGreaterEqual(identity["startup_hold_seconds"], 2)
                 pid = identity["pid"]
                 original_child_alive = identity["process"].is_running()
                 try:
@@ -4440,8 +4504,26 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 self.assertFalse(membership[1][6], membership)
                 self.assertTrue(membership[2][6], membership)
                 self.assertTrue(membership[3][6], membership)
-                self.assertIn(("force", "drained", 0, True), receipts)
-                self.assertIn(("close", "drained", 0, True), receipts)
+                for label, facts in receipts:
+                    self.assertEqual(facts["status"], "drained", (label, facts))
+                    self.assertTrue(facts["forced"], (label, facts))
+                    self.assertTrue(facts["root_was_forced"], (label, facts))
+                    self.assertEqual(facts["active_processes"], 0, (label, facts))
+                    self.assertGreaterEqual(
+                        facts["total_processes"], len(identity["known_pids"]), (label, facts)
+                    )
+                    self.assertEqual(
+                        facts["total_processes"], facts["retained_exact_handles"], (label, facts)
+                    )
+                    self.assertEqual(
+                        facts["retained_exact_handles"],
+                        facts["signaled_exact_handles"],
+                        (label, facts),
+                    )
+                    self.assertTrue(facts["root_birth_seen"], (label, facts))
+                    self.assertFalse(facts["unverified_membership"], (label, facts))
+                    self.assertFalse(facts["handle_probe_failed"], (label, facts))
+                    self.assertEqual(facts["live_members_without_handle"], 0, (label, facts))
                 self.assertFalse(
                     original_child_alive,
                     f"original child remains active: root={owners[0].pid} "
@@ -4450,15 +4532,9 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     f"after={observed} job={receipts} membership={membership}",
                 )
             finally:
-                if "handle" in identity:
-                    try:
-                        if _winapi.WaitForSingleObject(identity["handle"], 0) == 258:
-                            _winapi.TerminateProcess(identity["handle"], 1)
-                            self.assertEqual(
-                                _winapi.WaitForSingleObject(identity["handle"], 7000), 0
-                            )
-                    finally:
-                        _winapi.CloseHandle(identity["handle"])
+                for key in ("handle", "interpreter_handle", "root_handle"):
+                    if key in identity:
+                        _winapi.CloseHandle(identity[key])
 
     def test_stateless_collector_repeated_cancellation_joins_owned_close(self):
         if runner.os.name != "nt":
