@@ -2845,6 +2845,279 @@ def _receipt_dotnet_input(input_evidence: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _validate_collector_normalization_source(source: Any) -> str:
+    if not isinstance(source, Mapping) or not isinstance(source.get("source_path"), str):
+        _coverage_failure(
+            "COVERAGE_DOTNET_NORMALIZATION_FAILED", "collector class facts are malformed"
+        )
+    class_name = source.get("class_name")
+    if (
+        not isinstance(class_name, str)
+        or not class_name
+        or not isinstance(source.get("lines"), list)
+    ):
+        _coverage_failure(
+            "COVERAGE_DOTNET_NORMALIZATION_FAILED", "collector class identity is absent"
+        )
+    return class_name
+
+
+def _collect_stateless_branch_owners(
+    input_evidence: Mapping[str, Any], owners: dict[tuple[str, int], set[str]]
+) -> None:
+    if input_evidence.get("id") != "stateless":
+        return
+    collector_facts = input_evidence.get("facts")
+    if not isinstance(collector_facts, list):
+        _coverage_failure(
+            "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated input facts are absent"
+        )
+    for source in collector_facts:
+        class_name = _validate_collector_normalization_source(source)
+        for line in source["lines"]:
+            if (
+                isinstance(line, Mapping)
+                and type(line.get("number")) is int
+                and type(line.get("branches_valid")) is int
+                and line["branches_valid"] > 0
+            ):
+                owners.setdefault((source["source_path"], line["number"]), set()).add(class_name)
+
+
+def _validate_normalization_condition(condition: Any) -> None:
+    if (
+        not isinstance(condition, Mapping)
+        or set(condition) != {"number", "type", "covered", "valid"}
+        or not isinstance(condition.get("number"), str)
+        or re.fullmatch(r"\d+", condition["number"]) is None
+        or not isinstance(condition.get("type"), str)
+        or not condition["type"]
+        or type(condition.get("covered")) is not int
+        or type(condition.get("valid")) is not int
+        or condition["valid"] <= 0
+        or condition["covered"] < 0
+        or condition["covered"] > condition["valid"]
+    ):
+        _coverage_failure(
+            "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated condition fact is invalid"
+        )
+
+
+def _parse_normalization_conditions(
+    raw_conditions: Sequence[Any],
+    branch_valid: int,
+    branch_covered: int,
+    parsed_conditions: dict[tuple[str, str], tuple[int, int]],
+) -> None:
+    for condition in raw_conditions:
+        _validate_normalization_condition(condition)
+        identity = (condition["type"], str(int(condition["number"])))
+        if identity in parsed_conditions:
+            _coverage_failure(
+                "COVERAGE_DOTNET_NORMALIZATION_FAILED",
+                "validated condition identities are ambiguous",
+            )
+        parsed_conditions[identity] = (condition["valid"], condition["covered"])
+    if (
+        sum(valid for valid, _ in parsed_conditions.values()) != branch_valid
+        or sum(covered for _, covered in parsed_conditions.values()) != branch_covered
+    ):
+        _coverage_failure(
+            "COVERAGE_DOTNET_NORMALIZATION_FAILED",
+            "validated condition facts disagree with line coverage",
+        )
+
+
+def _merge_normalization_branches(
+    key: tuple[str, int],
+    mode: str,
+    parsed_conditions: dict[tuple[str, str], tuple[int, int]],
+    line_definitions: dict[tuple[str, int], tuple[str, tuple[tuple[str, str, int], ...]]],
+    line_conditions: dict[tuple[str, int], dict[tuple[str, str], tuple[int, int]]],
+) -> None:
+    definition = (
+        mode,
+        ()
+        if mode == "multi-class"
+        else tuple(
+            sorted(
+                (condition_type, condition_number, valid)
+                for (condition_type, condition_number), (valid, _) in parsed_conditions.items()
+            )
+        ),
+    )
+    existing_definition = line_definitions.get(key)
+    if existing_definition is not None and existing_definition != definition:
+        _coverage_failure(
+            "COVERAGE_DOTNET_NORMALIZATION_FAILED",
+            "overlapping line has ambiguous condition identities",
+        )
+    line_definitions[key] = definition
+    merged_conditions = line_conditions.setdefault(key, {})
+    for identity, (valid, covered) in parsed_conditions.items():
+        previous = merged_conditions.get(identity)
+        if previous is not None and previous[0] != valid:
+            _coverage_failure(
+                "COVERAGE_DOTNET_NORMALIZATION_FAILED",
+                "condition identity has inconsistent denominator",
+            )
+        merged_conditions[identity] = (valid, max(covered, previous[1] if previous else 0))
+
+
+def _merge_normalization_line(
+    input_evidence: Mapping[str, Any],
+    source: Mapping[str, Any],
+    source_path: str,
+    line: Any,
+    line_hits: dict[tuple[str, int], int],
+    line_conditions: dict[tuple[str, int], dict[tuple[str, str], tuple[int, int]]],
+    line_definitions: dict[tuple[str, int], tuple[str, tuple[tuple[str, str, int], ...]]],
+    providers: dict[tuple[str, int], str],
+    multi_class_branches: set[tuple[str, int]],
+) -> None:
+    if not isinstance(line, Mapping):
+        _coverage_failure(
+            "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated line fact is malformed"
+        )
+    number = line.get("number")
+    hits = line.get("hits")
+    branch_valid = line.get("branches_valid")
+    branch_covered = line.get("branches_covered")
+    if (
+        type(number) is not int
+        or type(hits) is not int
+        or type(branch_valid) is not int
+        or type(branch_covered) is not int
+        or number <= 0
+        or hits < 0
+        or branch_valid < 0
+        or branch_covered < 0
+        or branch_covered > branch_valid
+    ):
+        _coverage_failure("COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated line fact is invalid")
+    key = (source_path, number)
+    provider = (
+        CODE_COVERAGE_PACKAGE if input_evidence["id"] == "stateless" else COVERLET_MSBUILD_PACKAGE
+    )
+    if key in providers and providers[key] != provider:
+        _coverage_failure(
+            "COVERAGE_DOTNET_NORMALIZATION_FAILED",
+            "cross-provider condition identities cannot be unioned",
+        )
+    providers[key] = provider
+    line_hits[key] = max(line_hits.get(key, 0), hits)
+    raw_conditions = line.get("conditions", [])
+    if not isinstance(raw_conditions, list):
+        _coverage_failure(
+            "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated condition facts are malformed"
+        )
+    if branch_valid == 0:
+        if raw_conditions:
+            _coverage_failure(
+                "COVERAGE_DOTNET_NORMALIZATION_FAILED", "nonbranch line has conditions"
+            )
+        return
+    parsed_conditions: dict[tuple[str, str], tuple[int, int]] = {}
+    if raw_conditions:
+        _parse_normalization_conditions(
+            raw_conditions, branch_valid, branch_covered, parsed_conditions
+        )
+        mode = "identified"
+    else:
+        parsed_conditions = {("aggregate", "0"): (branch_valid, branch_covered)}
+        mode = "aggregate"
+    if provider == CODE_COVERAGE_PACKAGE and key in multi_class_branches:
+        parsed_conditions = {("class", source["class_name"]): (branch_valid, branch_covered)}
+        mode = "multi-class"
+    _merge_normalization_branches(key, mode, parsed_conditions, line_definitions, line_conditions)
+
+
+def _merge_normalization_input(
+    input_evidence: Mapping[str, Any],
+    line_hits: dict[tuple[str, int], int],
+    line_conditions: dict[tuple[str, int], dict[tuple[str, str], tuple[int, int]]],
+    line_definitions: dict[tuple[str, int], tuple[str, tuple[tuple[str, str, int], ...]]],
+    source_union: set[str],
+    providers: dict[tuple[str, int], str],
+    multi_class_branches: set[tuple[str, int]],
+) -> None:
+    facts = input_evidence.get("facts")
+    if not isinstance(facts, list):
+        _coverage_failure(
+            "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated input facts are absent"
+        )
+    for source in facts:
+        if not isinstance(source, Mapping) or not isinstance(source.get("source_path"), str):
+            _coverage_failure(
+                "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated input facts are malformed"
+            )
+        source_path = source["source_path"]
+        source_union.add(source_path)
+        lines = source.get("lines")
+        if not isinstance(lines, list):
+            _coverage_failure(
+                "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated line facts are absent"
+            )
+        for line in lines:
+            _merge_normalization_line(
+                input_evidence,
+                source,
+                source_path,
+                line,
+                line_hits,
+                line_conditions,
+                line_definitions,
+                providers,
+                multi_class_branches,
+            )
+
+
+def _append_normalized_source(
+    classes: ElementTree.Element,
+    source_path: str,
+    line_hits: dict[tuple[str, int], int],
+    line_conditions: dict[tuple[str, int], dict[tuple[str, str], tuple[int, int]]],
+    line_definitions: dict[tuple[str, int], tuple[str, tuple[tuple[str, str, int], ...]]],
+) -> None:
+    class_element = ElementTree.SubElement(
+        classes, "class", {"name": source_path.replace("/", "."), "filename": source_path}
+    )
+    ElementTree.SubElement(class_element, "methods")
+    lines_element = ElementTree.SubElement(class_element, "lines")
+    for source, number in sorted(key for key in line_hits if key[0] == source_path):
+        attributes = {"number": str(number), "hits": str(line_hits[(source, number)])}
+        conditions = line_conditions.get((source, number), {})
+        if conditions:
+            condition_values = list(conditions.values())
+            covered = sum(item[1] for item in condition_values)
+            valid = sum(item[0] for item in condition_values)
+            attributes.update(
+                {
+                    "branch": "true",
+                    "condition-coverage": f"{round(covered * 100 / valid)}% ({covered}/{valid})",
+                }
+            )
+        line_element = ElementTree.SubElement(lines_element, "line", attributes)
+        definition = line_definitions.get((source, number))
+        if conditions and definition is not None and definition[0] == "identified":
+            conditions_element = ElementTree.SubElement(line_element, "conditions")
+            for (condition_type, condition_number), (valid, covered) in sorted(conditions.items()):
+                if covered * 100 % valid:
+                    _coverage_failure(
+                        "COVERAGE_DOTNET_NORMALIZATION_FAILED",
+                        "normalized condition coverage is not exact",
+                    )
+                ElementTree.SubElement(
+                    conditions_element,
+                    "condition",
+                    {
+                        "number": condition_number,
+                        "type": condition_type,
+                        "coverage": f"{covered * 100 // valid}%",
+                    },
+                )
+
+
 def normalize_dotnet_cobertura(
     plan: CoveragePlan, inputs: Sequence[Mapping[str, Any]]
 ) -> dict[str, Any]:
@@ -2859,184 +3132,20 @@ def normalize_dotnet_cobertura(
     providers: dict[tuple[str, int], str] = {}
     collector_branch_owners: dict[tuple[str, int], set[str]] = {}
     for input_evidence in inputs:
-        if input_evidence.get("id") != "stateless":
-            continue
-        collector_facts = input_evidence.get("facts")
-        if not isinstance(collector_facts, list):
-            _coverage_failure(
-                "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated input facts are absent"
-            )
-        for source in collector_facts:
-            if not isinstance(source, Mapping) or not isinstance(source.get("source_path"), str):
-                _coverage_failure(
-                    "COVERAGE_DOTNET_NORMALIZATION_FAILED", "collector class facts are malformed"
-                )
-            class_name = source.get("class_name")
-            if (
-                not isinstance(class_name, str)
-                or not class_name
-                or not isinstance(source.get("lines"), list)
-            ):
-                _coverage_failure(
-                    "COVERAGE_DOTNET_NORMALIZATION_FAILED", "collector class identity is absent"
-                )
-            for line in source["lines"]:
-                if (
-                    isinstance(line, Mapping)
-                    and type(line.get("number")) is int
-                    and type(line.get("branches_valid")) is int
-                    and line["branches_valid"] > 0
-                ):
-                    collector_branch_owners.setdefault(
-                        (source["source_path"], line["number"]), set()
-                    ).add(class_name)
+        _collect_stateless_branch_owners(input_evidence, collector_branch_owners)
     multi_class_branches = {
         key for key, owners in collector_branch_owners.items() if len(owners) > 1
     }
     for input_evidence in inputs:
-        facts = input_evidence.get("facts")
-        if not isinstance(facts, list):
-            _coverage_failure(
-                "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated input facts are absent"
-            )
-        for source in facts:
-            if not isinstance(source, Mapping) or not isinstance(source.get("source_path"), str):
-                _coverage_failure(
-                    "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated input facts are malformed"
-                )
-            source_path = source["source_path"]
-            source_union.add(source_path)
-            lines = source.get("lines")
-            if not isinstance(lines, list):
-                _coverage_failure(
-                    "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated line facts are absent"
-                )
-            for line in lines:
-                if not isinstance(line, Mapping):
-                    _coverage_failure(
-                        "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated line fact is malformed"
-                    )
-                number = line.get("number")
-                hits = line.get("hits")
-                branch_valid = line.get("branches_valid")
-                branch_covered = line.get("branches_covered")
-                if (
-                    type(number) is not int
-                    or type(hits) is not int
-                    or type(branch_valid) is not int
-                    or type(branch_covered) is not int
-                    or number <= 0
-                    or hits < 0
-                    or branch_valid < 0
-                    or branch_covered < 0
-                    or branch_covered > branch_valid
-                ):
-                    _coverage_failure(
-                        "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated line fact is invalid"
-                    )
-                key = (source_path, number)
-                provider = (
-                    CODE_COVERAGE_PACKAGE
-                    if input_evidence["id"] == "stateless"
-                    else COVERLET_MSBUILD_PACKAGE
-                )
-                if key in providers and providers[key] != provider:
-                    _coverage_failure(
-                        "COVERAGE_DOTNET_NORMALIZATION_FAILED",
-                        "cross-provider condition identities cannot be unioned",
-                    )
-                providers[key] = provider
-                line_hits[key] = max(line_hits.get(key, 0), hits)
-                raw_conditions = line.get("conditions", [])
-                if not isinstance(raw_conditions, list):
-                    _coverage_failure(
-                        "COVERAGE_DOTNET_NORMALIZATION_FAILED",
-                        "validated condition facts are malformed",
-                    )
-                if branch_valid == 0:
-                    if raw_conditions:
-                        _coverage_failure(
-                            "COVERAGE_DOTNET_NORMALIZATION_FAILED", "nonbranch line has conditions"
-                        )
-                    continue
-                parsed_conditions: dict[tuple[str, str], tuple[int, int]] = {}
-                if raw_conditions:
-                    for condition in raw_conditions:
-                        if (
-                            not isinstance(condition, Mapping)
-                            or set(condition) != {"number", "type", "covered", "valid"}
-                            or not isinstance(condition.get("number"), str)
-                            or re.fullmatch(r"\d+", condition["number"]) is None
-                            or not isinstance(condition.get("type"), str)
-                            or not condition["type"]
-                            or type(condition.get("covered")) is not int
-                            or type(condition.get("valid")) is not int
-                            or condition["valid"] <= 0
-                            or condition["covered"] < 0
-                            or condition["covered"] > condition["valid"]
-                        ):
-                            _coverage_failure(
-                                "COVERAGE_DOTNET_NORMALIZATION_FAILED",
-                                "validated condition fact is invalid",
-                            )
-                        identity = (condition["type"], str(int(condition["number"])))
-                        if identity in parsed_conditions:
-                            _coverage_failure(
-                                "COVERAGE_DOTNET_NORMALIZATION_FAILED",
-                                "validated condition identities are ambiguous",
-                            )
-                        parsed_conditions[identity] = (condition["valid"], condition["covered"])
-                    if (
-                        sum(valid for valid, _ in parsed_conditions.values()) != branch_valid
-                        or sum(covered for _, covered in parsed_conditions.values())
-                        != branch_covered
-                    ):
-                        _coverage_failure(
-                            "COVERAGE_DOTNET_NORMALIZATION_FAILED",
-                            "validated condition facts disagree with line coverage",
-                        )
-                    mode = "identified"
-                else:
-                    parsed_conditions = {("aggregate", "0"): (branch_valid, branch_covered)}
-                    mode = "aggregate"
-                if provider == CODE_COVERAGE_PACKAGE and key in multi_class_branches:
-                    parsed_conditions = {
-                        ("class", source["class_name"]): (branch_valid, branch_covered)
-                    }
-                    mode = "multi-class"
-                definition = (
-                    mode,
-                    ()
-                    if mode == "multi-class"
-                    else tuple(
-                        sorted(
-                            (condition_type, condition_number, valid)
-                            for (condition_type, condition_number), (
-                                valid,
-                                _,
-                            ) in parsed_conditions.items()
-                        )
-                    ),
-                )
-                existing_definition = line_definitions.get(key)
-                if existing_definition is not None and existing_definition != definition:
-                    _coverage_failure(
-                        "COVERAGE_DOTNET_NORMALIZATION_FAILED",
-                        "overlapping line has ambiguous condition identities",
-                    )
-                line_definitions[key] = definition
-                merged_conditions = line_conditions.setdefault(key, {})
-                for identity, (valid, covered) in parsed_conditions.items():
-                    previous = merged_conditions.get(identity)
-                    if previous is not None and previous[0] != valid:
-                        _coverage_failure(
-                            "COVERAGE_DOTNET_NORMALIZATION_FAILED",
-                            "condition identity has inconsistent denominator",
-                        )
-                    merged_conditions[identity] = (
-                        valid,
-                        max(covered, previous[1] if previous else 0),
-                    )
+        _merge_normalization_input(
+            input_evidence,
+            line_hits,
+            line_conditions,
+            line_definitions,
+            source_union,
+            providers,
+            multi_class_branches,
+        )
     if not line_hits or not line_conditions:
         _coverage_failure(
             "COVERAGE_DOTNET_NORMALIZATION_FAILED", "normalized report has a zero denominator"
@@ -3068,47 +3177,9 @@ def normalize_dotnet_cobertura(
     package = ElementTree.SubElement(packages, "package", {"name": "normalized"})
     classes = ElementTree.SubElement(package, "classes")
     for source_path in sorted(source_union):
-        class_element = ElementTree.SubElement(
-            classes, "class", {"name": source_path.replace("/", "."), "filename": source_path}
+        _append_normalized_source(
+            classes, source_path, line_hits, line_conditions, line_definitions
         )
-        ElementTree.SubElement(class_element, "methods")
-        lines_element = ElementTree.SubElement(class_element, "lines")
-        for source, number in sorted(key for key in line_hits if key[0] == source_path):
-            attributes = {"number": str(number), "hits": str(line_hits[(source, number)])}
-            conditions = line_conditions.get((source, number), {})
-            if conditions:
-                condition_values = list(conditions.values())
-                covered = sum(item[1] for item in condition_values)
-                valid = sum(item[0] for item in condition_values)
-                attributes.update(
-                    {
-                        "branch": "true",
-                        "condition-coverage": (
-                            f"{round(covered * 100 / valid)}% ({covered}/{valid})"
-                        ),
-                    }
-                )
-            line_element = ElementTree.SubElement(lines_element, "line", attributes)
-            definition = line_definitions.get((source, number))
-            if conditions and definition is not None and definition[0] == "identified":
-                conditions_element = ElementTree.SubElement(line_element, "conditions")
-                for (condition_type, condition_number), (valid, covered) in sorted(
-                    conditions.items()
-                ):
-                    if covered * 100 % valid:
-                        _coverage_failure(
-                            "COVERAGE_DOTNET_NORMALIZATION_FAILED",
-                            "normalized condition coverage is not exact",
-                        )
-                    ElementTree.SubElement(
-                        conditions_element,
-                        "condition",
-                        {
-                            "number": condition_number,
-                            "type": condition_type,
-                            "coverage": f"{covered * 100 // valid}%",
-                        },
-                    )
     try:
         plan.dotnet_report.parent.mkdir(parents=True, exist_ok=True)
         ElementTree.ElementTree(root).write(
@@ -3733,6 +3804,27 @@ def project_inventory(repository_root: Path) -> tuple[Path, list[Path], list[Pat
     )
 
 
+def _collect_scanner_xml_metadata(
+    path: Path, relative: str, found: dict[str, list[tuple[str, str]]]
+) -> None:
+    root = ElementTree.parse(path).getroot()
+    for element in root.iter():
+        name = element.attrib.get("Name") or element.attrib.get("name") or element.attrib.get("key")
+        if name in found and element.text:
+            found[name].append((relative, element.text.strip()))
+        if element.tag.rsplit("}", 1)[-1] == "SonarProjectKey" and element.text:
+            found[SONAR_PROJECT_KEY_PROPERTY].append((relative, element.text.strip()))
+
+
+def _collect_scanner_text_metadata(
+    path: Path, relative: str, found: dict[str, list[tuple[str, str]]]
+) -> None:
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        name, separator, value = line.partition("=")
+        if separator and name.strip() in found:
+            found[name.strip()].append((relative, value.strip()))
+
+
 def scanner_metadata(repository_root: Path, expected_head: str) -> dict[str, Any]:
     metadata_root = repository_root / SONAR_METADATA_DIRECTORY
     if not metadata_root.is_dir():
@@ -3751,22 +3843,9 @@ def scanner_metadata(repository_root: Path, expected_head: str) -> dict[str, Any
         relative = str(path.relative_to(repository_root)).replace("\\", "/")
         try:
             if path.suffix.lower() == ".xml":
-                root = ElementTree.parse(path).getroot()
-                for element in root.iter():
-                    name = (
-                        element.attrib.get("Name")
-                        or element.attrib.get("name")
-                        or element.attrib.get("key")
-                    )
-                    if name in found and element.text:
-                        found[name].append((relative, element.text.strip()))
-                    if element.tag.rsplit("}", 1)[-1] == "SonarProjectKey" and element.text:
-                        found[SONAR_PROJECT_KEY_PROPERTY].append((relative, element.text.strip()))
+                _collect_scanner_xml_metadata(path, relative, found)
             else:
-                for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-                    name, separator, value = line.partition("=")
-                    if separator and name.strip() in found:
-                        found[name.strip()].append((relative, value.strip()))
+                _collect_scanner_text_metadata(path, relative, found)
         except (OSError, ElementTree.ParseError) as error:
             raise RunnerError("SonarScanner metadata could not be parsed.") from error
     observed_project_keys = {value for _, value in found[SONAR_PROJECT_KEY_PROPERTY]}
