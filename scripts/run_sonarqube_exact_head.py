@@ -1672,6 +1672,36 @@ def _runtime_coverage_toolchain(
     return {"executables": executables, "projects": projects}
 
 
+def _validate_coverage_project_toolchain(project: Mapping[str, Any]) -> None:
+    if not isinstance(project, Mapping):
+        raise RunnerError("COVERAGE_VSTEST_INCOMPATIBLE: invalid project evidence.")
+    if project.get("mtp_active") is True:
+        raise RunnerError("COVERAGE_MTP_INCOMPATIBLE: Microsoft Testing Platform is unsupported.")
+    if project.get("id") == "stateless":
+        if (
+            project.get("code_coverage") != CODE_COVERAGE_VERSION
+            or str(project.get("code_coverage_private_assets", "")).casefold() != "all"
+            or project.get("coverlet_msbuild") is not None
+        ):
+            raise RunnerError(
+                "COVERAGE_VSTEST_INCOMPATIBLE: Stateless collector is not the sole pinned provider."
+            )
+    elif (
+        project.get("coverlet_msbuild") != COVERLET_MSBUILD_VERSION
+        or str(project.get("coverlet_private_assets", "")).casefold() != "all"
+        or project.get("code_coverage") is not None
+    ):
+        raise RunnerError("COVERAGE_VSTEST_INCOMPATIBLE: Coverlet project provider is not pinned.")
+    if (
+        project.get("target_framework") != "net8.0"
+        or project.get("test_sdk") != TEST_SDK_VERSION
+        or str(project.get("test_platform", "")).casefold() != "vstest"
+    ):
+        raise RunnerError(
+            "COVERAGE_VSTEST_INCOMPATIBLE: project does not satisfy the fixed VSTest tuple."
+        )
+
+
 def preflight_coverage_toolchain(
     toolchain: Mapping[str, Any] | None = None,
     context: GitContext | None = None,
@@ -1713,37 +1743,7 @@ def preflight_coverage_toolchain(
     ]
     validate_coverage_project_inventory(inventory)
     for project in projects:
-        if not isinstance(project, Mapping):
-            raise RunnerError("COVERAGE_VSTEST_INCOMPATIBLE: invalid project evidence.")
-        if project.get("mtp_active") is True:
-            raise RunnerError(
-                "COVERAGE_MTP_INCOMPATIBLE: Microsoft Testing Platform is unsupported."
-            )
-        if project.get("id") == "stateless":
-            if (
-                project.get("code_coverage") != CODE_COVERAGE_VERSION
-                or str(project.get("code_coverage_private_assets", "")).casefold() != "all"
-                or project.get("coverlet_msbuild") is not None
-            ):
-                raise RunnerError(
-                    "COVERAGE_VSTEST_INCOMPATIBLE: Stateless collector is not the sole pinned provider."
-                )
-        elif (
-            project.get("coverlet_msbuild") != COVERLET_MSBUILD_VERSION
-            or str(project.get("coverlet_private_assets", "")).casefold() != "all"
-            or project.get("code_coverage") is not None
-        ):
-            raise RunnerError(
-                "COVERAGE_VSTEST_INCOMPATIBLE: Coverlet project provider is not pinned."
-            )
-        if (
-            project.get("target_framework") != "net8.0"
-            or project.get("test_sdk") != TEST_SDK_VERSION
-            or str(project.get("test_platform", "")).casefold() != "vstest"
-        ):
-            raise RunnerError(
-                "COVERAGE_VSTEST_INCOMPATIBLE: project does not satisfy the fixed VSTest tuple."
-            )
+        _validate_coverage_project_toolchain(project)
     return {"executables": dict(executables), "projects": [dict(project) for project in projects]}
 
 
@@ -2111,6 +2111,36 @@ def _coverage_environment() -> dict[str, str]:
     return scrub_sonar_environment(process_environment())
 
 
+def _cobertura_source_root(context: GitContext, value: str) -> Path:
+    normalized = value.replace("\\", "/")
+    if not normalized or "://" in normalized or normalized.startswith("file:"):
+        _coverage_failure(
+            "COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura source root is absent or a URI"
+        )
+    if normalized == ".":
+        candidate = context.repository_root
+    elif normalized.startswith("/") or WINDOWS_ABSOLUTE_PATH_RE.match(normalized):
+        candidate = Path(normalized)
+    else:
+        parts = normalized.split("/")
+        if any(part in {"", ".", "..", "bin", "obj"} for part in parts):
+            _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura source root is unsafe")
+        candidate = context.repository_root.joinpath(*parts)
+    try:
+        candidate.relative_to(context.repository_root)
+        metadata = _scanner_tree_metadata(candidate)
+    except (ValueError, RunnerError) as error:
+        _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", str(error))
+        raise AssertionError("unreachable") from error
+    attributes = int(getattr(metadata, "st_file_attributes", 0) or 0)
+    if not stat.S_ISDIR(metadata.st_mode) or attributes & 0x0400:
+        _coverage_failure(
+            "COVERAGE_SOURCE_MAPPING_INVALID",
+            "Cobertura source root is not a regular repository directory",
+        )
+    return candidate
+
+
 def _cobertura_source_roots(context: GitContext, root: ElementTree.Element) -> tuple[Path, ...]:
     values = [
         (element.text or "").strip()
@@ -2121,34 +2151,7 @@ def _cobertura_source_roots(context: GitContext, root: ElementTree.Element) -> t
         values = ["."]
     roots: list[Path] = []
     for value in values:
-        normalized = value.replace("\\", "/")
-        if not normalized or "://" in normalized or normalized.startswith("file:"):
-            _coverage_failure(
-                "COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura source root is absent or a URI"
-            )
-        if normalized == ".":
-            candidate = context.repository_root
-        elif normalized.startswith("/") or WINDOWS_ABSOLUTE_PATH_RE.match(normalized):
-            candidate = Path(normalized)
-        else:
-            parts = normalized.split("/")
-            if any(part in {"", ".", "..", "bin", "obj"} for part in parts):
-                _coverage_failure(
-                    "COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura source root is unsafe"
-                )
-            candidate = context.repository_root.joinpath(*parts)
-        try:
-            candidate.relative_to(context.repository_root)
-            metadata = _scanner_tree_metadata(candidate)
-        except (ValueError, RunnerError) as error:
-            _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", str(error))
-            raise AssertionError("unreachable") from error
-        attributes = int(getattr(metadata, "st_file_attributes", 0) or 0)
-        if not stat.S_ISDIR(metadata.st_mode) or attributes & 0x0400:
-            _coverage_failure(
-                "COVERAGE_SOURCE_MAPPING_INVALID",
-                "Cobertura source root is not a regular repository directory",
-            )
+        candidate = _cobertura_source_root(context, value)
         if candidate not in roots:
             roots.append(candidate)
     if context.repository_root not in roots:
@@ -2156,27 +2159,9 @@ def _cobertura_source_roots(context: GitContext, root: ElementTree.Element) -> t
     return tuple(roots)
 
 
-def _safe_coverage_source(
-    context: GitContext,
-    filename: Any,
-    language: str,
-    source_roots: Sequence[Path],
+def _resolve_coverage_source(
+    context: GitContext, parts: Sequence[str], source_roots: Sequence[Path]
 ) -> str:
-    if not isinstance(filename, str) or not filename:
-        _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura class filename is absent")
-    normalized = filename.replace("\\", "/")
-    if (
-        "://" in normalized
-        or normalized.startswith("file:")
-        or normalized.startswith("/")
-        or WINDOWS_ABSOLUTE_PATH_RE.match(normalized)
-    ):
-        _coverage_failure(
-            "COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura source path is absolute or a URI"
-        )
-    parts = normalized.split("/")
-    if any(part in {"", ".", "..", "bin", "obj"} for part in parts):
-        _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura source path is unsafe")
     matches: list[Path] = []
     for source_root in source_roots:
         candidate = source_root.joinpath(*parts)
@@ -2205,7 +2190,10 @@ def _safe_coverage_source(
             "COVERAGE_SOURCE_MAPPING_INVALID",
             "Cobertura source is missing or maps through multiple source roots",
         )
-    relative = matches[0].relative_to(context.repository_root).as_posix()
+    return matches[0].relative_to(context.repository_root).as_posix()
+
+
+def _validate_coverage_source_language(relative: str, language: str) -> None:
     if language == "python":
         if not relative.endswith(".py") or not (
             relative.startswith("src/netcoredbg_mcp/")
@@ -2231,6 +2219,31 @@ def _safe_coverage_source(
             )
     else:
         _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "coverage language is unknown")
+
+
+def _safe_coverage_source(
+    context: GitContext,
+    filename: Any,
+    language: str,
+    source_roots: Sequence[Path],
+) -> str:
+    if not isinstance(filename, str) or not filename:
+        _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura class filename is absent")
+    normalized = filename.replace("\\", "/")
+    if (
+        "://" in normalized
+        or normalized.startswith("file:")
+        or normalized.startswith("/")
+        or WINDOWS_ABSOLUTE_PATH_RE.match(normalized)
+    ):
+        _coverage_failure(
+            "COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura source path is absolute or a URI"
+        )
+    parts = normalized.split("/")
+    if any(part in {"", ".", "..", "bin", "obj"} for part in parts):
+        _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura source path is unsafe")
+    relative = _resolve_coverage_source(context, parts, source_roots)
+    _validate_coverage_source_language(relative, language)
     return relative
 
 
