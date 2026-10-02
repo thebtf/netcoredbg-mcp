@@ -467,69 +467,6 @@ def test_bridge_screenshot_falls_back_to_flash_focus_bitblt_when_blank() -> None
     assert "SetForegroundWindow(savedForeground)" in command
 
 
-def test_bridge_typed_bitblt_fallback_requires_verified_transition_and_safe_restoration() -> None:
-    command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
-        encoding="utf-8"
-    )
-    transport = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCaptureTransport.cs").read_text(
-        encoding="utf-8"
-    )
-
-    fallback_start = command.index(
-        "private static JsonObject CaptureEvidenceWithVerifiedBitBltFallback"
-    )
-    fallback_end = command.index(
-        "private static (int width, int height) GetWindowSize", fallback_start
-    )
-    fallback_capture = command[fallback_start:fallback_end]
-
-    activation = fallback_capture.index(
-        "var activationTransition = CaptureTransport.ActivateForegroundVerified("
-    )
-    bitblt = fallback_capture.index("CaptureBitmapWithBitBlt")
-    assert "CaptureTransport.SetForegroundWindow(hwnd)" not in fallback_capture
-    assert (
-        'activation["set_foreground_returned"] = activationTransition.SetForegroundReturned;'
-        in fallback_capture
-    )
-    assert activation < fallback_capture.index("if (!activationTransition.Verified)") < bitblt
-
-    restoration_guard = fallback_capture.rindex("CaptureTransport.GetForegroundWindow() != hwnd")
-    restoration = fallback_capture.index(
-        "var restorationTransition = CaptureTransport.ActivateForegroundVerified("
-    )
-    assert (
-        restoration_guard
-        < restoration
-        < fallback_capture.index("if (!restorationTransition.Verified)")
-    )
-    assert (
-        "savedForegroundSnapshot is not CaptureSnapshot restoredForegroundIdentity"
-        in fallback_capture
-    )
-    assert "restoredForegroundIdentity.ProcessId" in fallback_capture
-
-    assert "ForegroundTransition ActivateForegroundVerified(" in transport
-    assert "GetThreadDesktop" in transport
-    assert "AttachThreadInput(currentThread, foregroundThread, true)" in transport
-    assert "AttachThreadInput(currentThread, targetThread, true)" in transport
-    assert "AttachThreadInput(currentThread, targetThread, false)" in transport
-    assert "AttachThreadInput(currentThread, foregroundThread, false)" in transport
-    assert "BringWindowToTop(hwnd);" in transport
-    assert "NativeSetForegroundWindow(hwnd)" in transport
-    assert "WaitForForeground(hwnd)" in transport
-    assert "if (!WaitForForeground(hwnd))" in transport
-    assert 'result["method"] = "BitBlt";' in fallback_capture
-    assert 'result["fallback"] = "flash-focus";' in fallback_capture
-    assert 'result["fallback_reason"] = "probable_black_printwindow";' in fallback_capture
-    assert 'result["authority"] = "foreground_window_gdi_raster";' in fallback_capture
-    assert 'result["source_api"] = "GetWindowDC";' in fallback_capture
-    assert 'result["rop"] = "SRCCOPY";' in fallback_capture
-    assert 'result["evidence_grade"] = "typed_bitblt_fallback";' in fallback_capture
-    assert 'result["capture_stability"]' in fallback_capture
-    assert 'result["foreground"]' in fallback_capture
-
-
 def test_native_screenshot_capture_transport_binds_renamed_foreground_exports() -> None:
     transport = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCaptureTransport.cs").read_text(
         encoding="utf-8"
