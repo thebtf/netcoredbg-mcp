@@ -761,10 +761,73 @@ public sealed class PreviewProcessContractTests
     public async Task LegacyInitializeIsMethodNotFound()
     {
         await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+        await driver.WaitForStartupAsync(StartupObservationTimeout);
 
-        var response = await driver.SendAsync("initialize", new JsonObject(), new RequestId("legacy-initialize"));
+        var id = new RequestId("legacy-initialize");
+        var error = Assert.IsType<JsonRpcError>(await driver.SendAsync("initialize", new JsonObject(), id));
 
-        Assert.Equal(-32601, Assert.IsType<JsonRpcError>(response).Error.Code);
+        Assert.Equal(id, error.Id);
+        Assert.Equal(-32601, error.Error.Code);
+        Assert.Equal("Method not found", error.Error.Message);
+        Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromMilliseconds(250)));
+    }
+
+    [Fact]
+    public async Task ColdStartBeyondResponseDeadlinePreservesLegacyMethodNotFound()
+    {
+        var barrierName = $"Local\\preview-cold-response-{Guid.NewGuid():N}";
+        using var started = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-started");
+        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-release");
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var connection = PreviewMcpProcessDriver.StartRawAsync(
+            PreviewRepositoryLayout.FixtureRoot,
+            environment: new Dictionary<string, string?>
+            {
+                ["DOTNET_STARTUP_HOOKS"] = typeof(StartupHook).Assembly.Location,
+                [StartupHook.StartupBarrierEnvironmentVariable] = barrierName,
+            });
+        try
+        {
+            Assert.True(started.WaitOne(StartupObservationTimeout), "CLR child did not enter its pre-Main barrier.");
+            await using var driver = await connection.WaitAsync(StartupObservationTimeout);
+            _output.WriteLine($"{clock.ElapsedMilliseconds}ms: ConnectAsync returned while pre-Main release is unset.");
+            var startup = driver.WaitForStartupAsync(StartupObservationTimeout);
+            await Task.Delay(TimeSpan.FromSeconds(6));
+            Assert.False(startup.IsCompleted, "Discovery completed while Main was held before startup.");
+            _output.WriteLine($"{clock.ElapsedMilliseconds}ms: releasing pre-Main barrier; startup admission is still pending beyond 5s.");
+            release.Set();
+            await startup;
+            var id = new RequestId("cold-legacy-initialize");
+            var error = Assert.IsType<JsonRpcError>(await driver.SendAsync("initialize", new JsonObject(), id));
+            Assert.Equal(id, error.Id);
+            Assert.Equal(-32601, error.Error.Code);
+            Assert.Equal("Method not found", error.Error.Message);
+            Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromMilliseconds(250)));
+            _output.WriteLine($"{clock.ElapsedMilliseconds}ms: after release, exact-ID -32601 received with no extra message.");
+        }
+        finally
+        {
+            release.Set();
+        }
+    }
+
+    [Fact]
+    public async Task ResponseDeadlineAfterReadinessStillExpiresForAbsentCorrelatedResponse()
+    {
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+        await driver.WaitForStartupAsync(StartupObservationTimeout);
+        await driver.SendRequestAsync(
+            "server/discover",
+            new JsonObject { ["_meta"] = PreviewMcpProcessDriver.CurrentMeta() },
+            new RequestId("different-response"));
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => driver.TryReadResponseAsync(
+            new RequestId("deliberately-absent-response"), StartupObservationTimeout));
+
+        Assert.True(clock.Elapsed < StartupObservationTimeout, "Response wait inherited the startup observation budget.");
+        _output.WriteLine($"{clock.ElapsedMilliseconds}ms: no same-ID response after readiness still cancels at the unchanged 5s deadline.");
+        AssertCatalog(RequireResult(await driver.ListToolsAsync(new RequestId("after-response-timeout"))));
     }
 
     [Fact]

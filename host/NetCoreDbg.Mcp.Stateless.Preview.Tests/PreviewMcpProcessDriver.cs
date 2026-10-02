@@ -90,6 +90,18 @@ internal sealed class PreviewMcpProcessDriver : IAsyncDisposable
     internal Task<JsonRpcMessage> DiscoverAsync(RequestId id, CancellationToken cancellationToken = default) =>
         SendAsync("server/discover", new JsonObject { ["_meta"] = CurrentMeta() }, id, cancellationToken);
 
+    internal async Task WaitForStartupAsync(TimeSpan observationTimeout, CancellationToken cancellationToken = default)
+    {
+        // Stateless discovery observes startup; subsequent response waits retain their five-second deadline.
+        using var observation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        observation.CancelAfter(observationTimeout);
+        var id = new RequestId("preview-startup-discover");
+        await SendRequestAsync("server/discover", new JsonObject { ["_meta"] = CurrentMeta() }, id, observation.Token).ConfigureAwait(false);
+        var response = Assert.IsType<JsonRpcResponse>(await ReadCorrelatedResponseAsync(id, observation.Token).ConfigureAwait(false));
+        var result = Assert.IsType<JsonObject>(response.Result);
+        Assert.Equal(["tools"], result["capabilities"]!.AsObject().Select(static property => property.Key));
+    }
+
     internal Task<JsonRpcMessage> ListToolsAsync(RequestId id, JsonObject? meta = null, CancellationToken cancellationToken = default) =>
         SendAsync("tools/list", new JsonObject { ["_meta"] = (meta ?? CurrentMeta()).DeepClone() }, id, cancellationToken);
 
@@ -201,9 +213,14 @@ internal sealed class PreviewMcpProcessDriver : IAsyncDisposable
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(RequestTimeout);
+        return await ReadCorrelatedResponseAsync(id, deadline.Token).ConfigureAwait(false);
+    }
+
+    private async Task<JsonRpcMessage> ReadCorrelatedResponseAsync(RequestId id, CancellationToken cancellationToken)
+    {
         while (true)
         {
-            var incoming = await _transport.MessageReader.ReadAsync(deadline.Token).ConfigureAwait(false);
+            var incoming = await _transport.MessageReader.ReadAsync(cancellationToken).ConfigureAwait(false);
             if (incoming is JsonRpcMessageWithId correlated && correlated.Id == id)
             {
                 return incoming;
