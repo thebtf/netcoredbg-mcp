@@ -591,37 +591,38 @@ class SessionManager:
         if target_path not in self._worktree_cache_map:
             worktree_cache: list[str] = []
             self._worktree_cache_map[target_path] = worktree_cache
-            try:
-                # Find the .git directory (could be file pointing to gitdir for worktrees)
-                git_dir = os.path.join(target_path, ".git")
-                if os.path.isfile(git_dir):
-                    # This is a worktree itself — read the gitdir pointer
-                    with open(git_dir) as f:
-                        content = f.read().strip()
-                    if content.startswith("gitdir: "):
-                        real_git_dir = os.path.abspath(
-                            os.path.join(target_path, content[len("gitdir: ") :])
-                        )
-                        # Navigate up to the main .git directory
-                        # e.g., /main/.git/worktrees/wt-name → /main/.git
-                        git_dir = os.path.dirname(os.path.dirname(real_git_dir))
-
-                worktrees_dir = os.path.join(git_dir, "worktrees")
-                if os.path.isdir(worktrees_dir):
-                    entries = os.listdir(worktrees_dir)
-                    logger.debug(f"[worktree] entries in {worktrees_dir}: {entries}")
-                    for entry in entries:
-                        wt_path = self._worktree_from_gitdir(worktrees_dir, entry)
-                        if wt_path is not None:
-                            worktree_cache.append(wt_path)
-                else:
-                    logger.debug(f"[worktree] no worktrees dir at {worktrees_dir}")
-                logger.debug(
-                    f"[worktree] found {len(worktree_cache)} worktrees from {worktrees_dir}"
-                )
-            except OSError as e:
-                logger.debug(f"[worktree] cannot read worktrees: {e}")
+            self._populate_worktree_cache(target_path, worktree_cache)
         return self._worktree_cache_map[target_path]
+
+    def _populate_worktree_cache(self, target_path: str, worktree_cache: list[str]) -> None:
+        try:
+            # Find the .git directory (could be file pointing to gitdir for worktrees)
+            git_dir = os.path.join(target_path, ".git")
+            if os.path.isfile(git_dir):
+                # This is a worktree itself — read the gitdir pointer
+                with open(git_dir) as f:
+                    content = f.read().strip()
+                if content.startswith("gitdir: "):
+                    real_git_dir = os.path.abspath(
+                        os.path.join(target_path, content[len("gitdir: ") :])
+                    )
+                    # Navigate up to the main .git directory
+                    # e.g., /main/.git/worktrees/wt-name → /main/.git
+                    git_dir = os.path.dirname(os.path.dirname(real_git_dir))
+
+            worktrees_dir = os.path.join(git_dir, "worktrees")
+            if os.path.isdir(worktrees_dir):
+                entries = os.listdir(worktrees_dir)
+                logger.debug(f"[worktree] entries in {worktrees_dir}: {entries}")
+                for entry in entries:
+                    wt_path = self._worktree_from_gitdir(worktrees_dir, entry)
+                    if wt_path is not None:
+                        worktree_cache.append(wt_path)
+            else:
+                logger.debug(f"[worktree] no worktrees dir at {worktrees_dir}")
+            logger.debug(f"[worktree] found {len(worktree_cache)} worktrees from {worktrees_dir}")
+        except OSError as e:
+            logger.debug(f"[worktree] cannot read worktrees: {e}")
 
     @staticmethod
     def _get_env_allowed_paths() -> list[str]:
@@ -2974,6 +2975,22 @@ class SessionManager:
                 break  # Only first scope (Locals)
         return local_vars
 
+    def _add_stop_context_hit_count(self, result: dict[str, Any], frames: list[StackFrame]) -> None:
+        # Resolve runtime -> requested line so the count matches the
+        # key used by _update_hit_count (stable for DAP-adjusted bps).
+        if frames and frames[0].source and frames[0].line:
+            key = self._resolve_hit_count_key(frames[0].source, frames[0].line)
+            result["hitCount"] = self._state.hit_counts.get(key, 0)
+
+    def _add_stop_context_output(self, result: dict[str, Any], include_output_tail: int) -> None:
+        if include_output_tail > 0:
+            tail_entries = list(self._state.output_buffer)[-include_output_tail:]
+            result["recentOutput"] = [
+                {"text": e.text.rstrip(), "category": e.category}
+                for e in tail_entries
+                if e.text.strip()  # Skip empty lines
+            ]
+
     async def get_stop_context(
         self,
         include_variables: bool = True,
@@ -3018,20 +3035,10 @@ class SessionManager:
                     result["locals"] = [{"error": str(e)}]
 
             # Hit count for current location.
-            # Resolve runtime -> requested line so the count matches the
-            # key used by _update_hit_count (stable for DAP-adjusted bps).
-            if frames and frames[0].source and frames[0].line:
-                key = self._resolve_hit_count_key(frames[0].source, frames[0].line)
-                result["hitCount"] = self._state.hit_counts.get(key, 0)
+            self._add_stop_context_hit_count(result, frames)
 
         # Recent output
-        if include_output_tail > 0:
-            tail_entries = list(self._state.output_buffer)[-include_output_tail:]
-            result["recentOutput"] = [
-                {"text": e.text.rstrip(), "category": e.category}
-                for e in tail_entries
-                if e.text.strip()  # Skip empty lines
-            ]
+        self._add_stop_context_output(result, include_output_tail)
 
         # Exception info if stopped at exception
         if self._state.stop_reason == "exception" and tid is not None:
