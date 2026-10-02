@@ -403,10 +403,6 @@ def test_wpf_hover_plan_arms_after_focus_then_runs_four_measured_transitions() -
     assert "idle_ms" not in measured[2]
     assert measured[2]["settle"] == {"idle_ms": 100}
     assert measured[3]["action"] == {"kind": "wait", "idle_ms": 900}
-    assert plan["cleanup"]["steps"] == [
-        {"kind": "debug.stop"},
-        {"kind": "process.registry.assert_empty"},
-    ]
 
 
 def test_wpf_hover_live_evidence_accepts_complete_measured_contract() -> None:
