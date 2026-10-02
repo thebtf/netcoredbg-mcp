@@ -32,10 +32,40 @@ public partial class App : Application
 
 
         var window = new ProbeFixtureWindow(options.Mode);
-        window.ContentRendered += SignalWindowReadinessAsync;
+        if (options.Mode is ProbeFixtureMode.BridgeElements or ProbeFixtureMode.BridgeElementsAmbiguousRoots)
+        {
+            window.ShowActivated = false;
+        }
         MainWindow = window;
         ShutdownMode = ShutdownMode.OnMainWindowClose;
-        window.Show();
+        if (options.Mode == ProbeFixtureMode.BridgeElementsAmbiguousRoots)
+        {
+            var sibling = new ProbeFixtureWindow(options.Mode)
+            {
+                ShowActivated = false,
+                Left = window.Left + 32,
+                Top = window.Top + 32,
+            };
+            var pendingWindows = 2;
+            void OnWindowRendered(object? sender, EventArgs args)
+            {
+                ((Window)sender!).ContentRendered -= OnWindowRendered;
+                if (--pendingWindows == 0)
+                {
+                    SignalWindowReadinessAsync(window, EventArgs.Empty);
+                }
+            }
+            window.ContentRendered += OnWindowRendered;
+            sibling.ContentRendered += OnWindowRendered;
+            sibling.Closed += (_, _) => Shutdown();
+            window.Show();
+            sibling.Show();
+        }
+        else
+        {
+            window.ContentRendered += SignalWindowReadinessAsync;
+            window.Show();
+        }
         _probeClient = LocalProbeClient.TryStartFromEnvironment(
             new WpfAtomicSnapshotTransaction(window.Dispatcher, (IWpfProbeSnapshotSource)window));
     }
