@@ -168,10 +168,7 @@ class BuildSession:
 
         self._last_owner_drain_receipt = receipt
         if cancellation is not None:
-            try:
-                self._require_drained_owner_receipt(receipt, owner)
-            except OwnerDrainError as error:
-                raise error from cancellation
+            self._require_drained_owner_receipt(receipt, owner, cause=cancellation)
             raise cancellation
         return receipt
 
@@ -191,7 +188,10 @@ class BuildSession:
 
     @staticmethod
     def _require_drained_owner_receipt(
-        receipt: OwnerDrainReceipt, owner: WindowsOwnedProcess
+        receipt: OwnerDrainReceipt,
+        owner: WindowsOwnedProcess,
+        *,
+        cause: BaseException | None = None,
     ) -> None:
         """Only an exact-owner zero-accounting receipt completes this command."""
         if (
@@ -200,7 +200,10 @@ class BuildSession:
             and receipt.active_processes == 0
         ):
             return
-        raise OwnerDrainError(receipt)
+        error = OwnerDrainError(receipt)
+        if cause is not None:
+            raise error from cause
+        raise error
 
     async def _run_command(
         self,
@@ -308,10 +311,7 @@ class BuildSession:
                     # recorded its drain receipt. Returning first could report
                     # a timed-out build while a retained Job still has children.
                     receipt = await self._drain_windows_owner(owner, force=True)
-                    try:
-                        self._require_drained_owner_receipt(receipt, owner)
-                    except OwnerDrainError as error:
-                        raise error from timeout_error
+                    self._require_drained_owner_receipt(receipt, owner, cause=timeout_error)
                 else:
                     assert not isinstance(process, WindowsOwnedProcess)
                     process.kill()
@@ -329,10 +329,7 @@ class BuildSession:
                 # operation. Only a zero-accounting receipt permits restoration
                 # of the original cancellation outcome.
                 receipt = await self._drain_windows_owner(owner, force=True)
-                try:
-                    self._require_drained_owner_receipt(receipt, owner)
-                except OwnerDrainError as error:
-                    raise error from cancellation
+                self._require_drained_owner_receipt(receipt, owner, cause=cancellation)
             raise
         finally:
             pending_error = sys.exc_info()[1]
