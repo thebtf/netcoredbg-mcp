@@ -44,7 +44,7 @@ TERMINAL_CONTAINER_ITEM_LIMIT = 64
 TERMINAL_CONTAINER_DEPTH_LIMIT = 8
 
 _SENSITIVE_KEY_RE = re.compile(
-    r"(?i)(?:[A-Za-z0-9]+[_-])*(?:authorization|access[_-]?token|token|password|secret|api[_-]?key)"
+    r"(?i)(?:[a-z0-9]+[_-])*(?:authorization|access[_-]?token|token|password|secret|api[_-]?key)"
 )
 
 # Authorization headers are multi-word and diagnostics often quote values with
@@ -68,7 +68,7 @@ _ESCAPED_JSON_CREDENTIAL_VALUE_RE = re.compile(
     r'(?i)((?:\\+)"(?:[A-Za-z0-9]+[_-])*(?:authorization|access[_-]?token|token|password|secret|api[_-]?key)'
     r'(?:\\+)"\s*:\s*(?:\\+)")([^"\\]*)((?:\\+)")'
 )
-_BEARER_VALUE_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+_BEARER_VALUE_RE = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]+")
 _POSIX_PATH_RE = re.compile(r"(?<![\w:/])/(?!/)[^\s\"']+")
 _WINDOWS_PATH_RE = re.compile(r"(?i)(?:[A-Z]:[\\/]|\\\\)[^\s\"'<>|]+")
 
