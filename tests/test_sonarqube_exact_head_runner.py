@@ -42,6 +42,18 @@ class TestSonarqubeExactHeadRunner(TestCase):
         )
 
     @staticmethod
+    def analysis_evidence():
+        from tests.test_stateless_preview_artifact import _complete_v3_exact_head_receipt
+
+        analysis = _complete_v3_exact_head_receipt(
+            "a" * 40, role="diagnostic", outcome="DIAGNOSTIC_COMPLETE", release_intent="none"
+        )["analysis"]
+        analysis["status"] = "INCOMPLETE"
+        analysis["observations"]["current_after_measures"] = None
+        analysis["observations"]["current_final"] = None
+        return analysis
+
+    @staticmethod
     def patch_wave3_transaction(patches: ExitStack) -> None:
         plan = SimpleNamespace()
         patches.enter_context(patch.object(runner, "resolve_wave2_entry", return_value={}))
@@ -68,7 +80,11 @@ class TestSonarqubeExactHeadRunner(TestCase):
         )
         patches.enter_context(patch.object(runner, "cleanup_coverage_run", return_value={}))
         patches.enter_context(
-            patch.object(runner, "collect_coverage_analysis_evidence", return_value={})
+            patch.object(
+                runner,
+                "collect_coverage_analysis_evidence",
+                return_value=TestSonarqubeExactHeadRunner.analysis_evidence(),
+            )
         )
         patches.enter_context(patch.object(runner, "write_diagnostic_inventory", return_value={}))
 
@@ -902,6 +918,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                         "analysis_current_before_issues",
                         "analysis_current_after_issues",
                         "analysis_current_before_measures",
+                        "analysis_current_after_measures",
                         "analysis_current_final",
                     )[binding_calls - 1]
                 )
@@ -921,7 +938,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
 
             def coverage_measures(*_args, **_kwargs):
                 events.append("coverage_measures")
-                return {}
+                return self.analysis_evidence()
 
             def hotspot_inventory(_host, _token):
                 events.append("hotspots")
@@ -1040,9 +1057,10 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 "new_code_issues",
                 "analysis_current_after_issues",
                 "hotspots",
-                "generated_artifacts_removed_after_scan",
                 "analysis_current_before_measures",
                 "coverage_measures",
+                "analysis_current_after_measures",
+                "generated_artifacts_removed_after_scan",
                 "analysis_current_final",
             ],
         )
@@ -1060,7 +1078,6 @@ class TestSonarqubeExactHeadRunner(TestCase):
         )
         self.assertEqual(blocked_receipt["identity"]["analysis_id"], "analysis-1")
         self.assertEqual(blocked_receipt["coverage"], {})
-        self.assertEqual(blocked_receipt["analysis"], {})
         self.assertEqual(blocked_receipt["global_inventory"], {})
         self.assertEqual(blocked_receipt["cleanup"], {})
         self.assertEqual(new_code_inventory["total"], 2)
@@ -1212,6 +1229,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                         "analysis_current_before_issues",
                         "analysis_current_after_issues",
                         "analysis_current_before_measures",
+                        "analysis_current_after_measures",
                         "analysis_current_final",
                     )[binding_calls - 1]
                 )
@@ -1229,7 +1247,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 events.append("hotspots")
                 return hotspots
 
-            def fail_cleanup(_plan, _producer_terminal):
+            def fail_cleanup(_plan, _producer_terminal, _claim, **_kwargs):
                 events.append("post_scan_cleanup")
                 return {
                     "claimed_root": ".tmp/sonarqube-coverage/fixture",
@@ -1371,10 +1389,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 "new_code_issues",
                 "analysis_current_after_issues",
                 "hotspots",
-                "generated_artifacts_removed_after_scan",
-                "post_scan_cleanup",
                 "analysis_current_before_measures",
-                "analysis_current_final",
+                "analysis_current_after_measures",
+                "post_scan_cleanup",
             ],
         )
 
@@ -2047,6 +2064,652 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         return runner.derive_coverage_plan(cls._context(root), cls.RUN_ID)
 
     @staticmethod
+    def _pytest_git_scratch(plan):
+        scratch = plan.root / "python" / "pytest" / "test_git_fixture0"
+        scratch.mkdir(parents=True)
+        runner.subprocess.run(
+            ["git", "-c", "core.longpaths=true", "init", "--quiet", str(scratch)],
+            check=True,
+            capture_output=True,
+        )
+        result = runner.subprocess.run(
+            ["git", "-C", str(scratch), "hash-object", "-w", "--stdin"],
+            input=b"owned pytest fixture object\n",
+            check=True,
+            capture_output=True,
+        )
+        object_id = result.stdout.decode().strip()
+        return scratch / ".git" / "objects" / object_id[:2] / object_id[2:]
+
+    def test_terminal_claim_cleanup_removes_pytest_links_and_readonly_git_objects(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            plan = self._plan(root)
+            claim = runner.claim_coverage_run(context, plan, self._resolved_wave2_entry())
+            external = root / "external"
+            external.mkdir()
+            sentinel = external / "sentinel"
+            sentinel.write_bytes(b"external value")
+            sibling = plan.root.parent / "unclaimed"
+            sibling.mkdir()
+            (sibling / "sentinel").write_bytes(b"unclaimed value")
+            git_object = self._pytest_git_scratch(plan)
+            (git_object.parents[3] / "external-link").symlink_to(external, target_is_directory=True)
+            (plan.root / "file-link").symlink_to(sentinel)
+            (plan.root / "dangling-link").symlink_to(external / "missing")
+            if runner.os.name == "nt":
+                self.assertTrue(
+                    git_object.stat(follow_symlinks=False).st_file_attributes
+                    & stat.FILE_ATTRIBUTE_READONLY
+                )
+                with self.assertRaises(PermissionError) as denied:
+                    git_object.unlink()
+                print("CONTROLLED_PERMISSION_ERROR", denied.exception.filename)
+            with self.assertRaisesRegex(runner.RunnerError, "symbolic link"):
+                runner.clear_generated_artifacts(context, {})
+            cleanup = runner.cleanup_coverage_run(plan, True, claim)
+            if runner.os.name == "nt":
+                self.assertEqual(cleanup["status"], "OK", cleanup)
+                self.assertFalse(plan.root.exists())
+            else:
+                self.assertEqual(cleanup["status"], "FAILED", cleanup)
+                self.assertTrue(plan.root.exists())
+                self.assertTrue(git_object.exists())
+            self.assertEqual(sentinel.read_bytes(), b"external value")
+            self.assertEqual((sibling / "sentinel").read_bytes(), b"unclaimed value")
+            self.assertFalse(cleanup["parent_removed_if_empty"])
+
+    def test_cleanup_preserves_active_and_changed_marker_claims(self):
+        for terminal, corrupt_marker in ((False, False), (True, True)):
+            with self.subTest(terminal=terminal), TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                plan = self._plan(root)
+                claim = runner.claim_coverage_run(
+                    self._context(root), plan, self._resolved_wave2_entry()
+                )
+                if corrupt_marker:
+                    plan.marker.write_text("{}", encoding="utf-8")
+                cleanup = runner.cleanup_coverage_run(plan, terminal, claim)
+                self.assertEqual(cleanup["status"], "FAILED")
+                self.assertTrue(plan.root.exists())
+
+    def test_cleanup_refuses_unclaimed_redirected_or_replaced_roots(self):
+        cases = (
+            "unclaimed",
+            "missing-marker",
+            "resolved-entry",
+            "replaced-root",
+            "root-link",
+            "ancestor-link",
+            "forged-plan",
+            "forged-marker",
+            "marker-link",
+        )
+        for case in cases:
+            with self.subTest(case=case), TemporaryDirectory() as temporary_directory:
+                repository = Path(temporary_directory) / "repository"
+                repository.mkdir()
+                plan = self._plan(repository)
+                claim = runner.claim_coverage_run(
+                    self._context(repository), plan, self._resolved_wave2_entry()
+                )
+                external = repository.parent / "external"
+                external.mkdir()
+                sentinel = external / "sentinel"
+                sentinel.write_bytes(b"external value")
+                marker_bytes = plan.marker.read_bytes()
+                if case == "unclaimed":
+                    claim = None
+                elif case == "missing-marker":
+                    plan.marker.unlink()
+                elif case == "resolved-entry":
+                    plan.resolved_wave2_entry.write_bytes(b"{}")
+                elif case == "replaced-root":
+                    plan.root.rename(plan.root.with_name("preserved-original"))
+                    plan.root.mkdir()
+                    plan.marker.write_bytes(marker_bytes)
+                    plan.resolved_wave2_entry.write_bytes(b"{}")
+                elif case == "root-link":
+                    plan.root.rename(plan.root.with_name("preserved-original"))
+                    plan.root.symlink_to(external, target_is_directory=True)
+                elif case == "ancestor-link":
+                    parent = plan.root.parent
+                    parent.rename(parent.with_name("preserved-original"))
+                    parent.symlink_to(external, target_is_directory=True)
+                elif case == "forged-plan":
+                    plan = replace(plan, root=repository / "valuable")
+                    plan.root.mkdir()
+                elif case == "forged-marker":
+                    plan.marker.write_bytes(b"{}")
+                    claim = replace(claim, marker_sha256=sha256(b"{}").hexdigest())
+                elif case == "marker-link":
+                    plan.marker.unlink()
+                    plan.marker.symlink_to(sentinel)
+                result = runner.cleanup_coverage_run(plan, True, claim)
+                self.assertEqual(result["status"], "FAILED", (case, result))
+                self.assertEqual(result["removed_paths"], [])
+                self.assertEqual(sentinel.read_bytes(), b"external value")
+
+    def test_readonly_cleanup_refuses_to_change_shared_external_hardlink(self):
+        if runner.os.name != "nt":
+            self.skipTest("Windows read-only file deletion")
+        with TemporaryDirectory() as temporary_directory:
+            repository = Path(temporary_directory) / "repository"
+            repository.mkdir()
+            plan = self._plan(repository)
+            claim = runner.claim_coverage_run(
+                self._context(repository), plan, self._resolved_wave2_entry()
+            )
+            git_object = self._pytest_git_scratch(plan)
+            external = repository.parent / "external-object"
+            runner.os.link(git_object, external)
+            metadata = external.stat(follow_symlinks=False)
+            original = external.read_bytes()
+            result = runner.cleanup_coverage_run(plan, True, claim)
+            self.assertEqual(result["status"], "FAILED")
+            self.assertEqual(external.read_bytes(), original)
+            self.assertEqual(
+                external.stat(follow_symlinks=False).st_file_attributes, metadata.st_file_attributes
+            )
+
+    def test_readonly_cleanup_without_native_handle_capability_remains_blocked(self):
+        if runner.os.name != "nt":
+            self.skipTest("Windows read-only file deletion")
+        import ctypes
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            plan = self._plan(root)
+            claim = runner.claim_coverage_run(
+                self._context(root), plan, self._resolved_wave2_entry()
+            )
+            git_object = self._pytest_git_scratch(plan)
+            attributes = git_object.stat(follow_symlinks=False).st_file_attributes
+            original = git_object.read_bytes()
+            with patch.object(
+                ctypes, "WinDLL", side_effect=NotImplementedError("native handle API unavailable")
+            ):
+                cleanup = runner.cleanup_coverage_run(plan, True, claim)
+            self.assertEqual(cleanup["status"], "FAILED")
+            self.assertEqual(
+                cleanup["failure"],
+                {"code": "COVERAGE_CLEANUP_FAILED", "message": "NotImplementedError"},
+            )
+            self.assertTrue(plan.root.exists())
+            self.assertEqual(git_object.read_bytes(), original)
+            self.assertEqual(git_object.stat(follow_symlinks=False).st_file_attributes, attributes)
+
+    def test_post_end_failures_preserve_durable_evidence_and_exact_cleanup_authority(self):
+        for failure in ("guard", "cleanup", "end"):
+            if failure == "cleanup" and runner.os.name != "nt":
+                continue
+            with self.subTest(failure=failure), TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                context = self._context(root)
+                plan = self._plan(root)
+                receipts = []
+                sentinel = root / "external-value"
+                sentinel.write_bytes(b"preserved")
+                external_object = root / "external-object"
+                coverage = {"run_id": plan.run_id, "observed_reports": ["python", "dotnet"]}
+                analysis = TestSonarqubeExactHeadRunner.analysis_evidence()
+                claim_coverage_run = runner.claim_coverage_run
+                cleanup_coverage_run = runner.cleanup_coverage_run
+                write_receipt = runner.write_receipt
+
+                def capture_receipt(path, receipt, secrets):
+                    write_receipt(path, receipt, secrets)
+                    receipts.append((deepcopy(receipt), plan.root.exists()))
+
+                def produce(_plan, _environment):
+                    git_object = self._pytest_git_scratch(plan)
+                    (plan.root / "pytest-current").symlink_to(
+                        plan.root / "python", target_is_directory=True
+                    )
+                    if failure == "guard":
+                        (root / "unknown-link").symlink_to(sentinel)
+                    elif failure == "cleanup":
+                        runner.os.link(git_object, external_object)
+
+                with ExitStack() as patches:
+                    TestSonarqubeExactHeadRunner.patch_wave3_transaction(patches)
+                    values = {
+                        "process_environment": {},
+                        "git_context": context,
+                        "receipt_path": root / "receipt.json",
+                        "sonar_secret_values": set(),
+                        "load_credentials": TestSonarqubeExactHeadRunner.credentials(),
+                        "derive_coverage_plan": plan,
+                        "verify_wave2_entry": self._resolved_wave2_entry(),
+                        "strict_cleanliness": {},
+                        "project_key_from_xml": runner.PROJECT_KEY,
+                        "discover_scanner": ["scanner"],
+                        "scanner_environment": {},
+                        "project_inventory": (root / "solution.sln", [], []),
+                        "issue_inventory": {"records": []},
+                        "new_code_issue_inventory": {},
+                        "report_task": {"ce_task_id": "task-1"},
+                        "wait_for_ce_task": "analysis-1",
+                        "current_analysis_binding": {
+                            "revision": self.HEAD,
+                            "analysis_id": "analysis-1",
+                        },
+                        "analysis_quality_gate": {"status": "OK"},
+                        "issue_dispositions": {"blocking_count": 0},
+                        "hotspot_inventory": {},
+                        "hotspot_dispositions": {"blocking_count": 0},
+                        "validate_coverage_reports": coverage,
+                        "validate_dotnet_cobertura_inputs": [],
+                        "collect_coverage_analysis_evidence": analysis,
+                    }
+                    for name, value in values.items():
+                        patches.enter_context(patch.object(runner, name, return_value=value))
+                    patches.enter_context(
+                        patch.object(runner, "project_lock", return_value=nullcontext())
+                    )
+                    patches.enter_context(patch.object(runner, "run_process"))
+                    patches.enter_context(
+                        patch.object(runner, "prepare_worktree_python_environment")
+                    )
+                    patches.enter_context(
+                        patch.object(
+                            runner,
+                            "scanner_metadata",
+                            side_effect=runner.RunnerError(
+                                "COVERAGE_METADATA_INVALID: injected post-end failure"
+                            )
+                            if failure == "end"
+                            else None,
+                        )
+                    )
+                    patches.enter_context(patch.object(runner, "is_tracked", return_value=False))
+                    patches.enter_context(
+                        patch.object(runner, "run_coverage_producer", side_effect=produce)
+                    )
+                    patches.enter_context(
+                        patch.object(runner, "claim_coverage_run", wraps=claim_coverage_run)
+                    )
+                    patches.enter_context(
+                        patch.object(runner, "cleanup_coverage_run", wraps=cleanup_coverage_run)
+                    )
+                    patches.enter_context(
+                        patch.object(runner, "write_receipt", side_effect=capture_receipt)
+                    )
+                    with self.assertRaises(runner.RunnerError):
+                        runner.execute("diagnostic", "scanner")
+                blocked = json.loads((root / "receipt.json").read_bytes())
+                self.assertEqual(blocked, receipts[-1][0])
+                self.assertEqual(blocked["outcome"], "BLOCKED")
+                self.assertEqual(blocked["coverage"], coverage)
+                self.assertTrue(
+                    any(item["coverage"] == coverage and exists for item, exists in receipts)
+                )
+                self.assertEqual(sentinel.read_bytes(), b"preserved")
+                if failure == "cleanup":
+                    self.assertEqual(blocked["cleanup"]["status"], "FAILED")
+                    self.assertEqual(blocked["failure"]["code"], "COVERAGE_CLEANUP_FAILED")
+                    self.assertTrue(plan.root.exists())
+                    self.assertTrue(
+                        external_object.stat().st_file_attributes & stat.FILE_ATTRIBUTE_READONLY
+                    )
+                elif runner.os.name != "nt":
+                    self.assertEqual(blocked["cleanup"]["status"], "FAILED")
+                    self.assertTrue(plan.root.exists())
+                else:
+                    self.assertEqual(blocked["cleanup"]["status"], "OK")
+                    self.assertFalse(plan.root.exists())
+                if failure == "end":
+                    self.assertIsNone(blocked["analysis"])
+                    self.assertIsNone(blocked["identity"]["analysis_id"])
+                    self.assertEqual(blocked["failure"]["code"], "COVERAGE_METADATA_INVALID")
+                else:
+                    self.assertEqual(blocked["identity"]["analysis_id"], "analysis-1")
+                    self.assertEqual(blocked["analysis"], analysis)
+                    self.assertTrue(
+                        any(item["analysis"] == analysis and exists for item, exists in receipts)
+                    )
+                    self.assertEqual(blocked["global_inventory"], {})
+                if failure == "guard":
+                    self.assertTrue((root / "unknown-link").is_symlink())
+
+    def test_posix_claim_cleanup_blocks_before_any_removal(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            plan = self._plan(root)
+            claim = runner.claim_coverage_run(
+                self._context(root), plan, self._resolved_wave2_entry()
+            )
+            marker = plan.marker.read_bytes()
+            with (
+                patch.object(runner.os, "name", "posix"),
+                patch.object(
+                    runner.shutil,
+                    "rmtree",
+                    side_effect=AssertionError("unclaimed pathname removal"),
+                ),
+            ):
+                result = runner.cleanup_coverage_run(plan, True, claim)
+            self.assertEqual(result["status"], "FAILED")
+            self.assertEqual(result["failure"]["message"], "NotImplementedError")
+            self.assertEqual(result["removed_paths"], [])
+            self.assertEqual(plan.marker.read_bytes(), marker)
+
+    def test_incomplete_analysis_is_typed_and_cannot_authorize_completion(self):
+        from tests.test_stateless_preview_artifact import _complete_v3_exact_head_receipt
+
+        schema_path = (
+            RUNNER_PATH.parents[1]
+            / "specs/014-sonarqube-coverage-producer/contracts/exact-head-receipt-v3.schema.json"
+        )
+        schema = Draft202012Validator(json.loads(schema_path.read_bytes()))
+        complete = _complete_v3_exact_head_receipt(
+            self.HEAD, role="diagnostic", outcome="DIAGNOSTIC_COMPLETE", release_intent="none"
+        )
+        partial = deepcopy(complete)
+        partial["analysis"] = TestSonarqubeExactHeadRunner.analysis_evidence()
+        with self.assertRaises(runner.RunnerError):
+            runner.validate_exact_head_receipt_v3(partial)
+        self.assertFalse(schema.is_valid(partial))
+        for role in ("candidate", "post-merge"):
+            invalid = _complete_v3_exact_head_receipt(
+                self.HEAD, role=role, outcome="PASS", release_intent="v0.23.12"
+            )
+            invalid["analysis"] = TestSonarqubeExactHeadRunner.analysis_evidence()
+            with self.assertRaises(runner.RunnerError):
+                runner.validate_exact_head_receipt_v3(invalid)
+            self.assertFalse(schema.is_valid(invalid))
+        partial["outcome"] = "BLOCKED"
+        partial["failure"] = runner._blocked_failure(
+            "ANALYSIS_BOUND", runner.RunnerError("COVERAGE_CLEANUP_FAILED: controlled failure")
+        )
+        runner.validate_exact_head_receipt_v3(partial)
+        schema.validate(partial)
+        for field, value in (
+            ("current_final", True),
+            ("current_after_measures", False),
+            ("current_after_measures", 1),
+        ):
+            with self.subTest(field=field, value=value):
+                invalid = deepcopy(partial)
+                invalid["analysis"]["observations"][field] = value
+                with self.assertRaises(runner.RunnerError):
+                    runner.validate_exact_head_receipt_v3(invalid)
+                self.assertFalse(schema.is_valid(invalid))
+        for field in (
+            "submitted",
+            "current_before_measures",
+            "current_after_measures",
+            "current_final",
+        ):
+            invalid = deepcopy(partial)
+            del invalid["analysis"]["observations"][field]
+            with self.assertRaises(runner.RunnerError):
+                runner.validate_exact_head_receipt_v3(invalid)
+            self.assertFalse(schema.is_valid(invalid))
+        invalid = deepcopy(partial)
+        invalid["identity"]["analysis_id"] = None
+        with self.assertRaises(runner.RunnerError):
+            runner.validate_exact_head_receipt_v3(invalid)
+        self.assertFalse(schema.is_valid(invalid))
+
+    def test_cleanup_security_transaction_reaches_only_actual_analysis_bookends(self):
+        if runner.os.name != "nt":
+            self.skipTest("Windows native transaction proof")
+        import ctypes
+        from ctypes import wintypes
+        from tests.test_stateless_preview_artifact import _complete_v3_exact_head_receipt
+
+        schema_path = (
+            RUNNER_PATH.parents[1]
+            / "specs/014-sonarqube-coverage-producer/contracts/exact-head-receipt-v3.schema.json"
+        )
+        validator = Draft202012Validator(json.loads(schema_path.read_bytes()))
+        for failure in ("interrupt", "finalizer-interrupt", "cleanup", "after-measures", None):
+            with self.subTest(failure=failure), TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                context = self._context(root)
+                fixture = _complete_v3_exact_head_receipt(
+                    self.HEAD,
+                    role="diagnostic",
+                    outcome="DIAGNOSTIC_COMPLETE",
+                    release_intent="none",
+                )
+                plan = runner.derive_coverage_plan(context, fixture["coverage"]["run_id"])
+                analysis_id = fixture["identity"]["analysis_id"]
+                events = []
+                interrupt = KeyboardInterrupt("controlled native transaction interruption")
+                cleanup_calls = []
+                receipts = []
+                native_cleanup = runner.cleanup_coverage_run
+                claim_run = runner.claim_coverage_run
+                persist = runner.write_receipt
+                collect = runner.collect_coverage_analysis_evidence
+                leaf = None
+
+                def produce(*_args):
+                    nonlocal leaf
+                    leaf = self._pytest_git_scratch(plan)
+                    if failure == "cleanup":
+                        runner.os.link(leaf, root / "external-alias")
+
+                def cleanup(*args, **kwargs):
+                    cleanup_calls.append(True)
+                    return native_cleanup(*args, **kwargs)
+
+                def capture(path, receipt, secrets):
+                    persist(path, receipt, secrets)
+                    receipts.append(deepcopy(receipt))
+
+                def binding(*_args):
+                    after = "dotnet-components" in events
+                    events.append("binding-after" if after else "binding-before")
+                    if after and failure in {"after-measures", "finalizer-interrupt"}:
+                        raise runner.RunnerError(
+                            "COVERAGE_ANALYSIS_MISMATCH: controlled supersession after reads"
+                        )
+                    return {"revision": self.HEAD, "analysis_id": analysis_id}
+
+                def api(_host, endpoint, parameters, _token):
+                    if endpoint == "/api/measures/component":
+                        events.append("aggregate")
+                        return {
+                            "component": {
+                                "measures": [
+                                    {"metric": name, "value": str(value)}
+                                    for name, value in fixture["analysis"]["aggregate"].items()
+                                ]
+                            }
+                        }
+                    events.append(
+                        "python-components"
+                        if "python-components" not in events
+                        else "dotnet-components"
+                    )
+                    paths = [
+                        path
+                        for report in fixture["coverage"]["final_reports"]
+                        for path in report["source_paths"]
+                    ]
+                    return {
+                        "paging": {"total": len(paths)},
+                        "components": [
+                            {
+                                "path": path,
+                                "measures": [
+                                    {"metric": "lines_to_cover", "value": "10"},
+                                    {"metric": "uncovered_lines", "value": "2"},
+                                    {"metric": "conditions_to_cover", "value": "4"},
+                                    {"metric": "uncovered_conditions", "value": "1"},
+                                ],
+                            }
+                            for path in paths
+                        ],
+                    }
+
+                native_dll = ctypes.WinDLL
+                kernel = native_dll("kernel32", use_last_error=True)
+                kernel.SetFileInformationByHandle.argtypes = [
+                    wintypes.HANDLE,
+                    ctypes.c_int,
+                    ctypes.c_void_p,
+                    wintypes.DWORD,
+                ]
+                kernel.SetFileInformationByHandle.restype = wintypes.BOOL
+                interrupted = False
+
+                def setter(handle, kind, data, size):
+                    nonlocal interrupted
+                    result = kernel.SetFileInformationByHandle(handle, kind, data, size)
+                    if (
+                        failure in {"interrupt", "finalizer-interrupt"}
+                        and not interrupted
+                        and kind == 21
+                        and ctypes.cast(data, ctypes.POINTER(wintypes.DWORD))[0] & 1
+                    ):
+                        interrupted = True
+                        raise interrupt
+                    return result
+
+                proxy = SimpleNamespace(
+                    **{
+                        name: getattr(kernel, name)
+                        for name in (
+                            "CreateFileW",
+                            "GetFileType",
+                            "GetFileInformationByHandle",
+                            "GetFileInformationByHandleEx",
+                            "CloseHandle",
+                        )
+                    },
+                    SetFileInformationByHandle=setter,
+                )
+                with ExitStack() as patches:
+                    TestSonarqubeExactHeadRunner.patch_wave3_transaction(patches)
+                    values = {
+                        "process_environment": {},
+                        "git_context": context,
+                        "receipt_path": root / "receipt.json",
+                        "sonar_secret_values": set(),
+                        "load_credentials": TestSonarqubeExactHeadRunner.credentials(),
+                        "derive_coverage_plan": plan,
+                        "verify_wave2_entry": self._resolved_wave2_entry(),
+                        "strict_cleanliness": {},
+                        "project_key_from_xml": runner.PROJECT_KEY,
+                        "discover_scanner": ["scanner"],
+                        "scanner_environment": {},
+                        "project_inventory": (root / "solution.sln", [], []),
+                        "issue_inventory": {"records": []},
+                        "new_code_issue_inventory": {},
+                        "report_task": {"ce_task_id": "task"},
+                        "wait_for_ce_task": analysis_id,
+                        "issue_dispositions": {"blocking_count": 0},
+                        "hotspot_inventory": {},
+                        "hotspot_dispositions": {"blocking_count": 0},
+                        "validate_coverage_reports": fixture["coverage"],
+                        "validate_dotnet_cobertura_inputs": [],
+                        "write_diagnostic_inventory": fixture["global_inventory"],
+                        "analysis_quality_gate": {
+                            "status": "OK",
+                            "conditions": [
+                                {
+                                    "metricKey": "new_coverage",
+                                    "status": "OK",
+                                    "errorThreshold": "80",
+                                    "actualValue": "85",
+                                }
+                            ],
+                        },
+                    }
+                    for name, value in values.items():
+                        patches.enter_context(patch.object(runner, name, return_value=value))
+                    patches.enter_context(
+                        patch.object(
+                            runner.uuid, "uuid4", return_value=runner.uuid.UUID(plan.run_id)
+                        )
+                    )
+                    patches.enter_context(
+                        patch.object(runner, "project_lock", return_value=nullcontext())
+                    )
+                    for name in (
+                        "run_process",
+                        "prepare_worktree_python_environment",
+                        "scanner_metadata",
+                        "clear_generated_artifacts",
+                    ):
+                        patches.enter_context(patch.object(runner, name))
+                    patches.enter_context(
+                        patch.object(runner, "claim_coverage_run", wraps=claim_run)
+                    )
+                    patches.enter_context(
+                        patch.object(runner, "run_coverage_producer", side_effect=produce)
+                    )
+                    patches.enter_context(
+                        patch.object(
+                            runner,
+                            "collect_coverage_analysis_evidence",
+                            wraps=collect,
+                        )
+                    )
+                    patches.enter_context(
+                        patch.object(runner, "current_analysis_binding", side_effect=binding)
+                    )
+                    patches.enter_context(patch.object(runner, "api_json", side_effect=api))
+                    patches.enter_context(
+                        patch.object(runner, "cleanup_coverage_run", side_effect=cleanup)
+                    )
+                    patches.enter_context(
+                        patch.object(
+                            ctypes,
+                            "WinDLL",
+                            side_effect=lambda name, **kwargs: proxy
+                            if name == "kernel32"
+                            else native_dll(name, **kwargs),
+                        )
+                    )
+                    patches.enter_context(
+                        patch.object(runner, "write_receipt", side_effect=capture)
+                    )
+                    if failure in {"interrupt", "finalizer-interrupt"}:
+                        with self.assertRaises(KeyboardInterrupt) as caught:
+                            runner.execute("diagnostic", "scanner")
+                        self.assertIs(caught.exception, interrupt)
+                    elif failure is not None:
+                        with self.assertRaises(runner.RunnerError):
+                            runner.execute("diagnostic", "scanner")
+                    else:
+                        runner.execute("diagnostic", "scanner")
+                result = json.loads((root / "receipt.json").read_bytes())
+                validator.validate(result)
+                runner.validate_exact_head_receipt_v3(result)
+                self.assertEqual(cleanup_calls, [True])
+                self.assertEqual(result["coverage"], fixture["coverage"])
+                self.assertEqual(result["analysis"]["aggregate"], fixture["analysis"]["aggregate"])
+                observations = result["analysis"]["observations"]
+                if failure is None:
+                    self.assertEqual(result["outcome"], "DIAGNOSTIC_COMPLETE")
+                    self.assertTrue(all(value is True for value in observations.values()))
+                else:
+                    self.assertEqual(result["outcome"], "BLOCKED")
+                    self.assertEqual(result["analysis"]["status"], "INCOMPLETE")
+                    self.assertIsNone(observations["current_final"])
+                    self.assertIs(
+                        observations["current_after_measures"],
+                        None if failure in {"after-measures", "finalizer-interrupt"} else True,
+                    )
+                    if failure in {"interrupt", "finalizer-interrupt", "cleanup"}:
+                        self.assertEqual(result["cleanup"]["status"], "FAILED")
+                        self.assertEqual(
+                            result["failure"]["code"],
+                            "COVERAGE_ANALYSIS_MISMATCH"
+                            if failure == "finalizer-interrupt"
+                            else "COVERAGE_CLEANUP_FAILED",
+                        )
+                        self.assertTrue(plan.root.exists())
+                self.assertGreater(events.index("binding-after"), events.index("dotnet-components"))
+                print("CONTROLLED_TRANSACTION_RECEIPT", failure, json.dumps(result, sort_keys=True))
+
+    @staticmethod
     def _cobertura(
         filenames,
         *,
@@ -2115,11 +2778,11 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     raise runner.RunnerError("injected end failure")
                 raise runner.RunnerError("stop after transaction event capture")
 
-        def cleanup(_plan, producer_terminal):
+        def cleanup(_plan, producer_terminal, _claim, **kwargs):
             if producer_terminals is not None:
                 producer_terminals.append(producer_terminal)
             if real_cleanup:
-                return cleanup_coverage_run(_plan, producer_terminal)
+                return cleanup_coverage_run(_plan, producer_terminal, _claim, **kwargs)
             return {}
 
         def clear_generated(_context, _environment):

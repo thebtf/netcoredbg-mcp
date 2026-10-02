@@ -85,3 +85,20 @@ All roles validate against [exact-head-receipt-v3.schema.json](exact-head-receip
 No `SONAR_*` variable reaches `uv`, Bash, pytest, restore, test, or a test-host descendant. Receipts contain no credentials, environment dump, raw report body, or secret-bearing command line.
 
 The `finally` path removes only the claimed UUID root after foreground producers are terminal, including a proven drain of the collector's owned tree. If that drain fails, retain the run root and report cleanup failure; an unrelated owner cannot declare the producer terminal. Remove the coverage parent only when empty; never delete a generic `.tmp` path. Cleanup failure stays secondary to the first causal failure.
+
+Windows claim cleanup holds verified ancestor/claim handles before validation
+and verified child handles during every descent, including final directory
+deletion. Handle-bound `FileDispositionInfoEx | IGNORE_READONLY_ATTRIBUTE`
+deletion never clears shared file attributes. Unsupported native capability
+blocks cleanup without pathname or attribute-changing fallback. A same-user
+writer may still create an alias after a link-count observation; protection is
+unchanged external bytes/attributes, not atomic alias prevention. Private scanner
+POSIX claim cleanup fails closed before deletion until final-object identity
+and namespace ownership can be retained through the actual removal operation;
+product runtime POSIX support is unaffected.
+
+Cleanup interruption persists failed cleanup and already reached coverage,
+inventory, and analysis facts, then re-raises the exact original interruption.
+No interrupted deletion is retried by transaction finalization. A cleanup block
+uses the v3 `INCOMPLETE` analysis shape with null unobserved after/final bookends;
+it cannot satisfy the unchanged all-true completion/PASS contract.

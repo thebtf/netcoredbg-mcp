@@ -21,7 +21,7 @@ import urllib.request
 import uuid
 import xml.etree.ElementTree as ElementTree
 from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
 from datetime import datetime, timedelta, timezone
@@ -194,6 +194,7 @@ class CoverageRunClaim:
     marker: Path
     resolved_wave2_entry: Path
     marker_sha256: str
+    root_identity: tuple[int, int]
 
 
 def utc_now() -> str:
@@ -1973,6 +1974,33 @@ def validate_coverage_marker(plan: CoveragePlan, marker: Mapping[str, Any]) -> N
         raise RunnerError("COVERAGE_MARKER_INVALID: marker does not bind the fixed coverage plan.")
 
 
+def _coverage_directory_guard(plan: CoveragePlan, directory: Path) -> None:
+    repository = plan.repository_root
+    context = GitContext(repository, repository, repository, repository, plan.head)
+    if (
+        repository != Path(os.path.abspath(repository))
+        or repository != repository.resolve(strict=True)
+        or plan != derive_coverage_plan(context, plan.run_id)
+    ):
+        raise RunnerError("COVERAGE_MARKER_INVALID: coverage plan paths are not canonical.")
+    relative = directory.relative_to(repository)
+    current = repository
+    for component in (None, *relative.parts):
+        if component is not None:
+            current /= component
+        try:
+            metadata = current.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise RunnerError(
+                "COVERAGE_MARKER_INVALID: coverage ancestor is not a plain directory."
+            )
+
+
 def claim_coverage_run(
     context: GitContext, plan: CoveragePlan, resolved_entry: Mapping[str, Any]
 ) -> CoverageRunClaim:
@@ -1980,9 +2008,11 @@ def claim_coverage_run(
         raise RunnerError(
             "COVERAGE_MARKER_INVALID: plan does not belong to the captured exact head."
         )
+    _coverage_directory_guard(plan, plan.root.parent)
     try:
         plan.root.parent.mkdir(parents=True, exist_ok=True)
         plan.root.mkdir()
+        root_metadata = plan.root.stat(follow_symlinks=False)
     except FileExistsError as error:
         raise RunnerError(
             "COVERAGE_RUN_ROOT_EXISTS: claimed coverage root already exists."
@@ -2001,6 +2031,7 @@ def claim_coverage_run(
         plan.marker,
         plan.resolved_wave2_entry,
         _sha256_bytes(plan.marker.read_bytes()),
+        (root_metadata.st_dev, root_metadata.st_ino),
     )
 
 
@@ -3147,40 +3178,385 @@ def validate_coverage_reports(
     }
 
 
-def cleanup_coverage_run(plan: CoveragePlan, producer_terminal: bool) -> dict[str, Any]:
-    root_relative = _coverage_relative(plan, plan.root)
-    cleanup = {
-        "claimed_root": root_relative,
-        "producer_terminal": producer_terminal,
-        "removed_paths": [],
-        "parent_removed_if_empty": False,
-        "status": "OK",
-        "failure": None,
-    }
-    if not producer_terminal:
-        cleanup["status"] = "FAILED"
-        cleanup["failure"] = {
-            "code": "COVERAGE_CLEANUP_FAILED",
-            "message": "producer is not terminal",
-        }
-        return cleanup
-    try:
-        if plan.root.exists():
+def _delete_windows_coverage_run(
+    plan: CoveragePlan, claim: CoverageRunClaim, cleanup: dict[str, Any]
+) -> None:
+    import ctypes
+    from ctypes import wintypes
+    from types import SimpleNamespace
+
+    class FileInformation(ctypes.Structure):
+        _fields_ = [
+            ("attributes", wintypes.DWORD),
+            ("times", wintypes.FILETIME * 3),
+            ("volume", wintypes.DWORD),
+            ("size_high", wintypes.DWORD),
+            ("size_low", wintypes.DWORD),
+            ("links", wintypes.DWORD),
+            ("index_high", wintypes.DWORD),
+            ("index_low", wintypes.DWORD),
+        ]
+
+    class FileIdInformation(ctypes.Structure):
+        _fields_ = [
+            ("volume", ctypes.c_ulonglong),
+            ("index_low", ctypes.c_ulonglong),
+            ("index_high", ctypes.c_ulonglong),
+        ]
+
+    class FileDispositionInformationEx(ctypes.Structure):
+        _fields_ = [("flags", wintypes.DWORD)]
+
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.USHORT),
+            ("maximum", wintypes.USHORT),
+            ("buffer", wintypes.LPWSTR),
+        ]
+
+    class ObjectAttributes(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.ULONG),
+            ("root", wintypes.HANDLE),
+            ("name", ctypes.POINTER(UnicodeString)),
+            ("attributes", wintypes.ULONG),
+            ("security", ctypes.c_void_p),
+            ("quality", ctypes.c_void_p),
+        ]
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = [("status", ctypes.c_void_p), ("information", ctypes.c_size_t)]
+
+    class DirectoryInformation(ctypes.Structure):
+        _fields_ = [
+            ("next", wintypes.ULONG),
+            ("index", wintypes.ULONG),
+            ("times", ctypes.c_longlong * 4),
+            ("sizes", ctypes.c_longlong * 2),
+            ("attributes", wintypes.ULONG),
+            ("name_length", wintypes.ULONG),
+            ("ea_size", wintypes.ULONG),
+            ("tag", wintypes.ULONG),
+            ("id_low", ctypes.c_ulonglong),
+            ("id_high", ctypes.c_ulonglong),
+        ]
+
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    ntdll.NtCreateFile.argtypes = [
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.ULONG,
+        ctypes.POINTER(ObjectAttributes),
+        ctypes.POINTER(IoStatusBlock),
+        ctypes.c_void_p,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        ctypes.c_void_p,
+        wintypes.ULONG,
+    ]
+    ntdll.NtCreateFile.restype = wintypes.LONG
+    ntdll.RtlNtStatusToDosError.argtypes = [wintypes.LONG]
+    ntdll.RtlNtStatusToDosError.restype = wintypes.ULONG
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.GetFileType.argtypes = [wintypes.HANDLE]
+    kernel32.GetFileType.restype = wintypes.DWORD
+    kernel32.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+    kernel32.GetFileInformationByHandleEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    kernel32.GetFileInformationByHandleEx.restype = wintypes.BOOL
+    kernel32.SetFileInformationByHandle.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    invalid_handle = ctypes.c_void_p(-1).value
+    read_attributes = 0x80
+    delete_access = 0x10000
+    open_flags = 0x00200000 | 0x02000000
+
+    def require(success: Any) -> None:
+        if not success:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def close(handle: Any) -> None:
+        original = sys.exc_info()[1]
+        try:
+            require(kernel32.CloseHandle(handle))
+        except BaseException:
+            if original is None:
+                raise
+
+    def information(handle: Any, metadata: Any) -> None:
+        if kernel32.GetFileType(handle) != 1:
+            raise RunnerError("COVERAGE_MARKER_INVALID: cleanup handle is not a disk file.")
+        info = FileInformation()
+        require(kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)))
+        file_id = FileIdInformation()
+        require(
+            kernel32.GetFileInformationByHandleEx(
+                handle, 18, ctypes.byref(file_id), ctypes.sizeof(file_id)
+            )
+        )
+        if sys.version_info >= (3, 12):
+            identity = (file_id.volume, (file_id.index_high << 64) | file_id.index_low)
+        else:
+            index = (info.index_high << 32) | info.index_low
+            if file_id.index_high or file_id.index_low != index:
+                raise RunnerError("COVERAGE_MARKER_INVALID: ambiguous legacy file identity.")
+            identity = (info.volume, index)
+        reparse = bool(info.attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        expected_reparse = bool(
+            getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        )
+        if (
+            identity != (metadata.st_dev, metadata.st_ino)
+            or reparse != expected_reparse
+            or bool(info.attributes & stat.FILE_ATTRIBUTE_DIRECTORY)
+            != bool(metadata.st_file_attributes & stat.FILE_ATTRIBUTE_DIRECTORY)
+            or (not reparse and not stat.S_ISDIR(metadata.st_mode) and info.links != 1)
+        ):
+            raise RunnerError("COVERAGE_MARKER_INVALID: cleanup handle identity changed.")
+        if reparse:
+            tag = (wintypes.DWORD * 2)()
+            require(
+                kernel32.GetFileInformationByHandleEx(
+                    handle, 9, ctypes.byref(tag), ctypes.sizeof(tag)
+                )
+            )
+            if tag[1] != metadata.st_reparse_tag or tag[1] not in {
+                stat.IO_REPARSE_TAG_SYMLINK,
+                stat.IO_REPARSE_TAG_MOUNT_POINT,
+            }:
+                raise RunnerError("COVERAGE_MARKER_INVALID: unsupported cleanup reparse point.")
+
+    def pin(
+        stack: ExitStack,
+        path: Path,
+        metadata: Any,
+        access: int,
+        sharing: int,
+        parent: Any = None,
+    ) -> Any:
+        if parent is None:
+            handle = kernel32.CreateFileW(str(path), access, sharing, None, 3, open_flags, None)
+            if handle in (None, invalid_handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+        else:
+            name_buffer = ctypes.create_unicode_buffer(path.name)
+            length = len(path.name.encode("utf-16-le"))
+            name = UnicodeString(length, length + 2, ctypes.cast(name_buffer, wintypes.LPWSTR))
+            attributes = ObjectAttributes(
+                ctypes.sizeof(ObjectAttributes), parent, ctypes.pointer(name), 0x40, None, None
+            )
+            result = wintypes.HANDLE()
+            status = IoStatusBlock()
+            code = ntdll.NtCreateFile(
+                ctypes.byref(result),
+                access,
+                ctypes.byref(attributes),
+                ctypes.byref(status),
+                None,
+                0,
+                sharing,
+                1,
+                0x00204000,
+                None,
+                0,
+            )
+            if code < 0:
+                raise ctypes.WinError(ntdll.RtlNtStatusToDosError(code))
+            handle = result.value
+        stack.callback(close, handle)
+        information(handle, metadata)
+        return handle
+
+    def children(handle: Any, metadata: Any) -> Iterator[tuple[str, Any]]:
+        buffer = ctypes.create_string_buffer(65536)
+        kind = 20  # FileIdExtdDirectoryRestartInfo; subsequent pages continue this handle.
+        while True:
+            if not kernel32.GetFileInformationByHandleEx(handle, kind, buffer, len(buffer)):
+                error = ctypes.get_last_error()
+                if error == 18:  # ERROR_NO_MORE_FILES
+                    return
+                raise ctypes.WinError(error)
+            kind = 19
+            offset = 0
+            while True:
+                info = DirectoryInformation.from_buffer(buffer, offset)
+                name = ctypes.wstring_at(
+                    ctypes.addressof(buffer) + offset + ctypes.sizeof(DirectoryInformation),
+                    info.name_length // 2,
+                )
+                if name not in {".", ".."}:
+                    if not name or "/" in name or "\\" in name:
+                        raise RunnerError("COVERAGE_MARKER_INVALID: invalid cleanup child name.")
+                    index = (info.id_high << 64) | info.id_low
+                    if sys.version_info < (3, 12) and info.id_high:
+                        raise RunnerError(
+                            "COVERAGE_MARKER_INVALID: ambiguous legacy file identity."
+                        )
+                    yield (
+                        name,
+                        SimpleNamespace(
+                            st_dev=metadata.st_dev,
+                            st_ino=index,
+                            st_file_attributes=info.attributes,
+                            st_reparse_tag=info.tag,
+                            st_mode=stat.S_IFDIR
+                            if info.attributes & stat.FILE_ATTRIBUTE_DIRECTORY
+                            else stat.S_IFREG,
+                        ),
+                    )
+                if not info.next:
+                    break
+                offset += info.next
+
+    def dispose(handle: Any, metadata: Any) -> None:
+        information(handle, metadata)
+        # DELETE | IGNORE_READONLY_ATTRIBUTE never changes a shared file record's attributes.
+        disposition = FileDispositionInformationEx(0x11)
+        try:
+            require(
+                kernel32.SetFileInformationByHandle(
+                    handle, 21, ctypes.byref(disposition), ctypes.sizeof(disposition)
+                )
+            )
+        except BaseException:
+            disposition.flags = 0
+            try:
+                require(
+                    kernel32.SetFileInformationByHandle(
+                        handle, 21, ctypes.byref(disposition), ctypes.sizeof(disposition)
+                    )
+                )
+            except BaseException:
+                pass
+            raise
+
+    def descend(path: Path, handle: Any, metadata: Any) -> None:
+        if not metadata.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            if stat.S_ISDIR(metadata.st_mode):
+                for name, child_metadata in children(handle, metadata):
+                    child = path / name
+                    directory = stat.S_ISDIR(child_metadata.st_mode)
+                    with ExitStack() as child_pins:
+                        child_handle = pin(
+                            child_pins,
+                            child,
+                            child_metadata,
+                            read_attributes | delete_access | (1 if directory else 0),
+                            1 if directory else 0,
+                            handle,
+                        )
+                        descend(child, child_handle, child_metadata)
+        dispose(handle, metadata)
+
+    with ExitStack() as ancestors:
+        current = Path(plan.root.anchor)
+        parent_handle = None
+        parent_metadata = None
+        for component in (None, *plan.root.parent.relative_to(current).parts):
+            if component is not None:
+                current /= component
+            metadata = _scanner_tree_metadata(current)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise RunnerError("COVERAGE_MARKER_INVALID: cleanup ancestor is not a directory.")
+            access = read_attributes | (delete_access | 1 if current == plan.root.parent else 0)
+            handle = pin(ancestors, current, metadata, access, 1, parent_handle)
+            parent_handle = handle
+            if current == plan.root.parent:
+                parent_handle, parent_metadata = handle, metadata
+        with ExitStack() as root_pin:
             metadata = _scanner_tree_metadata(plan.root)
-            if not stat.S_ISDIR(getattr(metadata, "st_mode", 0)):
-                raise OSError("claimed root is not a directory")
-            shutil.rmtree(plan.root)
-            cleanup["removed_paths"] = [root_relative]
-        parent = plan.root.parent
-        if parent.exists() and not any(parent.iterdir()):
-            parent.rmdir()
+            root_handle = pin(
+                root_pin, plan.root, metadata, read_attributes | delete_access | 1, 1, parent_handle
+            )
+            _coverage_directory_guard(plan, plan.root)
+            if (
+                not isinstance(claim, CoverageRunClaim)
+                or (claim.root, claim.marker, claim.resolved_wave2_entry)
+                != (plan.root, plan.marker, plan.resolved_wave2_entry)
+                or (metadata.st_dev, metadata.st_ino) != claim.root_identity
+            ):
+                raise RunnerError("COVERAGE_MARKER_INVALID: cleanup claim identity does not match.")
+            with ExitStack() as marker_pins:
+                for path in (plan.marker, plan.resolved_wave2_entry):
+                    file_metadata = _scanner_tree_metadata(path)
+                    if not stat.S_ISREG(file_metadata.st_mode):
+                        raise RunnerError("COVERAGE_MARKER_INVALID: cleanup marker is not regular.")
+                    pin(marker_pins, path, file_metadata, 0x80000000 | read_attributes, 1)
+                raw_marker = plan.marker.read_bytes()
+                if _sha256_bytes(raw_marker) != claim.marker_sha256:
+                    raise RunnerError("COVERAGE_MARKER_INVALID: cleanup marker identity changed.")
+                marker = _load_json_object(raw_marker, "coverage marker")
+                validate_coverage_marker(plan, marker)
+                if (
+                    _load_json_object(
+                        plan.resolved_wave2_entry.read_bytes(), "resolved Wave-2 entry"
+                    )
+                    != marker["wave2_entry"]
+                ):
+                    raise RunnerError("COVERAGE_MARKER_INVALID: resolved cleanup entry changed.")
+            descend(plan.root, root_handle, metadata)
+        cleanup["removed_paths"] = [_coverage_relative(plan, plan.root)]
+        if next(children(parent_handle, parent_metadata), None) is None:
+            dispose(parent_handle, parent_metadata)
             cleanup["parent_removed_if_empty"] = True
-    except (OSError, RunnerError) as error:
+
+
+def cleanup_coverage_run(
+    plan: CoveragePlan,
+    producer_terminal: bool,
+    claim: CoverageRunClaim,
+    *,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    cleanup = evidence if evidence is not None else {}
+    cleanup.update(
+        {
+            "claimed_root": _coverage_relative(plan, plan.root),
+            "producer_terminal": producer_terminal,
+            "removed_paths": [],
+            "parent_removed_if_empty": False,
+            "status": "OK",
+            "failure": None,
+        }
+    )
+    try:
+        if producer_terminal is not True:
+            raise RunnerError("COVERAGE_CLEANUP_FAILED: producer is not terminal")
+        if os.name != "nt":
+            raise NotImplementedError("verified final-object deletion is unavailable on POSIX")
+        _delete_windows_coverage_run(plan, claim, cleanup)
+    except BaseException as error:
         cleanup["status"] = "FAILED"
         cleanup["failure"] = {
             "code": "COVERAGE_CLEANUP_FAILED",
             "message": error.__class__.__name__,
         }
+        if not isinstance(error, (OSError, RunnerError, NotImplementedError)):
+            raise
     return cleanup
 
 
@@ -4196,7 +4572,10 @@ def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
 
 
 def validate_coverage_analysis_evidence(
-    identity: Mapping[str, Any], observations: Mapping[str, Any]
+    identity: Mapping[str, Any],
+    observations: Mapping[str, Any],
+    *,
+    incomplete: bool = False,
 ) -> dict[str, Any]:
     """Require one canonical analysis identity and positive two-language import proof."""
 
@@ -4216,6 +4595,12 @@ def validate_coverage_analysis_evidence(
         "current_after_measures",
         "current_final",
     ):
+        if (
+            incomplete
+            and field in {"current_after_measures", "current_final"}
+            and observations.get(field) is None
+        ):
+            continue
         if observations.get(field) != identity:
             _coverage_failure(
                 "COVERAGE_ANALYSIS_MISMATCH", f"{field} does not match canonical identity"
@@ -4256,18 +4641,24 @@ def validate_coverage_analysis_evidence(
             _coverage_failure(
                 "COVERAGE_IMPORT_UNPROVEN", f"{language} component import is incomplete"
             )
-    return {
+    evidence = {
         "observations": {
-            "submitted": True,
-            "current_before_measures": True,
-            "current_after_measures": True,
-            "current_final": True,
+            field: True if observations.get(field) == identity else None
+            for field in (
+                "submitted",
+                "current_before_measures",
+                "current_after_measures",
+                "current_final",
+            )
         },
         "aggregate": dict(aggregate),
         "new_coverage_condition": dict(condition),
         "python_components": dict(observations["python_components"]),
         "dotnet_components": dict(observations["dotnet_components"]),
     }
+    if incomplete:
+        evidence["status"] = "INCOMPLETE"
+    return evidence
 
 
 def _v3_fail(detail: str) -> NoReturn:
@@ -4412,6 +4803,89 @@ def _v3_inventory_summary(value: Any) -> None:
         _v3_fail("global inventory is incomplete or count-only")
 
 
+def _v3_analysis(analysis: Any, *, incomplete: bool = False) -> None:
+    if not isinstance(analysis, Mapping):
+        _v3_fail("completed receipt lacks analysis evidence")
+    expected_analysis = {
+        "observations",
+        "aggregate",
+        "new_coverage_condition",
+        "python_components",
+        "dotnet_components",
+    }
+    if incomplete:
+        expected_analysis.add("status")
+        if analysis.get("status") != "INCOMPLETE":
+            _v3_fail("incomplete analysis status is invalid")
+    if set(analysis) != expected_analysis:
+        _v3_fail("analysis evidence has invalid fields")
+    observations = analysis["observations"]
+    aggregate = analysis["aggregate"]
+    condition = analysis["new_coverage_condition"]
+    if (
+        not isinstance(observations, Mapping)
+        or set(observations)
+        != {"submitted", "current_before_measures", "current_after_measures", "current_final"}
+        or (not incomplete and any(value is not True for value in observations.values()))
+        or (
+            incomplete
+            and (
+                observations.get("submitted") is not True
+                or observations.get("current_before_measures") is not True
+                or observations.get("current_after_measures") is not True
+                and observations.get("current_after_measures") is not None
+                or observations.get("current_final") is not None
+            )
+        )
+        or not isinstance(aggregate, Mapping)
+        or set(aggregate) != {"coverage", "lines_to_cover", "new_coverage", "new_lines_to_cover"}
+        or type(aggregate.get("coverage")) not in {int, float}
+        or not 0 < float(aggregate["coverage"]) <= 100
+        or type(aggregate.get("lines_to_cover")) is not int
+        or aggregate["lines_to_cover"] <= 0
+        or type(aggregate.get("new_lines_to_cover")) is not int
+        or aggregate["new_lines_to_cover"] <= 0
+        or type(aggregate.get("new_coverage")) not in {int, float}
+        or not 0 <= float(aggregate["new_coverage"]) <= 100
+        or not isinstance(condition, Mapping)
+        or set(condition) != {"status", "threshold", "actual_value"}
+        or condition.get("status") not in {"OK", "ERROR"}
+        or condition.get("threshold") != 80
+        or type(condition.get("actual_value")) not in {int, float}
+        or not 0 <= float(condition["actual_value"]) <= 100
+    ):
+        _v3_fail("analysis coverage evidence is invalid")
+    for component in (analysis["python_components"], analysis["dotnet_components"]):
+        if (
+            not isinstance(component, Mapping)
+            or set(component)
+            != {
+                "source_set_sha256",
+                "page_count",
+                "complete",
+                "mapped_path_count",
+                "lines_to_cover",
+                "covered_lines",
+                "branch_measure_path_count",
+                "mapped_paths_sha256",
+            }
+            or not _is_sha256(component.get("source_set_sha256"))
+            or not _is_sha256(component.get("mapped_paths_sha256"))
+            or component.get("complete") is not True
+            or any(
+                type(component.get(field)) is not int or component[field] <= 0
+                for field in (
+                    "page_count",
+                    "mapped_path_count",
+                    "lines_to_cover",
+                    "covered_lines",
+                    "branch_measure_path_count",
+                )
+            )
+        ):
+            _v3_fail("two-language component evidence is incomplete")
+
+
 def validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None:
     """Pure v3 discriminator shared by every exact-head receipt consumer."""
 
@@ -4493,6 +4967,14 @@ def validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None:
             or not failure["safe_message"]
         ):
             _v3_fail("blocked receipt lacks typed failure")
+        analysis = receipt.get("analysis")
+        if analysis is not None:
+            if identity.get("analysis_id") is None:
+                _v3_fail("analysis evidence lacks canonical identity")
+            _v3_analysis(
+                analysis,
+                incomplete=isinstance(analysis, Mapping) and analysis.get("status") == "INCOMPLETE",
+            )
         return
     if receipt.get("failure") is not None or not isinstance(identity.get("analysis_id"), str):
         _v3_fail("completed receipt has no canonical analysis identity")
@@ -4541,70 +5023,7 @@ def validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None:
         or stateless.get("restored") is not True
     ):
         _v3_fail("coverage normalization or Stateless restoration is invalid")
-    analysis = receipt.get("analysis")
-    if not isinstance(analysis, Mapping):
-        _v3_fail("completed receipt lacks analysis evidence")
-    expected_analysis = {
-        "observations",
-        "aggregate",
-        "new_coverage_condition",
-        "python_components",
-        "dotnet_components",
-    }
-    if set(analysis) != expected_analysis:
-        _v3_fail("analysis evidence has invalid fields")
-    observations = analysis["observations"]
-    aggregate = analysis["aggregate"]
-    condition = analysis["new_coverage_condition"]
-    if (
-        not isinstance(observations, Mapping)
-        or set(observations)
-        != {"submitted", "current_before_measures", "current_after_measures", "current_final"}
-        or any(value is not True for value in observations.values())
-        or not isinstance(aggregate, Mapping)
-        or set(aggregate) != {"coverage", "lines_to_cover", "new_coverage", "new_lines_to_cover"}
-        or type(aggregate.get("coverage")) not in {int, float}
-        or float(aggregate["coverage"]) <= 0
-        or type(aggregate.get("lines_to_cover")) is not int
-        or aggregate["lines_to_cover"] <= 0
-        or type(aggregate.get("new_lines_to_cover")) is not int
-        or aggregate["new_lines_to_cover"] <= 0
-        or not isinstance(condition, Mapping)
-        or set(condition) != {"status", "threshold", "actual_value"}
-        or condition.get("status") not in {"OK", "ERROR"}
-        or condition.get("threshold") != 80
-        or type(condition.get("actual_value")) not in {int, float}
-    ):
-        _v3_fail("analysis coverage evidence is invalid")
-    for component in (analysis["python_components"], analysis["dotnet_components"]):
-        if (
-            not isinstance(component, Mapping)
-            or set(component)
-            != {
-                "source_set_sha256",
-                "page_count",
-                "complete",
-                "mapped_path_count",
-                "lines_to_cover",
-                "covered_lines",
-                "branch_measure_path_count",
-                "mapped_paths_sha256",
-            }
-            or not _is_sha256(component.get("source_set_sha256"))
-            or not _is_sha256(component.get("mapped_paths_sha256"))
-            or component.get("complete") is not True
-            or any(
-                type(component.get(field)) is not int or component[field] <= 0
-                for field in (
-                    "page_count",
-                    "mapped_path_count",
-                    "lines_to_cover",
-                    "covered_lines",
-                    "branch_measure_path_count",
-                )
-            )
-        ):
-            _v3_fail("two-language component evidence is incomplete")
+    _v3_analysis(receipt.get("analysis"))
     inventory = receipt.get("global_inventory")
     inventory_path = (
         f".agent/e/sonarqube/{PROJECT_KEY}/{identity['captured_head']}/diagnostic/"
@@ -4819,7 +5238,9 @@ def collect_coverage_analysis_evidence(
             host, token, list(reports[1].get("source_paths", []))
         ),
     }
-    return validate_coverage_analysis_evidence(identity, combined)
+    return validate_coverage_analysis_evidence(
+        identity, combined, incomplete=observations.get("current_final") is None
+    )
 
 
 def _inventory_summary(
@@ -5006,6 +5427,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
             stage = "SCANNER_BEGUN"
             claim = claim_coverage_run(context, plan, resolved_wave2)
             stage = "RUN_CLAIMED"
+            producer_terminal = True
             prepare_worktree_python_environment(context, inherited_environment, secrets)
             solution, _, standalone_projects = project_inventory(context.repository_root)
             run_process(
@@ -5024,6 +5446,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
                     label=f"Standalone project build ({project.name})",
                 )
             stateless_before = capture_stateless_binary_hashes(plan)
+            producer_terminal = False
             run_coverage_producer(plan, inherited_environment)
             producer_terminal = True
             stage = "PRODUCING"
@@ -5041,6 +5464,9 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 normalization=normalization,
             )
             stage = "REPORTS_VALIDATED"
+            receipt["coverage"] = coverage
+            receipt["failure"]["stage"] = stage
+            write_receipt(target_receipt, receipt, secrets)
             assert_head_unchanged(context, clean_environment)
             run_process(
                 scanner_end_command(scanner, credentials["SONAR_TOKEN"]),
@@ -5064,12 +5490,13 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 "project_key": PROJECT_KEY,
                 "analysis_id": analysis_id,
             }
-            current_before = current_analysis_binding(
+            current_analysis_binding(
                 credentials["SONAR_HOST_URL"],
                 analysis_id,
                 context.head,
                 credentials["SONAR_READ_TOKEN"],
             )
+            receipt["identity"] = identity
             quality_gate = analysis_quality_gate(
                 credentials["SONAR_HOST_URL"], analysis_id, credentials["SONAR_READ_TOKEN"]
             )
@@ -5078,7 +5505,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
             )
             new_code_issue_inventory(credentials["SONAR_HOST_URL"], credentials["SONAR_READ_TOKEN"])
             issue_result = issue_dispositions(pre_scan_issues, post_scan_issues)
-            current_after = current_analysis_binding(
+            current_analysis_binding(
                 credentials["SONAR_HOST_URL"],
                 analysis_id,
                 context.head,
@@ -5097,11 +5524,8 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 issue_result,
                 hotspot_result,
             )
-            clear_generated_artifacts(context, clean_environment)
-            cleanup = cleanup_coverage_run(plan, producer_terminal)
-            stage = "CLEANED"
-            strict_cleanliness(context, clean_environment, "receipt publication")
-            assert_head_unchanged(context, clean_environment)
+            receipt["global_inventory"] = inventory
+            write_receipt(target_receipt, receipt, secrets)
             current_before_measures = current_analysis_binding(
                 credentials["SONAR_HOST_URL"],
                 analysis_id,
@@ -5117,28 +5541,26 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 {
                     "submitted": identity,
                     "current_before_measures": {
-                        "captured_head": current_before.get("revision"),
-                        "project_key": PROJECT_KEY,
-                        "analysis_id": current_before.get("analysis_id"),
-                    },
-                    "current_after_measures": {
-                        "captured_head": current_after.get("revision"),
-                        "project_key": PROJECT_KEY,
-                        "analysis_id": current_after.get("analysis_id"),
-                    },
-                    "current_final": {
                         "captured_head": current_before_measures.get("revision"),
                         "project_key": PROJECT_KEY,
                         "analysis_id": current_before_measures.get("analysis_id"),
                     },
+                    "current_after_measures": None,
+                    "current_final": None,
                 },
             )
-            _current_after_measures = current_analysis_binding(
+            stage = "ANALYSIS_BOUND"
+            receipt["analysis"] = analysis
+            receipt["failure"]["stage"] = stage
+            write_receipt(target_receipt, receipt, secrets)
+            current_analysis_binding(
                 credentials["SONAR_HOST_URL"],
                 analysis_id,
                 context.head,
                 credentials["SONAR_READ_TOKEN"],
             )
+            analysis["observations"]["current_after_measures"] = True
+            write_receipt(target_receipt, receipt, secrets)
             release_gate = None
             outcome = "DIAGNOSTIC_COMPLETE"
             gate_error: RunnerError | None = None
@@ -5158,6 +5580,29 @@ def execute(role: str, scanner_override: str | None) -> Path:
                     gate_error = RunnerError(
                         f"Analysis-bound quality gate is {gate_status}; only OK passes."
                     )
+            receipt["release_gate"] = release_gate
+            receipt["cleanup"] = {}
+            cleanup = cleanup_coverage_run(
+                plan, producer_terminal, claim, evidence=receipt["cleanup"]
+            )
+            receipt["cleanup"] = cleanup
+            write_receipt(target_receipt, receipt, secrets)
+            if cleanup.get("status") == "FAILED":
+                raise gate_error or RunnerError(
+                    "COVERAGE_CLEANUP_FAILED: claimed run cleanup failed."
+                )
+            clear_generated_artifacts(context, clean_environment)
+            stage = "CLEANED"
+            strict_cleanliness(context, clean_environment, "receipt publication")
+            assert_head_unchanged(context, clean_environment)
+            current_analysis_binding(
+                credentials["SONAR_HOST_URL"],
+                analysis_id,
+                context.head,
+                credentials["SONAR_READ_TOKEN"],
+            )
+            analysis["observations"]["current_final"] = True
+            analysis.pop("status", None)
             receipt = {
                 "schema_version": EXACT_HEAD_RECEIPT_V3_SCHEMA_VERSION,
                 "role": role,
@@ -5175,18 +5620,30 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 raise gate_error
             validate_exact_head_receipt_v3(receipt)
             write_receipt(target_receipt, receipt, secrets)
-        except Exception as error:
-            cleanup_result: Any
-            if plan is not None and claim is not None and stage != "CLEANED":
-                cleanup_result = cleanup_coverage_run(plan, producer_terminal)
-            else:
-                cleanup_result = receipt.get("cleanup")
-            try:
-                clear_generated_artifacts(context, clean_environment)
-            except Exception as cleanup_error:
-                error.add_note(
-                    f"Generated-artifact cleanup also failed: {cleanup_error.__class__.__name__}."
-                )
+        except BaseException as error:
+            interruption = error if not isinstance(error, Exception) else None
+            cleanup_result: Any = receipt.get("cleanup")
+            if plan is not None and claim is not None and cleanup_result is None:
+                receipt["cleanup"] = {}
+                try:
+                    cleanup_result = cleanup_coverage_run(
+                        plan, producer_terminal, claim, evidence=receipt["cleanup"]
+                    )
+                    receipt["cleanup"] = cleanup_result
+                except BaseException as cleanup_error:
+                    cleanup_result = receipt["cleanup"]
+                    if not isinstance(cleanup_error, Exception):
+                        interruption = cleanup_error
+            if isinstance(error, Exception) and (
+                not isinstance(cleanup_result, Mapping) or cleanup_result.get("status") != "FAILED"
+            ):
+                try:
+                    clear_generated_artifacts(context, clean_environment)
+                except Exception as cleanup_error:
+                    if hasattr(error, "add_note"):
+                        error.add_note(
+                            f"Generated-artifact cleanup also failed: {cleanup_error.__class__.__name__}."
+                        )
             blocked = {
                 "schema_version": EXACT_HEAD_RECEIPT_V3_SCHEMA_VERSION,
                 "role": role,
@@ -5205,10 +5662,23 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 "global_inventory": receipt.get("global_inventory"),
                 "release_gate": receipt.get("release_gate"),
                 "cleanup": cleanup_result,
-                "failure": _blocked_failure(stage, error),
+                "failure": _blocked_failure(stage, error)
+                if isinstance(error, Exception)
+                else {
+                    "code": "COVERAGE_CLEANUP_FAILED"
+                    if isinstance(cleanup_result, Mapping)
+                    and cleanup_result.get("status") == "FAILED"
+                    else "COVERAGE_RUN_BLOCKED",
+                    "stage": stage,
+                    "language": None,
+                    "project_id": None,
+                    "safe_message": error.__class__.__name__,
+                },
             }
             validate_exact_head_receipt_v3(blocked)
             write_receipt(target_receipt, blocked, secrets)
+            if interruption is not None:
+                raise interruption
             if isinstance(error, RunnerError):
                 raise
             raise RunnerError(blocked["failure"]["safe_message"]) from error
