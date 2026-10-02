@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Private scanner input handling now separates literal source selection, native credential validation, and runtime cursor/evidence helpers while keeping secret, path, identity, wire, and lifecycle checks unchanged. No measured analyzer-closure claim is made.
+- Native grid literal-key reuse and session path-cache/stop-context helpers preserve exact wire keys and ordering, cache identity, and existing error and cancellation behavior. Source/test literal proof is not a runtime grid-path verification claim; no Sonar closure claim is made.
 ### Fixed
 - Exact-head Sonar claim cleanup now pins verified Windows ancestors and every descended object through handle-bound final deletion, including ordinary files and directories. Python 3.10–3.13 read-only cleanup uses `FileDispositionInfoEx` with `IGNORE_READONLY_ATTRIBUTE` without changing shared attributes; unsupported native capability and private scanner POSIX claim cleanup fail closed without pathname fallback. Interrupted cleanup persists a failed receipt before re-raising the original interruption without retry. Reached analysis facts remain durable in a BLOCKED-only incomplete shape with null unobserved bookends; completed/PASS receipts still require actual after-read and final identity observations.
 - Python coverage now gives pytest a freshly reserved `--basetemp` child under the claimed Python producer root, keeping `tmp_path` fixtures out of global OS temporary storage without clearing the run root or valuable sibling artifacts. This is scratch-ownership hygiene, not a claimed fix for the historical host-initialization timeout; its cause remains unknown.
