@@ -5,7 +5,7 @@ using System.Text.RegularExpressions;
 namespace NetCoreDbg.Mcp.CodeSearch.Core;
 
 /// <summary>Deterministic, project-bounded source traversal and C# symbol matching.</summary>
-public sealed class SymbolSearchEngine
+public sealed partial class SymbolSearchEngine
 {
     private static readonly HashSet<string> AlwaysIgnoredDirectories = new(StringComparer.Ordinal)
     {
@@ -765,10 +765,13 @@ public sealed class SymbolSearchEngine
         return new SearchPattern(pattern, strictRegexMatch);
     }
 
+    [GeneratedRegex("^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.CultureInvariant)]
+    private static partial Regex IdentifierRegex();
+
     private static SearchPattern CreateReferencePattern(string name, Func<Regex, string, bool>? strictRegexMatch)
     {
         var escaped = Regex.Escape(name);
-        var pattern = Regex.IsMatch(name, "^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.CultureInvariant)
+        var pattern = IdentifierRegex().IsMatch(name)
             ? $@"(?<![A-Za-z0-9_]){escaped}(?![A-Za-z0-9_])"
             : escaped;
         return new SearchPattern(pattern, strictRegexMatch);
