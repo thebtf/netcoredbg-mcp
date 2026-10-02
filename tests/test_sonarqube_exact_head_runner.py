@@ -5282,10 +5282,10 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 return {
                     "component": {
                         "measures": [
-                            {"metric": "coverage", "value": "80"},
+                            {"metric": "coverage", "value": "80", "period": {"value": "0"}},
                             {"metric": "lines_to_cover", "value": "22"},
-                            {"metric": "new_coverage", "value": "79.5"},
-                            {"metric": "new_lines_to_cover", "value": "8"},
+                            {"metric": "new_coverage", "period": {"value": "79.5"}},
+                            {"metric": "new_lines_to_cover", "period": {"value": "8"}},
                         ]
                     }
                 }
@@ -5304,6 +5304,9 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         self.assertEqual(result["new_coverage_condition"]["status"], "ERROR")
         self.assertEqual(result["python_components"]["mapped_path_count"], 1)
         self.assertEqual(result["dotnet_components"]["covered_lines"], 9)
+        self.assertEqual(result["aggregate"]["coverage"], 80.0)
+        self.assertEqual(result["aggregate"]["new_coverage"], 79.5)
+        self.assertEqual(result["aggregate"]["new_lines_to_cover"], 8)
 
     def test_component_coverage_accepts_uncovered_and_empty_files_when_language_is_covered(self):
         expected_paths = [
@@ -5345,6 +5348,66 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         self.assertEqual(summary["lines_to_cover"], 15)
         self.assertEqual(summary["covered_lines"], 8)
         self.assertEqual(summary["branch_measure_path_count"], 1)
+
+    def test_component_coverage_aggregates_mapped_sources_across_pages(self):
+        expected_paths = [
+            "src/netcoredbg_mcp/uncovered.py",
+            "src/netcoredbg_mcp/covered.py",
+        ]
+        pages = {
+            "1": {
+                "paging": {"total": 3},
+                "components": [
+                    {
+                        "path": "unrelated/file.py",
+                        "measures": [
+                            {"metric": "lines_to_cover", "value": "100"},
+                            {"metric": "uncovered_lines", "value": "0"},
+                        ],
+                    },
+                    {
+                        "path": expected_paths[0],
+                        "measures": [
+                            {"metric": "lines_to_cover", "value": "5"},
+                            {"metric": "uncovered_lines", "value": "5"},
+                        ],
+                    },
+                ],
+            },
+            "2": {
+                "paging": {"total": 3},
+                "components": [
+                    {
+                        "path": expected_paths[1],
+                        "measures": [
+                            {"metric": "lines_to_cover", "value": "10"},
+                            {"metric": "uncovered_lines", "value": "2"},
+                            {"metric": "conditions_to_cover", "value": "4"},
+                        ],
+                    },
+                ],
+            },
+        }
+
+        def api_response(_host, _endpoint, parameters, _token):
+            return pages[parameters["p"]]
+
+        with patch.object(runner, "api_json", side_effect=api_response):
+            summary = runner._component_coverage_summary(
+                "https://sonar.example.test", "read-token", expected_paths
+            )
+
+        self.assertEqual(
+            (
+                summary["mapped_path_count"],
+                summary["lines_to_cover"],
+                summary["covered_lines"],
+                summary["branch_measure_path_count"],
+                summary["page_count"],
+                summary["complete"],
+            ),
+            (2, 15, 8, 1, 2, True),
+        )
 
     def test_wave3_inventory_is_create_new_and_hash_bound(self):
         with TemporaryDirectory() as temporary_directory:
