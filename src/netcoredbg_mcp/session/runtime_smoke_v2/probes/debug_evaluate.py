@@ -4,6 +4,9 @@ import inspect
 from typing import Any
 
 
+_DEBUG_EVALUATE = "debug.evaluate"
+
+
 async def handle_debug_evaluate(
     probe: dict[str, Any],
     context: Any,
@@ -12,8 +15,8 @@ async def handle_debug_evaluate(
 ) -> dict[str, Any]:
     expression = str(probe.get("expression") or "")
     adapters = context.action_context.service_adapters
-    if "debug.evaluate" in adapters:
-        result = await context.call_adapter("debug.evaluate", expression=expression)
+    if _DEBUG_EVALUATE in adapters:
+        result = await context.call_adapter(_DEBUG_EVALUATE, expression=expression)
     else:
         evaluate = getattr(context.session, "evaluate_expression", None)
         if evaluate is None:
@@ -33,8 +36,8 @@ async def handle_debug_evaluate(
     if phase == "after" and "expected" in probe and status == "PASS" and value != expected:
         status = "FAIL"
     output = {
-        "name": str(probe.get("name") or expression or "debug.evaluate"),
-        "kind": "debug.evaluate",
+        "name": str(probe.get("name") or expression or _DEBUG_EVALUATE),
+        "kind": _DEBUG_EVALUATE,
         "status": status,
         "value": value,
     }
