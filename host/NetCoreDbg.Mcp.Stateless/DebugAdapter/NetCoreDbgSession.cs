@@ -1075,7 +1075,7 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
 
         try
         {
-            await _process.WaitForExitAsync().WaitAsync(_stopTimeout).ConfigureAwait(false);
+            await _process.WaitForExitAsync(CancellationToken.None).WaitAsync(_stopTimeout, CancellationToken.None).ConfigureAwait(false);
         }
         catch (TimeoutException)
         {
@@ -1104,7 +1104,7 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
     {
         try
         {
-            await Task.WhenAll(_readerTask, _stderrTask).WaitAsync(_stopTimeout).ConfigureAwait(false);
+            await Task.WhenAll(_readerTask, _stderrTask).WaitAsync(_stopTimeout, CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception)
         {
@@ -1313,7 +1313,7 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
                 {
                     try
                     {
-                        await process.WaitForExitAsync().WaitAsync(RequirePositiveTimeout(stopTimeout, nameof(stopTimeout))).ConfigureAwait(false);
+                        await process.WaitForExitAsync(CancellationToken.None).WaitAsync(RequirePositiveTimeout(stopTimeout, nameof(stopTimeout)), CancellationToken.None).ConfigureAwait(false);
                     }
                     catch (TimeoutException)
                     {
@@ -1325,7 +1325,7 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
             if (!process.HasExited)
             {
                 process.Kill(entireProcessTree: true);
-                await process.WaitForExitAsync().WaitAsync(RequirePositiveTimeout(stopTimeout, nameof(stopTimeout))).ConfigureAwait(false);
+                await process.WaitForExitAsync(CancellationToken.None).WaitAsync(RequirePositiveTimeout(stopTimeout, nameof(stopTimeout)), CancellationToken.None).ConfigureAwait(false);
             }
         }
         finally
