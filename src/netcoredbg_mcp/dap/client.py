@@ -44,7 +44,7 @@ TERMINAL_CONTAINER_ITEM_LIMIT = 64
 TERMINAL_CONTAINER_DEPTH_LIMIT = 8
 
 _SENSITIVE_KEY_RE = re.compile(
-    r"(?i)(?:[A-Za-z0-9]+[_-])*(?:authorization|access[_-]?token|token|password|secret|api[_-]?key)"
+    r"(?i)(?:[a-z0-9]+[_-])*(?:authorization|access[_-]?token|token|password|secret|api[_-]?key)"
 )
 
 # Authorization headers are multi-word and diagnostics often quote values with
@@ -68,7 +68,7 @@ _ESCAPED_JSON_CREDENTIAL_VALUE_RE = re.compile(
     r'(?i)((?:\\+)"(?:[A-Za-z0-9]+[_-])*(?:authorization|access[_-]?token|token|password|secret|api[_-]?key)'
     r'(?:\\+)"\s*:\s*(?:\\+)")([^"\\]*)((?:\\+)")'
 )
-_BEARER_VALUE_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+_BEARER_VALUE_RE = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]+")
 _POSIX_PATH_RE = re.compile(r"(?<![\w:/])/(?!/)[^\s\"']+")
 _WINDOWS_PATH_RE = re.compile(r"(?i)(?:[A-Z]:[\\/]|\\\\)[^\s\"'<>|]+")
 
@@ -247,6 +247,7 @@ class _DapRun:
     stderr_task: asyncio.Task[None] | None = None
     process_task: asyncio.Task[None] | None = None
     finalizer_task: asyncio.Task[DapTransportTerminal] | None = None
+    owner_retry_task: asyncio.Task[OwnerDrainReceipt] | None = None
     terminal: DapTransportTerminal | None = None
 
 
@@ -473,6 +474,18 @@ class DAPClient:
             The exact identity bound to the new adapter run.
         """
 
+        previous = self._run
+        if previous is not None and previous.owner is not None:
+            if previous.finalizer_task is not None and not previous.finalizer_task.done():
+                raise RuntimeError("Retained adapter owner finalization is still in progress")
+            receipt = previous.owner_drain_receipt
+            if (previous.phase is not _RunPhase.ACTIVE or not self.is_running) and not (
+                receipt is not None
+                and receipt.owner == previous.owner.owner
+                and receipt.status is DrainStatus.DRAINED
+                and receipt.active_processes == 0
+            ):
+                raise RuntimeError("Retained adapter owner did not drain before admission")
         if self.is_running and self._run is not None:
             return self._run.generation
 
@@ -546,6 +559,7 @@ class DAPClient:
             return None
 
         finalizer, _ = self._request_finalization(run, DapTerminalTrigger.EXPLICIT_STOP)
+        already_finalized = finalizer.done()
         await asyncio.shield(finalizer)
         logger.info("netcoredbg stopped")
         owner = run.owner
@@ -553,6 +567,28 @@ class DAPClient:
             return None
 
         receipt = run.owner_drain_receipt
+        if already_finalized and not (
+            receipt is not None
+            and receipt.owner == owner.owner
+            and receipt.status is DrainStatus.DRAINED
+            and receipt.active_processes == 0
+        ):
+            retry = run.owner_retry_task
+            if retry is None or retry.done():
+                retry = asyncio.create_task(owner.aclose())
+                run.owner_retry_task = retry
+            refreshed = await asyncio.shield(retry)
+            if self._run is run and owner.owner == refreshed.owner:
+                run.owner_drain_receipt = refreshed
+                receipt = refreshed
+            else:
+                return OwnerDrainReceipt(
+                    owner=owner.owner,
+                    status=DrainStatus.STALE,
+                    forced=False,
+                    root_returncode=None,
+                    active_processes=None,
+                )
         if receipt is not None:
             return receipt
         return OwnerDrainReceipt(
@@ -932,57 +968,68 @@ class DAPClient:
                     future.set_result(message)
 
             elif isinstance(message, DAPEvent):
-                event_name = sanitize_terminal_text(message.event, TERMINAL_EVENT_NAME_LIMIT)
-                body_json = json.dumps(
-                    _sanitize_terminal_value(message.body),
-                    default=str,
-                    separators=(",", ":"),
-                )
-                body_preview = _bounded_text(body_json)
-                logger.debug("<<< Event %s: %s", event_name, body_preview)
-                if run is not None:
-                    event_seq = (
-                        message.seq
-                        if type(message.seq) is int and 0 <= message.seq <= TERMINAL_EVENT_SEQ_MAX
-                        else None
-                    )
-                    run.last_dap_event = (event_seq, event_name)
-                    run.last_dap_event_body_preview = body_preview
-                    if message.event == "terminated":
-                        run.protocol_terminated = True
-                    elif message.event == "exited":
-                        exit_code = message.body.get("exitCode")
-                        if type(exit_code) is int:
-                            run.debuggee_exit_code = exit_code
-
-                if run is not None and run is not self._run:
-                    # A former reader may finish after `start` installs a newer
-                    # run. Retain its local terminal facts above, but never call
-                    # handlers: manager callbacks have no generation argument,
-                    # so they would otherwise let old transport state mutate the
-                    # current session solely because the client object matches.
-                    return
-
-                handlers = (
-                    self._event_handlers.get(message.event, [])
-                    if isinstance(message.event, str)
-                    else []
-                )
-                if not handlers:
-                    logger.warning(
-                        "Unhandled DAP event '%s' dropped: body_size=%d body_preview=%s",
-                        event_name,
-                        len(body_json.encode("utf-8")),
-                        body_preview,
-                    )
-                for handler in handlers:
-                    try:
-                        handler(message)
-                    except Exception:
-                        logger.exception("Event handler error")
+                self._handle_event(message, run)
 
         except Exception:
             logger.exception("Error handling message, data: %s", data)
+
+    def _handle_event(self, message: DAPEvent, run: _DapRun | None) -> None:
+        """Retain bounded event facts before dispatching current-generation callbacks."""
+
+        event_name = sanitize_terminal_text(message.event, TERMINAL_EVENT_NAME_LIMIT)
+        body_json = json.dumps(
+            _sanitize_terminal_value(message.body),
+            default=str,
+            separators=(",", ":"),
+        )
+        body_preview = _bounded_text(body_json)
+        logger.debug("<<< Event %s: %s", event_name, body_preview)
+        if run is not None:
+            self._retain_terminal_event_facts(run, message, event_name, body_preview)
+
+        if run is not None and run is not self._run:
+            # A former reader may finish after `start` installs a newer
+            # run. Retain its local terminal facts above, but never call
+            # handlers: manager callbacks have no generation argument,
+            # so they would otherwise let old transport state mutate the
+            # current session solely because the client object matches.
+            return
+
+        handlers = (
+            self._event_handlers.get(message.event, []) if isinstance(message.event, str) else []
+        )
+        if not handlers:
+            logger.warning(
+                "Unhandled DAP event '%s' dropped: body_size=%d body_preview=%s",
+                event_name,
+                len(body_json.encode("utf-8")),
+                body_preview,
+            )
+        for handler in handlers:
+            try:
+                handler(message)
+            except Exception:
+                logger.exception("Event handler error")
+
+    @staticmethod
+    def _retain_terminal_event_facts(
+        run: _DapRun, message: DAPEvent, event_name: str, body_preview: str
+    ) -> None:
+        """Retain protocol metadata on its originating adapter run."""
+
+        event_seq = (
+            message.seq
+            if type(message.seq) is int and 0 <= message.seq <= TERMINAL_EVENT_SEQ_MAX
+            else None
+        )
+        run.last_dap_event = (event_seq, event_name)
+        run.last_dap_event_body_preview = body_preview
+        if message.event == "terminated":
+            run.protocol_terminated = True
+        elif message.event == "exited":
+            exit_code = message.body.get("exitCode")
+            if type(exit_code) is int:
+                run.debuggee_exit_code = exit_code
 
     # High-level DAP commands
 

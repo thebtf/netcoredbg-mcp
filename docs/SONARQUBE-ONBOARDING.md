@@ -94,6 +94,29 @@ with only the failed relative path, operation, and error type. A cleanup block
 retains the already-collected gate and finding diagnostics but cannot publish
 post-cleanliness, final-analysis binding, or a passing receipt.
 
+Claimed coverage scratch deletion on Windows pins verified namespace ancestors
+and the claim before marker validation, enumerates retained directory handles, opens children relative to those handles, and
+removes final files/directories through those same handles. Read-only files use
+`FileDispositionInfoEx` with `IGNORE_READONLY_ATTRIBUTE`, not shared-attribute
+mutation or pathname retries. Unsupported kernels/filesystems block that cleanup
+effect with no fallback. Hardlink counts are observations, not alias exclusion;
+even an alias created after the last observation retains its bytes and attributes.
+An interrupted cleanup persists `cleanup.status: FAILED` and reached evidence in
+a `BLOCKED` receipt before re-raising the identical interruption, without retry.
+
+Private scanner POSIX claim cleanup is unavailable: descriptor-relative stdlib
+operations cannot bind final `unlink`/`rmdir` to the verified object or exclude
+namespace replacement. It fails closed before deleting anything. Re-entry
+requires an implementation and proof retaining verified namespace/final-object
+ownership through deletion; this limitation does not change product runtime
+POSIX support or Windows release eligibility.
+
+After aggregate/component reads, an actual current-analysis query must succeed
+before `current_after_measures` becomes true. Until the real final query succeeds,
+`BLOCKED` evidence uses `analysis.status: INCOMPLETE`, with unobserved bookends
+explicitly null. Numeric/component facts remain available without implying a
+completed binding. `DIAGNOSTIC_COMPLETE`/`PASS` still require all four slots true.
+
 
 Because SonarQube's analysis item has no project field, project proof is the
 recorded `project=thebtf_netcoredbg_mcp` analysis query together with the

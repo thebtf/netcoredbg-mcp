@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.Diagnostics;
 using System.Runtime.ExceptionServices;
+using System.Runtime.InteropServices;
 using System.Text.Json.Nodes;
 using FlaUI.Core;
 using FlaUI.Core.AutomationElements;
@@ -11,36 +12,41 @@ using FlaUI.UIA3;
 
 namespace FlaUIBridge.Commands;
 
-public static class ClickCommands
+public static partial class ClickCommands
 {
     private sealed record DragPathPoint(int X, int Y, int HoldMs);
 
-    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
-    private static extern bool SetForegroundWindow(IntPtr hWnd);
+    [LibraryImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetForegroundWindow(IntPtr hWnd);
 
-    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
-    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [LibraryImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
-    [System.Runtime.InteropServices.DllImport("user32.dll")]
-    private static extern IntPtr GetForegroundWindow();
+    [LibraryImport("user32.dll")]
+    private static partial IntPtr GetForegroundWindow();
 
-    [System.Runtime.InteropServices.DllImport("user32.dll")]
-    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr processId);
+    [LibraryImport("user32.dll")]
+    private static partial uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr processId);
 
-    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
-    private static extern uint GetCurrentThreadId();
+    [LibraryImport("kernel32.dll")]
+    private static partial uint GetCurrentThreadId();
 
-    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
-    private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+    [LibraryImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool AttachThreadInput(uint idAttach, uint idAttachTo, [MarshalAs(UnmanagedType.Bool)] bool fAttach);
 
-    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
-    private static extern bool BringWindowToTop(IntPtr hWnd);
+    [LibraryImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool BringWindowToTop(IntPtr hWnd);
 
-    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
-    private static extern bool SetCursorPos(int x, int y);
+    [LibraryImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetCursorPos(int x, int y);
 
-    [System.Runtime.InteropServices.DllImport("user32.dll")]
-    private static extern void mouse_event(
+    [LibraryImport("user32.dll")]
+    private static partial void mouse_event(
         uint dwFlags,
         uint dx,
         uint dy,
@@ -60,6 +66,12 @@ public static class ClickCommands
     private const uint MOUSEEVENTF_LEFTUP = 0x0004;
     private const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
     private const uint MOUSEEVENTF_RIGHTUP = 0x0010;
+    private const string ClickedKey = "clicked";
+    private const string SpeedMsKey = "speed_ms";
+    private const string CancelKeyKey = "cancel_key";
+    private const string EscapeKey = "escape";
+    private const string PointIndexKey = "point_index";
+    private const string HoldMsKey = "hold_ms";
 
     public static JsonNode Click(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
@@ -82,7 +94,7 @@ public static class ClickCommands
 
             EnsureForeground(mainWindow);
             SignedLeftClick(new Point(x.Value, y.Value));
-            return new JsonObject { ["clicked"] = true, ["x"] = x.Value, ["y"] = y.Value };
+            return new JsonObject { [ClickedKey] = true, ["x"] = x.Value, ["y"] = y.Value };
         }
 
         throw new ArgumentException("Provide 'automationId' or 'x'/'y' coordinates");
@@ -117,7 +129,7 @@ public static class ClickCommands
             ?? throw new ArgumentException("Missing 'x2'");
         var y2 = @params?["y2"]?.GetValue<int>()
             ?? throw new ArgumentException("Missing 'y2'");
-        var speedMs = @params?["speed_ms"]?.GetValue<int>() ?? 200;
+        var speedMs = @params?[SpeedMsKey]?.GetValue<int>() ?? 200;
 
         if (speedMs < 20)
             throw new ArgumentException("speed_ms below drag-threshold safety floor (minimum 20)");
@@ -238,8 +250,8 @@ public static class ClickCommands
         {
             return DragPathBlocked(
                 "speed_ms below drag-path safety floor",
-                new JsonObject { ["speed_ms"] = speedMs },
-                new JsonObject { ["speed_ms"] = "integer >= 20" },
+                new JsonObject { [SpeedMsKey] = speedMs },
+                new JsonObject { [SpeedMsKey] = "integer >= 20" },
                 "Increase speed_ms to at least 20 for path-aware drag.");
         }
 
@@ -460,7 +472,7 @@ public static class ClickCommands
                     new List<DragPathPoint>(),
                     DragPathBlocked(
                         "drag_path point must be an object",
-                        new JsonObject { ["point_index"] = index },
+                        new JsonObject { [PointIndexKey] = index },
                         new JsonObject { ["point"] = "object with integer x and y" },
                         "Provide every path point as an object."));
             }
@@ -471,22 +483,22 @@ public static class ClickCommands
                     new List<DragPathPoint>(),
                     DragPathBlocked(
                         "drag_path point requires integer x and y",
-                        new JsonObject { ["point_index"] = index },
+                        new JsonObject { [PointIndexKey] = index },
                         new JsonObject { ["x"] = "integer", ["y"] = "integer" },
                         "Provide integer screen coordinates for each path point."));
             }
 
             var holdMs = 0;
-            if (pointObject.TryGetPropertyValue("hold_ms", out var holdNode))
+            if (pointObject.TryGetPropertyValue(HoldMsKey, out var holdNode))
             {
-                if (holdNode is null || !TryReadInt(pointObject, "hold_ms", out holdMs))
+                if (holdNode is null || !TryReadInt(pointObject, HoldMsKey, out holdMs))
                 {
                     return (
                         new List<DragPathPoint>(),
                         DragPathBlocked(
                             "hold_ms must be an integer",
-                            new JsonObject { ["point_index"] = index },
-                            new JsonObject { ["hold_ms"] = "integer >= 0" },
+                            new JsonObject { [PointIndexKey] = index },
+                            new JsonObject { [HoldMsKey] = "integer >= 0" },
                             "Use a non-negative integer hold_ms value."));
                 }
 
@@ -496,8 +508,8 @@ public static class ClickCommands
                         new List<DragPathPoint>(),
                         DragPathBlocked(
                             "hold_ms must be non-negative",
-                            new JsonObject { ["point_index"] = index, ["hold_ms"] = holdMs },
-                            new JsonObject { ["hold_ms"] = "integer >= 0" },
+                            new JsonObject { [PointIndexKey] = index, [HoldMsKey] = holdMs },
+                            new JsonObject { [HoldMsKey] = "integer >= 0" },
                             "Use a non-negative hold duration for path-aware drag."));
                 }
             }
@@ -539,12 +551,12 @@ public static class ClickCommands
                 null,
                 DragPathBlocked(
                     "cancel_key must be a string",
-                    new JsonObject { ["cancel_key"] = cancelNode.ToJsonString() },
-                    new JsonObject { ["cancel_key"] = "escape" },
+                    new JsonObject { [CancelKeyKey] = cancelNode.ToJsonString() },
+                    new JsonObject { [CancelKeyKey] = EscapeKey },
                     "Use cancel_key: escape for path-aware drag cancellation."));
         }
 
-        if (string.Equals(cancelText, "escape", StringComparison.OrdinalIgnoreCase) ||
+        if (string.Equals(cancelText, EscapeKey, StringComparison.OrdinalIgnoreCase) ||
             string.Equals(cancelText, "esc", StringComparison.OrdinalIgnoreCase))
         {
             return (FlaUI.Core.WindowsAPI.VirtualKeyShort.ESCAPE, null);
@@ -554,8 +566,8 @@ public static class ClickCommands
             null,
             DragPathBlocked(
                 "unsupported drag_path cancel_key",
-                new JsonObject { ["cancel_key"] = cancelText },
-                new JsonObject { ["cancel_key"] = "escape" },
+                new JsonObject { [CancelKeyKey] = cancelText },
+                new JsonObject { [CancelKeyKey] = EscapeKey },
                 "Use cancel_key: escape for path-aware drag cancellation."));
     }
 
@@ -598,7 +610,7 @@ public static class ClickCommands
         };
         if (point.HoldMs > 0)
         {
-            result["hold_ms"] = point.HoldMs;
+            result[HoldMsKey] = point.HoldMs;
         }
 
         return result;
@@ -667,7 +679,7 @@ public static class ClickCommands
 
             return new JsonObject
             {
-                ["clicked"] = true,
+                [ClickedKey] = true,
                 ["automationId"] = automationId,
                 ["method"] = "InvokePattern"
             };
@@ -696,7 +708,7 @@ public static class ClickCommands
 
         return new JsonObject
         {
-            ["clicked"] = true,
+            [ClickedKey] = true,
             ["automationId"] = automationId,
             ["method"] = "MouseClick",
             ["x"] = center.X,
@@ -741,7 +753,7 @@ public static class ClickCommands
 
         var result = new JsonObject
         {
-            ["clicked"] = true,
+            [ClickedKey] = true,
             ["method"] = "flash-focus",
             ["x"] = x,
             ["y"] = y,
@@ -776,7 +788,7 @@ public static class ClickCommands
         return (x, y);
     }
 
-    private static IReadOnlyList<Point> BuildDragWaypoints(int x1, int y1, int x2, int y2, int steps)
+    private static List<Point> BuildDragWaypoints(int x1, int y1, int x2, int y2, int steps)
     {
         var deltaX = x2 - x1;
         var deltaY = y2 - y1;

@@ -8,6 +8,8 @@ import pytest
 
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner, RuntimeSmokeSession
 from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
+from netcoredbg_mcp.session.runtime_smoke_v2.actions import ActionContext
+from netcoredbg_mcp.session.runtime_smoke_v2.cleanup import run_cleanup
 from tests import smoke_test_manual
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "WpfSmokeApp"
@@ -116,6 +118,77 @@ async def test_v2_wpf_state_oracle_runs_five_ab_cases_with_diffs() -> None:
     assert any(
         any(path.startswith("ui.property.") for path in case["before"]) for case in result["cases"]
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "make_plan",
+    [
+        smoke_test_manual._v2_visible_row_drag_plan,
+        smoke_test_manual._v2_offscreen_row_target_drag_plan,
+        smoke_test_manual._v2_edge_scroll_drag_plan,
+        smoke_test_manual._v2_negative_drag_plan,
+        lambda **kwargs: smoke_test_manual._v2_multi_row_drag_plan(
+            **kwargs,
+            mode="contiguous",
+            indices=[1, 2],
+            source_identity="Fixture cue two",
+            target_index=3,
+        ),
+        lambda **kwargs: smoke_test_manual._v2_text_probe_missing_selector_plan(
+            **kwargs, label="WPF"
+        ),
+    ],
+)
+async def test_plan_owned_wpf_bridge_disconnects_before_stop_and_registry_assertion(
+    make_plan: Any,
+) -> None:
+    from time import monotonic
+    from types import SimpleNamespace
+
+    plan = make_plan(program="WpfSmokeApp.dll", build_project="WpfSmokeApp.csproj")
+    events: list[str] = []
+    session = SimpleNamespace(state=SimpleNamespace(process_id=4242))
+
+    class Bridge:
+        process_id = 4242
+        alive = True
+
+        async def disconnect(self) -> None:
+            events.append("ui.disconnect")
+            self.alive = False
+            self.process_id = None
+
+    bridge = Bridge()
+
+    async def ensure_ui_connected() -> Bridge:
+        if session.state.process_id != bridge.process_id:
+            raise RuntimeError("debuggee PID unavailable for connection")
+        return bridge
+
+    async def debug_stop(**_: Any) -> dict[str, Any]:
+        events.append("debug.stop")
+        session.state.process_id = None
+        return {"status": "PASS"}
+
+    async def registry_count(**_: Any) -> dict[str, Any]:
+        events.append("process.registry.assert_empty")
+        return {"status": "PASS", "count": int(bridge.alive)}
+
+    adapters = ui_operation_adapters(ensure_ui_connected)
+    adapters.update({"debug.stop": debug_stop, "process.registry.count": registry_count})
+    result = await run_cleanup(
+        plan["cleanup"]["steps"],
+        ActionContext(service_adapters=adapters, clock=monotonic),
+    )
+
+    assert events == [
+        "ui.disconnect",
+        "debug.stop",
+        "process.registry.assert_empty",
+    ]
+    assert result["status"] == "PASS"
+    assert result["process_registry_after"] == 0
 
 
 def test_manual_smoke_exposes_offscreen_row_target_drag_entrypoint() -> None:
@@ -330,10 +403,6 @@ def test_wpf_hover_plan_arms_after_focus_then_runs_four_measured_transitions() -
     assert "idle_ms" not in measured[2]
     assert measured[2]["settle"] == {"idle_ms": 100}
     assert measured[3]["action"] == {"kind": "wait", "idle_ms": 900}
-    assert plan["cleanup"]["steps"] == [
-        {"kind": "debug.stop"},
-        {"kind": "process.registry.assert_empty"},
-    ]
 
 
 def test_wpf_hover_live_evidence_accepts_complete_measured_contract() -> None:

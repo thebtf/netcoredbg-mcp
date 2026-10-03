@@ -79,25 +79,25 @@ def serialize_element(
         # Try to get automation ID
         try:
             automation_id = element.element_info.automation_id or ""
-        except (AttributeError, Exception) as e:
+        except Exception as e:
             logger.debug(f"Could not get automation_id: {e}")
 
         # Try to get control type
         try:
             control_type = element.element_info.control_type or ""
-        except (AttributeError, Exception) as e:
+        except Exception as e:
             logger.debug(f"Could not get control_type: {e}")
 
         # Try to get name
         try:
             name = element.element_info.name or ""
-        except (AttributeError, Exception) as e:
+        except Exception as e:
             logger.debug(f"Could not get name: {e}")
 
         # Try to get class name
         try:
             class_name = element.element_info.class_name or ""
-        except (AttributeError, Exception) as e:
+        except Exception as e:
             logger.debug(f"Could not get class_name: {e}")
 
         # Try to get rectangle
@@ -109,25 +109,25 @@ def serialize_element(
                 "right": rect.right,
                 "bottom": rect.bottom,
             }
-        except (AttributeError, Exception) as e:
+        except Exception as e:
             logger.debug(f"Could not get rectangle: {e}")
 
         # Try to get enabled state
         try:
             is_enabled = element.is_enabled()
-        except (AttributeError, Exception) as e:
+        except Exception as e:
             logger.debug(f"Could not get is_enabled: {e}")
 
         # Try to get visible state
         try:
             is_visible = element.is_visible()
-        except (AttributeError, Exception) as e:
+        except Exception as e:
             logger.debug(f"Could not get is_visible: {e}")
 
         # Try to get keyboard focus state
         try:
             has_keyboard_focus = element.has_keyboard_focus()
-        except (AttributeError, Exception) as e:
+        except Exception as e:
             logger.debug(f"Could not get has_keyboard_focus: {e}")
 
         # Get children if we haven't reached max depth
@@ -160,7 +160,7 @@ def serialize_element(
                         logger.debug(f"Could not serialize child {i}: {e}")
                         continue
 
-            except (AttributeError, Exception) as e:
+            except Exception as e:
                 logger.debug(f"Could not get children: {e}")
 
         return ElementInfo(

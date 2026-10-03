@@ -41,11 +41,13 @@ public sealed class LocalProbeClient : IAsyncDisposable, IDisposable
     private readonly TimeSpan _readTimeout;
     private readonly int _maximumRequestBytes;
     private readonly int _maximumResponseBytes;
-    private readonly CancellationTokenSource _stopping = new();
+    private readonly CancellationTokenSource _stopping;
     private readonly object _pipeLock = new();
+    private readonly object _disposeLock = new();
 
     private NamedPipeClientStream? _pipe;
     private Task _runTask = Task.CompletedTask;
+    private Task? _cleanupTask;
     private int _disposed;
 
     private LocalProbeClient(
@@ -63,6 +65,7 @@ public sealed class LocalProbeClient : IAsyncDisposable, IDisposable
         _readTimeout = options.ReadTimeout;
         _maximumRequestBytes = options.MaximumRequestBytes;
         _maximumResponseBytes = options.MaximumResponseBytes;
+        _stopping = new CancellationTokenSource();
     }
 
     public static LocalProbeClient? TryStartFromEnvironment(
@@ -82,16 +85,29 @@ public sealed class LocalProbeClient : IAsyncDisposable, IDisposable
 
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) == 0)
+        lock (_disposeLock)
         {
+            if (_cleanupTask is not null)
+            {
+                return;
+            }
+
+            Volatile.Write(ref _disposed, 1);
             _stopping.Cancel();
             ClosePipe();
+            _cleanupTask = _runTask.ContinueWith(
+                static (_, state) => ((LocalProbeClient)state!)._stopping.Dispose(),
+                this,
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
         }
     }
 
     public async ValueTask DisposeAsync()
     {
         Dispose();
+        await _cleanupTask!.ConfigureAwait(false);
         await _runTask.ConfigureAwait(false);
     }
 

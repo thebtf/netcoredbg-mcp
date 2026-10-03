@@ -9,6 +9,14 @@ namespace NetCoreDbg.Mcp.Host;
 /// </summary>
 internal static partial class NativePrompts
 {
+    private const string NullReferenceExceptionKey = "nullreferenceexception";
+    private const string InvalidOperationExceptionKey = "invalidoperationexception";
+    private const string TaskCanceledExceptionKey = "taskcanceledexception";
+    private const string ObjectDisposedExceptionKey = "objectdisposedexception";
+    private const string DeadlockKey = "deadlock";
+    private const string CrashKey = "crash";
+    private const string PerformanceKey = "performance";
+
     private static readonly string NullReferenceExceptionPlaybook = NormalizeSourceOwnedText("""
 ## NullReferenceException Investigation
 
@@ -258,13 +266,13 @@ evaluate_expression("query.ToQueryString()")  # N+1 query?
     /// </summary>
     private static readonly Dictionary<string, string> ExceptionPlaybooks = new()
     {
-        ["nullreferenceexception"] = NullReferenceExceptionPlaybook,
-        ["invalidoperationexception"] = InvalidOperationExceptionPlaybook,
-        ["taskcanceledexception"] = TaskCanceledExceptionPlaybook,
-        ["objectdisposedexception"] = ObjectDisposedExceptionPlaybook,
-        ["deadlock"] = DeadlockPlaybook,
-        ["crash"] = CrashPlaybook,
-        ["performance"] = PerformancePlaybook,
+        [NullReferenceExceptionKey] = NullReferenceExceptionPlaybook,
+        [InvalidOperationExceptionKey] = InvalidOperationExceptionPlaybook,
+        [TaskCanceledExceptionKey] = TaskCanceledExceptionPlaybook,
+        [ObjectDisposedExceptionKey] = ObjectDisposedExceptionPlaybook,
+        [DeadlockKey] = DeadlockPlaybook,
+        [CrashKey] = CrashPlaybook,
+        [PerformanceKey] = PerformancePlaybook,
     };
 
     /// <summary>
@@ -277,53 +285,53 @@ evaluate_expression("query.ToQueryString()")  # N+1 query?
     /// </summary>
     private static readonly (string Keyword, string PlaybookKey)[] SymptomMapping =
     {
-        ("null", "nullreferenceexception"),
-        ("nullreference", "nullreferenceexception"),
-        ("nullreferenceexception", "nullreferenceexception"),
-        ("object reference not set", "nullreferenceexception"),
-        ("invalidoperation", "invalidoperationexception"),
-        ("invalidoperationexception", "invalidoperationexception"),
-        ("collection was modified", "invalidoperationexception"),
-        ("sequence contains no elements", "invalidoperationexception"),
-        ("disposed", "objectdisposedexception"),
-        ("objectdisposed", "objectdisposedexception"),
-        ("objectdisposedexception", "objectdisposedexception"),
-        ("cancel", "taskcanceledexception"),
-        ("timeout", "taskcanceledexception"),
-        ("taskcanceled", "taskcanceledexception"),
-        ("operationcanceled", "taskcanceledexception"),
-        ("deadlock", "deadlock"),
-        ("freeze", "deadlock"),
-        ("hang", "deadlock"),
-        ("not responding", "deadlock"),
-        ("crash", "crash"),
-        ("terminated", "crash"),
-        ("exit code", "crash"),
-        ("access violation", "crash"),
-        ("slow", "performance"),
-        ("performance", "performance"),
-        ("lag", "performance"),
-        ("high cpu", "performance"),
-        ("memory", "performance"),
-        ("argumentnull", "nullreferenceexception"),
-        ("argumentnullexception", "nullreferenceexception"),
-        ("filenotfound", "crash"),
-        ("directorynotfound", "crash"),
-        ("ioexception", "crash"),
-        ("stackoverflow", "crash"),
-        ("stackoverflowexception", "crash"),
-        ("httprequest", "taskcanceledexception"),
-        ("httprequestexception", "taskcanceledexception"),
-        ("network", "taskcanceledexception"),
-        ("connection refused", "taskcanceledexception"),
-        ("json", "invalidoperationexception"),
-        ("jsonexception", "invalidoperationexception"),
-        ("deserialization", "invalidoperationexception"),
-        ("format", "invalidoperationexception"),
-        ("formatexception", "invalidoperationexception"),
-        ("parse error", "invalidoperationexception"),
-        ("sqlexception", "invalidoperationexception"),
-        ("database", "invalidoperationexception"),
-        ("dbupdate", "invalidoperationexception"),
+        ("null", NullReferenceExceptionKey),
+        ("nullreference", NullReferenceExceptionKey),
+        (NullReferenceExceptionKey, NullReferenceExceptionKey),
+        ("object reference not set", NullReferenceExceptionKey),
+        ("invalidoperation", InvalidOperationExceptionKey),
+        (InvalidOperationExceptionKey, InvalidOperationExceptionKey),
+        ("collection was modified", InvalidOperationExceptionKey),
+        ("sequence contains no elements", InvalidOperationExceptionKey),
+        ("disposed", ObjectDisposedExceptionKey),
+        ("objectdisposed", ObjectDisposedExceptionKey),
+        (ObjectDisposedExceptionKey, ObjectDisposedExceptionKey),
+        ("cancel", TaskCanceledExceptionKey),
+        ("timeout", TaskCanceledExceptionKey),
+        ("taskcanceled", TaskCanceledExceptionKey),
+        ("operationcanceled", TaskCanceledExceptionKey),
+        (DeadlockKey, DeadlockKey),
+        ("freeze", DeadlockKey),
+        ("hang", DeadlockKey),
+        ("not responding", DeadlockKey),
+        (CrashKey, CrashKey),
+        ("terminated", CrashKey),
+        ("exit code", CrashKey),
+        ("access violation", CrashKey),
+        ("slow", PerformanceKey),
+        (PerformanceKey, PerformanceKey),
+        ("lag", PerformanceKey),
+        ("high cpu", PerformanceKey),
+        ("memory", PerformanceKey),
+        ("argumentnull", NullReferenceExceptionKey),
+        ("argumentnullexception", NullReferenceExceptionKey),
+        ("filenotfound", CrashKey),
+        ("directorynotfound", CrashKey),
+        ("ioexception", CrashKey),
+        ("stackoverflow", CrashKey),
+        ("stackoverflowexception", CrashKey),
+        ("httprequest", TaskCanceledExceptionKey),
+        ("httprequestexception", TaskCanceledExceptionKey),
+        ("network", TaskCanceledExceptionKey),
+        ("connection refused", TaskCanceledExceptionKey),
+        ("json", InvalidOperationExceptionKey),
+        ("jsonexception", InvalidOperationExceptionKey),
+        ("deserialization", InvalidOperationExceptionKey),
+        ("format", InvalidOperationExceptionKey),
+        ("formatexception", InvalidOperationExceptionKey),
+        ("parse error", InvalidOperationExceptionKey),
+        ("sqlexception", InvalidOperationExceptionKey),
+        ("database", InvalidOperationExceptionKey),
+        ("dbupdate", InvalidOperationExceptionKey),
     };
 }

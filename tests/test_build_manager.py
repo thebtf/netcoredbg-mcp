@@ -1,6 +1,7 @@
 """Tests for build manager."""
 
-from unittest.mock import AsyncMock, MagicMock
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -78,6 +79,145 @@ class TestBuildManagerSessions:
         session2 = manager2.get_session(str(tmp_path))
 
         assert session1 is not session2
+
+    @pytest.mark.parametrize("status", [DrainStatus.FAILED, DrainStatus.TIMED_OUT])
+    @pytest.mark.asyncio
+    async def test_unresolved_command_owner_survives_clear_and_blocks_next_build(
+        self, tmp_path, monkeypatch, status: DrainStatus
+    ):
+        project = tmp_path / "Test.csproj"
+        project.touch()
+        manager = BuildManager()
+        session = manager.get_session(str(tmp_path))
+        monkeypatch.setattr("netcoredbg_mcp.build.session._IS_WINDOWS", True)
+
+        owner_a = MagicMock()
+        owner_a.owner = OwnedProcessRef("owner-a", 1, 42001)
+        owner_a.stdout.readline = AsyncMock(return_value=b"")
+        owner_a.stderr.readline = AsyncMock(return_value=b"")
+        owner_a.wait = AsyncMock(return_value=0)
+        failed = OwnerDrainReceipt(owner_a.owner, status, True, 0, 1)
+        drained_a = OwnerDrainReceipt(owner_a.owner, DrainStatus.DRAINED, True, 0, 0)
+        owner_a.drain_after_grace = AsyncMock(return_value=failed)
+        owner_a.force_and_drain = AsyncMock(side_effect=[failed, drained_a])
+        owner_a.aclose = AsyncMock(side_effect=[failed, drained_a])
+
+        owner_b = MagicMock()
+        owner_b.owner = OwnedProcessRef("owner-b", 2, 42002)
+        owner_b.stdout.readline = AsyncMock(return_value=b"")
+        owner_b.stderr.readline = AsyncMock(return_value=b"")
+        owner_b.wait = AsyncMock(return_value=0)
+        drained_b = OwnerDrainReceipt(owner_b.owner, DrainStatus.DRAINED, False, 0, 0)
+        owner_b.drain_after_grace = AsyncMock(return_value=drained_b)
+        owner_b.aclose = AsyncMock(return_value=drained_b)
+
+        with patch(
+            "netcoredbg_mcp.build.session.WindowsOwnedProcess.launch",
+            new_callable=AsyncMock,
+            side_effect=[owner_a, owner_b],
+        ) as launch:
+            with pytest.raises(BuildError, match="owner did not drain"):
+                await manager.build(str(tmp_path), str(project))
+            assert manager.clear_session(str(tmp_path)) is False
+            assert manager.get_session(str(tmp_path)) is session
+
+            with pytest.raises(BuildError, match="owner did not drain"):
+                await manager.build(str(tmp_path), str(project))
+            assert launch.await_count == 1
+            assert owner_a.force_and_drain.await_count == 1
+            assert manager.clear_session(str(tmp_path)) is False
+
+            result = await manager.build(str(tmp_path), str(project))
+
+        assert result.success is True
+        assert launch.await_count == 2
+        assert owner_a.force_and_drain.await_count == 2
+        assert owner_a.aclose.await_count == 2
+        assert session._current_owner is None
+        assert manager.clear_session(str(tmp_path)) is True
+
+    @pytest.mark.asyncio
+    async def test_ready_listener_cannot_clear_a_session_with_queued_builds(self, tmp_path):
+        project = tmp_path / "Test.csproj"
+        project.touch()
+        manager = BuildManager()
+        session = manager.get_session(str(tmp_path))
+        started_a = asyncio.Event()
+        queued_b = asyncio.Event()
+        started_b = asyncio.Event()
+        selected_c = asyncio.Event()
+        release_a = asyncio.Event()
+        release_b = asyncio.Event()
+        launched: list[BuildSession] = []
+        clears: list[bool] = []
+        c_session: list[BuildSession] = []
+        c_task: asyncio.Task | None = None
+        task_b: asyncio.Task | None = None
+
+        async def command(current, *_args, **_kwargs):
+            launched.append(current)
+            if len(launched) == 1:
+                started_a.set()
+                await release_a.wait()
+            elif len(launched) == 2:
+                started_b.set()
+                await release_b.wait()
+            return 0, "", ""
+
+        original_get_session = manager.get_session
+
+        def get_session(path):
+            result = original_get_session(path)
+            if task_b is not None and asyncio.current_task() is task_b:
+                queued_b.set()
+            return result
+
+        async def launch_c():
+            c_session.append(manager.get_session(str(tmp_path)))
+            selected_c.set()
+            return await manager.build(str(tmp_path), str(project))
+
+        def on_state(_workspace, state):
+            nonlocal c_task
+            if state is BuildState.READY and not clears:
+                clears.append(manager.clear_session(str(tmp_path)))
+                c_task = asyncio.create_task(launch_c())
+
+        manager.on_build_state_change(on_state)
+        with (
+            patch.object(BuildSession, "_run_command", command),
+            patch.object(manager, "get_session", get_session),
+        ):
+            task_a = asyncio.create_task(manager.build(str(tmp_path), str(project)))
+            try:
+                await asyncio.wait_for(started_a.wait(), 1.0)
+                task_b = asyncio.create_task(manager.build(str(tmp_path), str(project)))
+                await asyncio.wait_for(queued_b.wait(), 1.0)
+                release_a.set()
+                await asyncio.wait_for(selected_c.wait(), 1.0)
+                assert clears == [False]
+                assert c_session == [session]
+                await asyncio.wait_for(started_b.wait(), 1.0)
+                release_b.set()
+                assert (await asyncio.wait_for(task_a, 1.0)).success
+                assert (await asyncio.wait_for(task_b, 1.0)).success
+                assert c_task is not None and (await asyncio.wait_for(c_task, 1.0)).success
+                assert launched == [session, session, session]
+            finally:
+                release_a.set()
+                release_b.set()
+                for task in (task_a, task_b, c_task):
+                    if task is not None and not task.done():
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+
+    def test_clear_session_does_not_discard_build_in_progress(self, tmp_path):
+        manager = BuildManager()
+        session = manager.get_session(str(tmp_path))
+        session._set_state(BuildState.BUILDING)
+
+        assert manager.clear_session(str(tmp_path)) is False
+        assert manager.get_session(str(tmp_path)) is session
 
 
 class TestBuildManagerStateListeners:

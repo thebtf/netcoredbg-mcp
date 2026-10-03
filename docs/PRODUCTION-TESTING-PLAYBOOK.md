@@ -134,6 +134,22 @@ Supporting contract check; this source-tree test is mandatory but does not produ
 uv run --locked --extra dev pytest tests/critical/test_release_critical.py -m critical
 ```
 
+#### 2.1 Verify nonblocking artifact maintenance
+
+Confine this verification to a dedicated repository `.agent/tmp` fixture. Set `TEMP`, `TMP`, and `TMPDIR` for every server, GC worker, and fixture process to that exact isolated directory. Do not enumerate or clean actual OS TEMP. On POSIX, use an already-authorized repository filesystem that supports private current-user directories and real OS locks. If the available filesystem cannot enforce privacy, record that capability gap rather than bypassing the guard.
+
+1. Launch the installed console entry point outside repository import paths. Use a test-only injector that traps global-root enumeration and blocks enumeration of the canonical artifact namespace inside the actual GC child. Record the child barrier before sending requests.
+2. While the child remains blocked, complete `initialize`, `tools/list`, and `ping` within five seconds. Verify the tools capability, `x-mux.sharing=isolated`, and consumer-critical tools. Keep child output separate from MCP stdout.
+3. Close stdin before initialization and after initialization in separate runs. Observe termination and successful drain of the exact owned child within the five-second close budget plus a stated harness allowance. A cancelled task or absent PID alone does not prove drain. Separately exercise useful-work expiry and repeated cancellation around admission and running ownership.
+4. In a second fixture process, persist raw and crop artifacts under the real retained OS lease and backdate their session directory beyond four hours. A GC pass must preserve their bytes while the lease is held. After that process exits without cleanup, a subsequent pass must remove the stale session while preserving a fresh abandoned sibling. Preserve legacy flat-directory and outside-link sentinels. Count only successful removals.
+5. Through the public `ui_take_screenshot` and `stop_debug` calls, verify raw and optional crop bytes against returned hashes, then verify owning-session cleanup and refusal of a late write. Record staged-bundle failure separately. Do not replace this consumer proof with a private manager call.
+
+Supporting Windows checks reuse `tests/test_temp_gc_startup.py` and `tests/test_temp_manager.py` with an isolated `--basetemp` and `TEMP_GC_TEST_PYTHON`/`TEMP_GC_TEST_CLI` pointing to the installed environment. Source-only checks and stdlib subprocess checks do not prove the installed MCP journey. Report POSIX runtime, lock, private-filesystem, and installed-client evidence separately. Missing dependencies or private filesystem support mean that route remains unproven, not cross-platform success.
+
+Python retention remains `stop_cleanup_or_stale_gc_after_4h`. For newly owned artifacts, session stop and normal manager disposal retain exact-session cleanup. Otherwise, an abandoned session directory becomes eligible for a later bounded startup sweep only when strictly older than four hours. Active OS leases override age. An interrupted, failed, or timed-out sweep is incomplete maintenance, not successful cleanup or an initialization failure.
+
+The accepted compatibility exception preserves unmarked legacy flat `mcp-netcoredbg-*` directories without scanning, migration, adoption, or automatic deletion. Such data may remain indefinitely. An old manager can still clean its own exact mapped directory. Returned real artifact paths, hashes, atomic raw/crop persistence, and closed-session fencing retain their contract. The separate native scene capability's session-stop or 14,400-second expiry remains unchanged.
+
 ### 3. Supporting Protocol Check — Launch Environment Metadata Safety
 
 Command:
@@ -359,6 +375,37 @@ Expected result:
 
 WinForms `dragList` primitive smoke is not a substitute for WPF DataGrid CR-001
 acceptance.
+
+#### Escape during an active mouse drag
+
+Pending regression/customer-test checklist. The inability to send Escape during
+an emulated mouse drag is operator-reported and unreproduced here. Concurrent
+interruption is not supported/proven by this checklist and is not part of any
+already-`PASS` release claim. Source inspection identifies a FlaUI limitation:
+client serialization and synchronous bridge execution queue `ui_send_keys`
+behind `ui_drag`. This is source-bound evidence, not a live reproduction or fix.
+
+- [ ] Start a real drag through public MCP `ui_drag` on the WPF DataGrid stand.
+  Observe the left button held and ongoing movement or a fixture drag-active
+  signal before submitting public `ui_send_keys` Escape from a concurrent client
+  call. Keep the drag call in flight.
+- [ ] Observe Escape received **before mouse-up** and cancellation without a
+  drop or reorder. Verify stable row identities, row count, and selection.
+- [ ] Verify the left button and temporary modifiers are released on
+  cancellation and on error. Verify the next click, keystroke, and session work.
+- [ ] Capture real observable event ordering or fixture diagnostics for button
+  down, drag activity, Escape receipt, cancellation, and mouse-up. Sleeps,
+  queued-key completion after the drag, private-helper calls, and source-text
+  checks do not prove interruption. If ordering cannot be observed, retain
+  pending evidence and name the missing diagnostic capability.
+- [ ] Record FlaUI and pywinauto results separately, including backend version,
+  public-call outcomes, event evidence, and cleanup evidence. Both results are
+  pending; do not infer either backend's result from the other.
+
+Existing `drag_path` internal `cancel_no_drop` injects Escape at the path end.
+It does not prove that a concurrent public `ui_send_keys` call can interrupt an
+active drag. This entry adds no runnable regression function and reports no
+test execution. Existing release commands remain unchanged.
 
 ### 8. Supporting Runtime-Smoke Diagnostic Schema Contract
 

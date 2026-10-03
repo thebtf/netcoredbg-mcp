@@ -7,9 +7,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from netcoredbg_mcp.build.session import BuildSession
+from netcoredbg_mcp.build.session import BuildSession, OwnerDrainError
 from netcoredbg_mcp.build.state import BuildError, BuildState
-from netcoredbg_mcp.windows_process_owner import AdmissionStage, DrainStatus, ProcessAdmissionError
+from netcoredbg_mcp.windows_process_owner import (
+    AdmissionStage,
+    DrainStatus,
+    OwnedProcessRef,
+    OwnerDrainReceipt,
+    ProcessAdmissionError,
+)
 from tests.owner_scope_red import (
     BlockingStream,
     OwnedCommandProcess,
@@ -23,6 +29,13 @@ def _use_asyncio_compatibility_path(monkeypatch, request) -> None:
     """Keep existing cross-platform command tests on their established path."""
     if request.cls is not None and request.cls.__name__ == "TestOwnerScopedBuildMatrix":
         monkeypatch.setattr("netcoredbg_mcp.build.session._IS_WINDOWS", True)
+        original_aclose = OwnedCommandProcess.aclose
+
+        async def close_with_receipt(owner):
+            await original_aclose(owner)
+            return owner.receipt
+
+        monkeypatch.setattr(OwnedCommandProcess, "aclose", close_with_receipt)
         return
     monkeypatch.setattr("netcoredbg_mcp.build.session._IS_WINDOWS", False)
 
@@ -644,6 +657,113 @@ class TestOwnerScopedBuildMatrix:
         assert owner.receipt is not None
         assert owner.receipt.status is DrainStatus.FAILED
         assert owner.aclose_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_close_receipt_must_match_same_owner_generation(self, tmp_path) -> None:
+        owner = OwnedCommandProcess(TreeProcess(pid=42012, initially_exited=True), "current")
+        other = OwnedProcessRef("other", "previous", owner.pid)
+        owner.aclose = AsyncMock(
+            return_value=OwnerDrainReceipt(other, DrainStatus.DRAINED, False, 0, 0)
+        )
+        session = BuildSession(workspace_root=str(tmp_path))
+
+        with (
+            patch("netcoredbg_mcp.build.session.WindowsOwnedProcess.launch", return_value=owner),
+            pytest.raises(OwnerDrainError),
+        ):
+            await session._run_command(["dotnet", "build"], timeout=0.1)
+
+        assert session._current_owner is owner
+        assert session._last_owner_drain_receipt.owner is other
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("close_status", [DrainStatus.DRAINED, DrainStatus.FAILED])
+    async def test_cancel_during_close_consumes_exact_receipt_before_next_launch(
+        self, tmp_path, close_status: DrainStatus
+    ) -> None:
+        project = tmp_path / "Test.csproj"
+        project.touch()
+        session = BuildSession(workspace_root=str(tmp_path))
+        first = OwnedCommandProcess(TreeProcess(pid=42013, initially_exited=True), "first")
+        second = OwnedCommandProcess(TreeProcess(pid=42014, initially_exited=True), "second")
+        close_started = asyncio.Event()
+        release_close = asyncio.Event()
+        receipt = OwnerDrainReceipt(
+            first.owner, close_status, True, 0, 0 if close_status is DrainStatus.DRAINED else 1
+        )
+
+        async def delayed_close() -> OwnerDrainReceipt:
+            close_started.set()
+            await release_close.wait()
+            return receipt
+
+        first.aclose = delayed_close
+        with patch(
+            "netcoredbg_mcp.build.session.WindowsOwnedProcess.launch",
+            new_callable=AsyncMock,
+            side_effect=[first, second],
+        ) as launch:
+            current = asyncio.create_task(session.build(str(project)))
+            next_build: asyncio.Task | None = None
+            try:
+                await asyncio.wait_for(close_started.wait(), 1.0)
+                current.cancel()
+                next_build = asyncio.create_task(session.build(str(project)))
+                await asyncio.sleep(0)
+                current.cancel()
+                await asyncio.sleep(0)
+                assert not current.done()
+                assert launch.await_count == 1
+                release_close.set()
+                if close_status is DrainStatus.DRAINED:
+                    cancelled = await asyncio.wait_for(current, 1.0)
+                    assert cancelled.state is BuildState.CANCELLED
+                    assert (await asyncio.wait_for(next_build, 1.0)).success
+                    assert launch.await_count == 2
+                else:
+                    with pytest.raises(BuildError, match="owner did not drain"):
+                        await asyncio.wait_for(current, 1.0)
+                    with pytest.raises(BuildError, match="owner did not drain"):
+                        await asyncio.wait_for(next_build, 1.0)
+                    assert launch.await_count == 1
+            finally:
+                release_close.set()
+                for task in (current, next_build):
+                    if task is not None and not task.done():
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_close_preserves_prior_owner_drain_error(self, tmp_path) -> None:
+        owner = OwnedCommandProcess(
+            TreeProcess(pid=42015, initially_exited=True),
+            "prior-failure",
+            normal_status=DrainStatus.FAILED,
+        )
+        close_started = asyncio.Event()
+        release_close = asyncio.Event()
+
+        async def delayed_close() -> OwnerDrainReceipt:
+            close_started.set()
+            await release_close.wait()
+            return OwnerDrainReceipt(owner.owner, DrainStatus.DRAINED, True, 0, 0)
+
+        owner.aclose = delayed_close
+        session = BuildSession(workspace_root=str(tmp_path))
+        with patch("netcoredbg_mcp.build.session.WindowsOwnedProcess.launch", return_value=owner):
+            command = asyncio.create_task(session._run_command(["dotnet", "build"]))
+            try:
+                await asyncio.wait_for(close_started.wait(), 1.0)
+                command.cancel()
+                release_close.set()
+                with pytest.raises(OwnerDrainError) as raised:
+                    await asyncio.wait_for(command, 1.0)
+                assert raised.value.receipt.status is DrainStatus.FAILED
+            finally:
+                release_close.set()
+                if not command.done():
+                    command.cancel()
+                    await asyncio.gather(command, return_exceptions=True)
 
     @pytest.mark.asyncio
     async def test_o11_lock_retry_relaunches_only_the_build_command(self, tmp_path) -> None:

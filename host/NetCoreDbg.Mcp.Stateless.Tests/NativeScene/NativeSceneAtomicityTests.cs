@@ -12,6 +12,7 @@ using NJsonSchema;
 using NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter;
 using NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace NetCoreDbg.Mcp.Stateless.Tests.NativeScene;
 
@@ -22,7 +23,7 @@ namespace NetCoreDbg.Mcp.Stateless.Tests.NativeScene;
 /// </summary>
 [Collection(NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter.NetCoreDbgSessionProcessCollection.Name)]
 [Trait("Coverage", "Exclude")]
-public sealed class NativeSceneAtomicityTests
+public sealed class NativeSceneAtomicityTests : IDisposable
 {
     private const string ActiveProtocolVersion = "native-scene-probe/1";
     private const string ActiveSchemaVersion = "native-scene-probe.schema/1";
@@ -38,6 +39,11 @@ public sealed class NativeSceneAtomicityTests
         "in_process_framework_probe",
         "uia_guarded",
         "adapter_reported");
+    private readonly Action<string>? _previousStartupDiagnosticOutput = FixtureProcess.StartupDiagnosticOutput.Value;
+
+    public NativeSceneAtomicityTests(ITestOutputHelper output) => FixtureProcess.StartupDiagnosticOutput.Value = output.WriteLine;
+
+    public void Dispose() => FixtureProcess.StartupDiagnosticOutput.Value = _previousStartupDiagnosticOutput;
 
     [Fact]
     public async Task StableFixture_UniqueElementCapture_ReturnsACompleteOneNodeObservedFactsArtifact()
@@ -292,6 +298,25 @@ public sealed class NativeSceneAtomicityTests
         await probe.AssertChannelClosedWithoutSecondRequestAsync();
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DisposeBeforeConnection_DrainsPendingCaptureAndKeepsTheChannelTerminal(bool captureBeforeDisposal)
+    {
+        await using var probe = NativeSceneAtomicityReflection.CreateRawProbeChannel();
+        var capture = captureBeforeDisposal ? probe.CaptureAsync(CancellationToken.None) : null;
+
+        await probe.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+
+        if (capture is not null)
+        {
+            Assert.Null(await capture.WaitAsync(TimeSpan.FromSeconds(1)));
+        }
+
+        Assert.Null(await probe.CaptureAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(1)));
+        await probe.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(1));
+    }
+
     [Fact]
     public async Task PostConnectCallerCancellation_TerminalizesProbeAndRejectsStaleResponseWithoutSendingASecondRequest()
     {
@@ -358,6 +383,209 @@ public sealed class NativeSceneAtomicityTests
         AssertInProcessAtomicity(second, expectedRevisionBefore: 77, expectedRevisionAfter: 77);
         Assert.Empty(Array(second["issues"]));
         Assert.InRange(Integer(AssertObservedFactsDescriptor(second)["byteLength"]), (1024 * 1024) + 1, MaximumProbeResponseBytes - 1);
+    }
+
+    [Fact]
+    public async Task WpfStartupBeyondTwoSeconds_PublishesOnlyReadyWindowAndDrainsOwnedChildren()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var barrierName = $"Local\\native-scene-startup-{Guid.NewGuid():N}";
+        using var started = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-started");
+        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-release");
+        await using var driver = await StartFixtureDriverAsync("stable", new Dictionary<string, string?>
+        {
+            ["NETCOREDBG_NATIVE_SCENE_PROBE_FIXTURE_STARTUP_BARRIER"] = barrierName,
+        });
+        var startup = StartBoundFixtureSessionAsync(driver, "atomic-scene-delayed-start");
+        try
+        {
+            Assert.True(started.WaitOne(TimeSpan.FromSeconds(5)), "WPF child did not enter the controlled startup barrier.");
+            using var child = System.Diagnostics.Process.GetProcessById(await driver.ReadDescendantProcessIdAsync());
+            _ = child.SafeHandle;
+            var transcriptPath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT")!;
+            var adapterPid = File.ReadAllLines(transcriptPath).Select(line => JsonNode.Parse(line)!.AsObject())
+                .Single(record => Text(record["kind"]) == "startup")["processId"]!.GetValue<int>();
+            using var adapter = System.Diagnostics.Process.GetProcessById(adapterPid);
+            _ = adapter.SafeHandle;
+
+            await Task.Delay(TimeSpan.FromMilliseconds(2500));
+            if (startup.IsCompleted)
+            {
+                _ = await startup;
+                Assert.Fail("Startup published the fixture before the held GUI was ready.");
+            }
+
+            Assert.False(child.HasExited);
+            child.Refresh();
+            Assert.Equal(IntPtr.Zero, child.MainWindowHandle);
+            release.Set();
+            var session = await startup;
+            child.Refresh();
+            Assert.False(string.IsNullOrWhiteSpace(child.MainModule?.FileName));
+            Assert.NotEqual(IntPtr.Zero, child.MainWindowHandle);
+
+            var request = NativeSceneCaptureArguments(session);
+            var capture = await CallCaptureAsync(driver, "capture_native_scene", request, "atomic-scene-delayed-capture", expectedError: false);
+            AssertNativeSceneManifest(capture, session, request, "COMPLETE");
+            AssertInProcessAtomicity(capture, expectedRevisionBefore: 77, expectedRevisionAfter: 77);
+            var stopped = await CallCaptureAsync(driver, "stop_debug", new JsonObject { ["debugSessionId"] = session.DebugSessionId },
+                "atomic-scene-delayed-stop", expectedError: false, requireNativeSceneSchema: false);
+            Assert.Equal("stop_debug_success", Text(stopped["kind"]));
+            using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await child.WaitForExitAsync(cleanup.Token);
+            await adapter.WaitForExitAsync(cleanup.Token);
+            Assert.True(child.HasExited);
+            Assert.True(adapter.HasExited);
+            var host = await driver.CloseClientAsync(cleanup.Token);
+            Assert.NotNull(host.ExitCode);
+            FixtureProcess.StartupDiagnosticOutput.Value?.Invoke("Delayed WPF startup: held 2500ms without publication; ready HWND/MainModule, COMPLETE probe, debugger/child exact-handle exit and host closure observed.");
+        }
+        finally
+        {
+            release.Set();
+            try
+            {
+                _ = await startup;
+            }
+            catch (Exception)
+            {
+                // Observe failed startup after releasing the controlled fixture; preserve the primary assertion.
+            }
+        }
+    }
+
+    [Fact]
+    public async Task WpfStartupBeforeReadiness_ExitedChildPublishesNothingAndDrainsOwnedChildren()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var barrierName = $"Local\\native-scene-startup-failure-{Guid.NewGuid():N}";
+        using var started = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-started");
+        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-release");
+        await using var driver = await StartFixtureDriverAsync("stable", new Dictionary<string, string?>
+        {
+            ["NETCOREDBG_NATIVE_SCENE_PROBE_FIXTURE_STARTUP_BARRIER"] = barrierName,
+        });
+        var startup = driver.CallToolRawAsync("start_debug", new JsonObject { ["program"] = ResolveFixtureExecutablePath() },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("atomic-scene-unready-start"));
+        try
+        {
+            Assert.True(started.WaitOne(TimeSpan.FromSeconds(5)), "WPF child did not enter the controlled startup barrier.");
+            using var child = System.Diagnostics.Process.GetProcessById(await driver.ReadDescendantProcessIdAsync());
+            _ = child.SafeHandle;
+            var transcriptPath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT")!;
+            var adapterPid = File.ReadAllLines(transcriptPath).Select(line => JsonNode.Parse(line)!.AsObject())
+                .Single(record => Text(record["kind"]) == "startup")["processId"]!.GetValue<int>();
+            using var adapter = System.Diagnostics.Process.GetProcessById(adapterPid);
+            _ = adapter.SafeHandle;
+            Assert.Equal(IntPtr.Zero, child.MainWindowHandle);
+            child.Kill(entireProcessTree: true);
+            var result = ModernMcpProcessDriver.RequireResult(await startup);
+            Assert.True(result["isError"]!.GetValue<bool>());
+            Assert.True(JsonNode.DeepEquals(JsonNode.Parse("{\"kind\":\"debug_session_not_found\",\"error\":\"DEBUG_SESSION_NOT_FOUND\"}"), result["structuredContent"]));
+
+            using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await child.WaitForExitAsync(cleanup.Token);
+            await adapter.WaitForExitAsync(cleanup.Token);
+            Assert.True(child.HasExited);
+            Assert.True(adapter.HasExited);
+            Assert.DoesNotContain(File.ReadAllLines(transcriptPath), line => line.Contains("\"kind\":\"launch-released\"", StringComparison.Ordinal));
+            var host = await driver.CloseClientAsync(cleanup.Token);
+            Assert.NotNull(host.ExitCode);
+            FixtureProcess.StartupDiagnosticOutput.Value?.Invoke("Unready WPF startup: exited child; no launch publication, debugger/child exact-handle exit and host closure observed.");
+        }
+        finally
+        {
+            release.Set();
+            try
+            {
+                _ = await startup;
+            }
+            catch (Exception)
+            {
+                // Failed/cancelled startup is observed without replacing the primary assertion.
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ControlledAdapter_ReadinessCancellationJoinsWaitsAndDrainsRealWpfChild()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var barrierName = $"Local\\native-scene-adapter-cancel-{Guid.NewGuid():N}";
+        using var started = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-started");
+        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-release");
+        using var caller = new CancellationTokenSource();
+        var configuration = new FixtureConfiguration(SpawnWindowedDescendant: true,
+            WindowedDescendantExecutablePath: ResolveFixtureExecutablePath(),
+            WindowedDescendantArguments: ["--native-scene-probe-test-harness", "--native-scene-probe-mode=stable"]);
+        await using var fixture = FixtureProcess.Create(configuration);
+        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(TestOutputPathResolver.ResolveManagedAssembly(
+            RepositoryLayout.Root, Path.Combine("host", "NetCoreDbg.Mcp.Stateless.Tests", "Fixtures", "ControlledDapAdapter"), "ControlledDapAdapter"));
+        var optionsType = assembly.GetType("AdapterOptions", throwOnError: true)!;
+        var options = optionsType.GetMethod("Parse")!.Invoke(null, [System.Array.Empty<string>(), configuration.AsEnvironmentValue()]);
+        var adapterType = assembly.GetType("ControlledDapAdapter", throwOnError: true)!;
+        var transcriptPath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT")!;
+        var adapter = Activator.CreateInstance(adapterType, [options, transcriptPath, System.Array.Empty<string>()])!;
+        using var input = new MemoryStream();
+        using var output = new MemoryStream();
+        var requests = new[]
+        {
+            new JsonObject { ["seq"] = 1, ["type"] = "request", ["command"] = "initialize" },
+            new JsonObject { ["seq"] = 2, ["type"] = "request", ["command"] = "launch", ["arguments"] = new JsonObject
+            {
+                ["env"] = new JsonObject { ["NETCOREDBG_NATIVE_SCENE_PROBE_FIXTURE_STARTUP_BARRIER"] = barrierName },
+            } },
+            new JsonObject { ["seq"] = 3, ["type"] = "request", ["command"] = "configurationDone" },
+        };
+        foreach (var request in requests)
+        {
+            var body = Encoding.UTF8.GetBytes(request.ToJsonString());
+            input.Write(Encoding.ASCII.GetBytes($"Content-Length: {body.Length}\r\n\r\n"));
+            input.Write(body);
+        }
+
+        input.Position = 0;
+        adapterType.GetField("_input", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(adapter, input);
+        adapterType.GetField("_output", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(adapter, output);
+        var run = (Task)adapterType.GetMethod("RunAsync")!.Invoke(adapter, [caller.Token])!;
+        try
+        {
+            Assert.True(started.WaitOne(TimeSpan.FromSeconds(5)), "WPF child did not enter the controlled startup barrier.");
+            using var child = System.Diagnostics.Process.GetProcessById(Assert.Single(await fixture.ReadTranscriptAsync(), record => record.Kind == "descendant").ProcessId!.Value);
+            _ = child.SafeHandle;
+            Assert.Equal(IntPtr.Zero, child.MainWindowHandle);
+            caller.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+            Assert.True(run.IsCompleted);
+            Assert.True(child.HasExited);
+            Assert.DoesNotContain(await fixture.ReadTranscriptAsync(), record => record.Kind == "launch-released");
+            FixtureProcess.StartupDiagnosticOutput.Value?.Invoke("Controlled adapter token cancellation: readiness/exit waits joined, real WPF child exact handle signaled, RunAsync cleanup completed without launch publication.");
+        }
+        finally
+        {
+            release.Set();
+            caller.Cancel();
+            try
+            {
+                await run;
+            }
+            catch (OperationCanceledException) when (caller.IsCancellationRequested)
+            {
+                // The asserted cancellation is observed before disposing the fixture barriers.
+            }
+        }
     }
 
     private static string LargeResponseText() => new string('x', 255) + "😀" + new string('x', 4096 - 257);
@@ -508,6 +736,8 @@ public sealed class NativeSceneAtomicityTests
             requireNativeSceneSchema: false);
         Assert.Equal("start_debug_success", Text(started["kind"]));
         var debugSessionId = Text(started["debugSessionId"]);
+        var processId = await driver.ReadDescendantProcessIdAsync();
+        await WaitForMainWindowAsync(processId);
 
         var declaration = await CallCaptureAsync(
             driver,
@@ -516,11 +746,11 @@ public sealed class NativeSceneAtomicityTests
             $"{requestId}-capabilities",
             expectedError: false);
         var candidate = Object(declaration["candidate"]);
-        Assert.Equal(await driver.ReadDescendantProcessIdAsync(), Integer(candidate["processId"]));
+        Assert.Equal(processId, Integer(candidate["processId"]));
         return new BoundFixtureSession(debugSessionId, candidate);
     }
 
-    private static Task<ModernMcpProcessDriver> StartFixtureDriverAsync(string mode) =>
+    private static Task<ModernMcpProcessDriver> StartFixtureDriverAsync(string mode, IReadOnlyDictionary<string, string?>? additionalEnvironment = null) =>
         ModernMcpProcessDriver.StartAsync(
             new ModernMcpStartOptions(
                 FixtureConfiguration: new FixtureConfiguration(
@@ -530,7 +760,8 @@ public sealed class NativeSceneAtomicityTests
                     [
                         "--native-scene-probe-test-harness",
                         $"--native-scene-probe-mode={mode}",
-                    ])));
+                    ]),
+                AdditionalEnvironment: additionalEnvironment));
 
     private static Task<ModernMcpProcessDriver> StartWindowedDescendantDriverAsync() =>
         ModernMcpProcessDriver.StartAsync(
@@ -716,6 +947,17 @@ public sealed class NativeSceneAtomicityTests
         var result = ModernMcpProcessDriver.RequireResult(response);
         Assert.Equal("complete", Text(result["resultType"]));
         var isError = result["isError"]?.GetValue<bool>() ?? false;
+        if (result["structuredContent"] is not JsonObject)
+        {
+            var closure = await driver.WaitForTransportClosureAsync(TimeSpan.Zero);
+            var envelope = JsonSerializer.Serialize(new { response, hostTransport = closure });
+            var root = RepositoryLayout.Root.Replace("\\", "\\\\", StringComparison.Ordinal);
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile).Replace("\\", "\\\\", StringComparison.Ordinal);
+            envelope = envelope.Replace(root, "<repo-root>", StringComparison.OrdinalIgnoreCase)
+                .Replace(home, "<user-home>", StringComparison.OrdinalIgnoreCase);
+            Assert.Fail($"{tool} requestId={requestId}: structuredContent is not an object; SDK envelope={envelope}");
+        }
+
         var content = Object(result["structuredContent"]);
         Assert.True(
             expectedError == isError,
@@ -755,7 +997,9 @@ public sealed class NativeSceneAtomicityTests
         Assert.Equal("native_scene_capture", Text(manifest["kind"]));
         if (expectedStatus is not null)
         {
-            Assert.Equal(expectedStatus, Text(manifest["status"]));
+            Assert.True(
+                StringComparer.Ordinal.Equals(expectedStatus, Text(manifest["status"])),
+                $"Expected native-scene status {expectedStatus}, actual {Text(manifest["status"])}; issues={manifest["issues"]?.ToJsonString()}; stability={manifest["stability"]?.ToJsonString()}; atomicity={manifest["atomicity"]?.ToJsonString()}.");
         }
 
         Assert.True(JsonNode.DeepEquals(request["sceneRequest"], manifest["sceneRequest"]));

@@ -95,6 +95,38 @@ public sealed class SessionSlotLifecycleTests
     }
 
     [Fact]
+    public async Task GetThreads_CallerCancellation_PropagatesWithoutEvictionAndReleasesLease()
+    {
+        // Arrange
+        using var observation = new CancellationTokenSource(DrainDeadline);
+        using var caller = new CancellationTokenSource();
+        await using var session = await NetCoreDbgSessionContractDriver.StartAsync(
+            new FixtureConfiguration(
+                SuppressLifecycleEvents: true,
+                ThreadsResponseMode: "hold"),
+            "D:\\fixtures\\program.dll",
+            ObservationTimeout,
+            TimeSpan.FromSeconds(10),
+            TimeSpan.FromMilliseconds(300),
+            observation.Token);
+        await using var hosted = await session.StartHostedThreadsLeaseAsync(caller.Token);
+        await session.Fixture.WaitForThreadsRequestAsync(observation.Token);
+
+        // Act
+        caller.Cancel();
+
+        // Assert
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => hosted.Threads.WaitAsync(DrainDeadline));
+        Assert.True(session.IsUsable);
+        Assert.DoesNotContain(
+            await session.Fixture.ReadTranscriptAsync(),
+            static entry => entry.Command is "terminate" or "disconnect");
+        await hosted.StopAsync(observation.Token).WaitAsync(DrainDeadline);
+        AssertSingleCleanup(await session.Fixture.ReadTranscriptAsync());
+    }
+
+    [Fact]
     public async Task GetThreads_UnusableSessionEviction_ReturnsNotFoundWithoutDapIo()
     {
         // Arrange

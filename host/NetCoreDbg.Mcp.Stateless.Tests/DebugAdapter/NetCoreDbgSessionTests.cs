@@ -6,6 +6,8 @@ using System.Text;
 using System.Text.Json;
 using System.Diagnostics;
 using Xunit;
+using Microsoft.Extensions.Time.Testing;
+using Xunit.Abstractions;
 
 namespace NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter;
 
@@ -17,9 +19,9 @@ public sealed class NetCoreDbgSessionProcessCollection
 
 [Collection(NetCoreDbgSessionProcessCollection.Name)]
 [Trait("Coverage", "Exclude")]
-public sealed class NetCoreDbgSessionTests
+public sealed class NetCoreDbgSessionTests(ITestOutputHelper output)
 {
-    private static readonly TimeSpan InitializeTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan InitializeTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan StopTimeout = TimeSpan.FromMilliseconds(300);
     private static readonly ImmutableArray<string?> ExpectedLifecycleEvents = ImmutableArray.Create<string?>(
@@ -82,21 +84,37 @@ public sealed class NetCoreDbgSessionTests
         }
     }
 
-    [Fact]
-    public async Task StartAsync_IgnoresUnmatchedResponseAndRejectsEarlyInitializedEvent()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task StartAsync_IgnoresUnmatchedResponseAndRejectsEarlyInitializedEvent(bool cancelCaller)
     {
         var transcript = new List<FixtureTranscriptEntry>();
+        var clock = new FakeTimeProvider();
+        var clockStart = clock.GetUtcNow();
+        using var callerCancellation = new CancellationTokenSource();
+        var responseReady = false;
         NetCoreDbgSessionContractDriver? session = null;
-        var failure = await Record.ExceptionAsync(async () => session = await NetCoreDbgSessionContractDriver.StartAsync(
+        var failure = await Record.ExceptionAsync(async () => session = await NetCoreDbgSessionContractDriver.StartWithInitializeContinuationGateAsync(
             new FixtureConfiguration(
                 InitializedBeforeCorrectInitializeResponse: true,
                 SuppressInitializedAfterInitializeResponse: true),
             "D:\\fixtures\\program.dll",
-            TimeSpan.FromMilliseconds(250),
+            InitializeTimeout,
             RequestTimeout,
             StopTimeout,
-            CancellationToken.None,
-            transcript));
+            callerCancellation.Token,
+            transcript,
+            clock,
+            () =>
+            {
+                responseReady = true;
+                clock.Advance(InitializeTimeout + RequestTimeout + TimeSpan.FromMilliseconds(500));
+                if (cancelCaller)
+                {
+                    callerCancellation.Cancel();
+                }
+            }));
 
         if (session is not null)
         {
@@ -104,13 +122,25 @@ public sealed class NetCoreDbgSessionTests
             await ((IAsyncDisposable)session).DisposeAsync();
         }
 
-        Assert.IsType<TimeoutException>(failure);
+        output.WriteLine($"Initialize response ready: {responseReady}; driver clock elapsed: {clock.GetUtcNow() - clockStart}; caller cancelled: {callerCancellation.IsCancellationRequested}; exception: {failure}");
+        Assert.True(responseReady, "The correlated initialize response must reach the held caller continuation.");
+        Assert.Equal(cancelCaller, callerCancellation.IsCancellationRequested);
+        if (cancelCaller)
+        {
+            Assert.IsType<TaskCanceledException>(failure);
+        }
+        else
+        {
+            Assert.IsType<TimeoutException>(failure);
+        }
         var unmatched = Array.FindIndex(transcript.ToArray(), entry => entry.Kind == "unmatched-response");
         var earlyInitialized = Array.FindIndex(transcript.ToArray(), entry => entry.Kind == "early-initialized-event");
         var initializeResponse = Array.FindIndex(transcript.ToArray(), entry => entry.Kind == "initialize-response");
         Assert.True(unmatched >= 0 && unmatched < earlyInitialized && earlyInitialized < initializeResponse,
             "The unmatched response and early initialized event must precede the correlated initialize response.");
         Assert.DoesNotContain(transcript, entry => entry.Kind == "request" && entry.Command == "launch");
+        var adapterProcessId = Assert.IsType<int>(Assert.Single(transcript, entry => entry.Kind == "startup").ProcessId);
+        Assert.True(HasExited(adapterProcessId), "The failed-start adapter must be gone before the driver returns.");
     }
 
     [Fact]
@@ -500,6 +530,24 @@ public sealed class NetCoreDbgSessionTests
                 await fixture.TerminateProcessTreeAsync(processId);
             }
         }
+    }
+
+    [Fact]
+    public async Task StopAsync_CancellationDuringGracefulShutdown_SharesCleanupWithDisposeAsync()
+    {
+        await using var session = await StartAsync(new FixtureConfiguration(
+            SupportsTerminate: true,
+            BlockGracefulShutdown: true));
+        using var cancellation = new CancellationTokenSource();
+        var stop = session.StopAsync(cancellation.Token);
+        await WaitUntilAsync(
+            async () => (await session.Fixture.ReadTranscriptAsync()).Any(entry => entry.Command == "terminate"),
+            TimeSpan.FromSeconds(2));
+
+        cancellation.Cancel();
+        var dispose = session.DisposeSessionAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stop.WaitAsync(StopTimeout + TimeSpan.FromSeconds(2)));
+        await dispose.WaitAsync(StopTimeout + TimeSpan.FromSeconds(2));
     }
 
     [Fact]

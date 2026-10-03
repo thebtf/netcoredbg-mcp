@@ -39,6 +39,8 @@ from ..session.state import DebugState
 from ..session.tracepoints import TracepointManager
 
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+_RUNTIME_SMOKE_RUN_NOT_FOUND = "runtime smoke run not found"
+_RUNTIME_SMOKE_SOURCE_EVIDENCE_ABSENT = "source evidence is absent"
 _RUNTIME_SMOKE_AGENT_DEFAULT_TIMEOUT_MS = 5000
 _RUNTIME_SMOKE_AGENT_DEFAULT_POLL_INTERVAL_MS = 500
 _RUNTIME_SMOKE_AGENT_DEFAULT_EVENT_LIMIT = 20
@@ -637,9 +639,7 @@ def register_runtime_smoke_tools(
             if agent_mode:
                 event_cursor = data.get("event_cursor")
                 event_cursor_sources = (
-                    event_cursor.get("sources")
-                    if isinstance(event_cursor, dict)
-                    else None
+                    event_cursor.get("sources") if isinstance(event_cursor, dict) else None
                 )
                 app_diagnostics_source = (
                     event_cursor_sources.get("app_diagnostics")
@@ -730,9 +730,8 @@ def register_runtime_smoke_tools(
             if agent_mode:
                 quiet_active = _runtime_smoke_event_delta_is_quiet_active(data)
                 quiet_wait = _runtime_smoke_agent_quiet_delta_should_wait(data)
-                if (
-                    quiet_wait
-                    and _runtime_smoke_agent_quiet_app_diagnostics_delta_should_wait(data)
+                if quiet_wait and _runtime_smoke_agent_quiet_app_diagnostics_delta_should_wait(
+                    data
                 ):
                     data["status"] = "RUNNING"
                 primary = (
@@ -884,11 +883,7 @@ def validate_runtime_smoke_plan_contract(plan: dict[str, Any]) -> dict[str, Any]
 
         v2_contract = validate_v2_plan_contract(plan)
         result.update(
-            {
-                key: value
-                for key, value in v2_contract.items()
-                if key != "validation_errors"
-            }
+            {key: value for key, value in v2_contract.items() if key != "validation_errors"}
         )
         result["validation_errors"].extend(v2_contract["validation_errors"])
     else:
@@ -1075,9 +1070,7 @@ def _runtime_smoke_probe_plan(
     probe_name = str(probe_payload.get("name") or kind or "probe")
     plan_name = str(name or f"run-probe-{probe_name}")
     diagnostic_launch = (
-        app_diagnostics_launch_contract(name=plan_name)
-        if kind == "app_diagnostics"
-        else None
+        app_diagnostics_launch_contract(name=plan_name) if kind == "app_diagnostics" else None
     )
     case: dict[str, Any] = {
         "id": "run_probe",
@@ -1104,9 +1097,7 @@ def _runtime_smoke_probe_plan(
         "budgets": dict(budgets or {"max_actions": 1, "max_elapsed_seconds": 5}),
     }
     if diagnostic_launch is not None:
-        plan["diagnostics"] = {
-            "app_diagnostics": {"diagnostic_launch": diagnostic_launch}
-        }
+        plan["diagnostics"] = {"app_diagnostics": {"diagnostic_launch": diagnostic_launch}}
     if debug_preflight:
         plan["baseline"] = {
             "steps": [
@@ -1137,9 +1128,7 @@ def _runtime_smoke_probe_plan(
         generated["diagnostic_launch"] = diagnostic_launch
     if guard_cleanup:
         generated["tracepoint_guard"] = {
-            "cleanup_operations": _runtime_smoke_tracepoint_cleanup_operations(
-                guard_cleanup
-            )
+            "cleanup_operations": _runtime_smoke_tracepoint_cleanup_operations(guard_cleanup)
         }
     return plan, generated
 
@@ -1216,7 +1205,7 @@ async def _runtime_smoke_evidence_bundle(
     if _runtime_smoke_run_missing(result):
         return {
             "status": "FAIL",
-            "reason": result.get("reason", "runtime smoke run not found"),
+            "reason": result.get("reason", _RUNTIME_SMOKE_RUN_NOT_FOUND),
             "run_id": run_id,
             "final": True,
             "events": [],
@@ -1242,16 +1231,7 @@ async def _runtime_smoke_evidence_bundle(
     if tail.get("final") and not result.get("final"):
         result = await registry.get_result(run_id)
     final = bool(result.get("final"))
-    if result.get("contaminated") is True:
-        next_actions = _runtime_smoke_lifecycle_next_actions(result)
-    else:
-        next_actions = [
-            "runtime_smoke_wait_for_result",
-            "runtime_smoke_evidence_bundle",
-            "runtime_smoke_tail_events",
-            "runtime_smoke_get_result",
-        ]
-        next_actions.append("runtime_smoke_run_plan" if final else "runtime_smoke_stop")
+    next_actions = _runtime_smoke_evidence_next_actions(result, final=final)
     diagnostic_launch = result.get("diagnostic_launch")
     event_cursor = _runtime_smoke_event_cursor(
         after_cursor=max(0, int(after_cursor)),
@@ -1280,6 +1260,40 @@ async def _runtime_smoke_evidence_bundle(
         "cleanup": compact_value(result.get("cleanup")),
         "next_actions": next_actions,
     }
+    _runtime_smoke_attach_evidence_pack_manifest(registry, run_id, result, bundle)
+    if isinstance(diagnostic_launch, dict):
+        bundle["diagnostic_launch"] = compact_value(diagnostic_launch)
+    if result.get("contaminated") is True:
+        bundle["contaminated"] = True
+        cleanup_contract = result.get("cleanup_contract")
+        if isinstance(cleanup_contract, dict):
+            bundle["cleanup_contract"] = compact_value(cleanup_contract)
+    return bundle
+
+
+def _runtime_smoke_evidence_next_actions(
+    result: dict[str, Any],
+    *,
+    final: bool,
+) -> list[str]:
+    if result.get("contaminated") is True:
+        return _runtime_smoke_lifecycle_next_actions(result)
+    next_actions = [
+        "runtime_smoke_wait_for_result",
+        "runtime_smoke_evidence_bundle",
+        "runtime_smoke_tail_events",
+        "runtime_smoke_get_result",
+    ]
+    next_actions.append("runtime_smoke_run_plan" if final else "runtime_smoke_stop")
+    return next_actions
+
+
+def _runtime_smoke_attach_evidence_pack_manifest(
+    registry: Any,
+    run_id: str,
+    result: dict[str, Any],
+    bundle: dict[str, Any],
+) -> None:
     pack_manifest = _runtime_smoke_merge_pack_manifest(
         actual=_runtime_smoke_pack_manifest(result),
         remembered=_runtime_smoke_remembered_pack_manifest(registry, run_id),
@@ -1293,14 +1307,6 @@ async def _runtime_smoke_evidence_bundle(
         bundle["pack_manifest"] = pack_manifest
         if isinstance(bundle.get("result"), dict):
             bundle["result"]["pack_manifest"] = pack_manifest
-    if isinstance(diagnostic_launch, dict):
-        bundle["diagnostic_launch"] = compact_value(diagnostic_launch)
-    if result.get("contaminated") is True:
-        bundle["contaminated"] = True
-        cleanup_contract = result.get("cleanup_contract")
-        if isinstance(cleanup_contract, dict):
-            bundle["cleanup_contract"] = compact_value(cleanup_contract)
-    return bundle
 
 
 async def _runtime_smoke_wait_for_result(
@@ -1386,9 +1392,7 @@ def _runtime_smoke_wait_timed_out(data: dict[str, Any]) -> dict[str, Any]:
             "status": "BLOCKED",
             "reason": "runtime smoke wait timed out",
             "final": False,
-            "next_step": (
-                "Poll again with runtime_smoke_evidence_bundle or increase timeout_ms."
-            ),
+            "next_step": ("Poll again with runtime_smoke_evidence_bundle or increase timeout_ms."),
         },
         include_stop=True,
     )
@@ -1428,7 +1432,7 @@ def _runtime_smoke_invalid_wait(
 def _runtime_smoke_wait_missing(data: dict[str, Any]) -> bool:
     return (
         data.get("status") == "FAIL"
-        and data.get("reason") == "runtime smoke run not found"
+        and data.get("reason") == _RUNTIME_SMOKE_RUN_NOT_FOUND
         and data.get("events") == []
         and data.get("result") is None
     )
@@ -1477,37 +1481,12 @@ async def _runtime_smoke_mark_event_cursor(
     if include_trace_source:
         _runtime_smoke_attach_trace_source_cursor(cursor, tracepoint_manager)
     if include_app_diagnostics:
-        if bool(tail.get("final")):
-            result = await registry.get_result(run_id)
-            if not _runtime_smoke_run_missing(result):
-                _runtime_smoke_attach_app_diagnostics_cursor(
-                    cursor,
-                    result,
-                    from_start=True,
-                )
-        else:
-            live_cursor_reader = getattr(
-                registry,
-                "get_app_diagnostics_source_cursor",
-                None,
-            )
-            live_cursor = (
-                await live_cursor_reader(run_id)
-                if callable(live_cursor_reader)
-                else None
-            )
-            if live_cursor is not None:
-                sources = dict(cursor.get("sources") or {})
-                sources["app_diagnostics"] = live_cursor
-                cursor["sources"] = sources
-            else:
-                result = await registry.get_result(run_id)
-                if not _runtime_smoke_run_missing(result):
-                    _runtime_smoke_attach_app_diagnostics_cursor(
-                        cursor,
-                        result,
-                        from_start=False,
-                    )
+        await _runtime_smoke_mark_app_diagnostics_cursor(
+            registry,
+            run_id,
+            cursor,
+            final=bool(tail.get("final")),
+        )
     return {
         "status": "PASS",
         "reason": "runtime smoke event cursor marked",
@@ -1520,6 +1499,32 @@ async def _runtime_smoke_mark_event_cursor(
             "runtime_smoke_tail_events",
         ],
     }
+
+
+async def _runtime_smoke_mark_app_diagnostics_cursor(
+    registry: Any,
+    run_id: str,
+    cursor: dict[str, Any],
+    *,
+    final: bool,
+) -> None:
+    if final:
+        result = await registry.get_result(run_id)
+        if not _runtime_smoke_run_missing(result):
+            _runtime_smoke_attach_app_diagnostics_cursor(cursor, result, from_start=True)
+        return
+
+    live_cursor_reader = getattr(registry, "get_app_diagnostics_source_cursor", None)
+    live_cursor = await live_cursor_reader(run_id) if callable(live_cursor_reader) else None
+    if live_cursor is not None:
+        sources = dict(cursor.get("sources") or {})
+        sources["app_diagnostics"] = live_cursor
+        cursor["sources"] = sources
+        return
+
+    result = await registry.get_result(run_id)
+    if not _runtime_smoke_run_missing(result):
+        _runtime_smoke_attach_app_diagnostics_cursor(cursor, result, from_start=False)
 
 
 async def _runtime_smoke_get_event_delta(
@@ -1538,46 +1543,46 @@ async def _runtime_smoke_get_event_delta(
         )
     parsed_debug_output_cursor = _runtime_smoke_parse_debug_output_source_cursor(cursor)
     if parsed_debug_output_cursor is False:
-        return _runtime_smoke_invalid_event_delta(
+        return _runtime_smoke_invalid_cursor_event_delta(
+            cursor,
             "cursor token debug_output cursor is invalid",
             after_cursor=0,
             limit=event_limit,
-            run_id=str(cursor.get("run_id") or ""),
         )
     parsed_trace_source_cursor = _runtime_smoke_parse_trace_source_cursor(cursor)
     if parsed_trace_source_cursor is False:
-        return _runtime_smoke_invalid_event_delta(
+        return _runtime_smoke_invalid_cursor_event_delta(
+            cursor,
             "cursor token trace_source cursor is invalid",
             after_cursor=0,
             limit=event_limit,
-            run_id=str(cursor.get("run_id") or ""),
         )
     parsed_app_diagnostics_cursor = _runtime_smoke_parse_app_diagnostics_source_cursor(cursor)
     if parsed_app_diagnostics_cursor is False:
-        return _runtime_smoke_invalid_event_delta(
+        return _runtime_smoke_invalid_cursor_event_delta(
+            cursor,
             "cursor token app_diagnostics cursor is invalid",
             after_cursor=0,
             limit=event_limit,
-            run_id=str(cursor.get("run_id") or ""),
         )
 
     parsed_after_cursor = _runtime_smoke_parse_nonnegative_int(
         cursor.get("after_cursor", cursor.get("next_cursor", 0))
     )
     if parsed_after_cursor is None:
-        return _runtime_smoke_invalid_event_delta(
+        return _runtime_smoke_invalid_cursor_event_delta(
+            cursor,
             "cursor token after_cursor must be an integer",
             after_cursor=0,
             limit=event_limit,
-            run_id=str(cursor.get("run_id") or ""),
         )
     parsed_limit = _runtime_smoke_parse_nonnegative_int(event_limit)
     if parsed_limit is None:
-        return _runtime_smoke_invalid_event_delta(
+        return _runtime_smoke_invalid_cursor_event_delta(
+            cursor,
             "event_limit must be an integer",
             after_cursor=parsed_after_cursor,
             limit=0,
-            run_id=str(cursor.get("run_id") or ""),
         )
 
     run_id = str(cursor.get("run_id") or "")
@@ -1600,32 +1605,21 @@ async def _runtime_smoke_get_event_delta(
         return _runtime_smoke_missing_event_delta(run_id, after_cursor, tail, limit=limit)
 
     final_result: dict[str, Any] | None = None
-    if parsed_app_diagnostics_cursor is not None:
-        live_delta_reader = getattr(
-            registry,
-            "get_app_diagnostics_source_delta",
-            None,
-        )
-        if callable(live_delta_reader):
-            app_diagnostics_delta = await live_delta_reader(
+    app_diagnostics_delta = await _runtime_smoke_read_live_app_diagnostics_delta(
+        registry,
+        run_id,
+        parsed_app_diagnostics_cursor,
+        limit=limit,
+    )
+    if parsed_app_diagnostics_cursor is not None and app_diagnostics_delta is None:
+        final_result = await registry.get_result(run_id)
+        if _runtime_smoke_run_missing(final_result):
+            return _runtime_smoke_missing_event_delta(
                 run_id,
-                after_index=parsed_app_diagnostics_cursor["after_index"],
-                entry_count=parsed_app_diagnostics_cursor["entry_count"],
+                after_cursor,
+                final_result,
                 limit=limit,
             )
-        else:
-            app_diagnostics_delta = None
-        if app_diagnostics_delta is None:
-            final_result = await registry.get_result(run_id)
-            if _runtime_smoke_run_missing(final_result):
-                return _runtime_smoke_missing_event_delta(
-                    run_id,
-                    after_cursor,
-                    final_result,
-                    limit=limit,
-                )
-        else:
-            final_result = None
 
     continuation_cursor = _runtime_smoke_tail_continuation_cursor(tail, after_cursor)
     next_cursor = _runtime_smoke_cursor_token(
@@ -1635,56 +1629,152 @@ async def _runtime_smoke_get_event_delta(
     )
     source_deltas: dict[str, Any] = {}
     source_cursors = dict(next_cursor.get("sources") or {})
-    if parsed_debug_output_cursor is not None:
-        debug_output_delta, debug_output_cursor = _runtime_smoke_debug_output_delta(
+    _runtime_smoke_attach_local_event_delta_sources(
+        source_deltas,
+        source_cursors,
+        parsed_debug_output_cursor,
+        parsed_trace_source_cursor,
+        session_state,
+        tracepoint_manager,
+        limit=limit,
+    )
+    if not _runtime_smoke_attach_app_diagnostics_event_delta(
+        source_deltas,
+        source_cursors,
+        next_cursor,
+        parsed_app_diagnostics_cursor,
+        app_diagnostics_delta,
+        final_result,
+        limit=limit,
+    ):
+        return _runtime_smoke_invalid_event_delta(
+            "cursor token app_diagnostics source is unavailable for this run",
+            after_cursor=after_cursor,
+            limit=limit,
+            run_id=run_id,
+        )
+    return await _runtime_smoke_complete_event_delta(
+        registry,
+        tail,
+        next_cursor,
+        source_deltas,
+        final_result,
+        after_cursor=after_cursor,
+        limit=limit,
+    )
+
+
+def _runtime_smoke_invalid_cursor_event_delta(
+    cursor: dict[str, Any],
+    reason: str,
+    *,
+    after_cursor: int,
+    limit: Any,
+) -> dict[str, Any]:
+    return _runtime_smoke_invalid_event_delta(
+        reason,
+        after_cursor=after_cursor,
+        limit=limit,
+        run_id=str(cursor.get("run_id") or ""),
+    )
+
+
+async def _runtime_smoke_read_live_app_diagnostics_delta(
+    registry: Any,
+    run_id: str,
+    source_cursor: Any,
+    *,
+    limit: int,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    if source_cursor is None:
+        return None
+    live_delta_reader = getattr(registry, "get_app_diagnostics_source_delta", None)
+    if not callable(live_delta_reader):
+        return None
+    return await live_delta_reader(
+        run_id,
+        after_index=source_cursor["after_index"],
+        entry_count=source_cursor["entry_count"],
+        limit=limit,
+    )
+
+
+def _runtime_smoke_attach_local_event_delta_sources(
+    source_deltas: dict[str, Any],
+    source_cursors: dict[str, Any],
+    debug_output_cursor: Any,
+    trace_source_cursor: Any,
+    session_state: Any | None,
+    tracepoint_manager: TracepointManager | None,
+    *,
+    limit: int,
+) -> None:
+    if debug_output_cursor is not None:
+        debug_output_delta, next_debug_output_cursor = _runtime_smoke_debug_output_delta(
             session_state,
-            after_sequence=parsed_debug_output_cursor["after_sequence"],
-            trimmed_before=parsed_debug_output_cursor["trimmed_before"],
+            after_sequence=debug_output_cursor["after_sequence"],
+            trimmed_before=debug_output_cursor["trimmed_before"],
             limit=limit,
         )
         source_deltas["debug_output"] = debug_output_delta
-        source_cursors["debug_output"] = debug_output_cursor
-    if parsed_trace_source_cursor is not None:
-        trace_source_delta, trace_source_cursor = _runtime_smoke_trace_source_delta(
+        source_cursors["debug_output"] = next_debug_output_cursor
+    if trace_source_cursor is not None:
+        trace_source_delta, next_trace_source_cursor = _runtime_smoke_trace_source_delta(
             tracepoint_manager,
-            parsed_trace_source_cursor,
+            trace_source_cursor,
             limit=limit,
         )
         source_deltas["trace_source"] = trace_source_delta
-        source_cursors["trace_source"] = trace_source_cursor
-    if parsed_app_diagnostics_cursor is not None:
+        source_cursors["trace_source"] = next_trace_source_cursor
+
+
+def _runtime_smoke_attach_app_diagnostics_event_delta(
+    source_deltas: dict[str, Any],
+    source_cursors: dict[str, Any],
+    next_cursor: dict[str, Any],
+    parsed_cursor: Any,
+    app_diagnostics_delta: tuple[dict[str, Any], dict[str, Any]] | None,
+    final_result: dict[str, Any] | None,
+    *,
+    limit: int,
+) -> bool:
+    if parsed_cursor is not None:
         if app_diagnostics_delta is None:
             app_diagnostics_delta = _runtime_smoke_app_diagnostics_delta(
                 final_result,
-                parsed_app_diagnostics_cursor,
+                parsed_cursor,
                 limit=limit,
             )
-            if app_diagnostics_delta is None:
-                if any(
-                    _runtime_smoke_source_delta_has_entries(delta)
-                    for name, delta in source_deltas.items()
-                    if name != "app_diagnostics"
-                ):
-                    source_deltas["app_diagnostics"] = (
-                        _runtime_smoke_app_diagnostics_unavailable_delta(limit=limit)
-                    )
-                else:
-                    return _runtime_smoke_invalid_event_delta(
-                        "cursor token app_diagnostics source is unavailable for this run",
-                        after_cursor=after_cursor,
-                        limit=limit,
-                        run_id=run_id,
-                    )
-            else:
-                delta_payload, source_cursor = app_diagnostics_delta
-                source_deltas["app_diagnostics"] = delta_payload
-                source_cursors["app_diagnostics"] = source_cursor
+        if app_diagnostics_delta is None:
+            if not any(
+                _runtime_smoke_source_delta_has_entries(delta)
+                for name, delta in source_deltas.items()
+                if name != "app_diagnostics"
+            ):
+                return False
+            source_deltas["app_diagnostics"] = _runtime_smoke_app_diagnostics_unavailable_delta(
+                limit=limit
+            )
         else:
             delta_payload, source_cursor = app_diagnostics_delta
             source_deltas["app_diagnostics"] = delta_payload
             source_cursors["app_diagnostics"] = source_cursor
     if source_cursors:
         next_cursor["sources"] = source_cursors
+    return True
+
+
+async def _runtime_smoke_complete_event_delta(
+    registry: Any,
+    tail: dict[str, Any],
+    next_cursor: dict[str, Any],
+    source_deltas: dict[str, Any],
+    final_result: dict[str, Any] | None,
+    *,
+    after_cursor: int,
+    limit: int,
+) -> dict[str, Any]:
+    run_id = next_cursor["run_id"]
     if final_result is None and tail.get("final"):
         result_reader = getattr(registry, "get_result", None)
         refreshed_result = await result_reader(run_id) if callable(result_reader) else None
@@ -1765,7 +1855,7 @@ def _runtime_smoke_missing_event_delta(
 ) -> dict[str, Any]:
     return {
         "status": "FAIL",
-        "reason": tail.get("reason", "runtime smoke run not found"),
+        "reason": tail.get("reason", _RUNTIME_SMOKE_RUN_NOT_FOUND),
         "run_id": run_id,
         "events": [],
         "event_cursor": _runtime_smoke_event_cursor(
@@ -1779,18 +1869,15 @@ def _runtime_smoke_missing_event_delta(
 
 
 def _runtime_smoke_tail_missing(tail: dict[str, Any]) -> bool:
-    return (
-        tail.get("status") == "FAIL"
-        and not any(
-            key in tail
-            for key in (
-                "events",
-                "next_cursor",
-                "oldest_cursor",
-                "dropped_count",
-                "stale_cursor",
-                "final",
-            )
+    return tail.get("status") == "FAIL" and not any(
+        key in tail
+        for key in (
+            "events",
+            "next_cursor",
+            "oldest_cursor",
+            "dropped_count",
+            "stale_cursor",
+            "final",
         )
     )
 
@@ -1915,11 +2002,7 @@ async def _runtime_smoke_attach_live_app_diagnostics_source_cursor(
         "get_app_diagnostics_source_cursor",
         None,
     )
-    live_cursor = (
-        await live_cursor_reader(run_id)
-        if callable(live_cursor_reader)
-        else None
-    )
+    live_cursor = await live_cursor_reader(run_id) if callable(live_cursor_reader) else None
     if live_cursor is None:
         return
     sources = dict(cursor.get("sources") or {})
@@ -1934,9 +2017,7 @@ def _runtime_smoke_current_debug_output_cursor(
         return None
     return {
         "after_sequence": max(0, int(getattr(session_state, "output_sequence", 0) or 0)),
-        "trimmed_before": max(
-            0, int(getattr(session_state, "output_trimmed_before", 0) or 0)
-        ),
+        "trimmed_before": max(0, int(getattr(session_state, "output_trimmed_before", 0) or 0)),
     }
 
 
@@ -1976,12 +2057,8 @@ def _runtime_smoke_parse_debug_output_source_cursor(
         return None
     if not isinstance(debug_output, dict):
         return False
-    after_sequence = _runtime_smoke_parse_nonnegative_int(
-        debug_output.get("after_sequence")
-    )
-    trimmed_before = _runtime_smoke_parse_nonnegative_int(
-        debug_output.get("trimmed_before")
-    )
+    after_sequence = _runtime_smoke_parse_nonnegative_int(debug_output.get("after_sequence"))
+    trimmed_before = _runtime_smoke_parse_nonnegative_int(debug_output.get("trimmed_before"))
     if after_sequence is None or trimmed_before is None:
         return False
     return {
@@ -2035,38 +2112,26 @@ def _runtime_smoke_parse_trace_source_cursor(
         return None
     if not isinstance(trace_source, dict):
         return False
-    after_timestamp = _runtime_smoke_parse_optional_float(
-        trace_source.get("after_timestamp")
-    )
+    after_timestamp = _runtime_smoke_parse_optional_float(trace_source.get("after_timestamp"))
     raw_global_after_timestamp = (
         trace_source.get("global_after_timestamp")
         if "global_after_timestamp" in trace_source
         else trace_source.get("after_timestamp")
     )
-    global_after_timestamp = _runtime_smoke_parse_optional_float(
-        raw_global_after_timestamp
-    )
+    global_after_timestamp = _runtime_smoke_parse_optional_float(raw_global_after_timestamp)
     buffer_start_timestamp = _runtime_smoke_parse_optional_float(
         trace_source.get("buffer_start_timestamp")
     )
-    after_ordinal = _runtime_smoke_parse_nonnegative_int(
-        trace_source.get("after_ordinal")
-    )
+    after_ordinal = _runtime_smoke_parse_nonnegative_int(trace_source.get("after_ordinal"))
     raw_global_after_ordinal = (
         trace_source.get("global_after_ordinal")
         if "global_after_ordinal" in trace_source
         else trace_source.get("after_ordinal")
     )
-    global_after_ordinal = _runtime_smoke_parse_nonnegative_int(
-        raw_global_after_ordinal
-    )
+    global_after_ordinal = _runtime_smoke_parse_nonnegative_int(raw_global_after_ordinal)
     buffer_size = _runtime_smoke_parse_nonnegative_int(trace_source.get("buffer_size"))
-    append_generation = _runtime_smoke_parse_nonnegative_int(
-        trace_source.get("append_generation")
-    )
-    drop_generation = _runtime_smoke_parse_nonnegative_int(
-        trace_source.get("drop_generation")
-    )
+    append_generation = _runtime_smoke_parse_nonnegative_int(trace_source.get("append_generation"))
+    drop_generation = _runtime_smoke_parse_nonnegative_int(trace_source.get("drop_generation"))
     if (
         after_timestamp is False
         or global_after_timestamp is False
@@ -2101,11 +2166,7 @@ def _runtime_smoke_debug_output_delta(
     trimmed_before: int,
     limit: int,
 ) -> tuple[dict[str, Any], dict[str, int]]:
-    entries = (
-        list(getattr(session_state, "output_buffer", []))
-        if session_state is not None
-        else []
-    )
+    entries = list(getattr(session_state, "output_buffer", [])) if session_state is not None else []
     current_sequence = (
         max(0, int(getattr(session_state, "output_sequence", 0) or 0))
         if session_state is not None
@@ -2118,45 +2179,39 @@ def _runtime_smoke_debug_output_delta(
     )
     bounded_limit = max(0, int(limit))
     filtered_entries = [
-        entry
-        for entry in entries
-        if int(getattr(entry, "sequence", 0) or 0) > after_sequence
+        entry for entry in entries if int(getattr(entry, "sequence", 0) or 0) > after_sequence
     ]
     available = len(filtered_entries)
     bounded_entries = filtered_entries[:bounded_limit]
     first_retained_sequence = (
-        int(getattr(filtered_entries[0], "sequence", 0) or 0)
-        if filtered_entries
-        else None
+        int(getattr(filtered_entries[0], "sequence", 0) or 0) if filtered_entries else None
     )
     cleared_gap = available == 0 and current_sequence > after_sequence
-    retained_gap = (
-        first_retained_sequence is not None
-        and first_retained_sequence > max(after_sequence + 1, trimmed_before + 1)
+    retained_gap = first_retained_sequence is not None and first_retained_sequence > max(
+        after_sequence + 1, trimmed_before + 1
     )
     stale_cursor = (
-        current_trimmed_before > max(after_sequence, trimmed_before)
-        or cleared_gap
-        or retained_gap
+        current_trimmed_before > max(after_sequence, trimmed_before) or cleared_gap or retained_gap
     )
-    dropped_count = max(0, current_trimmed_before - max(after_sequence, trimmed_before))
-    if cleared_gap:
-        dropped_count = max(dropped_count, current_sequence - after_sequence)
-    if retained_gap and first_retained_sequence is not None:
-        dropped_count = max(dropped_count, first_retained_sequence - after_sequence - 1)
-    if bounded_entries:
-        next_after_sequence = max(
-            int(getattr(entry, "sequence", 0) or 0) for entry in bounded_entries
-        )
-    elif available == 0 and not stale_cursor:
-        next_after_sequence = current_sequence
-    else:
-        next_after_sequence = after_sequence
+    dropped_count = _runtime_smoke_debug_output_dropped_count(
+        current_trimmed_before=current_trimmed_before,
+        after_sequence=after_sequence,
+        trimmed_before=trimmed_before,
+        cleared_gap=cleared_gap,
+        retained_gap=retained_gap,
+        current_sequence=current_sequence,
+        first_retained_sequence=first_retained_sequence,
+    )
+    next_after_sequence = _runtime_smoke_debug_output_next_sequence(
+        bounded_entries,
+        available=available,
+        stale_cursor=stale_cursor,
+        current_sequence=current_sequence,
+        after_sequence=after_sequence,
+    )
     return (
         {
-            "entries": [
-                _runtime_smoke_output_entry_to_dict(entry) for entry in bounded_entries
-            ],
+            "entries": [_runtime_smoke_output_entry_to_dict(entry) for entry in bounded_entries],
             "available": available,
             "limit": bounded_limit,
             "limited": available > bounded_limit,
@@ -2170,6 +2225,39 @@ def _runtime_smoke_debug_output_delta(
     )
 
 
+def _runtime_smoke_debug_output_dropped_count(
+    *,
+    current_trimmed_before: int,
+    after_sequence: int,
+    trimmed_before: int,
+    cleared_gap: bool,
+    retained_gap: bool,
+    current_sequence: int,
+    first_retained_sequence: int | None,
+) -> int:
+    dropped_count = max(0, current_trimmed_before - max(after_sequence, trimmed_before))
+    if cleared_gap:
+        dropped_count = max(dropped_count, current_sequence - after_sequence)
+    if retained_gap and first_retained_sequence is not None:
+        dropped_count = max(dropped_count, first_retained_sequence - after_sequence - 1)
+    return dropped_count
+
+
+def _runtime_smoke_debug_output_next_sequence(
+    bounded_entries: list[Any],
+    *,
+    available: int,
+    stale_cursor: bool,
+    current_sequence: int,
+    after_sequence: int,
+) -> int:
+    if bounded_entries:
+        return max(int(getattr(entry, "sequence", 0) or 0) for entry in bounded_entries)
+    if available == 0 and not stale_cursor:
+        return current_sequence
+    return after_sequence
+
+
 def _runtime_smoke_trace_source_delta(
     tracepoint_manager: TracepointManager | None,
     trace_source_cursor: dict[str, Any],
@@ -2181,8 +2269,7 @@ def _runtime_smoke_trace_source_delta(
     return (
         {
             "entries": [
-                _runtime_smoke_trace_entry_to_dict(entry)
-                for entry in delta.get("entries", [])
+                _runtime_smoke_trace_entry_to_dict(entry) for entry in delta.get("entries", [])
             ],
             "available": delta.get("available", 0),
             "limit": delta.get("limit"),
@@ -2210,8 +2297,7 @@ def _runtime_smoke_app_diagnostics_delta(
     after_index = max(0, int(app_diagnostics_cursor["after_index"]))
     bounded_limit = max(0, int(limit))
     stale_cursor = (
-        int(app_diagnostics_cursor["entry_count"]) > total_entries
-        or after_index > total_entries
+        int(app_diagnostics_cursor["entry_count"]) > total_entries or after_index > total_entries
     )
     available_entries = entries[after_index:] if after_index <= total_entries else []
     available = len(available_entries)
@@ -2268,37 +2354,64 @@ def _runtime_smoke_extract_app_diagnostics_entries(
         transitions = case.get("transitions")
         if not isinstance(transitions, list):
             continue
-        for transition_index, transition in enumerate(transitions):
-            if not isinstance(transition, dict):
-                continue
-            probes = transition.get("probes")
-            if not isinstance(probes, dict):
-                continue
-            for phase in ("before", "after"):
-                phase_probes = probes.get(phase, [])
-                if not isinstance(phase_probes, list):
-                    continue
-                for probe in phase_probes:
-                    if (
-                        not isinstance(probe, dict)
-                        or probe.get("kind") != "app_diagnostics"
-                    ):
-                        continue
-                    entry: dict[str, Any] = {
-                        "case_id": case_id,
-                        "transition_index": transition_index,
-                        "phase": phase,
-                        "probe": str(probe.get("name") or probe.get("kind") or ""),
-                        "status": probe.get("status"),
-                    }
-                    if "reason" in probe:
-                        entry["reason"] = probe.get("reason")
-                    if "value" in probe:
-                        entry["value"] = compact_value(probe.get("value"))
-                    if "evidence_ref" in probe:
-                        entry["evidence_ref"] = probe.get("evidence_ref")
-                    entries.append(compact_value(entry))
+        _runtime_smoke_append_case_app_diagnostics_entries(
+            entries,
+            transitions,
+            case_id=case_id,
+        )
     return entries
+
+
+def _runtime_smoke_append_case_app_diagnostics_entries(
+    entries: list[dict[str, Any]],
+    transitions: list[Any],
+    *,
+    case_id: Any,
+) -> None:
+    for transition_index, transition in enumerate(transitions):
+        if not isinstance(transition, dict):
+            continue
+        probes = transition.get("probes")
+        if not isinstance(probes, dict):
+            continue
+        for phase in ("before", "after"):
+            phase_probes = probes.get(phase, [])
+            if not isinstance(phase_probes, list):
+                continue
+            _runtime_smoke_append_phase_app_diagnostics_entries(
+                entries,
+                phase_probes,
+                case_id=case_id,
+                transition_index=transition_index,
+                phase=phase,
+            )
+
+
+def _runtime_smoke_append_phase_app_diagnostics_entries(
+    entries: list[dict[str, Any]],
+    phase_probes: list[Any],
+    *,
+    case_id: Any,
+    transition_index: int,
+    phase: str,
+) -> None:
+    for probe in phase_probes:
+        if not isinstance(probe, dict) or probe.get("kind") != "app_diagnostics":
+            continue
+        entry: dict[str, Any] = {
+            "case_id": case_id,
+            "transition_index": transition_index,
+            "phase": phase,
+            "probe": str(probe.get("name") or probe.get("kind") or ""),
+            "status": probe.get("status"),
+        }
+        if "reason" in probe:
+            entry["reason"] = probe.get("reason")
+        if "value" in probe:
+            entry["value"] = compact_value(probe.get("value"))
+        if "evidence_ref" in probe:
+            entry["evidence_ref"] = probe.get("evidence_ref")
+        entries.append(compact_value(entry))
 
 
 def _runtime_smoke_pack_manifest(data: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -2380,9 +2493,7 @@ def _runtime_smoke_merge_pack_manifest(
     if remembered_descriptor is None:
         return actual_descriptor
     actual_rank = _runtime_smoke_pack_manifest_status_rank(actual_descriptor["status"])
-    remembered_rank = _runtime_smoke_pack_manifest_status_rank(
-        remembered_descriptor["status"]
-    )
+    remembered_rank = _runtime_smoke_pack_manifest_status_rank(remembered_descriptor["status"])
     pack_id = (
         actual_descriptor["pack_id"]
         if actual_rank > remembered_rank
@@ -2394,8 +2505,7 @@ def _runtime_smoke_merge_pack_manifest(
             "status": actual_descriptor["status"],
             "manifest_ref": actual_descriptor["manifest_ref"],
             "materialized": bool(
-                actual_descriptor.get("materialized")
-                or remembered_descriptor.get("materialized")
+                actual_descriptor.get("materialized") or remembered_descriptor.get("materialized")
             ),
         }
     )
@@ -2441,9 +2551,7 @@ def _runtime_smoke_pack_manifest_materialized(
     descriptor: dict[str, Any],
     materialized: bool,
 ) -> dict[str, Any] | None:
-    return _runtime_smoke_compact_pack_manifest(
-        {**descriptor, "materialized": materialized}
-    )
+    return _runtime_smoke_compact_pack_manifest({**descriptor, "materialized": materialized})
 
 
 def _runtime_smoke_pack_manifest_evidence_dir(data: dict[str, Any]) -> Path | None:
@@ -2543,9 +2651,7 @@ def _runtime_smoke_pack_manifest_rollups(
     default_status = str(descriptor.get("status") or result.get("status") or "UNKNOWN")
     cleanup = result.get("cleanup")
     cleanup_status = (
-        _runtime_smoke_text_or_none(cleanup.get("status"))
-        if isinstance(cleanup, dict)
-        else None
+        _runtime_smoke_text_or_none(cleanup.get("status")) if isinstance(cleanup, dict) else None
     )
     return {
         "cleanup": {
@@ -2618,9 +2724,7 @@ def _runtime_smoke_pack_manifest_from_cases(
         )
         if descriptor is None:
             continue
-        descriptor_rank = _runtime_smoke_pack_manifest_status_rank(
-            descriptor["status"]
-        )
+        descriptor_rank = _runtime_smoke_pack_manifest_status_rank(descriptor["status"])
         if selected is None or descriptor_rank >= selected_rank:
             selected = descriptor
             selected_rank = descriptor_rank
@@ -2649,21 +2753,26 @@ def _runtime_smoke_iter_case_probes(cases: list[Any]) -> list[dict[str, Any]]:
         if not isinstance(transitions, list):
             continue
         for transition in transitions:
-            if not isinstance(transition, dict):
-                continue
-            raw_probes = transition.get("probes")
-            if isinstance(raw_probes, list):
-                probes.extend(probe for probe in raw_probes if isinstance(probe, dict))
-                continue
-            if not isinstance(raw_probes, dict):
-                continue
-            for phase in ("before", "after"):
-                phase_probes = raw_probes.get(phase, [])
-                if isinstance(phase_probes, list):
-                    probes.extend(
-                        probe for probe in phase_probes if isinstance(probe, dict)
-                    )
+            _runtime_smoke_append_transition_probes(probes, transition)
     return probes
+
+
+def _runtime_smoke_append_transition_probes(
+    probes: list[dict[str, Any]],
+    transition: Any,
+) -> None:
+    if not isinstance(transition, dict):
+        return
+    raw_probes = transition.get("probes")
+    if isinstance(raw_probes, list):
+        probes.extend(probe for probe in raw_probes if isinstance(probe, dict))
+        return
+    if not isinstance(raw_probes, dict):
+        return
+    for phase in ("before", "after"):
+        phase_probes = raw_probes.get(phase, [])
+        if isinstance(phase_probes, list):
+            probes.extend(probe for probe in phase_probes if isinstance(probe, dict))
 
 
 def _runtime_smoke_pack_manifest_from_probe(
@@ -2776,12 +2885,10 @@ def _runtime_smoke_text_or_none(value: Any) -> str | None:
 def _runtime_smoke_output_entry_to_dict(entry: Any) -> dict[str, Any]:
     return compact_value(
         {
-        "text": str(getattr(entry, "text", "")),
-        "category": str(getattr(entry, "category", "console") or "console"),
-        "variables_reference": max(
-            0, int(getattr(entry, "variables_reference", 0) or 0)
-        ),
-        "sequence": max(0, int(getattr(entry, "sequence", 0) or 0)),
+            "text": str(getattr(entry, "text", "")),
+            "category": str(getattr(entry, "category", "console") or "console"),
+            "variables_reference": max(0, int(getattr(entry, "variables_reference", 0) or 0)),
+            "sequence": max(0, int(getattr(entry, "sequence", 0) or 0)),
         }
     )
 
@@ -2804,6 +2911,28 @@ def _apply_runtime_smoke_agent_mode(
     data: dict[str, Any],
     primary_next_action: str,
 ) -> dict[str, Any]:
+    if _runtime_smoke_apply_agent_recovery(data, primary_next_action):
+        return data
+
+    cursor = _runtime_smoke_agent_cursor(data)
+    run_id = _runtime_smoke_agent_run_id(data)
+    next_request = _runtime_smoke_agent_next_request(primary_next_action, run_id, cursor)
+    if next_request is None:
+        primary_next_action = "runtime_smoke_run_plan"
+
+    data["agent_mode"] = _runtime_smoke_agent_mode_payload(
+        primary_next_action,
+        next_request=next_request,
+        cursor=cursor,
+        metrics=_runtime_smoke_agent_metrics(data),
+    )
+    return data
+
+
+def _runtime_smoke_apply_agent_recovery(
+    data: dict[str, Any],
+    primary_next_action: str,
+) -> bool:
     if (
         primary_next_action == "runtime_smoke_get_event_delta"
         and data.get("status") == "INVALID_SETUP"
@@ -2821,7 +2950,7 @@ def _apply_runtime_smoke_agent_mode(
             },
             metrics=_runtime_smoke_agent_metrics(data),
         )
-        return data
+        return True
     if (
         data.get("contaminated") is True
         and data.get("final") is True
@@ -2837,68 +2966,61 @@ def _apply_runtime_smoke_agent_mode(
             cursor=_runtime_smoke_agent_cursor(data),
             metrics=_runtime_smoke_agent_metrics(data),
         )
-        return data
+        return True
     if _runtime_smoke_agent_fail_closed(data):
         data["agent_mode"] = _runtime_smoke_agent_mode_payload(
             "runtime_smoke_run_plan",
             metrics=_runtime_smoke_agent_metrics(data),
         )
-        return data
+        return True
+    return False
 
-    cursor = _runtime_smoke_agent_cursor(data)
-    run_id = _runtime_smoke_agent_run_id(data)
-    next_request: dict[str, Any] | None = None
+
+def _runtime_smoke_agent_next_request(
+    primary_next_action: str,
+    run_id: str,
+    cursor: dict[str, Any] | None,
+) -> dict[str, Any] | None:
     if primary_next_action == "runtime_smoke_get_event_delta":
         if cursor:
-            next_request = {
+            return {
                 "tool": primary_next_action,
                 "arguments": _runtime_smoke_agent_next_arguments(
                     primary_next_action,
                     {"cursor": cursor, "agent_mode": True},
                 ),
             }
-        else:
-            primary_next_action = "runtime_smoke_run_plan"
-    elif primary_next_action == "runtime_smoke_wait_for_result":
-        if run_id:
-            arguments: dict[str, Any] = {"run_id": run_id, "agent_mode": True}
-            if cursor:
-                arguments["after_cursor"] = _runtime_smoke_tail_next_cursor(
-                    cursor,
-                    cursor.get("after_cursor", 0),
-                )
-            next_request = {
-                "tool": primary_next_action,
-                "arguments": _runtime_smoke_agent_next_arguments(
-                    primary_next_action,
-                    arguments,
-                ),
-            }
-        else:
-            primary_next_action = "runtime_smoke_run_plan"
-    elif primary_next_action == "runtime_smoke_cleanup_contract":
-        next_request = {
+        return None
+    if primary_next_action == "runtime_smoke_wait_for_result":
+        if not run_id:
+            return None
+        arguments: dict[str, Any] = {"run_id": run_id, "agent_mode": True}
+        if cursor:
+            arguments["after_cursor"] = _runtime_smoke_tail_next_cursor(
+                cursor,
+                cursor.get("after_cursor", 0),
+            )
+        return {
+            "tool": primary_next_action,
+            "arguments": _runtime_smoke_agent_next_arguments(
+                primary_next_action,
+                arguments,
+            ),
+        }
+    if primary_next_action == "runtime_smoke_cleanup_contract":
+        return {
             "tool": primary_next_action,
             "arguments": {},
         }
-    elif run_id:
-        next_request = {
+    if run_id:
+        return {
             "tool": primary_next_action,
             "arguments": _runtime_smoke_agent_next_arguments(
                 primary_next_action,
                 {"run_id": run_id, "agent_mode": True},
             ),
         }
-    else:
-        primary_next_action = "runtime_smoke_run_plan"
-
-    data["agent_mode"] = _runtime_smoke_agent_mode_payload(
-        primary_next_action,
-        next_request=next_request,
-        cursor=cursor,
-        metrics=_runtime_smoke_agent_metrics(data),
-    )
-    return data
+    return None
 
 
 def _runtime_smoke_run_probe_agent_next_action(
@@ -3006,9 +3128,7 @@ def _runtime_smoke_validate_probe_arguments(
         arguments["debug_preflight"] = True
     if tracepoint_guard is not None:
         arguments["tracepoint_guard"] = (
-            dict(tracepoint_guard)
-            if isinstance(tracepoint_guard, dict)
-            else tracepoint_guard
+            dict(tracepoint_guard) if isinstance(tracepoint_guard, dict) else tracepoint_guard
         )
     return arguments
 
@@ -3090,7 +3210,7 @@ def _runtime_smoke_agent_metrics_contract() -> dict[str, Any]:
 def _runtime_smoke_agent_metrics(data: dict[str, Any]) -> dict[str, Any]:
     missing_reason = _runtime_smoke_agent_metric_missing_reason(data)
     if missing_reason in {
-        "runtime smoke run not found",
+        _RUNTIME_SMOKE_RUN_NOT_FOUND,
         "runtime smoke run not started",
     }:
         return {
@@ -3132,7 +3252,7 @@ def _runtime_smoke_agent_metric_missing_reason(data: dict[str, Any]) -> str:
         return "runtime smoke run not started"
     if not data.get("final"):
         return "run is not final"
-    return "source evidence is absent"
+    return _RUNTIME_SMOKE_SOURCE_EVIDENCE_ABSENT
 
 
 def _runtime_smoke_agent_time_to_verdict_metric(
@@ -3156,7 +3276,7 @@ def _runtime_smoke_agent_evidence_completeness(data: dict[str, Any]) -> dict[str
         "event_cursor": isinstance(data.get("event_cursor"), dict),
     }
     if not any(signals.values()):
-        return _runtime_smoke_agent_no_data("source evidence is absent")
+        return _runtime_smoke_agent_no_data(_RUNTIME_SMOKE_SOURCE_EVIDENCE_ABSENT)
 
     return {
         "status": "COMPLETE" if all(signals.values()) else "PARTIAL",
@@ -3180,7 +3300,7 @@ def _runtime_smoke_agent_source_evidence_reason(
     missing_reason: str,
     source_absent_reason: str,
 ) -> str:
-    if missing_reason == "source evidence is absent":
+    if missing_reason == _RUNTIME_SMOKE_SOURCE_EVIDENCE_ABSENT:
         return source_absent_reason
     return missing_reason
 
@@ -3188,7 +3308,7 @@ def _runtime_smoke_agent_source_evidence_reason(
 def _runtime_smoke_agent_fail_closed(data: dict[str, Any]) -> bool:
     if data.get("status") == "INVALID_SETUP":
         return True
-    if data.get("reason") == "runtime smoke run not found":
+    if data.get("reason") == _RUNTIME_SMOKE_RUN_NOT_FOUND:
         return True
     return (
         data.get("status") == "FAIL"
@@ -3250,9 +3370,7 @@ def _runtime_smoke_agent_cursor(data: dict[str, Any]) -> dict[str, Any]:
         }
         sources = event_cursor.get("sources")
         if sources is not None:
-            agent_cursor["sources"] = (
-                dict(sources) if isinstance(sources, dict) else sources
-            )
+            agent_cursor["sources"] = dict(sources) if isinstance(sources, dict) else sources
         return agent_cursor
 
     next_cursor = _runtime_smoke_tail_next_cursor(data, 0)
@@ -3276,8 +3394,7 @@ def _runtime_smoke_event_delta_is_quiet_active(data: dict[str, Any]) -> bool:
     if not isinstance(source_deltas, dict):
         return True
     return not any(
-        _runtime_smoke_source_delta_has_entries(delta)
-        for delta in source_deltas.values()
+        _runtime_smoke_source_delta_has_entries(delta) for delta in source_deltas.values()
     )
 
 

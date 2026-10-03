@@ -30,6 +30,31 @@ unsupported version, excluded tool/method, cancellation, and EOF. Assert only
 the contract’s named launch/error outcome, no partial result, and no secret/root
 content.
 
+### Invalid-launch observation clock
+
+The [parent launch authority](../005-stateless-preview/spec.md#launch-authority)
+requires exit `64`, exact `PREVIEW_ROOT_INVALID\n` stderr, and zero stdout before
+MCP starts. It does not promise a two-second cold CLR startup SLA.
+
+The source process tests and retained-artifact validator use two harness phases:
+
+- `StartupObservationTimeout` / `_STARTUP_OBSERVATION_SECONDS`: **10 seconds**
+  to observe the exact validation emission, reusing the existing malformed-
+  metadata test observation budget. CLR startup and scheduling occur in this
+  phase; missing or incorrect validation is still a failure.
+- `PostValidationExitTimeout` / `_POST_VALIDATION_EXIT_SECONDS`: **2 seconds**
+  to observe child exit after validation. Exit must remain `64`, stdout empty,
+  and the remaining stderr empty. An emitted marker never excuses an exit hang.
+
+Both failed phases terminate and await the actual child. Successful validation
+uses the real stderr emission, not a new readiness protocol. Test-only CLR
+startup hooks and named-event barriers inject a held pre-`Main` startup and a
+held `ProcessExit`, reusing the existing modern-MCP hook and WPF barrier seams.
+The old cold-start clock fails with startup held for 2,500 ms; the phase-bound
+clock preserves the exact refusal. Separate held-startup and held-exit checks
+prove timeout cleanup, including the unchanged two-second post-validation bound.
+This proves clock placement, not the duration or phase of a historical timeout.
+
 ## Compatibility and rollback
 
 Run each existing legacy/Python parity owner separately. Each command MUST exit

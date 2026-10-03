@@ -2907,6 +2907,81 @@ async def test_v2_ui_drag_rejects_fractional_row_index() -> None:
     assert session.calls == []
 
 
+@pytest.mark.parametrize(
+    ("source_index", "drop_index", "expected_status"),
+    [(True, 2, "BLOCKED"), (1, True, "BLOCKED"), (1, 2, "PASS")],
+)
+@pytest.mark.asyncio
+async def test_v2_ui_drag_rejects_boolean_row_index_before_backend_drag(
+    source_index: int | bool, drop_index: int | bool, expected_status: str
+) -> None:
+    class GridDragBackend:
+        def __init__(self) -> None:
+            self.drag_calls: list[dict[str, Any]] = []
+
+        async def grid_drag_row_to_row(
+            self, selector: dict[str, Any], **request: Any
+        ) -> dict[str, Any]:
+            self.drag_calls.append({"selector": selector, **request})
+            return {
+                "status": "PASS",
+                "route_evidence": {"move_points": [{"x": 10, "y": 20}]},
+            }
+
+    backend = GridDragBackend()
+
+    async def connected() -> GridDragBackend:
+        return backend
+
+    session = ActionSmokeSession()
+    from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
+
+    runner = RuntimeSmokeRunner(
+        session,
+        service_adapters={"ui.drag": ui_operation_adapters(connected)["ui.drag"]},
+    )
+    result = await runner.run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cases": [
+                {
+                    "id": "grid_drag_row_index",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_index": source_index,
+                                },
+                                "path": [{"relative_to": "source", "x": 0.5, "y": 0.5}],
+                                "drop": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_index": drop_index,
+                                    "ensure_visible": True,
+                                },
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == expected_status
+    assert action["status"] == expected_status
+    assert len(backend.drag_calls) == (1 if expected_status == "PASS" else 0)
+    if expected_status == "PASS":
+        assert backend.drag_calls[0]["source_row_index"] == 1
+        assert backend.drag_calls[0]["target_row_index"] == 2
+    elif source_index is True:
+        assert action["reason"] == "invalid drag source"
+    else:
+        assert action["reason"] == "drag target row index is invalid"
+
+
 @pytest.mark.asyncio
 async def test_v2_ui_grid_select_routes_non_contiguous_indices() -> None:
     session = ActionSmokeSession()
@@ -3027,8 +3102,9 @@ async def test_v2_ui_grid_select_propagates_backend_blocked() -> None:
     assert action["next_step"]
 
 
+@pytest.mark.parametrize("invalid_index", [1.5, "²"])
 @pytest.mark.asyncio
-async def test_v2_ui_grid_select_rejects_fractional_indices() -> None:
+async def test_v2_ui_grid_select_rejects_fractional_indices(invalid_index: Any) -> None:
     session = ActionSmokeSession()
 
     result = await _runner(session).run(
@@ -3043,7 +3119,7 @@ async def test_v2_ui_grid_select_rejects_fractional_indices() -> None:
                             "action": {
                                 "kind": "ui.grid.select",
                                 "selector": {"automation_id": "CueDataGrid"},
-                                "indices": [1.5],
+                                "indices": [invalid_index],
                             },
                             "probes": [],
                         }
@@ -3057,7 +3133,7 @@ async def test_v2_ui_grid_select_rejects_fractional_indices() -> None:
     assert result["status"] == "BLOCKED"
     assert action["status"] == "BLOCKED"
     assert action["reason"] == "invalid grid selection index"
-    assert action["requested"] == {"index": 1.5}
+    assert action["requested"] == {"index": invalid_index}
     assert session.calls == []
 
 

@@ -78,6 +78,49 @@ sys.modules[_validator_spec.name] = preview_validator
 _validator_spec.loader.exec_module(preview_validator)
 
 
+@pytest.mark.parametrize(
+    ("before_validation", "after_validation"),
+    [(2.5, 0), (0, 30)],
+)
+def test_launch_refusal_separates_startup_observation_from_exit_and_drains_child(
+    monkeypatch: pytest.MonkeyPatch, before_validation: float, after_validation: float
+) -> None:
+    original_popen = subprocess.Popen
+    children: list[subprocess.Popen[bytes]] = []
+
+    def start(_command: Any, **options: Any) -> subprocess.Popen[bytes]:
+        child = original_popen(
+            [
+                sys.executable,
+                "-c",
+                f"import sys,time; time.sleep({before_validation}); "
+                "sys.stderr.buffer.write(b'PREVIEW_ROOT_INVALID\\n'); sys.stderr.flush(); "
+                f"time.sleep({after_validation}); sys.exit(64)",
+            ],
+            **options,
+        )
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(preview_validator.subprocess, "Popen", start)
+    try:
+        if after_validation:
+            with pytest.raises(ValueError, match="invalid launch case did not complete"):
+                preview_validator._run_launch_refusal(Path(sys.executable), ["--project"])
+            assert children[0].poll() is not None, "timed-out actual child was not drained"
+        else:
+            preview_validator._run_launch_refusal(Path(sys.executable), ["--project"])
+            assert children[0].poll() == 64
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=2)
+            for stream in (child.stdin, child.stdout, child.stderr):
+                if stream is not None:
+                    stream.close()
+
+
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -109,7 +152,7 @@ def _authority_paths() -> tuple[str, ...]:
 
 def _git(root: Path, *arguments: str) -> str:
     result = subprocess.run(
-        ["git", *arguments],
+        ["git", "-c", "core.longpaths=true", *arguments],
         cwd=root,
         capture_output=True,
         check=False,
@@ -120,13 +163,16 @@ def _git(root: Path, *arguments: str) -> str:
 
 
 def _create_authority_repository(
-    tmp_path: Path,
+    tmp_path: Path, *, release_version: str = "0.23.12"
 ) -> tuple[Path, str, list[dict[str, str]]]:
     origin = tmp_path / "origin.git"
     authority_root = tmp_path / "authority-root"
     _git(tmp_path, "init", "--bare", str(origin))
+    # Local receive-pack drops command-scoped config; keep it in both owned repositories.
+    _git(origin, "config", "--local", "core.longpaths", "true")
     authority_root.mkdir()
     _git(authority_root, "init")
+    _git(authority_root, "config", "--local", "core.longpaths", "true")
     _git(authority_root, "config", "user.email", "artifact-tests@example.test")
     _git(authority_root, "config", "user.name", "Artifact Tests")
     _git(authority_root, "checkout", "-b", "main")
@@ -137,6 +183,12 @@ def _create_authority_repository(
         assert source.is_file(), f"missing authority source: {relative_path}"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(source.read_bytes())
+
+    project_metadata = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    (authority_root / "pyproject.toml").write_text(
+        project_metadata.replace('version = "0.23.12"', f'version = "{release_version}"', 1),
+        encoding="utf-8",
+    )
 
     _git(authority_root, "add", ".")
     _git(authority_root, "commit", "-m", "snapshot release authorities")
@@ -469,6 +521,7 @@ def _write_post_merge_scan_receipt(
     *,
     outcome: str = "PASS",
     captured_head: str | None = None,
+    release_intent: str = "v0.23.12",
 ) -> Path:
     path = (
         repository_root
@@ -484,14 +537,14 @@ def _write_post_merge_scan_receipt(
         _blocked_v3_exact_head_receipt(
             source_commit,
             role="post-merge",
-            release_intent="v0.23.11",
+            release_intent=release_intent,
         )
         if outcome == "BLOCKED"
         else _complete_v3_exact_head_receipt(
             source_commit,
             role="post-merge",
             outcome=outcome,
-            release_intent="v0.23.11",
+            release_intent=release_intent,
         )
     )
     if outcome != "BLOCKED":
@@ -684,6 +737,27 @@ def test_post_merge_receipt_producer_binds_the_trusted_scan_to_main(tmp_path: Pa
         },
     }
     assert re.fullmatch(r"[^\r\n]+Z", produced["recorded_at"])
+
+
+def test_post_merge_receipt_matches_historical_project_version(tmp_path: Path) -> None:
+    authority_root, source_commit, _ = _create_authority_repository(
+        tmp_path, release_version="0.23.11"
+    )
+    _write_post_merge_scan_receipt(authority_root, source_commit, release_intent="v0.23.11")
+
+    produced = produce_post_merge_exact_head_receipt(
+        authority_root, _build_environment(source_commit)
+    )
+
+    assert produced["scanned_commit"] == source_commit
+
+
+def test_post_merge_receipt_refuses_historical_intent_on_new_head(tmp_path: Path) -> None:
+    authority_root, source_commit, _ = _create_authority_repository(tmp_path)
+    _write_post_merge_scan_receipt(authority_root, source_commit, release_intent="v0.23.11")
+
+    with pytest.raises(ValueError, match="post-merge exact-head scan receipt is not trusted"):
+        produce_post_merge_exact_head_receipt(authority_root, _build_environment(source_commit))
 
 
 @pytest.mark.parametrize(
@@ -1710,7 +1784,7 @@ def _write_v3_post_merge_scan_receipt(repository_root: Path, source_commit: str)
                 source_commit,
                 role="post-merge",
                 outcome="PASS",
-                release_intent="v0.23.11",
+                release_intent="v0.23.12",
             )
         )
     )
@@ -1722,6 +1796,8 @@ def _write_v3_post_merge_scan_receipt(repository_root: Path, source_commit: str)
     [
         ("diagnostic", "DIAGNOSTIC_COMPLETE", "none"),
         ("candidate", "PASS", "v0.23.11"),
+        ("candidate", "PASS", "v0.23.12"),
+        ("post-merge", "PASS", "v0.23.12"),
         ("post-merge", "PASS", "v0.23.11"),
     ],
 )

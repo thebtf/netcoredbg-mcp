@@ -12,8 +12,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 
 from ..windows_process_owner import DrainStatus, OwnerDrainReceipt, WindowsOwnedProcess
 from .policy import BuildCommand, BuildPolicy
@@ -68,6 +70,7 @@ class BuildSession:
         self._policy = policy or BuildPolicy(workspace_root=self._workspace_root)
         self._state = BuildState.IDLE
         self._lock = asyncio.Lock()
+        self._build_users = 0
         self._current_process: asyncio.subprocess.Process | WindowsOwnedProcess | None = None
         self._current_owner: WindowsOwnedProcess | None = None
         self._last_owner_drain_receipt: OwnerDrainReceipt | None = None
@@ -99,6 +102,15 @@ class BuildSession:
     def on_state_change(self, listener: Callable[[BuildState], None]) -> None:
         """Register state change listener."""
         self._state_listeners.append(listener)
+
+    @asynccontextmanager
+    async def _admit_build(self) -> AsyncIterator[None]:
+        self._build_users += 1
+        try:
+            async with self._lock:
+                yield
+        finally:
+            self._build_users -= 1
 
     def _set_state(self, new_state: BuildState) -> None:
         """Update state and notify listeners."""
@@ -156,22 +168,42 @@ class BuildSession:
 
         self._last_owner_drain_receipt = receipt
         if cancellation is not None:
-            try:
-                self._require_drained_owner_receipt(receipt)
-            except OwnerDrainError as error:
-                raise error from cancellation
+            self._require_drained_owner_receipt(receipt, owner, cause=cancellation)
             raise cancellation
         return receipt
 
     @staticmethod
-    def _require_drained_owner_receipt(receipt: OwnerDrainReceipt) -> None:
-        """Reject completion unless private-Job accounting reached literal zero."""
-        if receipt.status is DrainStatus.DRAINED and receipt.active_processes == 0:
+    async def _close_windows_owner(
+        owner: WindowsOwnedProcess,
+    ) -> tuple[OwnerDrainReceipt, asyncio.CancelledError | None]:
+        close_task = asyncio.create_task(owner.aclose())
+        cancellation: asyncio.CancelledError | None = None
+        while True:
+            try:
+                return await asyncio.shield(close_task), cancellation
+            except asyncio.CancelledError as error:
+                if close_task.cancelled():
+                    raise
+                cancellation = error
+
+    @staticmethod
+    def _require_drained_owner_receipt(
+        receipt: OwnerDrainReceipt,
+        owner: WindowsOwnedProcess,
+        *,
+        cause: BaseException | None = None,
+    ) -> None:
+        """Only an exact-owner zero-accounting receipt completes this command."""
+        if (
+            receipt.owner == owner.owner
+            and receipt.status is DrainStatus.DRAINED
+            and receipt.active_processes == 0
+        ):
             return
-        # A root exit, root kill, or numeric PID says nothing about descendants.
-        # Only zero accounting from this retained private Job proves this command
-        # tree is drained, so timeout and cancellation must fail closed as well.
-        raise OwnerDrainError(receipt)
+        error = OwnerDrainError(receipt)
+        if cause is not None:
+            raise error from cause
+        raise error
 
     async def _run_command(
         self,
@@ -279,10 +311,7 @@ class BuildSession:
                     # recorded its drain receipt. Returning first could report
                     # a timed-out build while a retained Job still has children.
                     receipt = await self._drain_windows_owner(owner, force=True)
-                    try:
-                        self._require_drained_owner_receipt(receipt)
-                    except OwnerDrainError as error:
-                        raise error from timeout_error
+                    self._require_drained_owner_receipt(receipt, owner, cause=timeout_error)
                 else:
                     assert not isinstance(process, WindowsOwnedProcess)
                     process.kill()
@@ -291,7 +320,7 @@ class BuildSession:
             exit_code = await process.wait()
             if owner is not None:
                 receipt = await self._drain_windows_owner(owner, force=False)
-                self._require_drained_owner_receipt(receipt)
+                self._require_drained_owner_receipt(receipt, owner)
             return exit_code, "".join(stdout_lines), "".join(stderr_lines)
 
         except asyncio.CancelledError as cancellation:
@@ -300,19 +329,27 @@ class BuildSession:
                 # operation. Only a zero-accounting receipt permits restoration
                 # of the original cancellation outcome.
                 receipt = await self._drain_windows_owner(owner, force=True)
-                try:
-                    self._require_drained_owner_receipt(receipt)
-                except OwnerDrainError as error:
-                    raise error from cancellation
+                self._require_drained_owner_receipt(receipt, owner, cause=cancellation)
             raise
         finally:
+            pending_error = sys.exc_info()[1]
             self._current_process = None
             if owner is not None:
-                try:
-                    await owner.aclose()
-                finally:
+                receipt, close_cancellation = await self._close_windows_owner(owner)
+                self._last_owner_drain_receipt = receipt
+                if (
+                    receipt.owner == owner.owner
+                    and receipt.status is DrainStatus.DRAINED
+                    and receipt.active_processes == 0
+                ):
                     if self._current_owner is owner:
                         self._current_owner = None
+                elif not isinstance(pending_error, OwnerDrainError):
+                    self._require_drained_owner_receipt(receipt, owner)
+                if close_cancellation is not None and not isinstance(
+                    pending_error, OwnerDrainError
+                ):
+                    raise close_cancellation
 
     def _is_file_lock_error(self, stdout: str, stderr: str) -> bool:
         """Check if build failed due to file lock errors.
@@ -413,12 +450,22 @@ class BuildSession:
         Raises:
             BuildError: If build fails critically
         """
-        async with self._lock:
+        async with self._admit_build():
             self._cancel_requested = False
             self._set_state(BuildState.BUILDING)
             start_time = time.perf_counter()
-
             try:
+                if self._current_owner is not None:
+                    owner = self._current_owner
+                    receipt = await self._drain_windows_owner(owner, force=True)
+                    self._require_drained_owner_receipt(receipt, owner)
+                    receipt, close_cancellation = await self._close_windows_owner(owner)
+                    self._last_owner_drain_receipt = receipt
+                    self._require_drained_owner_receipt(receipt, owner)
+                    self._current_owner = None
+                    if close_cancellation is not None:
+                        raise close_cancellation
+
                 # Validate project path
                 validated_path = self._policy.validate_project_path(project_path)
 
@@ -532,9 +579,10 @@ class BuildSession:
 
         self._cancel_requested = True
 
-        if self._current_owner is not None:
-            receipt = await self._drain_windows_owner(self._current_owner, force=True)
-            self._require_drained_owner_receipt(receipt)
+        owner = self._current_owner
+        if owner is not None:
+            receipt = await self._drain_windows_owner(owner, force=True)
+            self._require_drained_owner_receipt(receipt, owner)
         elif not _IS_WINDOWS and self._current_process is not None:
             assert not isinstance(self._current_process, WindowsOwnedProcess)
             try:

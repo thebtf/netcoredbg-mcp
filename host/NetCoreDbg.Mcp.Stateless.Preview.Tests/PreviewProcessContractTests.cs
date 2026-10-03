@@ -5,12 +5,21 @@ using System.Text.Json.Nodes;
 using NetCoreDbg.Mcp.CodeSearch.Core;
 using ModelContextProtocol.Protocol;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace NetCoreDbg.Mcp.Stateless.Preview.Tests;
 
 public sealed class PreviewProcessContractTests
 {
     private const string ToolName = "find_code_symbol";
+    private static readonly TimeSpan StartupObservationTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan PostValidationExitTimeout = TimeSpan.FromSeconds(2);
+    private readonly ITestOutputHelper _output;
+
+    public PreviewProcessContractTests(ITestOutputHelper output)
+    {
+        _output = output;
+    }
 
     [Fact]
     public async Task Discover_IsSupportedAsTheLiteralFirstFreshProcessRequest()
@@ -116,27 +125,90 @@ public sealed class PreviewProcessContractTests
             new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = new JsonObject { ["name"] = " ", ["version"] = "1.0" }, [MetaKeys.ClientCapabilities] = new JsonObject() } },
             new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = new JsonObject { ["name"] = "client", ["version"] = " " }, [MetaKeys.ClientCapabilities] = new JsonObject() } },
         };
+        // Allow test-runner scheduling headroom; this is not a product response deadline.
+        var observationTimeout = StartupObservationTimeout;
 
-        foreach (var parameters in malformedRequests)
+        for (var caseIndex = 0; caseIndex < malformedRequests.Length; caseIndex++)
         {
-            await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
-            await driver.SendRequestAsync("tools/list", parameters, new RequestId($"malformed-meta-{Guid.NewGuid():N}"));
-
-            var response = await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2));
-            if (response is null)
+            var parameters = malformedRequests[caseIndex];
+            var identity = $"malformed-meta-{caseIndex}: {parameters?.ToJsonString() ?? "<null>"}";
+            using var process = PreviewOutputPathResolver.StartDirect("--project", PreviewRepositoryLayout.FixtureRoot);
+            var stderr = process.StandardError.ReadToEndAsync();
+            var responseTimedOut = false;
+            var exitedBeforeCleanup = false;
+            string? responseLine = null;
+            try
             {
-                Assert.True(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
+                var request = new JsonRpcRequest
+                {
+                    Id = new RequestId($"malformed-meta-{caseIndex}"),
+                    Method = "tools/list",
+                    Params = parameters?.DeepClone(),
+                };
+                await process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(request, McpJsonUtilities.DefaultOptions));
+                await process.StandardInput.FlushAsync();
+                using var deadline = new CancellationTokenSource(observationTimeout);
+                try
+                {
+                    responseLine = await process.StandardOutput.ReadLineAsync(deadline.Token);
+                }
+                catch (OperationCanceledException) when (deadline.IsCancellationRequested)
+                {
+                    responseTimedOut = true;
+                }
+
+                if (responseLine is null && !responseTimedOut)
+                {
+                    try
+                    {
+                        await process.WaitForExitAsync().WaitAsync(observationTimeout);
+                        exitedBeforeCleanup = true;
+                    }
+                    catch (TimeoutException)
+                    {
+                        // Keep the pre-cleanup exit observation for the assertion.
+                    }
+                }
+            }
+            finally
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                    await process.WaitForExitAsync();
+                }
+            }
+
+            var remainingOutput = await process.StandardOutput.ReadToEndAsync();
+            Assert.False(responseTimedOut, $"{identity}; process {process.Id} emitted no complete response or EOF within 10s; remaining stdout={remainingOutput}; stderr={await stderr}");
+            if (responseLine is null)
+            {
+                Assert.True(exitedBeforeCleanup, $"{identity}; process {process.Id} closed stdout but did not exit within 10s with stdin open; stderr={await stderr}");
+                Assert.True(remainingOutput.Length == 0, $"{identity}; unexpected stdout after close: {remainingOutput}");
                 continue;
             }
 
-            Assert.IsType<JsonRpcError>(response);
+            var response = JsonNode.Parse(responseLine)!.AsObject();
+            Assert.Equal($"malformed-meta-{caseIndex}", response["id"]!.GetValue<string>());
+            Assert.True(response["error"] is JsonObject, $"{identity}; expected a JSON-RPC error or silent close, got: {responseLine}; stderr={await stderr}");
+            Assert.False(response.ContainsKey("result"), $"{identity}; request was dispatched: {responseLine}");
+            Assert.True(remainingOutput.Length == 0, $"{identity}; unexpected stdout after JSON-RPC error: {remainingOutput}");
         }
     }
 
     [Fact]
     public async Task MissingMetadataPrecedesMalformedToolArguments()
     {
-        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+        var readyName = $"Local\\preview-metadata-ready-{Guid.NewGuid():N}";
+        using var ready = new EventWaitHandle(false, EventResetMode.ManualReset, readyName);
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(
+            PreviewRepositoryLayout.FixtureRoot,
+            environment: new Dictionary<string, string?>
+            {
+                ["DOTNET_STARTUP_HOOKS"] = typeof(StartupHook).Assembly.Location,
+                [StartupHook.HostReadyEnvironmentVariable] = readyName,
+            });
+        Assert.True(ready.WaitOne(StartupObservationTimeout), "Generic host did not finish startup before the literal-first request.");
         await driver.SendRequestAsync(
             "tools/call",
             new JsonObject { ["name"] = ToolName, ["arguments"] = new JsonObject() },
@@ -144,6 +216,87 @@ public sealed class PreviewProcessContractTests
 
         Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2)));
         Assert.True(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public async Task ColdStartBeyondClosureDeadlinePreservesMissingMetadataRefusal()
+    {
+        var barrierName = $"Local\\preview-cold-closure-{Guid.NewGuid():N}";
+        using var started = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-started");
+        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-release");
+        using var ready = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-ready");
+        var connection = PreviewMcpProcessDriver.StartRawAsync(
+            PreviewRepositoryLayout.FixtureRoot,
+            environment: new Dictionary<string, string?>
+            {
+                ["DOTNET_STARTUP_HOOKS"] = typeof(StartupHook).Assembly.Location,
+                [StartupHook.StartupBarrierEnvironmentVariable] = barrierName,
+                [StartupHook.HostReadyEnvironmentVariable] = barrierName + "-ready",
+            });
+        try
+        {
+            Assert.True(started.WaitOne(StartupObservationTimeout), "CLR child did not enter its pre-Main barrier.");
+            await using var driver = await connection.WaitAsync(StartupObservationTimeout);
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            await Task.Delay(TimeSpan.FromMilliseconds(4500));
+            Assert.False(ready.WaitOne(TimeSpan.Zero), "Host-ready observation completed while Main was held.");
+            Assert.False(release.WaitOne(TimeSpan.Zero));
+            _output.WriteLine($"{clock.ElapsedMilliseconds}ms: Main still held beyond the old 2s+2s observation; no wire request sent before host readiness.");
+
+            release.Set();
+            Assert.True(ready.WaitOne(StartupObservationTimeout), "Generic host did not finish startup after pre-Main release.");
+            await driver.SendRequestAsync(
+                "tools/call",
+                new JsonObject { ["name"] = ToolName, ["arguments"] = new JsonObject() },
+                new RequestId("missing-meta-invalid-arguments"));
+            Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2)));
+            Assert.True(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
+            _output.WriteLine($"{clock.ElapsedMilliseconds}ms: after actual host readiness, literal-first missing-metadata request silently closed at unchanged 2s checks.");
+        }
+        finally
+        {
+            release.Set();
+        }
+    }
+
+    [Fact]
+    public async Task MissingMetadataClosureDeadlineAfterHostReadinessStillRefusesAHeldExit()
+    {
+        var barrierName = $"Local\\preview-metadata-exit-{Guid.NewGuid():N}";
+        using var ready = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-ready");
+        using var started = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-started");
+        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-release");
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(
+            PreviewRepositoryLayout.FixtureRoot,
+            environment: new Dictionary<string, string?>
+            {
+                ["DOTNET_STARTUP_HOOKS"] = typeof(StartupHook).Assembly.Location,
+                [StartupHook.HostReadyEnvironmentVariable] = barrierName + "-ready",
+                [StartupHook.ExitBarrierEnvironmentVariable] = barrierName,
+            });
+        try
+        {
+            Assert.True(ready.WaitOne(StartupObservationTimeout), "Generic host did not finish startup before the literal-first request.");
+            await driver.SendRequestAsync(
+                "tools/call",
+                new JsonObject { ["name"] = ToolName, ["arguments"] = new JsonObject() },
+                new RequestId("missing-meta-invalid-arguments"));
+            Assert.True(started.WaitOne(StartupObservationTimeout), "Refused request did not reach the controlled ProcessExit hold.");
+            Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2)));
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            Assert.False(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
+            Assert.False(release.WaitOne(TimeSpan.Zero));
+            Assert.True(clock.Elapsed < StartupObservationTimeout, "Closure wait inherited the startup observation budget.");
+            _output.WriteLine($"{clock.ElapsedMilliseconds}ms: after host readiness, held ProcessExit still fails the unchanged 2s closure observation.");
+
+            release.Set();
+            Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2)));
+            Assert.True(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
+        }
+        finally
+        {
+            release.Set();
+        }
     }
 
     [Fact]
@@ -698,10 +851,73 @@ public sealed class PreviewProcessContractTests
     public async Task LegacyInitializeIsMethodNotFound()
     {
         await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+        await driver.WaitForStartupAsync(StartupObservationTimeout);
 
-        var response = await driver.SendAsync("initialize", new JsonObject(), new RequestId("legacy-initialize"));
+        var id = new RequestId("legacy-initialize");
+        var error = Assert.IsType<JsonRpcError>(await driver.SendAsync("initialize", new JsonObject(), id));
 
-        Assert.Equal(-32601, Assert.IsType<JsonRpcError>(response).Error.Code);
+        Assert.Equal(id, error.Id);
+        Assert.Equal(-32601, error.Error.Code);
+        Assert.Equal("Method not found", error.Error.Message);
+        Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromMilliseconds(250)));
+    }
+
+    [Fact]
+    public async Task ColdStartBeyondResponseDeadlinePreservesLegacyMethodNotFound()
+    {
+        var barrierName = $"Local\\preview-cold-response-{Guid.NewGuid():N}";
+        using var started = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-started");
+        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-release");
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var connection = PreviewMcpProcessDriver.StartRawAsync(
+            PreviewRepositoryLayout.FixtureRoot,
+            environment: new Dictionary<string, string?>
+            {
+                ["DOTNET_STARTUP_HOOKS"] = typeof(StartupHook).Assembly.Location,
+                [StartupHook.StartupBarrierEnvironmentVariable] = barrierName,
+            });
+        try
+        {
+            Assert.True(started.WaitOne(StartupObservationTimeout), "CLR child did not enter its pre-Main barrier.");
+            await using var driver = await connection.WaitAsync(StartupObservationTimeout);
+            _output.WriteLine($"{clock.ElapsedMilliseconds}ms: ConnectAsync returned while pre-Main release is unset.");
+            var startup = driver.WaitForStartupAsync(StartupObservationTimeout);
+            await Task.Delay(TimeSpan.FromSeconds(6));
+            Assert.False(startup.IsCompleted, "Discovery completed while Main was held before startup.");
+            _output.WriteLine($"{clock.ElapsedMilliseconds}ms: releasing pre-Main barrier; startup admission is still pending beyond 5s.");
+            release.Set();
+            await startup;
+            var id = new RequestId("cold-legacy-initialize");
+            var error = Assert.IsType<JsonRpcError>(await driver.SendAsync("initialize", new JsonObject(), id));
+            Assert.Equal(id, error.Id);
+            Assert.Equal(-32601, error.Error.Code);
+            Assert.Equal("Method not found", error.Error.Message);
+            Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromMilliseconds(250)));
+            _output.WriteLine($"{clock.ElapsedMilliseconds}ms: after release, exact-ID -32601 received with no extra message.");
+        }
+        finally
+        {
+            release.Set();
+        }
+    }
+
+    [Fact]
+    public async Task ResponseDeadlineAfterReadinessStillExpiresForAbsentCorrelatedResponse()
+    {
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+        await driver.WaitForStartupAsync(StartupObservationTimeout);
+        await driver.SendRequestAsync(
+            "server/discover",
+            new JsonObject { ["_meta"] = PreviewMcpProcessDriver.CurrentMeta() },
+            new RequestId("different-response"));
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => driver.TryReadResponseAsync(
+            new RequestId("deliberately-absent-response"), StartupObservationTimeout));
+
+        Assert.True(clock.Elapsed < StartupObservationTimeout, "Response wait inherited the startup observation budget.");
+        _output.WriteLine($"{clock.ElapsedMilliseconds}ms: no same-ID response after readiness still cancels at the unchanged 5s deadline.");
+        AssertCatalog(RequireResult(await driver.ListToolsAsync(new RequestId("after-response-timeout"))));
     }
 
     [Fact]
@@ -767,14 +983,116 @@ public sealed class PreviewProcessContractTests
             arguments = ["--project", arguments[0]];
         }
 
-        using var process = PreviewOutputPathResolver.StartDirect(arguments);
-        var standardOutput = process.StandardOutput.ReadToEndAsync();
-        var standardError = process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        await AssertInvalidLaunchAsync(PreviewRepositoryLayout.Root, arguments);
+    }
 
-        Assert.Equal(64, process.ExitCode);
-        Assert.Equal("", await standardOutput);
-        Assert.Equal("PREVIEW_ROOT_INVALID\n", await standardError);
+    [Theory]
+    [InlineData("--project")]
+    [InlineData("--project", ".")]
+    public async Task InvalidLaunchBeforeValidationBeyondTwoSecondsPreservesTheClosedRefusal(params string[] arguments)
+    {
+        var barrierName = $"Local\\preview-startup-{Guid.NewGuid():N}";
+        using var started = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-started");
+        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-release");
+        using var process = PreviewOutputPathResolver.StartDirectIn(
+            PreviewRepositoryLayout.FixtureRoot,
+            new Dictionary<string, string?>
+            {
+                ["DOTNET_STARTUP_HOOKS"] = typeof(StartupHook).Assembly.Location,
+                [StartupHook.StartupBarrierEnvironmentVariable] = barrierName,
+            },
+            arguments);
+        _ = process.SafeHandle;
+        var observation = AssertInvalidLaunchAsync(process);
+        try
+        {
+            Assert.True(started.WaitOne(StartupObservationTimeout), "CLR child did not enter its pre-Main barrier.");
+            await Task.Delay(TimeSpan.FromMilliseconds(2500));
+            var exitedBeforeValidation = process.HasExited;
+            release.Set();
+            await observation;
+
+            Assert.False(exitedBeforeValidation);
+            Assert.True(process.HasExited);
+            _output.WriteLine($"process {process.Id}: pre-Main held 2500ms; exit=64; exact stderr; zero stdout; retained handle signaled.");
+        }
+        finally
+        {
+            release.Set();
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+        }
+    }
+
+    [Fact]
+    public async Task InvalidLaunchAfterValidationStillTimesOutAndCleansUpTheActualChild()
+    {
+        var barrierName = $"Local\\preview-exit-{Guid.NewGuid():N}";
+        using var started = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-started");
+        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-release");
+        using var process = PreviewOutputPathResolver.StartDirectIn(
+            PreviewRepositoryLayout.Root,
+            new Dictionary<string, string?>
+            {
+                ["DOTNET_STARTUP_HOOKS"] = typeof(StartupHook).Assembly.Location,
+                [StartupHook.ExitBarrierEnvironmentVariable] = barrierName,
+            },
+            "--project");
+        _ = process.SafeHandle;
+        var observation = AssertInvalidLaunchAsync(process);
+        try
+        {
+            Assert.True(started.WaitOne(StartupObservationTimeout), "CLR child did not reach ProcessExit after validation.");
+            await Assert.ThrowsAsync<TimeoutException>(() => observation);
+            Assert.True(process.HasExited);
+            _output.WriteLine($"process {process.Id}: actual validation emitted; held ProcessExit refused by 2s exit observation; retained handle signaled after tree kill.");
+        }
+        finally
+        {
+            release.Set();
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+        }
+    }
+
+    [Fact]
+    public async Task InvalidLaunchWithoutValidationStillTimesOutAndCleansUpTheActualChild()
+    {
+        var barrierName = $"Local\\preview-no-validation-{Guid.NewGuid():N}";
+        using var started = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-started");
+        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-release");
+        using var process = PreviewOutputPathResolver.StartDirectIn(
+            PreviewRepositoryLayout.Root,
+            new Dictionary<string, string?>
+            {
+                ["DOTNET_STARTUP_HOOKS"] = typeof(StartupHook).Assembly.Location,
+                [StartupHook.StartupBarrierEnvironmentVariable] = barrierName,
+            },
+            "--project");
+        _ = process.SafeHandle;
+        var observation = AssertInvalidLaunchAsync(process);
+        try
+        {
+            Assert.True(started.WaitOne(StartupObservationTimeout), "CLR child did not enter its pre-Main barrier.");
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => observation);
+            Assert.True(process.HasExited);
+            _output.WriteLine($"process {process.Id}: no validation within 10s startup observation; retained handle signaled after tree kill.");
+        }
+        finally
+        {
+            release.Set();
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+        }
     }
 
     [Fact]
@@ -1022,12 +1340,27 @@ public sealed class PreviewProcessContractTests
 
     private static async Task AssertInvalidLaunchAsync(string workingDirectory, params string[] arguments)
     {
-        using var process = PreviewOutputPathResolver.StartDirectIn(workingDirectory, arguments);
+        using var process = PreviewOutputPathResolver.StartDirectIn(workingDirectory, null, arguments);
+        await AssertInvalidLaunchAsync(process);
+    }
+
+    private static async Task AssertInvalidLaunchAsync(System.Diagnostics.Process process)
+    {
         var standardOutput = process.StandardOutput.ReadToEndAsync();
-        var standardError = process.StandardError.ReadToEndAsync();
+        var expectedValidation = "PREVIEW_ROOT_INVALID\n"u8.ToArray();
+        var observedValidation = new byte[expectedValidation.Length];
         try
         {
-            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(2));
+            using (var startupObservation = new CancellationTokenSource(StartupObservationTimeout))
+            {
+                await process.StandardError.BaseStream.ReadExactlyAsync(observedValidation, startupObservation.Token);
+            }
+            Assert.Equal(expectedValidation, observedValidation);
+            await process.WaitForExitAsync().WaitAsync(PostValidationExitTimeout);
+
+            Assert.Equal(64, process.ExitCode);
+            Assert.Equal("", await standardOutput);
+            Assert.Equal("", await process.StandardError.ReadToEndAsync());
         }
         finally
         {
@@ -1037,10 +1370,6 @@ public sealed class PreviewProcessContractTests
                 await process.WaitForExitAsync();
             }
         }
-
-        Assert.Equal(64, process.ExitCode);
-        Assert.Equal("", await standardOutput);
-        Assert.Equal("PREVIEW_ROOT_INVALID\n", await standardError);
     }
 
     private static bool TryCreateSymbolicLink(Action create)

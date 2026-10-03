@@ -6,6 +6,7 @@ using ModelContextProtocol.Protocol;
 using NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter;
 using NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace NetCoreDbg.Mcp.Stateless.Tests.NativeScene;
 
@@ -19,6 +20,9 @@ public sealed class NativeSceneVisualEvidenceTests
     private static readonly ImmutableArray<string> CandidateIdentityFailureCodes = ImmutableArray.Create(
         "CANDIDATE_MISMATCH",
         "OBSERVER_UNAVAILABLE");
+    private readonly ITestOutputHelper _output;
+
+    public NativeSceneVisualEvidenceTests(ITestOutputHelper output) => _output = output;
 
     [Fact]
     public async Task BoundControlledSession_CapturesCompactLosslessVisualEvidenceAndReconstructsArtifact()
@@ -146,11 +150,15 @@ public sealed class NativeSceneVisualEvidenceTests
 
         var artifactRoot = Path.Combine(RepositoryLayout.ScratchRoot, $"native-scene-visual-staging-{Guid.NewGuid():N}");
         Directory.CreateDirectory(artifactRoot);
+        var barrierName = $"Local\\native-scene-revalidation-{Guid.NewGuid():N}";
+        using var revalidationStarted = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-started");
+        using var revalidationRelease = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-release");
         try
         {
             await using (var driver = await StartWindowedDescendantDriverAsync(
                              publishSecondWindowedDescendantAfterRelease: true,
-                             artifactRoot: artifactRoot))
+                             artifactRoot: artifactRoot,
+                             revalidationBarrier: barrierName))
             {
                 var debugSessionId = await StartDebugAsync(driver, "visual-post-stage-identity-start");
                 var originalCandidate = Object((await CallToolAsync(
@@ -166,16 +174,39 @@ public sealed class NativeSceneVisualEvidenceTests
                     VisualCaptureArguments(debugSessionId, originalCandidate),
                     "visual-post-stage-identity-capture",
                     isError: true);
-                await WaitForStagedArtifactAsync(artifactRoot);
+                try
+                {
+                    await WaitForRevalidationAsync(revalidationStarted, captureTask);
+                    var stagedPath = Assert.Single(Directory.EnumerateFiles(artifactRoot, "*", SearchOption.AllDirectories));
+                    Assert.Equal("staging", Path.GetFileName(Path.GetDirectoryName(stagedPath)));
+                    var stagedPng = await File.ReadAllBytesAsync(stagedPath);
+                    Assert.Equal(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }, stagedPng.Take(8));
+                    _output.WriteLine($"Held post-stage revalidation; staged PNG bytes={stagedPng.Length}; no committed artifact.");
 
-                _ = await driver.PublishSecondWindowedDescendantAsync();
-                var failedCapture = await captureTask;
-                var error = failedCapture.StructuredContent;
+                    _ = await driver.PublishSecondWindowedDescendantAsync();
+                    var identityBarrier = await CallToolAsync(
+                        driver,
+                        "get_threads",
+                        new JsonObject { ["debugSessionId"] = debugSessionId },
+                        "visual-post-stage-identity-reader-barrier",
+                        isError: false);
+                    Assert.Equal("threads_success", Text(identityBarrier.StructuredContent["kind"]));
+                    _output.WriteLine("Second identity event reader-ordered before releasing revalidation.");
+                    revalidationRelease.Set();
+                    var error = (await captureTask).StructuredContent;
 
-                AssertSchemaValid("capture_visual_evidence", error);
-                Assert.Equal("tool_error", Text(error["kind"]));
-                Assert.Equal("CANDIDATE_MISMATCH", Text(error["code"]));
-                Assert.Empty(Directory.EnumerateFiles(artifactRoot, "*", SearchOption.AllDirectories));
+                    AssertSchemaValid("capture_visual_evidence", error);
+                    Assert.Equal("tool_error", Text(error["kind"]));
+                    Assert.Equal("CANDIDATE_MISMATCH", Text(error["code"]));
+                    Assert.DoesNotContain(EnumeratePropertyNames(error), name => name is
+                        "artifactId" or "artifacts" or "captureId" or "rasterCaptureId" or "byteLength" or "sha256" or "dataBase64" or "path" or "root");
+                    Assert.Empty(Directory.EnumerateFiles(artifactRoot, "*", SearchOption.AllDirectories));
+                    _output.WriteLine("Capture returned CANDIDATE_MISMATCH; staging aborted; no persisted files.");
+                }
+                finally
+                {
+                    revalidationRelease.Set();
+                }
 
             }
 
@@ -199,9 +230,13 @@ public sealed class NativeSceneVisualEvidenceTests
 
                 AssertSchemaValid("capture_visual_evidence", manifest);
                 AssertCompactManifest(retry.Result, manifest, retryArguments, retryCandidate);
-                AssertLosslessDescriptor(
-                    manifest,
-                    Assert.Single(Array(manifest["artifacts"]).Select(Object), artifact => Text(artifact["mediaType"]) == "image/png"));
+                var descriptor = Assert.Single(Array(manifest["artifacts"]).Select(Object), artifact => Text(artifact["mediaType"]) == "image/png");
+                AssertLosslessDescriptor(manifest, descriptor);
+                var chunks = await ReadArtifactAsync(retryDriver, retrySessionId, descriptor);
+                var reconstructed = chunks.SelectMany(static chunk => chunk.Bytes).ToArray();
+                Assert.Equal(Integer(descriptor["byteLength"]), reconstructed.Length);
+                Assert.Equal(Text(descriptor["sha256"]), Convert.ToHexString(SHA256.HashData(reconstructed)).ToLowerInvariant());
+                _output.WriteLine($"Later capture COMPLETE; reconstructed lossless PNG bytes={reconstructed.Length}; SHA-256 matched.");
             }
 
         }
@@ -264,19 +299,29 @@ public sealed class NativeSceneVisualEvidenceTests
             "artifactId" or "artifacts" or "captureId" or "byteLength" or "dataBase64" or "path" or "root");
     }
 
-    private static async Task WaitForStagedArtifactAsync(string artifactRoot)
+    private async Task WaitForRevalidationAsync(EventWaitHandle startedEvent, Task<ToolCall> captureTask)
     {
-        for (var attempt = 0; attempt < 80; attempt++)
+        var started = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var registration = ThreadPool.RegisterWaitForSingleObject(
+            startedEvent,
+            (_, _) => started.TrySetResult(true),
+            state: null,
+            millisecondsTimeOutInterval: Timeout.Infinite,
+            executeOnlyOnce: true);
+        try
         {
-            if (Directory.EnumerateFiles(artifactRoot, "*", SearchOption.AllDirectories).Any())
+            if (await Task.WhenAny(started.Task, captureTask) == captureTask)
             {
-                return;
+                var outcome = await captureTask;
+                Assert.Fail($"Capture completed before held post-stage revalidation: {outcome.StructuredContent.ToJsonString()}.");
             }
 
-            await Task.Delay(TimeSpan.FromMilliseconds(25));
+            await started.Task;
         }
-
-        Assert.NotEmpty(Directory.EnumerateFiles(artifactRoot, "*", SearchOption.AllDirectories));
+        finally
+        {
+            registration.Unregister(null);
+        }
     }
 
 
@@ -375,17 +420,31 @@ public sealed class NativeSceneVisualEvidenceTests
 
     private static Task<ModernMcpProcessDriver> StartWindowedDescendantDriverAsync(
         bool publishSecondWindowedDescendantAfterRelease = false,
-        string? artifactRoot = null) =>
+        string? artifactRoot = null,
+        string? revalidationBarrier = null) =>
         ModernMcpProcessDriver.StartAsync(
             new ModernMcpStartOptions(
                 FixtureConfiguration: new FixtureConfiguration(
                     SpawnWindowedDescendant: true,
-                    PublishSecondWindowedDescendantAfterRelease: publishSecondWindowedDescendantAfterRelease),
+                    PublishSecondWindowedDescendantAfterRelease: publishSecondWindowedDescendantAfterRelease,
+                    LifecycleMode: revalidationBarrier is null ? "default" : "all-stop",
+                    WindowedDescendantExecutablePath: revalidationBarrier is null ? null : ResolveProbeFixtureExecutablePath(),
+                    WindowedDescendantArguments: revalidationBarrier is null ? null :
+                    ["--native-scene-probe-test-harness", "--native-scene-probe-mode=stable"]),
                 AdditionalEnvironment: new Dictionary<string, string?>
                 {
                     ["FLAUI_BRIDGE_PATH"] = ResolveBridgeAssemblyPath(),
                     ["NETCOREDBG_MCP_ARTIFACT_ROOT"] = artifactRoot,
+                    ["NETCOREDBG_NATIVE_SCENE_PROBE_FIXTURE_REVALIDATION_BARRIER"] = revalidationBarrier,
                 }));
+
+    private static string ResolveProbeFixtureExecutablePath()
+    {
+        var configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent?.Name
+            ?? throw new InvalidOperationException("Test output configuration is absent.");
+        return Path.Combine(RepositoryLayout.Root, "host", "NetCoreDbg.Mcp.Stateless.Tests", "Fixtures",
+            "NativeSceneProbe.WpfFixture", "bin", configuration, "net8.0-windows", "NativeSceneProbe.WpfFixture.exe");
+    }
 
 
     private static string ResolveBridgeAssemblyPath()

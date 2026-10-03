@@ -28,6 +28,7 @@ namespace NetCoreDbg.Mcp.Host.Tests;
 /// use <see cref="SequentialOrderObserverTransport"/>, a test-only transport wrapper built the same way,
 /// to observe the downstream leg reliably.
 /// </summary>
+[Collection("SequentialRealPythonProcess")]
 public sealed class ProgressLoggingRelayTests
 {
     private const string SlowProbeToolName = "probe";
@@ -832,7 +833,7 @@ public sealed class ProgressLoggingRelayTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => slowCall.AsTask());
         using (var cancellationObserved = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
         {
-            while (state.IsAuthorized(queuedAuthorization))
+            while (ProgressLoggingRelay.NotificationState.IsAuthorized(queuedAuthorization))
             {
                 await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationObserved.Token);
             }

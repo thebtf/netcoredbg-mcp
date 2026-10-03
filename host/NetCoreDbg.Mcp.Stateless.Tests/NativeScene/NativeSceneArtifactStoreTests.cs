@@ -379,6 +379,55 @@ public sealed class NativeSceneArtifactStoreTests
     }
 
     [Fact]
+    public async Task ExpiredArtifactWithDeletionDenied_RemainsChargedUntilSubsequentPruneOnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 8, 19, 12, 0, 0, TimeSpan.Zero));
+        var payload = Payload(97);
+        await using var scope = ArtifactStoreTestScope.Create(clock, maximumArtifactCount: 2, maximumAggregateBytes: payload.Length);
+        var sessionId = Capability("locked-expiry-session");
+        var descriptor = AssertCommitted(await (await scope.Store.StageAsync(
+            sessionId,
+            Capability("locked-expiry-capture"),
+            MediaType,
+            ArtifactSchemaVersion,
+            payload)).CommitAsync());
+        var payloadPath = FindCommittedPayloadPath(scope.Root, payload);
+
+        using (var deletionBlocker = new FileStream(payloadPath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            clock.Advance(TimeSpan.FromHours(4) + TimeSpan.FromTicks(1));
+
+            AssertFixedNotFound(await scope.Store.ReadAsync(sessionId, descriptor.ArtifactId, offset: 0, maxBytes: 1));
+            Assert.Equal(0, scope.Store.CommittedArtifactMetadataCount);
+            Assert.True(File.Exists(payloadPath));
+            Assert.Equal(payload.Length, deletionBlocker.Length);
+
+            await Assert.ThrowsAsync<IOException>(() => scope.Store.StageAsync(
+                sessionId,
+                Capability("locked-expiry-capacity-rejection"),
+                MediaType,
+                ArtifactSchemaVersion,
+                payload));
+            Assert.Equal(0, scope.Store.StagedArtifactMetadataCount);
+            Assert.True(File.Exists(payloadPath));
+        }
+
+        var replacement = await scope.Store.StageAsync(
+            sessionId,
+            Capability("locked-expiry-replacement"),
+            MediaType,
+            ArtifactSchemaVersion,
+            payload);
+        Assert.False(File.Exists(payloadPath));
+        _ = AssertCommitted(await replacement.CommitAsync());
+    }
+
+    [Fact]
     public async Task PerStoreArtifactCountBudget_RejectsFurtherStagingWithoutPublishingAdditionalMetadata()
     {
         await using var scope = ArtifactStoreTestScope.Create(maximumArtifactCount: 2, maximumAggregateBytes: 1_024);
@@ -485,6 +534,29 @@ public sealed class NativeSceneArtifactStoreTests
         AssertCommitFailed(await staged.CommitAsync());
         AssertFixedNotFound(await scope.Store.ReadAsync(sessionId, staged.ArtifactId, offset: 0, maxBytes: 1));
         Assert.Empty(Directory.EnumerateFiles(scope.Root, "*", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public async Task CommitFailure_ExistingDestinationRetainsItsBytes()
+    {
+        await using var scope = ArtifactStoreTestScope.Create();
+        var sessionId = Capability("occupied-destination-session");
+        var stagedPayload = Payload(151);
+        var existingPayload = Payload(153);
+        var staged = await scope.Store.StageAsync(
+            sessionId,
+            Capability("occupied-destination-capture"),
+            MediaType,
+            ArtifactSchemaVersion,
+            stagedPayload);
+        var stagedPath = FindCommittedPayloadPath(scope.Root, stagedPayload);
+        var sessionRoot = Path.GetDirectoryName(Path.GetDirectoryName(stagedPath)!)!;
+        var destinationPath = Path.Combine(sessionRoot, "committed", staged.ArtifactId);
+        File.WriteAllBytes(destinationPath, existingPayload);
+
+        AssertCommitFailed(await staged.CommitAsync());
+        Assert.Equal(existingPayload, File.ReadAllBytes(destinationPath));
+        AssertFixedNotFound(await scope.Store.ReadAsync(sessionId, staged.ArtifactId, offset: 0, maxBytes: 1));
     }
 
     [Fact]

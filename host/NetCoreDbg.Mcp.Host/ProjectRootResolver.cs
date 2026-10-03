@@ -39,18 +39,19 @@ internal sealed class ProjectRootResolver
         string? explicitProjectPath = null;
         var projectFromCwd = false;
 
-        for (var index = 0; index < arguments.Count; index++)
+        var index = 0;
+        while (index < arguments.Count)
         {
-            var argument = arguments[index];
+            var argument = arguments[index++];
             if (string.Equals(argument, "--project-from-cwd", StringComparison.Ordinal))
             {
                 projectFromCwd = true;
                 continue;
             }
 
-            if (string.Equals(argument, "--project", StringComparison.Ordinal) && index + 1 < arguments.Count)
+            if (string.Equals(argument, "--project", StringComparison.Ordinal) && index < arguments.Count)
             {
-                explicitProjectPath = arguments[++index];
+                explicitProjectPath = arguments[index++];
                 continue;
             }
 
@@ -86,9 +87,17 @@ internal sealed class ProjectRootResolver
             return clientRoot;
         }
 
-        return _projectFromCwd
-            ? FindDotNetProjectRoot(_startupCwd)
-            : TryGetDirectory(_startupCwd, out var startupRoot) ? startupRoot : null;
+        if (_projectFromCwd)
+        {
+            return FindDotNetProjectRoot(_startupCwd);
+        }
+
+        if (TryGetDirectory(_startupCwd, out var startupRoot))
+        {
+            return startupRoot;
+        }
+
+        return null;
     }
 
     private bool HasOperatorScope() =>

@@ -7,14 +7,32 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from ....ui.hover import HOVER_SUCCESS_FIELDS, validate_hover_evidence, validate_hover_timeout
+from ...runtime_smoke_schema import (
+    _OPERATION_UI_GRID_CLICK_ROW,
+    _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
+    _OPERATION_UI_GRID_ENSURE_VISIBLE,
+    _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
+    _OPERATION_UI_GRID_SELECT_ROW,
+)
 from ..blocked import build_blocked
 from ..timing import sleep_ms
-from .ui_drag import handle_ui_drag
+from .ui_drag import _NON_NEGATIVE_INTEGER, handle_ui_drag
 from .ui_key_sequence import handle_ui_key_sequence
 from .ui_text_input import handle_ui_text_type_replace_selection
 
 ActionHandler = Callable[[dict[str, Any], "ActionContext"], Awaitable[dict[str, Any]]]
 _INTEGER_TEXT = re.compile(r"-?\d+")
+_HOVER_ADAPTER = "ui.hover"
+_GRID_ASSERT_RANGE_ADAPTER = "ui.grid.assert_range"
+_GRID_GET_STATE_ADAPTER = "ui.grid.get_state"
+_CLICK_ADAPTER = "ui.click"
+_INVOKE_ADAPTER = "ui.invoke"
+_GRID_ENSURE_VISIBLE_NON_OBJECT_REASON = "grid ensure-visible returned non-object result"
+_GET_PROPERTY_ADAPTER = "ui.get_property"
+_INVALID_GRID_SELECTION_INDEX_REASON = "invalid grid selection index"
+_INVALID_WAIT_DURATION_REASON = "invalid wait duration"
+_NON_NEGATIVE_INTEGER_MILLISECONDS = "non-negative integer milliseconds"
+_WAIT_IDLE_MS_NEXT_STEP = "Provide wait idle_ms as a non-negative integer."
 
 _ACTION_REGISTRY: dict[str, ActionHandler] = {}
 
@@ -36,10 +54,10 @@ _REQUIRES_GLOBAL_INPUT_ACTION_KINDS = frozenset(
         "ui.click_verified",
         "ui.double_click_verified",
         "ui.drag",
-        "ui.hover",
-        "ui.grid.click_row",
-        "ui.grid.double_click_row",
-        "ui.grid.right_click_row",
+        _HOVER_ADAPTER,
+        _OPERATION_UI_GRID_CLICK_ROW,
+        _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
+        _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
         "ui.key_sequence",
         "ui.right_click_verified",
         "ui.text.type_replace_selection",
@@ -50,14 +68,14 @@ _BACKGROUND_SAFE_ACTION_KINDS = frozenset(
         "noop",
         "ui.noop",
         "wait",
-        "ui.grid.assert_range",
-        "ui.grid.ensure_visible",
-        "ui.grid.get_state",
+        _GRID_ASSERT_RANGE_ADAPTER,
+        _OPERATION_UI_GRID_ENSURE_VISIBLE,
+        _GRID_GET_STATE_ADAPTER,
         "ui.grid.select",
-        "ui.grid.select_row",
+        _OPERATION_UI_GRID_SELECT_ROW,
     }
 )
-_APP_DISPATCH_SAFE_ACTION_KINDS = frozenset({"ui.click", "ui.invoke"})
+_APP_DISPATCH_SAFE_ACTION_KINDS = frozenset({_CLICK_ADAPTER, _INVOKE_ADAPTER})
 
 
 @dataclass(frozen=True)
@@ -249,10 +267,14 @@ def _attach_input_policy_evidence(
     enriched.setdefault("input_policy", dict(input_policy))
     enriched.setdefault("input_classification", input_classification)
     enriched.setdefault("physical_fallback_attempted", False)
-    enriched.setdefault("operator_isolated", input_classification in {
-        _INPUT_CLASSIFICATION_BACKGROUND_SAFE,
-        _INPUT_CLASSIFICATION_APP_DISPATCH_SAFE,
-    })
+    enriched.setdefault(
+        "operator_isolated",
+        input_classification
+        in {
+            _INPUT_CLASSIFICATION_BACKGROUND_SAFE,
+            _INPUT_CLASSIFICATION_APP_DISPATCH_SAFE,
+        },
+    )
     return enriched
 
 
@@ -265,7 +287,7 @@ async def _handle_ui_invoke(action: dict[str, Any], context: ActionContext) -> d
             "duration_ms": context.elapsed_ms(started),
             "route": "invoke",
         }
-    result = await context.call_adapter("ui.invoke", selector=selector)
+    result = await context.call_adapter(_INVOKE_ADAPTER, selector=selector)
     return _action_result(
         status=result.get("status", "PASS"),
         route="invoke",
@@ -304,7 +326,7 @@ async def _handle_ui_hover(action: dict[str, Any], context: ActionContext) -> di
         }
 
     result = await context.call_adapter(
-        "ui.hover",
+        _HOVER_ADAPTER,
         selector=selector,
         timeout_ms=timeout_ms,
     )
@@ -323,7 +345,7 @@ async def _handle_ui_hover(action: dict[str, Any], context: ActionContext) -> di
             output[field] = validated[field]
         output["runner_input"] = {
             "source": "runner_injected",
-            "kind": "ui.hover",
+            "kind": _HOVER_ADAPTER,
             "window": "action",
             "route": "hover",
         }
@@ -339,7 +361,7 @@ async def _handle_ui_click(action: dict[str, Any], context: ActionContext) -> di
             "duration_ms": context.elapsed_ms(started),
             "route": "click",
         }
-    result = await context.call_adapter("ui.click", selector=selector)
+    result = await context.call_adapter(_CLICK_ADAPTER, selector=selector)
     return _action_result(
         status=result.get("status", "PASS"),
         route="click",
@@ -469,7 +491,7 @@ async def _handle_ui_click_verified(
         action,
         context,
         route="click_verified",
-        adapter="ui.click",
+        adapter=_CLICK_ADAPTER,
         default_reason="failed to click verified target",
     )
 
@@ -577,7 +599,7 @@ async def _handle_ui_grid_get_state(
     rows = _mapping_from_action(action, "rows")
     columns = _list_from_action(action, "columns")
     result = await context.call_adapter(
-        "ui.grid.get_state",
+        _GRID_GET_STATE_ADAPTER,
         selector=selector,
         identity=identity,
         rows=rows,
@@ -615,7 +637,7 @@ async def _handle_ui_grid_assert_range(
             "route": "grid_assert_range",
         }
     result = await context.call_adapter(
-        "ui.grid.assert_range",
+        _GRID_ASSERT_RANGE_ADAPTER,
         selector=selector,
         start_index=start_index,
         end_index=end_index,
@@ -659,7 +681,7 @@ async def _handle_ui_grid_select_row(
     ensure_visible_result: dict[str, Any] | None = None
     if ensure_visible:
         ensure_visible_result = await context.call_adapter(
-            "ui.grid.ensure_visible",
+            _OPERATION_UI_GRID_ENSURE_VISIBLE,
             selector=selector,
             row=row,
             identity=identity,
@@ -670,7 +692,7 @@ async def _handle_ui_grid_select_row(
         )
         non_object_failure = _object_only_adapter_failure(
             ensure_visible_result,
-            reason="grid ensure-visible returned non-object result",
+            reason=_GRID_ENSURE_VISIBLE_NON_OBJECT_REASON,
             raw_key="ensure_visible_result",
         )
         if non_object_failure is not None:
@@ -712,7 +734,7 @@ async def _handle_ui_grid_select_row(
                 result=result,
             )
     result = await context.call_adapter(
-        "ui.grid.select_row",
+        _OPERATION_UI_GRID_SELECT_ROW,
         selector=selector,
         row=row,
         identity=identity,
@@ -784,7 +806,7 @@ async def _handle_ui_grid_ensure_visible(
     max_scrolls = action.get("max_scrolls")
     scroll_settle_ms = action.get("scroll_settle_ms")
     result = await context.call_adapter(
-        "ui.grid.ensure_visible",
+        _OPERATION_UI_GRID_ENSURE_VISIBLE,
         selector=selector,
         row=row,
         identity=identity,
@@ -837,7 +859,7 @@ async def _handle_ui_grid_click_row(
     ensure_visible_result: dict[str, Any] | None = None
     if ensure_visible:
         ensure_visible_result = await context.call_adapter(
-            "ui.grid.ensure_visible",
+            _OPERATION_UI_GRID_ENSURE_VISIBLE,
             selector=selector,
             row=row,
             identity=identity,
@@ -848,7 +870,7 @@ async def _handle_ui_grid_click_row(
         )
         non_object_failure = _object_only_adapter_failure(
             ensure_visible_result,
-            reason="grid ensure-visible returned non-object result",
+            reason=_GRID_ENSURE_VISIBLE_NON_OBJECT_REASON,
             raw_key="ensure_visible_result",
         )
         if non_object_failure is not None:
@@ -892,7 +914,7 @@ async def _handle_ui_grid_click_row(
                 result=result,
             )
     result = await context.call_adapter(
-        "ui.grid.click_row",
+        _OPERATION_UI_GRID_CLICK_ROW,
         selector=selector,
         row=row,
         identity=identity,
@@ -971,7 +993,7 @@ async def _handle_ui_grid_right_click_row(
     ensure_visible_result: dict[str, Any] | None = None
     if ensure_visible:
         ensure_visible_result = await context.call_adapter(
-            "ui.grid.ensure_visible",
+            _OPERATION_UI_GRID_ENSURE_VISIBLE,
             selector=selector,
             row=row,
             identity=identity,
@@ -982,7 +1004,7 @@ async def _handle_ui_grid_right_click_row(
         )
         non_object_failure = _object_only_adapter_failure(
             ensure_visible_result,
-            reason="grid ensure-visible returned non-object result",
+            reason=_GRID_ENSURE_VISIBLE_NON_OBJECT_REASON,
             raw_key="ensure_visible_result",
         )
         if non_object_failure is not None:
@@ -1026,7 +1048,7 @@ async def _handle_ui_grid_right_click_row(
                 result=result,
             )
     result = await context.call_adapter(
-        "ui.grid.right_click_row",
+        _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
         selector=selector,
         row=row,
         identity=identity,
@@ -1105,7 +1127,7 @@ async def _handle_ui_grid_double_click_row(
     ensure_visible_result: dict[str, Any] | None = None
     if ensure_visible:
         ensure_visible_result = await context.call_adapter(
-            "ui.grid.ensure_visible",
+            _OPERATION_UI_GRID_ENSURE_VISIBLE,
             selector=selector,
             row=row,
             identity=identity,
@@ -1116,7 +1138,7 @@ async def _handle_ui_grid_double_click_row(
         )
         non_object_failure = _object_only_adapter_failure(
             ensure_visible_result,
-            reason="grid ensure-visible returned non-object result",
+            reason=_GRID_ENSURE_VISIBLE_NON_OBJECT_REASON,
             raw_key="ensure_visible_result",
         )
         if non_object_failure is not None:
@@ -1160,7 +1182,7 @@ async def _handle_ui_grid_double_click_row(
                 result=result,
             )
     result = await context.call_adapter(
-        "ui.grid.double_click_row",
+        _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
         selector=selector,
         row=row,
         identity=identity,
@@ -1371,11 +1393,11 @@ async def _verify_postcondition(
     route: str,
 ) -> dict[str, Any]:
     op_name = str(postcondition.get("op") or "")
-    if op_name != "ui.get_property":
+    if op_name != _GET_PROPERTY_ADAPTER:
         blocked = build_blocked(
             reason="unsupported click postcondition",
             requested={"op": op_name},
-            accepted={"op": "ui.get_property"},
+            accepted={"op": _GET_PROPERTY_ADAPTER},
             next_step="Use a bounded property postcondition for ui.click_verified.",
         )
         return {
@@ -1388,7 +1410,7 @@ async def _verify_postcondition(
     property_name = str(postcondition["property"])
     expected = postcondition["equals"]
     result = await context.call_adapter(
-        "ui.get_property",
+        _GET_PROPERTY_ADAPTER,
         selector=selector,
         property_name=property_name,
     )
@@ -1494,11 +1516,11 @@ def _postcondition_from_action(
         return {}, {"status": "BLOCKED", **blocked}
     postcondition = dict(raw_postcondition)
     op_name = str(postcondition.get("op") or "")
-    if op_name != "ui.get_property":
+    if op_name != _GET_PROPERTY_ADAPTER:
         blocked = build_blocked(
             reason="unsupported click postcondition",
             requested={"op": op_name},
-            accepted={"op": "ui.get_property"},
+            accepted={"op": _GET_PROPERTY_ADAPTER},
             next_step="Use a bounded property postcondition for ui.click_verified.",
         )
         return {}, {"status": "BLOCKED", **blocked}
@@ -1674,9 +1696,9 @@ def _indices_from_action(action: dict[str, Any]) -> tuple[list[int], dict[str, A
     for raw_index in raw_indices:
         if isinstance(raw_index, bool):
             blocked = build_blocked(
-                reason="invalid grid selection index",
+                reason=_INVALID_GRID_SELECTION_INDEX_REASON,
                 requested={"index": raw_index},
-                accepted={"index": "non-negative integer"},
+                accepted={"index": _NON_NEGATIVE_INTEGER},
                 next_step="Use integer row indices.",
             )
             return [], {"status": "BLOCKED", **blocked}
@@ -1686,17 +1708,17 @@ def _indices_from_action(action: dict[str, Any]) -> tuple[list[int], dict[str, A
             index = int(raw_index)
         else:
             blocked = build_blocked(
-                reason="invalid grid selection index",
+                reason=_INVALID_GRID_SELECTION_INDEX_REASON,
                 requested={"index": raw_index},
-                accepted={"index": "non-negative integer"},
+                accepted={"index": _NON_NEGATIVE_INTEGER},
                 next_step="Use integer row indices.",
             )
             return [], {"status": "BLOCKED", **blocked}
         if index < 0:
             blocked = build_blocked(
-                reason="invalid grid selection index",
+                reason=_INVALID_GRID_SELECTION_INDEX_REASON,
                 requested={"index": raw_index},
-                accepted={"index": "non-negative integer"},
+                accepted={"index": _NON_NEGATIVE_INTEGER},
                 next_step="Use non-negative row indices.",
             )
             return [], {"status": "BLOCKED", **blocked}
@@ -1798,7 +1820,7 @@ def _invalid_grid_row_index(raw_index: Any) -> dict[str, Any]:
     blocked = build_blocked(
         reason="invalid grid row index",
         requested={"index": raw_index},
-        accepted={"index": "non-negative integer"},
+        accepted={"index": _NON_NEGATIVE_INTEGER},
         next_step="Use an integer row index for visible DataGrid row actions.",
     )
     return {"status": "BLOCKED", **blocked}
@@ -1808,7 +1830,7 @@ def _invalid_grid_range_index(field_name: str, value: Any) -> dict[str, Any]:
     blocked = build_blocked(
         reason="invalid grid range index",
         requested={field_name: value},
-        accepted={field_name: "non-negative integer"},
+        accepted={field_name: _NON_NEGATIVE_INTEGER},
         next_step=f"Use a non-negative integer for {field_name}.",
     )
     return {"status": "BLOCKED", **blocked}
@@ -1830,28 +1852,28 @@ def _idle_ms_from_action(action: dict[str, Any]) -> tuple[int, dict[str, Any] | 
         isinstance(raw_idle_ms, float) and not raw_idle_ms.is_integer()
     ):
         blocked = build_blocked(
-            reason="invalid wait duration",
+            reason=_INVALID_WAIT_DURATION_REASON,
             requested={"idle_ms": raw_idle_ms},
-            accepted={"idle_ms": "non-negative integer milliseconds"},
-            next_step="Provide wait idle_ms as a non-negative integer.",
+            accepted={"idle_ms": _NON_NEGATIVE_INTEGER_MILLISECONDS},
+            next_step=_WAIT_IDLE_MS_NEXT_STEP,
         )
         return 0, {"status": "BLOCKED", **blocked}
     try:
         idle_ms = int(raw_idle_ms)
     except (TypeError, ValueError):
         blocked = build_blocked(
-            reason="invalid wait duration",
+            reason=_INVALID_WAIT_DURATION_REASON,
             requested={"idle_ms": raw_idle_ms},
-            accepted={"idle_ms": "non-negative integer milliseconds"},
-            next_step="Provide wait idle_ms as a non-negative integer.",
+            accepted={"idle_ms": _NON_NEGATIVE_INTEGER_MILLISECONDS},
+            next_step=_WAIT_IDLE_MS_NEXT_STEP,
         )
         return 0, {"status": "BLOCKED", **blocked}
     if idle_ms < 0:
         blocked = build_blocked(
-            reason="invalid wait duration",
+            reason=_INVALID_WAIT_DURATION_REASON,
             requested={"idle_ms": raw_idle_ms},
-            accepted={"idle_ms": "non-negative integer milliseconds"},
-            next_step="Provide wait idle_ms as a non-negative integer.",
+            accepted={"idle_ms": _NON_NEGATIVE_INTEGER_MILLISECONDS},
+            next_step=_WAIT_IDLE_MS_NEXT_STEP,
         )
         return 0, {"status": "BLOCKED", **blocked}
     return idle_ms, None
@@ -1880,22 +1902,22 @@ def _selector_from_action(
 
 register_action("noop", _handle_noop)
 register_action("ui.noop", _handle_noop)
-register_action("ui.click", _handle_ui_click)
+register_action(_CLICK_ADAPTER, _handle_ui_click)
 register_action("ui.click_verified", _handle_ui_click_verified)
 register_action("ui.right_click_verified", _handle_ui_right_click_verified)
 register_action("ui.double_click_verified", _handle_ui_double_click_verified)
 register_action("ui.drag", handle_ui_drag)
-register_action("ui.hover", _handle_ui_hover)
-register_action("ui.grid.get_state", _handle_ui_grid_get_state)
-register_action("ui.grid.assert_range", _handle_ui_grid_assert_range)
-register_action("ui.grid.ensure_visible", _handle_ui_grid_ensure_visible)
-register_action("ui.grid.select_row", _handle_ui_grid_select_row)
-register_action("ui.grid.click_row", _handle_ui_grid_click_row)
-register_action("ui.grid.right_click_row", _handle_ui_grid_right_click_row)
-register_action("ui.grid.double_click_row", _handle_ui_grid_double_click_row)
+register_action(_HOVER_ADAPTER, _handle_ui_hover)
+register_action(_GRID_GET_STATE_ADAPTER, _handle_ui_grid_get_state)
+register_action(_GRID_ASSERT_RANGE_ADAPTER, _handle_ui_grid_assert_range)
+register_action(_OPERATION_UI_GRID_ENSURE_VISIBLE, _handle_ui_grid_ensure_visible)
+register_action(_OPERATION_UI_GRID_SELECT_ROW, _handle_ui_grid_select_row)
+register_action(_OPERATION_UI_GRID_CLICK_ROW, _handle_ui_grid_click_row)
+register_action(_OPERATION_UI_GRID_RIGHT_CLICK_ROW, _handle_ui_grid_right_click_row)
+register_action(_OPERATION_UI_GRID_DOUBLE_CLICK_ROW, _handle_ui_grid_double_click_row)
 register_action("ui.grid.select", _handle_ui_grid_select)
 register_action("ui.input.ensure_target", _handle_ui_input_ensure_target)
-register_action("ui.invoke", _handle_ui_invoke)
+register_action(_INVOKE_ADAPTER, _handle_ui_invoke)
 register_action("ui.key_sequence", handle_ui_key_sequence)
 register_action("ui.text.type_replace_selection", handle_ui_text_type_replace_selection)
 register_action("wait", _handle_wait)

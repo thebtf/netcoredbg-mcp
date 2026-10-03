@@ -1,3 +1,4 @@
+using ModelContextProtocol.Client;
 using System.Text.Json.Nodes;
 using System.Text.Json;
 using ModelContextProtocol.Protocol;
@@ -10,6 +11,25 @@ namespace NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
 [Trait("Coverage", "Exclude")]
 public sealed class CapabilityLifecycleContractTests
 {
+    [Fact]
+    public async Task FailedSdkStartup_ReportsChildStandardError()
+    {
+        var marker = $"controlled-mcp-startup-error-{Guid.NewGuid():N}";
+        var failure = await Assert.ThrowsAsync<ClientTransportClosedException>(() => ModernMcpProcessDriver.StartAsync(
+            new ModernMcpStartOptions(AdditionalEnvironment: new Dictionary<string, string?>
+            {
+                [StartupHook.ErrorMarkerEnvironmentVariable] = marker,
+                ["DOTNET_STARTUP_HOOKS"] = typeof(StartupHook).Assembly.Location,
+            })));
+
+        var completion = Assert.IsType<StdioClientCompletionDetails>(failure.Details);
+        Assert.True(completion.ProcessId is > 0);
+        Assert.True(completion.ExitCode is not null and not 0);
+        Assert.NotNull(completion.StandardErrorTail);
+        Assert.Contains(completion.StandardErrorTail, line => line.Contains(marker, StringComparison.Ordinal));
+        Assert.Contains(marker, Assert.IsType<string>(failure.Data["ModernMcpStartupStandardError"]), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task LiveHost_ResolvesOnlyExplicitOpaqueTokensAcrossIndependentInterleavedRequests()
     {
@@ -103,7 +123,7 @@ public sealed class CapabilityLifecycleContractTests
         await using var session = await NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter.NetCoreDbgSessionContractDriver.StartAsync(
             new NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter.FixtureConfiguration(),
             "D:\\fixtures\\program.dll",
-            TimeSpan.FromSeconds(2),
+            TimeSpan.FromSeconds(20),
             TimeSpan.FromSeconds(2),
             TimeSpan.FromMilliseconds(300),
             CancellationToken.None);

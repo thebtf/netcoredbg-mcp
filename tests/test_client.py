@@ -1814,3 +1814,86 @@ class TestOwnerScopedAdapterRedMatrix:
         assert receipt is not None
         assert receipt.status is DrainStatus.DRAINED
         assert receipt.active_processes == 0
+
+    @pytest.mark.asyncio
+    async def test_failed_finalizer_owner_retries_before_next_admission(self) -> None:
+        """A completed finalizer keeps its owner until a later stop proves drain."""
+
+        class RecoveringOwner(OwnedTestProcess):
+            close_calls = 0
+
+            async def drain_after_grace(
+                self, *, grace_timeout: float, force_timeout: float
+            ) -> OwnerDrainReceipt:
+                del grace_timeout, force_timeout
+                return OwnerDrainReceipt(self.owner, DrainStatus.FAILED, True, None, 1)
+
+            async def aclose(self) -> OwnerDrainReceipt:
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    return OwnerDrainReceipt(self.owner, DrainStatus.FAILED, True, None, 1)
+                self._process.kill()
+                self._process.child_alive = False
+                return OwnerDrainReceipt(self.owner, DrainStatus.DRAINED, True, self.returncode, 0)
+
+        process = TreeProcess(pid=43013, stdout=BlockingStream(), stderr=BlockingStream())
+        owner = RecoveringOwner(process, "failed-then-drained")
+        next_process = TreeProcess(pid=43014, stdout=BlockingStream(), stderr=BlockingStream())
+        next_owner = OwnedTestProcess(next_process, "next-generation")
+        records: list[DapTransportTerminal] = []
+        client = DAPClient("/path/to/netcoredbg")
+        client.set_transport_terminal_handler(records.append)
+
+        with patch(
+            "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch",
+            side_effect=[owner, next_owner],
+        ) as launch:
+            await client.start(generation="failed-then-drained")
+            failed = await client.stop(expected_owner=owner.owner)
+            assert failed is not None and failed.status is DrainStatus.FAILED
+            assert owner.close_calls == 1
+            assert len(records) == 1
+            with pytest.raises(RuntimeError, match="Retained adapter owner did not drain"):
+                await client.start(generation="next-generation")
+            launch.assert_awaited_once()
+
+            recovered = await client.stop(expected_owner=owner.owner)
+            assert recovered is not None and recovered.status is DrainStatus.DRAINED
+            assert recovered.active_processes == 0
+            assert client._run is not None and client._run.owner_drain_receipt == recovered
+            assert len(records) == 1
+            assert await client.stop(expected_owner=owner.owner) == recovered
+            assert owner.close_calls == 2
+
+            assert await client.start(generation="next-generation") == "next-generation"
+            assert launch.await_count == 2
+            await client.stop(expected_owner=next_owner.owner)
+        assert len(records) == 2
+
+    @pytest.mark.asyncio
+    async def test_previous_owner_stop_does_not_finalize_new_generation(self) -> None:
+        """A stale owner cannot retry or publish a terminal for the next owner."""
+        first_process = TreeProcess(pid=43015, stdout=BlockingStream(), stderr=BlockingStream())
+        second_process = TreeProcess(pid=43016, stdout=BlockingStream(), stderr=BlockingStream())
+        first_owner = OwnedTestProcess(first_process, "first")
+        second_owner = OwnedTestProcess(second_process, "second")
+        records: list[DapTransportTerminal] = []
+        client = DAPClient("/path/to/netcoredbg")
+        client.set_transport_terminal_handler(records.append)
+
+        with patch(
+            "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch",
+            side_effect=[first_owner, second_owner],
+        ):
+            await client.start(generation="first")
+            await client.stop(expected_owner=first_owner.owner)
+            await client.start(generation="second")
+            current = client._run
+            stale = await client.stop(expected_owner=first_owner.owner)
+            assert stale is not None and stale.status is DrainStatus.STALE
+            assert current is client._run
+            assert current is not None and current.finalizer_task is None
+            assert second_process.child_alive is True
+            assert len(records) == 1
+            await client.stop(expected_owner=second_owner.owner)
+        assert [record.generation for record in records] == ["first", "second"]

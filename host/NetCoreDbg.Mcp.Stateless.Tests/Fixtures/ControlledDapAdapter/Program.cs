@@ -1,11 +1,38 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Unicode;
+
+if (args.Length == 2 && string.Equals(args[0], "--controlled-bridge-tree", StringComparison.Ordinal))
+{
+    var childInfo = new ProcessStartInfo
+    {
+        FileName = Environment.ProcessPath ?? throw new InvalidOperationException("Process path is unavailable."),
+        UseShellExecute = false,
+        CreateNoWindow = true,
+    };
+    if (string.Equals(Path.GetFileNameWithoutExtension(childInfo.FileName), "dotnet", StringComparison.OrdinalIgnoreCase))
+    {
+        childInfo.ArgumentList.Add(System.Reflection.Assembly.GetExecutingAssembly().Location);
+    }
+
+    childInfo.ArgumentList.Add("--controlled-dap-descendant");
+    using var child = Process.Start(childInfo) ?? throw new InvalidOperationException("Controlled bridge child did not start.");
+    using var ready = new System.IO.Pipes.NamedPipeServerStream(args[1], System.IO.Pipes.PipeDirection.Out,
+        1, System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+    await ready.WaitForConnectionAsync();
+    var pid = new byte[sizeof(int)];
+    System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(pid, child.Id);
+    await ready.WriteAsync(pid);
+    await ready.FlushAsync();
+    await Task.Delay(Timeout.InfiniteTimeSpan);
+    return;
+}
 
 if (args.Length == 1 && string.Equals(args[0], "--controlled-dap-descendant", StringComparison.Ordinal))
 {
@@ -338,11 +365,11 @@ internal sealed class ControlledDapAdapter
     private static readonly TimeSpan InitializeGateWindow = TimeSpan.FromMilliseconds(75);
     private static readonly TimeSpan GracefulReleaseTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ConfigurationDoneCapabilityDeltaReleaseTimeout = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan SecondWindowedDescendantReleaseTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DescendantCleanupTimeout = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan LifecycleEventsCompletionTimeout = TimeSpan.FromSeconds(1);
     private Task<DapFrame?>? _nextRequest;
     private int _outgoingSequence = 1;
+    private string _startupStage = "adapter-handler";
 
     public ControlledDapAdapter(AdapterOptions options, string transcriptPath, string[] processArguments)
     {
@@ -374,6 +401,31 @@ internal sealed class ControlledDapAdapter
                     request.Document.Dispose();
                 }
             }
+        }
+        catch (Exception exception)
+        {
+            if (Environment.GetEnvironmentVariable("NETCOREDBG_MCP_PRIVATE_START_DIAGNOSTICS") is { Length: > 0 })
+            {
+                try
+                {
+                    await RecordAsync(new
+                    {
+                        kind = "private-start-failure",
+                        stage = _startupStage,
+                        exceptionClass = ExceptionClass(exception),
+                        baseExceptionClass = ExceptionClass(exception.GetBaseException()),
+                        hresult = exception.HResult,
+                        descendantExited = _descendant?.HasExited,
+                        descendantExitCode = _descendant is { HasExited: true } exited ? exited.ExitCode : (int?)null,
+                    }, CancellationToken.None);
+                }
+                catch (Exception)
+                {
+                    // Diagnostic failure must not replace the controlled adapter failure.
+                }
+            }
+
+            throw;
         }
         finally
         {
@@ -435,6 +487,19 @@ internal sealed class ControlledDapAdapter
         }
     }
 
+    private static string ExceptionClass(Exception exception) => exception switch
+    {
+        OperationCanceledException => nameof(OperationCanceledException),
+        TimeoutException => nameof(TimeoutException),
+        System.ComponentModel.Win32Exception => "Win32Exception",
+        InvalidDataException => nameof(InvalidDataException),
+        IOException => nameof(IOException),
+        UnauthorizedAccessException => nameof(UnauthorizedAccessException),
+        ArgumentException => nameof(ArgumentException),
+        InvalidOperationException => nameof(InvalidOperationException),
+        _ => "OtherException",
+    };
+
     private async Task<bool> HandleRequestAsync(DapFrame request, CancellationToken cancellationToken)
     {
         var root = request.Document.RootElement;
@@ -458,6 +523,7 @@ internal sealed class ControlledDapAdapter
         switch (command)
         {
             case "initialize":
+                _startupStage = "initialize";
                 if (!_options.EnableTerminateAfterInitialization)
                 {
                     await WriteEventAsync(
@@ -527,6 +593,7 @@ internal sealed class ControlledDapAdapter
                 await ProcessDeferredRequestsAsync(cancellationToken);
                 return false;
             case "launch":
+                _startupStage = "launch";
                 SetLaunchEnvironment(root);
                 _pendingLaunch = request.Detach();
                 await RecordAsync(new { kind = "launch-gated", sequence }, cancellationToken);
@@ -536,6 +603,7 @@ internal sealed class ControlledDapAdapter
                 }
                 return false;
             case "configurationDone":
+                _startupStage = "configuration-done";
                 await WriteResponseAsync(sequence, command, body: null, cancellationToken);
                 await RecordAsync(new { kind = "configuration-done", sequence }, cancellationToken);
                 await CompleteLaunchAsync(cancellationToken);
@@ -579,8 +647,15 @@ internal sealed class ControlledDapAdapter
         _pendingLaunch = null;
         if (_options.SpawnDescendant && _descendant is null)
         {
-            _descendant = StartDescendant(_options.SpawnWindowedDescendant);
+            _startupStage = "descendant-start";
+            using var readiness = CreateWindowedDescendantReadinessPipe(_options.SpawnWindowedDescendant, out var readinessPipeName);
+            _descendant = StartDescendant(_options.SpawnWindowedDescendant, readinessPipeName);
             await RecordAsync(new { kind = "descendant", processId = _descendant.Id }, cancellationToken);
+            if (readiness is not null)
+            {
+                _startupStage = "window-readiness";
+                await WaitForWindowedDescendantReadyAsync(_descendant, readiness, cancellationToken);
+            }
         }
 
         if (_options.DelayLaunchResponseForStartupTimeout)
@@ -588,8 +663,10 @@ internal sealed class ControlledDapAdapter
             await Task.Delay(TimeSpan.FromMilliseconds(1100), cancellationToken);
         }
 
+        _startupStage = "launch-response";
         await WriteResponseAsync(launch.Document.RootElement.GetProperty("seq").GetInt32(), "launch", body: null, cancellationToken);
         await RecordAsync(new { kind = "launch-released" }, cancellationToken);
+        _startupStage = "running";
         if (_options.ExitAfterLaunchResponse)
         {
             await RecordAsync(new { kind = "unexpected-root-exit" }, cancellationToken);
@@ -612,6 +689,68 @@ internal sealed class ControlledDapAdapter
         launch.Document.Dispose();
     }
 
+    private static NamedPipeServerStream? CreateWindowedDescendantReadinessPipe(bool windowed, out string? pipeName)
+    {
+        pipeName = null;
+        if (!OperatingSystem.IsWindows() || !windowed ||
+            string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE")))
+        {
+            return null;
+        }
+
+        pipeName = $"controlled-dap-window-ready-{Guid.NewGuid():N}";
+        return new NamedPipeServerStream(pipeName, PipeDirection.In,
+            1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+    }
+
+    private static async Task WaitForWindowedDescendantReadyAsync(Process descendant, NamedPipeServerStream readiness, CancellationToken cancellationToken)
+    {
+        using var wait = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var exited = descendant.WaitForExitAsync(wait.Token);
+        var ready = ReadReadyWindowAsync(readiness, wait.Token);
+        try
+        {
+            if (await Task.WhenAny(ready, exited) == exited)
+            {
+                await exited;
+                throw new InvalidOperationException("Configured windowed descendant exited before loader/window readiness.");
+            }
+
+            var window = await ready;
+            cancellationToken.ThrowIfCancellationRequested();
+            descendant.Refresh();
+            if (descendant.HasExited)
+            {
+                throw new InvalidOperationException("Configured windowed descendant exited before loader/window readiness.");
+            }
+
+            if (window == 0 || descendant.MainWindowHandle.ToInt64() != window || string.IsNullOrWhiteSpace(descendant.MainModule?.FileName))
+            {
+                throw new InvalidDataException("Configured windowed descendant reported an unusable ready window.");
+            }
+        }
+        finally
+        {
+            wait.Cancel();
+            try
+            {
+                await Task.WhenAll(ready, exited);
+            }
+            catch (Exception) when (wait.IsCancellationRequested)
+            {
+                // Both waits are observed; preserve the readiness/exit/cancellation outcome selected above.
+            }
+        }
+
+        static async Task<long> ReadReadyWindowAsync(NamedPipeServerStream pipe, CancellationToken token)
+        {
+            await pipe.WaitForConnectionAsync(token);
+            var handle = new byte[sizeof(long)];
+            await pipe.ReadExactlyAsync(handle, token);
+            return System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(handle);
+        }
+    }
+
     private async Task EmitLifecycleEventsAsync(CancellationToken cancellationToken)
     {
         if (_descendant is { } descendant)
@@ -631,7 +770,12 @@ internal sealed class ControlledDapAdapter
         if (_options.PublishSecondWindowedDescendantAfterRelease)
         {
             await WaitForSecondWindowedDescendantReleaseAsync(cancellationToken);
-            _secondDescendant = StartDescendant(windowed: true);
+            using var readiness = CreateWindowedDescendantReadinessPipe(windowed: true, out var readinessPipeName);
+            _secondDescendant = StartDescendant(windowed: true, readinessPipeName);
+            if (readiness is not null)
+            {
+                await WaitForWindowedDescendantReadyAsync(_secondDescendant, readiness, cancellationToken);
+            }
             await WriteEventAsync(
                 "process",
                 new
@@ -750,7 +894,7 @@ internal sealed class ControlledDapAdapter
         await RecordAsync(new { kind = "continued-event" }, cancellationToken);
     }
 
-    private Process StartDescendant(bool windowed)
+    private Process StartDescendant(bool windowed, string? readinessPipeName = null)
     {
         var configuredExecutable = windowed
             ? Environment.GetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE")
@@ -767,6 +911,11 @@ internal sealed class ControlledDapAdapter
         {
             startInfo.Environment[name] = value;
         }
+        if (readinessPipeName is not null)
+        {
+            startInfo.Environment["CONTROLLED_DAP_WINDOWED_DESCENDANT_READINESS_PIPE"] = readinessPipeName;
+        }
+
 
 
         if (string.IsNullOrWhiteSpace(configuredExecutable))
@@ -943,11 +1092,9 @@ internal sealed class ControlledDapAdapter
             throw new InvalidOperationException("CONTROLLED_DAP_SECOND_WINDOWED_DESCENDANT_RELEASE is required when the second windowed descendant is held.");
         }
 
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(SecondWindowedDescendantReleaseTimeout);
         while (!File.Exists(_secondWindowedDescendantReleasePath))
         {
-            await Task.Delay(TimeSpan.FromMilliseconds(25), timeout.Token);
+            await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken);
         }
     }
 

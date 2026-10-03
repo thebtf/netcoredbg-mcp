@@ -16,13 +16,18 @@ internal static class NativeSceneContractCatalog
     private const string ManifestPrefix = "NetCoreDbg.Mcp.Stateless.NativeScene.";
     private const string ActiveProtocolVersion = "native-scene-probe/1";
     private const string ActiveSchemaVersion = "native-scene-probe.schema/1";
+    private const string InvalidToolArguments = "INVALID_TOOL_ARGUMENTS";
+    private const string ProbeSchemaFileName = "native-scene-probe.schema.json";
+    private const string ArtifactSchemaFileName = "native-scene-artifact.schema.json";
+    private const string CorpusFileName = "parity-corpus.json";
+    private const string SchemaRejection = "schema_rejection";
 
     private static readonly NativeSceneValidationResult Valid = new(true, null, null);
-    private static readonly NativeSceneValidationResult InvalidRequest = new(false, "INVALID_TOOL_ARGUMENTS", "Native scene request is invalid.");
-    private static readonly NativeSceneValidationResult InvalidResult = new(false, "INVALID_TOOL_ARGUMENTS", "Native scene result is invalid.");
-    private static readonly NativeSceneValidationResult InvalidVersion = new(false, "INVALID_TOOL_ARGUMENTS", "Native scene version syntax is invalid.");
+    private static readonly NativeSceneValidationResult InvalidRequest = new(false, InvalidToolArguments, "Native scene request is invalid.");
+    private static readonly NativeSceneValidationResult InvalidResult = new(false, InvalidToolArguments, "Native scene result is invalid.");
+    private static readonly NativeSceneValidationResult InvalidVersion = new(false, InvalidToolArguments, "Native scene version syntax is invalid.");
     private static readonly NativeSceneValidationResult UnsupportedVersion = new(false, "UNSUPPORTED_PROTOCOL", "Native scene version is unsupported.");
-    private static readonly NativeSceneValidationResult InvalidCorpus = new(false, "INVALID_TOOL_ARGUMENTS", "Native scene corpus is invalid.");
+    private static readonly NativeSceneValidationResult InvalidCorpus = new(false, InvalidToolArguments, "Native scene corpus is invalid.");
     private static readonly ContractState State = LoadState();
 
     internal static ReadOnlyMemory<byte> GetArtifactBytes(string fileName) => State.Artifacts.TryGetValue(fileName, out var artifact)
@@ -103,14 +108,14 @@ internal static class NativeSceneContractCatalog
     {
         var artifacts = new Dictionary<string, ContractArtifact>(StringComparer.Ordinal)
         {
-            ["native-scene-probe.schema.json"] = LoadArtifact("native-scene-probe.schema.json", "f446166f9a1062d3e1a2190327d06c04905e76a1c1f81af16c87572394f90022"),
-            ["native-scene-artifact.schema.json"] = LoadArtifact("native-scene-artifact.schema.json", "07c257c9b5f75c01aa4f4141968c789b045d7c831575343df429075c732f7668"),
-            ["parity-corpus.json"] = LoadArtifact("parity-corpus.json", "90c24f8f9706c207ca3ecf8dee93d1937c16a6be45feac65d812e48853bc4621"),
+            [ProbeSchemaFileName] = LoadArtifact(ProbeSchemaFileName, "f446166f9a1062d3e1a2190327d06c04905e76a1c1f81af16c87572394f90022"),
+            [ArtifactSchemaFileName] = LoadArtifact(ArtifactSchemaFileName, "07c257c9b5f75c01aa4f4141968c789b045d7c831575343df429075c732f7668"),
+            [CorpusFileName] = LoadArtifact(CorpusFileName, "90c24f8f9706c207ca3ecf8dee93d1937c16a6be45feac65d812e48853bc4621"),
         };
 
-        var probeSchema = ParseObject(artifacts["native-scene-probe.schema.json"].Bytes, "native-scene-probe.schema.json");
-        var artifactSchema = ParseObject(artifacts["native-scene-artifact.schema.json"].Bytes, "native-scene-artifact.schema.json");
-        var corpus = ParseObject(artifacts["parity-corpus.json"].Bytes, "parity-corpus.json");
+        var probeSchema = ParseObject(artifacts[ProbeSchemaFileName].Bytes, ProbeSchemaFileName);
+        var artifactSchema = ParseObject(artifacts[ArtifactSchemaFileName].Bytes, ArtifactSchemaFileName);
+        var corpus = ParseObject(artifacts[CorpusFileName].Bytes, CorpusFileName);
         var probeDefinitions = RequiredObject(probeSchema["definitions"]);
         var artifactDefinitions = RequiredObject(artifactSchema["definitions"]);
 
@@ -199,20 +204,7 @@ internal static class NativeSceneContractCatalog
         switch (node)
         {
             case JsonObject objectNode:
-                if (depth > MaxJsonNesting || objectNode.Count > MaxContainerMembers)
-                {
-                    return false;
-                }
-
-                foreach (var property in objectNode)
-                {
-                    if (!HasRuntimeBounds(property.Value, depth + 1))
-                    {
-                        return false;
-                    }
-                }
-
-                return true;
+                return HasObjectRuntimeBounds(objectNode, depth);
             case JsonArray arrayNode:
                 if (depth > MaxJsonNesting || arrayNode.Count > MaxContainerMembers)
                 {
@@ -233,26 +225,30 @@ internal static class NativeSceneContractCatalog
         }
     }
 
+    private static bool HasObjectRuntimeBounds(JsonObject node, int depth)
+    {
+        if (depth > MaxJsonNesting || node.Count > MaxContainerMembers)
+        {
+            return false;
+        }
+
+        foreach (var property in node)
+        {
+            if (!HasRuntimeBounds(property.Value, depth + 1))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static bool HasBoundedStateValues(JsonNode? node)
     {
         switch (node)
         {
             case JsonObject objectNode:
-                foreach (var property in objectNode)
-                {
-                    if ((StringComparer.Ordinal.Equals(property.Key, "selectedState") || StringComparer.Ordinal.Equals(property.Key, "currentState")) &&
-                        property.Value is not null && Encoding.UTF8.GetByteCount(property.Value.ToJsonString()) > MaxInputUtf8Bytes)
-                    {
-                        return false;
-                    }
-
-                    if (!HasBoundedStateValues(property.Value))
-                    {
-                        return false;
-                    }
-                }
-
-                return true;
+                return HasBoundedObjectStateValues(objectNode);
             case JsonArray arrayNode:
                 foreach (var item in arrayNode)
                 {
@@ -266,6 +262,25 @@ internal static class NativeSceneContractCatalog
             default:
                 return true;
         }
+    }
+
+    private static bool HasBoundedObjectStateValues(JsonObject node)
+    {
+        foreach (var property in node)
+        {
+            if ((StringComparer.Ordinal.Equals(property.Key, "selectedState") || StringComparer.Ordinal.Equals(property.Key, "currentState")) &&
+                property.Value is not null && Encoding.UTF8.GetByteCount(property.Value.ToJsonString()) > MaxInputUtf8Bytes)
+            {
+                return false;
+            }
+
+            if (!HasBoundedStateValues(property.Value))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool HasPositiveVersion(string? value, string prefix)
@@ -363,24 +378,31 @@ internal static class NativeSceneContractCatalog
             return false;
         }
 
-        if (caseEntry.TryGetPropertyValue("schemaInvalidVariants", out var variantsNode))
+        return HasApprovedInvalidVariants(state, caseEntry);
+    }
+
+    private static bool HasApprovedInvalidVariants(ContractState state, JsonObject caseEntry)
+    {
+        if (!caseEntry.TryGetPropertyValue("schemaInvalidVariants", out var variantsNode))
         {
-            if (!TryGetArray(variantsNode, out var variants) || variants.Count == 0)
+            return true;
+        }
+
+        if (!TryGetArray(variantsNode, out var variants) || variants.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var variantNode in variants)
+        {
+            if (!TryGetObject(variantNode, out var variant) ||
+                !TryGetString(variant["name"], out _) ||
+                !TryGetObject(variant["expected"], out var variantExpected) ||
+                !TryGetString(variantExpected["classification"], out var variantClassification) ||
+                !StringComparer.Ordinal.Equals(variantClassification, SchemaRejection) ||
+                !ValidateCorpusResponse(state, variant, variant["responseSchema"] ?? caseEntry["responseSchema"], variant["response"]))
             {
                 return false;
-            }
-
-            foreach (var variantNode in variants)
-            {
-                if (!TryGetObject(variantNode, out var variant) ||
-                    !TryGetString(variant["name"], out _) ||
-                    !TryGetObject(variant["expected"], out var variantExpected) ||
-                    !TryGetString(variantExpected["classification"], out var variantClassification) ||
-                    !StringComparer.Ordinal.Equals(variantClassification, "schema_rejection") ||
-                    !ValidateCorpusResponse(state, variant, variant["responseSchema"] ?? caseEntry["responseSchema"], variant["response"]))
-                {
-                    return false;
-                }
             }
         }
 
@@ -401,7 +423,7 @@ internal static class NativeSceneContractCatalog
         }
 
         var valid = new SchemaValidator(state.ProbeDefinitions).Validate(response, definition);
-        return StringComparer.Ordinal.Equals(classification, "schema_rejection") ? !valid : valid;
+        return StringComparer.Ordinal.Equals(classification, SchemaRejection) ? !valid : valid;
     }
 
     private static bool ValidatesRequestShape(ContractState state, string tool, JsonNode instance) =>
@@ -420,21 +442,7 @@ internal static class NativeSceneContractCatalog
         switch (node)
         {
             case JsonObject objectNode:
-                if (objectNode.TryGetPropertyValue("$ref", out var referenceNode) &&
-                    (!TryGetString(referenceNode, out var reference) || !TryResolveDefinition(definitions, reference, out _)))
-                {
-                    return false;
-                }
-
-                foreach (var property in objectNode)
-                {
-                    if (!HasResolvedLocalReferences(property.Value, definitions))
-                    {
-                        return false;
-                    }
-                }
-
-                return true;
+                return HasResolvedObjectReferences(objectNode, definitions);
             case JsonArray arrayNode:
                 foreach (var item in arrayNode)
                 {
@@ -448,6 +456,25 @@ internal static class NativeSceneContractCatalog
             default:
                 return true;
         }
+    }
+
+    private static bool HasResolvedObjectReferences(JsonObject node, JsonObject definitions)
+    {
+        if (node.TryGetPropertyValue("$ref", out var referenceNode) &&
+            (!TryGetString(referenceNode, out var reference) || !TryResolveDefinition(definitions, reference, out _)))
+        {
+            return false;
+        }
+
+        foreach (var property in node)
+        {
+            if (!HasResolvedLocalReferences(property.Value, definitions))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool TryResolveDefinition(JsonObject definitions, string reference, out JsonObject definition)
@@ -519,7 +546,7 @@ internal static class NativeSceneContractCatalog
         StringComparer.Ordinal.Equals(value, "capability_declaration") ||
         StringComparer.Ordinal.Equals(value, "complete_observation") ||
         StringComparer.Ordinal.Equals(value, "qualified_observation") ||
-        StringComparer.Ordinal.Equals(value, "schema_rejection") ||
+        StringComparer.Ordinal.Equals(value, SchemaRejection) ||
         StringComparer.Ordinal.Equals(value, "typed_error");
 
     private static bool TryGetObject(JsonNode? node, out JsonObject value)
@@ -583,13 +610,11 @@ internal static class NativeSceneContractCatalog
                 return false;
             }
 
-            if (schema.TryGetPropertyValue("$ref", out var referenceNode))
+            if (schema.TryGetPropertyValue("$ref", out var referenceNode) &&
+                (!TryGetString(referenceNode, out var reference) || !TryResolveDefinition(_definitions, reference, out var referenceSchema) ||
+                 !Validate(instance, referenceSchema)))
             {
-                if (!TryGetString(referenceNode, out var reference) || !TryResolveDefinition(_definitions, reference, out var referenceSchema) ||
-                    !Validate(instance, referenceSchema))
-                {
-                    return false;
-                }
+                return false;
             }
 
             if (schema.TryGetPropertyValue("type", out var typeNode) && !MatchesType(instance, typeNode))
@@ -597,12 +622,10 @@ internal static class NativeSceneContractCatalog
                 return false;
             }
 
-            if (schema.TryGetPropertyValue("enum", out var enumNode))
+            if (schema.TryGetPropertyValue("enum", out var enumNode) &&
+                (!TryGetArray(enumNode, out var values) || !MatchesEnum(instance, values)))
             {
-                if (!TryGetArray(enumNode, out var values) || !MatchesEnum(instance, values))
-                {
-                    return false;
-                }
+                return false;
             }
 
             if (schema.TryGetPropertyValue("const", out var constant) && !JsonNode.DeepEquals(instance, constant))
@@ -610,6 +633,21 @@ internal static class NativeSceneContractCatalog
                 return false;
             }
 
+            if (!ValidateInstance(instance, schema))
+            {
+                return false;
+            }
+
+            if (!ValidateCombinators(instance, schema))
+            {
+                return false;
+            }
+
+            return ValidateConditional(instance, schema);
+        }
+
+        private bool ValidateInstance(JsonNode? instance, JsonObject schema)
+        {
             if (instance is JsonObject objectNode && !ValidateObject(objectNode, schema))
             {
                 return false;
@@ -631,12 +669,7 @@ internal static class NativeSceneContractCatalog
                 return false;
             }
 
-            if (!ValidateCombinators(instance, schema))
-            {
-                return false;
-            }
-
-            return ValidateConditional(instance, schema);
+            return true;
         }
 
         private bool ValidateObject(JsonObject instance, JsonObject schema)
@@ -653,43 +686,50 @@ internal static class NativeSceneContractCatalog
                 return false;
             }
 
-            if (schema.TryGetPropertyValue("required", out var requiredNode))
+            if (schema.TryGetPropertyValue("required", out var requiredNode) && !HasRequiredProperties(instance, requiredNode))
             {
-                if (!TryGetArray(requiredNode, out var required))
-                {
-                    return false;
-                }
-
-                foreach (var requiredName in required)
-                {
-                    if (!TryGetString(requiredName, out var name) || !instance.ContainsKey(name))
-                    {
-                        return false;
-                    }
-                }
+                return false;
             }
 
             JsonObject? properties = null;
-            if (schema.TryGetPropertyValue("properties", out var propertiesNode))
+            if (schema.TryGetPropertyValue("properties", out var propertiesNode) && !TryGetObject(propertiesNode, out properties))
             {
-                if (!TryGetObject(propertiesNode, out properties))
-                {
-                    return false;
-                }
+                return false;
             }
 
             JsonObject? patternProperties = null;
-            if (schema.TryGetPropertyValue("patternProperties", out var patternPropertiesNode))
+            if (schema.TryGetPropertyValue("patternProperties", out var patternPropertiesNode) &&
+                !TryGetObject(patternPropertiesNode, out patternProperties))
             {
-                if (!TryGetObject(patternPropertiesNode, out patternProperties))
-                {
-                    return false;
-                }
+                return false;
             }
 
             var additionalPropertiesFalse = schema.TryGetPropertyValue("additionalProperties", out var additionalProperties) &&
                                             TryGetBoolean(additionalProperties, out var additionalAllowed) && !additionalAllowed;
 
+            return ValidateObjectProperties(instance, properties, patternProperties, additionalPropertiesFalse);
+        }
+
+        private static bool HasRequiredProperties(JsonObject instance, JsonNode? requiredNode)
+        {
+            if (!TryGetArray(requiredNode, out var required))
+            {
+                return false;
+            }
+
+            foreach (var requiredName in required)
+            {
+                if (!TryGetString(requiredName, out var name) || !instance.ContainsKey(name))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private bool ValidateObjectProperties(JsonObject instance, JsonObject? properties, JsonObject? patternProperties, bool additionalPropertiesFalse)
+        {
             foreach (var property in instance)
             {
                 var matched = false;
@@ -703,28 +743,35 @@ internal static class NativeSceneContractCatalog
                     matched = true;
                 }
 
-                if (patternProperties is not null)
+                if (patternProperties is not null && !ValidatePatternProperties(property.Key, property.Value, patternProperties, ref matched))
                 {
-                    foreach (var patternProperty in patternProperties)
-                    {
-                        if (!Regex.IsMatch(property.Key, patternProperty.Key, RegexOptions.CultureInvariant))
-                        {
-                            continue;
-                        }
-
-                        if (patternProperty.Value is not JsonObject patternSchema || !Validate(property.Value, patternSchema))
-                        {
-                            return false;
-                        }
-
-                        matched = true;
-                    }
+                    return false;
                 }
 
                 if (!matched && additionalPropertiesFalse)
                 {
                     return false;
                 }
+            }
+
+            return true;
+        }
+
+        private bool ValidatePatternProperties(string name, JsonNode? value, JsonObject patternProperties, ref bool matched)
+        {
+            foreach (var patternProperty in patternProperties)
+            {
+                if (!Regex.IsMatch(name, patternProperty.Key, RegexOptions.CultureInvariant))
+                {
+                    continue;
+                }
+
+                if (patternProperty.Value is not JsonObject patternSchema || !Validate(value, patternSchema))
+                {
+                    return false;
+                }
+
+                matched = true;
             }
 
             return true;
@@ -793,7 +840,7 @@ internal static class NativeSceneContractCatalog
             }
         }
 
-        private bool ValidateString(string value, JsonObject schema)
+        private static bool ValidateString(string value, JsonObject schema)
         {
             var length = ScalarLength(value);
             if (schema.TryGetPropertyValue("minLength", out var minLength) &&
@@ -856,53 +903,47 @@ internal static class NativeSceneContractCatalog
 
         private bool ValidateCombinators(JsonNode? instance, JsonObject schema)
         {
-            if (schema.TryGetPropertyValue("allOf", out var allOfNode))
+            if (schema.TryGetPropertyValue("allOf", out var allOfNode) &&
+                (!TryGetArray(allOfNode, out var allOf) || !ValidateAllOf(instance, allOf)))
             {
-                if (!TryGetArray(allOfNode, out var allOf))
-                {
-                    return false;
-                }
-
-                foreach (var branch in allOf)
-                {
-                    if (branch is not JsonObject branchSchema || !Validate(instance, branchSchema))
-                    {
-                        return false;
-                    }
-                }
+                return false;
             }
 
-            if (schema.TryGetPropertyValue("anyOf", out var anyOfNode))
+            if (schema.TryGetPropertyValue("anyOf", out var anyOfNode) &&
+                (!TryGetArray(anyOfNode, out var anyOf) || !anyOf.Any(branch => branch is JsonObject branchSchema && Validate(instance, branchSchema))))
             {
-                if (!TryGetArray(anyOfNode, out var anyOf) || !anyOf.Any(branch => branch is JsonObject branchSchema && Validate(instance, branchSchema)))
-                {
-                    return false;
-                }
+                return false;
             }
 
-            if (schema.TryGetPropertyValue("oneOf", out var oneOfNode))
+            return !schema.TryGetPropertyValue("oneOf", out var oneOfNode) ||
+                   (TryGetArray(oneOfNode, out var oneOf) && ValidateOneOf(instance, oneOf));
+        }
+
+        private bool ValidateAllOf(JsonNode? instance, JsonArray branches)
+        {
+            foreach (var branch in branches)
             {
-                if (!TryGetArray(oneOfNode, out var oneOf))
-                {
-                    return false;
-                }
-
-                var matches = 0;
-                foreach (var branch in oneOf)
-                {
-                    if (branch is JsonObject branchSchema && Validate(instance, branchSchema))
-                    {
-                        matches++;
-                    }
-                }
-
-                if (matches != 1)
+                if (branch is not JsonObject branchSchema || !Validate(instance, branchSchema))
                 {
                     return false;
                 }
             }
 
             return true;
+        }
+
+        private bool ValidateOneOf(JsonNode? instance, JsonArray branches)
+        {
+            var matches = 0;
+            foreach (var branch in branches)
+            {
+                if (branch is JsonObject branchSchema && Validate(instance, branchSchema))
+                {
+                    matches++;
+                }
+            }
+
+            return matches == 1;
         }
 
         private bool ValidateConditional(JsonNode? instance, JsonObject schema)
@@ -1023,8 +1064,14 @@ internal static class NativeSceneContractCatalog
         private static bool TryGetWholeNumber(JsonNode? node, out int value)
         {
             value = 0;
-            return TryGetNumber(node, out var number) && decimal.Truncate(number) == number &&
-                   number is >= int.MinValue and <= int.MaxValue && (value = decimal.ToInt32(number)) == number;
+            if (!TryGetNumber(node, out var number) || decimal.Truncate(number) != number ||
+                number is < int.MinValue or > int.MaxValue)
+            {
+                return false;
+            }
+
+            value = decimal.ToInt32(number);
+            return true;
         }
     }
 }

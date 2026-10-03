@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -106,6 +107,22 @@ def test_keypad_tokens_emit_physical_down_and_up(send_keys, mock_user32, name, v
         assert not flags & 0x0004  # KEYEVENTF_UNICODE
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32" or ctypes.sizeof(ctypes.c_void_p) != 8,
+    reason="64-bit Windows SendInput layout",
+)
+def test_keypad_and_modifier_events_use_native_input_size(send_keys, mock_user32):
+    from netcoredbg_mcp.ui.automation import _press, _release
+
+    send_keys("{NUMPAD1}")
+    _press(0x11)
+    _release(0x11)
+
+    assert mock_user32.SendInput.call_count == 4
+    for call in mock_user32.SendInput.call_args_list:
+        assert call.args[2] == 40  # Win64 INPUT includes the 32-byte MOUSEINPUT union arm.
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
 def test_keypad_events_differ_from_text_digit_and_standard_enter(send_keys, mock_user32):
     keypad_digit = _keyboard_events(send_keys, mock_user32, "{NUMPAD1}")
@@ -143,6 +160,62 @@ def test_unknown_keypad_name_fails_without_sending_an_event(send_keys, mock_user
     with pytest.raises(ValueError, match="Unknown special key"):
         _keyboard_events(send_keys, mock_user32, "{NUMPADNOTAKEY}")
     mock_user32.SendInput.assert_not_called()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
+@pytest.mark.parametrize("sequence", ["^+a", "^+(a)"])
+def test_failed_shift_release_still_attempts_ctrl_release(send_keys, mock_user32, sequence):
+    events = []
+
+    def capture(_count, input_pointer, _size):
+        event = input_pointer._obj
+        key = event._input.ki
+        events.append((event.type, key.wVk, key.dwFlags))
+        return 0 if key.wVk == 0x10 and key.dwFlags & 0x0002 else 1
+
+    mock_user32.SendInput.side_effect = capture
+    ctypes.windll.kernel32.GetLastError.return_value = 5
+
+    with pytest.raises(OSError, match="SendInput failed") as error:
+        send_keys(sequence)
+
+    assert error.value.errno == 5
+    assert events == [
+        (1, 0x11, 0),
+        (1, 0x10, 0),
+        (1, 0x41, 0),
+        (1, 0x41, 0x0002),
+        (1, 0x10, 0x0002),
+        (1, 0x11, 0x0002),
+    ]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
+def test_drag_failed_shift_release_still_attempts_ctrl_release(send_keys, mock_user32):
+    from netcoredbg_mcp.ui.automation import _send_drag
+
+    events = []
+
+    def capture(_count, input_pointer, _size):
+        event = input_pointer._obj
+        key = event._input.ki
+        events.append((event.type, key.wVk, key.dwFlags))
+        return 0 if key.wVk == 0x10 and key.dwFlags & 0x0002 else 1
+
+    mock_user32.SendInput.side_effect = capture
+    ctypes.windll.kernel32.GetLastError.return_value = 5
+
+    with pytest.raises(OSError, match="SendInput failed") as error:
+        _send_drag(10, 20, 30, 40, speed_ms=20, hold_modifiers=["ctrl", "shift"])
+
+    assert error.value.errno == 5
+    assert events == [
+        (1, 0x11, 0),
+        (1, 0x10, 0),
+        (1, 0x10, 0x0002),
+        (1, 0x11, 0x0002),
+    ]
+    assert [call.args[0] for call in mock_user32.mouse_event.call_args_list] == [0x0002, 0x0004]
 
 
 class TestSendKeysParser:

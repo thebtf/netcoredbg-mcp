@@ -21,6 +21,20 @@ public partial class ProbeFixtureWindow : Window, IWpfProbeSnapshotSource
     {
         _mode = mode;
         InitializeComponent();
+        if (mode is ProbeFixtureMode.BridgeElements or ProbeFixtureMode.BridgeElementsAmbiguousRoots)
+        {
+            var content = SceneRoot.Child;
+            SceneRoot.Child = null;
+            var root = new GroupBox
+            {
+                Content = content,
+                BorderThickness = new Thickness(0),
+                Padding = new Thickness(0),
+            };
+            AutomationProperties.SetAutomationId(root, "Gallery");
+            AutomationProperties.SetName(root, "Gallery fixture root");
+            SceneRoot.Child = root;
+        }
         RefreshProbeState();
     }
 
@@ -35,6 +49,14 @@ public partial class ProbeFixtureWindow : Window, IWpfProbeSnapshotSource
 
         UpdateLayout();
         var materializationCount = checked(++_materializationCount);
+        var barrierName = Environment.GetEnvironmentVariable("NETCOREDBG_NATIVE_SCENE_PROBE_FIXTURE_REVALIDATION_BARRIER");
+        if (materializationCount == 1 && !string.IsNullOrWhiteSpace(barrierName))
+        {
+            using var started = EventWaitHandle.OpenExisting(barrierName + "-started");
+            using var release = EventWaitHandle.OpenExisting(barrierName + "-release");
+            started.Set();
+            release.WaitOne();
+        }
         var revisionBefore = _revision;
         if (_mode == ProbeFixtureMode.ChangedBeforeMaterialization)
         {
@@ -191,6 +213,8 @@ internal enum ProbeFixtureMode
     IncompleteEvidence,
     LargeResponse,
     StaleLayout,
+    BridgeElements,
+    BridgeElementsAmbiguousRoots,
 }
 
 internal static class ProbeFixtureModeParser
@@ -217,6 +241,12 @@ internal static class ProbeFixtureModeParser
             case "stale-layout":
                 mode = ProbeFixtureMode.StaleLayout;
                 return true;
+            case "bridge-elements":
+                mode = ProbeFixtureMode.BridgeElements;
+                return true;
+            case "bridge-elements-ambiguous-roots":
+                mode = ProbeFixtureMode.BridgeElementsAmbiguousRoots;
+                return true;
             default:
                 mode = default;
                 return false;
@@ -231,6 +261,8 @@ internal static class ProbeFixtureModeParser
         ProbeFixtureMode.IncompleteEvidence => "incomplete",
         ProbeFixtureMode.LargeResponse => "large-response",
         ProbeFixtureMode.StaleLayout => "stale-layout",
+        ProbeFixtureMode.BridgeElements => "bridge-elements",
+        ProbeFixtureMode.BridgeElementsAmbiguousRoots => "bridge-elements-ambiguous-roots",
         _ => throw new InvalidOperationException($"Unsupported fixture mode '{mode}'."),
     };
 }
