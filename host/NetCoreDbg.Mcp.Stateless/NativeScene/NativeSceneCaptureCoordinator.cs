@@ -13,6 +13,7 @@ internal sealed class NativeSceneCaptureCoordinator
 {
     private const string ArtifactSchemaVersion = "native-scene-artifact/1";
     private const string NativeSceneMediaType = "application/vnd.netcoredbg.native-scene+json";
+    private const string StableStatus = "STABLE";
     private const int MaximumNodes = 4_096;
     private const int MaximumArtifactBytes = 16 * 1024 * 1024;
     private static readonly TimeSpan ArtifactRetention = TimeSpan.FromHours(4);
@@ -185,7 +186,7 @@ internal sealed class NativeSceneCaptureCoordinator
         }
 
         if (normalized.Authority == CaptureAuthority.InProcess &&
-            !StringComparer.Ordinal.Equals(ReadString(stability, "status"), "STABLE"))
+            !StringComparer.Ordinal.Equals(ReadString(stability, "status"), StableStatus))
         {
             return ToolError(tool, "UI_NOT_STABLE", "Capture-time stability requirements are not met.");
         }
@@ -313,7 +314,7 @@ internal sealed class NativeSceneCaptureCoordinator
 
     private static string ClassifyStatus(NormalizedCapture capture, JsonObject stability, bool isElement)
     {
-        if (!StringComparer.Ordinal.Equals(ReadString(stability, "status"), "STABLE"))
+        if (!StringComparer.Ordinal.Equals(ReadString(stability, "status"), StableStatus))
         {
             return capture.Nodes.Count == 0 ? "UNOBSERVABLE" : "PARTIAL";
         }
@@ -333,7 +334,7 @@ internal sealed class NativeSceneCaptureCoordinator
     private static JsonArray BuildIssues(NormalizedCapture capture, JsonObject stability, bool isElement)
     {
         var issues = DeepClone(capture.Issues) as JsonArray ?? new JsonArray();
-        if (!StringComparer.Ordinal.Equals(ReadString(stability, "status"), "STABLE"))
+        if (!StringComparer.Ordinal.Equals(ReadString(stability, "status"), StableStatus))
         {
             AddIssueOnce(issues, "CAPTURE_REVALIDATION_FAILED", "Capture-time stability could not be fully revalidated.");
         }
