@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sys
+from itertools import chain, repeat
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -155,6 +158,180 @@ class TestUIAutomation:
     def test_shutdown(self, ui_automation):
         """Test shutdown doesn't raise."""
         ui_automation.shutdown()
+
+
+class TestElementInfoSnapshot:
+    """Exercise the real metadata worker without a desktop or native lookup."""
+
+    @pytest.fixture
+    def ui_automation(self):
+        from netcoredbg_mcp.ui.automation import UIAutomation
+
+        automation = UIAutomation()
+        yield automation
+        automation.shutdown()
+
+    @pytest.fixture
+    def metadata_records(self):
+        return [
+            SimpleNamespace(
+                handle=101,
+                automation_id="selected-id",
+                control_type="Button",
+                name="Selected",
+                class_name="SelectedButton",
+                rectangle=SimpleNamespace(left=11, top=22, right=111, bottom=72),
+                enabled=True,
+                visible=False,
+                focused=True,
+            ),
+            SimpleNamespace(
+                handle=202,
+                automation_id="replacement-id",
+                control_type="Text",
+                name="Replacement",
+                class_name="ReplacementText",
+                rectangle=SimpleNamespace(left=211, top=222, right=411, bottom=322),
+                enabled=False,
+                visible=True,
+                focused=False,
+            ),
+        ]
+
+    @pytest.fixture
+    def selected_wire(self):
+        return {
+            "automationId": "selected-id",
+            "controlType": "Button",
+            "name": "Selected",
+            "className": "SelectedButton",
+            "rectangle": {"left": 11, "top": 22, "right": 111, "bottom": 72},
+            "isEnabled": True,
+            "isVisible": False,
+            "hasKeyboardFocus": True,
+            "childCount": 0,
+            "children": [],
+        }
+
+    @pytest.fixture
+    def native_wrappers(self, metadata_records):
+        if sys.platform != "win32":
+            pytest.skip("Real pywinauto wrappers require Windows")
+
+        from pywinauto.base_wrapper import BaseWrapper
+
+        class SnapshotWrapper(BaseWrapper):
+            def has_keyboard_focus(self):
+                return self.element_info.focused
+
+            def children(self, **kwargs):
+                return [self]
+
+        wrappers = []
+        for record in metadata_records:
+            wrapper = object.__new__(SnapshotWrapper)
+            BaseWrapper.__init__(wrapper, record, active_backend=None)
+            wrappers.append(wrapper)
+        return wrappers
+
+    @pytest.fixture
+    def window_specification(self, monkeypatch):
+        if sys.platform != "win32":
+            pytest.skip("Real WindowSpecification requires Windows")
+
+        from pywinauto.application import WindowSpecification
+
+        def make_specification(*outcomes):
+            specification = WindowSpecification({"backend": "win32"}).child_window(
+                auto_id="selected-id"
+            )
+            resolutions = chain(outcomes, repeat(outcomes[-1]))
+
+            def resolve(criteria, timeout=None, retry_interval=None):
+                outcome = next(resolutions)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome, outcome
+
+            # Keep pywinauto's real lazy dispatch and wrapper_object implementation.
+            monkeypatch.setattr(specification, "_WindowSpecification__resolve_control", resolve)
+            return specification
+
+        return make_specification
+
+    @pytest.mark.asyncio
+    async def test_get_element_info_snapshot_uses_one_selected_instance(
+        self, ui_automation, native_wrappers, window_specification, selected_wire
+    ):
+        specification = window_specification(*native_wrappers)
+
+        result = await ui_automation.get_element_info(specification)
+
+        assert result.to_dict() == selected_wire
+
+    @pytest.mark.asyncio
+    async def test_get_element_info_snapshot_keeps_native_partial_metadata(
+        self, ui_automation, native_wrappers, selected_wire
+    ):
+        wrapper = native_wrappers[0]
+        del wrapper.element_info.class_name
+        del wrapper.element_info.rectangle
+        del wrapper.element_info.visible
+
+        result = await ui_automation.get_element_info(wrapper)
+
+        assert result.to_dict() == {
+            **selected_wire,
+            "className": "",
+            "rectangle": {"left": 0, "top": 0, "right": 0, "bottom": 0},
+            "isVisible": False,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure", ["initial", "persistent"])
+    async def test_get_element_info_snapshot_resolution_failure_is_best_effort(
+        self, ui_automation, native_wrappers, window_specification, selected_wire, failure
+    ):
+        unavailable = RuntimeError("Controlled resolution failure")
+        outcomes = (unavailable, native_wrappers[0]) if failure == "initial" else (unavailable,)
+        specification = window_specification(*outcomes)
+
+        result = await ui_automation.get_element_info(specification)
+
+        if failure == "initial":
+            # The first unavailable property may default; healthy properties must survive.
+            assert result.to_dict() in (selected_wire, {**selected_wire, "automationId": ""})
+        else:
+            assert result.to_dict() == {
+                "automationId": "",
+                "controlType": "",
+                "name": "",
+                "className": "",
+                "rectangle": {"left": 0, "top": 0, "right": 0, "bottom": 0},
+                "isEnabled": False,
+                "isVisible": False,
+                "hasKeyboardFocus": False,
+                "childCount": 0,
+                "children": [],
+            }
+
+    @pytest.mark.asyncio
+    async def test_get_element_info_snapshot_keeps_portable_wrapper_consumers(
+        self, ui_automation, metadata_records, selected_wire
+    ):
+        record = metadata_records[0]
+        wrapper = SimpleNamespace(
+            element_info=record,
+            rectangle=lambda: record.rectangle,
+            is_enabled=lambda: record.enabled,
+            is_visible=lambda: record.visible,
+            has_keyboard_focus=lambda: record.focused,
+            children=lambda: [object()],
+        )
+
+        result = await ui_automation.get_element_info(wrapper)
+
+        assert result.to_dict() == selected_wire
 
 
 class TestSerializeElement:

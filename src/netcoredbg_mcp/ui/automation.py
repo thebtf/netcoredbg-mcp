@@ -730,7 +730,22 @@ class UIAutomation:
 
         def _get_info():
             try:
-                return serialize_element(element, max_depth=0, max_children=0)
+                import sys
+
+                snapshot_element = element
+                if sys.platform == "win32":
+                    from pywinauto.application import WindowSpecification
+
+                    if isinstance(element, WindowSpecification):
+                        try:
+                            snapshot_element = element.wrapper_object()
+                        except Exception as e:
+                            logger.debug(
+                                "Metadata snapshot resolution failed; retaining best-effort "
+                                "property access on the original specification: %s",
+                                e,
+                            )
+                return serialize_element(snapshot_element, max_depth=0, max_children=0)
             except Exception as e:
                 logger.exception(f"Failed to get element info: {e}")
                 raise ApplicationNotRespondingError(f"Cannot access element info: {e}") from e
