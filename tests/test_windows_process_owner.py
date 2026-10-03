@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import queue
+import runpy
 import shutil
 import subprocess
 import sys
@@ -755,10 +756,10 @@ class _FakePipes:
     def __init__(self, events: list[str]) -> None:
         self.events = events
 
-    def close_child_ends(self, _api: _FakeApi) -> None:
+    def close_child_ends(self, _api: _FakeApi, *, strict: bool = False) -> None:
         self.events.append("close-child-ends")
 
-    def close_unwired(self, _api: _FakeApi) -> None:
+    def close_unwired(self, _api: _FakeApi, *, strict: bool = False) -> None:
         self.events.append("close-unwired")
 
     async def wire(
@@ -1895,6 +1896,257 @@ async def _launch_debug(monkeypatch, api, events, *, pipes=None):
     )
 
 
+async def _probe_direct_capture_fatal_lifecycle(
+    fatal_kind: str, ambiguous_effect: str | None, predispatch_faults: int = 0
+):
+    class DirectFatal(BaseException):
+        pass
+
+    fatal = {
+        "base": BaseException("resume fatal"),
+        "direct": DirectFatal("resume fatal"),
+        "system_exit": SystemExit(77),
+        "keyboard_interrupt": KeyboardInterrupt("resume fatal"),
+        "cancelled": asyncio.CancelledError("resume fatal"),
+    }[fatal_kind]
+    fatal.winerror = 7
+    later = DirectFatal("unacknowledged continuation")
+    later.winerror = 56
+    events = []
+    reapers = []
+    release_facts = []
+    worker_exceptions = []
+    predispatch_turns = queue.Queue()
+    advance_dispatch = threading.Semaphore(0)
+    predispatch_errors = []
+
+    class ObservedReaper(_FailedAdmissionReaper):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            reapers.append(self)
+
+    class FatalApi(_DebugApi):
+        def __init__(self):
+            super().__init__(events)
+            self.exit_entered = threading.Event()
+            self.release_exit = threading.Event()
+            self.exit_attempts = 0
+            self.exit_event = None
+            self.exit_status = None
+            self.wait_calls = 0
+
+        def resume_thread(self, thread):
+            self.debug_threads.append(threading.current_thread())
+            events.append("resume-thread")
+            raise fatal
+
+        def wait_debug_event(self, timeout_ms):
+            self.wait_calls += 1
+            return super().wait_debug_event(timeout_ms)
+
+        def continue_debug_event(self, event, status):
+            if event.dwDebugEventCode == windows_process_owner._EXIT_PROCESS_DEBUG_EVENT:
+                self.debug_threads.append(threading.current_thread())
+                self.exit_attempts += 1
+                self.exit_event, self.exit_status = event, status
+                if ambiguous_effect is None:
+                    self.exit_entered.set()
+                    assert self.release_exit.wait(5), "EXIT hold was not released by the probe"
+                elif self.exit_attempts == 1:
+                    if ambiguous_effect == "after":
+                        super().continue_debug_event(event, status)
+                    self.exit_entered.set()
+                    # Both throws escape the opaque API without acknowledgment.
+                    # The fake's knowledge of its side effect is not retry authority.
+                    raise later
+            super().continue_debug_event(event, status)
+            if event.dwDebugEventCode == windows_process_owner._EXIT_PROCESS_DEBUG_EVENT:
+                events.append("exit-continued")
+
+        def close_handle(self, handle):
+            if handle in (11, 12, 21):
+                capture = reapers[0]._debug_capture
+                release_facts.append(
+                    (
+                        handle,
+                        self.root_exited.is_set(),
+                        not self.debug_threads[0].is_alive(),
+                        capture.root_exit_continued,
+                        not capture.live,
+                        capture._pending is None,
+                    )
+                )
+            super().close_handle(handle)
+
+    api = FatalApi()
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(windows_process_owner, "_FailedAdmissionReaper", ObservedReaper)
+        monkeypatch.setattr(threading, "excepthook", worker_exceptions.append)
+        if predispatch_faults:
+            real_continue = windows_process_owner._DebugCapture._continue_pending_event
+
+            def fail_before_dispatch(capture):
+                pending = capture._pending
+                if (
+                    pending.event.dwDebugEventCode
+                    == windows_process_owner._EXIT_PROCESS_DEBUG_EVENT
+                ):
+                    predispatch_turns.put((threading.current_thread(), pending))
+                    assert advance_dispatch.acquire(timeout=5)
+                    if len(predispatch_errors) < predispatch_faults:
+                        error = DirectFatal(f"pre-dispatch fatal {len(predispatch_errors)}")
+                        error.winerror = 56
+                        predispatch_errors.append(error)
+                        raise error
+                return real_continue(capture)
+
+            monkeypatch.setattr(
+                windows_process_owner._DebugCapture, "_continue_pending_event", fail_before_dispatch
+            )
+
+        async def observe_public_delivery():
+            try:
+                await _launch_debug(monkeypatch, api, events)
+            except BaseException as error:
+                events.append("public-delivery")
+                return error, reapers[0].closed, api.debug_threads[0].is_alive()
+            raise AssertionError("fatal resume was converted into successful admission")
+
+        caller = asyncio.create_task(observe_public_delivery())
+        if predispatch_faults:
+            pending_identity = None
+            counts = None
+            for index in range(predispatch_faults + 1):
+                thread, pending = await asyncio.to_thread(predispatch_turns.get, True, 3)
+                capture = reapers[0]._debug_capture
+                assert pending.continuation_progress.name == "READY"
+                assert pending.continuation_status == windows_process_owner._DBG_CONTINUE
+                assert pending_identity is None or pending is pending_identity
+                assert thread is api.debug_threads[0] and thread.is_alive()
+                assert len(set(api.debug_threads)) == 1
+                assert not caller.done() and not reapers[0].closed and not release_facts
+                assert not api.root_exited.is_set() and not worker_exceptions
+                current_counts = api.wait_calls, api.duplicate_count
+                assert counts is None or counts == current_counts
+                pending_identity, counts = pending, current_counts
+                assert len(predispatch_errors) == index
+                advance_dispatch.release()
+        assert await asyncio.to_thread(api.exit_entered.wait, 3), "cleanup did not pump EXIT"
+        assert len(reapers) == 1
+        reaper = reapers[0]
+        capture = reaper._debug_capture
+        worker = api.debug_threads[0]
+        first_causal = capture.failure
+
+        if ambiguous_effect is not None:
+            # A bounded observation on the real owner loop, not a drain receipt.
+            assert not await reaper.wait_for_completion(0.25), "ambiguous effect allowed closure"
+            assert api.exit_attempts == 1, "unacknowledged ContinueDebugEvent was repeated"
+            assert not caller.done(), "fatal escaped while native-effect ownership was unresolved"
+            assert worker.is_alive() and len(set(api.debug_threads)) == 1
+            assert capture._pending is not None and not capture.root_exit_continued
+            assert capture.failure is first_causal and first_causal.winerror == 7
+            assert not release_facts and "public-delivery" not in events
+            assert not worker_exceptions, "fatal escaped through the worker exception hook"
+            print("fatal-lifecycle-proof", flush=True)
+            # Deliberately terminate this isolated observation process while its
+            # real cleanup loop/worker remain live. This is NOT product closure.
+            os._exit(0)
+
+        held = (
+            not caller.done(),
+            not reaper.closed,
+            worker.is_alive(),
+            len(set(api.debug_threads)) == 1,
+            capture._pending.event is api.exit_event,
+            capture.live == {41} and capture.root_seen,
+            not capture.root_exit_continued and not api.root_exited.is_set(),
+            len(capture.retained_handles()) == api.total == 1,
+            api.exit_status == windows_process_owner._DBG_CONTINUE,
+            not release_facts and "public-delivery" not in events,
+        )
+        waits, duplicates = api.wait_calls, api.duplicate_count
+        await asyncio.sleep(0)
+        unchanged = api.wait_calls == waits and api.duplicate_count == duplicates
+        api.release_exit.set()
+        observed, closed_at_delivery, worker_alive_at_delivery = await asyncio.wait_for(caller, 3)
+        assert all(held) and unchanged, "held EXIT lost worker/event/capability ownership"
+        assert reaper.closed and closed_at_delivery and not worker_alive_at_delivery
+        assert not worker.is_alive() and len(set(api.debug_threads)) == 1
+        assert not worker_exceptions, "fatal escaped through the worker exception hook"
+        assert capture.failure is first_causal
+        assert first_causal.stage is AdmissionStage.RESUME and first_causal.winerror == 7
+        assert capture.fatal_error is fatal
+        assert capture.created.done() and capture.started.done()
+        assert capture.created.result().error is None
+        assert capture.started.result().error is fatal
+        assert api.exit_attempts == 1
+        assert len(predispatch_errors) == predispatch_faults
+        assert len({id(error) for error in predispatch_errors}) == predispatch_faults
+        assert len(release_facts) == 3 and all(all(facts[1:]) for facts in release_facts), (
+            "controlling capability closed before exact exit, worker join or event retirement",
+            release_facts,
+        )
+        for handle in (11, 12, 21, 31):
+            assert events.count(f"close:{handle}") == 1
+        assert (
+            events.index("exit-continued")
+            < events.index("close:21")
+            < events.index("public-delivery")
+        )
+        assert observed is fatal, f"original fatal was replaced by {type(observed).__name__}"
+        print("fatal-lifecycle-proof", flush=True)
+
+
+def _run_direct_capture_probe(name, *arguments):
+    root = Path(__file__).resolve().parents[1]
+    code = (
+        "import asyncio, runpy\n"
+        f"namespace = runpy.run_path({str(Path(__file__).resolve())!r})\n"
+        f"asyncio.run(namespace[{name!r}](*{arguments!r}))\n"
+    )
+    environment = {
+        name: value for name, value in os.environ.items() if not name.upper().startswith("SONAR_")
+    }
+    environment["PYTHONPATH"] = str(root / "src")
+    probe = subprocess.run(
+        (sys.executable, "-c", code),
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert probe.returncode == 0, probe.stdout + probe.stderr
+    assert probe.stdout.strip() == "fatal-lifecycle-proof", (
+        "probe exited before its assertions completed"
+    )
+
+
+def _run_direct_capture_fatal_probe(
+    fatal_kind: str, ambiguous_effect: str | None = None, predispatch_faults: int = 0
+):
+    _run_direct_capture_probe(
+        "_probe_direct_capture_fatal_lifecycle", fatal_kind, ambiguous_effect, predispatch_faults
+    )
+
+
+@pytest.mark.parametrize(
+    "fatal_kind", ("base", "direct", "system_exit", "keyboard_interrupt", "cancelled")
+)
+def test_direct_capture_fatal_resume_preserves_original_after_closure(fatal_kind):
+    _run_direct_capture_fatal_probe(fatal_kind)
+
+
+@pytest.mark.parametrize("ambiguous_effect", ("before", "after"))
+def test_direct_capture_ambiguous_continuation_retains_owner(ambiguous_effect):
+    _run_direct_capture_fatal_probe("direct", ambiguous_effect)
+
+
+def test_direct_capture_repeated_predispatch_fatals_preserve_pending_and_original():
+    _run_direct_capture_fatal_probe("direct", predispatch_faults=4)
+
+
 @pytest.mark.asyncio
 async def test_direct_capture_counts_distinct_objects_not_reused_pids_or_debug_handles(monkeypatch):
     events = []
@@ -1924,49 +2176,407 @@ async def test_direct_capture_counts_distinct_objects_not_reused_pids_or_debug_h
         assert events.count(f"close:{handle}") == 1
 
 
+async def _probe_direct_capture_creation_fatal(mode):
+    fatal = SystemExit(77)
+    events, reapers = [], []
+    api = _DebugApi(events)
+
+    class ObservedReaper(_FailedAdmissionReaper):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            reapers.append(self)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(os, "set_handle_inheritable", lambda *_: None, raising=False)
+        monkeypatch.setattr(windows_process_owner, "_FailedAdmissionReaper", ObservedReaper)
+
+        def before_dispatch(capture):
+            raise fatal
+
+        def creator(**kwargs):
+            if mode != "before":
+                value = _creator(events)(
+                    **{
+                        key: value
+                        for key, value in kwargs.items()
+                        if key != "capture_process_handles"
+                    }
+                )
+                if mode == "ready":
+                    return value
+            raise fatal
+
+        if mode == "ready":
+            monkeypatch.setattr(
+                windows_process_owner._DebugCapture, "_create_process", before_dispatch
+            )
+
+        async def collect():
+            try:
+                await WindowsOwnedProcess._launch_with(
+                    generation=mode,
+                    argv=("fixture.exe", "--interpreter=vscode"),
+                    cwd=None,
+                    env=None,
+                    stdin_mode="pipe",
+                    api=api,
+                    pipe_ends=_FakePipes(events),
+                    process_creator=creator,
+                    capture_process_handles=True,
+                )
+            except BaseException as error:
+                return error
+            raise AssertionError("fatal creation succeeded")
+
+        caller = asyncio.create_task(collect())
+        if mode == "ready":
+            assert await asyncio.wait_for(caller, 3) is fatal
+            capture = reapers[0]._debug_capture
+            assert capture.known_no_child and capture._joined and not capture.worker_alive
+            assert capture.created.result().error is capture.started.result().error is fatal
+            assert reapers[0].closed
+            assert not any(
+                event in events
+                for event in ("resume-thread", "terminate-process", "create-suspended")
+            )
+            assert events.count("close:11") == events.count("close:12") == 1
+            assert "close:21" not in events and "close:31" not in events
+            print("fatal-lifecycle-proof", flush=True)
+            return
+        for _ in range(300):
+            if reapers:
+                break
+            await asyncio.sleep(0.01)
+        assert reapers
+        capture = reapers[0]._debug_capture
+        assert not await reapers[0].wait_for_completion(0.1)
+        assert not caller.done() and not capture.known_no_child and capture.worker_alive
+        assert capture._creation.progress.name == "IN_FLIGHT"
+        assert capture.fatal_error is fatal
+        assert "resume-thread" not in events and "close:11" not in events
+        print("fatal-lifecycle-proof", flush=True)
+        os._exit(0)  # Unknown acquisition is retained, not interpreted as no child.
+
+
+@pytest.mark.parametrize("mode", ("ready", "before", "after"))
+def test_direct_capture_creation_requires_positive_no_child_proof(mode):
+    _run_direct_capture_probe("_probe_direct_capture_creation_fatal", mode)
+
+
+async def _probe_direct_capture_cleanup_operation_faults(kind):
+    class Fatal(BaseException):
+        pass
+
+    fatal = Fatal("first collector failure")
+    later = [
+        SystemExit(78),
+        KeyboardInterrupt("later cleanup"),
+        asyncio.CancelledError("later cleanup"),
+    ]
+    events, owners, turns, errors = [], [], queue.Queue(), []
+    advance = threading.Semaphore(0)
+    retirement_failures = []
+    api = _DebugApi(events)
+    real_retire = windows_process_owner._DebugCapture._retire_pending_event
+    real_invoke = windows_process_owner._NativeEffect.invoke
+
+    def retire(capture):
+        pending = capture._pending
+        if pending.event.dwDebugEventCode == 5 and not retirement_failures and kind != "terminate":
+            assert pending.continuation_progress.name == "ACKNOWLEDGED"
+            retirement_failures.append(pending)
+            raise fatal
+        return real_retire(capture)
+
+    def invoke(effect):
+        call = effect.call
+        operation = getattr(call, "__name__", "")
+        if getattr(call, "__self__", None) is api and operation == {
+            "terminate": "terminate_job",
+            "close": "close_handle",
+        }.get(kind):
+            if kind == "close" and effect.arguments != (11,):
+                return real_invoke(effect)
+            if kind == "terminate" and not retirement_failures:
+                retirement_failures.append(effect)
+                raise fatal
+            if len(errors) < len(later):
+                assert effect.progress.name == "READY"
+                turns.put(len(errors))
+                assert advance.acquire(timeout=5)
+                error = later[len(errors)]
+                errors.append(error)
+                raise error
+        return real_invoke(effect)
+
+    def readonly_fault(call, *arguments):
+        if owners and owners[0].fatal_error is fatal and len(errors) < len(later):
+            turns.put(len(errors))
+            assert advance.acquire(timeout=5)
+            error = later[len(errors)]
+            errors.append(error)
+            raise error
+        return call(*arguments)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(windows_process_owner._DebugCapture, "_retire_pending_event", retire)
+        monkeypatch.setattr(windows_process_owner._NativeEffect, "invoke", invoke)
+        if kind == "query":
+            native = api.total_processes
+            monkeypatch.setattr(api, "total_processes", lambda job: readonly_fault(native, job))
+        elif kind == "wait":
+            native = api.wait_for_process
+            monkeypatch.setattr(
+                api, "wait_for_process", lambda *args: readonly_fault(native, *args)
+            )
+        owner = await _launch_debug(monkeypatch, api, events)
+        owners.append(owner)
+        assert owner._debug_capture._resume_possible and "resume-thread" in events
+        if kind != "terminate":
+            api._queue_root_exit()
+
+        async def collect():
+            cleanup = asyncio.create_task(owner.wait_closed())
+            while not cleanup.done():
+                try:
+                    await asyncio.wait((cleanup,))
+                except asyncio.CancelledError:
+                    pass
+            assert cleanup.result().status is DrainStatus.FAILED
+            return owner.fatal_error
+
+        caller = asyncio.create_task(collect())
+        first_causal = None
+        for index in range(len(later)):
+            assert await asyncio.to_thread(turns.get, True, 3) == index
+            capture = owner._debug_capture
+            assert owner.fatal_error is fatal and not caller.done() and not owner.closed
+            assert first_causal is None or capture.failure is first_causal
+            first_causal = capture.failure
+            assert owner._job_handle == 11 and owner._port_handle == 12
+            if kind == "close":
+                assert capture._joined and not capture.worker_alive
+                assert owner._process_handle is None and events.count("close:21") == 1
+            else:
+                assert capture.worker_alive and "close:21" not in events
+            caller.cancel()
+            await asyncio.sleep(0)
+            assert not caller.done()
+            advance.release()
+        assert await asyncio.wait_for(caller, 5) is fatal
+        assert owner.closed and owner._debug_capture.failure is first_causal
+        assert owner._debug_capture.fatal_error is fatal
+        assert owner._debug_capture.root_exit_continued and owner._debug_capture._pending is None
+        assert sum(code == 5 for code, _, _ in api.continued) == 1
+        assert len(errors) == 3 and all(error is expected for error, expected in zip(errors, later))
+        for handle in (11, 12, 21, 31):
+            assert events.count(f"close:{handle}") == 1
+        assert (await owner.aclose()).status is DrainStatus.FAILED
+        print("fatal-lifecycle-proof", flush=True)
+
+
+@pytest.mark.parametrize("kind", ("terminate", "query", "wait", "close"))
+def test_direct_capture_native_cleanup_faults_remain_private_until_acknowledged_closure(kind):
+    _run_direct_capture_probe("_probe_direct_capture_cleanup_operation_faults", kind)
+
+
+async def _probe_direct_capture_actual_runner(mode):
+    root = Path(__file__).resolve().parents[1]
+    owned_vstest = runpy.run_path(str(root / "scripts/run_sonarqube_exact_head.py"))[
+        "_run_owned_vstest"
+    ]
+    fatal = SystemExit(77)
+    errors = [
+        fatal,
+        BaseException("later"),
+        KeyboardInterrupt("later"),
+        asyncio.CancelledError("later"),
+    ]
+    owners, api_threads, turns = [], [], queue.Queue()
+    advance = threading.Semaphore(0)
+    real_launch = WindowsOwnedProcess.launch
+    real_continue = windows_process_owner._DebugCapture._continue_pending_event
+    native_continue = _Kernel32.continue_debug_event
+    native_wait = _Kernel32.wait_debug_event
+    attempts = []
+    python, environment = _native_python()
+    sentinel = None
+
+    def wait(api, timeout):
+        api_threads.append(threading.current_thread())
+        return native_wait(api, timeout)
+
+    def opaque_continue(api, event, status):
+        api_threads.append(threading.current_thread())
+        result = native_continue(api, event, status)
+        if (
+            mode == "ambiguous"
+            and event.dwDebugEventCode == 5
+            and owners
+            and event.dwProcessId == owners[0].pid
+        ):
+            turns.put(event)
+            raise fatal
+        return result
+
+    def continue_operation(capture):
+        pending = capture._pending
+        if (
+            mode != "ambiguous"
+            and pending.event.dwDebugEventCode == 5
+            and pending.event.dwProcessId == capture.root_pid
+            and len(attempts) < len(errors)
+        ):
+            turns.put((threading.current_thread(), pending))
+            assert advance.acquire(timeout=5)
+            error = errors[len(attempts)]
+            attempts.append(error)
+            raise error
+        return real_continue(capture)
+
+    async def launch(**kwargs):
+        owner = await real_launch(**kwargs)
+        owners.append(owner)
+        return owner
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(WindowsOwnedProcess, "launch", launch)
+        monkeypatch.setattr(_Kernel32, "wait_debug_event", wait)
+        monkeypatch.setattr(_Kernel32, "continue_debug_event", opaque_continue)
+        monkeypatch.setattr(
+            windows_process_owner._DebugCapture, "_continue_pending_event", continue_operation
+        )
+        if mode != "ambiguous":
+            sentinel = await real_launch(
+                generation="fatal-isolation-sentinel",
+                argv=(python, "-c", "import time;time.sleep(30)"),
+                cwd=None,
+                env=environment,
+                stdin_mode="devnull",
+            )
+        inner_code = (
+            "import asyncio\nfrom netcoredbg_mcp.windows_process_owner import WindowsOwnedProcess\n"
+            "async def run():\n"
+            f"    owner = await WindowsOwnedProcess.launch(generation='inner', argv=({python!r}, '-c', 'pass'), cwd=None, env=None, stdin_mode='devnull')\n"
+            "    await owner.wait_root()\n    await owner.aclose()\n"
+            "asyncio.run(run())\n"
+        )
+
+        async def collect():
+            try:
+                await owned_vstest((python, "-c", inner_code), root, timeout_seconds=10)
+            except BaseException as error:
+                assert owners[0].closed, "actual runner escaped before owned closure"
+                return error
+            raise AssertionError("fatal collection was reported as success")
+
+        caller = asyncio.create_task(collect())
+        if mode == "ambiguous":
+            await asyncio.to_thread(turns.get, True, 10)
+            await asyncio.sleep(0.25)
+            owner = owners[0]
+            assert not caller.done() and not owner.closed
+            assert owner.fatal_error is fatal and owner._debug_capture.worker_alive
+            assert owner._debug_capture._pending.continuation_progress.name == "IN_FLIGHT"
+            assert not owner._debug_capture.root_exit_continued
+            assert (
+                owner._debug_capture._driver is not None and not owner._debug_capture._driver.done()
+            )
+            print("fatal-lifecycle-proof", flush=True)
+            os._exit(0)  # The live asyncio.run window is the observation; termination is not drain.
+        pending_identity = None
+        for index in range(len(errors)):
+            thread, pending = await asyncio.to_thread(turns.get, True, 10)
+            owner = owners[0]
+            assert pending.continuation_progress.name == "READY"
+            assert pending_identity is None or pending is pending_identity
+            pending_identity = pending
+            assert thread is owner._debug_capture._worker and thread.is_alive()
+            assert not caller.done() and not owner.closed
+            if mode == "cancel" and index:
+                caller.cancel()
+                await asyncio.sleep(0)
+                assert not caller.done()
+            advance.release()
+        assert await asyncio.wait_for(caller, 10) is fatal
+        owner = owners[0]
+        assert owner.closed and not owner._debug_capture.worker_alive
+        assert owner._debug_capture._joined and owner._debug_capture._pending is None
+        assert owner._debug_capture.root_exit_continued
+        receipt = await owner.aclose()
+        assert receipt.status is DrainStatus.FAILED
+        facts = owner.drain_snapshot(receipt)
+        assert (
+            facts["total_processes"]
+            == facts["retained_exact_handles"]
+            == facts["signaled_exact_handles"]
+            == 2
+        )
+        assert all(thread is owner._debug_capture._worker for thread in api_threads)
+        assert sentinel is not None and sentinel.returncode is None
+        assert (await sentinel.force_and_drain(timeout=5)).status is DrainStatus.DRAINED
+        assert (await sentinel.aclose()).status is DrainStatus.DRAINED
+        print("fatal-lifecycle-proof", flush=True)
+
+
+@pytest.mark.skipif(
+    os.name != "nt", reason="Actual Windows collector loop and native nested Job proof"
+)
+@pytest.mark.parametrize("mode", ("recover", "cancel", "ambiguous"))
+def test_direct_capture_actual_runner_keeps_asyncio_run_alive_until_physical_closure(mode):
+    _run_direct_capture_probe("_probe_direct_capture_actual_runner", mode)
+
+
+async def _probe_direct_capture_retained_failure(kind, value):
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        events = []
+        if kind == "count":
+            api = _DebugApi(events, total=value)
+        else:
+            api = _DebugApi(events, total=2, error=value)
+            api.debug_events.put(_debug_event(3, 42, 0 if value == "null" else 102))
+            api.debug_events.put(_debug_event(5, 42))
+        api.debug_events.put(_debug_event(5))
+        owner = await _launch_debug(monkeypatch, api, events)
+        await asyncio.wait_for(owner.wait_root(), 2)
+        first = await owner.drain_after_grace(grace_timeout=0.1, force_timeout=0.1)
+        second = await owner.force_and_drain(timeout=0.1)
+        facts = owner.drain_snapshot(first)
+        assert first.status is second.status is DrainStatus.FAILED
+        capture = owner._debug_capture
+        if kind == "api" and value == "continue":
+            closed = await asyncio.wait_for(owner.wait_closed(), 2)
+            assert closed.status is DrainStatus.FAILED and owner.closed
+            assert capture.failure.winerror == 56 and not capture.worker_alive
+            for handle in (11, 12, 21):
+                assert events.count(f"close:{handle}") == 1
+            print("fatal-lifecycle-proof", flush=True)
+            return
+        assert not owner.closed and capture.worker_alive
+        assert not await capture.join_exited(0.1)
+        assert "close:11" not in events and "close:21" not in events
+        if kind == "count":
+            assert facts["total_processes"] == value and facts["active_processes"] == 0
+            assert facts["retained_exact_handles"] == facts["signaled_exact_handles"] == 1
+        else:
+            assert capture.failure is not None
+            assert (
+                first.winerror
+                == second.winerror
+                == (55 if value in ("duplicate", "null") else None)
+            )
+        print("fatal-lifecycle-proof", flush=True)
+        os._exit(0)  # Bounded retention observation, deliberately not product drain evidence.
+
+
 @pytest.mark.parametrize("total", (2, 65537))
-@pytest.mark.asyncio
-async def test_direct_capture_never_repairs_raw_lifetime_count_gaps(monkeypatch, total):
-    events = []
-    api = _DebugApi(events, total=total)
-    api.debug_events.put(_debug_event(5))
-    owner = await _launch_debug(monkeypatch, api, events)
-    await asyncio.wait_for(owner.wait_root(), 2)
-    receipt = await owner.drain_after_grace(grace_timeout=0, force_timeout=0)
-    facts = owner.drain_snapshot(receipt)
-    assert receipt.status is DrainStatus.FAILED and facts["active_processes"] == 0
-    assert facts["retained_exact_handles"] == facts["signaled_exact_handles"] == 1
-    assert facts["total_processes"] == api.total
-    assert "close:11" not in events and "close:21" not in events
-    capture = owner._debug_capture
-    assert capture is not None and capture._thread.is_alive()
-    # The simulator has no native capabilities; join only after asserting
-    # production failed closed and retained its controlling handles.
-    assert await capture.join_exited(1)
+def test_direct_capture_never_repairs_raw_lifetime_count_gaps(total):
+    _run_direct_capture_probe("_probe_direct_capture_retained_failure", "count", total)
 
 
 @pytest.mark.parametrize("error", ("duplicate", "membership", "identity", "null", "continue"))
-@pytest.mark.asyncio
-async def test_direct_capture_api_identity_and_continue_failures_remain_causal(monkeypatch, error):
-    events = []
-    api = _DebugApi(events, total=2, error=error)
-    api.debug_events.put(_debug_event(3, 42, 0 if error == "null" else 102))
-    api.debug_events.put(_debug_event(5, 42))
-    api.debug_events.put(_debug_event(5))
-    owner = await _launch_debug(monkeypatch, api, events)
-    await asyncio.wait_for(owner.wait_root(), 2)
-    first = await owner.drain_after_grace(grace_timeout=0, force_timeout=0)
-    second = await owner.force_and_drain(timeout=0)
-    assert first.status is second.status is DrainStatus.FAILED
-    assert (
-        first.winerror
-        == second.winerror
-        == (56 if error == "continue" else 55 if error in ("duplicate", "null") else None)
-    )
-    assert "close:11" not in events and "close:21" not in events
-    capture = owner._debug_capture
-    assert capture.failure is not None and capture._thread.is_alive()
-    assert await capture.join_exited(1)
+def test_direct_capture_api_identity_and_continue_failures_remain_causal(error):
+    _run_direct_capture_probe("_probe_direct_capture_retained_failure", "api", error)
 
 
 @pytest.mark.asyncio
@@ -2162,8 +2772,10 @@ async def run():
     assert facts['total_processes'] == 2 and facts['retained_exact_handles'] == 1, facts
     assert facts['signaled_exact_handles'] == 1 and facts['active_processes'] == 0, facts
     assert owner._job_handle is not None and owner._process_handle is not None
-    assert owner._debug_capture._thread.is_alive()
+    assert owner._debug_capture.worker_alive
     print(json.dumps({{'ancestor': facts, 'inner': json.loads(await out)}}), flush=True)
+    import os
+    os._exit(0)  # Observed retention only; do not tear down the live owner loop as drain proof.
 asyncio.run(run())
 """
     probe = subprocess.run(

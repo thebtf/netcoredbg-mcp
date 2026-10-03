@@ -151,6 +151,34 @@ pump resources. Failed cleanup retains the owner and first causal error;
 producer-terminal evidence, scanner completion, and run-root deletion stay
 closed. Debugger/Job crash protection is not an exit receipt.
 
+The collector uses one strongly retained private single-worker executor with
+finite create, resume, capture, continuation and retirement operations. Failed
+operation Futures are inspected without raising their stored exception into an
+asyncio Task. Creation/start phase notifications settle once as outcome data.
+The first non-`Exception` failure and the first causal Win32 diagnostic remain
+separate, immutable facts; only the collector caller receives the identical
+original fatal object, after owned physical closure.
+
+One capture-owned pending record preserves the event, continuation status and
+capture/retirement progress. Continuation moves `READY -> IN_FLIGHT` immediately
+before the opaque native invocation, then `ACKNOWLEDGED` on successful return.
+Finite failures of a submitted operation before dispatch preserve `READY` and
+permit retry of that same event without recapture. An unacknowledged opaque
+effect, including creation, continuation, duplication or close, is ambiguity:
+retain ownership, do not repeat the effect, and withhold public fatal delivery.
+Acknowledged continuation permits retirement only, never a second continuation.
+
+Existing admission reapers and admitted owner close/drain operations alone own
+cleanup. Positive no-child proof is distinct from an unpublished creation
+outcome. A possibly resumed root needs the full positive `C == T`, exact-handle,
+empty live/pending state and acknowledged-root-exit predicate. Physical exit
+authorizes an external, bounded executor shutdown/join; only acknowledged
+releases remove resources. The read-only `closed` fact reports that physical
+closure. Fatal collection remains `FAILED`, even when closed, and never permits
+producer-terminal success. Repeated caller cancellation retains the same
+cleanup owner. These guarantees cover submitted-operation faults, not arbitrary
+instruction-level interruption, executor corruption or interpreter teardown.
+
 `drain_snapshot(receipt)` returns a serialized, bounded, secret-free diagnostic
 value in either mode; it returns no handles and never independently admits
 drain. The collector uses owner operations for cleanup rather than private

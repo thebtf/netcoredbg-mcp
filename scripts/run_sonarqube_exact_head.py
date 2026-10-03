@@ -69,7 +69,6 @@ DISABLE_MSBUILD_NODE_REUSE = "-nr:false"
 STATELESS_SOURCE_PREFIX = "host/NetCoreDbg.Mcp.Stateless/"
 STATELESS_BINARY_DIRECTORY = "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_retained_collector_owners: list[Any] = []
 RELATIVE_PATH_RE = re.compile(r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._/-]+$")
 WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
 FIXED_COVERAGE_PROJECTS = (
@@ -6056,10 +6055,9 @@ async def _run_owned_vstest(
         raise
     finally:
 
-        async def finish_owned_cleanup() -> None:
+        async def finish_owned_cleanup() -> Exception | None:
             nonlocal first_drain
             close_error: Exception | None = None
-            closed = False
             try:
                 if failed:
                     try:
@@ -6072,7 +6070,7 @@ async def _run_owned_vstest(
                             or receipt.active_processes != 0
                         ):
                             first_drain = owner.drain_snapshot(receipt)
-                for _ in range(2):
+                while not owner.closed:
                     try:
                         receipt = await owner.aclose()
                     except Exception as error:
@@ -6080,22 +6078,13 @@ async def _run_owned_vstest(
                             close_error = error
                     else:
                         if (
-                            receipt.status is owner_module.DrainStatus.DRAINED
-                            and receipt.active_processes == 0
+                            first_drain is None
+                            and receipt.status is not owner_module.DrainStatus.DRAINED
                         ):
-                            closed = True
-                            break
-                        if first_drain is None:
                             first_drain = owner.drain_snapshot(receipt)
-                if not closed:
-                    _retained_collector_owners.append(owner)
-                    drain_failure(
-                        "collector cleanup is unverified; owner retained until runner exit"
-                    )
-                if close_error is not None and not (
-                    first_drain is not None and isinstance(first_error, RunnerError)
-                ):
-                    raise close_error
+                    if not owner.closed:
+                        await asyncio.sleep(0.05)
+                return close_error
             finally:
                 for task in pumps:
                     if not task.done():
@@ -6106,10 +6095,16 @@ async def _run_owned_vstest(
         cancelled_during_cleanup = False
         while not cleanup.done():
             try:
-                await asyncio.shield(cleanup)
+                await asyncio.wait((cleanup,))
             except asyncio.CancelledError:
                 cancelled_during_cleanup = True
-        await cleanup
+        close_error = cleanup.result()
+        if owner.fatal_error is not None:
+            raise owner.fatal_error
+        if close_error is not None and not (
+            first_drain is not None and isinstance(first_error, RunnerError)
+        ):
+            raise close_error
         if cancelled_during_cleanup and not failed:
             raise asyncio.CancelledError
 

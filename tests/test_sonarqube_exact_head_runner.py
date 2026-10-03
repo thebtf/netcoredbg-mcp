@@ -3833,30 +3833,28 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 with self.assertRaisesRegex(runner.RunnerError, "COVERAGE_REPORT_INVALID"):
                     runner.resolve_collector_attachment(results, trx, href)
 
-    def test_stateless_collector_failed_cleanup_retains_same_owner_without_private_bypass(self):
+    def test_stateless_collector_failed_cleanup_keeps_loop_alive_until_failed_owner_closes(self):
         if runner.os.name != "nt":
             self.skipTest("Windows Job Object ownership only")
         sys.path.insert(0, str(RUNNER_PATH.parents[1] / "src"))
         owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
 
         class Owner:
-            def __init__(self, wait_error, close_error, force_error):
-                self.wait_error = wait_error
-                self.close_error = close_error
-                self.force_error = force_error
-                self.close_calls = 0
-                self.force_calls = 0
+            fatal_error = None
+            closed = False
+
+            def __init__(self):
                 self.stdout = asyncio.StreamReader()
                 self.stdout.feed_eof()
                 self.stderr = asyncio.StreamReader()
                 self.stderr.feed_eof()
+                self.close_entered = asyncio.Event()
+                self.release_close = asyncio.Event()
 
             def __getattr__(self, name):
                 raise AssertionError(f"collector bypassed owner interface: {name}")
 
             async def wait_root(self):
-                if self.wait_error is not None:
-                    raise self.wait_error
                 return 0
 
             async def drain_after_grace(self, **_kwargs):
@@ -3864,12 +3862,15 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     status=owner_module.DrainStatus.FAILED, forced=False, active_processes=0
                 )
 
+            async def force_and_drain(self, **_kwargs):
+                return await self.drain_after_grace()
+
             def drain_snapshot(self, receipt):
                 return {
                     "status": receipt.status.value,
                     "forced": receipt.forced,
                     "root_was_forced": False,
-                    "active_processes": receipt.active_processes,
+                    "active_processes": 0,
                     "total_processes": 2,
                     "birth_notifications": 2,
                     "exit_notifications": 1,
@@ -3883,69 +3884,32 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     "winerror": None,
                 }
 
-            async def force_and_drain(self, **_kwargs):
-                self.force_calls += 1
-                if self.force_error:
-                    raise RuntimeError("private force detail")
-                return await self.drain_after_grace()
-
             async def aclose(self):
-                self.close_calls += 1
-                if self.close_error is not None:
-                    raise self.close_error
+                self.close_entered.set()
+                await self.release_close.wait()
+                self.closed = True
                 return await self.drain_after_grace()
 
-        for wait_error, close_error, force_error in (
-            (None, None, False),
-            (None, RuntimeError("private cleanup detail"), False),
-            (asyncio.CancelledError(), None, False),
-            (TimeoutError(), None, False),
-            (TimeoutError(), RuntimeError("private cleanup detail"), True),
-        ):
-            with self.subTest(wait=type(wait_error).__name__, force_error=force_error):
+        async def exercise():
+            owner = Owner()
+            with patch.object(owner_module.WindowsOwnedProcess, "launch", return_value=owner):
+                caller = asyncio.create_task(
+                    runner._run_owned_vstest(["collector"], RUNNER_PATH.parents[1])
+                )
+                await asyncio.wait_for(owner.close_entered.wait(), 2)
+                for _ in range(2):
+                    caller.cancel()
+                    await asyncio.sleep(0)
+                    self.assertFalse(caller.done())
+                    self.assertFalse(owner.closed)
+                owner.release_close.set()
+                with self.assertRaisesRegex(
+                    runner.RunnerError, "COVERAGE_PROCESS_TREE_NOT_DRAINED"
+                ):
+                    await asyncio.wait_for(caller, 2)
+                self.assertTrue(owner.closed)
 
-                async def exercise():
-                    owner = Owner(wait_error, close_error, force_error)
-                    with patch.object(
-                        owner_module.WindowsOwnedProcess, "launch", return_value=owner
-                    ):
-                        with self.assertRaisesRegex(
-                            runner.RunnerError, "COVERAGE_PROCESS_TREE_NOT_DRAINED"
-                        ) as raised:
-                            await asyncio.wait_for(
-                                runner._run_owned_vstest(["collector"], RUNNER_PATH.parents[1]), 2
-                            )
-                    return owner, raised.exception
-
-                with patch.object(runner, "_retained_collector_owners", []):
-                    owner, observed = asyncio.run(exercise())
-                    self.assertEqual(runner._retained_collector_owners, [owner])
-                self.assertEqual((owner.force_calls, owner.close_calls), (1, 2))
-                self.assertNotIn("private cleanup detail", str(observed))
-                self.assertNotIn("private force detail", str(observed))
-                if force_error:
-                    with patch.object(
-                        runner.subprocess,
-                        "run",
-                        return_value=SimpleNamespace(
-                            returncode=1,
-                            stdout=f"PROJECT_RELEASE_PROTOCOL_BLOCKED: {observed}\n",
-                        ),
-                    ):
-                        with self.assertRaisesRegex(
-                            runner.RunnerError, "COVERAGE_PROCESS_TREE_NOT_DRAINED"
-                        ):
-                            runner.run_process(
-                                ["coverage-producer"],
-                                cwd=RUNNER_PATH.parents[1],
-                                environment={},
-                                secrets=(),
-                                label="Coverage producer",
-                            )
-                else:
-                    diagnostic = json.loads(str(observed).split("owner_drain=", 1)[1])
-                    self.assertEqual(diagnostic["first"]["total_processes"], 2)
-                    self.assertEqual(diagnostic["first"]["retained_exact_handles"], 1)
+        asyncio.run(exercise())
 
     def test_stateless_collector_lifetime_reconciliation_failure_keeps_first_owner_evidence(self):
         if runner.os.name != "nt":
@@ -3955,6 +3919,9 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         secret_path = r"C:\private\scan-token\test.dll"
 
         class Owner:
+            fatal_error = None
+            closed = False
+
             def __init__(self):
                 self.births = 2
                 self.close_calls = 0
@@ -4001,10 +3968,10 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 self.close_calls += 1
                 if self.close_calls == 1:
                     raise RuntimeError("later cleanup failure")
-                return SimpleNamespace(status=owner_module.DrainStatus.DRAINED, active_processes=0)
+                self.closed = True
+                return SimpleNamespace(status=owner_module.DrainStatus.FAILED, active_processes=0)
 
         with (
-            patch.object(runner, "_retained_collector_owners", []),
             patch.object(
                 owner_module.WindowsOwnedProcess, "launch", side_effect=lambda **_: Owner()
             ),
@@ -4032,7 +3999,6 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 )
 
         with (
-            patch.object(runner, "_retained_collector_owners", []),
             patch.object(
                 owner_module.WindowsOwnedProcess, "launch", side_effect=lambda **_: ActiveOwner()
             ),
@@ -4125,6 +4091,8 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
 
         class Owner:
+            fatal_error = None
+
             def __init__(self):
                 self.stdout = asyncio.StreamReader()
                 self.stdout.feed_eof()
@@ -4192,6 +4160,9 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
 
         class Owner:
+            fatal_error = None
+            closed = False
+
             def __init__(self):
                 self.stdout = asyncio.StreamReader()
                 self.stdout.feed_eof()
@@ -4208,6 +4179,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
 
             async def aclose(self):
                 cleanup_calls.append(True)
+                self.closed = True
                 return SimpleNamespace(status=owner_module.DrainStatus.DRAINED, active_processes=0)
 
         cleanup_calls = []
@@ -4233,6 +4205,9 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
 
         class Owner:
+            fatal_error = None
+            closed = False
+
             def __init__(self, wait_error, close_error):
                 self.wait_error = wait_error
                 self.close_error = close_error
@@ -4254,6 +4229,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 self.close_calls += 1
                 if self.close_error is not None and self.close_calls == 1:
                     raise self.close_error
+                self.closed = True
                 return SimpleNamespace(status=owner_module.DrainStatus.DRAINED, active_processes=0)
 
         for wait_error, close_error in (
@@ -4636,6 +4612,8 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
 
         class Owner:
+            fatal_error = None
+
             def __init__(self):
                 self.stdout = asyncio.StreamReader()
                 self.stdout.feed_eof()
