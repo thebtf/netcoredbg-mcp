@@ -923,7 +923,10 @@ def _coverage_drain_diagnostic(line: str, marker: str) -> dict[str, Any] | None:
 def _raise_coverage_process_tree_failure(output: str) -> None:
     marker = "PROJECT_RELEASE_PROTOCOL_BLOCKED: COVERAGE_PROCESS_TREE_NOT_DRAINED: "
     for line in reversed(output.splitlines()):
-        if line == (marker + "collector cleanup is unverified; owner retained until runner exit"):
+        if line in (
+            marker + "collector cleanup is unverified; owner retained until runner exit",
+            marker + "collector failed",
+        ):
             raise RunnerError(line.removeprefix("PROJECT_RELEASE_PROTOCOL_BLOCKED: "))
         diagnostic = _coverage_drain_diagnostic(line, marker)
         if diagnostic is not None:
@@ -6280,6 +6283,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             produce_stateless_collector(*(Path(item) for item in arguments_list[1:]))
         except RunnerError as error:
             print(f"PROJECT_RELEASE_PROTOCOL_BLOCKED: {error}", file=sys.stderr)
+            return 1
+        except BaseException:
+            print(
+                "PROJECT_RELEASE_PROTOCOL_BLOCKED: COVERAGE_PROCESS_TREE_NOT_DRAINED: "
+                "collector failed",
+                file=sys.stderr,
+            )
             return 1
         return 0
     arguments = parse_args(arguments_list)

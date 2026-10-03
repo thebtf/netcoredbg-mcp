@@ -4084,6 +4084,90 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         self.assertIn("lifetime_accounting_mismatch", blocked["failure"]["safe_message"])
         self.assertNotIn(secret_path, json.dumps(blocked))
 
+    def test_stateless_collector_zero_status_fatal_cli_retains_failed_producer_claim(self):
+        private_detail = "private-collector-fatal-detail"
+        environment = runner.scrub_sonar_environment(dict(runner.os.environ))
+        for exit_code in (0, None):
+            with self.subTest(exit_code=exit_code), TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                claimed = root / ".tmp/sonarqube-coverage/claimed"
+                claimed.mkdir(parents=True)
+                evidence = claimed / "coverage-run.json"
+                evidence.write_text("retained", encoding="utf-8")
+                code = (
+                    "import importlib.util, sys\n"
+                    f"spec = importlib.util.spec_from_file_location('collector_cli_probe', {str(RUNNER_PATH)!r})\n"
+                    "module = importlib.util.module_from_spec(spec)\n"
+                    "sys.modules[spec.name] = module\n"
+                    "spec.loader.exec_module(module)\n"
+                    f"fatal = SystemExit({exit_code!r})\n"
+                    f"fatal.args = ({private_detail!r},)\n"
+                    "def collector(*paths):\n"
+                    "    raise fatal\n"
+                    "module.produce_stateless_collector = collector\n"
+                    "raise SystemExit(module.main(['collector-stateless', 'repo', 'project', 'output', 'include']))\n"
+                )
+                command = [sys.executable, "-c", code]
+                completed = runner.subprocess.run(
+                    command,
+                    cwd=RUNNER_PATH.parents[1],
+                    env=environment,
+                    stdout=runner.subprocess.PIPE,
+                    stderr=runner.subprocess.STDOUT,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                self.assertNotEqual(completed.returncode, 0, completed.stdout)
+                self.assertIn(
+                    "PROJECT_RELEASE_PROTOCOL_BLOCKED: COVERAGE_PROCESS_TREE_NOT_DRAINED:",
+                    completed.stdout,
+                )
+                self.assertNotIn(private_detail, completed.stdout)
+                with patch.object(runner.subprocess, "run", return_value=completed):
+                    with self.assertRaises(runner.RunnerError) as producer:
+                        runner.run_process(
+                            ["coverage-producer"],
+                            cwd=root,
+                            environment=environment,
+                            secrets=(),
+                            label="Coverage producer",
+                        )
+                terminals, receipts, events = [], [], []
+                with self.assertRaises(runner.RunnerError):
+                    self._transaction_events(
+                        root,
+                        events,
+                        producer_error=producer.exception,
+                        producer_terminals=terminals,
+                        real_cleanup=True,
+                        receipts=receipts,
+                    )
+                self.assertEqual(terminals, [False])
+                self.assertEqual(evidence.read_text(encoding="utf-8"), "retained")
+                self.assertNotIn("normalize", events)
+                self.assertNotIn("end", events)
+                blocked = receipts[-1]
+                self.assertEqual(blocked["outcome"], "BLOCKED")
+                self.assertEqual(blocked["failure"]["code"], "COVERAGE_PROCESS_TREE_NOT_DRAINED")
+                self.assertEqual(blocked["cleanup"]["status"], "FAILED")
+                self.assertFalse(blocked["cleanup"]["producer_terminal"])
+                self.assertEqual(blocked["cleanup"]["removed_paths"], [])
+                self.assertNotIn(private_detail, json.dumps(blocked))
+
+    def test_runner_cli_help_remains_successful(self):
+        completed = runner.subprocess.run(
+            [sys.executable, str(RUNNER_PATH), "--help"],
+            cwd=RUNNER_PATH.parents[1],
+            env=runner.scrub_sonar_environment(dict(runner.os.environ)),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertNotIn("PROJECT_RELEASE_PROTOCOL_BLOCKED", completed.stderr)
+
     def test_stateless_collector_direct_capture_returns_only_after_owner_close(self):
         if runner.os.name != "nt":
             self.skipTest("Windows Job Object ownership only")
