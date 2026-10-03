@@ -4,6 +4,7 @@ using System.IO.Pipes;
 using System.Text.Json.Nodes;
 using NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace NetCoreDbg.Mcp.Stateless.Tests.NativeScene;
 
@@ -13,6 +14,9 @@ public sealed class ElementCommandsBehaviorTests
     private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(5);
+    private readonly ITestOutputHelper _output;
+
+    public ElementCommandsBehaviorTests(ITestOutputHelper output) => _output = output;
 
     [Fact]
     public async Task ExtractText_AutomationIdWinsOverConflictingXPathAndName()
@@ -121,6 +125,55 @@ public sealed class ElementCommandsBehaviorTests
         AssertError(response, ambiguity);
     }
 
+    [Fact]
+    public async Task FindElement_GalleryMissReportsActualScopeAndSameConnectionFindsSaveButton()
+    {
+        await RunBridgeAsync(async (bridge, processId, requestId) =>
+        {
+            var missing = await CallBridgeAsync(bridge, "find_element", new JsonObject
+            {
+                ["rootAutomationId"] = "Gallery",
+                ["automationId"] = "MissingButton",
+                ["controlType"] = "Button",
+            }, requestId++);
+            Assert.False(missing.ContainsKey("error"), missing.ToJsonString());
+            var miss = Assert.IsType<JsonObject>(missing["result"]);
+            Assert.False(miss["found"]!.GetValue<bool>());
+            Assert.Equal("Gallery fixture root", miss["searchRootName"]!.GetValue<string>());
+            Assert.Equal("Gallery", miss["searchRootAutomationId"]!.GetValue<string>());
+            Assert.False(miss["searchRootOffscreen"]!.GetValue<bool>());
+            Assert.Equal(processId, miss["processId"]!.GetValue<int>());
+            Assert.Equal(1, miss["topLevelWindowCount"]!.GetValue<int>());
+            Assert.False(miss.ContainsKey("automationId"));
+            Assert.False(miss.ContainsKey("name"));
+            Assert.False(miss.ContainsKey("controlType"));
+            Assert.False(miss.ContainsKey("rect"));
+
+            var found = await CallBridgeAsync(bridge, "find_element", new JsonObject
+            {
+                ["rootAutomationId"] = "Gallery",
+                ["automationId"] = "SaveButton",
+                ["controlType"] = "Button",
+            }, requestId++);
+            Assert.False(found.ContainsKey("error"), found.ToJsonString());
+            var match = Assert.IsType<JsonObject>(found["result"]);
+            Assert.True(match["found"]!.GetValue<bool>());
+            Assert.Equal("SaveButton", match["automationId"]!.GetValue<string>());
+            Assert.Equal("Save scene", match["name"]!.GetValue<string>());
+            Assert.Equal("Button", match["controlType"]!.GetValue<string>());
+
+            var outside = await CallBridgeAsync(bridge, "find_element", new JsonObject
+            {
+                ["rootAutomationId"] = "Gallery",
+                ["automationId"] = "SceneHeading",
+            }, requestId);
+            Assert.False(outside.ContainsKey("error"), outside.ToJsonString());
+            var outsideMiss = Assert.IsType<JsonObject>(outside["result"]);
+            Assert.True(JsonNode.DeepEquals(miss, outsideMiss), outside.ToJsonString());
+            return found;
+        });
+    }
+
     private static void AssertText(JsonObject response, string expected)
     {
         Assert.False(response.ContainsKey("error"), response.ToJsonString());
@@ -136,7 +189,11 @@ public sealed class ElementCommandsBehaviorTests
         Assert.Contains(expectedMessage, error["message"]!.GetValue<string>(), StringComparison.Ordinal);
     }
 
-    private static async Task<JsonObject> RunExtractTextAsync(JsonObject selector, string mode = "bridge-elements")
+    private Task<JsonObject> RunExtractTextAsync(JsonObject selector, string mode = "bridge-elements") =>
+        RunBridgeAsync((bridge, _, requestId) => CallBridgeAsync(bridge, "extract_text", selector, requestId), mode);
+
+    private async Task<JsonObject> RunBridgeAsync(
+        Func<Process, int, int, Task<JsonObject>> exercise, string mode = "bridge-elements")
     {
         Assert.True(OperatingSystem.IsWindows(), "ElementCommands behavioral proof requires the Windows desktop.");
         var configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent?.Name
@@ -195,11 +252,22 @@ public sealed class ElementCommandsBehaviorTests
             var bridgeError = bridge.StandardError.ReadToEndAsync();
             try
             {
-                var connected = await CallBridgeAsync(bridge, "connect", new JsonObject
+                var connectStarted = Stopwatch.GetTimestamp();
+                JsonObject connected;
+                try
                 {
-                    ["pid"] = fixture.Id,
-                    ["stealth"] = true,
-                }, 1);
+                    connected = await CallBridgeAsync(bridge, "connect", new JsonObject
+                    {
+                        ["pid"] = fixture.Id,
+                        ["stealth"] = true,
+                    }, 1);
+                }
+                finally
+                {
+                    _output.WriteLine($"Bridge RPC method=connect id=1 elapsed={Stopwatch.GetElapsedTime(connectStarted)} " +
+                        $"fixturePid={fixture.Id} fixtureHasExited={fixture.HasExited} " +
+                        $"bridgePid={bridge.Id} bridgeHasExited={bridge.HasExited} bridgePath='{bridgePath}'");
+                }
                 Assert.False(connected.ContainsKey("error"), connected.ToJsonString());
                 Assert.True(connected["result"]!["connected"]!.GetValue<bool>());
                 var requestId = 2;
@@ -223,37 +291,80 @@ public sealed class ElementCommandsBehaviorTests
                         Assert.True(TreeContainsAutomationId(window, "Gallery"), window.ToJsonString());
                     });
                 }
-                return await CallBridgeAsync(bridge, "extract_text", selector, requestId);
+                return await exercise(bridge, fixture.Id, requestId);
+            }
+            catch (Exception exception)
+            {
+                _output.WriteLine("Bridge operation failed before teardown:");
+                _output.WriteLine(exception.ToString());
+                throw;
             }
             finally
             {
-                await StopAndDrainAsync(bridge, bridgeError, closeStandardInput: true);
+                try
+                {
+                    await StopAndDrainAsync(bridge, bridgeError, closeStandardInput: true);
+                }
+                catch (Exception exception)
+                {
+                    _output.WriteLine("Bridge cleanup failed before fixture teardown:");
+                    _output.WriteLine(exception.ToString());
+                    throw;
+                }
             }
         }
         finally
         {
-            await StopAndDrainAsync(fixture, fixtureError, closeStandardInput: false);
+            try
+            {
+                await StopAndDrainAsync(fixture, fixtureError, closeStandardInput: false);
+            }
+            catch (Exception exception)
+            {
+                _output.WriteLine("Fixture cleanup failed:");
+                _output.WriteLine(exception.ToString());
+                throw;
+            }
         }
     }
 
-    private static async Task<JsonObject> CallBridgeAsync(Process bridge, string method, JsonObject parameters, int id)
+    private async Task<JsonObject> CallBridgeAsync(Process bridge, string method, JsonObject parameters, int id)
     {
         using var request = new CancellationTokenSource(RequestTimeout);
-        var payload = new JsonObject
+        var started = Stopwatch.GetTimestamp();
+        var phase = "serialize";
+        try
         {
-            ["jsonrpc"] = "2.0",
-            ["id"] = id,
-            ["method"] = method,
-            ["params"] = parameters.DeepClone(),
-        };
-        await bridge.StandardInput.WriteLineAsync(payload.ToJsonString().AsMemory(), request.Token);
-        await bridge.StandardInput.FlushAsync(request.Token);
-        var line = await bridge.StandardOutput.ReadLineAsync(request.Token);
-        Assert.NotNull(line);
-        var response = Assert.IsType<JsonObject>(JsonNode.Parse(line));
-        Assert.Equal("2.0", response["jsonrpc"]!.GetValue<string>());
-        Assert.Equal(id, response["id"]!.GetValue<int>());
-        return response;
+            var payload = new JsonObject
+            {
+                ["jsonrpc"] = "2.0",
+                ["id"] = id,
+                ["method"] = method,
+                ["params"] = parameters.DeepClone(),
+            };
+            var lineToWrite = payload.ToJsonString();
+            phase = "write";
+            await bridge.StandardInput.WriteLineAsync(lineToWrite.AsMemory(), request.Token);
+            phase = "flush";
+            await bridge.StandardInput.FlushAsync(request.Token);
+            phase = "read";
+            var line = await bridge.StandardOutput.ReadLineAsync(request.Token);
+            phase = "assert-response-present";
+            Assert.NotNull(line);
+            phase = "parse";
+            var response = Assert.IsType<JsonObject>(JsonNode.Parse(line));
+            phase = "assert-envelope";
+            Assert.Equal("2.0", response["jsonrpc"]!.GetValue<string>());
+            Assert.Equal(id, response["id"]!.GetValue<int>());
+            return response;
+        }
+        catch (Exception exception)
+        {
+            _output.WriteLine($"Bridge RPC method={method} id={id} phase={phase} " +
+                $"elapsed={Stopwatch.GetElapsedTime(started)} requestCancelled={request.IsCancellationRequested}");
+            _output.WriteLine(exception.ToString());
+            throw;
+        }
     }
 
     private static bool TreeContainsAutomationId(JsonObject node, string automationId) =>
