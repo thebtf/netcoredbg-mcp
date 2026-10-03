@@ -3734,10 +3734,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 "Microsoft.Interop.LibraryImportGenerator/LibraryImports.g.cs"
             )
             sources = (
-                (stateless, "NetCoreDbg.Mcp.Stateless.Program"),
                 (bridge, "FlaUIBridge.Commands.NativeSceneEvidenceCommands"),
-                (wpf, "NetCoreDbg.Mcp.DesignProbe.Wpf.LocalProbeClient"),
-                (fixture, "ControlledEvidenceWindow"),
                 (generated, "FlaUIBridge.Commands.ClickCommands"),
                 (generated, adapter_class),
             )
@@ -3752,9 +3749,23 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 '<line number="123" hits="0" branch="true" condition-coverage="0% (0/2)"/>'
                 "</lines></class>"
             )
+            other_packages = "".join(
+                f'<package name="{module}"><classes><class name="{name}" filename="{path}">'
+                '<lines><line number="1" hits="1" branch="true" '
+                'condition-coverage="100% (1/1)"/></lines></class></classes></package>'
+                for module, path, name in (
+                    ("NetCoreDbg.Mcp.Stateless", stateless, "NetCoreDbg.Mcp.Stateless.Program"),
+                    (
+                        "NetCoreDbg.Mcp.DesignProbe.Wpf",
+                        wpf,
+                        "NetCoreDbg.Mcp.DesignProbe.Wpf.LocalProbeClient",
+                    ),
+                    ("ControlledDapAdapter", fixture, "ControlledEvidenceWindow"),
+                )
+            )
             full_xml = (
-                '<coverage><packages><package name="ModuleNamespace"><classes>'
-                f"{classes}{authored_adapter}</classes></package></packages></coverage>"
+                '<coverage><packages><package name="FlaUIBridge"><classes>'
+                f"{classes}{authored_adapter}</classes></package>{other_packages}</packages></coverage>"
             )
             raw.write_text(full_xml, encoding="utf-8")
             with patch.object(
@@ -3823,8 +3834,9 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 with self.assertRaisesRegex(runner.RunnerError, "unrecognized generated"):
                     runner.project_stateless_collector(context, raw, root / "projected.xml")
             invalid_owners = (
-                full_xml.replace("ModuleNamespace", "ForeignModule"),
-                full_xml.replace("ModuleNamespace", ""),
+                full_xml.replace('package name="FlaUIBridge"', 'package name="ForeignModule"'),
+                full_xml.replace('package name="FlaUIBridge"', 'package name="ModuleNamespace"'),
+                full_xml.replace('package name="FlaUIBridge"', 'package name=""'),
                 full_xml.replace(authored_adapter, ""),
                 full_xml.replace(
                     authored_adapter,
@@ -3861,6 +3873,196 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             ):
                 with self.assertRaisesRegex(runner.RunnerError, "collector source is untracked"):
                     runner.project_stateless_collector(context, raw, root / "projected.xml")
+
+    def _library_import_capture(self, root: Path, kind: str):
+        module, class_name, owner_relative, generated_relative = {
+            "screenshot": (
+                "FlaUIBridge",
+                "FlaUIBridge.Commands.NativeScreenshotCaptureTransport",
+                "bridge/Commands/ScreenshotCaptureTransport.cs",
+                "bridge/obj/Debug/net8.0-windows/win-x64/Microsoft.Interop.LibraryImportGenerator/"
+                "Microsoft.Interop.LibraryImportGenerator/LibraryImports.g.cs",
+            ),
+            "session": (
+                "NetCoreDbg.Mcp.Stateless",
+                "NetCoreDbg.Mcp.Stateless.DebugAdapter.NetCoreDbgSession.WindowsProcessTreeOwnership",
+                "host/NetCoreDbg.Mcp.Stateless/DebugAdapter/NetCoreDbgSession.cs",
+                "host/NetCoreDbg.Mcp.Stateless/obj/Debug/net8.0/Microsoft.Interop.LibraryImportGenerator/"
+                "Microsoft.Interop.LibraryImportGenerator/LibraryImports.g.cs",
+            ),
+        }[kind]
+        owner = self._write_source(root, owner_relative)
+        generated = root / generated_relative
+        capture = runner.ElementTree.fromstring(
+            self._cobertura(
+                [owner.as_posix()],
+                line_xml='<line number="123" hits="0" branch="true" condition-coverage="0% (0/2)"/>',
+            )
+        )
+        package = capture.find("./packages/package")
+        package.set("name", module)
+        classes = package.find("classes")
+        classes[0].set("name", class_name)
+        generated_capture = runner.ElementTree.fromstring(
+            self._cobertura(
+                [generated.as_posix()],
+                line_xml='<line number="9" hits="5" branch="true" condition-coverage="100% (1/1)"/>',
+            )
+        )
+        generated_class = generated_capture.find("./packages/package/classes/class")
+        generated_class.set("name", class_name)
+        classes.insert(0, generated_class)
+        program = self._write_source(root, "host/NetCoreDbg.Mcp.Stateless/Program.cs")
+        program_capture = runner.ElementTree.fromstring(self._cobertura([program.as_posix()]))
+        program_package = program_capture.find("./packages/package")
+        program_package.set("name", "NetCoreDbg.Mcp.Stateless")
+        program_class = program_package.find("./classes/class")
+        program_class.set("name", "NetCoreDbg.Mcp.Stateless.Program")
+        if module == "NetCoreDbg.Mcp.Stateless":
+            classes.append(program_class)
+        else:
+            capture.find("packages").append(program_package)
+        return capture, owner, generated
+
+    def _assert_library_import_capture_projection(self, kind: str):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            capture, owner, generated = self._library_import_capture(root, kind)
+            original = runner.ElementTree.tostring(capture, encoding="unicode")
+            raw = root / "raw.xml"
+            raw.write_text(original, encoding="utf-8")
+            with patch.object(
+                runner, "is_tracked", side_effect=lambda _root, _env, path: path != generated
+            ):
+                parsed = runner.project_stateless_collector(
+                    self._context(root), raw, root / "projected.xml"
+                )
+            self.assertEqual(
+                parsed["source_paths"],
+                sorted(
+                    (
+                        owner.relative_to(root).as_posix(),
+                        "host/NetCoreDbg.Mcp.Stateless/Program.cs",
+                    )
+                ),
+            )
+            self.assertEqual(
+                tuple(
+                    parsed[key]
+                    for key in (
+                        "lines_valid",
+                        "lines_covered",
+                        "branches_valid",
+                        "branches_covered",
+                    )
+                ),
+                (2, 1, 4, 1),
+            )
+            owner_fact = next(
+                item
+                for item in parsed["facts"]
+                if item["source_path"] == owner.relative_to(root).as_posix()
+            )
+            self.assertEqual(
+                owner_fact["lines"],
+                [
+                    {
+                        "number": 123,
+                        "hits": 0,
+                        "branches_covered": 0,
+                        "branches_valid": 2,
+                        "conditions": [],
+                    }
+                ],
+            )
+            self.assertEqual(raw.read_text(encoding="utf-8"), original)
+            self.assertFalse(generated.exists())
+
+    def test_stateless_collector_library_import_capture_actual_screenshot_identity(self):
+        self._assert_library_import_capture_projection("screenshot")
+
+    def test_stateless_collector_library_import_capture_actual_session_identity(self):
+        self._assert_library_import_capture_projection("session")
+
+    def test_stateless_collector_library_import_capture_rejects_unproven_identity(self):
+        variants = (
+            "wrong_package",
+            "legacy_package",
+            "missing_package",
+            "missing_owner",
+            "owner_other_package",
+            "wrong_owner_filename",
+            "foreign_owner_class",
+            "wrong_generated_filename",
+            "foreign_generated_source",
+            "other_generated_class",
+            "tracked_generated",
+            "untracked_owner",
+        )
+        for kind in ("screenshot", "session"):
+            for variant in variants:
+                with (
+                    self.subTest(kind=kind, variant=variant),
+                    TemporaryDirectory() as temporary_directory,
+                ):
+                    root = Path(temporary_directory) / "checkout"
+                    root.mkdir()
+                    capture, owner, generated = self._library_import_capture(root, kind)
+                    package = capture.find("./packages/package")
+                    classes = package.find("classes")
+                    generated_class, authored_class = classes[0], classes[1]
+                    if variant == "wrong_package":
+                        package.set("name", "ForeignModule")
+                    elif variant == "legacy_package":
+                        package.set("name", "ModuleNamespace")
+                    elif variant == "missing_package":
+                        package.attrib.pop("name")
+                    elif variant == "missing_owner":
+                        classes.remove(authored_class)
+                    elif variant == "owner_other_package":
+                        classes.remove(authored_class)
+                        other = runner.ElementTree.SubElement(
+                            capture.find("packages"), "package", name="ForeignModule"
+                        )
+                        runner.ElementTree.SubElement(other, "classes").append(authored_class)
+                    elif variant == "wrong_owner_filename":
+                        authored_class.set(
+                            "filename", str(root / "host/NetCoreDbg.Mcp.Stateless/Program.cs")
+                        )
+                    elif variant == "foreign_owner_class":
+                        authored_class.set("name", "Foreign.GeneratedOwner")
+                    elif variant == "wrong_generated_filename":
+                        generated = generated.with_name("Injected.g.cs")
+                        generated_class.set("filename", str(generated))
+                    elif variant == "foreign_generated_source":
+                        generated = root.parent / "foreign/LibraryImports.g.cs"
+                        generated_class.set("filename", str(generated))
+                    elif variant == "other_generated_class":
+                        other_class = (
+                            generated_class.get("name").rsplit(".", 1)[0] + ".UnregisteredImports"
+                        )
+                        generated_class.set("name", other_class)
+                        authored_class.set("name", other_class)
+                    if generated.is_relative_to(root):
+                        self._write_source(root, generated.relative_to(root).as_posix())
+                    raw = root / "raw.xml"
+                    raw.write_text(
+                        runner.ElementTree.tostring(capture, encoding="unicode"), encoding="utf-8"
+                    )
+                    with patch.object(
+                        runner,
+                        "is_tracked",
+                        side_effect=lambda _root, _env, path: (
+                            variant == "tracked_generated" or path != generated
+                        )
+                        and (variant != "untracked_owner" or path != owner),
+                    ):
+                        with self.assertRaisesRegex(
+                            runner.RunnerError, "COVERAGE_SOURCE_MAPPING_INVALID"
+                        ):
+                            runner.project_stateless_collector(
+                                self._context(root), raw, root / "projected.xml"
+                            )
 
     def test_stateless_collector_refuses_relative_escape_and_fixture_paths(self):
         with TemporaryDirectory() as temporary_directory:

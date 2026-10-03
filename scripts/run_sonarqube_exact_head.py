@@ -2321,7 +2321,7 @@ def _collector_source_relative(
         if class_name == "FlaUIBridge.Commands.NativeScreenshotCaptureTransport":
             owner_relative = "bridge/Commands/ScreenshotCaptureTransport.cs"
             owner_filename = (context.repository_root / owner_relative).as_posix()
-            if package.get("name") != "ModuleNamespace" or not any(
+            if package.get("name") != "FlaUIBridge" or not any(
                 owner.get("name") == class_name
                 and owner.get("filename", "").replace("\\", "/") in {owner_relative, owner_filename}
                 for owner in package.findall("./classes/class")
@@ -2330,6 +2330,29 @@ def _collector_source_relative(
                     "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized generated collector owner"
                 )
             _safe_coverage_source(context, owner_relative, "dotnet", (context.repository_root,))
+        return None
+    if relative.startswith(STATELESS_SOURCE_PREFIX + "obj/"):
+        if (
+            relative
+            != "host/NetCoreDbg.Mcp.Stateless/obj/Debug/net8.0/Microsoft.Interop.LibraryImportGenerator/Microsoft.Interop.LibraryImportGenerator/LibraryImports.g.cs"
+            or class_name
+            != "NetCoreDbg.Mcp.Stateless.DebugAdapter.NetCoreDbgSession.WindowsProcessTreeOwnership"
+            or is_tracked(context.repository_root, _coverage_environment(), candidate)
+        ):
+            _coverage_failure(
+                "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized generated collector source"
+            )
+        owner_relative = "host/NetCoreDbg.Mcp.Stateless/DebugAdapter/NetCoreDbgSession.cs"
+        owner_filename = (context.repository_root / owner_relative).as_posix()
+        if package.get("name") != "NetCoreDbg.Mcp.Stateless" or not any(
+            owner.get("name") == class_name
+            and owner.get("filename", "").replace("\\", "/") in {owner_relative, owner_filename}
+            for owner in package.findall("./classes/class")
+        ):
+            _coverage_failure(
+                "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized generated collector owner"
+            )
+        _safe_coverage_source(context, owner_relative, "dotnet", (context.repository_root,))
         return None
     metadata = _scanner_tree_metadata(candidate)
     if (
