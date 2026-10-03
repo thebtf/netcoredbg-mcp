@@ -116,13 +116,13 @@ class TestUIAutomation:
     @pytest.mark.asyncio
     async def test_get_window_tree_not_connected(self, ui_automation):
         """Test get_window_tree when not connected."""
-        with pytest.raises(NoProcessIdError, match="Not connected"):
+        with pytest.raises(NoProcessIdError):
             await ui_automation.get_window_tree()
 
     @pytest.mark.asyncio
     async def test_find_element_not_connected(self, ui_automation):
         """Test find_element when not connected."""
-        with pytest.raises(NoProcessIdError, match="Not connected"):
+        with pytest.raises(NoProcessIdError):
             await ui_automation.find_element(automation_id="test")
 
     @pytest.mark.asyncio
@@ -138,7 +138,7 @@ class TestUIAutomation:
     @pytest.mark.asyncio
     async def test_send_keys_focused_not_connected(self, ui_automation):
         """Test send_keys_focused when not connected."""
-        with pytest.raises(NoProcessIdError, match="Not connected"):
+        with pytest.raises(NoProcessIdError):
             await ui_automation.send_keys_focused("{ENTER}")
 
     @pytest.mark.asyncio

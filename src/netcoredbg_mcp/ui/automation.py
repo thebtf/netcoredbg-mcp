@@ -462,6 +462,8 @@ def _send_drag(
 
 logger = logging.getLogger(__name__)
 
+_NOT_CONNECTED_MESSAGE = "Not connected to any process"
+
 
 class UIAutomation:
     """Async wrapper for pywinauto UI Automation."""
@@ -499,7 +501,7 @@ class UIAutomation:
                 app = Application(backend="uia").connect(process=process_id)
                 return app
             except Exception as e:
-                logger.error(f"Failed to connect to process {process_id}: {e}")
+                logger.exception(f"Failed to connect to process {process_id}: {e}")
                 raise ApplicationNotRespondingError(
                     f"Cannot connect to process {process_id}: {e}"
                 ) from e
@@ -618,7 +620,7 @@ class UIAutomation:
             UIOperationTimeoutError: If operation takes too long
         """
         if self._app is None:
-            raise NoProcessIdError("Not connected to any process")
+            raise NoProcessIdError(_NOT_CONNECTED_MESSAGE)
 
         def _get_tree():
             try:
@@ -626,7 +628,7 @@ class UIAutomation:
                 window = self._app.top_window()
                 return serialize_element(window, max_depth=max_depth, max_children=max_children)
             except Exception as e:
-                logger.error(f"Failed to get window tree: {e}")
+                logger.exception(f"Failed to get window tree: {e}")
                 raise ApplicationNotRespondingError(f"Cannot access window tree: {e}") from e
 
         try:
@@ -668,7 +670,7 @@ class UIAutomation:
             ValueError: If no search criteria provided
         """
         if self._app is None:
-            raise NoProcessIdError("Not connected to any process")
+            raise NoProcessIdError(_NOT_CONNECTED_MESSAGE)
 
         if not any((automation_id, name, control_type)):
             raise ValueError("At least one search criterion must be provided")
@@ -697,7 +699,7 @@ class UIAutomation:
                 return element
 
             except Exception as e:
-                logger.error(f"Failed to find element: {e}")
+                logger.exception(f"Failed to find element: {e}")
                 raise ElementNotFoundError(
                     f"Element not found with criteria {criteria}: {e}"
                 ) from e
@@ -730,7 +732,7 @@ class UIAutomation:
             try:
                 return serialize_element(element, max_depth=0, max_children=0)
             except Exception as e:
-                logger.error(f"Failed to get element info: {e}")
+                logger.exception(f"Failed to get element info: {e}")
                 raise ApplicationNotRespondingError(f"Cannot access element info: {e}") from e
 
         try:
@@ -760,7 +762,7 @@ class UIAutomation:
                 element.set_focus()
                 logger.debug(f"Set focus to element: {element.element_info.name}")
             except Exception as e:
-                logger.error(f"Failed to set focus: {e}")
+                logger.exception(f"Failed to set focus: {e}")
                 raise ApplicationNotRespondingError(f"Cannot set focus to element: {e}") from e
 
         try:
@@ -800,7 +802,7 @@ class UIAutomation:
                     element.type_keys(keys, with_spaces=True)
                 logger.debug(f"Sent keys to element: {keys}")
             except Exception as e:
-                logger.error(f"Failed to send keys: {e}")
+                logger.exception(f"Failed to send keys: {e}")
                 raise ApplicationNotRespondingError(f"Cannot send keys to element: {e}") from e
 
         try:
@@ -827,7 +829,7 @@ class UIAutomation:
                 element.click()
                 logger.debug(f"Clicked element: {element.element_info.name}")
             except Exception as e:
-                logger.error(f"Failed to click element: {e}")
+                logger.exception(f"Failed to click element: {e}")
                 raise ApplicationNotRespondingError(f"Cannot click element: {e}") from e
 
         try:
@@ -856,14 +858,14 @@ class UIAutomation:
             UIOperationTimeoutError: If operation times out
         """
         if self._app is None:
-            raise NoProcessIdError("Not connected to any process")
+            raise NoProcessIdError(_NOT_CONNECTED_MESSAGE)
 
         def _send_keys_focused():
             try:
                 _send_keys_via_input(keys)
                 logger.debug(f"Sent keys to focused element via SendInput: {keys}")
             except Exception as e:
-                logger.error(f"Failed to send keys to focused: {e}")
+                logger.exception(f"Failed to send keys to focused: {e}")
                 raise ApplicationNotRespondingError(
                     f"Cannot send keys to focused element: {e}"
                 ) from e
