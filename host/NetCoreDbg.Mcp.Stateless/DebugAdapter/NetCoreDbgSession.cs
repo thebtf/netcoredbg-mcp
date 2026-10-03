@@ -772,7 +772,7 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
     {
         var allThreadsStopped = ReadOptionalBoolean(body, "allThreadsStopped");
         var threadId = TryGetInt32(body, "threadId");
-        _callStackAdmissionGate.Wait();
+        _callStackAdmissionGate.Wait(CancellationToken.None);
         try
         {
             lock (_stateGate)
@@ -805,7 +805,7 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
             && body.TryGetProperty("allThreadsContinued", out _);
         var allThreadsContinued = ReadOptionalBoolean(body, "allThreadsContinued");
         var threadId = TryGetInt32(body, "threadId");
-        _callStackAdmissionGate.Wait();
+        _callStackAdmissionGate.Wait(CancellationToken.None);
         try
         {
             lock (_stateGate)
@@ -832,7 +832,7 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
 
     private void HandleTerminalEvent(string eventName, JsonElement body)
     {
-        _callStackAdmissionGate.Wait();
+        _callStackAdmissionGate.Wait(CancellationToken.None);
         try
         {
             lock (_stateGate)
@@ -1112,7 +1112,7 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
-    private Task DrainStandardErrorAsync() => _error.CopyToAsync(Stream.Null);
+    private Task DrainStandardErrorAsync() => _error.CopyToAsync(Stream.Null, CancellationToken.None);
 
     private async Task<JsonDocument?> ReadFrameAsync(CancellationToken cancellationToken)
     {
