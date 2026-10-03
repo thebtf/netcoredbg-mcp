@@ -15,7 +15,7 @@ using NetCoreDbg.Mcp.Stateless.NativeScene;
 
 namespace NetCoreDbg.Mcp.Stateless.DebugAdapter;
 
-internal sealed class NetCoreDbgSession : IAsyncDisposable
+internal sealed partial class NetCoreDbgSession : IAsyncDisposable
 {
     private const int MaximumHeaderBytes = 16 * 1024;
     private const int MaximumPayloadBytes = 16 * 1024 * 1024;
@@ -1420,7 +1420,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private sealed record UnixProcessGroupLaunch(Process Process, UnixProcessGroupOwnership Ownership);
 
-    internal sealed class WindowsProcessTreeOwnership : IProcessTreeOwnership
+    internal sealed partial class WindowsProcessTreeOwnership : IProcessTreeOwnership
     {
         private const uint CreateNoWindow = 0x08000000;
         private const uint CreateSuspended = 0x00000004;
@@ -1747,7 +1747,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             var attributes = new SecurityAttributes
             {
                 Length = Marshal.SizeOf<SecurityAttributes>(),
-                InheritHandle = true,
+                InheritHandle = 1,
             };
             if (!CreatePipe(out var read, out var write, ref attributes, 0))
             {
@@ -1938,17 +1938,17 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             ref StartupInfoEx startupInfo,
             out ProcessInformation processInformation);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
+        [LibraryImport("kernel32.dll", EntryPoint = "InitializeProcThreadAttributeList", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool InitializeProcThreadAttributeList(
+        private static partial bool InitializeProcThreadAttributeList(
             IntPtr attributeList,
             uint attributeCount,
             uint flags,
             ref IntPtr size);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
+        [LibraryImport("kernel32.dll", EntryPoint = "UpdateProcThreadAttribute", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool UpdateProcThreadAttribute(
+        private static partial bool UpdateProcThreadAttribute(
             IntPtr attributeList,
             uint flags,
             UIntPtr attribute,
@@ -1957,59 +1957,58 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             IntPtr previousValue,
             IntPtr returnSize);
 
-        [DllImport("kernel32.dll")]
-        private static extern void DeleteProcThreadAttributeList(IntPtr attributeList);
+        [LibraryImport("kernel32.dll", EntryPoint = "DeleteProcThreadAttributeList")]
+        private static partial void DeleteProcThreadAttributeList(IntPtr attributeList);
 
 
-        [DllImport("kernel32.dll", SetLastError = true)]
+        [LibraryImport("kernel32.dll", EntryPoint = "CreatePipe", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool CreatePipe(
+        private static partial bool CreatePipe(
             out IntPtr readPipe,
             out IntPtr writePipe,
             ref SecurityAttributes pipeAttributes,
             uint size);
 
-        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern IntPtr CreateJobObject(IntPtr jobAttributes, string? name);
+        [LibraryImport("kernel32.dll", EntryPoint = "CreateJobObjectW", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+        private static partial IntPtr CreateJobObject(IntPtr jobAttributes, string? name);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
+        [LibraryImport("kernel32.dll", EntryPoint = "SetInformationJobObject", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool SetInformationJobObject(
+        private static partial bool SetInformationJobObject(
             SafeKernelHandle job,
             uint informationClass,
             ref JobObjectExtendedLimitInformation jobObjectInformation,
             uint jobObjectInformationLength);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
+        [LibraryImport("kernel32.dll", EntryPoint = "AssignProcessToJobObject", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool AssignProcessToJobObject(SafeKernelHandle job, IntPtr process);
+        private static partial bool AssignProcessToJobObject(SafeKernelHandle job, IntPtr process);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern uint ResumeThread(IntPtr thread);
+        [LibraryImport("kernel32.dll", EntryPoint = "ResumeThread", SetLastError = true)]
+        private static partial uint ResumeThread(IntPtr thread);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
+        [LibraryImport("kernel32.dll", EntryPoint = "TerminateProcess", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+        private static partial bool TerminateProcess(IntPtr process, uint exitCode);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
+        [LibraryImport("kernel32.dll", EntryPoint = "TerminateJobObject", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool TerminateJobObject(SafeKernelHandle job, uint exitCode);
+        private static partial bool TerminateJobObject(SafeKernelHandle job, uint exitCode);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
+        [LibraryImport("kernel32.dll", EntryPoint = "SetHandleInformation", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool SetHandleInformation(SafeFileHandle handle, uint mask, uint flags);
+        private static partial bool SetHandleInformation(SafeFileHandle handle, uint mask, uint flags);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
+        [LibraryImport("kernel32.dll", EntryPoint = "CloseHandle", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool CloseHandle(IntPtr handle);
+        private static partial bool CloseHandle(IntPtr handle);
 
         [StructLayout(LayoutKind.Sequential)]
         private struct SecurityAttributes
         {
             public int Length;
             public IntPtr SecurityDescriptor;
-            [MarshalAs(UnmanagedType.Bool)]
-            public bool InheritHandle;
+            public int InheritHandle;
         }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]

@@ -53,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.23.12] - 2026-09-27
 
 ### Fixed
+- The Stateless host now uses source-generated marshalling for twelve Win32 imports, preserving native entry points, BOOL/UTF-16 encoding, last-error capture, and SafeHandle protection. Windows standard-I/O inheritance, Job containment, and cleanup behavior are unchanged; `CreateProcess` retains runtime marshalling for its mutable command-line buffer.
 - The existing Windows keyboard-input tools send all 17 named numeric-keypad keys as physical events through FlaUI and pywinauto: ten digits, Add/Subtract/Multiply/Divide/Decimal, keypad Enter, and NumLock. Keypad Enter and Divide retain their extended-key distinction; NumLock uses the physical VK 0x90 / scan 0x45 nonextended event instead of an incorrectly resolved key.
 - Python startup artifact GC now runs once in a lifespan-owned subprocess instead of blocking server construction. A five-second useful-work budget and bounded owner drain isolate incomplete maintenance from MCP initialization. New artifacts use a private current-user namespace and a retained OS lease; active owners remain protected regardless of age.
 
