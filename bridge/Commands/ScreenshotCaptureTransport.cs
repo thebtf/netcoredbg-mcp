@@ -37,7 +37,7 @@ internal interface IScreenshotCaptureTransport
     bool SetForegroundWindow(IntPtr hwnd);
 }
 
-internal sealed class NativeScreenshotCaptureTransport : IScreenshotCaptureTransport
+internal sealed partial class NativeScreenshotCaptureTransport : IScreenshotCaptureTransport
 {
     private const uint PwRenderFullContent = 0x00000002;
     private const int SwRestore = 9;
@@ -52,50 +52,58 @@ internal sealed class NativeScreenshotCaptureTransport : IScreenshotCaptureTrans
         public int Bottom;
     }
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
+    [LibraryImport("user32.dll", EntryPoint = "PrintWindow", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
+    [LibraryImport("user32.dll", EntryPoint = "GetWindowRect", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetWindowRect(IntPtr hwnd, out Rect rect);
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool GetClientRect(IntPtr hwnd, out Rect rect);
+    [LibraryImport("user32.dll", EntryPoint = "GetClientRect", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetClientRect(IntPtr hwnd, out Rect rect);
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern uint GetDpiForWindow(IntPtr hwnd);
+    [LibraryImport("user32.dll", EntryPoint = "GetDpiForWindow", SetLastError = true)]
+    private static partial uint GetDpiForWindow(IntPtr hwnd);
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+    [LibraryImport("user32.dll", EntryPoint = "GetWindowThreadProcessId", SetLastError = true)]
+    private static partial uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
 
-    [DllImport("user32.dll", EntryPoint = "GetForegroundWindow")]
-    private static extern IntPtr NativeGetForegroundWindow();
+    [LibraryImport("user32.dll", EntryPoint = "GetForegroundWindow")]
+    private static partial IntPtr NativeGetForegroundWindow();
 
-    [DllImport("user32.dll", EntryPoint = "SetForegroundWindow", SetLastError = true)]
-    private static extern bool NativeSetForegroundWindow(IntPtr hwnd);
+    [LibraryImport("user32.dll", EntryPoint = "SetForegroundWindow", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool NativeSetForegroundWindow(IntPtr hwnd);
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool ShowWindow(IntPtr hwnd, int command);
+    [LibraryImport("user32.dll", EntryPoint = "ShowWindow", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool ShowWindow(IntPtr hwnd, int command);
 
-    [DllImport("kernel32.dll")]
-    private static extern uint GetCurrentThreadId();
+    [LibraryImport("kernel32.dll", EntryPoint = "GetCurrentThreadId")]
+    private static partial uint GetCurrentThreadId();
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
+    [LibraryImport("user32.dll", EntryPoint = "AttachThreadInput", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool AttachThreadInput(uint idAttach, uint idAttachTo, [MarshalAs(UnmanagedType.Bool)] bool attach);
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool BringWindowToTop(IntPtr hwnd);
+    [LibraryImport("user32.dll", EntryPoint = "BringWindowToTop", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool BringWindowToTop(IntPtr hwnd);
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern IntPtr GetThreadDesktop(uint threadId);
+    [LibraryImport("user32.dll", EntryPoint = "GetThreadDesktop", SetLastError = true)]
+    private static partial IntPtr GetThreadDesktop(uint threadId);
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern IntPtr GetWindowDC(IntPtr hwnd);
+    [LibraryImport("user32.dll", EntryPoint = "GetWindowDC", SetLastError = true)]
+    private static partial IntPtr GetWindowDC(IntPtr hwnd);
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
+    [LibraryImport("user32.dll", EntryPoint = "ReleaseDC", SetLastError = true)]
+    private static partial int ReleaseDC(IntPtr hwnd, IntPtr hdc);
 
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern bool BitBlt(
+    [LibraryImport("gdi32.dll", EntryPoint = "BitBlt", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool BitBlt(
         IntPtr destination,
         int xDestination,
         int yDestination,

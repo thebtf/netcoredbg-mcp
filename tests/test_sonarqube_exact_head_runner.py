@@ -3721,6 +3721,8 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             context = self._context(root)
             stateless = self._write_source(root, "host/NetCoreDbg.Mcp.Stateless/Program.cs")
             bridge = self._write_source(root, "bridge/Commands/NativeSceneEvidenceCommands.cs")
+            adapter = self._write_source(root, "bridge/Commands/ScreenshotCaptureTransport.cs")
+            adapter_class = "FlaUIBridge.Commands.NativeScreenshotCaptureTransport"
             wpf = self._write_source(
                 root, "host/NetCoreDbg.Mcp.DesignProbe.Wpf/LocalProbeClient.cs"
             )
@@ -3737,6 +3739,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 (wpf, "NetCoreDbg.Mcp.DesignProbe.Wpf.LocalProbeClient"),
                 (fixture, "ControlledEvidenceWindow"),
                 (generated, "FlaUIBridge.Commands.ClickCommands"),
+                (generated, adapter_class),
             )
             classes = "".join(
                 f'<class name="{name}" filename="{path}"><lines><line number="1" hits="1" '
@@ -3744,7 +3747,15 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 for path, name in sources
             )
             raw = root / "full.xml"
-            full_xml = f"<coverage><packages><package><classes>{classes}</classes></package></packages></coverage>"
+            authored_adapter = (
+                f'<class name="{adapter_class}" filename="{adapter}"><lines>'
+                '<line number="123" hits="0" branch="true" condition-coverage="0% (0/2)"/>'
+                "</lines></class>"
+            )
+            full_xml = (
+                '<coverage><packages><package name="ModuleNamespace"><classes>'
+                f"{classes}{authored_adapter}</classes></package></packages></coverage>"
+            )
             raw.write_text(full_xml, encoding="utf-8")
             with patch.object(
                 runner, "is_tracked", side_effect=lambda _root, _env, path: path != generated
@@ -3757,19 +3768,51 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                         "host/NetCoreDbg.Mcp.Stateless/Program.cs",
                         "bridge/Commands/NativeSceneEvidenceCommands.cs",
                         "host/NetCoreDbg.Mcp.DesignProbe.Wpf/LocalProbeClient.cs",
+                        "bridge/Commands/ScreenshotCaptureTransport.cs",
                     )
                 ),
             )
-            self.assertEqual((parsed["lines_covered"], parsed["branches_covered"]), (3, 3))
-            self.assertGreater(
-                sum(
-                    line["hits"]
-                    for source in parsed["facts"]
-                    if source["source_path"].startswith("bridge/")
-                    for line in source["lines"]
+            self.assertEqual(
+                tuple(
+                    parsed[key]
+                    for key in (
+                        "lines_valid",
+                        "lines_covered",
+                        "branches_valid",
+                        "branches_covered",
+                    )
                 ),
-                0,
+                (4, 3, 5, 3),
             )
+            adapter_fact = next(
+                source
+                for source in parsed["facts"]
+                if source["source_path"] == "bridge/Commands/ScreenshotCaptureTransport.cs"
+            )
+            self.assertEqual(adapter_fact["class_name"], adapter_class)
+            self.assertEqual(
+                adapter_fact["lines"],
+                [
+                    {
+                        "number": 123,
+                        "hits": 0,
+                        "branches_covered": 0,
+                        "branches_valid": 2,
+                        "conditions": [],
+                    }
+                ],
+            )
+            self.assertEqual(raw.read_text(encoding="utf-8"), full_xml)
+            reordered_xml = full_xml.replace(
+                f"{classes}{authored_adapter}", f"{authored_adapter}{classes}"
+            )
+            raw.write_text(reordered_xml, encoding="utf-8")
+            with patch.object(
+                runner, "is_tracked", side_effect=lambda _root, _env, path: path != generated
+            ):
+                reordered = runner.project_stateless_collector(context, raw, root / "projected.xml")
+            self.assertCountEqual(reordered["facts"], parsed["facts"])
+            self.assertEqual(raw.read_text(encoding="utf-8"), reordered_xml)
             self.assertFalse(generated.exists())
             raw.write_text(
                 full_xml.replace("LibraryImports.g.cs", "Injected.g.cs"), encoding="utf-8"
@@ -3779,7 +3822,38 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             ):
                 with self.assertRaisesRegex(runner.RunnerError, "unrecognized generated"):
                     runner.project_stateless_collector(context, raw, root / "projected.xml")
+            invalid_owners = (
+                full_xml.replace("ModuleNamespace", "ForeignModule"),
+                full_xml.replace("ModuleNamespace", ""),
+                full_xml.replace(authored_adapter, ""),
+                full_xml.replace(
+                    authored_adapter,
+                    authored_adapter.replace(str(adapter), str(bridge)),
+                ),
+                full_xml.replace(
+                    authored_adapter,
+                    authored_adapter.replace(adapter_class, "Foreign.ScreenshotCaptureTransport"),
+                ),
+                full_xml.replace(adapter_class, "Foreign.ScreenshotCaptureTransport"),
+            )
+            with patch.object(
+                runner, "is_tracked", side_effect=lambda _root, _env, path: path != generated
+            ):
+                for invalid_xml in invalid_owners:
+                    with self.subTest(xml=invalid_xml):
+                        raw.write_text(invalid_xml, encoding="utf-8")
+                        with self.assertRaisesRegex(
+                            runner.RunnerError, "COVERAGE_SOURCE_MAPPING_INVALID"
+                        ):
+                            runner.project_stateless_collector(context, raw, root / "projected.xml")
             raw.write_text(full_xml, encoding="utf-8")
+            with patch.object(
+                runner,
+                "is_tracked",
+                side_effect=lambda _root, _env, path: path not in {generated, adapter},
+            ):
+                with self.assertRaisesRegex(runner.RunnerError, "untracked"):
+                    runner.project_stateless_collector(context, raw, root / "projected.xml")
             with patch.object(
                 runner,
                 "is_tracked",

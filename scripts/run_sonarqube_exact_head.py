@@ -2280,7 +2280,9 @@ def _safe_coverage_source(
     return relative
 
 
-def _collector_source_relative(context: GitContext, item: ElementTree.Element) -> str | None:
+def _collector_source_relative(
+    context: GitContext, package: ElementTree.Element, item: ElementTree.Element
+) -> str | None:
     if item.tag != "class":
         _coverage_failure("COVERAGE_REPORT_INVALID", "collector class is malformed")
     raw_filename = item.get("filename", "")
@@ -2309,12 +2311,25 @@ def _collector_source_relative(context: GitContext, item: ElementTree.Element) -
                 "FlaUIBridge.Commands.ClickCommands",
                 "FlaUIBridge.Commands.ElementCommands",
                 "FlaUIBridge.Commands.HoverCommands",
+                "FlaUIBridge.Commands.NativeScreenshotCaptureTransport",
             }
             or is_tracked(context.repository_root, _coverage_environment(), candidate)
         ):
             _coverage_failure(
                 "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized generated collector source"
             )
+        if class_name == "FlaUIBridge.Commands.NativeScreenshotCaptureTransport":
+            owner_relative = "bridge/Commands/ScreenshotCaptureTransport.cs"
+            owner_filename = (context.repository_root / owner_relative).as_posix()
+            if package.get("name") != "ModuleNamespace" or not any(
+                owner.get("name") == class_name
+                and owner.get("filename", "").replace("\\", "/") in {owner_relative, owner_filename}
+                for owner in package.findall("./classes/class")
+            ):
+                _coverage_failure(
+                    "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized generated collector owner"
+                )
+            _safe_coverage_source(context, owner_relative, "dotnet", (context.repository_root,))
         return None
     metadata = _scanner_tree_metadata(candidate)
     if (
@@ -2488,7 +2503,7 @@ def project_stateless_collector(
             _coverage_failure("COVERAGE_REPORT_INVALID", "collector package has no classes")
         counts = [0, 0, 0, 0]
         for item in list(classes):
-            relative = _collector_source_relative(context, item)
+            relative = _collector_source_relative(context, package, item)
             if relative is None or _collector_test_source(
                 package,
                 item.get("name", ""),

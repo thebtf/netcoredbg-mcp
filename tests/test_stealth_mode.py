@@ -467,21 +467,6 @@ def test_bridge_screenshot_falls_back_to_flash_focus_bitblt_when_blank() -> None
     assert "SetForegroundWindow(savedForeground)" in command
 
 
-def test_native_screenshot_capture_transport_binds_renamed_foreground_exports() -> None:
-    transport = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCaptureTransport.cs").read_text(
-        encoding="utf-8"
-    )
-
-    assert (
-        '[DllImport("user32.dll", EntryPoint = "GetForegroundWindow")]\n'
-        "    private static extern IntPtr NativeGetForegroundWindow();"
-    ) in transport
-    assert (
-        '[DllImport("user32.dll", EntryPoint = "SetForegroundWindow", SetLastError = true)]\n'
-        "    private static extern bool NativeSetForegroundWindow(IntPtr hwnd);"
-    ) in transport
-
-
 def test_bridge_evidence_fallback_discards_black_printwindow_for_ordinary_and_strict_calls() -> (
     None
 ):
