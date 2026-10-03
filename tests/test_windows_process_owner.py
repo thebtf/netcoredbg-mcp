@@ -819,6 +819,7 @@ async def test_owner_drain_snapshot_preserves_closed_receipt_without_private_cap
     assert before["status"] == "drained"
     assert before["retained_exact_handles"] == before["signaled_exact_handles"] == 1
     assert before["total_processes"] == before["birth_notifications"] == 1
+    assert before["live_members_without_handle"] == 0
     assert set(before) == {
         "status",
         "forced",
@@ -836,6 +837,33 @@ async def test_owner_drain_snapshot_preserves_closed_receipt_without_private_cap
         "failure_stage",
         "winerror",
     }
+    for live_pids, expected in (
+        (set(), 0),
+        ({owner.pid}, 0),
+        ({42}, 0),
+        ({43}, 1),
+        ({owner.pid, 42, 43}, 1),
+        ({owner.pid, 42, 43, 44}, 2),
+    ):
+        for capture_handles in (None, {42: [43, 44]}):
+            with monkeypatch.context() as snapshot_patch:
+                snapshot_patch.setattr(owner, "_live_births", live_pids)
+                snapshot_patch.setattr(
+                    owner, "_member_handles", {42: 43} if capture_handles is None else {43: 42}
+                )
+                capture = (
+                    None
+                    if capture_handles is None
+                    else SimpleNamespace(
+                        lock=threading.Lock(),
+                        handles=capture_handles,
+                        retained_handles=lambda: (21,),
+                        root_seen=True,
+                        failure=None,
+                    )
+                )
+                snapshot_patch.setattr(owner, "_debug_capture", capture)
+                assert owner.drain_snapshot(receipt)["live_members_without_handle"] == expected
     await owner.aclose()
     assert owner.drain_snapshot(receipt) == before
     json.dumps(before)

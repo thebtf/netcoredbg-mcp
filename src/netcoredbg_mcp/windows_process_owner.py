@@ -1548,6 +1548,12 @@ class _FailedAdmissionReaper:
         self._completed.set()
 
 
+def _count_live_members_without_handle(
+    live_pids: set[int], root_pid: int, retained_handles: Mapping[int, object]
+) -> int:
+    return sum(pid != root_pid and pid not in retained_handles for pid in live_pids)
+
+
 def _close_ignoring_errors(api: _WindowsApi, handle: int) -> None:
     try:
         api.close_handle(handle)
@@ -2471,10 +2477,10 @@ class WindowsOwnedProcess:
                 "unverified_membership": self._unverified_membership
                 or (capture is not None and capture.failure is not None),
                 "root_birth_seen": capture.root_seen if capture else self._root_birth_seen,
-                "live_members_without_handle": sum(
-                    pid != self.pid
-                    and pid not in (capture.handles if capture else self._member_handles)
-                    for pid in self._live_births
+                "live_members_without_handle": _count_live_members_without_handle(
+                    self._live_births,
+                    self.pid,
+                    capture.handles if capture else self._member_handles,
                 ),
                 "retained_exact_handles": len(handles),
                 "signaled_exact_handles": signaled,
