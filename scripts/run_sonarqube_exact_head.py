@@ -2371,6 +2371,7 @@ def _collector_source_relative(
 
 
 def _collector_test_source(
+    context: GitContext,
     package: ElementTree.Element,
     class_name: str,
     relative: str,
@@ -2388,6 +2389,21 @@ def _collector_test_source(
         _coverage_failure(
             "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized test startup hook origin"
         )
+    smoke_fixture = "tests/fixtures/WpfSmokeApp/"
+    smoke_namespace = "WpfSmokeApp."
+    if relative.startswith(smoke_fixture):
+        if (
+            not relative.endswith(".cs")
+            or package.get("name") != "WpfSmokeApp"
+            or not class_name.startswith(smoke_namespace)
+            or class_name == smoke_namespace
+        ):
+            _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized fixture source")
+        parts = relative.split("/")
+        if any(part in {"", ".", "..", "bin", "obj"} for part in parts):
+            _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "fixture source path is unsafe")
+        _resolve_coverage_source(context, parts, (context.repository_root,))
+        return True
     fixtures = "host/NetCoreDbg.Mcp.Stateless.Tests/Fixtures/"
     if relative.startswith(fixtures):
         if not relative.endswith(".cs") or not any(
@@ -2528,6 +2544,7 @@ def project_stateless_collector(
         for item in list(classes):
             relative = _collector_source_relative(context, package, item)
             if relative is None or _collector_test_source(
+                context,
                 package,
                 item.get("name", ""),
                 relative,

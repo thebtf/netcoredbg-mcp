@@ -18,6 +18,12 @@ public sealed class ElementCommandsBehaviorTests
 
     public ElementCommandsBehaviorTests(ITestOutputHelper output) => _output = output;
 
+    private enum BridgeFixture
+    {
+        NativeSceneProbe,
+        WpfSmokeApp,
+    }
+
     [Fact]
     public async Task ExtractText_AutomationIdWinsOverConflictingXPathAndName()
     {
@@ -174,6 +180,69 @@ public sealed class ElementCommandsBehaviorTests
         });
     }
 
+    [Fact]
+    public async Task GridSelectRange_ReadsExactlyTwoCueRows()
+    {
+        await RunBridgeAsync(async (bridge, _, requestId) =>
+        {
+            var gallery = await CallBridgeAsync(bridge, "extract_text", new JsonObject
+            {
+                ["automationId"] = "smokeGalleryStatus",
+            }, requestId++);
+            Assert.False(gallery.ContainsKey("error"), gallery.ToJsonString());
+            var galleryResult = Assert.IsType<JsonObject>(gallery["result"]);
+            var readiness = Assert.IsType<JsonObject>(JsonNode.Parse(galleryResult["text"]!.GetValue<string>()));
+            Assert.Equal("ready", readiness["state"]!.GetValue<string>());
+            Assert.True(readiness["generation"]!.GetValue<long>() > 0, readiness.ToJsonString());
+
+            var selected = await CallBridgeAsync(bridge, "grid_select_range", new JsonObject
+            {
+                ["selector"] = new JsonObject
+                {
+                    ["automationId"] = "dataGrid",
+                    ["controlType"] = "DataGrid",
+                },
+                ["start_index"] = 0,
+                ["end_index"] = 1,
+                ["columns"] = new JsonArray("Phrase"),
+            }, requestId++);
+            AssertSelectedCueRows(selected);
+            var range = Assert.IsType<JsonObject>(selected["result"]!["selected_range"]);
+            Assert.Equal(0, range["start"]!.GetValue<int>());
+            Assert.Equal(1, range["end"]!.GetValue<int>());
+
+            var readback = await CallBridgeAsync(bridge, "grid_selected_rows", new JsonObject
+            {
+                ["selector"] = new JsonObject
+                {
+                    ["automationId"] = "dataGrid",
+                    ["controlType"] = "DataGrid",
+                },
+                ["columns"] = new JsonArray("Phrase"),
+            }, requestId);
+            AssertSelectedCueRows(readback);
+            return readback;
+        }, fixtureChoice: BridgeFixture.WpfSmokeApp);
+    }
+
+    private static void AssertSelectedCueRows(JsonObject response)
+    {
+        Assert.False(response.ContainsKey("error"), response.ToJsonString());
+        var result = Assert.IsType<JsonObject>(response["result"]);
+        Assert.Equal("PASS", result["status"]!.GetValue<string>());
+        var rows = Assert.IsType<JsonArray>(result["selected_rows"]);
+        Assert.Equal(2, rows.Count);
+        for (var index = 0; index < rows.Count; index++)
+        {
+            var row = Assert.IsType<JsonObject>(rows[index]);
+            Assert.Equal(index, row["index"]!.GetValue<int>());
+            Assert.Equal(index, row["row_index"]!.GetValue<int>());
+            Assert.True(row["selected"]!.GetValue<bool>(), row.ToJsonString());
+            var cells = Assert.IsType<JsonObject>(row["cells"]);
+            Assert.Equal(index == 0 ? "Fixture cue one" : "Fixture cue two", cells["Phrase"]!.GetValue<string>());
+        }
+    }
+
     private static void AssertText(JsonObject response, string expected)
     {
         Assert.False(response.ContainsKey("error"), response.ToJsonString());
@@ -193,13 +262,17 @@ public sealed class ElementCommandsBehaviorTests
         RunBridgeAsync((bridge, _, requestId) => CallBridgeAsync(bridge, "extract_text", selector, requestId), mode);
 
     private async Task<JsonObject> RunBridgeAsync(
-        Func<Process, int, int, Task<JsonObject>> exercise, string mode = "bridge-elements")
+        Func<Process, int, int, Task<JsonObject>> exercise, string mode = "bridge-elements",
+        BridgeFixture fixtureChoice = BridgeFixture.NativeSceneProbe)
     {
         Assert.True(OperatingSystem.IsWindows(), "ElementCommands behavioral proof requires the Windows desktop.");
         var configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent?.Name
             ?? throw new InvalidOperationException("Test output configuration is absent.");
-        var fixturePath = Path.Combine(RepositoryLayout.Root, "host", "NetCoreDbg.Mcp.Stateless.Tests", "Fixtures",
-            "NativeSceneProbe.WpfFixture", "bin", configuration, "net8.0-windows", "NativeSceneProbe.WpfFixture.exe");
+        var fixturePath = fixtureChoice == BridgeFixture.NativeSceneProbe
+            ? Path.Combine(RepositoryLayout.Root, "host", "NetCoreDbg.Mcp.Stateless.Tests", "Fixtures",
+                "NativeSceneProbe.WpfFixture", "bin", configuration, "net8.0-windows", "NativeSceneProbe.WpfFixture.exe")
+            : Path.Combine(RepositoryLayout.Root, "tests", "fixtures", "WpfSmokeApp", "bin", configuration,
+                "net8.0-windows", "WpfSmokeApp.exe");
         Assert.True(File.Exists(fixturePath), $"Built WPF fixture is absent: '{fixturePath}'.");
         var bridgeDirectory = Path.Combine(RepositoryLayout.Root, "bridge", "bin", configuration, "net8.0-windows");
         var bridgePath = new[]
@@ -208,33 +281,48 @@ public sealed class ElementCommandsBehaviorTests
             Path.Combine(bridgeDirectory, "FlaUIBridge.dll"),
         }.FirstOrDefault(File.Exists) ?? throw new InvalidOperationException("Built FlaUI bridge assembly is absent.");
 
-        var readinessName = $"element-commands-window-ready-{Guid.NewGuid():N}";
-        using var readiness = new NamedPipeServerStream(readinessName, PipeDirection.In, 1,
-            PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-        var fixtureInfo = new ProcessStartInfo(fixturePath)
-        {
-            WorkingDirectory = RepositoryLayout.Root,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-        };
-        fixtureInfo.ArgumentList.Add("--native-scene-probe-test-harness");
-        fixtureInfo.ArgumentList.Add($"--native-scene-probe-mode={mode}");
-        fixtureInfo.Environment["NETCOREDBG_NATIVE_SCENE_PROBE_FIXTURE_MODE"] = mode;
-        fixtureInfo.Environment["CONTROLLED_DAP_WINDOWED_DESCENDANT_READINESS_PIPE"] = readinessName;
-        using var fixture = Process.Start(fixtureInfo)
-            ?? throw new InvalidOperationException("WPF fixture could not be started.");
-        var fixtureError = fixture.StandardError.ReadToEndAsync();
+        using var fixture = new Process();
+        Task<string>? fixtureError = null;
         try
         {
-            using (var startup = new CancellationTokenSource(StartupTimeout))
+            var readinessName = fixtureChoice == BridgeFixture.NativeSceneProbe
+                ? $"element-commands-window-ready-{Guid.NewGuid():N}"
+                : null;
+            using var readiness = readinessName is null ? null : new NamedPipeServerStream(readinessName, PipeDirection.In, 1,
+                PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            var fixtureInfo = new ProcessStartInfo(fixturePath)
             {
+                WorkingDirectory = RepositoryLayout.Root,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            if (readinessName is not null)
+            {
+                fixtureInfo.ArgumentList.Add("--native-scene-probe-test-harness");
+                fixtureInfo.ArgumentList.Add($"--native-scene-probe-mode={mode}");
+                fixtureInfo.Environment["NETCOREDBG_NATIVE_SCENE_PROBE_FIXTURE_MODE"] = mode;
+                fixtureInfo.Environment["CONTROLLED_DAP_WINDOWED_DESCENDANT_READINESS_PIPE"] = readinessName;
+            }
+            fixture.StartInfo = fixtureInfo;
+            if (!fixture.Start())
+            {
+                throw new InvalidOperationException("WPF fixture could not be started.");
+            }
+            fixtureError = fixture.StandardError.ReadToEndAsync();
+            if (readiness is not null)
+            {
+                using var startup = new CancellationTokenSource(StartupTimeout);
                 await readiness.WaitForConnectionAsync(startup.Token);
                 var handle = new byte[sizeof(long)];
                 await readiness.ReadExactlyAsync(handle, startup.Token);
                 Assert.NotEqual(0L, BinaryPrimitives.ReadInt64LittleEndian(handle));
                 Assert.False(fixture.HasExited, "WPF fixture exited before window readiness.");
+            }
+            else
+            {
+                await NativeSceneAtomicityTests.WaitForMainWindowAsync(fixture.Id);
             }
 
             var bridgeInfo = new ProcessStartInfo("dotnet")
@@ -270,6 +358,10 @@ public sealed class ElementCommandsBehaviorTests
                 }
                 Assert.False(connected.ContainsKey("error"), connected.ToJsonString());
                 Assert.True(connected["result"]!["connected"]!.GetValue<bool>());
+                if (fixtureChoice == BridgeFixture.WpfSmokeApp)
+                {
+                    Assert.Equal("WPF Smoke Test", connected["result"]!["title"]!.GetValue<string>());
+                }
                 var requestId = 2;
                 if (mode == "bridge-elements-ambiguous-roots")
                 {
@@ -315,15 +407,18 @@ public sealed class ElementCommandsBehaviorTests
         }
         finally
         {
-            try
+            if (fixtureError is not null)
             {
-                await StopAndDrainAsync(fixture, fixtureError, closeStandardInput: false);
-            }
-            catch (Exception exception)
-            {
-                _output.WriteLine("Fixture cleanup failed:");
-                _output.WriteLine(exception.ToString());
-                throw;
+                try
+                {
+                    await StopAndDrainAsync(fixture, fixtureError, closeStandardInput: false);
+                }
+                catch (Exception exception)
+                {
+                    _output.WriteLine("Fixture cleanup failed:");
+                    _output.WriteLine(exception.ToString());
+                    throw;
+                }
             }
         }
     }

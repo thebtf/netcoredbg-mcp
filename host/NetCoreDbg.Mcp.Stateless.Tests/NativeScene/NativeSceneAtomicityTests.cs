@@ -815,7 +815,7 @@ public sealed class NativeSceneAtomicityTests : IDisposable
         return new BoundFixtureSession(debugSessionId, candidate);
     }
 
-    private static async Task WaitForMainWindowAsync(int processId)
+    internal static async Task WaitForMainWindowAsync(int processId)
     {
         using var process = System.Diagnostics.Process.GetProcessById(processId);
         var timeout = System.Diagnostics.Stopwatch.StartNew();

@@ -4064,6 +4064,173 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                                 self._context(root), raw, root / "projected.xml"
                             )
 
+    def _wpf_smoke_fixture_capture(self, root: Path):
+        program = self._write_source(root, "host/NetCoreDbg.Mcp.Stateless/Program.cs")
+        production = runner.ElementTree.fromstring(self._cobertura([program.as_posix()]))
+        program_package = production.find("./packages/package")
+        program_package.set("name", "NetCoreDbg.Mcp.Stateless")
+        program_package.find("./classes/class").set("name", "NetCoreDbg.Mcp.Stateless.Program")
+        grid = self._write_source(root, "bridge/Commands/GridCommands.cs")
+        bridge_capture = runner.ElementTree.fromstring(
+            self._cobertura(
+                [grid.as_posix()],
+                line_xml='<line number="26" hits="2" branch="true" condition-coverage="100% (1/1)"/>',
+            )
+        )
+        bridge_package = bridge_capture.find("./packages/package")
+        bridge_package.set("name", "FlaUIBridge")
+        bridge_package.find("./classes/class").set("name", "FlaUIBridge.Commands.GridCommands")
+        production.find("packages").append(bridge_package)
+        main = self._write_source(root, "tests/fixtures/WpfSmokeApp/MainWindow.xaml.cs")
+        calibration = self._write_source(
+            root, "tests/fixtures/WpfSmokeApp/NativeCalibrationWindow.cs"
+        )
+        identities = (
+            (main, "WpfSmokeApp.MainWindow"),
+            (main, "WpfSmokeApp.GuardedChildDriftButton"),
+            (main, "WpfSmokeApp.MainViewModel"),
+            (main, "WpfSmokeApp.CueRow"),
+            (main, "WpfSmokeApp.CharacterRow"),
+            (calibration, "WpfSmokeApp.NativeCalibrationWindow"),
+            (main, "WpfSmokeApp.MainWindow.CueDragPayload"),
+            (main, "WpfSmokeApp.MainWindow.CueDropDiagnostics"),
+            (main, "WpfSmokeApp.MainWindow.<>c"),
+            (main, "WpfSmokeApp.MainWindow.<>c__DisplayClass100_0"),
+            (main, "WpfSmokeApp.MainWindow.<>c__DisplayClass101_0"),
+            (main, "WpfSmokeApp.MainWindow.<>c__DisplayClass93_0"),
+            (main, "WpfSmokeApp.MainWindow.<>c__DisplayClass95_0"),
+            (main, "WpfSmokeApp.MainWindow.<>c__DisplayClass98_0"),
+            (main, "WpfSmokeApp.GuardedChildDriftButton.GuardedChildDriftButtonAutomationPeer"),
+            (main, "WpfSmokeApp.MainViewModel.CueRowSeed"),
+            (main, "WpfSmokeApp.MainViewModel.CharacterSeed"),
+        )
+        fixture_capture = runner.ElementTree.fromstring(
+            self._cobertura(
+                [path.as_posix() for path, _name in identities],
+                line_xml='<line number="5" hits="19" branch="true" condition-coverage="100% (3/3)"/>',
+            )
+        )
+        fixture_package = fixture_capture.find("./packages/package")
+        fixture_package.set("name", "WpfSmokeApp")
+        for item, (_path, name) in zip(
+            fixture_package.findall("./classes/class"), identities, strict=True
+        ):
+            item.set("name", name)
+        return production, fixture_package, main
+
+    def test_stateless_collector_wpf_smoke_fixture_actual_capture_preserves_production_facts(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            production, fixture_package, _main = self._wpf_smoke_fixture_capture(root)
+            raw = root / "raw.xml"
+            projected = root / "projected.xml"
+            raw.write_text(
+                runner.ElementTree.tostring(production, encoding="unicode"), encoding="utf-8"
+            )
+            with patch.object(runner, "is_tracked", return_value=True):
+                baseline = runner.project_stateless_collector(context, raw, projected)
+                self.assertEqual(
+                    tuple(
+                        baseline[key]
+                        for key in (
+                            "lines_valid",
+                            "lines_covered",
+                            "branches_valid",
+                            "branches_covered",
+                        )
+                    ),
+                    (2, 2, 3, 2),
+                )
+                production.find("packages").append(fixture_package)
+                captured_xml = runner.ElementTree.tostring(production, encoding="unicode")
+                raw.write_text(captured_xml, encoding="utf-8")
+                observed = runner.project_stateless_collector(context, raw, projected)
+            self.assertEqual(observed["facts"], baseline["facts"])
+            self.assertEqual(observed["source_paths"], baseline["source_paths"])
+            self.assertEqual(
+                tuple(
+                    observed[key]
+                    for key in (
+                        "lines_valid",
+                        "lines_covered",
+                        "branches_valid",
+                        "branches_covered",
+                    )
+                ),
+                (2, 2, 3, 2),
+            )
+            self.assertEqual(raw.read_text(encoding="utf-8"), captured_xml)
+
+    def test_stateless_collector_wpf_smoke_fixture_refuses_unproven_identity(self):
+        variants = (
+            "wrong_module",
+            "missing_module",
+            "module_alias",
+            "foreign_class",
+            "namespace_lookalike",
+            "empty_root_namespace",
+            "sibling_fixture",
+            "namespace_outside_fixture",
+            "untracked_source",
+            "nonregular_source",
+            "unexpected_obj",
+        )
+        for variant in variants:
+            with self.subTest(variant=variant), TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                production, fixture_package, source = self._wpf_smoke_fixture_capture(root)
+                classes = fixture_package.find("classes")
+                item = classes[0]
+                classes[:] = [item]
+                if variant == "wrong_module":
+                    fixture_package.set("name", "ForeignModule")
+                elif variant == "missing_module":
+                    fixture_package.attrib.pop("name")
+                elif variant == "module_alias":
+                    fixture_package.set("name", "ModuleNamespace")
+                elif variant == "foreign_class":
+                    item.set("name", "Foreign.MainWindow")
+                elif variant == "namespace_lookalike":
+                    item.set("name", "WpfSmokeAppForeign.MainWindow")
+                elif variant == "empty_root_namespace":
+                    item.set("name", "WpfSmokeApp.")
+                elif variant == "sibling_fixture":
+                    source = self._write_source(
+                        root, "tests/fixtures/WpfSmokeAppSibling/MainWindow.xaml.cs"
+                    )
+                    item.set("filename", source.as_posix())
+                elif variant == "namespace_outside_fixture":
+                    item.set(
+                        "filename", (root / "host/NetCoreDbg.Mcp.Stateless/Program.cs").as_posix()
+                    )
+                elif variant == "nonregular_source":
+                    source = root / "tests/fixtures/WpfSmokeApp/Directory.cs"
+                    source.mkdir()
+                    item.set("filename", source.as_posix())
+                elif variant == "unexpected_obj":
+                    source = self._write_source(
+                        root, "tests/fixtures/WpfSmokeApp/obj/Debug/net8.0-windows/MainWindow.g.cs"
+                    )
+                    item.set("filename", source.as_posix())
+                production.find("packages").append(fixture_package)
+                raw = root / "raw.xml"
+                raw.write_text(
+                    runner.ElementTree.tostring(production, encoding="unicode"), encoding="utf-8"
+                )
+                with patch.object(
+                    runner,
+                    "is_tracked",
+                    side_effect=lambda _root, _env, path: variant != "untracked_source"
+                    or path != source,
+                ):
+                    with self.assertRaisesRegex(
+                        runner.RunnerError, "COVERAGE_SOURCE_MAPPING_INVALID"
+                    ):
+                        runner.project_stateless_collector(
+                            self._context(root), raw, root / "projected.xml"
+                        )
+
     def test_stateless_collector_refuses_relative_escape_and_fixture_paths(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory) / "checkout"
