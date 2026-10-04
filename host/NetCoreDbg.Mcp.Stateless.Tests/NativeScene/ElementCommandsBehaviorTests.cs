@@ -181,6 +181,81 @@ public sealed class ElementCommandsBehaviorTests
     }
 
     [Fact]
+    public async Task FindByXPath_GalleryAmbiguityThenUniqueAndMissesStayScoped()
+    {
+        await RunBridgeAsync(async (bridge, _, requestId) =>
+        {
+            var ambiguous = await CallBridgeAsync(bridge, "find_by_xpath", new JsonObject
+            {
+                ["rootAutomationId"] = "Gallery",
+                ["xpath"] = "//Button[@AutomationId='AmbiguousButton']",
+            }, requestId++);
+            Assert.False(ambiguous.ContainsKey("error"), ambiguous.ToJsonString());
+            var first = Assert.IsType<JsonObject>(ambiguous["result"]);
+            Assert.True(first["found"]!.GetValue<bool>());
+            Assert.Equal(2, first["matchCount"]!.GetValue<int>());
+            Assert.Equal("Ambiguous action one", first["name"]!.GetValue<string>());
+            Assert.Equal("AmbiguousButton", first["automationId"]!.GetValue<string>());
+            Assert.Equal("Button", first["controlType"]!.GetValue<string>());
+            Assert.Equal("XPath matched 2 elements; returning first. Use more specific XPath to avoid ambiguity.",
+                first["warning"]!.GetValue<string>());
+            var bounds = Assert.IsType<JsonObject>(first["rect"]);
+            Assert.Equal(4, bounds.Count);
+            foreach (var coordinate in new[] { "x", "y", "width", "height" })
+            {
+                Assert.True(double.IsFinite(bounds[coordinate]!.GetValue<double>()), bounds.ToJsonString());
+            }
+            Assert.True(bounds["width"]!.GetValue<double>() > 0, bounds.ToJsonString());
+            Assert.True(bounds["height"]!.GetValue<double>() > 0, bounds.ToJsonString());
+
+            var unique = await CallBridgeAsync(bridge, "find_by_xpath", new JsonObject
+            {
+                ["rootAutomationId"] = "Gallery",
+                ["xpath"] = "//Button[@AutomationId='SaveButton']",
+            }, requestId++);
+            Assert.False(unique.ContainsKey("error"), unique.ToJsonString());
+            var save = Assert.IsType<JsonObject>(unique["result"]);
+            Assert.True(save["found"]!.GetValue<bool>());
+            Assert.Equal(1, save["matchCount"]!.GetValue<int>());
+            Assert.Equal("Save scene", save["name"]!.GetValue<string>());
+            Assert.Equal("SaveButton", save["automationId"]!.GetValue<string>());
+            Assert.Equal("Button", save["controlType"]!.GetValue<string>());
+            Assert.False(save.ContainsKey("warning"), unique.ToJsonString());
+
+            const string missingXPath = "//Button[@AutomationId='MissingButton']";
+            var missing = await CallBridgeAsync(bridge, "find_by_xpath", new JsonObject
+            {
+                ["rootAutomationId"] = "Gallery",
+                ["xpath"] = missingXPath,
+            }, requestId++);
+            Assert.False(missing.ContainsKey("error"), missing.ToJsonString());
+            var miss = Assert.IsType<JsonObject>(missing["result"]);
+            Assert.True(JsonNode.DeepEquals(new JsonObject
+            {
+                ["found"] = false,
+                ["xpath"] = missingXPath,
+                ["matchCount"] = 0,
+            }, miss), missing.ToJsonString());
+
+            const string outsideXPath = "//*[@AutomationId='SceneHeading']";
+            var outside = await CallBridgeAsync(bridge, "find_by_xpath", new JsonObject
+            {
+                ["rootAutomationId"] = "Gallery",
+                ["xpath"] = outsideXPath,
+            }, requestId);
+            Assert.False(outside.ContainsKey("error"), outside.ToJsonString());
+            var outsideMiss = Assert.IsType<JsonObject>(outside["result"]);
+            Assert.True(JsonNode.DeepEquals(new JsonObject
+            {
+                ["found"] = false,
+                ["xpath"] = outsideXPath,
+                ["matchCount"] = 0,
+            }, outsideMiss), outside.ToJsonString());
+            return outside;
+        });
+    }
+
+    [Fact]
     public async Task GridSelectRange_ReadsExactlyTwoCueRows()
     {
         await RunBridgeAsync(async (bridge, _, requestId) =>
