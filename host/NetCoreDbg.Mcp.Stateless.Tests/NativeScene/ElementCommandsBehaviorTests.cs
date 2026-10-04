@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Text.Json.Nodes;
 using NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter;
 using Xunit;
@@ -300,6 +301,168 @@ public sealed class ElementCommandsBehaviorTests
         }, fixtureChoice: BridgeFixture.WpfSmokeApp);
     }
 
+    [Fact]
+    public async Task Screenshot_WpfSmokeApp_PngAndEvidenceMatchIndependentWin32Facts()
+    {
+        await RunBridgeAsync(async (bridge, processId, requestId) =>
+        {
+            using var fixture = Process.GetProcessById(processId);
+            var target = ObserveWindow(fixture);
+            Assert.Equal(checked((uint)processId), target.ProcessId);
+
+            var missingTarget = await CallBridgeAsync(bridge, "screenshot", new JsonObject
+            {
+                ["evidence"] = true,
+                ["typed_bitblt_fallback"] = true,
+            }, requestId++);
+            AssertError(missingTarget,
+                "Typed BitBlt fallback requires an expected HWND, active process ID, and positive physical dimensions.");
+
+            var zeroTarget = await CallBridgeAsync(bridge, "screenshot", new JsonObject
+            {
+                ["evidence"] = true,
+                ["typed_bitblt_fallback"] = true,
+                ["expected_hwnd"] = 0L,
+                ["expected_process_id"] = processId,
+                ["expected_physical_width"] = target.Window.Right - target.Window.Left,
+                ["expected_physical_height"] = target.Window.Bottom - target.Window.Top,
+            }, requestId++);
+            AssertError(zeroTarget,
+                "Typed BitBlt fallback requires an expected HWND, active process ID, and positive physical dimensions.");
+
+            Assert.NotEqual(processId, bridge.Id);
+            var wrongProcess = await CallBridgeAsync(bridge, "screenshot", new JsonObject
+            {
+                ["evidence"] = true,
+                ["typed_bitblt_fallback"] = true,
+                ["hwnd"] = target.Hwnd.ToInt64(),
+                ["expected_hwnd"] = target.Hwnd.ToInt64(),
+                ["expected_process_id"] = bridge.Id,
+                ["expected_physical_width"] = target.Window.Right - target.Window.Left,
+                ["expected_physical_height"] = target.Window.Bottom - target.Window.Top,
+            }, requestId++);
+            AssertError(wrongProcess, "Capture target does not belong to the active debuggee process.");
+
+            // Both capture paths may flash focus before these PrintWindow assertions can fail.
+            var ordinaryBefore = ObserveWindow(fixture);
+            Assert.Equal(target, ordinaryBefore);
+            var ordinary = await CallBridgeAsync(bridge, "screenshot", new JsonObject(), requestId++);
+            var ordinaryAfter = ObserveWindow(fixture);
+            Assert.Equal(ordinaryBefore, ordinaryAfter);
+            AssertScreenshotPng(ordinary, ordinaryBefore);
+
+            var evidenceBefore = ObserveWindow(fixture);
+            Assert.Equal(ordinaryAfter, evidenceBefore);
+            var evidence = await CallBridgeAsync(bridge, "screenshot", new JsonObject
+            {
+                ["evidence"] = true,
+            }, requestId);
+            var evidenceAfter = ObserveWindow(fixture);
+            Assert.Equal(evidenceBefore, evidenceAfter);
+            var result = AssertScreenshotPng(evidence, evidenceBefore);
+            Assert.Equal(evidenceBefore.Hwnd.ToInt64(), result["hwnd"]!.GetValue<long>());
+            Assert.Equal(checked((int)evidenceBefore.ProcessId), result["process_id"]!.GetValue<int>());
+            Assert.Equal(checked((int)evidenceBefore.Dpi), result["dpi"]!.GetValue<int>());
+            AssertScreenshotRect(result["client_rect"], evidenceBefore.Client, "client", "GetClientRect");
+            AssertScreenshotRect(result["window_bounds"], evidenceBefore.Window, "screen", "GetWindowRect");
+            return evidence;
+        }, fixtureChoice: BridgeFixture.WpfSmokeApp);
+    }
+
+    private JsonObject AssertScreenshotPng(JsonObject response, WindowObservation observation)
+    {
+        Assert.False(response.ContainsKey("error"), response["error"]?.ToJsonString());
+        var result = Assert.IsType<JsonObject>(response["result"]);
+        _output.WriteLine($"Screenshot classification: method={result["method"]} flags={result["flags"]} " +
+            $"fallback={result["fallback"]} printwindow_classification={result["printwindow_classification"]} " +
+            $"foreground={result["foreground"]?.ToJsonString()}");
+        Assert.Equal("PrintWindow", result["method"]!.GetValue<string>());
+        Assert.Equal(2, result["flags"]!.GetValue<int>());
+        Assert.False(result.ContainsKey("fallback"));
+        Assert.False(result.ContainsKey("foreground"));
+
+        var png = Convert.FromBase64String(result["base64"]!.GetValue<string>());
+        Assert.True(png.Length >= 33, "PNG must contain its signature and complete IHDR chunk.");
+        ReadOnlySpan<byte> signature = [137, 80, 78, 71, 13, 10, 26, 10];
+        Assert.True(png.AsSpan(0, 8).SequenceEqual(signature), "Screenshot is not a PNG.");
+        Assert.Equal(13u, BinaryPrimitives.ReadUInt32BigEndian(png.AsSpan(8, 4)));
+        Assert.True(png.AsSpan(12, 4).SequenceEqual("IHDR"u8), "PNG first chunk must be IHDR.");
+        var width = BinaryPrimitives.ReadUInt32BigEndian(png.AsSpan(16, 4));
+        var height = BinaryPrimitives.ReadUInt32BigEndian(png.AsSpan(20, 4));
+        Assert.Equal(checked((uint)result["width"]!.GetValue<int>()), width);
+        Assert.Equal(checked((uint)result["height"]!.GetValue<int>()), height);
+        Assert.Equal(checked((uint)(observation.Window.Right - observation.Window.Left)), width);
+        Assert.Equal(checked((uint)(observation.Window.Bottom - observation.Window.Top)), height);
+        return result;
+    }
+
+    private static void AssertScreenshotRect(JsonNode? node, RECT expected, string coordinateSpace, string sourceApi)
+    {
+        var rect = Assert.IsType<JsonObject>(node);
+        Assert.Equal(expected.Left, rect["left"]!.GetValue<int>());
+        Assert.Equal(expected.Top, rect["top"]!.GetValue<int>());
+        Assert.Equal(expected.Right, rect["right"]!.GetValue<int>());
+        Assert.Equal(expected.Bottom, rect["bottom"]!.GetValue<int>());
+        Assert.Equal("physical_px", rect["unit"]!.GetValue<string>());
+        Assert.Equal(coordinateSpace, rect["coordinate_space"]!.GetValue<string>());
+        Assert.Equal(sourceApi, rect["source_api"]!.GetValue<string>());
+    }
+
+    private static WindowObservation ObserveWindow(Process fixture)
+    {
+        // Keep physical-coordinate observation and DPI-context restoration on this synchronous thread.
+        var previous = SetThreadDpiAwarenessContext(new IntPtr(-4));
+        Assert.NotEqual(IntPtr.Zero, previous);
+        try
+        {
+            fixture.Refresh();
+            Assert.False(fixture.HasExited, "WPF screenshot fixture exited before observation.");
+            var hwnd = fixture.MainWindowHandle;
+            Assert.NotEqual(IntPtr.Zero, hwnd);
+            Assert.True(GetWindowRect(hwnd, out var window), $"GetWindowRect failed: {Marshal.GetLastWin32Error()}");
+            Assert.True(GetClientRect(hwnd, out var client), $"GetClientRect failed: {Marshal.GetLastWin32Error()}");
+            var dpi = GetDpiForWindow(hwnd);
+            Assert.NotEqual(0u, dpi);
+            Assert.NotEqual(0u, GetWindowThreadProcessId(hwnd, out var ownerProcessId));
+            Assert.Equal(checked((uint)fixture.Id), ownerProcessId);
+            Assert.True(window.Right > window.Left && window.Bottom > window.Top);
+            Assert.True(client.Right > client.Left && client.Bottom > client.Top);
+            return new WindowObservation(hwnd, ownerProcessId, window, client, dpi);
+        }
+        finally
+        {
+            Assert.NotEqual(IntPtr.Zero, SetThreadDpiAwarenessContext(previous));
+        }
+    }
+
+    private readonly record struct WindowObservation(IntPtr Hwnd, uint ProcessId, RECT Window, RECT Client, uint Dpi);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint GetDpiForWindow(IntPtr hwnd);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+
     private static void AssertSelectedCueRows(JsonObject response)
     {
         Assert.False(response.ContainsKey("error"), response.ToJsonString());
@@ -352,9 +515,9 @@ public sealed class ElementCommandsBehaviorTests
         var bridgeDirectory = Path.Combine(RepositoryLayout.Root, "bridge", "bin", configuration, "net8.0-windows");
         var bridgePath = new[]
         {
-            Path.Combine(bridgeDirectory, "win-x64", "FlaUIBridge.dll"),
-            Path.Combine(bridgeDirectory, "FlaUIBridge.dll"),
-        }.FirstOrDefault(File.Exists) ?? throw new InvalidOperationException("Built FlaUI bridge assembly is absent.");
+            Path.Combine(bridgeDirectory, "win-x64", "FlaUIBridge.exe"),
+            Path.Combine(bridgeDirectory, "FlaUIBridge.exe"),
+        }.FirstOrDefault(File.Exists) ?? throw new InvalidOperationException("Built FlaUI bridge apphost is absent.");
 
         using var fixture = new Process();
         Task<string>? fixtureError = null;
@@ -400,7 +563,7 @@ public sealed class ElementCommandsBehaviorTests
                 await NativeSceneAtomicityTests.WaitForMainWindowAsync(fixture.Id);
             }
 
-            var bridgeInfo = new ProcessStartInfo("dotnet")
+            var bridgeInfo = new ProcessStartInfo(bridgePath)
             {
                 WorkingDirectory = RepositoryLayout.Root,
                 UseShellExecute = false,
@@ -409,7 +572,6 @@ public sealed class ElementCommandsBehaviorTests
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             };
-            bridgeInfo.ArgumentList.Add(bridgePath);
             using var bridge = Process.Start(bridgeInfo)
                 ?? throw new InvalidOperationException("FlaUI bridge could not be started.");
             var bridgeError = bridge.StandardError.ReadToEndAsync();
