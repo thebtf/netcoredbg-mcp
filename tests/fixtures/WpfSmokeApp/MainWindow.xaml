@@ -70,6 +70,11 @@
                     <ComboBoxItem Content="Option C"/>
                 </ComboBox>
 
+                <Expander Header="Pattern details" Margin="0,2" IsExpanded="False"
+                          AutomationProperties.AutomationId="patternDetails">
+                    <TextBlock Text="Persistent pattern details"/>
+                </Expander>
+
                 <!-- Duplicate-named button inside panel (for root_id test) -->
                 <Button Content="Action (Inside)" Margin="0,5"
                         AutomationProperties.AutomationId="btnAction"/>

@@ -10,10 +10,13 @@ namespace FlaUIBridge.Commands;
 
 public static class PatternCommands
 {
+    private const string NotConnected = "Not connected. Call 'connect' first.";
+    private const string AutomationIdOutputKey = "automation_id";
+
     public static JsonNode InvokeElement(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         if (mainWindow is null)
-            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+            throw new InvalidOperationException(NotConnected);
 
         var searchRoot = ElementCommands.ResolveSearchRoot(mainWindow, @params, automation);
         AutomationElement element;
@@ -58,7 +61,7 @@ public static class PatternCommands
     public static JsonNode ToggleElement(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         if (mainWindow is null)
-            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+            throw new InvalidOperationException(NotConnected);
 
         var searchRoot = ElementCommands.ResolveSearchRoot(mainWindow, @params, automation);
         AutomationElement element;
@@ -122,7 +125,7 @@ public static class PatternCommands
     public static JsonNode ExpandElement(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         if (mainWindow is null)
-            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+            throw new InvalidOperationException(NotConnected);
 
         var automationId = @params?["automationId"]?.GetValue<string>()
             ?? throw new ArgumentException("Missing required parameter: automationId");
@@ -148,7 +151,7 @@ public static class PatternCommands
         return new JsonObject
         {
             ["expanded"] = true,
-            ["automation_id"] = automationId,
+            [AutomationIdOutputKey] = automationId,
             ["was_already"] = wasAlready
         };
     }
@@ -156,7 +159,7 @@ public static class PatternCommands
     public static JsonNode CollapseElement(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         if (mainWindow is null)
-            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+            throw new InvalidOperationException(NotConnected);
 
         var automationId = @params?["automationId"]?.GetValue<string>()
             ?? throw new ArgumentException("Missing required parameter: automationId");
@@ -182,7 +185,7 @@ public static class PatternCommands
         return new JsonObject
         {
             ["collapsed"] = true,
-            ["automation_id"] = automationId,
+            [AutomationIdOutputKey] = automationId,
             ["was_already"] = wasAlready
         };
     }
@@ -190,7 +193,7 @@ public static class PatternCommands
     public static JsonNode SetRangeValue(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         if (mainWindow is null)
-            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+            throw new InvalidOperationException(NotConnected);
 
         var automationId = @params?["automationId"]?.GetValue<string>()
             ?? throw new ArgumentException("Missing required parameter: automationId");
@@ -227,7 +230,7 @@ public static class PatternCommands
             {
                 ["set"] = false,
                 ["reason"] = $"value {value} out of range [{minimum}..{maximum}]",
-                ["automation_id"] = automationId,
+                [AutomationIdOutputKey] = automationId,
                 ["minimum"] = minimum,
                 ["maximum"] = maximum
             };
@@ -239,7 +242,7 @@ public static class PatternCommands
         return new JsonObject
         {
             ["set"] = true,
-            ["automation_id"] = automationId,
+            [AutomationIdOutputKey] = automationId,
             ["value"] = value,
             ["minimum"] = minimum,
             ["maximum"] = maximum

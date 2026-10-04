@@ -455,6 +455,59 @@ public sealed class ElementCommandsBehaviorTests
     }
 
     [Fact]
+    public async Task ExpandCollapse_WpfSmokeApp_TransitionsAreIdempotentAndUnsupportedPatternKeepsConnectionUsable()
+    {
+        await RunBridgeAsync(async (bridge, _, requestId) =>
+        {
+            var selector = new JsonObject { ["automationId"] = "patternDetails" };
+            var baseline = await CallBridgeAsync(bridge, "collapse", selector, requestId++);
+            Assert.False(baseline.ContainsKey("error"), baseline.ToJsonString());
+            var baselineResult = Assert.IsType<JsonObject>(baseline["result"]);
+            Assert.True(baselineResult["collapsed"]!.GetValue<bool>());
+            Assert.Equal("patternDetails", baselineResult["automation_id"]!.GetValue<string>());
+
+            var unsupported = await CallBridgeAsync(bridge, "expand", new JsonObject
+            {
+                ["automationId"] = "btnInvoke",
+            }, requestId++);
+            Assert.False(unsupported.ContainsKey("result"), unsupported.ToJsonString());
+            var error = Assert.IsType<JsonObject>(unsupported["error"]);
+            Assert.Equal(-32603, error["code"]!.GetValue<int>());
+            Assert.Equal("Internal error: Element 'btnInvoke' does not support ExpandCollapsePattern",
+                error["message"]!.GetValue<string>());
+
+            var expanded = await CallBridgeAsync(bridge, "expand", selector, requestId++);
+            Assert.False(expanded.ContainsKey("error"), expanded.ToJsonString());
+            var expandedResult = Assert.IsType<JsonObject>(expanded["result"]);
+            Assert.True(expandedResult["expanded"]!.GetValue<bool>());
+            Assert.Equal("patternDetails", expandedResult["automation_id"]!.GetValue<string>());
+            Assert.False(expandedResult["was_already"]!.GetValue<bool>());
+
+            var expandedAgain = await CallBridgeAsync(bridge, "expand", selector, requestId++);
+            Assert.False(expandedAgain.ContainsKey("error"), expandedAgain.ToJsonString());
+            var expandedAgainResult = Assert.IsType<JsonObject>(expandedAgain["result"]);
+            Assert.True(expandedAgainResult["expanded"]!.GetValue<bool>());
+            Assert.Equal("patternDetails", expandedAgainResult["automation_id"]!.GetValue<string>());
+            Assert.True(expandedAgainResult["was_already"]!.GetValue<bool>());
+
+            var collapsed = await CallBridgeAsync(bridge, "collapse", selector, requestId++);
+            Assert.False(collapsed.ContainsKey("error"), collapsed.ToJsonString());
+            var collapsedResult = Assert.IsType<JsonObject>(collapsed["result"]);
+            Assert.True(collapsedResult["collapsed"]!.GetValue<bool>());
+            Assert.Equal("patternDetails", collapsedResult["automation_id"]!.GetValue<string>());
+            Assert.False(collapsedResult["was_already"]!.GetValue<bool>());
+
+            var collapsedAgain = await CallBridgeAsync(bridge, "collapse", selector, requestId++);
+            Assert.False(collapsedAgain.ContainsKey("error"), collapsedAgain.ToJsonString());
+            var collapsedAgainResult = Assert.IsType<JsonObject>(collapsedAgain["result"]);
+            Assert.True(collapsedAgainResult["collapsed"]!.GetValue<bool>());
+            Assert.Equal("patternDetails", collapsedAgainResult["automation_id"]!.GetValue<string>());
+            Assert.True(collapsedAgainResult["was_already"]!.GetValue<bool>());
+            return collapsedAgain;
+        }, fixtureChoice: BridgeFixture.WpfSmokeApp);
+    }
+
+    [Fact]
     public async Task Screenshot_WpfSmokeApp_PngAndEvidenceMatchIndependentWin32Facts()
     {
         await RunBridgeAsync(async (bridge, processId, requestId) =>
