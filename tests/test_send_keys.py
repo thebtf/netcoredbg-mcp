@@ -218,6 +218,106 @@ def test_drag_failed_shift_release_still_attempts_ctrl_release(send_keys, mock_u
     assert [call.args[0] for call in mock_user32.mouse_event.call_args_list] == [0x0002, 0x0004]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
+def test_group_keypad_escape_sequence_preserves_event_and_pause_order(send_keys, mock_user32):
+    events = []
+    scans = {ord("a"): 0x41, ord("b"): 0x42, ord("}"): 0xDD | 0x100, ord("c"): 0x43}
+    mock_user32.VkKeyScanW.side_effect = scans.__getitem__
+
+    def capture(_count, input_pointer, _size):
+        key = input_pointer._obj._input.ki
+        events.append(("key", key.wVk, key.wScan, key.dwFlags))
+        return 1
+
+    mock_user32.SendInput.side_effect = capture
+    with patch("time.sleep", side_effect=lambda delay: events.append(("sleep", delay))):
+        send_keys("^+(ab){NUMPAD1}^{}}c")
+
+    assert events == [
+        ("key", 0x11, 0, 0),
+        ("sleep", 0.01),
+        ("key", 0x10, 0, 0),
+        ("sleep", 0.01),
+        ("key", 0x41, 0, 0),
+        ("sleep", 0.01),
+        ("key", 0x41, 0, 0x0002),
+        ("sleep", 0.02),
+        ("key", 0x42, 0, 0),
+        ("sleep", 0.01),
+        ("key", 0x42, 0, 0x0002),
+        ("sleep", 0.02),
+        ("key", 0x10, 0, 0x0002),
+        ("sleep", 0.01),
+        ("key", 0x11, 0, 0x0002),
+        ("sleep", 0.01),
+        ("sleep", 0.02),
+        ("key", 0, 0x4F, 0x0008),
+        ("key", 0, 0x4F, 0x000A),
+        ("sleep", 0.02),
+        ("key", 0x11, 0, 0),
+        ("sleep", 0.01),
+        ("key", 0x10, 0, 0),
+        ("sleep", 0.01),
+        ("key", 0xDD, 0, 0),
+        ("sleep", 0.01),
+        ("key", 0xDD, 0, 0x0002),
+        ("key", 0x10, 0, 0x0002),
+        ("sleep", 0.01),
+        ("key", 0x11, 0, 0x0002),
+        ("sleep", 0.01),
+        ("key", 0x43, 0, 0),
+        ("sleep", 0.01),
+        ("key", 0x43, 0, 0x0002),
+        ("sleep", 0.02),
+    ]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
+@pytest.mark.parametrize(
+    ("sequence", "message", "expected"),
+    [
+        ("^+{UNKNOWN}", "Unknown special key", [(0x11, 0), (0x10, 0), (0x10, 2), (0x11, 2)]),
+        ("^+{ENTER", "Unclosed brace", [(0x11, 0), (0x10, 0), (0x10, 2), (0x11, 2)]),
+        ("^+(ab", "Unclosed parenthesis", []),
+    ],
+)
+def test_malformed_modified_keys_keep_cleanup_order(
+    send_keys, mock_user32, sequence, message, expected
+):
+    events = []
+
+    def capture(_count, input_pointer, _size):
+        key = input_pointer._obj._input.ki
+        events.append((key.wVk, key.dwFlags))
+        return 1
+
+    mock_user32.SendInput.side_effect = capture
+    with patch("time.sleep"), pytest.raises(ValueError, match=message):
+        send_keys(sequence)
+    assert events == expected
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
+def test_cleanup_error_keeps_precedence_over_parse_error(send_keys, mock_user32):
+    events = []
+
+    def capture(_count, input_pointer, _size):
+        key = input_pointer._obj._input.ki
+        events.append((key.wVk, key.dwFlags))
+        return 0 if key.dwFlags & 0x0002 else 1
+
+    mock_user32.SendInput.side_effect = capture
+    with (
+        patch("ctypes.windll.kernel32.GetLastError", side_effect=[5, 6]),
+        patch("time.sleep"),
+        pytest.raises(OSError, match="SendInput failed") as error,
+    ):
+        send_keys("^+{UNKNOWN}")
+
+    assert error.value.errno == 5
+    assert events == [(0x11, 0), (0x10, 0), (0x10, 2), (0x11, 2)]
+
+
 class TestSendKeysParser:
     """Test key sequence parsing logic."""
 

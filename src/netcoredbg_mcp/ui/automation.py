@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import logging
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from ctypes import wintypes
 from typing import TYPE_CHECKING, Any
@@ -199,6 +200,120 @@ def _send_double_click(x: int, y: int) -> None:
     _send_click(x, y, "left")
 
 
+def _dispatch_special_key(
+    key_name: str,
+    held_modifiers: list[int],
+    vk_map: dict[str, int],
+    literal_special_keys: dict[str, str],
+    type_char: Callable[[str, list[int]], None],
+    tap_keypad: Callable[[str], None],
+) -> None:
+    vk = vk_map.get(key_name)
+    literal = literal_special_keys.get(key_name)
+    if literal is not None:
+        type_char(literal, held_modifiers)
+    elif key_name in _KEYPAD_KEYS:
+        tap_keypad(key_name)
+    elif vk is not None:
+        _tap(vk)
+    else:
+        raise ValueError(f"Unknown special key: {{{key_name}}}")
+
+
+def _send_modified_group(
+    group_chars: str,
+    held_modifiers: list[int],
+    type_char: Callable[[str, list[int]], None],
+) -> None:
+    import time
+
+    pressed_modifiers: list[int] = []
+    try:
+        for mod_vk in held_modifiers:
+            _press(mod_vk)
+            pressed_modifiers.append(mod_vk)
+            time.sleep(0.01)
+        for gch in group_chars:
+            type_char(gch, held_modifiers)
+            time.sleep(0.02)
+    finally:
+        _release_modifiers(pressed_modifiers)
+
+
+def _send_modified_key(
+    keys: str,
+    i: int,
+    held_modifiers: list[int],
+    vk_map: dict[str, int],
+    literal_special_keys: dict[str, str],
+    type_char: Callable[[str, list[int]], None],
+    tap_keypad: Callable[[str], None],
+) -> int:
+    import time
+
+    pressed_modifiers: list[int] = []
+    try:
+        for mod_vk in held_modifiers:
+            _press(mod_vk)
+            pressed_modifiers.append(mod_vk)
+            time.sleep(0.01)
+        if keys[i] == "{":
+            if keys.startswith("{}}", i):
+                type_char("}", held_modifiers)
+                return i + 3
+            end = keys.find("}", i)
+            if end == -1:
+                raise ValueError(f"Unclosed brace in key sequence at position {i}: '{keys[i:]}'")
+            key_name = keys[i + 1 : end].upper()
+            _dispatch_special_key(
+                key_name, held_modifiers, vk_map, literal_special_keys, type_char, tap_keypad
+            )
+            i = end + 1
+        else:
+            type_char(keys[i], held_modifiers)
+            i += 1
+    finally:
+        _release_modifiers(pressed_modifiers)
+
+    time.sleep(0.02)
+    return i
+
+
+def _dispatch_key_sequence(
+    keys: str,
+    vk_map: dict[str, int],
+    modifier_map: dict[str, int],
+    literal_special_keys: dict[str, str],
+    type_char: Callable[[str, list[int]], None],
+    tap_keypad: Callable[[str], None],
+) -> None:
+    import time
+
+    i = 0
+    length = len(keys)
+    while i < length:
+        held_modifiers: list[int] = []
+        while i < length and keys[i] in modifier_map:
+            held_modifiers.append(modifier_map[keys[i]])
+            i += 1
+
+        if i >= length:
+            break
+
+        if keys[i] == "(" and held_modifiers:
+            close = keys.find(")", i)
+            if close == -1:
+                raise ValueError(f"Unclosed parenthesis in key sequence at position {i}")
+            _send_modified_group(keys[i + 1 : close], held_modifiers, type_char)
+            i = close + 1
+            time.sleep(0.02)
+            continue
+
+        i = _send_modified_key(
+            keys, i, held_modifiers, vk_map, literal_special_keys, type_char, tap_keypad
+        )
+
+
 def _send_keys_via_input(keys: str) -> None:
     """Send keyboard input using Win32 SendInput API.
 
@@ -306,80 +421,9 @@ def _send_keys_via_input(keys: str) -> None:
         finally:
             _release_modifiers(pressed_mods)
 
-    i = 0
-    length = len(keys)
-
-    while i < length:
-        # Collect modifier prefixes
-        held_modifiers: list[int] = []
-        while i < length and keys[i] in modifier_map:
-            held_modifiers.append(modifier_map[keys[i]])
-            i += 1
-
-        if i >= length:
-            break
-
-        ch = keys[i]
-
-        # Handle grouped modifier application: ^(abc) holds Ctrl for a, b, c
-        if ch == "(" and held_modifiers:
-            close = keys.find(")", i)
-            if close == -1:
-                raise ValueError(f"Unclosed parenthesis in key sequence at position {i}")
-            group_chars = keys[i + 1 : close]
-            pressed_modifiers: list[int] = []
-            try:
-                for mod_vk in held_modifiers:
-                    _press(mod_vk)
-                    pressed_modifiers.append(mod_vk)
-                    time.sleep(0.01)
-                for gch in group_chars:
-                    _type_char(gch, held_modifiers)
-                    time.sleep(0.02)
-            finally:
-                _release_modifiers(pressed_modifiers)
-            i = close + 1
-            time.sleep(0.02)
-            continue
-
-        # Press held modifiers
-        pressed_modifiers = []
-        try:
-            for mod_vk in held_modifiers:
-                _press(mod_vk)
-                pressed_modifiers.append(mod_vk)
-                time.sleep(0.01)
-            if ch == "{":
-                # Special key in braces: {ENTER}, {F4}, etc.
-                if keys.startswith("{}}", i):
-                    _type_char("}", held_modifiers)
-                    i += 3
-                    continue
-                end = keys.find("}", i)
-                if end == -1:
-                    raise ValueError(
-                        f"Unclosed brace in key sequence at position {i}: '{keys[i:]}'"
-                    )
-                key_name = keys[i + 1 : end].upper()
-                vk = vk_map.get(key_name)
-                literal = literal_special_keys.get(key_name)
-                if literal is not None:
-                    _type_char(literal, held_modifiers)
-                elif key_name in _KEYPAD_KEYS:
-                    _tap_keypad(key_name)
-                elif vk is not None:
-                    _tap(vk)
-                else:
-                    raise ValueError(f"Unknown special key: {{{key_name}}}")
-                i = end + 1
-            else:
-                # Regular character
-                _type_char(ch, held_modifiers)
-                i += 1
-        finally:
-            _release_modifiers(pressed_modifiers)
-
-        time.sleep(0.02)
+    _dispatch_key_sequence(
+        keys, vk_map, modifier_map, literal_special_keys, _type_char, _tap_keypad
+    )
 
 
 def _send_drag(

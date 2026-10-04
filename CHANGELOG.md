@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Runtime-smoke debug evaluation reuses its unchanged identifier through one private module constant; behavior is unchanged.
+- The pywinauto keyboard parser now separates sequence and special-key dispatch while preserving native event ordering, numeric-keypad scan codes, extended Enter/Divide, and modifier cleanup after parsing errors. The installed fallback journey verifies all 17 keypad tokens and restores NumLock and foreground focus.
 - Windows process capture now separates its persistent debug-event pump into one private helper, preserving launch ordering, pending-event retries, exception forwarding, first causal failures, exact Job-qualified capability ownership, and drain/close accounting. No Sonar closure or new scan-pass claim is made.
 - Native grid literal-key reuse and session path-cache/stop-context helpers preserve exact wire keys and ordering, cache identity, and existing error and cancellation behavior. Source/test literal proof is not a runtime grid-path verification claim; no Sonar closure claim is made.
 - Windows process-owner snapshots now count live non-root PIDs missing retained mapping keys through one pure private helper, preserving selected mappings, public diagnostic fields, and cached closed receipts. This is diagnostic-only refactoring, not a runtime ownership fix or Sonar closure claim.
