@@ -257,6 +257,73 @@ public sealed class ElementCommandsBehaviorTests
     }
 
     [Fact]
+    public async Task FindAllCascade_SameConnectionPreservesTotalsAndCombinesFiltersWithinRoot()
+    {
+        await RunBridgeAsync(async (bridge, _, requestId) =>
+        {
+            var parameters = new JsonObject
+            {
+                ["rootAutomationId"] = "AmbiguousIdentityRegion",
+                ["controlType"] = "Button",
+                ["maxResults"] = 10,
+            };
+            var all = await CallBridgeAsync(bridge, "find_all_cascade", parameters, requestId++);
+            Assert.False(all.ContainsKey("error"), all.ToJsonString());
+            var allResult = Assert.IsType<JsonObject>(all["result"]);
+            Assert.Equal(2, allResult["totalMatches"]!.GetValue<int>());
+            var matches = Assert.IsType<JsonArray>(allResult["results"]);
+            Assert.Equal(2, matches.Count);
+            var expectedNames = new[] { "Ambiguous action one", "Ambiguous action two" };
+            Assert.All(matches, node =>
+            {
+                var match = Assert.IsType<JsonObject>(node);
+                Assert.Equal("AmbiguousButton", match["automationId"]!.GetValue<string>());
+                Assert.Equal("Button", match["controlType"]!.GetValue<string>());
+            });
+            Assert.Equal(expectedNames, matches.Select(node => node!["name"]!.GetValue<string>())
+                .OrderBy(name => name, StringComparer.Ordinal).ToArray());
+
+            parameters["maxResults"] = 1;
+            var capped = await CallBridgeAsync(bridge, "find_all_cascade", parameters, requestId++);
+            Assert.False(capped.ContainsKey("error"), capped.ToJsonString());
+            var cappedResult = Assert.IsType<JsonObject>(capped["result"]);
+            Assert.Equal(2, cappedResult["totalMatches"]!.GetValue<int>());
+            var cappedMatch = Assert.IsType<JsonObject>(Assert.Single(Assert.IsType<JsonArray>(cappedResult["results"])));
+            Assert.Equal("AmbiguousButton", cappedMatch["automationId"]!.GetValue<string>());
+            Assert.Contains(cappedMatch["name"]!.GetValue<string>(), expectedNames);
+            Assert.Equal("Button", cappedMatch["controlType"]!.GetValue<string>());
+
+            parameters["name"] = "Ambiguous action two";
+            var unique = await CallBridgeAsync(bridge, "find_all_cascade", parameters, requestId++);
+            Assert.False(unique.ContainsKey("error"), unique.ToJsonString());
+            var uniqueResult = Assert.IsType<JsonObject>(unique["result"]);
+            Assert.Equal(1, uniqueResult["totalMatches"]!.GetValue<int>());
+            var second = Assert.IsType<JsonObject>(Assert.Single(Assert.IsType<JsonArray>(uniqueResult["results"])));
+            Assert.Equal("AmbiguousButton", second["automationId"]!.GetValue<string>());
+            Assert.Equal("Ambiguous action two", second["name"]!.GetValue<string>());
+            Assert.Equal("Button", second["controlType"]!.GetValue<string>());
+
+            parameters["controlType"] = "Window";
+            var conflicting = await CallBridgeAsync(bridge, "find_all_cascade", parameters, requestId++);
+            Assert.False(conflicting.ContainsKey("error"), conflicting.ToJsonString());
+            var conflictingResult = Assert.IsType<JsonObject>(conflicting["result"]);
+            Assert.Equal(0, conflictingResult["totalMatches"]!.GetValue<int>());
+            Assert.Empty(Assert.IsType<JsonArray>(conflictingResult["results"]));
+
+            var outside = await CallBridgeAsync(bridge, "find_all_cascade", new JsonObject
+            {
+                ["rootAutomationId"] = "Gallery",
+                ["name"] = "Gallery Button Primary",
+            }, requestId);
+            Assert.False(outside.ContainsKey("error"), outside.ToJsonString());
+            var outsideResult = Assert.IsType<JsonObject>(outside["result"]);
+            Assert.Equal(0, outsideResult["totalMatches"]!.GetValue<int>());
+            Assert.Empty(Assert.IsType<JsonArray>(outsideResult["results"]));
+            return outside;
+        });
+    }
+
+    [Fact]
     public async Task GetTree_DepthZeroAndOneRemainBoundedAndSameConnectionFindsSaveButton()
     {
         await RunBridgeAsync(async (bridge, _, requestId) =>
