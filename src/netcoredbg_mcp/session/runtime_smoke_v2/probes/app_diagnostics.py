@@ -31,6 +31,7 @@ from ._diagnostic_common import (
 
 LAUNCH_DIAGNOSTIC_WAIT_TIMEOUT_MS = 0
 LAUNCH_DIAGNOSTIC_WAIT_POLL_INTERVAL_MS = 50
+_UNREADABLE_DIAGNOSTIC_JSON_REASON = "diagnostic JSON is not readable"
 
 
 async def handle_app_diagnostics(
@@ -464,14 +465,14 @@ async def _read_wait_json(
             metadata["validation_error"] = str(exc)
             file_text = None
         except OSError as exc:
-            metadata["reason"] = "diagnostic JSON is not readable"
+            metadata["reason"] = _UNREADABLE_DIAGNOSTIC_JSON_REASON
             metadata["error"] = str(exc)
             file_text = None
         if file_text is not None:
             try:
                 payload = json.loads(file_text)
             except json.JSONDecodeError as exc:
-                metadata["reason"] = "diagnostic JSON is not readable"
+                metadata["reason"] = _UNREADABLE_DIAGNOSTIC_JSON_REASON
                 metadata["error"] = str(exc)
             else:
                 if isinstance(payload, dict):
@@ -876,7 +877,7 @@ def _manifest_classification(acquisition: dict[str, Any] | None) -> str:
     if acquisition.get("observed") is True:
         return APP_DIAGNOSTICS_OBSERVED
     reason = str(acquisition.get("reason") or "")
-    if reason == "diagnostic JSON is not readable":
+    if reason == _UNREADABLE_DIAGNOSTIC_JSON_REASON:
         return APP_DIAGNOSTICS_UNREADABLE
     if reason == "diagnostic JSON not observed after since cursor":
         return APP_DIAGNOSTICS_STALE
