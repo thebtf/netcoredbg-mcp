@@ -21,6 +21,7 @@ internal sealed class NativeSceneCaptureCoordinator
     private const string UnobservableState = "unobservable";
     private const string NodeIdProperty = "nodeId";
     private const string SchemaVersionProperty = "schemaVersion";
+    private const string StatusProperty = "status";
     private const string ProcessIdProperty = "processId";
     private const string AutomationIdProperty = "automationId";
     private const string RelationsProperty = "relations";
@@ -200,7 +201,7 @@ internal sealed class NativeSceneCaptureCoordinator
         }
 
         if (normalized.Authority == CaptureAuthority.InProcess &&
-            !StringComparer.Ordinal.Equals(ReadString(stability, "status"), StableStatus))
+            !StringComparer.Ordinal.Equals(ReadString(stability, StatusProperty), StableStatus))
         {
             return ToolError(tool, "UI_NOT_STABLE", "Capture-time stability requirements are not met.");
         }
@@ -328,7 +329,7 @@ internal sealed class NativeSceneCaptureCoordinator
 
     private static string ClassifyStatus(NormalizedCapture capture, JsonObject stability, bool isElement)
     {
-        if (!StringComparer.Ordinal.Equals(ReadString(stability, "status"), StableStatus))
+        if (!StringComparer.Ordinal.Equals(ReadString(stability, StatusProperty), StableStatus))
         {
             return capture.Nodes.Count == 0 ? UnobservableStatus : PartialStatus;
         }
@@ -348,7 +349,7 @@ internal sealed class NativeSceneCaptureCoordinator
     private static JsonArray BuildIssues(NormalizedCapture capture, JsonObject stability, bool isElement)
     {
         var issues = DeepClone(capture.Issues) as JsonArray ?? new JsonArray();
-        if (!StringComparer.Ordinal.Equals(ReadString(stability, "status"), StableStatus))
+        if (!StringComparer.Ordinal.Equals(ReadString(stability, StatusProperty), StableStatus))
         {
             AddIssueOnce(issues, "CAPTURE_REVALIDATION_FAILED", "Capture-time stability could not be fully revalidated.");
         }
@@ -395,7 +396,7 @@ internal sealed class NativeSceneCaptureCoordinator
         new()
         {
             ["kind"] = isElement ? "element_snapshot_capture" : "native_scene_capture",
-            ["status"] = status,
+            [StatusProperty] = status,
             ["captureId"] = captureId,
             ["protocolVersion"] = "native-scene-probe/1",
             [SchemaVersionProperty] = "native-scene-probe.schema/1",
@@ -452,7 +453,7 @@ internal sealed class NativeSceneCaptureCoordinator
             ["protocolVersion"] = "native-scene-probe/1",
             ["captureId"] = captureId,
             ["capturedAt"] = Timestamp(capturedAt),
-            ["status"] = status,
+            [StatusProperty] = status,
             ["observationKind"] = observationKind,
             ["sceneRequest"] = CloneObject(sceneRequest),
             ["candidate"] = DeepClone(candidate),
@@ -952,7 +953,7 @@ internal sealed class NativeSceneCaptureCoordinator
 
     private static JsonObject CreateUnobservableStability() => new()
     {
-        ["status"] = UnobservableStatus,
+        [StatusProperty] = UnobservableStatus,
         ["revalidatedByCapture"] = true,
         ["conditions"] = new JsonObject
         {
