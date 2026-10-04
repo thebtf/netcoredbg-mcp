@@ -257,6 +257,92 @@ public sealed class ElementCommandsBehaviorTests
     }
 
     [Fact]
+    public async Task GetTree_DepthZeroAndOneRemainBoundedAndSameConnectionFindsSaveButton()
+    {
+        await RunBridgeAsync(async (bridge, _, requestId) =>
+        {
+            // FlaUI treats the selected window as the XPath root, so /* selects its direct children.
+            var directChildren = await CallBridgeAsync(bridge, "find_by_xpath", new JsonObject
+            {
+                ["rootAutomationId"] = "NativeSceneProbeWindow",
+                ["xpath"] = "/*",
+            }, requestId++);
+            Assert.False(directChildren.ContainsKey("error"), directChildren.ToJsonString());
+            var firstMatch = Assert.IsType<JsonObject>(directChildren["result"]);
+            Assert.True(firstMatch["found"]!.GetValue<bool>(), firstMatch.ToJsonString());
+            var directChildCount = firstMatch["matchCount"]!.GetValue<int>();
+            Assert.True(directChildCount > 1, directChildren.ToJsonString());
+
+            var depthZero = await CallBridgeAsync(bridge, "get_tree", new JsonObject
+            {
+                ["maxDepth"] = 0,
+                ["maxChildren"] = 1,
+            }, requestId++);
+            Assert.False(depthZero.ContainsKey("error"), depthZero.ToJsonString());
+            var rootOnly = Assert.IsType<JsonObject>(depthZero["result"]);
+            Assert.Equal(1, rootOnly["count"]!.GetValue<int>());
+            Assert.Equal("Native Scene Probe Fixture", rootOnly["primary"]!.GetValue<string>());
+            var rootWindows = Assert.IsType<JsonArray>(rootOnly["windows"]);
+            var root = Assert.IsType<JsonObject>(Assert.Single(rootWindows));
+            Assert.True(root["found"]!.GetValue<bool>(), root.ToJsonString());
+            Assert.Equal("NativeSceneProbeWindow", root["automationId"]!.GetValue<string>());
+            Assert.Equal("Native Scene Probe Fixture", root["name"]!.GetValue<string>());
+            Assert.Equal("Window", root["controlType"]!.GetValue<string>());
+            Assert.False(root.ContainsKey("children"), root.ToJsonString());
+            Assert.IsType<JsonArray>(root["patterns"]);
+            var bounds = Assert.IsType<JsonObject>(root["rect"]);
+            foreach (var coordinate in new[] { "x", "y", "width", "height" })
+            {
+                Assert.True(double.IsFinite(bounds[coordinate]!.GetValue<double>()), bounds.ToJsonString());
+            }
+            Assert.True(bounds["width"]!.GetValue<double>() > 0, bounds.ToJsonString());
+            Assert.True(bounds["height"]!.GetValue<double>() > 0, bounds.ToJsonString());
+
+            var depthOne = await CallBridgeAsync(bridge, "get_tree", new JsonObject
+            {
+                ["maxDepth"] = 1,
+                ["maxChildren"] = 1,
+            }, requestId++);
+            Assert.False(depthOne.ContainsKey("error"), depthOne.ToJsonString());
+            var shallow = Assert.IsType<JsonObject>(depthOne["result"]);
+            var shallowWindows = Assert.IsType<JsonArray>(shallow["windows"]);
+            var shallowRoot = Assert.IsType<JsonObject>(Assert.Single(shallowWindows));
+            Assert.Equal("NativeSceneProbeWindow", shallowRoot["automationId"]!.GetValue<string>());
+            Assert.IsType<JsonArray>(shallowRoot["patterns"]);
+            var children = Assert.IsType<JsonArray>(shallowRoot["children"]);
+            Assert.Equal(2, children.Count);
+            var firstChild = Assert.IsType<JsonObject>(children[0]);
+            Assert.True(firstChild["found"]!.GetValue<bool>(), firstChild.ToJsonString());
+            Assert.Equal(firstMatch["automationId"]!.GetValue<string>(), firstChild["automationId"]!.GetValue<string>());
+            Assert.Equal(firstMatch["name"]!.GetValue<string>(), firstChild["name"]!.GetValue<string>());
+            Assert.Equal(firstMatch["controlType"]!.GetValue<string>(), firstChild["controlType"]!.GetValue<string>());
+            Assert.False(firstChild.ContainsKey("children"), firstChild.ToJsonString());
+            Assert.False(firstChild.ContainsKey("patterns"), firstChild.ToJsonString());
+            var truncation = Assert.IsType<JsonObject>(children[1]);
+            Assert.True(JsonNode.DeepEquals(new JsonObject
+            {
+                ["truncated"] = true,
+                ["total"] = directChildCount,
+            }, truncation), truncation.ToJsonString());
+
+            var unique = await CallBridgeAsync(bridge, "find_by_xpath", new JsonObject
+            {
+                ["rootAutomationId"] = "Gallery",
+                ["xpath"] = "//Button[@AutomationId='SaveButton']",
+            }, requestId);
+            Assert.False(unique.ContainsKey("error"), unique.ToJsonString());
+            var save = Assert.IsType<JsonObject>(unique["result"]);
+            Assert.True(save["found"]!.GetValue<bool>());
+            Assert.Equal(1, save["matchCount"]!.GetValue<int>());
+            Assert.Equal("SaveButton", save["automationId"]!.GetValue<string>());
+            Assert.Equal("Save scene", save["name"]!.GetValue<string>());
+            Assert.Equal("Button", save["controlType"]!.GetValue<string>());
+            Assert.False(save.ContainsKey("warning"), unique.ToJsonString());
+            return unique;
+        });
+    }
+
+    [Fact]
     public async Task GridSelectRange_ReadsExactlyTwoCueRows()
     {
         await RunBridgeAsync(async (bridge, _, requestId) =>
