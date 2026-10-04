@@ -71,23 +71,14 @@ async def handle_ui_text(
             "ui.text.read",
             selector=dict(probe.get("selector") or {}),
         )
-        status = str(result.get("status", "PASS"))
-        value = result.get("text", result.get("value"))
-        output = {
-            "name": probe_name(probe, kind),
-            "kind": kind,
-            "status": status,
-            "value": value,
-        }
-        if "source" in result:
-            output["source"] = result["source"]
-        if status != "PASS":
-            output["reason"] = result.get("reason", "text read failed")
-            attach_blocked_details(output, result)
-        ref = evidence_ref(result)
-        if ref:
-            output["evidence_ref"] = ref
-        return attach_expected_and_status(output, probe=probe, phase=phase, value=value)
+        return _text_probe_output(
+            result,
+            probe=probe,
+            kind=kind,
+            phase=phase,
+            failure_reason="text read failed",
+            include_source=True,
+        )
 
     if not service_available(context, "ui.text.assert"):
         return blocked_probe(
@@ -103,6 +94,25 @@ async def handle_ui_text(
         equals=probe.get("equals"),
         must_exist=bool(probe.get("must_exist", True)),
     )
+    return _text_probe_output(
+        result,
+        probe=probe,
+        kind=kind,
+        phase=phase,
+        failure_reason="text assertion failed",
+        include_source=False,
+    )
+
+
+def _text_probe_output(
+    result: dict[str, Any],
+    *,
+    probe: dict[str, Any],
+    kind: str,
+    phase: str,
+    failure_reason: str,
+    include_source: bool,
+) -> dict[str, Any]:
     status = str(result.get("status", "PASS"))
     value = result.get("text", result.get("value"))
     output = {
@@ -111,8 +121,10 @@ async def handle_ui_text(
         "status": status,
         "value": value,
     }
+    if include_source and "source" in result:
+        output["source"] = result["source"]
     if status != "PASS":
-        output["reason"] = result.get("reason", "text assertion failed")
+        output["reason"] = result.get("reason", failure_reason)
         attach_blocked_details(output, result)
     ref = evidence_ref(result)
     if ref:
