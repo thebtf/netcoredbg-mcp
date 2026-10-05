@@ -5272,6 +5272,31 @@ def validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None:
             _v3_fail("blocked receipt lacks typed failure")
         cleanup = receipt.get("cleanup")
         cleanup_failure = cleanup.get("failure") if isinstance(cleanup, Mapping) else None
+        if isinstance(cleanup, Mapping) and type(cleanup.get("producer_terminal")) is not bool:
+            _v3_fail("blocked cleanup producer terminal claim must be a boolean")
+        if isinstance(cleanup, Mapping) and cleanup.get("producer_terminal") is False:
+            if (
+                set(cleanup)
+                != {
+                    "claimed_root",
+                    "producer_terminal",
+                    "removed_paths",
+                    "parent_removed_if_empty",
+                    "status",
+                    "failure",
+                }
+                or not _is_relative_path(cleanup.get("claimed_root"))
+                or cleanup.get("status") != "FAILED"
+                or cleanup.get("removed_paths") != []
+                or cleanup.get("parent_removed_if_empty") is not False
+                or not isinstance(cleanup_failure, Mapping)
+                or not {"code", "message"} <= set(cleanup_failure) <= {"code", "message", "native"}
+                or any(
+                    not isinstance(cleanup_failure.get(field), str) or not cleanup_failure[field]
+                    for field in ("code", "message")
+                )
+            ):
+                _v3_fail("nonterminal producer cleanup must retain the failed claim")
         if isinstance(cleanup_failure, Mapping) and "native" in cleanup_failure:
             native = cleanup_failure["native"]
             if (

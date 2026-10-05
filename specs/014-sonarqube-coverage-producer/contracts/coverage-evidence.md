@@ -92,6 +92,8 @@ Before `DIAGNOSTIC_COMPLETE`, the runner writes a create-new artifact that valid
 
 All roles validate against [exact-head-receipt-v3.schema.json](exact-head-receipt-v3.schema.json). Diagnostic records can be `DIAGNOSTIC_COMPLETE` or `BLOCKED` and always have `release_intent: none`. Candidate and post-merge records can be `PASS` or `BLOCKED` and require v3 coverage, canonical identity, complete inventory, successful cleanup, and a zero-blocking release gate for PASS. `scripts/stateless_preview_artifact.py` must consume the same v3 post-merge shape. Schema v2 has no compatibility path.
 
+A `BLOCKED` record may retain `cleanup.producer_terminal: false` only with failed cleanup, a validated relative claimed root, a typed cleanup failure, no removed paths, and `parent_removed_if_empty: false`. Both the JSON schema and runtime validator reject contradictory cleanup or completed-outcome mutations. This shape preserves an unproven producer owner; it grants no cleanup, scanner-end, merge, or publication authority. Completed `DIAGNOSTIC_COMPLETE` and `PASS` records still require terminal producers and successful cleanup. Existing `BLOCKED` failed-cleanup records with terminal producers remain valid; neither validator proves producer provenance from the boolean alone.
+
 ## Protect secrets and cleanup
 
 No `SONAR_*` variable reaches `uv`, Bash, pytest, restore, test, or a test-host descendant. Receipts contain no credentials, environment dump, raw report body, or secret-bearing command line.

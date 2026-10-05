@@ -1115,7 +1115,7 @@
           "$ref": "#/$defs/relative_path"
         },
         "producer_terminal": {
-          "const": true
+          "type": "boolean"
         },
         "removed_paths": {
           "type": "array",
@@ -1143,7 +1143,34 @@
             }
           ]
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "producer_terminal": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": "FAILED"
+              },
+              "failure": {
+                "$ref": "#/$defs/safe_failure"
+              },
+              "removed_paths": {
+                "maxItems": 0
+              },
+              "parent_removed_if_empty": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
     },
     "cleanup_ok": {
       "allOf": [
@@ -1152,6 +1179,9 @@
         },
         {
           "properties": {
+            "producer_terminal": {
+              "const": true
+            },
             "status": {
               "const": "OK"
             },

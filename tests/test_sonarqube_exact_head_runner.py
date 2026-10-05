@@ -54,6 +54,19 @@ class TestSonarqubeExactHeadRunner(TestCase):
         return analysis
 
     @staticmethod
+    def cleanup_evidence(claimed_root: str, producer_terminal: bool) -> dict[str, Any]:
+        return {
+            "claimed_root": claimed_root,
+            "producer_terminal": producer_terminal,
+            "removed_paths": [claimed_root] if producer_terminal else [],
+            "parent_removed_if_empty": False,
+            "status": "OK" if producer_terminal else "FAILED",
+            "failure": None
+            if producer_terminal
+            else {"code": "COVERAGE_CLEANUP_FAILED", "message": "RunnerError"},
+        }
+
+    @staticmethod
     def patch_wave3_transaction(patches: ExitStack) -> None:
         plan = SimpleNamespace()
         patches.enter_context(patch.object(runner, "resolve_wave2_entry", return_value={}))
@@ -78,7 +91,17 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 return_value={"dll_sha256": "a" * 64, "pdb_sha256": "b" * 64},
             )
         )
-        patches.enter_context(patch.object(runner, "cleanup_coverage_run", return_value={}))
+        patches.enter_context(
+            patch.object(
+                runner,
+                "cleanup_coverage_run",
+                side_effect=lambda _plan, terminal, _claim, **_kwargs: (
+                    TestSonarqubeExactHeadRunner.cleanup_evidence(
+                        ".tmp/sonarqube-coverage/fixture", terminal
+                    )
+                ),
+            )
+        )
         patches.enter_context(
             patch.object(
                 runner,
@@ -1079,7 +1102,17 @@ class TestSonarqubeExactHeadRunner(TestCase):
         self.assertEqual(blocked_receipt["identity"]["analysis_id"], "analysis-1")
         self.assertEqual(blocked_receipt["coverage"], {})
         self.assertEqual(blocked_receipt["global_inventory"], {})
-        self.assertEqual(blocked_receipt["cleanup"], {})
+        self.assertEqual(
+            blocked_receipt["cleanup"],
+            {
+                "claimed_root": ".tmp/sonarqube-coverage/fixture",
+                "producer_terminal": True,
+                "removed_paths": [".tmp/sonarqube-coverage/fixture"],
+                "parent_removed_if_empty": False,
+                "status": "OK",
+                "failure": None,
+            },
+        )
         self.assertEqual(new_code_inventory["total"], 2)
 
     def test_execute_disables_msbuild_node_reuse_for_solution_and_standalone_builds(self):
@@ -1647,7 +1680,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 with self.assertRaises(runner.RunnerError) as raised:
                     runner.execute("candidate", "scanner")
                 self.assertIs(raised.exception, failure)
-                self.assertEqual(lookup_receipts, [runner.receipt_base(context, "candidate", "none")])
+                self.assertEqual(
+                    lookup_receipts, [runner.receipt_base(context, "candidate", "none")]
+                )
                 intent_lookup.assert_called_once_with(context.repository_root, {}, context.head)
                 for operation in not_started:
                     operation.assert_not_called()
@@ -2948,6 +2983,88 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         source.write_text("# source\n", encoding="utf-8")
         return source
 
+    def _assert_unproven_producer_receipt(self, root: Path, captured: dict[str, Any]) -> None:
+        from tests.test_stateless_preview_artifact import _complete_v3_exact_head_receipt
+
+        schema_path = (
+            RUNNER_PATH.parents[1]
+            / "specs/014-sonarqube-coverage-producer/contracts/exact-head-receipt-v3.schema.json"
+        )
+        schema = Draft202012Validator(
+            json.loads(schema_path.read_bytes()), format_checker=FormatChecker()
+        )
+        receipt = json.loads((root / "receipt.json").read_bytes())
+        self.assertEqual(receipt, captured)
+        self.assertEqual(receipt["outcome"], "BLOCKED")
+        self.assertIs(receipt["cleanup"]["producer_terminal"], False)
+        self.assertEqual(receipt["cleanup"]["status"], "FAILED")
+        self.assertEqual(receipt["cleanup"]["removed_paths"], [])
+        self.assertIs(receipt["cleanup"]["parent_removed_if_empty"], False)
+        self.assertIsNone(receipt["identity"]["analysis_id"])
+        for field in ("coverage", "analysis", "global_inventory", "release_gate"):
+            self.assertIsNone(receipt[field])
+
+        for role in ("diagnostic", "candidate", "post-merge"):
+            blocked = deepcopy(receipt)
+            blocked.update(role=role, release_intent="none" if role == "diagnostic" else "v0.23.12")
+            schema.validate(blocked)
+            runner.validate_exact_head_receipt_v3(blocked)
+            invalid_cleanup = (
+                ("producer_terminal", 0),
+                ("producer_terminal", 1),
+                ("producer_terminal", None),
+                ("producer_terminal", "false"),
+                ("producer_terminal", []),
+                ("producer_terminal", {}),
+                ("status", "OK"),
+                ("removed_paths", [blocked["cleanup"]["claimed_root"]]),
+                ("parent_removed_if_empty", True),
+                ("claimed_root", "/absolute/claim"),
+                ("claimed_root", "C:/absolute/claim"),
+                ("claimed_root", ".tmp/../claim"),
+                ("claimed_root", ""),
+                ("failure", None),
+                ("failure", {}),
+                ("failure", {"code": "", "message": "RunnerError"}),
+                ("failure", {"code": "COVERAGE_CLEANUP_FAILED", "message": ""}),
+            )
+            for field, value in invalid_cleanup:
+                with self.subTest(role=role, field=field, value=value):
+                    invalid = deepcopy(blocked)
+                    invalid["cleanup"][field] = value
+                    self.assertFalse(schema.is_valid(invalid))
+                    with self.assertRaises(runner.RunnerError):
+                        runner.validate_exact_head_receipt_v3(invalid)
+            with self.subTest(role=role, field="producer_terminal", state="missing"):
+                invalid = deepcopy(blocked)
+                del invalid["cleanup"]["producer_terminal"]
+                self.assertFalse(schema.is_valid(invalid))
+                with self.assertRaises(runner.RunnerError):
+                    runner.validate_exact_head_receipt_v3(invalid)
+            with self.subTest(role=role, field="failure", value=None):
+                invalid = deepcopy(blocked)
+                invalid["failure"] = None
+                self.assertFalse(schema.is_valid(invalid))
+                with self.assertRaises(runner.RunnerError):
+                    runner.validate_exact_head_receipt_v3(invalid)
+            outcome = "DIAGNOSTIC_COMPLETE" if role == "diagnostic" else "PASS"
+            with self.subTest(role=role, outcome=outcome, state="promoted-failure"):
+                invalid = deepcopy(blocked)
+                invalid.update(outcome=outcome, failure=None)
+                self.assertFalse(schema.is_valid(invalid))
+                with self.assertRaises(runner.RunnerError):
+                    runner.validate_exact_head_receipt_v3(invalid)
+            complete = _complete_v3_exact_head_receipt(
+                self.HEAD, role=role, outcome=outcome, release_intent=blocked["release_intent"]
+            )
+            schema.validate(complete)
+            runner.validate_exact_head_receipt_v3(complete)
+            with self.subTest(role=role, outcome=outcome, state="complete-nonterminal"):
+                complete["cleanup"]["producer_terminal"] = False
+                self.assertFalse(schema.is_valid(complete))
+                with self.assertRaises(runner.RunnerError):
+                    runner.validate_exact_head_receipt_v3(complete)
+
     def _transaction_events(
         self,
         root: Path,
@@ -2962,6 +3079,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         context = self._context(root)
         plan = SimpleNamespace(repository_root=root, root=root / ".tmp/sonarqube-coverage/claimed")
         cleanup_coverage_run = runner.cleanup_coverage_run
+        persist_receipt = runner.write_receipt
         claim = SimpleNamespace()
 
         def step(name, result=None):
@@ -2991,12 +3109,19 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 producer_terminals.append(producer_terminal)
             if real_cleanup:
                 return cleanup_coverage_run(_plan, producer_terminal, _claim, **kwargs)
-            return {}
+            return TestSonarqubeExactHeadRunner.cleanup_evidence(
+                _plan.root.relative_to(_plan.repository_root).as_posix(), producer_terminal
+            )
 
         def clear_generated(_context, _environment):
             if generated_cleanup_calls is not None:
                 generated_cleanup_calls.append("clear")
             return []
+
+        def capture_receipt(path, receipt, secrets):
+            if receipts is not None:
+                persist_receipt(path, receipt, secrets)
+                receipts.append(deepcopy(receipt))
 
         with ExitStack() as patches:
             patches.enter_context(patch.object(runner, "process_environment", return_value={}))
@@ -3014,9 +3139,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 patch.object(
                     runner,
                     "write_receipt",
-                    side_effect=lambda _path, receipt, _secrets: (
-                        receipts.append(deepcopy(receipt)) if receipts is not None else None
-                    ),
+                    side_effect=capture_receipt,
                 )
             )
             patches.enter_context(
@@ -4632,6 +4755,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     receipts=receipts,
                 )
             self.assertEqual(evidence.read_text(encoding="utf-8"), "retained")
+            self._assert_unproven_producer_receipt(root, receipts[-1])
         self.assertNotIn("end", events)
         blocked = receipts[-1]
         self.assertEqual(blocked["outcome"], "BLOCKED")
@@ -4712,6 +4836,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 self.assertFalse(blocked["cleanup"]["producer_terminal"])
                 self.assertEqual(blocked["cleanup"]["removed_paths"], [])
                 self.assertNotIn(private_detail, json.dumps(blocked))
+                self._assert_unproven_producer_receipt(root, blocked)
 
     def test_runner_cli_help_remains_successful(self):
         completed = runner.subprocess.run(
@@ -5760,6 +5885,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 )
             self.assertEqual(terminals, [False])
             self.assertEqual(generated_file.read_text(encoding="utf-8"), "evidence")
+            self._assert_unproven_producer_receipt(root, receipts[-1])
         self.assertNotIn("end", events)
         blocked = receipts[-1]
         self.assertEqual(blocked["outcome"], "BLOCKED")
