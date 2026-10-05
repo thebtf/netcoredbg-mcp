@@ -1593,6 +1593,121 @@ class TestSonarqubeExactHeadRunner(TestCase):
         self.assertEqual(replacement["outcome"], "BLOCKED")
         self.assertEqual(replacement["failure"]["code"], "COVERAGE_RUN_INCOMPLETE")
 
+    def test_release_intent_failure_invalidates_prior_pass_before_scanner_begin(self):
+        from tests.test_stateless_preview_artifact import _complete_v3_exact_head_receipt
+
+        schema_path = (
+            RUNNER_PATH.parents[1]
+            / "specs/014-sonarqube-coverage-producer/contracts/exact-head-receipt-v3.schema.json"
+        )
+        schema = Draft202012Validator(json.loads(schema_path.read_bytes()))
+        failure = runner.RunnerError(
+            "COVERAGE_RELEASE_INTENT_INVALID: controlled tracked metadata lookup failure"
+        )
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root / "primary", root / "scanner")
+            receipt_path = runner.receipt_path(context, "candidate")
+            prior = _complete_v3_exact_head_receipt(
+                context.head, role="candidate", outcome="PASS", release_intent="v0.23.12"
+            )
+            schema.validate(prior)
+            runner.validate_exact_head_receipt_v3(prior)
+            runner.write_receipt(receipt_path, prior, ())
+            lookup_receipts = []
+
+            def fail_lookup(*_args):
+                lookup_receipts.append(json.loads(receipt_path.read_text(encoding="utf-8")))
+                raise failure
+
+            with ExitStack() as patches:
+                patches.enter_context(patch.object(runner, "process_environment", return_value={}))
+                patches.enter_context(patch.object(runner, "git_context", return_value=context))
+                patches.enter_context(
+                    patch.object(runner, "sonar_secret_values", return_value=set())
+                )
+                intent_lookup = patches.enter_context(
+                    patch.object(runner, "release_intent_at_head", side_effect=fail_lookup)
+                )
+                patches.enter_context(patch.object(runner, "clear_generated_artifacts"))
+                not_started = [
+                    patches.enter_context(patch.object(runner, name))
+                    for name in (
+                        "resolve_wave2_entry",
+                        "preflight_coverage_toolchain",
+                        "load_credentials",
+                        "scanner_begin_command",
+                        "scanner_end_command",
+                        "run_process",
+                        "claim_coverage_run",
+                        "run_coverage_producer",
+                        "cleanup_coverage_run",
+                    )
+                ]
+                with self.assertRaises(runner.RunnerError) as raised:
+                    runner.execute("candidate", "scanner")
+                self.assertIs(raised.exception, failure)
+                self.assertEqual(lookup_receipts, [runner.receipt_base(context, "candidate", "none")])
+                intent_lookup.assert_called_once_with(context.repository_root, {}, context.head)
+                for operation in not_started:
+                    operation.assert_not_called()
+            replacement = json.loads(receipt_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(replacement["outcome"], "BLOCKED")
+        self.assertEqual(replacement["role"], "candidate")
+        self.assertEqual(replacement["release_intent"], "none")
+        self.assertEqual(
+            replacement["identity"],
+            {"captured_head": context.head, "project_key": runner.PROJECT_KEY, "analysis_id": None},
+        )
+        for field in ("coverage", "analysis", "global_inventory", "release_gate", "cleanup"):
+            self.assertIsNone(replacement[field], field)
+        self.assertEqual(
+            replacement["failure"],
+            {
+                "code": "COVERAGE_RELEASE_INTENT_INVALID",
+                "stage": "PLANNED",
+                "language": None,
+                "project_id": None,
+                "safe_message": str(failure),
+            },
+        )
+        schema.validate(replacement)
+        runner.validate_exact_head_receipt_v3(replacement)
+        for role in ("candidate", "post-merge"):
+            with self.subTest(role=role, state="unobserved"):
+                unobserved = deepcopy(replacement)
+                unobserved["role"] = role
+                schema.validate(unobserved)
+                runner.validate_exact_head_receipt_v3(unobserved)
+            for outcome in ("PASS", "DIAGNOSTIC_COMPLETE"):
+                with self.subTest(role=role, outcome=outcome):
+                    completed = deepcopy(prior)
+                    completed.update(role=role, outcome=outcome, release_intent="none")
+                    self.assertFalse(schema.is_valid(completed))
+                    with self.assertRaises(runner.RunnerError):
+                        runner.validate_exact_head_receipt_v3(completed)
+            for field in ("coverage", "analysis", "global_inventory", "release_gate", "cleanup"):
+                with self.subTest(role=role, observed=field):
+                    observed = deepcopy(unobserved)
+                    observed[field] = deepcopy(prior[field])
+                    self.assertFalse(schema.is_valid(observed))
+                    with self.assertRaises(runner.RunnerError):
+                        runner.validate_exact_head_receipt_v3(observed)
+            with self.subTest(role=role, observed="analysis_id"):
+                observed = deepcopy(unobserved)
+                observed["identity"]["analysis_id"] = prior["identity"]["analysis_id"]
+                self.assertFalse(schema.is_valid(observed))
+                with self.assertRaises(runner.RunnerError):
+                    runner.validate_exact_head_receipt_v3(observed)
+            for stage in ("TOOLCHAIN_READY", "SCANNER_BEGUN", "RUN_CLAIMED", "BLOCKED"):
+                with self.subTest(role=role, stage=stage):
+                    observed = deepcopy(unobserved)
+                    observed["failure"]["stage"] = stage
+                    self.assertFalse(schema.is_valid(observed))
+                    with self.assertRaises(runner.RunnerError):
+                        runner.validate_exact_head_receipt_v3(observed)
+
     def test_v3_failure_code_schema_and_validator_reject_non_strings(self):
         schema_path = (
             RUNNER_PATH.parents[1]

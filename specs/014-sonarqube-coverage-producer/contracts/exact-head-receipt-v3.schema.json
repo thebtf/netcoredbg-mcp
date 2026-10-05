@@ -157,12 +157,57 @@
               "PASS",
               "BLOCKED"
             ]
-          },
-          "release_intent": {
-            "type": "string",
-            "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
           }
-        }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "release_intent": {
+                "type": "string",
+                "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+              }
+            }
+          },
+          {
+            "properties": {
+              "outcome": {
+                "const": "BLOCKED"
+              },
+              "release_intent": {
+                "const": "none"
+              },
+              "identity": {
+                "properties": {
+                  "analysis_id": {
+                    "type": "null"
+                  }
+                }
+              },
+              "failure": {
+                "properties": {
+                  "stage": {
+                    "const": "PLANNED"
+                  }
+                }
+              },
+              "coverage": {
+                "type": "null"
+              },
+              "analysis": {
+                "type": "null"
+              },
+              "global_inventory": {
+                "type": "null"
+              },
+              "release_gate": {
+                "type": "null"
+              },
+              "cleanup": {
+                "type": "null"
+              }
+            }
+          }
+        ]
       }
     },
     {

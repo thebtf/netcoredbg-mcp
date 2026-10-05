@@ -18,6 +18,8 @@ Before the runner starts a scanner transaction, it must:
 
 A failed entry or preflight emits a planned-stage failure. It has zero scanner-begin calls and zero run-root claims.
 
+Before fallible tracked release-intent lookup, the runner invalidates any earlier same-head/role receipt under the existing project lock with a validated `PLANNED` / `BLOCKED` receipt. Candidate and post-merge roles may use `release_intent: none` only in that unobserved planned failure state: `identity.analysis_id`, coverage, analysis, global inventory, release gate, and cleanup must all be null. This state grants no release authority. Completed or observed release-role evidence still requires the original semantic-version intent; `PASS` admission is unchanged.
+
 ## Own one transaction
 
 After entry and preflight succeed, `scripts/run_sonarqube_exact_head.py`:

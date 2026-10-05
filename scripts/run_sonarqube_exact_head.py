@@ -5210,10 +5210,22 @@ def validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None:
         ):
             _v3_fail("diagnostic role has illegal outcome or release authority")
     elif role in {"candidate", "post-merge"}:
+        unobserved_intent = (
+            intent == "none"
+            and outcome == "BLOCKED"
+            and isinstance(receipt["failure"], Mapping)
+            and receipt["failure"].get("stage") == "PLANNED"
+            and isinstance(receipt["identity"], Mapping)
+            and receipt["identity"].get("analysis_id") is None
+            and all(
+                receipt[field] is None
+                for field in ("coverage", "analysis", "global_inventory", "release_gate", "cleanup")
+            )
+        )
         if (
             outcome not in {"PASS", "BLOCKED"}
             or not isinstance(intent, str)
-            or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", intent)
+            or (not unobserved_intent and not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", intent))
         ):
             _v3_fail("release role has illegal outcome or intent")
     else:
@@ -5712,9 +5724,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
     inherited_environment = process_environment()
     clean_environment = scrub_sonar_environment(inherited_environment)
     context = git_context(Path.cwd(), clean_environment)
-    release_intent = release_intent_at_head(
-        context.repository_root, clean_environment, context.head
-    )
+    release_intent = "none"
     run_id = str(uuid.uuid4())
     target_receipt = receipt_path(context, role)
     receipt = receipt_base(context, role, release_intent)
@@ -5728,6 +5738,10 @@ def execute(role: str, scanner_override: str | None) -> Path:
         validate_exact_head_receipt_v3(receipt)
         write_receipt(target_receipt, receipt, secrets)
         try:
+            release_intent = release_intent_at_head(
+                context.repository_root, clean_environment, context.head
+            )
+            receipt["release_intent"] = _release_intent_for_role(role, release_intent)
             entry = resolve_wave2_entry(context, clean_environment)
             resolved_wave2 = verify_wave2_entry(entry, context, clean_environment)
             preflight_coverage_toolchain(context=context, environment=clean_environment)
