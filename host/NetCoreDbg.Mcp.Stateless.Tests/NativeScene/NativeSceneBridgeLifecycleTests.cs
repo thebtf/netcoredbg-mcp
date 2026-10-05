@@ -247,6 +247,145 @@ public sealed class NativeSceneBridgeLifecycleTests
     }
 
     [Fact]
+    public async Task Binding_ExitedRootAndJobCloseFailure_BlocksAdmissionUntilRetainedOwnerIsReleased()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var binding = new BindingDriver(stop: StopRootOnlyAsync);
+        await binding.StartAsync();
+        var owner = binding.Ownership!;
+        var job = BindingDriver.Job(owner);
+        BindingDriver.ProtectJob(job, protect: true);
+        try
+        {
+            var outcome = await binding.CleanupBridgeAsync();
+
+            Assert.True(binding.Outcome<bool>(outcome, "ExitObserved"));
+            Assert.False(binding.Outcome<bool>(outcome, "TerminationHandedToKernel"));
+            Assert.IsType<System.ComponentModel.Win32Exception>(binding.Outcome<Exception>(outcome, "Failure"));
+            Assert.Same(owner, binding.Ownership);
+            Assert.False(job.IsClosed);
+            Assert.False(binding.Descendant!.HasExited);
+
+            var admissionFailure = await Record.ExceptionAsync(binding.StartAsync);
+            Assert.IsType<InvalidOperationException>(admissionFailure);
+            Assert.Equal(1, binding.LaunchCount);
+            Assert.Same(owner, binding.Ownership);
+
+            BindingDriver.ProtectJob(job, protect: false);
+            var recovery = await binding.CleanupBridgeAsync();
+            Assert.Null(binding.Outcome<Exception?>(recovery, "Failure"));
+            Assert.True(binding.Outcome<bool>(recovery, "TerminationHandedToKernel"));
+            Assert.Null(binding.Ownership);
+            Assert.True(job.IsClosed);
+            binding.AssertTreeExited();
+
+            await binding.StartAsync();
+            Assert.Equal(2, binding.LaunchCount);
+            _ = await binding.CleanupBridgeAsync();
+            binding.AssertTreeExited();
+        }
+        finally
+        {
+            BindingDriver.ProtectJob(job, protect: false);
+            BindingDriver.CloseOwner(owner);
+            _ = await binding.CleanupBridgeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Binding_DisposeJobCloseFailure_RetriesSameOwnerAndPreservesFirstFailure()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var primary = new IOException("controlled first disposal stop failure");
+        var stopCalls = 0;
+        await using var binding = new BindingDriver(stop: async (process, token) =>
+        {
+            await StopRootOnlyAsync(process, token);
+            if (++stopCalls == 1) throw primary;
+        });
+        await binding.StartAsync();
+        var owner = binding.Ownership!;
+        var job = BindingDriver.Job(owner);
+        BindingDriver.ProtectJob(job, protect: true);
+        try
+        {
+            var failure = await Record.ExceptionAsync(binding.DisposeBindingAsync);
+            var failures = Assert.IsType<AggregateException>(failure).Flatten().InnerExceptions;
+            Assert.Same(primary, failures[0]);
+            Assert.IsType<System.ComponentModel.Win32Exception>(failures[1]);
+            Assert.Same(owner, binding.Ownership);
+            Assert.False(job.IsClosed);
+            Assert.False(binding.Descendant!.HasExited);
+            Assert.Equal(1, binding.GateCount);
+
+            BindingDriver.ProtectJob(job, protect: false);
+            await binding.DisposeBindingAsync();
+
+            Assert.Null(binding.Ownership);
+            Assert.True(job.IsClosed);
+            Assert.Equal(2, stopCalls);
+            Assert.Equal(1, binding.LaunchCount);
+            Assert.Equal(1, binding.GateCount);
+            binding.AssertTreeExited();
+            await binding.DisposeBindingAsync();
+            Assert.Equal(2, stopCalls);
+        }
+        finally
+        {
+            BindingDriver.ProtectJob(job, protect: false);
+            BindingDriver.CloseOwner(owner);
+            _ = await binding.CleanupBridgeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Binding_LaunchRollbackJobCloseFailure_RetainsOwnerBeforeObserverUnavailable()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var session = await StartIndependentSessionAsync();
+        var targetPid = Assert.Single(await session.Fixture.ReadTranscriptAsync(), entry => entry.Kind == "descendant").ProcessId!.Value;
+        var primary = new IOException("controlled owned-launch initialization failure");
+        await using var binding = new BindingDriver(stop: StopRootOnlyAsync, retainedLaunchFailure: primary);
+        binding.AttachSession(session);
+        await binding.WaitForCandidateAsync(targetPid);
+        try
+        {
+            Assert.Equal("OBSERVER_UNAVAILABLE", await binding.CaptureVisualAsync(CancellationToken.None));
+            Assert.NotNull(binding.LaunchedOwnership);
+            var launchedOwner = binding.LaunchedOwnership!;
+            var job = BindingDriver.Job(launchedOwner);
+            Assert.IsType<System.ComponentModel.Win32Exception>(primary.Data["NativeSceneBridgeCleanupFailure"]);
+            Assert.Contains(nameof(ThrowStartup), primary.StackTrace);
+            Assert.False(job.IsClosed);
+            Assert.False(binding.Descendant!.HasExited);
+
+            Assert.NotNull(binding.Ownership);
+            var retainedOwner = binding.Ownership!;
+            Assert.Same(job, BindingDriver.Job(retainedOwner));
+            Assert.Equal("OBSERVER_UNAVAILABLE", await binding.CaptureVisualAsync(CancellationToken.None));
+            Assert.Equal(1, binding.LaunchCount);
+            Assert.Same(retainedOwner, binding.Ownership);
+
+            BindingDriver.ProtectJob(job, protect: false);
+            var recovery = await binding.CleanupBridgeAsync();
+            Assert.Null(binding.Outcome<Exception?>(recovery, "Failure"));
+            Assert.True(binding.Outcome<bool>(recovery, "TerminationHandedToKernel"));
+            Assert.Null(binding.Ownership);
+            Assert.True(job.IsClosed);
+            binding.AssertTreeExited();
+        }
+        finally
+        {
+            if (binding.LaunchedOwnership is { } owner)
+            {
+                BindingDriver.ProtectJob(BindingDriver.Job(owner), protect: false);
+                BindingDriver.CloseOwner(owner);
+            }
+            _ = await binding.CleanupBridgeAsync();
+        }
+    }
+
+    [Fact]
     public async Task Binding_StartupFailure_PreservesPrimaryIdentityAndStackDespiteStopFailure()
     {
         if (!OperatingSystem.IsWindows()) return;
@@ -421,7 +560,7 @@ public sealed class NativeSceneBridgeLifecycleTests
             if (cleanupPath is "slot" or "unregistered")
             {
                 var method = cleanupPath == "slot" ? "DisposeSlotResourcesAsync" : "DisposeUnregisteredResourcesAsync";
-                var arguments = cleanupPath == "slot" ? new[] { instance, binding.Instance } : new[] { binding.Instance, instance };
+                var arguments = cleanupPath == "slot" ? new[] { BindingDriver.SessionId, instance, binding.Instance } : new[] { binding.Instance, instance };
                 await (ValueTask)registryType.GetMethod(method, flags)!.Invoke(registry, arguments)!;
                 return;
             }
@@ -448,6 +587,167 @@ public sealed class NativeSceneBridgeLifecycleTests
         Assert.True(debugger.WaitForExit(3_000), "Registry skipped independent debugger cleanup after binding disposal failed.");
         Assert.True(debuggee.WaitForExit(3_000), "Registry skipped independent debuggee cleanup after binding disposal failed.");
         _output.WriteLine($"registry {cleanupPath}: binding failure consumed after bridge tree termination; debugger={debugger.Id}, debuggee={debuggee.Id} exited; established result preserved.");
+    }
+
+    [Theory]
+    [InlineData("stop")]
+    [InlineData("host")]
+    public async Task Registry_ProtectedJobCleanupFailure_RetriesReachableOwnerWithoutReopeningSession(string cleanupPath)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await using var session = await StartIndependentSessionAsync();
+        using var debugger = Process.GetProcessById(session.OwnedProcessId);
+        using var debuggee = Process.GetProcessById(Assert.Single(await session.Fixture.ReadTranscriptAsync(), entry => entry.Kind == "descendant").ProcessId!.Value);
+        _ = debugger.SafeHandle;
+        _ = debuggee.SafeHandle;
+        var primary = new IOException("controlled registry pre-kill failure while the Job is protected");
+        var failStop = true;
+        var stopCalls = 0;
+        await using var binding = new BindingDriver(stop: (process, token) =>
+        {
+            stopCalls++;
+            return failStop ? Task.FromException(primary) : StopRootOnlyAsync(process, token);
+        });
+        binding.AttachSession(session);
+        await binding.StartAsync();
+        binding.AssertDedicatedJobContainsTree();
+
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+        var assembly = LoadHostAssembly();
+        var instance = typeof(NetCoreDbgSessionContractDriver).GetField("_session", flags)!.GetValue(session)!;
+        var registryType = assembly.GetType("NetCoreDbg.Mcp.Stateless.Program+DebugSessionRegistry", true)!;
+        var registry = registryType.GetConstructor(flags, null, [typeof(string)], null)!.Invoke([null]);
+        await using var registryCleanup = (IAsyncDisposable)registry;
+        var slotType = registryType.GetNestedType("SessionSlot", BindingFlags.NonPublic)!;
+        object? slot = null;
+        Func<CancellationToken, Task> stopSession = session.StopAsync;
+        Func<ValueTask> dispose = () => (ValueTask)registryType.GetMethod("DisposeSlotResourcesAsync", flags)!
+            .Invoke(registry, [BindingDriver.SessionId, instance, binding.Instance])!;
+        Action remove = () => registryType.GetMethod("RemoveSlot", flags)!
+            .Invoke(registry, [BindingDriver.SessionId, instance, slot!]);
+        slot = slotType.GetConstructor(flags, null,
+            [typeof(TimeSpan), typeof(Func<CancellationToken, Task>), typeof(Func<ValueTask>), typeof(Action)], null)!
+            .Invoke([TestTimeout, stopSession, dispose, remove]);
+        foreach (var (name, value) in new[] { ("_sessions", instance), ("_slots", slot), ("_nativeSceneBindings", binding.Instance) })
+        {
+            var entries = (System.Collections.IDictionary)registryType.GetField(name, flags)!.GetValue(registry)!;
+            entries.Add(BindingDriver.SessionId, value);
+        }
+
+        var bindings = (System.Collections.IDictionary)registryType.GetField("_nativeSceneBindings", flags)!.GetValue(registry)!;
+        var resolver = registryType.GetMethod("ResolveNativeSceneBindingAsync", flags)!;
+        var resolveBinding = resolver.CreateDelegate(typeof(Func<,>).MakeGenericType(typeof(string), resolver.ReturnType), registry);
+        var dispatcher = assembly.GetType("NetCoreDbg.Mcp.Stateless.NativeScene.NativeSceneToolDispatcher", true)!
+            .GetMethod("DispatchAsync", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var owner = binding.Ownership!;
+        var job = BindingDriver.Job(owner);
+        var processHandle = (SafeHandle)owner.GetType().GetField("_processHandle", flags)!.GetValue(owner)!;
+        var originalJobHandle = job.DangerousGetHandle();
+        var originalProcessHandle = processHandle.DangerousGetHandle();
+        try
+        {
+            BindingDriver.ProtectJob(job, protect: true);
+            ModelContextProtocol.Protocol.CallToolResult? firstResult = null;
+            var firstFailure = await Record.ExceptionAsync(async () =>
+            {
+                if (cleanupPath == "host") await registryCleanup.DisposeAsync();
+                else firstResult = await CallRegistryAsync("StopAsync", "stop_debug");
+            });
+            var firstStopCalls = stopCalls;
+            if (cleanupPath == "host")
+            {
+                var failures = Assert.IsType<AggregateException>(firstFailure).Flatten().InnerExceptions;
+                Assert.Same(primary, failures[0]);
+                Assert.Contains(failures, static failure => failure is System.ComponentModel.Win32Exception);
+            }
+            else
+            {
+                Assert.Null(firstFailure);
+                AssertSessionNotFound(firstResult!);
+                Assert.True(firstStopCalls >= 2, "Explicit stop must exercise both binding removal and registered slot disposal while protection persists.");
+            }
+
+            Assert.Same(owner, binding.Ownership);
+            Assert.False(job.IsClosed);
+            Assert.False(processHandle.IsClosed);
+            Assert.Equal(originalJobHandle, job.DangerousGetHandle());
+            Assert.Equal(originalProcessHandle, processHandle.DangerousGetHandle());
+            Assert.False(binding.Process!.HasExited);
+            Assert.False(binding.Descendant!.HasExited);
+            Assert.True(debugger.WaitForExit(3_000), "Failed native ownership cleanup must not skip debugger disposal.");
+            Assert.True(debuggee.WaitForExit(3_000), "Failed native ownership cleanup must not skip debuggee disposal.");
+            var retainedBinding = bindings[BindingDriver.SessionId];
+
+            AssertSessionNotFound(await CallRegistryAsync("GetStateAsync", "get_debug_state"));
+            AssertSessionNotFound(await CallRegistryAsync("GetThreadsAsync", "get_threads"));
+            var nativeArguments = new Dictionary<string, JsonElement>
+            {
+                ["debugSessionId"] = JsonSerializer.SerializeToElement(BindingDriver.SessionId),
+                ["protocolVersion"] = JsonSerializer.SerializeToElement("native-scene-probe/1"),
+                ["schemaVersion"] = JsonSerializer.SerializeToElement("native-scene-probe.schema/1"),
+            };
+            var nativeResult = await (ValueTask<ModelContextProtocol.Protocol.CallToolResult>)dispatcher.Invoke(null,
+                ["get_ui_probe_capabilities", nativeArguments, resolveBinding, CancellationToken.None])!;
+            var nativeContent = ErrorContent(nativeResult);
+            Assert.Equal("tool_error", nativeContent.GetProperty("kind").GetString());
+            Assert.Equal("get_ui_probe_capabilities", nativeContent.GetProperty("tool").GetString());
+            Assert.Equal("DEBUG_SESSION_NOT_FOUND", nativeContent.GetProperty("code").GetString());
+            var retainedAfterLookup = bindings[BindingDriver.SessionId];
+            Assert.Same(owner, binding.Ownership);
+            Assert.False(job.IsClosed);
+            Assert.False(processHandle.IsClosed);
+            _output.WriteLine($"registry {cleanupPath}: first stop attempts={firstStopCalls}; cleanup reachable={ReferenceEquals(binding.Instance, retainedBinding)}; closed session/native lookups refused while original Job/process handles and descendant remain live.");
+
+            BindingDriver.ProtectJob(job, protect: false);
+            failStop = false;
+            var beforeRetry = stopCalls;
+            if (cleanupPath == "host") await registryCleanup.DisposeAsync();
+            else AssertSessionNotFound(await CallRegistryAsync("StopAsync", "stop_debug"));
+
+            Assert.True(binding.Descendant!.WaitForExit(3_000), $"The same registry {cleanupPath} retry could not reach the retained protected Job owner; its descendant survived before fixture safety cleanup.");
+            binding.AssertTreeExited();
+            Assert.True(job.IsClosed, "Registry retry must close the original Job handle.");
+            Assert.True(processHandle.IsClosed, "Registry retry must close the original process handle.");
+            Assert.Null(binding.Ownership);
+            Assert.True(stopCalls > beforeRetry, "Registry retry must invoke retained binding cleanup, not only replay a cached failed slot-close task.");
+            Assert.Same(binding.Instance, retainedBinding);
+            Assert.Same(binding.Instance, retainedAfterLookup);
+            Assert.False(bindings.Contains(BindingDriver.SessionId));
+            Assert.Equal(1, binding.LaunchCount);
+            Assert.Equal(1, binding.GateCount);
+            _output.WriteLine($"registry {cleanupPath}: existing cleanup entry retried the same owner; bridge={binding.Process!.Id}, descendant={binding.Descendant!.Id} exited and both original handles closed before safety cleanup.");
+        }
+        finally
+        {
+            failStop = false;
+            BindingDriver.ProtectJob(job, protect: false);
+            BindingDriver.CloseOwner(owner);
+            _ = await binding.CleanupBridgeAsync();
+        }
+
+        async ValueTask<ModelContextProtocol.Protocol.CallToolResult> CallRegistryAsync(string method, string tool) =>
+            await (ValueTask<ModelContextProtocol.Protocol.CallToolResult>)registryType.GetMethod(method, flags)!.Invoke(registry,
+                [new ModelContextProtocol.Protocol.CallToolRequestParams
+                {
+                    Name = tool,
+                    Arguments = new Dictionary<string, JsonElement> { ["debugSessionId"] = JsonSerializer.SerializeToElement(BindingDriver.SessionId) },
+                }, CancellationToken.None])!;
+
+        static JsonElement ErrorContent(ModelContextProtocol.Protocol.CallToolResult result)
+        {
+            Assert.Equal("complete", result.ResultType);
+            Assert.True(result.IsError);
+            var content = Assert.IsType<JsonElement>(result.StructuredContent);
+            Assert.Equal(content.GetRawText(), Assert.IsType<ModelContextProtocol.Protocol.TextContentBlock>(Assert.Single(result.Content)).Text);
+            return content;
+        }
+
+        static void AssertSessionNotFound(ModelContextProtocol.Protocol.CallToolResult result)
+        {
+            var content = ErrorContent(result);
+            Assert.Equal("debug_session_not_found", content.GetProperty("kind").GetString());
+            Assert.Equal("DEBUG_SESSION_NOT_FOUND", content.GetProperty("error").GetString());
+        }
     }
 
     [Fact]
@@ -495,6 +795,15 @@ public sealed class NativeSceneBridgeLifecycleTests
         Assert.IsType<System.ComponentModel.Win32Exception>(failure.InnerException);
         Assert.Empty(ControlledProcessIdentities().Except(before));
         _output.WriteLine($"native creation failure invalidJob={invalidJob}: Win32 rejection; no newly running controlled child.");
+    }
+
+    private static async Task StopRootOnlyAsync(Process process, CancellationToken cancellationToken)
+    {
+        if (!process.HasExited)
+        {
+            process.Kill();
+            await process.WaitForExitAsync(cancellationToken);
+        }
     }
 
     private static IAsyncDisposable ThrowStartup(Exception exception) => throw exception;
@@ -552,10 +861,13 @@ public sealed class NativeSceneBridgeLifecycleTests
         private readonly List<Process> _observedProcesses = [];
         public Process? Descendant { get; private set; }
         public object Instance => _binding;
+        public object? Ownership => _type.GetField("_bridgeOwnership", InstanceFlags)!.GetValue(_binding);
+        public int LaunchCount { get; private set; }
+        public object? LaunchedOwnership { get; private set; }
         public int GateCount => ((SemaphoreSlim)_type.GetField("_gate", InstanceFlags)!.GetValue(_binding)!).CurrentCount;
 
         public BindingDriver(Func<Process, CancellationToken, Task>? stop = null, Func<string, IAsyncDisposable>? createClient = null,
-            Func<IAsyncDisposable, ValueTask>? disposeClient = null, bool assemblyLaunch = false)
+            Func<IAsyncDisposable, ValueTask>? disposeClient = null, bool assemblyLaunch = false, Exception? retainedLaunchFailure = null)
         {
             _type = LoadHostAssembly().GetType("NetCoreDbg.Mcp.Stateless.NativeScene.NativeSceneSessionBinding", throwOnError: true)!;
             var fixtureAssembly = FixtureAssemblyPath();
@@ -563,12 +875,24 @@ public sealed class NativeSceneBridgeLifecycleTests
             object? instance = null;
             Func<ProcessStartInfo, Process> launch = info =>
             {
+                LaunchCount++;
                 var readyPipe = $"controlled-bridge-ready-{Guid.NewGuid():N}";
                 info.ArgumentList.Clear();
                 if (assemblyLaunch) info.ArgumentList.Add(fixtureAssembly);
                 info.ArgumentList.Add("--controlled-bridge-tree");
                 info.ArgumentList.Add(readyPipe);
-                var process = (Process)_type.GetMethod("LaunchBridge", InstanceFlags)!.Invoke(instance, [info])!;
+                Process process;
+                if (retainedLaunchFailure is null)
+                {
+                    process = (Process)_type.GetMethod("LaunchBridge", InstanceFlags)!.Invoke(instance, [info])!;
+                    LaunchedOwnership = _type.GetField("_bridgeOwnership", InstanceFlags)!.GetValue(instance);
+                }
+                else
+                {
+                    var ownerType = LoadHostAssembly().GetType("NetCoreDbg.Mcp.Stateless.DebugAdapter.NetCoreDbgSession+WindowsProcessTreeOwnership+WindowsBridgeProcess", true)!;
+                    LaunchedOwnership = ownerType.GetMethod("Start", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [info]);
+                    process = (Process)ownerType.GetProperty("Process", InstanceFlags)!.GetValue(LaunchedOwnership)!;
+                }
                 Process = System.Diagnostics.Process.GetProcessById(process.Id);
                 _ = Process.SafeHandle;
                 _observedProcesses.Add(Process);
@@ -583,6 +907,30 @@ public sealed class NativeSceneBridgeLifecycleTests
                 _ = Descendant.SafeHandle;
                 _observedProcesses.Add(Descendant);
                 _ = Descendant.StartTime;
+                if (retainedLaunchFailure is not null)
+                {
+                    var owner = LaunchedOwnership!;
+                    var job = Job(owner);
+                    ProtectJob(job, protect: true);
+                    try
+                    {
+                        _ = ThrowStartup(retainedLaunchFailure);
+                    }
+                    catch (Exception primary)
+                    {
+                        try
+                        {
+                            owner.GetType().GetMethod("CloseJob", InstanceFlags)!.Invoke(owner, []);
+                        }
+                        catch (TargetInvocationException rollback)
+                        {
+                            primary.Data["NativeSceneBridgeTerminationOwner"] = job;
+                            primary.Data["NativeSceneBridgeProcessHandle"] = owner.GetType().GetField("_processHandle", InstanceFlags)!.GetValue(owner);
+                            primary.Data["NativeSceneBridgeCleanupFailure"] = rollback.InnerException!;
+                        }
+                        throw;
+                    }
+                }
                 return process;
             };
             var constructor = _type.GetConstructors(InstanceFlags).Single(candidate => candidate.GetParameters().Length == 8);
@@ -644,6 +992,22 @@ public sealed class NativeSceneBridgeLifecycleTests
         public T Outcome<T>(object outcome, string property) => (T)outcome.GetType().GetProperty(property, InstanceFlags)!.GetValue(outcome)!;
         public Task DisposeBindingAsync() => ((IAsyncDisposable)_binding).DisposeAsync().AsTask();
 
+        public static SafeHandle Job(object owner) => (SafeHandle)owner.GetType().GetField("_job", InstanceFlags)!.GetValue(owner)!;
+
+        public static void ProtectJob(SafeHandle job, bool protect)
+        {
+            if (job.IsClosed) return;
+            const uint protectFromClose = 2;
+            Assert.True(SetHandleInformation(job.DangerousGetHandle(), protectFromClose, protect ? protectFromClose : 0),
+                $"Could not {(protect ? "protect" : "unprotect")} the controlled Job handle: {Marshal.GetLastWin32Error()}.");
+        }
+
+        public static void CloseOwner(object owner)
+        {
+            owner.GetType().GetMethod("CloseJob", InstanceFlags)!.Invoke(owner, []);
+            owner.GetType().GetMethod("CloseProcessHandle", InstanceFlags)!.Invoke(owner, []);
+        }
+
         public void AssertDedicatedJobContainsTree()
         {
             var ownership = _type.GetField("_bridgeOwnership", InstanceFlags)!.GetValue(_binding)!;
@@ -699,6 +1063,10 @@ public sealed class NativeSceneBridgeLifecycleTests
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool IsProcessInJob(Microsoft.Win32.SafeHandles.SafeProcessHandle process, IntPtr job, [MarshalAs(UnmanagedType.Bool)] out bool contained);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
     }
 
     private static JsonObject Request(string operation) => new()

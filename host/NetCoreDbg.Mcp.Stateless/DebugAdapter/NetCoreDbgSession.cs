@@ -1547,16 +1547,16 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
         internal sealed class WindowsBridgeProcess
         {
             private readonly SafeKernelHandle _job;
-            private readonly SafeKernelHandle _processHandle;
+            private readonly SafeKernelHandle? _processHandle;
 
-            private WindowsBridgeProcess(Process process, SafeKernelHandle job, SafeKernelHandle processHandle)
+            private WindowsBridgeProcess(Process? process, SafeKernelHandle job, SafeKernelHandle? processHandle)
             {
                 Process = process;
                 _job = job;
                 _processHandle = processHandle;
             }
 
-            internal Process Process { get; }
+            internal Process? Process { get; }
 
             internal static WindowsBridgeProcess Start(ProcessStartInfo startInfo)
             {
@@ -1597,6 +1597,10 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
                         {
                             primary.Data["NativeSceneBridgeProcessHandle"] = processHandle;
                         }
+                        if (process is not null)
+                        {
+                            primary.Data["NativeSceneBridgeProcess"] = process;
+                        }
                     }
 
                     if (handedToKernel)
@@ -1617,6 +1621,8 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
                         catch (Exception exception)
                         {
                             cleanupFailure = cleanupFailure is null ? exception : new AggregateException(cleanupFailure, exception);
+                            primary.Data["NativeSceneBridgeTerminationOwner"] = job;
+                            primary.Data["NativeSceneBridgeProcessHandle"] = processHandle;
                         }
                     }
 
@@ -1629,8 +1635,25 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
                 }
             }
 
+            internal static WindowsBridgeProcess? TakeFailedLaunchOwnership(Exception failure)
+            {
+                if (failure.Data["NativeSceneBridgeTerminationOwner"] is not SafeKernelHandle job)
+                {
+                    return null;
+                }
+
+                var ownership = new WindowsBridgeProcess(
+                    failure.Data["NativeSceneBridgeProcess"] as Process,
+                    job,
+                    failure.Data["NativeSceneBridgeProcessHandle"] as SafeKernelHandle);
+                failure.Data.Remove("NativeSceneBridgeTerminationOwner");
+                failure.Data.Remove("NativeSceneBridgeProcessHandle");
+                failure.Data.Remove("NativeSceneBridgeProcess");
+                return ownership;
+            }
+
             internal void CloseJob() => _job.CloseChecked();
-            internal void CloseProcessHandle() => _processHandle.CloseChecked();
+            internal void CloseProcessHandle() => _processHandle?.CloseChecked();
 
             private static ProcessInformation CreateBridgeProcess(ProcessStartInfo startInfo, SafeKernelHandle job)
             {

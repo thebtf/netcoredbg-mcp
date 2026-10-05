@@ -274,8 +274,8 @@ internal static class Program
                 slot = new SessionSlot(
                     StopTimeout,
                     session.StopAsync,
-                    () => DisposeSlotResourcesAsync(session, binding),
-                    () => RemoveSlot(token, session, binding, slot!));
+                    () => DisposeSlotResourcesAsync(token, session, binding),
+                    () => RemoveSlot(token, session, slot!));
                 if (!_sessions.TryAdd(token, session)
                     || !_slots.TryAdd(token, slot)
                     || !_nativeSceneBindings.TryAdd(token, binding))
@@ -638,10 +638,13 @@ internal static class Program
             var sessions = _sessions.ToArray();
             _sessions.Clear();
             var bindings = _nativeSceneBindings.ToArray();
-            _nativeSceneBindings.Clear();
             try
             {
-                await Task.WhenAll(bindings.Select(static binding => binding.Value.DisposeAsync().AsTask())).ConfigureAwait(false);
+                await Task.WhenAll(bindings.Select(async binding =>
+                {
+                    await binding.Value.DisposeAsync().ConfigureAwait(false);
+                    _nativeSceneBindings.TryRemove(binding);
+                })).ConfigureAwait(false);
             }
             catch (Exception exception)
             {
@@ -687,15 +690,14 @@ internal static class Program
         private void RemoveSlot(
             string token,
             NetCoreDbgSession session,
-            NativeSceneSessionBinding binding,
             SessionSlot slot)
         {
             _slots.TryRemove(new KeyValuePair<string, SessionSlot>(token, slot));
             _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(token, session));
-            _nativeSceneBindings.TryRemove(new KeyValuePair<string, NativeSceneSessionBinding>(token, binding));
         }
 
         private async ValueTask DisposeSlotResourcesAsync(
+            string token,
             NetCoreDbgSession session,
             NativeSceneSessionBinding binding)
         {
@@ -703,6 +705,7 @@ internal static class Program
             try
             {
                 await binding.DisposeAsync().ConfigureAwait(false);
+                _nativeSceneBindings.TryRemove(new KeyValuePair<string, NativeSceneSessionBinding>(token, binding));
             }
             catch (Exception exception)
             {
@@ -909,11 +912,12 @@ internal static class Program
 
         private async ValueTask RemoveNativeSceneBindingAsync(string sessionId)
         {
-            if (_nativeSceneBindings.TryRemove(sessionId, out var binding))
+            if (_nativeSceneBindings.TryGetValue(sessionId, out var binding))
             {
                 try
                 {
                     await binding.DisposeAsync().ConfigureAwait(false);
+                    _nativeSceneBindings.TryRemove(new KeyValuePair<string, NativeSceneSessionBinding>(sessionId, binding));
                 }
                 catch (Exception)
                 {

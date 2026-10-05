@@ -47,6 +47,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
     private JsonObject? _captureStabilityObservation;
     private readonly NativeSceneStabilityCoordinator _stabilityCoordinator;
     private int _disposed;
+    private int _disposeCompleted;
 
     internal NativeSceneSessionBinding(
         string debugSessionId,
@@ -347,15 +348,21 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        if (Volatile.Read(ref _disposeCompleted) != 0)
         {
             return;
         }
 
+        Interlocked.Exchange(ref _disposed, 1);
         await _gate.WaitAsync().ConfigureAwait(false);
         Exception? failure = null;
         try
         {
+            if (_disposeCompleted != 0)
+            {
+                return;
+            }
+
             failure = (await DisposeBridgeAsync().ConfigureAwait(false)).Failure;
             try
             {
@@ -385,6 +392,11 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
                 {
                     failure = AddCleanupFailure(failure, exception);
                 }
+            }
+
+            if (failure is null)
+            {
+                Volatile.Write(ref _disposeCompleted, 1);
             }
         }
         finally
@@ -526,7 +538,8 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
 
     private async Task<NativeSceneBridgeClient> StartBridgeAsync(int processId)
     {
-        if (_bridgeClient is not null || _bridgeProcess is not null || !TryGetBridgePath(out var bridgePath))
+        if (Volatile.Read(ref _disposed) != 0 || _bridgeClient is not null || _bridgeProcess is not null ||
+            _bridgeOwnership is not null || !TryGetBridgePath(out var bridgePath))
         {
             throw new InvalidOperationException("The local native-scene observer cannot be started.");
         }
@@ -551,7 +564,17 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
         startInfo.ArgumentList.Add(AuthorizationNonce);
         startInfo.ArgumentList.Add(processId.ToString(CultureInfo.InvariantCulture));
 
-        var process = _launchBridge(startInfo);
+        Process process;
+        try
+        {
+            process = _launchBridge(startInfo);
+        }
+        catch (Exception primary)
+        {
+            _bridgeOwnership ??= WindowsBridgeProcess.TakeFailedLaunchOwnership(primary);
+            _bridgeProcess ??= _bridgeOwnership?.Process;
+            throw;
+        }
         try
         {
             _bridgeProcess = process;
@@ -613,7 +636,6 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
                 {
                     ownership.CloseJob();
                     handedToKernel = true;
-                    _bridgeOwnership = null;
                 }
                 catch (Exception exception)
                 {
@@ -636,6 +658,10 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
                 try
                 {
                     ownership?.CloseProcessHandle();
+                    if (handedToKernel)
+                    {
+                        _bridgeOwnership = null;
+                    }
                 }
                 catch (Exception exception)
                 {
@@ -657,7 +683,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
         var ownership = WindowsBridgeProcess.Start(startInfo);
         _bridgeOwnership = ownership;
         _bridgeProcess = ownership.Process;
-        return ownership.Process;
+        return ownership.Process ?? throw new InvalidOperationException("The contained native-scene observer process was not initialized.");
     }
 
     private static IAsyncDisposable CreateBridgeClient(string pipeName) => new NativeSceneBridgeClient(
