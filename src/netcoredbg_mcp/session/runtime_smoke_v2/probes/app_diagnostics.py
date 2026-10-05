@@ -61,6 +61,20 @@ async def handle_app_diagnostics(
     if merged_errors:
         return invalid_diagnostic_probe(probe, kind=kind, errors=merged_errors)
 
+    value = _app_diagnostics_value(probe, acquisition, acquisition_field)
+    freshness = _verify_declared_freshness(probe, context)
+    if freshness is not None:
+        value["freshness"] = freshness
+        if value["status"] == "PASS" and freshness.get("status") == "FAIL":
+            value["status"] = "FAIL"
+    return _app_diagnostics_result(probe, value, acquisition, acquisition_field, freshness)
+
+
+def _app_diagnostics_value(
+    probe: dict[str, Any],
+    acquisition: dict[str, Any] | None,
+    acquisition_field: str | None,
+) -> dict[str, Any]:
     observations = [
         dict(observation)
         for observation in probe.get("observations", [])
@@ -78,12 +92,19 @@ async def handle_app_diagnostics(
     }
     if acquisition is not None and acquisition_field is not None:
         value[acquisition_field] = acquisition
-    freshness = _verify_declared_freshness(probe, context)
-    if freshness is not None:
-        value["freshness"] = freshness
-        if status == "PASS" and freshness.get("status") == "FAIL":
-            status = "FAIL"
-            value["status"] = status
+    return value
+
+
+def _app_diagnostics_result(
+    probe: dict[str, Any],
+    value: dict[str, Any],
+    acquisition: dict[str, Any] | None,
+    acquisition_field: str | None,
+    freshness: dict[str, Any] | None,
+) -> dict[str, Any]:
+    value = dict(value)
+    app = value["app"]
+    status = value["status"]
     value["manifest"] = {
         "sources": [
             _manifest_source_entry(
@@ -98,15 +119,15 @@ async def handle_app_diagnostics(
     }
     limits = diagnostic_limits(probe)
     output = {
-        "name": probe_name(probe, kind),
-        "kind": kind,
+        "name": probe_name(probe, "app_diagnostics"),
+        "kind": "app_diagnostics",
         "status": status,
         "value": bounded_diagnostic_value(value, limits=limits),
         "evidence_ref": f"diagnostic:app_diagnostics:{app.get('name') or 'app'}",
     }
     if status == "BLOCKED":
         output["reason"] = "app diagnostics reported BLOCKED"
-        output.update(blocked_details_from_first_observation(observations))
+        output.update(blocked_details_from_first_observation(value["observations"]))
     elif status == "FAIL" and freshness is not None and freshness.get("status") == "FAIL":
         output["reason"] = "app diagnostics freshness mismatch"
     elif status == "FAIL":
@@ -244,19 +265,22 @@ def _string_list(value: Any) -> list[str]:
     if isinstance(value, str):
         return [value] if value else []
     if isinstance(value, dict):
-        path = value.get("path") or value.get("name")
-        return [str(path)] if path else []
+        item = _diagnostic_string_item(value)
+        return [item] if item is not None else []
     if isinstance(value, (list, tuple, set)):
         items: list[str] = []
         for item in value:
-            if isinstance(item, dict):
-                item_value = item.get("path") or item.get("name")
-                if item_value:
-                    items.append(str(item_value))
-            elif item:
-                items.append(str(item))
+            item_value = _diagnostic_string_item(item)
+            if item_value is not None:
+                items.append(item_value)
         return items
     return []
+
+
+def _diagnostic_string_item(value: Any) -> str | None:
+    if isinstance(value, dict):
+        value = value.get("path") or value.get("name")
+    return str(value) if value else None
 
 
 async def _probe_with_diagnostic_json(
@@ -417,18 +441,9 @@ async def _read_wait_json(
     timeout_ms = _bounded_int(wait_json.get("timeout_ms"), default=0)
     poll_interval_ms = _bounded_int(wait_json.get("poll_interval_ms"), default=50)
     condition = _diagnostic_condition(wait_json)
-    metadata: dict[str, Any] = {
-        "path": raw_path,
-        "observed": False,
-        "polls": 0,
-        "timeout_ms": timeout_ms,
-    }
     pattern = _diagnostic_pattern(wait_json)
-    if pattern is not None:
-        metadata["pattern"] = pattern
     since_cursor = _diagnostic_since_cursor(wait_json)
-    if since_cursor is not None:
-        metadata["since"] = _diagnostic_cursor_payload(since_cursor)
+    metadata = _diagnostic_wait_metadata(raw_path, timeout_ms, pattern, since_cursor)
     if not raw_path:
         metadata["reason"] = "diagnostic JSON path is required"
         return None, metadata
@@ -445,79 +460,38 @@ async def _read_wait_json(
     last_progress_fingerprint: str | None = None
     while True:
         metadata["polls"] += 1
-        try:
-            candidate_entry = await asyncio.to_thread(
-                _first_diagnostic_candidate,
-                path,
-                pattern,
-                since_cursor,
+        file_text, metadata = await _read_diagnostic_candidate(
+            path, pattern, since_cursor, context, metadata
+        )
+        payload, metadata, unmatched_condition = _diagnostic_json_observation(
+            file_text, condition, metadata
+        )
+        if payload is not None:
+            return payload, metadata
+        if unmatched_condition.get("terminal"):
+            last_progress_fingerprint = await _maybe_report_diagnostic_progress(
+                progress_reporter,
+                metadata,
+                previous_fingerprint=last_progress_fingerprint,
             )
-            file_text = None
-            if candidate_entry is not None:
-                candidate, cursor = candidate_entry
-                metadata["matched_path"] = str(candidate)
-                candidate = _resolve_matched_candidate_path(candidate, context)
-                metadata["matched_path"] = str(candidate)
-                metadata["cursor"] = _diagnostic_cursor_payload(cursor)
-                file_text = await asyncio.to_thread(_read_file_if_present, candidate)
-        except ValueError as exc:
-            metadata["reason"] = "matched diagnostic JSON is outside allowed scope"
-            metadata["validation_error"] = str(exc)
-            file_text = None
-        except OSError as exc:
-            metadata["reason"] = _UNREADABLE_DIAGNOSTIC_JSON_REASON
-            metadata["error"] = str(exc)
-            file_text = None
-        if file_text is not None:
-            try:
-                payload = json.loads(file_text)
-            except json.JSONDecodeError as exc:
-                metadata["reason"] = _UNREADABLE_DIAGNOSTIC_JSON_REASON
-                metadata["error"] = str(exc)
-            else:
-                if isinstance(payload, dict):
-                    condition_result = _evaluate_diagnostic_condition(payload, condition)
-                    if condition_result is not None:
-                        metadata["candidate_observed"] = True
-                        metadata["condition"] = condition_result
-                        if not condition_result["matched"]:
-                            metadata["reason"] = (
-                                "diagnostic JSON condition not satisfied"
-                            )
-                            metadata.pop("error", None)
-                            if condition_result.get("error"):
-                                metadata["error"] = condition_result["error"]
-                            if condition_result.get("terminal"):
-                                last_progress_fingerprint = await _maybe_report_diagnostic_progress(
-                                    progress_reporter,
-                                    metadata,
-                                    previous_fingerprint=last_progress_fingerprint,
-                                )
-                                break
-                            if clock() < deadline:
-                                last_progress_fingerprint = await _maybe_report_diagnostic_progress(
-                                    progress_reporter,
-                                    metadata,
-                                    previous_fingerprint=last_progress_fingerprint,
-                                )
-                                await sleep_ms(
-                                    clock,
-                                    _poll_sleep_ms(
-                                        timeout_ms=timeout_ms,
-                                        poll_interval_ms=poll_interval_ms,
-                                        remaining_ms=max(
-                                            1,
-                                            int((deadline - clock()) * 1000),
-                                        ),
-                                    ),
-                                )
-                                continue
-                            break
-                    metadata["observed"] = True
-                    metadata.pop("reason", None)
-                    metadata.pop("error", None)
-                    return payload, metadata
-                metadata["reason"] = "diagnostic JSON must be an object"
+            break
+        if unmatched_condition:
+            if clock() < deadline:
+                last_progress_fingerprint = await _maybe_report_diagnostic_progress(
+                    progress_reporter,
+                    metadata,
+                    previous_fingerprint=last_progress_fingerprint,
+                )
+                await sleep_ms(
+                    clock,
+                    _poll_sleep_ms(
+                        timeout_ms=timeout_ms,
+                        poll_interval_ms=poll_interval_ms,
+                        remaining_ms=max(1, int((deadline - clock()) * 1000)),
+                    ),
+                )
+                continue
+            break
         last_progress_fingerprint = await _maybe_report_diagnostic_progress(
             progress_reporter,
             metadata,
@@ -540,6 +514,91 @@ async def _read_wait_json(
     else:
         metadata.setdefault("reason", "diagnostic JSON not observed")
     return None, metadata
+
+
+def _diagnostic_wait_metadata(
+    raw_path: str,
+    timeout_ms: int,
+    pattern: str | None,
+    since_cursor: tuple[int, str] | None,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "path": raw_path,
+        "observed": False,
+        "polls": 0,
+        "timeout_ms": timeout_ms,
+    }
+    if pattern is not None:
+        metadata["pattern"] = pattern
+    if since_cursor is not None:
+        metadata["since"] = _diagnostic_cursor_payload(since_cursor)
+    return metadata
+
+
+async def _read_diagnostic_candidate(
+    path: Path,
+    pattern: str | None,
+    since_cursor: tuple[int, str] | None,
+    context: Any,
+    metadata: dict[str, Any],
+) -> tuple[str | None, dict[str, Any]]:
+    metadata = dict(metadata)
+    try:
+        candidate_entry = await asyncio.to_thread(
+            _first_diagnostic_candidate,
+            path,
+            pattern,
+            since_cursor,
+        )
+        if candidate_entry is None:
+            return None, metadata
+        candidate, cursor = candidate_entry
+        metadata["matched_path"] = str(candidate)
+        candidate = _resolve_matched_candidate_path(candidate, context)
+        metadata["matched_path"] = str(candidate)
+        metadata["cursor"] = _diagnostic_cursor_payload(cursor)
+        file_text = await asyncio.to_thread(_read_file_if_present, candidate)
+        return file_text, metadata
+    except ValueError as exc:
+        metadata["reason"] = "matched diagnostic JSON is outside allowed scope"
+        metadata["validation_error"] = str(exc)
+    except OSError as exc:
+        metadata["reason"] = _UNREADABLE_DIAGNOSTIC_JSON_REASON
+        metadata["error"] = str(exc)
+    return None, metadata
+
+
+def _diagnostic_json_observation(
+    file_text: str | None,
+    condition: dict[str, Any] | None,
+    metadata: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
+    metadata = dict(metadata)
+    if file_text is None:
+        return None, metadata, {}
+    try:
+        payload = json.loads(file_text)
+    except json.JSONDecodeError as exc:
+        metadata["reason"] = _UNREADABLE_DIAGNOSTIC_JSON_REASON
+        metadata["error"] = str(exc)
+        return None, metadata, {}
+    if not isinstance(payload, dict):
+        metadata["reason"] = "diagnostic JSON must be an object"
+        return None, metadata, {}
+    condition_result = _evaluate_diagnostic_condition(payload, condition)
+    if condition_result is not None:
+        metadata["candidate_observed"] = True
+        metadata["condition"] = condition_result
+        if not condition_result["matched"]:
+            metadata["reason"] = "diagnostic JSON condition not satisfied"
+            metadata.pop("error", None)
+            if condition_result.get("error"):
+                metadata["error"] = condition_result["error"]
+            return None, metadata, condition_result
+    metadata["observed"] = True
+    metadata.pop("reason", None)
+    metadata.pop("error", None)
+    return payload, metadata, {}
 
 
 async def _maybe_report_diagnostic_progress(
