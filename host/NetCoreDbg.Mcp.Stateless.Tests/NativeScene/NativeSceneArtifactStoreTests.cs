@@ -428,6 +428,165 @@ public sealed class NativeSceneArtifactStoreTests
     }
 
     [Fact]
+    public async Task ExpiredArtifactWithDeletionDenied_RetriesAutonomouslyAndReleasesCapacityOnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 8, 19, 12, 0, 0, TimeSpan.Zero));
+        var payload = Payload(97);
+        await using var scope = ArtifactStoreTestScope.Create(clock, maximumArtifactCount: 1, maximumAggregateBytes: payload.Length);
+        var sessionId = Capability("autonomous-locked-expiry-session");
+        var descriptor = AssertCommitted(await (await scope.Store.StageAsync(
+            sessionId,
+            Capability("autonomous-locked-expiry-capture"),
+            MediaType,
+            ArtifactSchemaVersion,
+            payload)).CommitAsync());
+        var payloadPath = FindCommittedPayloadPath(scope.Root, payload);
+
+        using (var deletionBlocker = new FileStream(payloadPath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            clock.Advance(TimeSpan.FromHours(4) + TimeSpan.FromTicks(1));
+
+            await WaitForAsync(
+                () => scope.Store.CommittedArtifactMetadataCount == 0,
+                "Expiry must remove committed metadata even while deletion is denied.");
+            AssertFixedNotFound(await scope.Store.ReadAsync(sessionId, descriptor.ArtifactId, offset: 0, maxBytes: 1));
+            Assert.True(File.Exists(payloadPath));
+            Assert.Equal(payload.Length, deletionBlocker.Length);
+
+            await Assert.ThrowsAsync<IOException>(() => scope.Store.StageAsync(
+                sessionId,
+                Capability("autonomous-locked-expiry-capacity-rejection"),
+                MediaType,
+                ArtifactSchemaVersion,
+                payload));
+            Assert.Equal(0, scope.Store.StagedArtifactMetadataCount);
+            Assert.True(File.Exists(payloadPath));
+        }
+
+        clock.Advance(TimeSpan.FromMinutes(1));
+
+        await WaitForAsync(
+            () => !File.Exists(payloadPath),
+            "Expiry cleanup must retry within one virtual minute after unlocking without another store operation.");
+        Assert.Empty(Directory.EnumerateFiles(scope.Root, "*", SearchOption.AllDirectories));
+
+        _ = AssertCommitted(await (await scope.Store.StageAsync(
+            sessionId,
+            Capability("autonomous-locked-expiry-replacement"),
+            MediaType,
+            ArtifactSchemaVersion,
+            payload)).CommitAsync());
+        Assert.Equal(1, scope.Store.CommittedArtifactMetadataCount);
+        Assert.Equal(payload, File.ReadAllBytes(FindCommittedPayloadPath(scope.Root, payload)));
+    }
+
+    [Fact]
+    public async Task PendingDeletionRetry_PreservesEarlierLiveArtifactExpiryOnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 8, 19, 12, 0, 0, TimeSpan.Zero));
+        await using var scope = ArtifactStoreTestScope.Create(clock);
+        var sessionId = Capability("pending-delete-earliest-expiry-session");
+        var lockedPayload = Payload(97);
+        _ = AssertCommitted(await (await scope.Store.StageAsync(
+            sessionId,
+            Capability("pending-delete-earliest-expiry-locked"),
+            MediaType,
+            ArtifactSchemaVersion,
+            lockedPayload)).CommitAsync());
+        var lockedPath = FindCommittedPayloadPath(scope.Root, lockedPayload);
+        var stagger = TimeSpan.FromMilliseconds(500);
+        clock.Advance(stagger);
+
+        var livePayload = Payload(98);
+        _ = AssertCommitted(await (await scope.Store.StageAsync(
+            sessionId,
+            Capability("pending-delete-earliest-expiry-live"),
+            MediaType,
+            ArtifactSchemaVersion,
+            livePayload)).CommitAsync());
+        var livePath = FindCommittedPayloadPath(scope.Root, livePayload);
+
+        using (var deletionBlocker = new FileStream(lockedPath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            clock.Advance(TimeSpan.FromHours(4) - stagger);
+            await WaitForAsync(
+                () => scope.Store.CommittedArtifactMetadataCount == 1,
+                "Only the first artifact must expire at its retention deadline.");
+            Assert.True(File.Exists(lockedPath));
+            Assert.True(File.Exists(livePath));
+
+            clock.Advance(stagger);
+            await WaitForAsync(
+                () => !File.Exists(livePath) && scope.Store.CommittedArtifactMetadataCount == 0,
+                "Pending deletion retries must not postpone an earlier live-artifact retention deadline.");
+            Assert.True(File.Exists(lockedPath));
+        }
+
+        clock.Advance(TimeSpan.FromSeconds(1));
+        await WaitForAsync(
+            () => !File.Exists(lockedPath),
+            "Pending deletion must still retry after the final live artifact expires.");
+        Assert.Empty(Directory.EnumerateFiles(scope.Root, "*", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public async Task AbortedStagedArtifactWithDeletionDenied_RetriesAutonomouslyAndReleasesCapacityOnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 8, 19, 12, 0, 0, TimeSpan.Zero));
+        var payload = Payload(97);
+        await using var scope = ArtifactStoreTestScope.Create(clock, maximumArtifactCount: 1, maximumAggregateBytes: payload.Length);
+        var sessionId = Capability("autonomous-locked-abort-session");
+        var staged = await scope.Store.StageAsync(
+            sessionId,
+            Capability("autonomous-locked-abort-capture"),
+            MediaType,
+            ArtifactSchemaVersion,
+            payload);
+        var payloadPath = FindCommittedPayloadPath(scope.Root, payload);
+
+        using (var deletionBlocker = new FileStream(payloadPath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            await staged.AbortAsync();
+
+            Assert.Equal(0, scope.Store.StagedArtifactMetadataCount);
+            Assert.Equal(0, scope.Store.CommittedArtifactMetadataCount);
+            Assert.True(File.Exists(payloadPath));
+            Assert.Equal(payload.Length, deletionBlocker.Length);
+        }
+
+        clock.Advance(TimeSpan.FromMinutes(1));
+
+        await WaitForAsync(
+            () => !File.Exists(payloadPath),
+            "Aborted staging cleanup must retry within one virtual minute after unlocking without another store operation.");
+        Assert.Empty(Directory.EnumerateFiles(scope.Root, "*", SearchOption.AllDirectories));
+
+        _ = AssertCommitted(await (await scope.Store.StageAsync(
+            sessionId,
+            Capability("autonomous-locked-abort-replacement"),
+            MediaType,
+            ArtifactSchemaVersion,
+            payload)).CommitAsync());
+        Assert.Equal(1, scope.Store.CommittedArtifactMetadataCount);
+        Assert.Equal(payload, File.ReadAllBytes(FindCommittedPayloadPath(scope.Root, payload)));
+    }
+
+    [Fact]
     public async Task PerStoreArtifactCountBudget_RejectsFurtherStagingWithoutPublishingAdditionalMetadata()
     {
         await using var scope = ArtifactStoreTestScope.Create(maximumArtifactCount: 2, maximumAggregateBytes: 1_024);

@@ -14,6 +14,7 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
     private const int DefaultMaximumArtifactCount = 256;
     private const long DefaultMaximumAggregateBytes = 268_435_456;
     private static readonly TimeSpan Retention = TimeSpan.FromHours(4);
+    private static readonly TimeSpan PendingDeleteRetryDelay = TimeSpan.FromSeconds(1);
     private static readonly NativeSceneArtifactReadError Unavailable = new(
         "ARTIFACT_NOT_FOUND",
         "Artifact is not available.");
@@ -733,15 +734,22 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
             return;
         }
 
-        if (_artifacts.Count == 0)
+        if (_artifacts.Count == 0 && _pendingDeletes.Count == 0)
         {
             _expiryTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
             return;
         }
 
-        var deadline = _artifacts.Values.Min(static artifact => artifact.ExpiresAt);
+        var dueTime = _artifacts.Count == 0
+            ? PendingDeleteRetryDelay
+            : _artifacts.Values.Min(static artifact => artifact.ExpiresAt) - now;
+        if (_pendingDeletes.Count != 0 && dueTime > PendingDeleteRetryDelay)
+        {
+            dueTime = PendingDeleteRetryDelay;
+        }
+
         _expiryTimer.Change(
-            deadline <= now ? TimeSpan.Zero : deadline - now,
+            dueTime <= TimeSpan.Zero ? TimeSpan.Zero : dueTime,
             Timeout.InfiniteTimeSpan);
     }
 
@@ -793,6 +801,7 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
         _pendingDeletes.Add(path, (session, remainingBytes));
         session.PendingDeleteCount++;
         _aggregateBytes += remainingBytes - chargedBytes;
+        ScheduleExpiryTimer(_timeProvider.GetUtcNow());
     }
 
     private static bool TryDeleteFile(string path)

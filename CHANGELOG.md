@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Native-scene cleanup now keeps its existing timer active while expired or aborted artifact deletions remain blocked, retrying retained paths after the lock clears without another store operation. Pending files remain charged until deletion succeeds, and an earlier live-artifact expiry still takes precedence over the one-second retry interval.
 - Runtime-smoke text `get_state` dispatch now uses one private async helper, preserving service availability, selector and adapter ordering, bounded state fields, and error precedence. No Sonar closure or measured coverage increase is claimed.
 - Runtime-smoke viewport comparisons and after-phase decisions now use private helpers, preserving missing-evidence precedence, movement direction, row identity ordering, adapter outcomes, and caller inputs. No Sonar closure or measured coverage increase is claimed.
 - Runtime-smoke app diagnostics now separate bounded result assembly and JSON observation from acquisition, polling, and freshness decisions, preserving source-failure precedence, conditions, progress ordering, and public evidence fields. No Sonar closure or measured coverage increase is claimed.
