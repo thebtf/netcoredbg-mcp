@@ -21,18 +21,7 @@ async def handle_ui_text(
     kind = "ui.text"
     action = str(probe.get("action") or "assert")
     if action == "get_state":
-        if not service_available(context, "ui.text.get_state"):
-            return blocked_probe(
-                probe,
-                kind=kind,
-                requested={"selector": dict(probe.get("selector") or {})},
-                next_step="Connect a UI backend that exposes ui.text.get_state.",
-            )
-        result = await context.call_adapter(
-            "ui.text.get_state",
-            selector=dict(probe.get("selector") or {}),
-        )
-        return _state_probe_output(result, probe=probe, kind=kind, phase=phase)
+        return await _get_state_probe(probe, context, kind, phase)
 
     if action == "assert_selection":
         selection_start, selection_end = _selection_range_from_probe(probe)
@@ -102,6 +91,26 @@ async def handle_ui_text(
         failure_reason="text assertion failed",
         include_source=False,
     )
+
+
+async def _get_state_probe(
+    probe: dict[str, Any],
+    context: Any,
+    kind: str,
+    phase: str,
+) -> dict[str, Any]:
+    if not service_available(context, "ui.text.get_state"):
+        return blocked_probe(
+            probe,
+            kind=kind,
+            requested={"selector": dict(probe.get("selector") or {})},
+            next_step="Connect a UI backend that exposes ui.text.get_state.",
+        )
+    result = await context.call_adapter(
+        "ui.text.get_state",
+        selector=dict(probe.get("selector") or {}),
+    )
+    return _state_probe_output(result, probe=probe, kind=kind, phase=phase)
 
 
 def _text_probe_output(
