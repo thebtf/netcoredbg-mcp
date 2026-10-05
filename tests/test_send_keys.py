@@ -163,6 +163,54 @@ def test_unknown_keypad_name_fails_without_sending_an_event(send_keys, mock_user
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
+@pytest.mark.parametrize(
+    ("token", "vk", "scan", "flags"),
+    [
+        ("a", 0x41, 0, 0),
+        ("{ENTER}", 0x0D, 0, 0),
+        ("{NUMPAD1}", 0, 0x4F, 0x0008),
+        ("{NUMPADENTER}", 0, 0x1C, 0x0009),
+        ("{NUMLOCK}", 0, 0x45, 0x0008),
+    ],
+)
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_failed_key_up_attempts_owned_up_only_cleanup(
+    send_keys, mock_user32, token, vk, scan, flags, cleanup_fails
+):
+    events = []
+    key_up = (1, vk, scan, flags | 0x0002)
+
+    def capture(_count, input_pointer, _size):
+        event = input_pointer._obj
+        key = event._input.ki
+        current = (event.type, key.wVk, key.wScan, key.dwFlags)
+        events.append(current)
+        if current == key_up and (events.count(key_up) == 1 or cleanup_fails):
+            return 0
+        return 1
+
+    mock_user32.SendInput.side_effect = capture
+    with (
+        patch("ctypes.windll.kernel32.GetLastError", side_effect=[5, 87]) as last_error,
+        patch("time.sleep"),
+        pytest.raises(OSError, match="SendInput failed") as error,
+    ):
+        send_keys("^+" + token)
+
+    assert error.value.errno == 5
+    assert events == [
+        (1, 0x11, 0, 0),
+        (1, 0x10, 0, 0),
+        (1, vk, scan, flags),
+        key_up,
+        key_up,
+        (1, 0x10, 0, 0x0002),
+        (1, 0x11, 0, 0x0002),
+    ]
+    assert last_error.call_count == (2 if cleanup_fails else 1)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
 @pytest.mark.parametrize("sequence", ["^+a", "^+(a)"])
 def test_failed_shift_release_still_attempts_ctrl_release(send_keys, mock_user32, sequence):
     events = []

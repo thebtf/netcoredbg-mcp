@@ -32,7 +32,7 @@ Rollback preserves both layouts without moving or deleting retained evidence. St
 
 ## Release gates and residual risks
 
-- Installed-wheel Windows keypad journeys passed: all 17 named keys reached the WPF target, the pywinauto path passed 6/6 manual checks, and the final keypad regression suite passed 82/82. The original NumLock state was restored.
+- Historical installed-wheel Windows keypad journeys passed all 17 named keys, with NumLock restored; the original pywinauto manual path passed 6/6 checks. After the key-up failure-safety repair, all 51 SendKeys regressions and direct 17-token success-event comparisons pass. A fresh installed replay confirms grouped keypad/Enter events, parse-error modifier cleanup and subsequent input, but stops at a later `txtOutput` focus precondition before the full token set. It is partial evidence, not a current full-journey PASS; complete the current installed journey before publication.
 - The current candidate remains **unscanned after the latest repairs**. The last completed historical diagnostic at `79fa93cbaf65f205d8be718d35b95cf784673339` recorded 68.2% new-code coverage against the unchanged 80% requirement and 460 OPEN findings, with zero hotspots. It is not a passing candidate receipt and does not authorize merge or publication. A fresh exact-head candidate scan and the separate actual post-merge scan must satisfy the release protocol before tagging; replace this disclosure with final receipts before publication.
 
 ---

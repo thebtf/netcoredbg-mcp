@@ -124,13 +124,25 @@ def _release_modifiers(pressed_modifiers: list[int]) -> None:
         raise first_error
 
 
+def _release_tapped_key(vk: int, flags: int = 0, scan: int = 0) -> None:
+    flags |= 0x0002
+    try:
+        _send_keyboard_input(vk, flags=flags, scan=scan)
+    except OSError:
+        try:
+            _send_keyboard_input(vk, flags=flags, scan=scan)
+        except Exception:
+            pass
+        raise
+
+
 def _tap(vk: int) -> None:
     """Press and release a virtual key."""
     import time
 
     _press(vk)
     time.sleep(0.01)
-    _release(vk)
+    _release_tapped_key(vk)
 
 
 def _send_click(x: int, y: int, button: str = "left") -> None:
@@ -384,9 +396,9 @@ def _send_keys_via_input(keys: str) -> None:
 
     def _tap_keypad(key_name: str) -> None:
         scan, extended = _KEYPAD_KEYS[key_name]
-        for key_up in (False, True):
-            flags = 0x0008 | (0x0001 if extended else 0) | (0x0002 if key_up else 0)
-            _send_keyboard_input(0, flags=flags, scan=scan)
+        flags = 0x0008 | (0x0001 if extended else 0)
+        _send_keyboard_input(0, flags=flags, scan=scan)
+        _release_tapped_key(0, flags=flags, scan=scan)
 
     def _char_to_vk(ch: str) -> tuple[int, bool, bool, bool]:
         """Convert a character to (vk_code, needs_shift, needs_ctrl, needs_alt) via VkKeyScanW."""
