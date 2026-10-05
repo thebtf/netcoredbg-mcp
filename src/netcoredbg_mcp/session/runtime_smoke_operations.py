@@ -1797,9 +1797,9 @@ async def _drag_result_with_selected_payload(
         merged_route_evidence["final_pointer"] = dict(final_pointer)
     if selected_payload is not None:
         merged_route_evidence["selected_payload"] = selected_payload
-    status = str(result.get("status", "PASS")).upper()
+    verdict = _drag_result_verdict(result, expect, selected_payload)
     output: dict[str, Any] = {
-        "status": status,
+        "status": verdict["status"],
         "backend": type(backend).__name__,
         "route_evidence": merged_route_evidence,
         "result": result,
@@ -1820,20 +1820,31 @@ async def _drag_result_with_selected_payload(
         output["cancel"] = {"key": cancel_key, "sent": True}
     if selected_payload is not None:
         output["selected_payload"] = selected_payload
+    output.update(verdict)
+    return output
+
+
+def _drag_result_verdict(
+    result: dict[str, Any],
+    expect: dict[str, Any],
+    selected_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    status = str(result.get("status", "PASS")).upper()
+    verdict: dict[str, Any] = {"status": status}
     if (
         status == "PASS"
         and expect.get("selected_payload_preserved") is True
         and selected_payload is not None
         and selected_payload.get("preserved") is not True
     ):
-        output["status"] = "FAIL"
-        output["reason"] = "selected payload was not preserved after drag"
+        verdict["status"] = "FAIL"
+        verdict["reason"] = "selected payload was not preserved after drag"
     if status != "PASS":
-        output["reason"] = str(result.get("reason") or "ui.drag backend did not pass")
+        verdict["reason"] = str(result.get("reason") or "ui.drag backend did not pass")
         for key in ("reason", "requested", "accepted", "next_step"):
             if key in result:
-                output[key] = result[key]
-    return output
+                verdict[key] = result[key]
+    return verdict
 
 
 def _mapping_evidence_from_result(
