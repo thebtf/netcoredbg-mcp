@@ -11,7 +11,8 @@ Prepared: 2026-09-27
 - `ui_send_keys`, `ui_send_keys_focused`, and `ui_send_keys_batch` accept `{NUMPAD0}`–`{NUMPAD9}`, `{NUMPADADD}`, `{NUMPADSUBTRACT}`, `{NUMPADMULTIPLY}`, `{NUMPADDIVIDE}`, `{NUMPADDECIMAL}`, `{NUMPADENTER}`, and `{NUMLOCK}` on both Windows FlaUI and pywinauto send paths. The FlaUI-only scoped `ui_key_sequence` accepts the same names without braces in its list.
 - These names produce physical keypad key-down/key-up events rather than ordinary text or top-row digits. Keypad Enter and Divide use extended-key events; NumLock uses VK 0x90 / scan 0x45 without the extended flag.
 - NumLock is pressed and released, not set to a chosen state. The resulting digit characters depend on the existing NumLock state. Consumer verification restores its original state after an intentional NumLock press.
-- The opt-in native scene artifact store retains its capacity charge when expiry cannot delete a locked artifact; it retries cleanup on a later store operation. A failed commit no longer deletes an existing destination that the store did not create.
+- The opt-in native scene artifact store retains its capacity charge when deletion of an expired or aborted artifact is blocked. Its existing timer now retries retained paths after the lock clears without another store operation, while preserving earlier live-artifact expiry deadlines. A failed commit does not delete an existing destination that the store did not create.
+- Guarded child resolution now treats unsupported optional UIA AutomationId and Name properties as absent instead of refusing an otherwise valid scene. Process identity, unique matching, HWND ownership, physical containment, and two-read stability checks remain mandatory.
 - Python server construction no longer scans temporary directories. One lifespan-owned subprocess performs an opportunistic sweep of the private artifact namespace. A blocked or failed sweep does not prevent MCP initialization. The worker has a five-second useful-work budget; EOF or cancellation initiates bounded owner drain without waiting for that budget.
 
 ## Compatibility
@@ -31,7 +32,7 @@ Rollback preserves both layouts without moving or deleting retained evidence. St
 ## Release gates and residual risks
 
 - Installed-wheel Windows keypad journeys passed: all 17 named keys reached the WPF target, the pywinauto path passed 6/6 manual checks, and the final keypad regression suite passed 82/82. The original NumLock state was restored.
-- The mandatory candidate SonarQube scan is **blocked**, not passed: the completed diagnostic at `bc4a89fe2b2f47c6d07f8569aef80b396da00e1f` reports 58.9% new-code coverage against 80% and 726 open findings, with no hotspots. This diagnostic does not authorize merging or publication. The post-merge scan has not run. Do not merge, tag, or publish this release until both exact-head scans satisfy the release protocol; replace this status with final receipts before publication.
+- The current candidate remains **unscanned after the latest repairs**. The last completed historical diagnostic at `972662fb426e63a810f2485546c43ea088e432a6` recorded 66.4% new-code coverage against the unchanged 80% requirement and 468 OPEN findings, with zero hotspots. It is not a passing candidate receipt and does not authorize merge or publication. A fresh exact-head candidate scan and the separate actual post-merge scan must satisfy the release protocol before tagging; replace this disclosure with final receipts before publication.
 
 ---
 

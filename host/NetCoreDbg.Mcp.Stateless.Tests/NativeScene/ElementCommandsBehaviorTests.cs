@@ -182,6 +182,89 @@ public sealed class ElementCommandsBehaviorTests
     }
 
     [Fact]
+    public async Task ResolveGuardedChild_ReportsUniqueMissingAndAmbiguousDescendants()
+    {
+        await RunBridgeAsync(async (bridge, processId, requestId) =>
+        {
+            using var fixture = Process.GetProcessById(processId);
+            var observation = ObserveWindow(fixture);
+            var parameters = new JsonObject
+            {
+                ["parent"] = new JsonObject { ["automationId"] = "Gallery" },
+                ["predicate"] = new JsonObject
+                {
+                    ["automationId"] = "SaveButton",
+                    ["controlType"] = "Button",
+                },
+                ["maximumNodes"] = 512,
+            };
+            var response = await CallBridgeAsync(bridge, "resolve_guarded_child", parameters, requestId++);
+            _output.WriteLine($"Guarded child response: {response.ToJsonString()}");
+            Assert.Equal(observation, ObserveWindow(fixture));
+            Assert.False(response.ContainsKey("error"), response.ToJsonString());
+            var admitted = Assert.IsType<JsonObject>(response["result"]);
+            Assert.Equal("ADMITTED", admitted["status"]!.GetValue<string>());
+            Assert.Equal(1, admitted["match_count"]!.GetValue<int>());
+            var target = Assert.IsType<JsonObject>(admitted["target"]);
+            Assert.Equal("SaveButton", target["automation_id"]!.GetValue<string>());
+            Assert.Equal("Save scene", target["name"]!.GetValue<string>());
+            Assert.Equal("Button", target["control_type"]!.GetValue<string>());
+            Assert.Equal(processId, target["process_id"]!.GetValue<int>());
+            Assert.Equal(checked((int)observation.ProcessId), target["process_id"]!.GetValue<int>());
+            Assert.Equal(observation.Hwnd.ToInt64(), target["hwnd"]!.GetValue<long>());
+            var window = Assert.IsType<JsonObject>(admitted["window"]);
+            Assert.Equal(checked((int)observation.ProcessId), window["process_id"]!.GetValue<int>());
+            Assert.Equal(observation.Hwnd.ToInt64(), window["hwnd"]!.GetValue<long>());
+
+            var rectangle = Assert.IsType<JsonObject>(target["rectangle"]);
+            var client = Assert.IsType<JsonObject>(window["client_rectangle"]);
+            foreach (var bounds in new[] { rectangle, client })
+            {
+                Assert.Equal("physical_px", bounds["unit"]!.GetValue<string>());
+                Assert.Equal("screen", bounds["coordinate_space"]!.GetValue<string>());
+            }
+            var left = rectangle["left"]!.GetValue<int>();
+            var top = rectangle["top"]!.GetValue<int>();
+            var right = rectangle["right"]!.GetValue<int>();
+            var bottom = rectangle["bottom"]!.GetValue<int>();
+            Assert.True(right > left && bottom > top, rectangle.ToJsonString());
+            var clientLeft = client["left"]!.GetValue<int>();
+            var clientTop = client["top"]!.GetValue<int>();
+            var clientRight = client["right"]!.GetValue<int>();
+            var clientBottom = client["bottom"]!.GetValue<int>();
+            Assert.Equal(observation.Client.Right - observation.Client.Left, clientRight - clientLeft);
+            Assert.Equal(observation.Client.Bottom - observation.Client.Top, clientBottom - clientTop);
+            Assert.True(clientLeft >= observation.Window.Left && clientTop >= observation.Window.Top &&
+                clientRight <= observation.Window.Right && clientBottom <= observation.Window.Bottom,
+                client.ToJsonString());
+            Assert.True(left >= clientLeft && top >= clientTop && right <= clientRight && bottom <= clientBottom,
+                response.ToJsonString());
+            var center = Assert.IsType<JsonObject>(target["center"]);
+            Assert.Equal(left + ((right - left) / 2), center["x"]!.GetValue<int>());
+            Assert.Equal(top + ((bottom - top) / 2), center["y"]!.GetValue<int>());
+            var stability = Assert.IsType<JsonObject>(admitted["stability"]);
+            Assert.Equal(2, stability["reads"]!.GetValue<int>());
+            Assert.True(stability["matched"]!.GetValue<bool>());
+
+            foreach (var missingOrAmbiguous in new[]
+            {
+                (AutomationId: "MissingButton", Reason: "CHILD_NOT_FOUND", MatchCount: 0),
+                (AutomationId: "AmbiguousButton", Reason: "CHILD_AMBIGUOUS", MatchCount: 2),
+            })
+            {
+                parameters["predicate"]!["automationId"] = missingOrAmbiguous.AutomationId;
+                response = await CallBridgeAsync(bridge, "resolve_guarded_child", parameters, requestId++);
+                Assert.False(response.ContainsKey("error"), response.ToJsonString());
+                var blocked = Assert.IsType<JsonObject>(response["result"]);
+                Assert.Equal("BLOCKED", blocked["status"]!.GetValue<string>());
+                Assert.Equal(missingOrAmbiguous.Reason, blocked["reason"]!.GetValue<string>());
+                Assert.Equal(missingOrAmbiguous.MatchCount, blocked["match_count"]!.GetValue<int>());
+            }
+            return response;
+        });
+    }
+
+    [Fact]
     public async Task FindByXPath_GalleryAmbiguityThenUniqueAndMissesStayScoped()
     {
         await RunBridgeAsync(async (bridge, _, requestId) =>

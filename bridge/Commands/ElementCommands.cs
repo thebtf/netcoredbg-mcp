@@ -881,8 +881,8 @@ public static partial class ElementCommands
     {
         try
         {
-            var automationId = element.AutomationId ?? string.Empty;
-            var name = element.Name ?? string.Empty;
+            var automationId = element.Properties.AutomationId.ValueOrDefault ?? string.Empty;
+            var name = element.Properties.Name.ValueOrDefault ?? string.Empty;
             var controlType = element.ControlType;
 
             isMatch =
@@ -908,8 +908,8 @@ public static partial class ElementCommands
         string name;
         try
         {
-            automationId = element.AutomationId ?? string.Empty;
-            name = element.Name ?? string.Empty;
+            automationId = element.Properties.AutomationId.ValueOrDefault ?? string.Empty;
+            name = element.Properties.Name.ValueOrDefault ?? string.Empty;
         }
         catch
         {
