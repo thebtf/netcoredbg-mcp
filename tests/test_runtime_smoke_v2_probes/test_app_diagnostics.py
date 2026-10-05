@@ -63,6 +63,23 @@ def _app_manifest_source(probe: dict[str, Any]) -> dict[str, Any]:
     return sources[0]
 
 
+def _assert_matched_diagnostic_path(probe: dict[str, Any], expected_path: Path) -> None:
+    poll = probe["value"]["poll"]
+    path = str(expected_path)
+    max_text_length = probe["value"]["limits"]["max_text_length"]
+    if len(path) <= max_text_length:
+        assert poll["matched_path"] == path
+    else:
+        assert "matched_path" not in poll
+        assert poll["matched_path_length"] == len(path)
+        assert "matched_path" in poll["omitted_fields"]
+    if poll["observed"]:
+        assert poll["cursor"] == {
+            "mtime_ns": expected_path.stat().st_mtime_ns,
+            "name": expected_path.name,
+        }
+
+
 class _RewriteJsonOnSleepClock:
     def __init__(self, path: Path, payload: dict[str, Any]) -> None:
         self._path = path
@@ -384,7 +401,7 @@ async def test_app_diagnostics_launch_default_falls_back_to_directory_when_path_
     assert probe["status"] == "PASS"
     assert probe["value"]["app"]["name"] == "DirectoryFallbackApp"
     assert probe["value"]["poll"]["path"] == diagnostic_path.parent.as_posix()
-    assert probe["value"]["poll"]["matched_path"] == str(fallback_path.resolve())
+    _assert_matched_diagnostic_path(probe, fallback_path.resolve())
     assert probe["value"]["poll"]["observed"] is True
 
 
@@ -456,6 +473,7 @@ async def test_app_diagnostics_launch_default_falls_back_to_directory_when_path_
     )
     os.utime(diagnostic_path, ns=(1_000_000_000, 1_000_000_000))
     newer_path = diagnostic_path.parent / "newer-launch-advertised-app-diagnostics.json"
+
     def write_newer() -> None:
         newer_path.write_text(
             json.dumps(
@@ -488,7 +506,7 @@ async def test_app_diagnostics_launch_default_falls_back_to_directory_when_path_
     assert probe["status"] == "PASS"
     assert probe["value"]["app"]["name"] == "FreshLaunchAdvertisedApp"
     assert probe["value"]["poll"]["path"] == diagnostic_path.parent.as_posix()
-    assert probe["value"]["poll"]["matched_path"] == str(newer_path.resolve())
+    _assert_matched_diagnostic_path(probe, newer_path.resolve())
     assert probe["value"]["poll"]["since"] == {
         "mtime_ns": 1_000_000_000,
         "name": "launch-advertised-app-diagnostics.json",
@@ -612,7 +630,7 @@ async def test_app_diagnostics_explicit_poll_overrides_launch_directory_fallback
     assert probe["status"] == "PASS"
     assert probe["value"]["app"]["name"] == "ExplicitPollApp"
     assert probe["value"]["poll"]["path"] == str(explicit_dir)
-    assert probe["value"]["poll"]["matched_path"] == str(explicit_path)
+    _assert_matched_diagnostic_path(probe, explicit_path)
     assert "wait_json" not in probe["value"]
     assert result["diagnostic_launch"]["evidence"]["path"] == launch_path.as_posix()
 
@@ -1590,7 +1608,7 @@ async def test_app_diagnostics_poll_reads_matching_json_from_directory(
     assert probe["value"]["app"]["name"] == "NovaScript"
     assert probe["value"]["poll"]["path"] == str(diagnostic_dir)
     assert probe["value"]["poll"]["pattern"] == "diagnostic-*.json"
-    assert probe["value"]["poll"]["matched_path"] == str(diagnostic_path)
+    _assert_matched_diagnostic_path(probe, diagnostic_path)
     assert probe["value"]["poll"]["observed"] is True
 
 
@@ -1766,7 +1784,7 @@ async def test_app_diagnostics_poll_since_waits_for_new_matching_json_before_mer
     assert result["status"] == "PASS"
     assert probe["status"] == "PASS"
     assert probe["value"]["app"]["name"] == "NovaScript"
-    assert probe["value"]["poll"]["matched_path"] == str(new_path)
+    _assert_matched_diagnostic_path(probe, new_path)
     assert probe["value"]["poll"]["cursor"] == {
         "mtime_ns": 2_000_000_000,
         "name": "diagnostic-new.json",
@@ -1888,7 +1906,7 @@ async def test_app_diagnostics_poll_revalidates_matched_directory_candidate(
     assert result["status"] == "BLOCKED"
     assert probe["status"] == "BLOCKED"
     assert probe["reason"] == "matched diagnostic JSON is outside allowed scope"
-    assert probe["value"]["poll"]["matched_path"] == str(diagnostic_path.resolve())
+    _assert_matched_diagnostic_path(probe, diagnostic_path.resolve())
     assert probe["value"]["poll"]["observed"] is False
     assert probe["value"]["poll"]["validation_error"] == "Path outside project scope"
     assert (diagnostic_dir.resolve(), False) in session.validated_paths
