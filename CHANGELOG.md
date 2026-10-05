@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Runtime-smoke text `get_state` dispatch now uses one private async helper, preserving service availability, selector and adapter ordering, bounded state fields, and error precedence. No Sonar closure or measured coverage increase is claimed.
+- Runtime-smoke viewport comparisons and after-phase decisions now use private helpers, preserving missing-evidence precedence, movement direction, row identity ordering, adapter outcomes, and caller inputs. No Sonar closure or measured coverage increase is claimed.
 - Runtime-smoke debug evaluation reuses its unchanged identifier through one private module constant; behavior is unchanged.
 - The pywinauto keyboard parser now separates sequence and special-key dispatch while preserving native event ordering, numeric-keypad scan codes, extended Enter/Divide, and modifier cleanup after parsing errors. The installed fallback journey verifies all 17 keypad tokens and restores NumLock and foreground focus.
 - Windows process capture now separates its persistent debug-event pump into one private helper, preserving launch ordering, pending-event retries, exception forwarding, first causal failures, exact Job-qualified capability ownership, and drain/close accounting. No Sonar closure or new scan-pass claim is made.

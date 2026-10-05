@@ -58,50 +58,7 @@ async def handle_ui_grid_viewport(
         context.scratch[scratch_key] = snapshot
     elif phase == "after":
         previous = context.scratch.get(scratch_key)
-        if expect and (
-            not isinstance(previous, dict) or not isinstance(snapshot, dict)
-        ):
-            output["status"] = "BLOCKED"
-            output["reason"] = "before snapshot unavailable"
-            output["requested"] = {"expect": expect, "phase": "both"}
-            output["accepted"] = {
-                "phase": ["before", "after"],
-                "snapshot": "grid viewport snapshots for both phases",
-            }
-            output["next_step"] = (
-                "Run the probe in both phases so expectations can be compared."
-            )
-            return output
-        if isinstance(previous, dict) and isinstance(snapshot, dict):
-            comparison = _compare_snapshots(previous, snapshot)
-            output["comparison"] = comparison
-            if expect:
-                output["expected"] = expect
-                if (
-                    expect.get("selected_payload_preserved") is True
-                    and comparison.get("selected_payload_preserved") is None
-                ):
-                    output["status"] = "BLOCKED"
-                    output["reason"] = "selected row evidence unavailable"
-                    output["requested"] = {"expect": {"selected_payload_preserved": True}}
-                    output["accepted"] = {
-                        "selected_rows": "before and after selected row identities"
-                    }
-                    output["next_step"] = (
-                        "Use a UI backend that returns selected row evidence for viewport probes."
-                    )
-                    return output
-                missing_expectation = _missing_expectation_capability(comparison, expect)
-                if missing_expectation is not None:
-                    output["status"] = "BLOCKED"
-                    output["reason"] = missing_expectation["reason"]
-                    output["requested"] = missing_expectation["requested"]
-                    output["accepted"] = missing_expectation["accepted"]
-                    output["next_step"] = missing_expectation["next_step"]
-                    return output
-                if status == "PASS" and not _expectation_matches(comparison, expect):
-                    output["status"] = "FAIL"
-                    output["reason"] = "grid viewport expectation failed"
+        output.update(_after_snapshot_result(previous, snapshot, expect, status))
     return output
 
 
@@ -110,7 +67,66 @@ def _compact_snapshot(result: dict[str, Any]) -> Any:
     return compact_evidence(snapshot)
 
 
+def _after_snapshot_result(
+    before: Any,
+    after: Any,
+    expect: dict[str, Any],
+    status: str,
+) -> dict[str, Any]:
+    if expect and (not isinstance(before, dict) or not isinstance(after, dict)):
+        return {
+            "status": "BLOCKED",
+            "reason": "before snapshot unavailable",
+            "requested": {"expect": expect, "phase": "both"},
+            "accepted": {
+                "phase": ["before", "after"],
+                "snapshot": "grid viewport snapshots for both phases",
+            },
+            "next_step": "Run the probe in both phases so expectations can be compared.",
+        }
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return {}
+
+    comparison = _compare_snapshots(before, after)
+    output: dict[str, Any] = {"comparison": comparison}
+    if not expect:
+        return output
+
+    output["expected"] = expect
+    if (
+        expect.get("selected_payload_preserved") is True
+        and comparison.get("selected_payload_preserved") is None
+    ):
+        output["status"] = "BLOCKED"
+        output["reason"] = "selected row evidence unavailable"
+        output["requested"] = {"expect": {"selected_payload_preserved": True}}
+        output["accepted"] = {"selected_rows": "before and after selected row identities"}
+        output["next_step"] = (
+            "Use a UI backend that returns selected row evidence for viewport probes."
+        )
+        return output
+    missing_expectation = _missing_expectation_capability(comparison, expect)
+    if missing_expectation is not None:
+        output["status"] = "BLOCKED"
+        output["reason"] = missing_expectation["reason"]
+        output["requested"] = missing_expectation["requested"]
+        output["accepted"] = missing_expectation["accepted"]
+        output["next_step"] = missing_expectation["next_step"]
+        return output
+    if status == "PASS" and not _expectation_matches(comparison, expect):
+        output["status"] = "FAIL"
+        output["reason"] = "grid viewport expectation failed"
+    return output
+
+
 def _compare_snapshots(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **_compare_viewport(before, after),
+        **_compare_row_evidence(before, after),
+    }
+
+
+def _compare_viewport(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     before_first = before.get("first_visible_index")
     after_first = after.get("first_visible_index")
     before_last = before.get("last_visible_index")
@@ -132,6 +148,15 @@ def _compare_snapshots(before: dict[str, Any], after: dict[str, Any]) -> dict[st
             direction = "down"
         elif after_last < before_last:
             direction = "up"
+    return {
+        "first_visible_index_changed": first_changed,
+        "last_visible_index_changed": last_changed,
+        "viewport_moved": first_changed or last_changed,
+        "direction": direction,
+    }
+
+
+def _compare_row_evidence(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     selected_before = _row_identity_refs(before.get("selected_rows"))
     selected_after = _row_identity_refs(after.get("selected_rows"))
     selected_duplicate_identities = _duplicate_identities(selected_before, selected_after)
@@ -147,10 +172,6 @@ def _compare_snapshots(before: dict[str, Any], after: dict[str, Any]) -> dict[st
     before_row_count = before.get("row_count")
     after_row_count = after.get("row_count")
     return {
-        "first_visible_index_changed": first_changed,
-        "last_visible_index_changed": last_changed,
-        "viewport_moved": first_changed or last_changed,
-        "direction": direction,
         "before_order": before_order,
         "after_order": after_order,
         "identity_order_preserved": before_order == after_order
