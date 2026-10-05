@@ -105,10 +105,13 @@ python_test_paths=(
   tests/test_project_utils.py
   tests/test_protocol.py
   tests/test_resource_updates.py
+  tests/test_runtime_smoke_lifecycle.py
   tests/test_runtime_smoke_runner.py
   tests/test_runtime_smoke_schema.py
   tests/test_runtime_smoke_v2_actions.py
   tests/test_runtime_smoke_v2_cleanup.py
+  tests/test_runtime_smoke_v2_probes/
+  tests/test_send_keys.py
   tests/test_session.py
   tests/test_source_context.py
   tests/test_state.py
