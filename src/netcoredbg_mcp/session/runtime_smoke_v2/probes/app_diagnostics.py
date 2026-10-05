@@ -509,11 +509,14 @@ async def _read_wait_json(
             ),
         )
 
-    if since_cursor is not None:
-        metadata.setdefault("reason", "diagnostic JSON not observed after since cursor")
-    else:
-        metadata.setdefault("reason", "diagnostic JSON not observed")
+    metadata.setdefault("reason", _unobserved_diagnostic_json_reason(since_cursor))
     return None, metadata
+
+
+def _unobserved_diagnostic_json_reason(since_cursor: tuple[int, str] | None) -> str:
+    if since_cursor is not None:
+        return "diagnostic JSON not observed after since cursor"
+    return "diagnostic JSON not observed"
 
 
 def _diagnostic_wait_metadata(

@@ -24,50 +24,10 @@ async def handle_ui_text(
         return await _get_state_probe(probe, context, kind, phase)
 
     if action == "assert_selection":
-        selection_start, selection_end = _selection_range_from_probe(probe)
-        if selection_start is None or selection_end is None:
-            return {
-                "name": probe_name(probe, kind),
-                "kind": kind,
-                "status": "FAIL",
-                "value": None,
-                "reason": "selection.start and selection.end are required",
-            }
-        if not service_available(context, "ui.text.assert_selection"):
-            return blocked_probe(
-                probe,
-                kind=kind,
-                requested={"selector": dict(probe.get("selector") or {})},
-                next_step="Connect a UI backend that exposes ui.text.assert_selection.",
-            )
-        result = await context.call_adapter(
-            "ui.text.assert_selection",
-            selector=dict(probe.get("selector") or {}),
-            selection_start=selection_start,
-            selection_end=selection_end,
-        )
-        return _selection_probe_output(result, probe=probe, kind=kind)
+        return await _assert_selection_probe(probe, context, kind)
 
     if action == "read":
-        if not service_available(context, "ui.text.read"):
-            return blocked_probe(
-                probe,
-                kind=kind,
-                requested={"selector": dict(probe.get("selector") or {})},
-                next_step="Connect a UI backend that exposes ui.text.read.",
-            )
-        result = await context.call_adapter(
-            "ui.text.read",
-            selector=dict(probe.get("selector") or {}),
-        )
-        return _text_probe_output(
-            result,
-            probe=probe,
-            kind=kind,
-            phase=phase,
-            failure_reason="text read failed",
-            include_source=True,
-        )
+        return await _read_text_probe(probe, context, kind, phase)
 
     if not service_available(context, "ui.text.assert"):
         return blocked_probe(
@@ -111,6 +71,63 @@ async def _get_state_probe(
         selector=dict(probe.get("selector") or {}),
     )
     return _state_probe_output(result, probe=probe, kind=kind, phase=phase)
+
+
+async def _assert_selection_probe(
+    probe: dict[str, Any],
+    context: Any,
+    kind: str,
+) -> dict[str, Any]:
+    selection_start, selection_end = _selection_range_from_probe(probe)
+    if selection_start is None or selection_end is None:
+        return {
+            "name": probe_name(probe, kind),
+            "kind": kind,
+            "status": "FAIL",
+            "value": None,
+            "reason": "selection.start and selection.end are required",
+        }
+    if not service_available(context, "ui.text.assert_selection"):
+        return blocked_probe(
+            probe,
+            kind=kind,
+            requested={"selector": dict(probe.get("selector") or {})},
+            next_step="Connect a UI backend that exposes ui.text.assert_selection.",
+        )
+    result = await context.call_adapter(
+        "ui.text.assert_selection",
+        selector=dict(probe.get("selector") or {}),
+        selection_start=selection_start,
+        selection_end=selection_end,
+    )
+    return _selection_probe_output(result, probe=probe, kind=kind)
+
+
+async def _read_text_probe(
+    probe: dict[str, Any],
+    context: Any,
+    kind: str,
+    phase: str,
+) -> dict[str, Any]:
+    if not service_available(context, "ui.text.read"):
+        return blocked_probe(
+            probe,
+            kind=kind,
+            requested={"selector": dict(probe.get("selector") or {})},
+            next_step="Connect a UI backend that exposes ui.text.read.",
+        )
+    result = await context.call_adapter(
+        "ui.text.read",
+        selector=dict(probe.get("selector") or {}),
+    )
+    return _text_probe_output(
+        result,
+        probe=probe,
+        kind=kind,
+        phase=phase,
+        failure_reason="text read failed",
+        include_source=True,
+    )
 
 
 def _text_probe_output(
