@@ -5,6 +5,5 @@
   <Property Name="sonar.scanner.scanAll">true</Property>
   <Property Name="sonar.python.version">3.10,3.11,3.12</Property>
   <Property Name="sonar.exclusions">**/bin/**,**/obj/**,**/__pycache__/**,**/.venv/**,**/venv/**,**/env/**,**/ENV/**,**/.agent/**,**/.agent-*/**,**/.scannerwork/**,**/.sonarqube/**,**/node_modules/**,**/vendor/**,tests/fixtures/**,host/NetCoreDbg.Mcp.Stateless.Tests/Fixtures/**,**/test-app/**</Property>
-  <Property Name="sonar.test.inclusions">tests/**</Property>
   <Property Name="sonar.test.exclusions">tests/fixtures/**,host/NetCoreDbg.Mcp.Stateless.Tests/Fixtures/**</Property>
 </SonarQubeAnalysisProperties>
