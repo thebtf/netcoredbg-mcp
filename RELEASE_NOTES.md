@@ -14,10 +14,11 @@ Prepared: 2026-09-27
 - The opt-in native scene artifact store retains its capacity charge when deletion of an expired or aborted artifact is blocked. Its existing timer now retries retained paths after the lock clears without another store operation, while preserving earlier live-artifact expiry deadlines. A failed commit does not delete an existing destination that the store did not create.
 - Guarded child resolution now treats unsupported optional UIA AutomationId and Name properties as absent instead of refusing an otherwise valid scene. Process identity, unique matching, HWND ownership, physical containment, and two-read stability checks remain mandatory.
 - Python server construction no longer scans temporary directories. One lifespan-owned subprocess performs an opportunistic sweep of the private artifact namespace. A blocked or failed sweep does not prevent MCP initialization. The worker has a five-second useful-work budget; EOF or cancellation initiates bounded owner drain without waiting for that budget.
+- Source/developer .NET native-scene bridges launch inside dedicated Windows kill-on-close Jobs. Bridge cleanup preserves the debugger/debuggee, releases owned descendants, and retains the first failure across independent probe, artifact, and session cleanup. Windows adapter/build ownership also requires retained process-lifetime evidence, not zero Job accounting alone, before declaring an owned tree drained.
 
 ## Compatibility
 
-There are no new tool arguments or response shapes, and the Python backend selection remains unchanged. The scoped sequence still requires FlaUI; the opt-in source-only .NET preview is unchanged.
+There are no new tool arguments or response shapes, and the Python backend selection remains unchanged. The scoped sequence still requires FlaUI. Source/developer .NET fixes do not promote the opt-in preview or change the published Python default.
 
 ### Artifact-retention compatibility exception
 
@@ -32,7 +33,7 @@ Rollback preserves both layouts without moving or deleting retained evidence. St
 ## Release gates and residual risks
 
 - Installed-wheel Windows keypad journeys passed: all 17 named keys reached the WPF target, the pywinauto path passed 6/6 manual checks, and the final keypad regression suite passed 82/82. The original NumLock state was restored.
-- The current candidate remains **unscanned after the latest repairs**. The last completed historical diagnostic at `972662fb426e63a810f2485546c43ea088e432a6` recorded 66.4% new-code coverage against the unchanged 80% requirement and 468 OPEN findings, with zero hotspots. It is not a passing candidate receipt and does not authorize merge or publication. A fresh exact-head candidate scan and the separate actual post-merge scan must satisfy the release protocol before tagging; replace this disclosure with final receipts before publication.
+- The current candidate remains **unscanned after the latest repairs**. The last completed historical diagnostic at `79fa93cbaf65f205d8be718d35b95cf784673339` recorded 68.2% new-code coverage against the unchanged 80% requirement and 460 OPEN findings, with zero hotspots. It is not a passing candidate receipt and does not authorize merge or publication. A fresh exact-head candidate scan and the separate actual post-merge scan must satisfy the release protocol before tagging; replace this disclosure with final receipts before publication.
 
 ---
 
