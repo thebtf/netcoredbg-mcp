@@ -675,6 +675,95 @@ public sealed class NativeSceneArtifactStoreTests
         Assert.Empty(Directory.EnumerateFiles(scope.Root, "*", SearchOption.AllDirectories));
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task DisposalWithDeletionDenied_RetainsOwnershipUntilSameStoreRecoveryOnWindows(bool stopSessionFirst, bool retryDisposal)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 8, 19, 12, 0, 0, TimeSpan.Zero));
+        var payload = Payload(97);
+        await using var scope = ArtifactStoreTestScope.Create(clock, maximumArtifactCount: 1, maximumAggregateBytes: payload.Length);
+        var sessionId = Capability("locked-disposal-session");
+        var descriptor = AssertCommitted(await (await scope.Store.StageAsync(
+            sessionId,
+            Capability("locked-disposal-capture"),
+            MediaType,
+            ArtifactSchemaVersion,
+            payload)).CommitAsync());
+        var payloadPath = FindCommittedPayloadPath(scope.Root, payload);
+        var ownedRoot = Assert.Single(Directory.EnumerateDirectories(scope.Root));
+
+        using (var deletionBlocker = new FileStream(payloadPath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            if (stopSessionFirst)
+            {
+                await scope.Store.StopSessionAsync(sessionId);
+                AssertFixedNotFound(await scope.Store.ReadAsync(sessionId, descriptor.ArtifactId, offset: 0, maxBytes: 1));
+                var stopped = await scope.Store.GetDeletionOwnershipAsync(payloadPath, sessionId);
+                Assert.Equal(1, stopped.PendingCount);
+                Assert.Equal(payload.Length, stopped.AggregateBytes);
+                Assert.Equal(1, stopped.SessionCount);
+                Assert.Equal(1, stopped.SessionPendingDeleteCount);
+                Assert.True(stopped.OwnsSession);
+                Assert.True(stopped.OwnsPath);
+            }
+
+            var disposalFailure = await Record.ExceptionAsync(async () =>
+                await scope.Store.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.False(disposalFailure is TimeoutException, "Disposal must make a bounded cleanup attempt, not wait indefinitely for an external file lock.");
+            Assert.True(File.Exists(payloadPath));
+            Assert.Equal(payload.Length, deletionBlocker.Length);
+
+            var retained = await scope.Store.GetDeletionOwnershipAsync(payloadPath, sessionId);
+            Assert.Equal(1, retained.PendingCount);
+            Assert.Equal(payload.Length, retained.AggregateBytes);
+            Assert.Equal(1, retained.SessionCount);
+            Assert.Equal(1, retained.SessionPendingDeleteCount);
+            Assert.True(retained.OwnsSession);
+            Assert.True(retained.OwnsPath);
+            Assert.True(retained.HasRetryTimer, "The real binding drops its store reference after disposal, so pending deletion needs its existing timer owner.");
+            Assert.Equal(0, scope.Store.CommittedArtifactMetadataCount);
+            Assert.Equal(0, scope.Store.StagedArtifactMetadataCount);
+            AssertFixedNotFound(await scope.Store.ReadAsync(sessionId, descriptor.ArtifactId, offset: 0, maxBytes: 1));
+            await Assert.ThrowsAsync<ObjectDisposedException>(() => scope.Store.StageAsync(
+                sessionId,
+                Capability("locked-disposal-rejected-stage"),
+                MediaType,
+                ArtifactSchemaVersion,
+                payload));
+        }
+
+        if (retryDisposal)
+        {
+            await scope.Store.DisposeAsync();
+        }
+        else
+        {
+            clock.Advance(TimeSpan.FromSeconds(1));
+            await WaitForAsync(
+                () => !File.Exists(payloadPath),
+                "The same store must autonomously retry locked disposal after unlocking, without a caller or a real retention wait.");
+        }
+
+        Assert.False(File.Exists(payloadPath));
+        Assert.False(Directory.Exists(ownedRoot));
+        var recovered = await scope.Store.GetDeletionOwnershipAsync(payloadPath, sessionId);
+        Assert.Equal(0, recovered.PendingCount);
+        Assert.Equal(0, recovered.AggregateBytes);
+        Assert.Equal(0, recovered.SessionCount);
+        Assert.False(recovered.OwnsPath);
+        Assert.False(recovered.HasRetryTimer);
+        await scope.Store.DisposeAsync();
+        Assert.Empty(Directory.EnumerateFiles(scope.Root, "*", SearchOption.AllDirectories));
+    }
+
     [Fact]
     public async Task CommitFailure_DoesNotPublishAnArtifactAndCleansItsStagedBytes()
     {
@@ -1106,6 +1195,34 @@ internal sealed class NativeSceneArtifactStoreDriver : IAsyncDisposable
             var count = metadata!.GetType().GetProperty("Count", BindingFlags.Instance | BindingFlags.Public);
             Assert.NotNull(count);
             return Assert.IsType<int>(count!.GetValue(metadata));
+        }
+    }
+
+    public async Task<(int PendingCount, long AggregateBytes, int SessionCount, int SessionPendingDeleteCount, bool OwnsSession, bool OwnsPath, bool HasRetryTimer)>
+        GetDeletionOwnershipAsync(string path, string debugSessionId)
+    {
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+        var type = _store.GetType();
+        var gate = Assert.IsType<SemaphoreSlim>(type.GetField("_gate", flags)!.GetValue(_store));
+        await gate.WaitAsync();
+        try
+        {
+            var pending = Assert.IsAssignableFrom<System.Collections.IDictionary>(type.GetField("_pendingDeletes", flags)!.GetValue(_store));
+            var sessions = Assert.IsAssignableFrom<System.Collections.IDictionary>(type.GetField("_sessions", flags)!.GetValue(_store));
+            var retained = pending[path];
+            var session = retained?.GetType().GetField("Item1")!.GetValue(retained);
+            return (
+                pending.Count,
+                Assert.IsType<long>(type.GetField("_aggregateBytes", flags)!.GetValue(_store)),
+                sessions.Count,
+                session is null ? 0 : RequiredInt32(session, "PendingDeleteCount"),
+                session is not null && ReferenceEquals(sessions[debugSessionId], session),
+                session is not null && RequiredString(session, "DebugSessionId") == debugSessionId,
+                type.GetField("_expiryTimer", flags)!.GetValue(_store) is ITimer);
+        }
+        finally
+        {
+            gate.Release();
         }
     }
 

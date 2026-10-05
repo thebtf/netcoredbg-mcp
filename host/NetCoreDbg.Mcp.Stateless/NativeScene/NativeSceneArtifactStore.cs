@@ -33,6 +33,7 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
     private readonly Dictionary<string, (ArtifactSession Session, long ByteLength)> _pendingDeletes = new(StringComparer.Ordinal);
     private ITimer? _expiryTimer;
     private long _aggregateBytes;
+    private bool _disposeRequested;
     private bool _disposed;
 
     internal NativeSceneArtifactStore(string root, TimeProvider timeProvider)
@@ -143,7 +144,7 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (_disposed ||
+            if (_disposeRequested ||
                 !_artifacts.TryGetValue(artifactId, out var artifact) ||
                 !StringComparer.Ordinal.Equals(artifact.Session.DebugSessionId, debugSessionId))
             {
@@ -247,7 +248,7 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (_disposed || !_sessions.TryGetValue(debugSessionId, out var session))
+            if (_disposeRequested || !_sessions.TryGetValue(debugSessionId, out var session))
             {
                 return;
             }
@@ -266,7 +267,7 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (_disposed ||
+            if (_disposeRequested ||
                 staged.CommitResult is not null ||
                 !_staged.TryGetValue(staged.ArtifactId, out var activeStaging) ||
                 !ReferenceEquals(activeStaging, staged))
@@ -296,25 +297,36 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
                 return;
             }
 
-            _disposed = true;
-            _expiryTimer?.Dispose();
-            _expiryTimer = null;
-            foreach (var staged in _staged.Values)
+            _disposeRequested = true;
+            var now = _timeProvider.GetUtcNow();
+            PruneExpiredArtifacts(now);
+            foreach (var session in _sessions.Values.ToArray())
             {
-                staged.Complete(NativeSceneArtifactCommitResult.WriteFailed());
+                ExpireSession(session);
             }
 
-            _staged.Clear();
-            _artifacts.Clear();
-            _pendingDeletes.Clear();
-            _sessions.Clear();
-            _aggregateBytes = 0;
-            TryDeleteDirectory(_ownedRoot, recursive: true);
+            if (!TryCompleteDisposal())
+            {
+                ScheduleExpiryTimer(now);
+            }
         }
         finally
         {
             _gate.Release();
         }
+    }
+
+    private bool TryCompleteDisposal()
+    {
+        if (_pendingDeletes.Count != 0 || !TryDeleteDirectory(_ownedRoot, recursive: true))
+        {
+            return false;
+        }
+
+        _expiryTimer?.Dispose();
+        _expiryTimer = null;
+        _disposed = true;
+        return true;
     }
 
     internal async Task<NativeSceneArtifactCommitResult> CommitAsync(
@@ -329,7 +341,7 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
                 return priorResult;
             }
 
-            if (_disposed ||
+            if (_disposeRequested ||
                 !_staged.TryGetValue(staged.ArtifactId, out var activeStaging) ||
                 !ReferenceEquals(activeStaging, staged))
             {
@@ -612,7 +624,6 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
 
         session.StagedArtifactIds.Clear();
         session.CommittedArtifactIds.Clear();
-        _sessions.Remove(session.DebugSessionId);
         RemoveEmptySession(session);
     }
 
@@ -695,7 +706,10 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
 
             var now = _timeProvider.GetUtcNow();
             PruneExpiredArtifacts(now);
-            ScheduleExpiryTimer(now);
+            if (!_disposeRequested || !TryCompleteDisposal())
+            {
+                ScheduleExpiryTimer(now);
+            }
         }
         finally
         {
@@ -734,7 +748,7 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
             return;
         }
 
-        if (_artifacts.Count == 0 && _pendingDeletes.Count == 0)
+        if (_artifacts.Count == 0 && _pendingDeletes.Count == 0 && !_disposeRequested)
         {
             _expiryTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
             return;
@@ -774,7 +788,7 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
 
     private void ThrowIfDisposed()
     {
-        if (_disposed)
+        if (_disposeRequested)
         {
             throw new ObjectDisposedException(nameof(NativeSceneArtifactStore));
         }
@@ -801,7 +815,10 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
         _pendingDeletes.Add(path, (session, remainingBytes));
         session.PendingDeleteCount++;
         _aggregateBytes += remainingBytes - chargedBytes;
-        ScheduleExpiryTimer(_timeProvider.GetUtcNow());
+        if (!_disposeRequested)
+        {
+            ScheduleExpiryTimer(_timeProvider.GetUtcNow());
+        }
     }
 
     private static bool TryDeleteFile(string path)
@@ -821,15 +838,20 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
         }
     }
 
-    private static void TryDeleteDirectory(string path, bool recursive = false)
+    private static bool TryDeleteDirectory(string path, bool recursive = false)
     {
         try
         {
             Directory.Delete(path, recursive);
+            return true;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return true;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
-            // A missing, nonempty, or locked directory is safe to leave after its artifacts are untracked.
+            return false;
         }
     }
 

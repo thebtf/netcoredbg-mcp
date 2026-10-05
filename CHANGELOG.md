@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.23.12] - 2026-09-27
 
 ### Fixed
+- Source/developer native-scene artifact disposal immediately invalidates capabilities but retains locked paths, session ownership and capacity accounting until deletion succeeds. The existing timer can finish cleanup after the binding releases its store reference; same-instance disposal retries the same ledger, and terminal disposal follows successful owned-root cleanup.
 - The Stateless host now uses source-generated marshalling for twelve Win32 imports, preserving native entry points, BOOL/UTF-16 encoding, last-error capture, and SafeHandle protection. Windows standard-I/O inheritance, Job containment, and cleanup behavior are unchanged; `CreateProcess` retains runtime marshalling for its mutable command-line buffer.
 - Stateless owned-process exit and reader-cleanup joins now explicitly use `CancellationToken.None`, preserving intentionally uncancellable cleanup within the existing timeout bounds. Caller cancellation, forced-cleanup signaling, and disposal ordering remain unchanged; no Sonar closure claim is made.
 - Stateless coverage projection now recognizes the collector's actual screenshot and session LibraryImport identities only at their exact generated paths with the required module and tracked same-package authored owner. Authored-source hit and branch counts remain unchanged, and unknown mappings still fail closed; no coverage increase or completed scan is claimed.
