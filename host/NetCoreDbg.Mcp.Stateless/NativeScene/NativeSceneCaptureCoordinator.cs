@@ -167,23 +167,13 @@ internal sealed class NativeSceneCaptureCoordinator
     {
         if (isElement)
         {
-            var selected = SelectElement(normalized.Nodes, selector);
-            if (selected.Count == 0)
+            var (selected, error) = SelectElement(normalized, selector, tool);
+            if (error is not null)
             {
-                return ToolError(tool, "ELEMENT_NOT_FOUND", "No element matches the requested selector.");
+                return error;
             }
 
-            if (selected.Count > 1)
-            {
-                return ToolError(tool, "ELEMENT_AMBIGUOUS", "The requested selector matches multiple elements.");
-            }
-
-            normalized = normalized with
-            {
-                Nodes = new JsonArray(DeepClone(selected[0])),
-                RootId = selected[0]![NodeIdProperty]!.GetValue<string>(),
-                Atomicity = new JsonObject { [AuthorityProperty] = NotApplicableAuthority },
-            };
+            normalized = selected;
         }
 
         _setCaptureStabilityObservation(normalized.StabilityObservation);
@@ -860,12 +850,15 @@ internal sealed class NativeSceneCaptureCoordinator
         return true;
     }
 
-    private static List<JsonObject?> SelectElement(JsonArray nodes, JsonElement selector)
+    private static (NormalizedCapture Capture, JsonObject? Error) SelectElement(
+        NormalizedCapture normalized,
+        JsonElement selector,
+        string tool)
     {
         var matches = new List<JsonObject?>();
         var contractId = ReadOptionalString(selector, ContractIdProperty);
         var automationId = ReadOptionalString(selector, AutomationIdProperty);
-        foreach (var node in nodes.OfType<JsonObject>())
+        foreach (var node in normalized.Nodes.OfType<JsonObject>())
         {
             var nodeContractId = node[IdentityProperty] is JsonObject identity ? ReadString(identity, ContractIdProperty) : null;
             var nodeAutomationId = node[AccessibilityProperty] is JsonObject accessibility ? ReadString(accessibility, AutomationIdProperty) : null;
@@ -881,7 +874,22 @@ internal sealed class NativeSceneCaptureCoordinator
             }
         }
 
-        return matches;
+        if (matches.Count == 0)
+        {
+            return (normalized, ToolError(tool, "ELEMENT_NOT_FOUND", "No element matches the requested selector."));
+        }
+
+        if (matches.Count > 1)
+        {
+            return (normalized, ToolError(tool, "ELEMENT_AMBIGUOUS", "The requested selector matches multiple elements."));
+        }
+
+        return (normalized with
+        {
+            Nodes = new JsonArray(DeepClone(matches[0])),
+            RootId = matches[0]![NodeIdProperty]!.GetValue<string>(),
+            Atomicity = new JsonObject { [AuthorityProperty] = NotApplicableAuthority },
+        }, null);
     }
 
     private static bool HasUnchangedGuards(JsonObject? guards)
