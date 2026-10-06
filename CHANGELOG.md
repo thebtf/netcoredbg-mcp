@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.23.12] - 2026-09-27
 
 ### Fixed
+- Source distributions exclude local runtime PID files, coverage/TRX outputs and temporary proof directories while retaining maintained package and build inputs.
 - Runtime-smoke drag optional evidence uses one private helper, preserving field conditions and order, mapping copies and selected-payload references.
 - Runtime-smoke coordinate clicks classify lookup failures in one private helper, preserving refusal precedence, result fields, selector inputs and click/settle ordering.
 - Bridge focus, selection and list commands reuse three private property-key constants without changing wire values, selectors, actions or result ordering. Two incidental focus source-text assertions are removed; behavioral checks are unchanged.
