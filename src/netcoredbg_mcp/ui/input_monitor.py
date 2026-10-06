@@ -14,6 +14,7 @@ _DWORD_MODULUS = 2**32
 _DWORD_HALF_RANGE = 2**31
 _VALID_WINDOWS = frozenset({"before_action", "after_action"})
 _LAST_INPUT_BASIS = "windows_last_input_info"
+_TICK_REGRESSED_REASON = "input monitor tick regressed"
 
 
 class InputMonitorUnavailableError(RuntimeError):
@@ -192,7 +193,7 @@ class RuntimeInputMonitor:
                     )
                 if comparison == "regressed":
                     return {
-                        **_blocked("input monitor tick regressed", window=window),
+                        **_blocked(_TICK_REGRESSED_REASON, window=window),
                         "monitor": monitor,
                     }
             self._baselines[key] = sample
@@ -227,7 +228,7 @@ class RuntimeInputMonitor:
             )
         if comparison == "regressed":
             return {
-                **_blocked("input monitor tick regressed", window=window),
+                **_blocked(_TICK_REGRESSED_REASON, window=window),
                 "monitor": monitor,
             }
         self._last_sample = sample
@@ -260,7 +261,7 @@ class RuntimeInputMonitor:
             )
         if comparison == "regressed":
             return {
-                **_blocked("input monitor tick regressed", window=window),
+                **_blocked(_TICK_REGRESSED_REASON, window=window),
                 "monitor": monitor,
             }
         return None
