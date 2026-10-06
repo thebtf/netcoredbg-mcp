@@ -12,6 +12,9 @@ from .blocked import build_blocked
 from .cleanup import run_cleanup
 
 
+_FIXTURE_RESTORE = "fixture.restore"
+
+
 async def execute_baseline(
     baseline: dict[str, Any] | None,
     context: ActionContext,
@@ -77,9 +80,9 @@ async def _execute_step(
     diagnostic_launch: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     kind = str(step.get("kind") or "")
-    if kind == "fixture.restore":
+    if kind == _FIXTURE_RESTORE:
         return await context.call_adapter(
-            "fixture.restore",
+            _FIXTURE_RESTORE,
             path=str(step.get("path") or ""),
             baseline_file=str(step.get("baseline_file") or ""),
         )
@@ -124,9 +127,9 @@ async def _execute_step(
 
 def _cleanup_step_for(step: dict[str, Any]) -> dict[str, Any] | None:
     kind = str(step.get("kind") or "")
-    if kind == "fixture.restore":
+    if kind == _FIXTURE_RESTORE:
         return {
-            "kind": "fixture.restore",
+            "kind": _FIXTURE_RESTORE,
             "path": str(step.get("path") or ""),
             "baseline_file": str(step.get("baseline_file") or ""),
         }
@@ -171,7 +174,7 @@ def _accepted_step_kinds() -> list[str]:
     return [
         "control_set",
         "debug_hygiene_preflight",
-        "fixture.restore",
+        _FIXTURE_RESTORE,
         "isolated_profile.launch",
     ]
 
