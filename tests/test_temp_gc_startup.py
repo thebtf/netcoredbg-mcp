@@ -121,7 +121,8 @@ async def cli(tmp_path, mode="block"):
             assert facts["active_processes"] == 0, facts
             assert facts["total_processes"] == facts["retained_exact_handles"], facts
             assert facts["retained_exact_handles"] == facts["signaled_exact_handles"], facts
-            assert not facts["unverified_membership"] and not facts["handle_probe_failed"], facts
+            assert not facts["unverified_membership"], facts
+            assert not facts["handle_probe_failed"], facts
         else:
             if process.returncode is None:
                 process.kill()
@@ -143,12 +144,14 @@ def worker_receipt(stderr, barrier_pid):
     assert len(matches) == 1, stderr
     facts = json.loads(matches[0])
     assert facts["total_processes"] == facts["birth_notifications"], facts
-    assert facts["root_birth_seen"] and facts["live_members_without_handle"] == 0, facts
+    assert facts["root_birth_seen"], facts
+    assert facts["live_members_without_handle"] == 0, facts
     facts["barrier_interpreter_pid"] = barrier_pid
     print("PRODUCTION_DRAIN " + json.dumps(facts))
     assert facts["status"] == "drained", facts
     assert facts["active_processes"] == 0, facts
-    assert not facts["unverified_membership"] and not facts["handle_probe_failed"], facts
+    assert not facts["unverified_membership"], facts
+    assert not facts["handle_probe_failed"], facts
     return facts
 
 
@@ -353,10 +356,12 @@ async def test_repeated_cancellation_joins_real_worker_owner(tmp_path, monkeypat
         facts = receipts[0]
         (tmp_path / "production-cancellation-drain.json").write_text(json.dumps(facts, indent=2))
         print("CANCELLATION_DRAIN " + json.dumps(dict(stage=stage, **facts)))
-        assert facts["status"] == "drained" and facts["active_processes"] == 0, facts
+        assert facts["status"] == "drained", facts
+        assert facts["active_processes"] == 0, facts
         assert facts["total_processes"] == facts["birth_notifications"], facts
         assert facts["retained_exact_handles"] == facts["signaled_exact_handles"], facts
-        assert not facts["unverified_membership"] and not facts["handle_probe_failed"], facts
+        assert not facts["unverified_membership"], facts
+        assert not facts["handle_probe_failed"], facts
     finally:
         release_admission.set()
         release_close.set()

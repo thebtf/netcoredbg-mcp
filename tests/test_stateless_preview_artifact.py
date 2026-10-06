@@ -44,7 +44,8 @@ _spec = importlib.util.spec_from_file_location(
     "stateless_preview_artifact",
     ARTIFACT_CONTRACT_PATH,
 )
-assert _spec is not None and _spec.loader is not None
+assert _spec is not None
+assert _spec.loader is not None
 artifact_contract = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = artifact_contract
 _spec.loader.exec_module(artifact_contract)
@@ -72,7 +73,8 @@ _validator_spec = importlib.util.spec_from_file_location(
     "preview_artifact_validator",
     PREVIEW_ARTIFACT_VALIDATOR_PATH,
 )
-assert _validator_spec is not None and _validator_spec.loader is not None
+assert _validator_spec is not None
+assert _validator_spec.loader is not None
 preview_validator = importlib.util.module_from_spec(_validator_spec)
 sys.modules[_validator_spec.name] = preview_validator
 _validator_spec.loader.exec_module(preview_validator)
@@ -1753,7 +1755,8 @@ def _exact_head_runner_for_receipt_tests() -> Any:
         "wave3_exact_head_runner_for_receipt_tests",
         EXACT_HEAD_RUNNER_PATH,
     )
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     runner = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = runner
     spec.loader.exec_module(runner)

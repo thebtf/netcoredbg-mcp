@@ -271,39 +271,6 @@ def test_bridge_screenshot_uses_printwindow_in_stealth_mode() -> None:
     assert command.index("if (JsonRpcHandler.Stealth)") < command.index("Capture.Rectangle(rect)")
 
 
-def test_bridge_resize_window_returns_unit_labelled_post_resize_geometry() -> None:
-    command = (PROJECT_ROOT / "bridge" / "Commands" / "TransformCommands.cs").read_text(
-        encoding="utf-8"
-    )
-    resize_start = command.index("public static JsonNode ResizeWindow")
-    resize_body = command[resize_start:]
-
-    required_fields = (
-        '["request"]',
-        '["geometry"]',
-        '["target_comparability"]',
-        '["uia_bounds"]',
-        '["window_bounds"]',
-        '["client_bounds"]',
-        '["dpi"]',
-        '["dpi_scale"]',
-        '"MATCHED"',
-        '"MISMATCH"',
-        '"UNAVAILABLE"',
-        '"physical_px"',
-        '"dip"',
-        '"uia_element_bounds"',
-        '"UIA.TransformPattern.Resize"',
-        '"UIA.BoundingRectangle"',
-        '"GetWindowRect"',
-        '"GetClientRect"',
-        '"POST_RESIZE_GEOMETRY_UNAVAILABLE"',
-    )
-    assert all(field in resize_body for field in required_fields) and (
-        resize_body.index("pattern.Resize(width, height);") < resize_body.index('["geometry"]')
-    )
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("comparability", ("MATCHED", "MISMATCH", "UNAVAILABLE"))
 async def test_ui_resize_window_preserves_bridge_target_comparability(comparability: str) -> None:

@@ -43,10 +43,12 @@ def test_bundle_bytes_and_closed_session_fencing(manager):
     )
     assert bundle is not None
     raw, crop = bundle
-    assert raw.read_bytes() == b"raw-png" and crop.read_bytes() == b"crop-png"
+    assert raw.read_bytes() == b"raw-png"
+    assert crop.read_bytes() == b"crop-png"
     assert manager.get_session_dir("evidence") == raw.parent
     manager.cleanup_session("evidence")
-    assert not raw.exists() and not crop.exists()
+    assert not raw.exists()
+    assert not crop.exists()
     assert manager.save_screenshot_bundle("evidence", b"late", "late.png") is None
     assert not raw.parent.exists()
 
@@ -97,7 +99,8 @@ def test_abandoned_stale_session_removed_but_fresh_sibling_kept(manager):
     backdate(stale.parent.parent)
     abandon(manager)
     assert tm.SessionTempManager.gc_stale() == 1
-    assert not stale.exists() and fresh.read_bytes() == b"fresh"
+    assert not stale.exists()
+    assert fresh.read_bytes() == b"fresh"
 
 
 def test_strict_cutoff_uses_session_not_owner_time(manager, monkeypatch):
@@ -109,7 +112,8 @@ def test_strict_cutoff_uses_session_not_owner_time(manager, monkeypatch):
     abandon(manager)
     monkeypatch.setattr(tm.time, "time", lambda: now)
     assert tm.SessionTempManager.gc_stale() == 1
-    assert exact.read_bytes() == b"exact" and not stale.exists()
+    assert exact.read_bytes() == b"exact"
+    assert not stale.exists()
 
 
 def test_global_temp_legacy_and_unknown_entries_preserved(manager, tmp_path, monkeypatch):
@@ -183,7 +187,8 @@ def test_deletion_denial_is_not_counted_and_next_pass_discovers_remainder(manage
         with pytest.raises(KeyboardInterrupt):
             tm.SessionTempManager.gc_stale()
     assert tm.SessionTempManager.gc_stale() == 1
-    assert not first.exists() and not second.exists()
+    assert not first.exists()
+    assert not second.exists()
 
 
 def make_link(link, target):
@@ -207,7 +212,8 @@ def test_reparse_or_symlink_session_and_subtree_never_delete_outside(manager, tm
     backdate(path.parent)
     abandon(manager)
     assert tm.SessionTempManager.gc_stale() == 0
-    assert sentinel.read_bytes() == b"outside" and path.read_bytes() == b"old"
+    assert sentinel.read_bytes() == b"outside"
+    assert path.read_bytes() == b"old"
     (path.parent / "linked").rmdir() if os.name == "nt" else (path.parent / "linked").unlink()
     path.unlink()
     path.parent.rmdir()
@@ -257,11 +263,14 @@ sys.stdin.readline()
         paths = json.loads(process.stdout.readline())
         raw, crop, fresh = map(Path, paths)
         assert tm.SessionTempManager.gc_stale() == 0
-        assert raw.read_bytes() == b"raw" and crop.read_bytes() == b"crop"
+        assert raw.read_bytes() == b"raw"
+        assert crop.read_bytes() == b"crop"
         process.stdin.close()
         assert process.wait(timeout=5) == 0
         assert tm.SessionTempManager.gc_stale() == 1
-        assert not raw.exists() and not crop.exists() and fresh.read_bytes() == b"fresh"
+        assert not raw.exists()
+        assert not crop.exists()
+        assert fresh.read_bytes() == b"fresh"
     finally:
         if process.poll() is None:
             process.kill()
@@ -349,7 +358,8 @@ async def test_public_screenshot_stop_preserves_evidence_lifecycle(
         ),
     ):
         content = await server.call_tool("ui_take_screenshot", arguments)
-    assert isinstance(content, list) and isinstance(content[1], TextContent), content
+    assert isinstance(content, list), content
+    assert isinstance(content[1], TextContent), content
     metadata = json.loads(content[1].text)
     raw = Path(metadata["raw_path"])
     hd = Path(metadata["hd_path"])
@@ -370,11 +380,13 @@ async def test_public_screenshot_stop_preserves_evidence_lifecycle(
     else:
         assert "crop_path" not in metadata
     stop_content = await server.call_tool("stop_debug", {})
-    assert isinstance(stop_content, list) and isinstance(stop_content[0], TextContent), stop_content
+    assert isinstance(stop_content, list), stop_content
+    assert isinstance(stop_content[0], TextContent), stop_content
     stop_result = json.loads(stop_content[0].text)
     assert stop_result.get("data") == {"success": True}, stop_content
     assert stop_result["state"] == "idle", stop_result
-    assert session.session_id is None and session.state.state is DebugState.IDLE
+    assert session.session_id is None
+    assert session.state.state is DebugState.IDLE
     assert all(not path.exists() for path in paths)
     assert manager.save_screenshot_bundle("public-evidence", raw_png, "late.png") is None
     assert not raw.parent.exists()

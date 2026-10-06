@@ -16,7 +16,8 @@ from unittest.mock import patch
 
 RUNNER_PATH = Path(__file__).resolve().parents[1] / "scripts" / "run_sonarqube_exact_head.py"
 SPEC = importlib.util.spec_from_file_location("windows_claim_leaf_runner", RUNNER_PATH)
-assert SPEC is not None and SPEC.loader is not None
+assert SPEC is not None
+assert SPEC.loader is not None
 runner = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = runner
 SPEC.loader.exec_module(runner)

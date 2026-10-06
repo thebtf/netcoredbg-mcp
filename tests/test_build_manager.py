@@ -201,7 +201,8 @@ class TestBuildManagerSessions:
                 release_b.set()
                 assert (await asyncio.wait_for(task_a, 1.0)).success
                 assert (await asyncio.wait_for(task_b, 1.0)).success
-                assert c_task is not None and (await asyncio.wait_for(c_task, 1.0)).success
+                assert c_task is not None
+                assert (await asyncio.wait_for(c_task, 1.0)).success
                 assert launched == [session, session, session]
             finally:
                 release_a.set()

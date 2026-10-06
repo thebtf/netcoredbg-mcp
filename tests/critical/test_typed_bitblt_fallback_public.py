@@ -69,7 +69,10 @@ def test_installed_public_strict_bitblt_fallback_has_real_transport_proof(tmp_pa
         pytest.fail("typed BitBlt fallback public proof requires Windows")
 
     debugger_path = os.environ.get("NETCOREDBG_PATH") or shutil.which("netcoredbg")
-    assert debugger_path and Path(debugger_path).is_file(), (
+    assert debugger_path, (
+        "typed BitBlt fallback public proof requires NETCOREDBG_PATH or netcoredbg on PATH"
+    )
+    assert Path(debugger_path).is_file(), (
         "typed BitBlt fallback public proof requires NETCOREDBG_PATH or netcoredbg on PATH"
     )
     source_identity = _source_identity()
@@ -172,7 +175,8 @@ async def test_public_consumer_forces_cleanup_after_stop_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = importlib.util.spec_from_file_location("typed_bitblt_fallback_consumer", CONSUMER_PROOF)
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     consumer = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(consumer)
     calls: list[tuple[str, dict[str, object]]] = []
@@ -198,7 +202,8 @@ async def test_public_consumer_records_dead_spawned_roles_when_cleanup_count_is_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = importlib.util.spec_from_file_location("typed_bitblt_fallback_consumer", CONSUMER_PROOF)
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     consumer = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(consumer)
     monkeypatch.setattr(consumer.psutil, "pid_exists", lambda _pid: False)
@@ -225,7 +230,8 @@ async def test_public_consumer_rejects_live_spawned_role_after_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = importlib.util.spec_from_file_location("typed_bitblt_fallback_consumer", CONSUMER_PROOF)
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     consumer = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(consumer)
     monkeypatch.setattr(consumer, "POLL_DEADLINE_SECONDS", 0.0)

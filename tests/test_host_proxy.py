@@ -795,9 +795,11 @@ def _assert_code_search_envelope(payload: dict[str, Any], *, error: bool) -> Non
     assert set(payload) == expected_keys, payload
     assert payload["state"] == "idle", payload
     assert payload["next_actions"] == _CODE_SEARCH_NEXT_ACTIONS, payload
-    assert isinstance(payload["message"], str) and payload["message"], payload
+    assert isinstance(payload["message"], str), payload
+    assert payload["message"], payload
     if error:
-        assert isinstance(payload["error"], str) and payload["error"], payload
+        assert isinstance(payload["error"], str), payload
+        assert payload["error"], payload
         assert payload["message"] == (
             f"Error: {payload['error']}. Try one of the suggested next_actions."
         ), payload

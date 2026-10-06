@@ -1731,7 +1731,8 @@ class TestOwnerScopedAdapterRedMatrix:
         run = client._run
         assert receipt is not None
         assert receipt.root_was_forced is False
-        assert run is not None and run.terminal is not None
+        assert run is not None
+        assert run.terminal is not None
         assert run.terminal.cleanup_outcome is DapCleanupOutcome.NATURAL_EXIT
 
     @pytest.mark.asyncio
@@ -1759,7 +1760,8 @@ class TestOwnerScopedAdapterRedMatrix:
             stale = await client.stop(expected_owner=foreign)
             receipt = await client.stop(expected_owner=owner.owner)
 
-        assert stale is not None and stale.status is DrainStatus.STALE
+        assert stale is not None
+        assert stale.status is DrainStatus.STALE
         assert process.child_alive is False
         assert receipt is not None
         assert receipt.status is DrainStatus.DRAINED
@@ -1850,7 +1852,8 @@ class TestOwnerScopedAdapterRedMatrix:
         ) as launch:
             await client.start(generation="failed-then-drained")
             failed = await client.stop(expected_owner=owner.owner)
-            assert failed is not None and failed.status is DrainStatus.FAILED
+            assert failed is not None
+            assert failed.status is DrainStatus.FAILED
             assert owner.close_calls == 1
             assert len(records) == 1
             with pytest.raises(RuntimeError, match="Retained adapter owner did not drain"):
@@ -1858,9 +1861,11 @@ class TestOwnerScopedAdapterRedMatrix:
             launch.assert_awaited_once()
 
             recovered = await client.stop(expected_owner=owner.owner)
-            assert recovered is not None and recovered.status is DrainStatus.DRAINED
+            assert recovered is not None
+            assert recovered.status is DrainStatus.DRAINED
             assert recovered.active_processes == 0
-            assert client._run is not None and client._run.owner_drain_receipt == recovered
+            assert client._run is not None
+            assert client._run.owner_drain_receipt == recovered
             assert len(records) == 1
             assert await client.stop(expected_owner=owner.owner) == recovered
             assert owner.close_calls == 2
@@ -1890,9 +1895,11 @@ class TestOwnerScopedAdapterRedMatrix:
             await client.start(generation="second")
             current = client._run
             stale = await client.stop(expected_owner=first_owner.owner)
-            assert stale is not None and stale.status is DrainStatus.STALE
+            assert stale is not None
+            assert stale.status is DrainStatus.STALE
             assert current is client._run
-            assert current is not None and current.finalizer_task is None
+            assert current is not None
+            assert current.finalizer_task is None
             assert second_process.child_alive is True
             assert len(records) == 1
             await client.stop(expected_owner=second_owner.owner)
