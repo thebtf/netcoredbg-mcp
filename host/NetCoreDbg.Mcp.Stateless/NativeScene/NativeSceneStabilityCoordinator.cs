@@ -6,6 +6,8 @@ namespace NetCoreDbg.Mcp.Stateless.NativeScene;
 
 internal sealed class NativeSceneStabilityCoordinator
 {
+    private const string UnobservableState = "unobservable";
+
     private static readonly string[] ConditionNames =
     [
         "dispatcherIdle",
@@ -194,7 +196,7 @@ internal sealed class NativeSceneStabilityCoordinator
         var conditions = new JsonObject();
         foreach (var name in ConditionNames)
         {
-            conditions[name] = new JsonObject { ["state"] = "unobservable" };
+            conditions[name] = new JsonObject { ["state"] = UnobservableState };
         }
 
         return conditions;
@@ -217,12 +219,12 @@ internal sealed class NativeSceneStabilityCoordinator
         if (node is JsonObject condition &&
             condition["state"] is JsonValue value &&
             value.TryGetValue<string>(out var state) &&
-            state is "met" or "not_met" or "unsupported" or "unobservable")
+            state is "met" or "not_met" or "unsupported" or UnobservableState)
         {
             return state;
         }
 
-        return "unobservable";
+        return UnobservableState;
     }
 
     private static long ReadSceneEpoch(JsonObject observation)
@@ -272,7 +274,7 @@ internal sealed class NativeSceneStabilityCoordinator
 
             switch (ReadState(conditions[ConditionNames[conditionIndex]]))
             {
-                case "unobservable":
+                case UnobservableState:
                     hasUnobservable = true;
                     break;
                 case "met":
@@ -283,7 +285,17 @@ internal sealed class NativeSceneStabilityCoordinator
             }
         }
 
-        return hasUnobservable ? "UNOBSERVABLE" : hasPartialCondition ? "PARTIAL" : "STABLE";
+        if (hasUnobservable)
+        {
+            return "UNOBSERVABLE";
+        }
+
+        if (hasPartialCondition)
+        {
+            return "PARTIAL";
+        }
+
+        return "STABLE";
     }
 
     private sealed record SettlePolicy(

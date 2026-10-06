@@ -29,6 +29,8 @@ internal sealed class NativeSceneCaptureCoordinator
     private const string AccessibilityProperty = "accessibility";
     private const string TransformProperty = "transform";
     private const string StateProperty = "state";
+    private const string AuthorityProperty = "authority";
+    private const string IdentityProperty = "identity";
     private const int MaximumNodes = 4_096;
     private const int MaximumArtifactBytes = 16 * 1024 * 1024;
     private static readonly TimeSpan ArtifactRetention = TimeSpan.FromHours(4);
@@ -142,7 +144,7 @@ internal sealed class NativeSceneCaptureCoordinator
             captureId,
             capturedAt,
             isElement
-                ? new JsonObject { ["authority"] = NotApplicableAuthority }
+                ? new JsonObject { [AuthorityProperty] = NotApplicableAuthority }
                 : UnobservableGuardedAtomicity(),
             new JsonArray
             {
@@ -180,7 +182,7 @@ internal sealed class NativeSceneCaptureCoordinator
             {
                 Nodes = new JsonArray(DeepClone(selected[0])),
                 RootId = selected[0]![NodeIdProperty]!.GetValue<string>(),
-                Atomicity = new JsonObject { ["authority"] = NotApplicableAuthority },
+                Atomicity = new JsonObject { [AuthorityProperty] = NotApplicableAuthority },
             };
         }
 
@@ -519,7 +521,7 @@ internal sealed class NativeSceneCaptureCoordinator
     private static bool TryNormalizeProbe(JsonObject source, NativeSceneTargetIdentity target, out NormalizedCapture capture)
     {
         capture = default!;
-        if (!StringComparer.Ordinal.Equals(ReadString(source, "authority"), "in_process_probe") ||
+        if (!StringComparer.Ordinal.Equals(ReadString(source, AuthorityProperty), "in_process_probe") ||
             source["candidate"] is not JsonObject candidate ||
             !TryReadInt32(candidate, ProcessIdProperty, out var processId) || processId != target.ProcessId ||
             !StringComparer.Ordinal.Equals(ReadString(candidate, "processIdentity"), target.ProcessIdentity) ||
@@ -545,7 +547,7 @@ internal sealed class NativeSceneCaptureCoordinator
             CaptureAuthority.InProcess,
             new JsonObject
             {
-                ["authority"] = "in_process_framework_probe",
+                [AuthorityProperty] = "in_process_framework_probe",
                 ["transaction"] = "dispatcher_affine_non_yielding",
                 ["immutableDto"] = true,
                 ["layoutStateRevisionBefore"] = revisionBefore,
@@ -560,7 +562,7 @@ internal sealed class NativeSceneCaptureCoordinator
     {
         capture = default!;
         if (!StringComparer.Ordinal.Equals(ReadString(source, "kind"), "uia_guarded_observation") ||
-            !StringComparer.Ordinal.Equals(ReadString(source, "authority"), UiaGuardedAuthority) ||
+            !StringComparer.Ordinal.Equals(ReadString(source, AuthorityProperty), UiaGuardedAuthority) ||
             !StringComparer.Ordinal.Equals(ReadString(source, "qualification"), PartialStatus) ||
             source["process"] is not JsonObject process ||
             !TryReadInt32(process, ProcessIdProperty, out var processId) || processId != target.ProcessId ||
@@ -622,7 +624,7 @@ internal sealed class NativeSceneCaptureCoordinator
             {
                 [NodeIdProperty] = nodeId,
                 [RelationsProperty] = new JsonArray(),
-                ["identity"] = new JsonObject { [ContractIdProperty] = id },
+                [IdentityProperty] = new JsonObject { [ContractIdProperty] = id },
                 [AccessibilityProperty] = new JsonObject
                 {
                     [AutomationIdProperty] = CloneBoundedArtifactString(node[AutomationIdProperty]),
@@ -644,7 +646,7 @@ internal sealed class NativeSceneCaptureCoordinator
                     {
                         ["namespace"] = "netcoredbg.wpf.probe",
                         [SchemaVersionProperty] = "1",
-                        ["authority"] = authority == CaptureAuthority.InProcess ? "in_process_framework_probe" : UiaGuardedAuthority,
+                        [AuthorityProperty] = authority == CaptureAuthority.InProcess ? "in_process_framework_probe" : UiaGuardedAuthority,
                         ["payload"] = CreateProbeAdapterPayload(node),
                     },
                 },
@@ -720,7 +722,7 @@ internal sealed class NativeSceneCaptureCoordinator
             if (item is not JsonObject node ||
                 !TryReadLabel(node, "id", out var id) ||
                 !ids.Add(id) ||
-                node["identity"] is not JsonObject identity ||
+                node[IdentityProperty] is not JsonObject identity ||
                 node["geometry"] is not JsonObject geometry ||
                 !TryMapGuardedNode(node, id, identity, geometry, out var mapped))
             {
@@ -757,7 +759,7 @@ internal sealed class NativeSceneCaptureCoordinator
         {
             [NodeIdProperty] = id,
             [RelationsProperty] = relations,
-            ["identity"] = null,
+            [IdentityProperty] = null,
             [AccessibilityProperty] = new JsonObject
             {
                 [AutomationIdProperty] = identity[AutomationIdProperty]?.DeepClone(),
@@ -781,7 +783,7 @@ internal sealed class NativeSceneCaptureCoordinator
                 {
                     ["namespace"] = "netcoredbg.uia",
                     [SchemaVersionProperty] = "1",
-                    ["authority"] = UiaGuardedAuthority,
+                    [AuthorityProperty] = UiaGuardedAuthority,
                     ["payload"] = new JsonObject
                     {
                         [TransformProperty] = node[TransformProperty]?.DeepClone(),
@@ -865,7 +867,7 @@ internal sealed class NativeSceneCaptureCoordinator
         var automationId = ReadOptionalString(selector, AutomationIdProperty);
         foreach (var node in nodes.OfType<JsonObject>())
         {
-            var nodeContractId = node["identity"] is JsonObject identity ? ReadString(identity, ContractIdProperty) : null;
+            var nodeContractId = node[IdentityProperty] is JsonObject identity ? ReadString(identity, ContractIdProperty) : null;
             var nodeAutomationId = node[AccessibilityProperty] is JsonObject accessibility ? ReadString(accessibility, AutomationIdProperty) : null;
             if ((contractId is null || StringComparer.Ordinal.Equals(contractId, nodeContractId)) &&
                 (automationId is null || StringComparer.Ordinal.Equals(automationId, nodeAutomationId)))
@@ -898,7 +900,7 @@ internal sealed class NativeSceneCaptureCoordinator
 
     private static JsonObject GuardedAtomicity(string state) => new()
     {
-        ["authority"] = UiaGuardedAuthority,
+        [AuthorityProperty] = UiaGuardedAuthority,
         ["guards"] = GuardStates(state),
     };
 
@@ -996,7 +998,7 @@ internal sealed class NativeSceneCaptureCoordinator
     {
         foreach (var node in nodes.OfType<JsonObject>())
         {
-            if (node["identity"] is JsonObject identity &&
+            if (node[IdentityProperty] is JsonObject identity &&
                 StringComparer.Ordinal.Equals(ReadString(identity, ContractIdProperty), contractId) &&
                 ReadString(node, NodeIdProperty) is { } matched)
             {
