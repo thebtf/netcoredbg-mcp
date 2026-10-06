@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.23.12] - 2026-09-27
 
 ### Fixed
+- Bridge focus, selection and list commands reuse three private property-key constants without changing wire values, selectors, actions or result ordering. Two incidental focus source-text assertions are removed; behavioral checks are unchanged.
 - Exact-head Sonar cleanup and receipt validation reuse three private operation-label constants without changing native API bindings, claim checks, deletion order, error discriminators, or first-error preservation. Sonar closure remains unmeasured.
 - Runtime scanning reuses one private runtime framework-directory literal for `Microsoft.NETCore.App`; scan roots, path ordering and duplicate handling are unchanged.
 - Source/developer native-scene artifact disposal immediately invalidates capabilities but retains locked paths, session ownership and capacity accounting until deletion succeeds. The existing timer can finish cleanup after the binding releases its store reference; same-instance disposal retries the same ledger, and terminal disposal follows successful owned-root cleanup.

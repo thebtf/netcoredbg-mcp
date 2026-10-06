@@ -22,6 +22,7 @@ public static class FocusCommands
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
     private const int SW_RESTORE = 9;
+    private const string FocusedKey = "focused";
 
     /// <summary>
     /// Set focus to an element using UIA Focus() — monitor/DPI-agnostic.
@@ -81,7 +82,7 @@ public static class FocusCommands
             element.Focus();
             return new JsonObject
             {
-                ["focused"] = true,
+                [FocusedKey] = true,
                 ["automationId"] = automationId,
                 ["name"] = name,
                 ["method"] = "UIA.Focus"
@@ -93,7 +94,7 @@ public static class FocusCommands
             mainWindow.Focus();
             return new JsonObject
             {
-                ["focused"] = true,
+                [FocusedKey] = true,
                 ["method"] = "Window.Focus"
             };
         }
@@ -119,7 +120,7 @@ public static class FocusCommands
         return new JsonObject
         {
             ["status"] = matched ? "PASS" : "FAIL",
-            ["focused"] = matched,
+            [FocusedKey] = matched,
             ["reason"] = matched ? "focus matched" : "focus outside selector",
             ["expected"] = ElementCommands.BuildElementInfo(expected, includePatterns: false),
             ["actual"] = focused is null
@@ -161,7 +162,7 @@ public static class FocusCommands
             return EmptyFocusedElementInfo();
 
         var result = ElementCommands.BuildElementInfo(focused, includePatterns: false);
-        result["focused"] = true;
+        result[FocusedKey] = true;
         result["value"] = FocusedValue(focused);
         return result;
     }
@@ -171,7 +172,7 @@ public static class FocusCommands
         return new JsonObject
         {
             ["found"] = false,
-            ["focused"] = false,
+            [FocusedKey] = false,
             ["automationId"] = "",
             ["name"] = "",
             ["controlType"] = "",

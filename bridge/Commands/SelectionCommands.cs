@@ -12,12 +12,14 @@ namespace FlaUIBridge.Commands;
 
 public static class SelectionCommands
 {
+    private const string AutomationIdKey = "automationId";
+
     public static JsonNode MultiSelect(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         if (mainWindow is null)
             throw new InvalidOperationException("Not connected. Call 'connect' first.");
 
-        var automationId = @params?["automationId"]?.GetValue<string>()
+        var automationId = @params?[AutomationIdKey]?.GetValue<string>()
             ?? throw new ArgumentException("Missing required parameter: automationId");
 
         var indices = @params?["indices"]?.AsArray()
@@ -86,7 +88,7 @@ public static class SelectionCommands
         {
             ["selected"] = true,
             ["selected_count"] = selected.Count,
-            ["automationId"] = automationId,
+            [AutomationIdKey] = automationId,
             ["indices"] = selected,
             ["mode"] = mode,
             ["method"] = usedClickFallback
@@ -110,7 +112,7 @@ public static class SelectionCommands
             {
                 ["index"] = -1,
                 ["name"] = "",
-                ["automationId"] = "",
+                [AutomationIdKey] = "",
                 ["controlType"] = "",
                 ["selected"] = false,
                 ["selected_count"] = 0,
@@ -241,7 +243,7 @@ public static class SelectionCommands
         if (mainWindow is null)
             throw new InvalidOperationException("Not connected. Call 'connect' first.");
 
-        var automationId = @params?["automationId"]?.GetValue<string>()
+        var automationId = @params?[AutomationIdKey]?.GetValue<string>()
             ?? throw new ArgumentException("Missing required parameter: automationId");
         var action = @params?["action"]?.GetValue<string>()?.ToLowerInvariant() ?? "toggle";
 
@@ -277,7 +279,7 @@ public static class SelectionCommands
         return new JsonObject
         {
             ["done"] = true,
-            ["automationId"] = automationId,
+            [AutomationIdKey] = automationId,
             ["previousState"] = previousState.ToString(),
             ["currentState"] = newState.ToString()
         };
