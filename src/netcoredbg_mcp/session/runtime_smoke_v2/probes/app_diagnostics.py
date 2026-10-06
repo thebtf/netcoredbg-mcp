@@ -32,6 +32,7 @@ from ._diagnostic_common import (
 LAUNCH_DIAGNOSTIC_WAIT_TIMEOUT_MS = 0
 LAUNCH_DIAGNOSTIC_WAIT_POLL_INTERVAL_MS = 50
 _UNREADABLE_DIAGNOSTIC_JSON_REASON = "diagnostic JSON is not readable"
+_UNOBSERVED_DIAGNOSTIC_JSON_REASON = "diagnostic JSON not observed"
 
 
 async def handle_app_diagnostics(
@@ -516,7 +517,7 @@ async def _read_wait_json(
 def _unobserved_diagnostic_json_reason(since_cursor: tuple[int, str] | None) -> str:
     if since_cursor is not None:
         return "diagnostic JSON not observed after since cursor"
-    return "diagnostic JSON not observed"
+    return _UNOBSERVED_DIAGNOSTIC_JSON_REASON
 
 
 def _diagnostic_wait_metadata(
@@ -886,7 +887,7 @@ def _blocked_diagnostic_json_probe(
         "value": bounded_diagnostic_value(value, limits=limits),
         "evidence_ref": f"diagnostic:app_diagnostics:{app.get('name') or 'app'}",
         **build_blocked(
-            reason=str(acquisition.get("reason") or "diagnostic JSON not observed"),
+            reason=str(acquisition.get("reason") or _UNOBSERVED_DIAGNOSTIC_JSON_REASON),
             requested={field: acquisition},
             accepted={
                 "source": f"app_diagnostics.{field}",
@@ -943,7 +944,7 @@ def _manifest_classification(acquisition: dict[str, Any] | None) -> str:
         return APP_DIAGNOSTICS_UNREADABLE
     if reason == "diagnostic JSON not observed after since cursor":
         return APP_DIAGNOSTICS_STALE
-    if reason == "diagnostic JSON not observed":
+    if reason == _UNOBSERVED_DIAGNOSTIC_JSON_REASON:
         return APP_DIAGNOSTICS_MISSING
     return APP_DIAGNOSTICS_BLOCKED
 
