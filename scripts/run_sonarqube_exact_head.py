@@ -58,6 +58,9 @@ GENERATED_ROOT_NAMES = {SONAR_METADATA_DIRECTORY, ".scannerwork", PYTHON_ENV_DIR
 WAVE2_ENTRY_RELATIVE_PATH = "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json"
 WAVE2_RECEIPT_RELATIVE_PATH = "specs/013-owner-scoped-prebuild-cleanup/acceptance-receipt.md"
 COVERAGE_PARENT_RELATIVE_PATH = ".tmp/sonarqube-coverage"
+_FILE_DISPOSITION_INFO_EX_OPERATION = "SetFileInformationByHandle(FileDispositionInfoEx)"
+_PATH_STAT_OPERATION = "Path.stat"
+_PATH_READ_BYTES_OPERATION = "Path.read_bytes"
 COVERAGE_PY_VERSION = "7.15.4"
 COVERLET_MSBUILD_PACKAGE = "coverlet.msbuild"
 COVERLET_MSBUILD_VERSION = "10.0.1"
@@ -3676,7 +3679,7 @@ def _delete_windows_coverage_run(
         disposition = FileDispositionInformationEx(0x11)
         try:
             require(
-                "SetFileInformationByHandle(FileDispositionInfoEx)",
+                _FILE_DISPOSITION_INFO_EX_OPERATION,
                 "DISPOSITION",
                 path,
                 kernel32.SetFileInformationByHandle,
@@ -3689,7 +3692,7 @@ def _delete_windows_coverage_run(
             disposition.flags = 0
             try:
                 require(
-                    "SetFileInformationByHandle(FileDispositionInfoEx)",
+                    _FILE_DISPOSITION_INFO_EX_OPERATION,
                     "DISPOSITION",
                     path,
                     kernel32.SetFileInformationByHandle,
@@ -3727,7 +3730,7 @@ def _delete_windows_coverage_run(
         for component in (None, *plan.root.parent.relative_to(current).parts):
             if component is not None:
                 current /= component
-            with boundary("Path.stat", "METADATA", current):
+            with boundary(_PATH_STAT_OPERATION, "METADATA", current):
                 metadata = _scanner_tree_metadata(current)
             if not stat.S_ISDIR(metadata.st_mode):
                 raise RunnerError("COVERAGE_MARKER_INVALID: cleanup ancestor is not a directory.")
@@ -3737,7 +3740,7 @@ def _delete_windows_coverage_run(
             if current == plan.root.parent:
                 parent_handle, parent_metadata = handle, metadata
         with ExitStack() as root_pin:
-            with boundary("Path.stat", "METADATA", plan.root):
+            with boundary(_PATH_STAT_OPERATION, "METADATA", plan.root):
                 metadata = _scanner_tree_metadata(plan.root)
             root_handle = pin(
                 root_pin, plan.root, metadata, read_attributes | delete_access | 1, 1, parent_handle
@@ -3752,18 +3755,18 @@ def _delete_windows_coverage_run(
                 raise RunnerError("COVERAGE_MARKER_INVALID: cleanup claim identity does not match.")
             with ExitStack() as marker_pins:
                 for path in (plan.marker, plan.resolved_wave2_entry):
-                    with boundary("Path.stat", "METADATA", path):
+                    with boundary(_PATH_STAT_OPERATION, "METADATA", path):
                         file_metadata = _scanner_tree_metadata(path)
                     if not stat.S_ISREG(file_metadata.st_mode):
                         raise RunnerError("COVERAGE_MARKER_INVALID: cleanup marker is not regular.")
                     pin(marker_pins, path, file_metadata, 0x80000000 | read_attributes, 1)
-                with boundary("Path.read_bytes", "MARKER_READ", plan.marker):
+                with boundary(_PATH_READ_BYTES_OPERATION, "MARKER_READ", plan.marker):
                     raw_marker = plan.marker.read_bytes()
                 if _sha256_bytes(raw_marker) != claim.marker_sha256:
                     raise RunnerError("COVERAGE_MARKER_INVALID: cleanup marker identity changed.")
                 marker = _load_json_object(raw_marker, "coverage marker")
                 validate_coverage_marker(plan, marker)
-                with boundary("Path.read_bytes", "MARKER_READ", plan.resolved_wave2_entry):
+                with boundary(_PATH_READ_BYTES_OPERATION, "MARKER_READ", plan.resolved_wave2_entry):
                     raw_entry = plan.resolved_wave2_entry.read_bytes()
                 if _load_json_object(raw_entry, "resolved Wave-2 entry") != marker["wave2_entry"]:
                     raise RunnerError("COVERAGE_MARKER_INVALID: resolved cleanup entry changed.")
@@ -5312,9 +5315,9 @@ def validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None:
                     "GetFileInformationByHandleEx(FileIdInfo)",
                     "GetFileInformationByHandleEx(FileAttributeTagInfo)",
                     "GetFileInformationByHandleEx(FileIdExtdDirectoryInfo)",
-                    "SetFileInformationByHandle(FileDispositionInfoEx)",
-                    "Path.stat",
-                    "Path.read_bytes",
+                    _FILE_DISPOSITION_INFO_EX_OPERATION,
+                    _PATH_STAT_OPERATION,
+                    _PATH_READ_BYTES_OPERATION,
                 }
                 or not isinstance(native.get("stage"), str)
                 or native.get("stage")
