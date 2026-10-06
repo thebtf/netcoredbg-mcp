@@ -265,15 +265,10 @@ internal static class PreviewOutputPathResolver
 {
     internal static PreviewOutputProcess ResolveProcess()
     {
-        var outputDirectory = new DirectoryInfo(AppContext.BaseDirectory);
-        var targetFramework = outputDirectory.Name;
-        var configuration = outputDirectory.Parent?.Name
-            ?? throw new InvalidOperationException($"Test output configuration is absent from '{AppContext.BaseDirectory}'.");
-        var projectDirectory = Path.Combine(PreviewRepositoryLayout.Root, "host", "NetCoreDbg.Mcp.Stateless.Preview");
         var assemblyName = "NetCoreDbg.Mcp.Stateless.Preview";
-        var targetPath = Path.Combine(projectDirectory, "bin", configuration, targetFramework, $"{assemblyName}.dll");
+        var targetPath = Path.Combine(AppContext.BaseDirectory, $"{assemblyName}.dll");
         Assert.True(File.Exists(targetPath), $"Built preview target is absent: '{targetPath}'.");
-        var appHost = Path.Combine(Path.GetDirectoryName(targetPath)!, OperatingSystem.IsWindows() ? $"{assemblyName}.exe" : assemblyName);
+        var appHost = Path.Combine(AppContext.BaseDirectory, OperatingSystem.IsWindows() ? $"{assemblyName}.exe" : assemblyName);
         return File.Exists(appHost)
             ? new PreviewOutputProcess(appHost, [])
             : new PreviewOutputProcess("dotnet", [targetPath]);
