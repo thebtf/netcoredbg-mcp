@@ -6,6 +6,9 @@ from ..blocked import build_blocked, selector_guidance
 from ..evidence import attach_blocked_details
 
 
+_UI_PROPERTY = "ui.property"
+
+
 async def handle_ui_property(
     probe: dict[str, Any],
     context: Any,
@@ -27,8 +30,8 @@ async def handle_ui_property(
             next_step="Run ui_get_window_tree or ui_find_element before reading property.",
         )
         return {
-            "name": str(probe.get("name") or property_name or "ui.property"),
-            "kind": "ui.property",
+            "name": str(probe.get("name") or property_name or _UI_PROPERTY),
+            "kind": _UI_PROPERTY,
             "status": "BLOCKED",
             "value": None,
             **blocked,
@@ -37,8 +40,8 @@ async def handle_ui_property(
     if result_status != "PASS":
         status = result_status
         output = {
-            "name": str(probe.get("name") or property_name or "ui.property"),
-            "kind": "ui.property",
+            "name": str(probe.get("name") or property_name or _UI_PROPERTY),
+            "kind": _UI_PROPERTY,
             "status": status,
             "value": result.get("value"),
             "reason": _failure_reason(result),
@@ -52,8 +55,8 @@ async def handle_ui_property(
     if phase == "after" and "expected" in probe and status == "PASS" and value != expected:
         status = "FAIL"
     output = {
-        "name": str(probe.get("name") or property_name or "ui.property"),
-        "kind": "ui.property",
+        "name": str(probe.get("name") or property_name or _UI_PROPERTY),
+        "kind": _UI_PROPERTY,
         "status": status,
         "value": value,
     }
