@@ -13,6 +13,7 @@ from .input_signature import RUNNER_INPUT_SIGNATURE
 _DWORD_MODULUS = 2**32
 _DWORD_HALF_RANGE = 2**31
 _VALID_WINDOWS = frozenset({"before_action", "after_action"})
+_LAST_INPUT_BASIS = "windows_last_input_info"
 
 
 class InputMonitorUnavailableError(RuntimeError):
@@ -198,7 +199,7 @@ class RuntimeInputMonitor:
             self._last_sample = sample
             return {
                 "status": "PASS",
-                "basis": "windows_last_input_info",
+                "basis": _LAST_INPUT_BASIS,
                 "window": window,
                 "monitor": {"baseline": _sample_payload(sample)},
             }
@@ -232,7 +233,7 @@ class RuntimeInputMonitor:
         self._last_sample = sample
         return {
             "status": "PASS",
-            "basis": "windows_last_input_info",
+            "basis": _LAST_INPUT_BASIS,
             "window": window,
             "monitor": monitor,
         }
@@ -370,7 +371,7 @@ def _blocked(
     reason: str,
     *,
     window: str,
-    basis: str = "windows_last_input_info",
+    basis: str = _LAST_INPUT_BASIS,
 ) -> dict[str, Any]:
     return {
         "status": "BLOCKED",
@@ -383,7 +384,7 @@ def _blocked(
 def _dirty(*, window: str, summary: str, monitor: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": "DIRTY",
-        "basis": "windows_last_input_info",
+        "basis": _LAST_INPUT_BASIS,
         "source": "global_input",
         "window": window,
         "summary": summary,
