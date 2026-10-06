@@ -63,12 +63,12 @@ internal static class RelayComposition
     /// </summary>
     internal static async Task RunPairedAsync(IHost host, RelaySession session)
     {
-        var hostRunTask = host.RunAsync();
+        var hostRunTask = host.RunAsync(CancellationToken.None);
         var sessionEndedTask = session.RunUntilSessionEndedAsync(CancellationToken.None);
         await ObserveTerminalRaceAsync(
             hostRunTask,
             sessionEndedTask,
-            () => host.StopAsync()).ConfigureAwait(false);
+            () => host.StopAsync(CancellationToken.None)).ConfigureAwait(false);
     }
 
     /// <summary>
