@@ -564,16 +564,9 @@ def ui_operation_adapters(
                 "next_step": _UI_BACKEND_DIAGNOSTICS_NEXT_STEP,
                 "result": blocked,
             }
-        if not isinstance(result, dict):
-            failed = _backend_failure_result(result, operation=adapter_name)
-            failed["selector"] = selector
-            return failed
-        if _is_selector_miss(result):
-            return _selector_blocked(selector, result=_bounded_ui_result(result))
-        if not _is_backend_success(result):
-            failed = _backend_failure_result(_bounded_ui_result(result), operation=adapter_name)
-            failed["selector"] = selector
-            return failed
+        blocked = _coordinate_lookup_blocked(result, selector, adapter_name)
+        if blocked is not None:
+            return blocked
         center = _element_center(result)
         if center is None:
             return {
@@ -3484,6 +3477,24 @@ def _bounded_text_result(result: dict[str, Any]) -> dict[str, Any]:
 def _bounded_ui_result(result: dict[str, Any]) -> dict[str, Any]:
     unbounded_keys = {"full_tree", "raw_tree", "ui_tree", "window_tree"}
     return {key: value for key, value in result.items() if key not in unbounded_keys}
+
+
+def _coordinate_lookup_blocked(
+    result: Any,
+    selector: dict[str, Any],
+    adapter_name: str,
+) -> dict[str, Any] | None:
+    if not isinstance(result, dict):
+        failed = _backend_failure_result(result, operation=adapter_name)
+        failed["selector"] = selector
+        return failed
+    if _is_selector_miss(result):
+        return _selector_blocked(selector, result=_bounded_ui_result(result))
+    if not _is_backend_success(result):
+        failed = _backend_failure_result(_bounded_ui_result(result), operation=adapter_name)
+        failed["selector"] = selector
+        return failed
+    return None
 
 
 def _element_center(result: Mapping[str, Any]) -> tuple[int, int] | None:
