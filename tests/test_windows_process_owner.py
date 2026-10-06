@@ -249,7 +249,8 @@ async def test_graceful_zero_refuses_historical_unseen_member(
     assert receipt.forced is True
     closed = await owner.aclose()
     assert closed.status is DrainStatus.FAILED
-    assert "close:11" not in events and "close:21" not in events
+    assert "close:11" not in events
+    assert "close:21" not in events
 
 
 @pytest.mark.asyncio
@@ -280,7 +281,8 @@ async def test_member_born_during_force_gap_fails_closed(
     assert events.count("terminate-job") == 2
     closed = await owner.aclose()
     assert closed.status is DrainStatus.FAILED
-    assert "close:11" not in events and "close:21" not in events
+    assert "close:11" not in events
+    assert "close:21" not in events
     assert owner._close_reaper is not None
 
 
@@ -596,7 +598,8 @@ async def test_force_waits_through_denied_open_until_child_retirement(
     api._active_counts = [1, 1, 0]
     receipt = await owner.force_and_drain(timeout=0.1)
     assert receipt.status is DrainStatus.DRAINED
-    assert receipt.forced and api.observations >= 3
+    assert receipt.forced
+    assert api.observations >= 3
     assert (await owner.aclose()).status is DrainStatus.DRAINED
 
 
@@ -611,7 +614,8 @@ async def test_concurrent_close_releases_each_controlling_handle_once(
 
     first, second = await asyncio.gather(owner.aclose(), owner.aclose())
 
-    assert first is second and first.status is DrainStatus.DRAINED
+    assert first is second
+    assert first.status is DrainStatus.DRAINED
     assert events.count("close:11") == 1
     assert events.count("close:12") == 1
     assert events.count("close:21") == 1
@@ -1504,7 +1508,8 @@ async def test_production_dap_path_inherits_descendant_and_drains_job(
         child_pid = await _read_marker_pid(child_marker)
 
         run = client._run
-        assert run is not None and run.owner is not None
+        assert run is not None
+        assert run.owner is not None
         assert run.owner._job_handle is not None
         assert _child_is_in_job(child_pid, run.owner._job_handle) is True
 
@@ -1577,7 +1582,8 @@ async def test_real_exit_259_is_natural_when_the_job_forces_its_descendant(
     try:
         await client.start(generation="real-owner-exit-259")
         run = client._run
-        assert run is not None and run.owner is not None
+        assert run is not None
+        assert run.owner is not None
         await asyncio.wait_for(output_seen.wait(), timeout=10.0)
         await _wait_for_path(child_marker)
         child_pid = await _read_marker_pid(child_marker)
@@ -1673,7 +1679,8 @@ async def test_real_prebuild_drains_only_captured_owner(
         assert client_b.is_running is True
         assert psutil.pid_exists(child_b) is True
         assert sentinel.poll() is None
-        assert sentinel_child is not None and psutil.pid_exists(sentinel_child) is True
+        assert sentinel_child is not None
+        assert psutil.pid_exists(sentinel_child) is True
         build_session.build.assert_awaited_once()
     finally:
         if client_a.is_running:
@@ -1766,12 +1773,15 @@ asyncio.run(run())
         assert returncode == 0, (await stderr).decode(errors="replace")
         assert (await stdout).splitlines() == [str(index).encode() for index in range(8)]
         assert receipt.status is DrainStatus.DRAINED, facts
-        assert not receipt.forced and not receipt.root_was_forced
+        assert not receipt.forced
+        assert not receipt.root_was_forced
         assert facts["active_processes"] == 0
         assert facts["total_processes"] == facts["retained_exact_handles"] == 33
         assert facts["signaled_exact_handles"] == 33
-        assert facts["birth_notifications"] == 33 and facts["exit_notifications"] == 1
-        assert not facts["unverified_membership"] and not facts["handle_probe_failed"]
+        assert facts["birth_notifications"] == 33
+        assert facts["exit_notifications"] == 1
+        assert not facts["unverified_membership"]
+        assert not facts["handle_probe_failed"]
     finally:
         closed = await owner.aclose()
         assert closed.status is DrainStatus.DRAINED, owner.drain_snapshot(closed)
@@ -2050,10 +2060,14 @@ async def _probe_direct_capture_fatal_lifecycle(
                 assert pending.continuation_progress.name == "READY"
                 assert pending.continuation_status == windows_process_owner._DBG_CONTINUE
                 assert pending_identity is None or pending is pending_identity
-                assert thread is api.debug_threads[0] and thread.is_alive()
+                assert thread is api.debug_threads[0]
+                assert thread.is_alive()
                 assert len(set(api.debug_threads)) == 1
-                assert not caller.done() and not reapers[0].closed and not release_facts
-                assert not api.root_exited.is_set() and not worker_exceptions
+                assert not caller.done()
+                assert not reapers[0].closed
+                assert not release_facts
+                assert not api.root_exited.is_set()
+                assert not worker_exceptions
                 current_counts = api.wait_calls, api.duplicate_count
                 assert counts is None or counts == current_counts
                 pending_identity, counts = pending, current_counts
@@ -2071,10 +2085,14 @@ async def _probe_direct_capture_fatal_lifecycle(
             assert not await reaper.wait_for_completion(0.25), "ambiguous effect allowed closure"
             assert api.exit_attempts == 1, "unacknowledged ContinueDebugEvent was repeated"
             assert not caller.done(), "fatal escaped while native-effect ownership was unresolved"
-            assert worker.is_alive() and len(set(api.debug_threads)) == 1
-            assert capture._pending is not None and not capture.root_exit_continued
-            assert capture.failure is first_causal and first_causal.winerror == 7
-            assert not release_facts and "public-delivery" not in events
+            assert worker.is_alive()
+            assert len(set(api.debug_threads)) == 1
+            assert capture._pending is not None
+            assert not capture.root_exit_continued
+            assert capture.failure is first_causal
+            assert first_causal.winerror == 7
+            assert not release_facts
+            assert "public-delivery" not in events
             assert not worker_exceptions, "fatal escaped through the worker exception hook"
             print("fatal-lifecycle-proof", flush=True)
             # Deliberately terminate this isolated observation process while its
@@ -2098,20 +2116,30 @@ async def _probe_direct_capture_fatal_lifecycle(
         unchanged = api.wait_calls == waits and api.duplicate_count == duplicates
         api.release_exit.set()
         observed, closed_at_delivery, worker_alive_at_delivery = await asyncio.wait_for(caller, 3)
-        assert all(held) and unchanged, "held EXIT lost worker/event/capability ownership"
-        assert reaper.closed and closed_at_delivery and not worker_alive_at_delivery
-        assert not worker.is_alive() and len(set(api.debug_threads)) == 1
+        assert all(held), "held EXIT lost worker/event/capability ownership"
+        assert unchanged, "held EXIT lost worker/event/capability ownership"
+        assert reaper.closed
+        assert closed_at_delivery
+        assert not worker_alive_at_delivery
+        assert not worker.is_alive()
+        assert len(set(api.debug_threads)) == 1
         assert not worker_exceptions, "fatal escaped through the worker exception hook"
         assert capture.failure is first_causal
-        assert first_causal.stage is AdmissionStage.RESUME and first_causal.winerror == 7
+        assert first_causal.stage is AdmissionStage.RESUME
+        assert first_causal.winerror == 7
         assert capture.fatal_error is fatal
-        assert capture.created.done() and capture.started.done()
+        assert capture.created.done()
+        assert capture.started.done()
         assert capture.created.result().error is None
         assert capture.started.result().error is fatal
         assert api.exit_attempts == 1
         assert len(predispatch_errors) == predispatch_faults
         assert len({id(error) for error in predispatch_errors}) == predispatch_faults
-        assert len(release_facts) == 3 and all(all(facts[1:]) for facts in release_facts), (
+        assert len(release_facts) == 3, (
+            "controlling capability closed before exact exit, worker join or event retirement",
+            release_facts,
+        )
+        assert all(all(facts[1:]) for facts in release_facts), (
             "controlling capability closed before exact exit, worker join or event retirement",
             release_facts,
         )
@@ -2192,7 +2220,8 @@ async def test_direct_capture_counts_distinct_objects_not_reused_pids_or_debug_h
     owner = await _launch_debug(monkeypatch, api, events)
     receipt = await owner.drain_after_grace(grace_timeout=1, force_timeout=1)
     facts = owner.drain_snapshot(receipt)
-    assert receipt.status is DrainStatus.DRAINED and not receipt.forced, facts
+    assert receipt.status is DrainStatus.DRAINED, facts
+    assert not receipt.forced, facts
     assert facts["total_processes"] == facts["retained_exact_handles"] == 3
     assert facts["signaled_exact_handles"] == 3
     assert facts["birth_notifications"] == 1  # Diagnostic omissions cannot manufacture or veto C.
@@ -2260,7 +2289,9 @@ async def _probe_direct_capture_creation_fatal(mode):
         if mode == "ready":
             assert await asyncio.wait_for(caller, 3) is fatal
             capture = reapers[0]._debug_capture
-            assert capture.known_no_child and capture._joined and not capture.worker_alive
+            assert capture.known_no_child
+            assert capture._joined
+            assert not capture.worker_alive
             assert capture.created.result().error is capture.started.result().error is fatal
             assert reapers[0].closed
             assert not any(
@@ -2268,7 +2299,8 @@ async def _probe_direct_capture_creation_fatal(mode):
                 for event in ("resume-thread", "terminate-process", "create-suspended")
             )
             assert events.count("close:11") == events.count("close:12") == 1
-            assert "close:21" not in events and "close:31" not in events
+            assert "close:21" not in events
+            assert "close:31" not in events
             print("fatal-lifecycle-proof", flush=True)
             return
         for _ in range(300):
@@ -2278,10 +2310,13 @@ async def _probe_direct_capture_creation_fatal(mode):
         assert reapers
         capture = reapers[0]._debug_capture
         assert not await reapers[0].wait_for_completion(0.1)
-        assert not caller.done() and not capture.known_no_child and capture.worker_alive
+        assert not caller.done()
+        assert not capture.known_no_child
+        assert capture.worker_alive
         assert capture._creation.progress.name == "IN_FLIGHT"
         assert capture.fatal_error is fatal
-        assert "resume-thread" not in events and "close:11" not in events
+        assert "resume-thread" not in events
+        assert "close:11" not in events
         print("fatal-lifecycle-proof", flush=True)
         os._exit(0)  # Unknown acquisition is retained, not interpreted as no child.
 
@@ -2359,7 +2394,8 @@ async def _probe_direct_capture_cleanup_operation_faults(kind):
             )
         owner = await _launch_debug(monkeypatch, api, events)
         owners.append(owner)
-        assert owner._debug_capture._resume_possible and "resume-thread" in events
+        assert owner._debug_capture._resume_possible
+        assert "resume-thread" in events
         if kind != "terminate":
             api._queue_root_exit()
 
@@ -2378,25 +2414,34 @@ async def _probe_direct_capture_cleanup_operation_faults(kind):
         for index in range(len(later)):
             assert await asyncio.to_thread(turns.get, True, 3) == index
             capture = owner._debug_capture
-            assert owner.fatal_error is fatal and not caller.done() and not owner.closed
+            assert owner.fatal_error is fatal
+            assert not caller.done()
+            assert not owner.closed
             assert first_causal is None or capture.failure is first_causal
             first_causal = capture.failure
-            assert owner._job_handle == 11 and owner._port_handle == 12
+            assert owner._job_handle == 11
+            assert owner._port_handle == 12
             if kind == "close":
-                assert capture._joined and not capture.worker_alive
-                assert owner._process_handle is None and events.count("close:21") == 1
+                assert capture._joined
+                assert not capture.worker_alive
+                assert owner._process_handle is None
+                assert events.count("close:21") == 1
             else:
-                assert capture.worker_alive and "close:21" not in events
+                assert capture.worker_alive
+                assert "close:21" not in events
             caller.cancel()
             await asyncio.sleep(0)
             assert not caller.done()
             advance.release()
         assert await asyncio.wait_for(caller, 5) is fatal
-        assert owner.closed and owner._debug_capture.failure is first_causal
+        assert owner.closed
+        assert owner._debug_capture.failure is first_causal
         assert owner._debug_capture.fatal_error is fatal
-        assert owner._debug_capture.root_exit_continued and owner._debug_capture._pending is None
+        assert owner._debug_capture.root_exit_continued
+        assert owner._debug_capture._pending is None
         assert sum(code == 5 for code, _, _ in api.continued) == 1
-        assert len(errors) == 3 and all(error is expected for error, expected in zip(errors, later))
+        assert len(errors) == 3
+        assert all(error is expected for error, expected in zip(errors, later))
         for handle in (11, 12, 21, 31):
             assert events.count(f"close:{handle}") == 1
         assert (await owner.aclose()).status is DrainStatus.FAILED
@@ -2503,13 +2548,14 @@ async def _probe_direct_capture_actual_runner(mode):
             await asyncio.to_thread(turns.get, True, 10)
             await asyncio.sleep(0.25)
             owner = owners[0]
-            assert not caller.done() and not owner.closed
-            assert owner.fatal_error is fatal and owner._debug_capture.worker_alive
+            assert not caller.done()
+            assert not owner.closed
+            assert owner.fatal_error is fatal
+            assert owner._debug_capture.worker_alive
             assert owner._debug_capture._pending.continuation_progress.name == "IN_FLIGHT"
             assert not owner._debug_capture.root_exit_continued
-            assert (
-                owner._debug_capture._driver is not None and not owner._debug_capture._driver.done()
-            )
+            assert owner._debug_capture._driver is not None
+            assert not owner._debug_capture._driver.done()
             print("fatal-lifecycle-proof", flush=True)
             os._exit(0)  # The live asyncio.run window is the observation; termination is not drain.
         pending_identity = None
@@ -2519,8 +2565,10 @@ async def _probe_direct_capture_actual_runner(mode):
             assert pending.continuation_progress.name == "READY"
             assert pending_identity is None or pending is pending_identity
             pending_identity = pending
-            assert thread is owner._debug_capture._worker and thread.is_alive()
-            assert not caller.done() and not owner.closed
+            assert thread is owner._debug_capture._worker
+            assert thread.is_alive()
+            assert not caller.done()
+            assert not owner.closed
             if mode == "cancel" and index:
                 caller.cancel()
                 await asyncio.sleep(0)
@@ -2528,8 +2576,10 @@ async def _probe_direct_capture_actual_runner(mode):
             advance.release()
         assert await asyncio.wait_for(caller, 10) is fatal
         owner = owners[0]
-        assert owner.closed and not owner._debug_capture.worker_alive
-        assert owner._debug_capture._joined and owner._debug_capture._pending is None
+        assert owner.closed
+        assert not owner._debug_capture.worker_alive
+        assert owner._debug_capture._joined
+        assert owner._debug_capture._pending is None
         assert owner._debug_capture.root_exit_continued
         receipt = await owner.aclose()
         assert receipt.status is DrainStatus.FAILED
@@ -2541,7 +2591,8 @@ async def _probe_direct_capture_actual_runner(mode):
             == 2
         )
         assert all(thread is owner._debug_capture._worker for thread in api_threads)
-        assert sentinel is not None and sentinel.returncode is None
+        assert sentinel is not None
+        assert sentinel.returncode is None
         assert (await sentinel.force_and_drain(timeout=5)).status is DrainStatus.DRAINED
         assert (await sentinel.aclose()).status is DrainStatus.DRAINED
         print("fatal-lifecycle-proof", flush=True)
@@ -2574,17 +2625,22 @@ async def _probe_direct_capture_retained_failure(kind, value):
         capture = owner._debug_capture
         if kind == "api" and value == "continue":
             closed = await asyncio.wait_for(owner.wait_closed(), 2)
-            assert closed.status is DrainStatus.FAILED and owner.closed
-            assert capture.failure.winerror == 56 and not capture.worker_alive
+            assert closed.status is DrainStatus.FAILED
+            assert owner.closed
+            assert capture.failure.winerror == 56
+            assert not capture.worker_alive
             for handle in (11, 12, 21):
                 assert events.count(f"close:{handle}") == 1
             print("fatal-lifecycle-proof", flush=True)
             return
-        assert not owner.closed and capture.worker_alive
+        assert not owner.closed
+        assert capture.worker_alive
         assert not await capture.join_exited(0.1)
-        assert "close:11" not in events and "close:21" not in events
+        assert "close:11" not in events
+        assert "close:21" not in events
         if kind == "count":
-            assert facts["total_processes"] == value and facts["active_processes"] == 0
+            assert facts["total_processes"] == value
+            assert facts["active_processes"] == 0
             assert facts["retained_exact_handles"] == facts["signaled_exact_handles"] == 1
         else:
             assert capture.failure is not None
@@ -2654,7 +2710,8 @@ async def test_direct_capture_repeated_launch_cancellation_joins_admission_and_c
     for _ in range(2):
         caller.cancel()
         await asyncio.sleep(0)
-    assert not caller.done() and "resume-thread" not in events
+    assert not caller.done()
+    assert "resume-thread" not in events
     release_wire.set()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(caller, 2)
@@ -2679,7 +2736,8 @@ async def test_direct_capture_cancelled_close_pumps_exit_before_signaling_and_jo
     second.cancel()
     with pytest.raises(asyncio.CancelledError):
         await second
-    assert "close:11" not in events and "close:21" not in events
+    assert "close:11" not in events
+    assert "close:21" not in events
     assert not api.wait_for_process(21, 0)
     api.release_exit.set()
     receipt = await asyncio.wait_for(owner.aclose(), 2)
@@ -2720,7 +2778,8 @@ async def test_direct_capture_native_suspended_termination_and_app_breakpoint(
         assert await asyncio.wait_for(owner.wait_root(), 10) == expected
         receipt = await owner.drain_after_grace(grace_timeout=1, force_timeout=1)
         facts = owner.drain_snapshot(receipt)
-        assert receipt.status is DrainStatus.DRAINED and not receipt.forced, facts
+        assert receipt.status is DrainStatus.DRAINED, facts
+        assert not receipt.forced, facts
         assert facts["total_processes"] == facts["retained_exact_handles"] == total
         assert facts["signaled_exact_handles"] == total
     finally:
