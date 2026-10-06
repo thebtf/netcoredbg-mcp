@@ -252,6 +252,7 @@ public sealed class NativeSceneBridgeLifecycleTests
         if (!OperatingSystem.IsWindows()) return;
         await using var binding = new BindingDriver(stop: StopRootOnlyAsync);
         await binding.StartAsync();
+        binding.AssertDedicatedJobContainsTree();
         var owner = binding.Ownership!;
         var job = BindingDriver.Job(owner);
         BindingDriver.ProtectJob(job, protect: true);
@@ -261,9 +262,11 @@ public sealed class NativeSceneBridgeLifecycleTests
 
             Assert.True(binding.Outcome<bool>(outcome, "ExitObserved"));
             Assert.False(binding.Outcome<bool>(outcome, "TerminationHandedToKernel"));
-            Assert.IsType<System.ComponentModel.Win32Exception>(binding.Outcome<Exception>(outcome, "Failure"));
+            var failure = binding.Outcome<Exception?>(outcome, "Failure");
+            Assert.NotNull(failure);
+            _output.WriteLine($"protected Job cleanup failure: {failure}");
             Assert.Same(owner, binding.Ownership);
-            Assert.False(job.IsClosed);
+            BindingDriver.AssertJobProtected(job);
             Assert.False(binding.Descendant!.HasExited);
 
             var admissionFailure = await Record.ExceptionAsync(binding.StartAsync);
@@ -304,6 +307,7 @@ public sealed class NativeSceneBridgeLifecycleTests
             if (++stopCalls == 1) throw primary;
         });
         await binding.StartAsync();
+        binding.AssertDedicatedJobContainsTree();
         var owner = binding.Ownership!;
         var job = BindingDriver.Job(owner);
         BindingDriver.ProtectJob(job, protect: true);
@@ -312,9 +316,11 @@ public sealed class NativeSceneBridgeLifecycleTests
             var failure = await Record.ExceptionAsync(binding.DisposeBindingAsync);
             var failures = Assert.IsType<AggregateException>(failure).Flatten().InnerExceptions;
             Assert.Same(primary, failures[0]);
-            Assert.IsType<System.ComponentModel.Win32Exception>(failures[1]);
+            Assert.Equal(2, failures.Count);
+            Assert.NotSame(primary, failures[1]);
+            _output.WriteLine($"secondary protected Job cleanup failure: {failures[1]}");
             Assert.Same(owner, binding.Ownership);
-            Assert.False(job.IsClosed);
+            BindingDriver.AssertJobProtected(job);
             Assert.False(binding.Descendant!.HasExited);
             Assert.Equal(1, binding.GateCount);
 
@@ -354,14 +360,17 @@ public sealed class NativeSceneBridgeLifecycleTests
             Assert.NotNull(binding.LaunchedOwnership);
             var launchedOwner = binding.LaunchedOwnership!;
             var job = BindingDriver.Job(launchedOwner);
-            Assert.IsType<System.ComponentModel.Win32Exception>(primary.Data["NativeSceneBridgeCleanupFailure"]);
+            var cleanupFailure = Assert.IsAssignableFrom<Exception>(primary.Data["NativeSceneBridgeCleanupFailure"]);
+            Assert.NotSame(primary, cleanupFailure);
+            _output.WriteLine($"owned-launch protected Job cleanup failure: {cleanupFailure}");
             Assert.Contains(nameof(ThrowStartup), primary.StackTrace);
-            Assert.False(job.IsClosed);
+            BindingDriver.AssertJobProtected(job);
             Assert.False(binding.Descendant!.HasExited);
 
             Assert.NotNull(binding.Ownership);
             var retainedOwner = binding.Ownership!;
             Assert.Same(job, BindingDriver.Job(retainedOwner));
+            binding.AssertDedicatedJobContainsTree();
             Assert.Equal("OBSERVER_UNAVAILABLE", await binding.CaptureVisualAsync(CancellationToken.None));
             Assert.Equal(1, binding.LaunchCount);
             Assert.Same(retainedOwner, binding.Ownership);
@@ -658,7 +667,8 @@ public sealed class NativeSceneBridgeLifecycleTests
             {
                 var failures = Assert.IsType<AggregateException>(firstFailure).Flatten().InnerExceptions;
                 Assert.Same(primary, failures[0]);
-                Assert.Contains(failures, static failure => failure is System.ComponentModel.Win32Exception);
+                Assert.Contains(failures, failure => !ReferenceEquals(primary, failure));
+                _output.WriteLine($"registry {cleanupPath} protected Job cleanup failure: {firstFailure}");
             }
             else
             {
@@ -668,7 +678,7 @@ public sealed class NativeSceneBridgeLifecycleTests
             }
 
             Assert.Same(owner, binding.Ownership);
-            Assert.False(job.IsClosed);
+            BindingDriver.AssertJobProtected(job);
             Assert.False(processHandle.IsClosed);
             Assert.Equal(originalJobHandle, job.DangerousGetHandle());
             Assert.Equal(originalProcessHandle, processHandle.DangerousGetHandle());
@@ -694,7 +704,7 @@ public sealed class NativeSceneBridgeLifecycleTests
             Assert.Equal("DEBUG_SESSION_NOT_FOUND", nativeContent.GetProperty("code").GetString());
             var retainedAfterLookup = bindings[BindingDriver.SessionId];
             Assert.Same(owner, binding.Ownership);
-            Assert.False(job.IsClosed);
+            BindingDriver.AssertJobProtected(job);
             Assert.False(processHandle.IsClosed);
             _output.WriteLine($"registry {cleanupPath}: first stop attempts={firstStopCalls}; cleanup reachable={ReferenceEquals(binding.Instance, retainedBinding)}; closed session/native lookups refused while original Job/process handles and descendant remain live.");
 
@@ -1002,6 +1012,14 @@ public sealed class NativeSceneBridgeLifecycleTests
                 $"Could not {(protect ? "protect" : "unprotect")} the controlled Job handle: {Marshal.GetLastWin32Error()}.");
         }
 
+        public static void AssertJobProtected(SafeHandle job)
+        {
+            Assert.False(job.IsClosed);
+            Assert.True(GetHandleInformation(job.DangerousGetHandle(), out var flags),
+                $"Could not inspect the retained Job handle: {Marshal.GetLastWin32Error()}.");
+            Assert.Equal(2u, flags & 2u);
+        }
+
         public static void CloseOwner(object owner)
         {
             owner.GetType().GetMethod("CloseJob", InstanceFlags)!.Invoke(owner, []);
@@ -1067,6 +1085,10 @@ public sealed class NativeSceneBridgeLifecycleTests
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetHandleInformation(IntPtr handle, out uint flags);
     }
 
     private static JsonObject Request(string operation) => new()
