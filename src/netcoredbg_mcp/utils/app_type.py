@@ -31,6 +31,28 @@ def _check_framework_entry(name: str) -> bool:
     return any(marker in name for marker in _GUI_FRAMEWORK_MARKERS)
 
 
+def _check_runtime_frameworks(runtime_options: dict) -> str | None:
+    # Check single "framework" entry
+    framework = runtime_options.get("framework")
+    if isinstance(framework, dict):
+        name = framework.get("name", "")
+        if isinstance(name, str) and _check_framework_entry(name):
+            logger.debug("GUI framework detected in 'framework': %s", name)
+            return "gui"
+
+    # Check "frameworks" array
+    frameworks = runtime_options.get("frameworks")
+    if isinstance(frameworks, list):
+        for entry in frameworks:
+            if isinstance(entry, dict):
+                name = entry.get("name", "")
+                if isinstance(name, str) and _check_framework_entry(name):
+                    logger.debug("GUI framework detected in 'frameworks': %s", name)
+                    return "gui"
+
+    return None
+
+
 def _check_runtimeconfig(runtimeconfig_path: Path) -> str | None:
     """Check runtimeconfig.json for GUI framework references.
 
@@ -56,23 +78,9 @@ def _check_runtimeconfig(runtimeconfig_path: Path) -> str | None:
         logger.debug("runtimeconfig.json has no valid runtimeOptions: %s", runtimeconfig_path)
         return None
 
-    # Check single "framework" entry
-    framework = runtime_options.get("framework")
-    if isinstance(framework, dict):
-        name = framework.get("name", "")
-        if isinstance(name, str) and _check_framework_entry(name):
-            logger.debug("GUI framework detected in 'framework': %s", name)
-            return "gui"
-
-    # Check "frameworks" array
-    frameworks = runtime_options.get("frameworks")
-    if isinstance(frameworks, list):
-        for entry in frameworks:
-            if isinstance(entry, dict):
-                name = entry.get("name", "")
-                if isinstance(name, str) and _check_framework_entry(name):
-                    logger.debug("GUI framework detected in 'frameworks': %s", name)
-                    return "gui"
+    result = _check_runtime_frameworks(runtime_options)
+    if result is not None:
+        return result
 
     logger.debug("No GUI framework found in runtimeconfig.json: %s", runtimeconfig_path)
     return "console"
