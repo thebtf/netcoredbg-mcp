@@ -1162,15 +1162,19 @@ internal static class Program
 
     private static class ToolCatalog
     {
+        private const string SchemaPropertiesPrefix = "{\"type\":\"object\",\"properties\":{\"";
+        private const string SchemaRequiredSuffix = "\"],\"additionalProperties\":false}";
+        private const string DebugSessionSchema = SchemaPropertiesPrefix + Program.DebugSessionIdKey + "\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"" + Program.DebugSessionIdKey + SchemaRequiredSuffix;
+
         internal static ListToolsResult List() => new()
         {
             Tools =
             [
                 Tool("start_debug", "Start debugging a program.", "{\"type\":\"object\",\"properties\":{\"program\":{\"type\":\"string\",\"minLength\":1}},\"additionalProperties\":false}"),
-                Tool("get_debug_state", "Get the state of a debug session.", "{\"type\":\"object\",\"properties\":{\"" + Program.DebugSessionIdKey + "\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"" + Program.DebugSessionIdKey + "\"],\"additionalProperties\":false}"),
-                Tool("stop_debug", "Stop a debug session.", "{\"type\":\"object\",\"properties\":{\"" + Program.DebugSessionIdKey + "\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"" + Program.DebugSessionIdKey + "\"],\"additionalProperties\":false}"),
-                Tool("get_threads", "Get threads in a debug session.", "{\"type\":\"object\",\"properties\":{\"" + Program.DebugSessionIdKey + "\":{\"type\":\"string\",\"minLength\":1}},\"required\":[\"" + Program.DebugSessionIdKey + "\"],\"additionalProperties\":false}"),
-                Tool("get_call_stack", "Get a bounded stack-frame page for one stopped thread.", "{\"type\":\"object\",\"properties\":{\"" + Program.DebugSessionIdKey + "\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647},\"startFrame\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295},\"levels\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":256}},\"required\":[\"" + Program.DebugSessionIdKey + "\",\"threadId\"],\"additionalProperties\":false}"),
+                Tool("get_debug_state", "Get the state of a debug session.", DebugSessionSchema),
+                Tool("stop_debug", "Stop a debug session.", DebugSessionSchema),
+                Tool("get_threads", "Get threads in a debug session.", SchemaPropertiesPrefix + Program.DebugSessionIdKey + "\":{\"type\":\"string\",\"minLength\":1}},\"required\":[\"" + Program.DebugSessionIdKey + SchemaRequiredSuffix),
+                Tool("get_call_stack", "Get a bounded stack-frame page for one stopped thread.", SchemaPropertiesPrefix + Program.DebugSessionIdKey + "\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647},\"startFrame\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295},\"levels\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":256}},\"required\":[\"" + Program.DebugSessionIdKey + "\",\"threadId\"],\"additionalProperties\":false}"),
                 .. NativeSceneToolDispatcher.ListTools(),
             ],
             TimeToLive = CacheLifetime,
