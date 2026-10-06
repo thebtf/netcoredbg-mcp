@@ -5,6 +5,21 @@ This repository uses the fixed SonarQube project key
 `scripts/run_sonarqube_exact_head.py`; it is the required release-scan command.
 It writes only secret-free receipts and redacted logs.
 
+`SonarQube.Analysis.xml` sets `sonar.test.inclusions=tests/**,host/**/*.Tests/**`
+to keep Python tests under `tests/` and native tests under `tests/dotnet/` and
+the four `host/*.Tests/` roots eligible for test analysis; all 60 observed native
+`UTS` files must remain in scope. SonarQube also applies
+[test inclusion patterns as source exclusions](https://docs.sonarsource.com/sonarqube-server/2026.1/project-administration/adjusting-analysis/setting-analysis-scope/excluding-files-based-on-patterns.md),
+while [native .NET project categorization](https://docs.sonarsource.com/sonarqube-server/2026.1/analyzing-source-code/dotnet-environments/specify-test-project-analysis.md)
+remains project-based. This is a classification correction, not a quality-gate
+waiver; existing fixture exclusions, quality profiles, thresholds, and the
+new-code period are unchanged. Pattern-membership sanity evidence is not
+effective scanner-scope proof: a fresh full, unfiltered exact-head diagnostic
+must show `tests/test_windows_process_owner.py` as `UTS`, preserve all 60 native
+test identities, and retain the mapped 130 Python and 69 .NET source identity
+sets unchanged before the correction is accepted. It does not establish a
+measured coverage improvement or attribute the entire failed coverage denominator.
+
 ## One-time local onboarding
 
 Install the supported SonarScanner for .NET on `PATH`:
