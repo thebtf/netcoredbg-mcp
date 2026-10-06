@@ -1719,6 +1719,32 @@ def _grid_row_drag_request(endpoint: Mapping[str, Any]) -> tuple[int | None, str
     return None, None
 
 
+def _drag_optional_evidence(
+    result: dict[str, Any],
+    merged_route_evidence: dict[str, Any],
+    selected_payload: dict[str, Any] | None,
+    cancel_key: str | None,
+) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    no_op = _mapping_evidence_from_result(result, "no_op")
+    if no_op is not None:
+        output["no_op"] = no_op
+    cleanup = _drag_cleanup_evidence(result)
+    if cleanup is not None:
+        output["cleanup"] = cleanup
+    target_ensure_visible_result = merged_route_evidence.get("target_ensure_visible_result")
+    if isinstance(target_ensure_visible_result, Mapping):
+        output["drop_ensure_visible_result"] = dict(target_ensure_visible_result)
+    cancel_evidence = result.get("cancel")
+    if isinstance(cancel_evidence, Mapping):
+        output["cancel"] = dict(cancel_evidence)
+    elif cancel_key is not None:
+        output["cancel"] = {"key": cancel_key, "sent": True}
+    if selected_payload is not None:
+        output["selected_payload"] = selected_payload
+    return output
+
+
 async def _drag_result_with_selected_payload(
     *,
     backend: Any,
@@ -1797,22 +1823,9 @@ async def _drag_result_with_selected_payload(
         "route_evidence": merged_route_evidence,
         "result": result,
     }
-    no_op = _mapping_evidence_from_result(result, "no_op")
-    if no_op is not None:
-        output["no_op"] = no_op
-    cleanup = _drag_cleanup_evidence(result)
-    if cleanup is not None:
-        output["cleanup"] = cleanup
-    target_ensure_visible_result = merged_route_evidence.get("target_ensure_visible_result")
-    if isinstance(target_ensure_visible_result, Mapping):
-        output["drop_ensure_visible_result"] = dict(target_ensure_visible_result)
-    cancel_evidence = result.get("cancel")
-    if isinstance(cancel_evidence, Mapping):
-        output["cancel"] = dict(cancel_evidence)
-    elif cancel_key is not None:
-        output["cancel"] = {"key": cancel_key, "sent": True}
-    if selected_payload is not None:
-        output["selected_payload"] = selected_payload
+    output.update(
+        _drag_optional_evidence(result, merged_route_evidence, selected_payload, cancel_key)
+    )
     output.update(verdict)
     return output
 
