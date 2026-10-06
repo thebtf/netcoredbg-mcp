@@ -5,20 +5,63 @@ This repository uses the fixed SonarQube project key
 `scripts/run_sonarqube_exact_head.py`; it is the required release-scan command.
 It writes only secret-free receipts and redacted logs.
 
-`SonarQube.Analysis.xml` sets `sonar.test.inclusions=tests/**,host/**/*.Tests/**`
-to keep Python tests under `tests/` and native tests under `tests/dotnet/` and
-the four `host/*.Tests/` roots eligible for test analysis; all 60 observed native
-`UTS` files must remain in scope. SonarQube also applies
-[test inclusion patterns as source exclusions](https://docs.sonarsource.com/sonarqube-server/2026.1/project-administration/adjusting-analysis/setting-analysis-scope/excluding-files-based-on-patterns.md),
-while [native .NET project categorization](https://docs.sonarsource.com/sonarqube-server/2026.1/analyzing-source-code/dotnet-environments/specify-test-project-analysis.md)
-remains project-based. This is a classification correction, not a quality-gate
-waiver; existing fixture exclusions, quality profiles, thresholds, and the
-new-code period are unchanged. Pattern-membership sanity evidence is not
-effective scanner-scope proof: a fresh full, unfiltered exact-head diagnostic
-must show `tests/test_windows_process_owner.py` as `UTS`, preserve all 60 native
-test identities, and retain the mapped 130 Python and 69 .NET source identity
-sets unchanged before the correction is accepted. It does not establish a
-measured coverage improvement or attribute the entire failed coverage denominator.
+## Mixed-language test ownership
+
+`SonarQube.Analysis.xml` retains
+`sonar.test.inclusions=tests/**,host/**/*.Tests/**` for both Python and native
+test eligibility. Inclusion patterns are not a classifier: SonarQube also
+applies them as
+[source exclusions](https://docs.sonarsource.com/sonarqube-server/2026.1/project-administration/adjusting-analysis/setting-analysis-scope/excluding-files-based-on-patterns.md).
+The completed `dcbdcab14e6f2fe36c1095e9f4b000b2e4e2ff4d` analysis retained
+60 native `UTS` files but indexed no Python tests; the selected
+`tests/test_windows_process_owner.py` component was absent. That inclusion-only
+configuration did not restore Python test analysis.
+
+The installed scanner 11.2.1.137242 identifies upstream commit
+`57e91fb2a8ccbf247c3999311336bb02692bb7ab`. Its
+[AdditionalFilesService](https://github.com/SonarSource/sonar-scanner-msbuild/blob/57e91fb2a8ccbf247c3999311336bb02692bb7ab/src/SonarScanner.MSBuild.Shim/AdditionalFilesService.cs)
+puts auto-discovered Python files in `Sources`; its additional-file test-name
+recognition covers JavaScript and TypeScript, not Python. Its
+[ScannerEngineInputGenerator](https://github.com/SonarSource/sonar-scanner-msbuild/blob/57e91fb2a8ccbf247c3999311336bb02692bb7ab/src/SonarScanner.MSBuild.Shim/ScannerEngineInputGenerator.cs)
+assigns files to the closest physically containing project directory. Files
+without such an owner become root sources. Consequently, external `Content`
+or `None` links from a nested `host/*.Tests/` project cannot give `tests/*.py`
+TEST ownership. Native project categorization remains
+[project-based](https://docs.sonarsource.com/sonarqube-server/2026.1/analyzing-source-code/dotnet-environments/specify-test-project-analysis.md).
+
+`tests/SonarQube.PythonTests.Analysis.csproj` is a standard SDK analysis-only
+project physically above the Python tests, with `SonarQubeTestProject=true`.
+It associates real non-fixture Python files as `None` items, disables default
+items (including recursive C# compilation and implicit `None` discovery), and
+forbids output/publish copies, packing, and publishing. It adds no test SDK,
+test framework, executable test code, or coverage producer. The existing
+runner discovers and builds maintained projects omitted from the solution,
+so no solution or runner change is needed. All five coverage producer IDs
+and project paths remain unchanged; this project does not execute Python tests
+or provide a coverage report. Existing nearer native test projects retain
+their ownership. With `scanAll`, other supported files physically beneath
+`tests/` can also receive this TEST owner, not just its explicit Python items.
+
+Source/configuration preparation is not effective-scope proof. Before accepting
+this correction, evaluate the actual project without running build targets:
+
+```powershell
+dotnet msbuild tests/SonarQube.PythonTests.Analysis.csproj -nologo -verbosity:quiet -nr:false -getProperty:TargetFramework,EnableDefaultItems,SonarQubeTestProject,IsTestProject,IsPackable,IsPublishable -getItem:Compile,None,Content,EmbeddedResource,PackageReference,ProjectReference
+```
+
+Require 146 physical non-fixture Python `None` items, no default C# inputs or
+package/project references, and `Never` copy metadata. Then prove ownership
+with the installed 11.2.1 generator and run a fresh full, unfiltered exact-head
+diagnostic: all 146 Python paths, including `tests/test_windows_process_owner.py`,
+must be `UTS`; all 60 native test identities and the mapped 130 Python plus
+69 .NET product source identity hashes must remain unchanged. SDK evaluation,
+generator inspection, and the new full scan are **NOT_RUN** at preparation.
+
+This correction changes classification, not coverage inputs or release policy.
+Existing fixture exclusions, quality profiles, the new-code period, strict 80%
+new-code coverage, and zero OPEN findings remain unchanged. Proven indexing
+alone does not satisfy the quality gate, predict a coverage improvement, or
+attribute every denominator or findings change to this ownership correction.
 
 ## One-time local onboarding
 
