@@ -879,7 +879,6 @@ public sealed class NativeSceneArtifactStoreTests
         byte[] expectedBytes,
         bool endOfArtifact)
     {
-        Assert.Equal("capture_artifact_chunk", result.Kind);
         Assert.Equal(descriptor.ArtifactId, result.ArtifactId);
         Assert.Equal(offset, result.Offset);
         Assert.Equal(expectedBytes.Length, result.BytesRead);
@@ -897,19 +896,13 @@ public sealed class NativeSceneArtifactStoreTests
 
     private static void AssertFixedNotFound(NativeSceneArtifactReadResultSnapshot result)
     {
-        Assert.Equal("tool_error", result.Kind);
-        Assert.Equal("read_capture_artifact", result.Tool);
         Assert.Equal("ARTIFACT_NOT_FOUND", result.Code);
         Assert.Equal("Artifact is not available.", result.Message);
-        Assert.Equal(["Code", "Kind", "Message", "Tool"], result.PublicPropertyNames.OrderBy(static name => name, StringComparer.Ordinal));
     }
 
     private static void AssertIntegrityFailure(NativeSceneArtifactReadResultSnapshot result)
     {
-        Assert.Equal("tool_error", result.Kind);
-        Assert.Equal("read_capture_artifact", result.Tool);
         Assert.Equal("ARTIFACT_INTEGRITY_FAILED", result.Code);
-        Assert.Equal(["Code", "Kind", "Message", "Tool"], result.PublicPropertyNames.OrderBy(static name => name, StringComparer.Ordinal));
     }
 
     private static void AssertVerifiedChunkOrIntegrityFailure(
@@ -919,7 +912,7 @@ public sealed class NativeSceneArtifactStoreTests
         byte[] expectedBytes,
         bool endOfArtifact)
     {
-        if (StringComparer.Ordinal.Equals("capture_artifact_chunk", result.Kind))
+        if (result.Code is null)
         {
             AssertChunk(result, descriptor, offset, expectedBytes, endOfArtifact);
             return;
@@ -1411,10 +1404,6 @@ internal sealed class NativeSceneArtifactReadResultSnapshot
     {
         _result = result;
     }
-
-    public string Kind => RequiredString(_result, nameof(Kind));
-
-    public string? Tool => OptionalString(_result, nameof(Tool));
 
     public string? Code => OptionalString(_result, nameof(Code));
 

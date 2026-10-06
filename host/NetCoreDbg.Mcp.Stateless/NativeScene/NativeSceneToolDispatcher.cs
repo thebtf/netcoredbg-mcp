@@ -313,7 +313,7 @@ internal static class NativeSceneToolDispatcher
         {
             NativeSceneArtifactReadChunk chunk => Success(ReadCaptureArtifactTool, new JsonObject
             {
-                ["kind"] = chunk.Kind,
+                ["kind"] = "capture_artifact_chunk",
                 ["artifactId"] = chunk.ArtifactId,
                 ["offset"] = chunk.Offset,
                 ["bytesRead"] = chunk.BytesRead,

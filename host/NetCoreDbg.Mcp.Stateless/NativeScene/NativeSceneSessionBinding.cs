@@ -310,7 +310,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
         }
     }
 
-    internal async Task<NativeSceneArtifactReadResult> ReadCaptureArtifactAsync(
+    internal async Task<INativeSceneArtifactReadResult> ReadCaptureArtifactAsync(
         string artifactId,
         long offset,
         int maxBytes,

@@ -125,7 +125,7 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
         }
     }
 
-    internal async Task<NativeSceneArtifactReadResult> ReadAsync(
+    internal async Task<INativeSceneArtifactReadResult> ReadAsync(
         string debugSessionId,
         string artifactId,
         long offset,
@@ -1077,11 +1077,11 @@ internal sealed class NativeSceneArtifactDescriptor
     public string ArtifactSchemaVersion { get; }
 }
 
-internal abstract class NativeSceneArtifactReadResult
+internal interface INativeSceneArtifactReadResult
 {
 }
 
-internal sealed class NativeSceneArtifactReadChunk : NativeSceneArtifactReadResult
+internal sealed class NativeSceneArtifactReadChunk : INativeSceneArtifactReadResult
 {
     internal NativeSceneArtifactReadChunk(
         NativeSceneArtifactDescriptor descriptor,
@@ -1100,8 +1100,6 @@ internal sealed class NativeSceneArtifactReadChunk : NativeSceneArtifactReadResu
         Sha256 = descriptor.Sha256;
         ArtifactSchemaVersion = descriptor.ArtifactSchemaVersion;
     }
-
-    public string Kind => "capture_artifact_chunk";
 
     public string ArtifactId { get; }
 
@@ -1122,17 +1120,13 @@ internal sealed class NativeSceneArtifactReadChunk : NativeSceneArtifactReadResu
     public string ArtifactSchemaVersion { get; }
 }
 
-internal sealed class NativeSceneArtifactReadError : NativeSceneArtifactReadResult
+internal sealed class NativeSceneArtifactReadError : INativeSceneArtifactReadResult
 {
     internal NativeSceneArtifactReadError(string code, string message)
     {
         Code = code;
         Message = message;
     }
-
-    public string Kind => "tool_error";
-
-    public string Tool => "read_capture_artifact";
 
     public string Code { get; }
 
