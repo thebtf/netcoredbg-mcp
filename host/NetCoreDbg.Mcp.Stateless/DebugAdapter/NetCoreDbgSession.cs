@@ -1546,6 +1546,8 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
 
         internal sealed class WindowsBridgeProcess
         {
+            private const string TerminationOwnerDataKey = "NativeSceneBridgeTerminationOwner";
+            private const string ProcessHandleDataKey = "NativeSceneBridgeProcessHandle";
             private readonly SafeKernelHandle _job;
             private readonly SafeKernelHandle? _processHandle;
 
@@ -1592,10 +1594,10 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
                     catch (Exception exception)
                     {
                         cleanupFailure = exception;
-                        primary.Data["NativeSceneBridgeTerminationOwner"] = job;
+                        primary.Data[TerminationOwnerDataKey] = job;
                         if (processHandle is not null)
                         {
-                            primary.Data["NativeSceneBridgeProcessHandle"] = processHandle;
+                            primary.Data[ProcessHandleDataKey] = processHandle;
                         }
                         if (process is not null)
                         {
@@ -1621,8 +1623,8 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
                         catch (Exception exception)
                         {
                             cleanupFailure = cleanupFailure is null ? exception : new AggregateException(cleanupFailure, exception);
-                            primary.Data["NativeSceneBridgeTerminationOwner"] = job;
-                            primary.Data["NativeSceneBridgeProcessHandle"] = processHandle;
+                            primary.Data[TerminationOwnerDataKey] = job;
+                            primary.Data[ProcessHandleDataKey] = processHandle;
                         }
                     }
 
@@ -1637,7 +1639,7 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
 
             internal static WindowsBridgeProcess? TakeFailedLaunchOwnership(Exception failure)
             {
-                if (failure.Data["NativeSceneBridgeTerminationOwner"] is not SafeKernelHandle job)
+                if (failure.Data[TerminationOwnerDataKey] is not SafeKernelHandle job)
                 {
                     return null;
                 }
@@ -1645,9 +1647,9 @@ internal sealed partial class NetCoreDbgSession : IAsyncDisposable
                 var ownership = new WindowsBridgeProcess(
                     failure.Data["NativeSceneBridgeProcess"] as Process,
                     job,
-                    failure.Data["NativeSceneBridgeProcessHandle"] as SafeKernelHandle);
-                failure.Data.Remove("NativeSceneBridgeTerminationOwner");
-                failure.Data.Remove("NativeSceneBridgeProcessHandle");
+                    failure.Data[ProcessHandleDataKey] as SafeKernelHandle);
+                failure.Data.Remove(TerminationOwnerDataKey);
+                failure.Data.Remove(ProcessHandleDataKey);
                 failure.Data.Remove("NativeSceneBridgeProcess");
                 return ownership;
             }
