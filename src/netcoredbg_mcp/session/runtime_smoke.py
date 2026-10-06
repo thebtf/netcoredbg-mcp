@@ -31,6 +31,8 @@ TERMINAL_STATUSES = {"PASS", "FAIL", "BLOCKED", "IMPASSE", "INVALID_SETUP"}
 RESTORE_RETRY_DELAYS_SECONDS = (0.1, 0.2, 0.5, 1.0, 2.0, 4.0)
 UI_OPERATION_PREFIXES = ("ui.",)
 UI_OPERATION_NAMES = {"ui_key_sequence", "ui_grid"}
+_FIXTURE_RESTORE = "fixture.restore"
+_STOP_CLEANUP_FAILED = "runtime smoke stop cleanup failed"
 
 CleanupCallback = Callable[[], None]
 CleanupFailure = dict[str, str]
@@ -310,7 +312,7 @@ class RuntimeSmokeRunner:
                 return _blocked(name, "launch service unavailable")
             return {"status": "PASS", "reason": "launch completed", "result": await launch(**args)}
 
-        if name == "fixture.restore":
+        if name == _FIXTURE_RESTORE:
             return self._restore_file(args)
 
         if name in {"ui_key_sequence", "ui_grid"}:
@@ -405,7 +407,7 @@ class RuntimeSmokeRunner:
                     restored_files.append(await self._restore_file_with_retries(entry))
                 except Exception as exc:
                     failure = {
-                        "operation": "fixture.restore",
+                        "operation": _FIXTURE_RESTORE,
                         "path": _safe_validated_path(self._session, raw_path),
                         "reason": str(exc),
                     }
@@ -1254,7 +1256,7 @@ class RuntimeSmokeRunRegistry:
             except Exception as exc:
                 return v2_runner._finalize(
                     status="FAIL",
-                    reason="runtime smoke stop cleanup failed",
+                    reason=_STOP_CLEANUP_FAILED,
                     started=record.created_at,
                     action_count=0,
                     cases=[],
@@ -1286,7 +1288,7 @@ class RuntimeSmokeRunRegistry:
         except Exception as exc:
             return runner._finalize(
                 status="FAIL",
-                reason="runtime smoke stop cleanup failed",
+                reason=_STOP_CLEANUP_FAILED,
                 started=record.created_at,
                 action_count=0,
                 completed_steps=[],
@@ -1323,7 +1325,7 @@ class RuntimeSmokeRunRegistry:
             v2_runner.capture_plan_metadata(plan)
             return v2_runner._finalize(
                 status="FAIL",
-                reason="runtime smoke stop cleanup failed",
+                reason=_STOP_CLEANUP_FAILED,
                 started=record.created_at,
                 action_count=0,
                 cases=[],
@@ -1335,7 +1337,7 @@ class RuntimeSmokeRunRegistry:
             )
         return runner._finalize(
             status="FAIL",
-            reason="runtime smoke stop cleanup failed",
+            reason=_STOP_CLEANUP_FAILED,
             started=record.created_at,
             action_count=0,
             completed_steps=[],
@@ -1810,7 +1812,7 @@ def _iter_restore_entries(plan: dict[str, Any]) -> list[tuple[str, Any]]:
         if not isinstance(raw_items, list):
             continue
         for index, raw in enumerate(raw_items):
-            if isinstance(raw, dict) and raw.get("op") == "fixture.restore":
+            if isinstance(raw, dict) and raw.get("op") == _FIXTURE_RESTORE:
                 entries.append((f"{collection_name}[{index}]", _public_operation_args(raw)))
     return entries
 
