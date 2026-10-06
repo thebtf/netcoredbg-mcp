@@ -32,6 +32,8 @@ from .probes import accepted_probe_kinds
 from .result_envelope import compact_value, finalize_result
 from .run_confidence import aggregate_case_confidence
 
+_ELAPSED_TIME_BUDGET_EXHAUSTED = "elapsed time budget exhausted"
+
 
 def compact_v2_result(result: dict[str, Any]) -> dict[str, Any]:
     compact = {
@@ -232,7 +234,7 @@ class RuntimeStateOracleRunner:
             remaining = None if deadline is None else deadline - self._clock()
             if remaining is not None and remaining <= 0:
                 terminal_status = "IMPASSE"
-                terminal_reason = "elapsed time budget exhausted"
+                terminal_reason = _ELAPSED_TIME_BUDGET_EXHAUSTED
                 break
 
             max_actions_budget = budgets["max_actions"]
@@ -258,7 +260,7 @@ class RuntimeStateOracleRunner:
                 case_result = _timeout_case_result(case, cleanup=case_cleanup)
                 executed_actions = 0
                 terminal_status = "IMPASSE"
-                terminal_reason = "elapsed time budget exhausted"
+                terminal_reason = _ELAPSED_TIME_BUDGET_EXHAUSTED
                 case_results.append(case_result)
                 case_cleanups.append(case_cleanup)
                 break
@@ -590,7 +592,7 @@ def _timeout_case_result(
     return {
         "id": case.get("id"),
         "status": "IMPASSE",
-        "reason": "elapsed time budget exhausted",
+        "reason": _ELAPSED_TIME_BUDGET_EXHAUSTED,
         "actions": [],
         "transitions": [],
         "before": {},
