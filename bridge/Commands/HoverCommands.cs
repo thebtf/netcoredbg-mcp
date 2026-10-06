@@ -51,6 +51,8 @@ public static partial class HoverCommands
     private const string AutomationIdKey = "automationId";
     private const string XPathKey = "xpath";
     private const string ControlTypeKey = "controlType";
+    private const string ForegroundHwndBeforeKey = "foregroundHwndBefore";
+    private const string RequestedPointKey = "requestedPoint";
 
     public static JsonNode Hover(
         JsonNode? @params,
@@ -166,10 +168,10 @@ public static partial class HoverCommands
                 {
                     [TargetRootHwndKey] = targetRootHwnd.ToInt64(),
                     [TargetProcessIdKey] = targetProcessId,
-                    ["foregroundHwndBefore"] = foregroundHwndBefore.ToInt64(),
+                    [ForegroundHwndBeforeKey] = foregroundHwndBefore.ToInt64(),
                     [ForegroundVerifiedKey] = false,
                     [TargetRectKey] = RectJson(targetRect),
-                    ["requestedPoint"] = PointJson(requestedPoint),
+                    [RequestedPointKey] = PointJson(requestedPoint),
                 });
         }
 
@@ -224,11 +226,11 @@ public static partial class HoverCommands
                 {
                     [TargetRootHwndKey] = targetRootHwnd.ToInt64(),
                     [TargetProcessIdKey] = targetProcessId,
-                    ["foregroundHwndBefore"] = foregroundHwndBefore.ToInt64(),
+                    [ForegroundHwndBeforeKey] = foregroundHwndBefore.ToInt64(),
                     ["foregroundHwndImmediatelyBeforeMove"] = foregroundHwndImmediatelyBeforeMove.ToInt64(),
                     [ForegroundVerifiedKey] = false,
                     [TargetRectKey] = RectJson(targetRect),
-                    ["requestedPoint"] = PointJson(requestedPoint),
+                    [RequestedPointKey] = PointJson(requestedPoint),
                 });
         }
 
@@ -414,7 +416,7 @@ public static partial class HoverCommands
             [MatchCountKey] = 1,
             [TargetRootHwndKey] = targetRootHwnd.ToInt64(),
             [TargetProcessIdKey] = targetProcessId,
-            ["foregroundHwndBefore"] = foregroundHwndBefore.ToInt64(),
+            [ForegroundHwndBeforeKey] = foregroundHwndBefore.ToInt64(),
             ["foregroundHwndImmediatelyBeforeMove"] = foregroundHwndImmediatelyBeforeMove.ToInt64(),
             ["foregroundHwndAfter"] = foregroundHwndAfter.ToInt64(),
             [ForegroundVerifiedKey] = true,
@@ -422,7 +424,7 @@ public static partial class HoverCommands
             ["focusAfter"] = ElementCommands.BuildElementInfo(focusAfter, includePatterns: false),
             ["focusUnchanged"] = true,
             [TargetRectKey] = RectJson(targetRect),
-            ["requestedPoint"] = PointJson(requestedPoint),
+            [RequestedPointKey] = PointJson(requestedPoint),
             ["actualPointer"] = PointJson(actualPointer),
             ["hitElement"] = ElementCommands.BuildElementInfo(hitElement!, includePatterns: false),
             ["hitRelation"] = hitRelation,
@@ -913,9 +915,9 @@ public static partial class HoverCommands
         result[PointerMutationStateKey] = Moved;
         result[TargetRootHwndKey] = evidence.RootHwnd.ToInt64();
         result[TargetProcessIdKey] = evidence.ProcessId;
-        result["foregroundHwndBefore"] = evidence.ForegroundBefore.ToInt64();
+        result[ForegroundHwndBeforeKey] = evidence.ForegroundBefore.ToInt64();
         result[TargetRectKey] = RectJson(evidence.Rect);
-        result["requestedPoint"] = PointJson(evidence.RequestedPoint);
+        result[RequestedPointKey] = PointJson(evidence.RequestedPoint);
         if (actualPointer is not null)
         {
             result["actualPointer"] = PointJson(actualPointer.Value);
