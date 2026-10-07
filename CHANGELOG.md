@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.23.12] - 2026-09-27
 
 ### Fixed
+- System-event theme mode reuses one private light-mode constant. Whole-source inverse and compiled unsupported-event/mode guards retain exact refusal before registry or broadcast work; theme mutation, Win32 delivery, rollback and Sonar closure are not claimed from this no-effect proof.
 - Modifier commands reuse one private payload-key constant. Whole-source inverse and compiled null/invalid-array guards preserve field names and exact failures before held-state or input work; hold/release behavior and Sonar closure are not claimed from this no-input proof.
 - Clipboard retries and write refusal reuse one private busy-reason constant. Whole-source inverse and compiled literal checks preserve the existing reason, retries, STA behavior and errors; no clipboard access or current Sonar closure is claimed.
 - Public Preview symbol-search regression preserves a supplementary Unicode pair spanning the serializer's 128-unit UTF-16 chunk boundary. The real stdio process returns exact authored context in structured and decoded text results within the 256 KiB UTF-8 frame cap; production serialization and limits are unchanged.
