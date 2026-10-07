@@ -1185,15 +1185,12 @@ def _validate_step(
         _validate_restore_entry(prefix, args, errors)
 
 
-def _validate_op_args(
+def _validate_grid_operation_args(
     prefix: str,
     op_name: str,
     args: dict[str, Any],
     errors: list[str],
-) -> None:
-    if "selector" in args and not isinstance(args["selector"], dict):
-        errors.append(f"{prefix}.selector must be an object for op {op_name}")
-
+) -> bool:
     if op_name in {
         "ui.grid.snapshot",
         "ui.grid.get_state",
@@ -1251,7 +1248,24 @@ def _validate_op_args(
             errors.append(f"{prefix}.rows must be a list for op {op_name}")
         elif isinstance(rows, list):
             _validate_grid_row_assertions(prefix, op_name, rows, errors)
-    elif op_name in {"ui.list.invoke_item", _OPERATION_UI_LIST_TOGGLE_ITEM_CHILD}:
+    else:
+        return False
+    return True
+
+
+def _validate_op_args(
+    prefix: str,
+    op_name: str,
+    args: dict[str, Any],
+    errors: list[str],
+) -> None:
+    if "selector" in args and not isinstance(args["selector"], dict):
+        errors.append(f"{prefix}.selector must be an object for op {op_name}")
+
+    if _validate_grid_operation_args(prefix, op_name, args, errors):
+        return
+
+    if op_name in {"ui.list.invoke_item", _OPERATION_UI_LIST_TOGGLE_ITEM_CHILD}:
         item = args.get("item")
         if "item" in args and not isinstance(item, dict):
             errors.append(f"{prefix}.item must be an object for op {op_name}")
