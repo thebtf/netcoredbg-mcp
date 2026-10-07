@@ -30,7 +30,7 @@ from .runtime_smoke_v2.actions import ActionContext
 from .runtime_smoke_v2.actions.ui_text_input import handle_ui_text_type_replace_selection
 
 BackendProvider = Callable[[], Awaitable[Any]]
-OperationAdapterMap = dict[str, Callable[..., Awaitable[dict[str, Any]]]]
+OperationAdapterMap = dict[str, Callable[..., dict[str, Any] | Awaitable[dict[str, Any]]]]
 STATE_CHANGE_SETTLE_SECONDS = 0.5
 SELECTED_PAYLOAD_SETTLE_ATTEMPTS = 10
 SELECTED_PAYLOAD_SETTLE_INTERVAL_SECONDS = 0.1
@@ -1180,7 +1180,7 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
             return cast(dict[str, Any], result)
         return {"status": "PASS", "mode": mode, "result": result}
 
-    async def process_registry_count(**_: Any) -> dict[str, Any]:
+    def process_registry_count(**_: Any) -> dict[str, Any]:
         registry = getattr(session, "process_registry", None)
         if registry is None:
             return _adapter_blocked(
@@ -1246,7 +1246,7 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
             "byte_count": len(content.encode("utf-8")),
         }
 
-    async def runtime_input_monitor_check(**args: Any) -> dict[str, Any]:
+    def runtime_input_monitor_check(**args: Any) -> dict[str, Any]:
         return input_monitor.check(**args)
 
     async def debug_hygiene_preflight(**args: Any) -> dict[str, Any]:
@@ -1393,7 +1393,7 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
             "hit_count": int(getattr(tracepoint, "hit_count", 0)),
         }
 
-    async def debug_trace_log_clear(**_: Any) -> dict[str, Any]:
+    def debug_trace_log_clear(**_: Any) -> dict[str, Any]:
         manager = _session_tracepoint_manager(session, create=False)
         if manager is None:
             return {"status": "PASS", "cleared": 0}

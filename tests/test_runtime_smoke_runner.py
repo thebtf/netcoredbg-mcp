@@ -1749,8 +1749,7 @@ async def test_session_operation_adapters_preserve_non_pass_statuses() -> None:
     assert stop == {"status": "BLOCKED", "reason": "debuggee is busy"}
 
 
-@pytest.mark.asyncio
-async def test_process_registry_count_blocks_registry_errors() -> None:
+def test_process_registry_count_blocks_registry_errors() -> None:
     class FailingRegistry:
         def reap_stale(self) -> None:
             raise RuntimeError("registry unavailable")
@@ -1771,7 +1770,7 @@ async def test_process_registry_count_blocks_registry_errors() -> None:
 
     adapters = ui_operation_adapters(backend_provider, session=RegistrySession())
 
-    result = await adapters["process.registry.count"]()
+    result = adapters["process.registry.count"]()
 
     assert result["status"] == "BLOCKED"
     assert result["reason"] == "registry unavailable"
