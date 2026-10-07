@@ -10,7 +10,7 @@ using Xunit.Abstractions;
 namespace NetCoreDbg.Mcp.Stateless.Tests.NativeScene;
 
 [Collection(NetCoreDbgSessionProcessCollection.Name)]
-public sealed class ElementCommandsBehaviorTests
+public sealed partial class ElementCommandsBehaviorTests
 {
     private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(10);
@@ -756,34 +756,34 @@ public sealed class ElementCommandsBehaviorTests
         public int Bottom;
     }
 
-    [DllImport("user32.dll", SetLastError = true)]
+    [LibraryImport("user32.dll", EntryPoint = "GetWindowRect", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+    private static partial bool GetWindowRect(IntPtr hwnd, out RECT rect);
 
-    [DllImport("user32.dll", SetLastError = true)]
+    [LibraryImport("user32.dll", EntryPoint = "GetClientRect", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
+    private static partial bool GetClientRect(IntPtr hwnd, out RECT rect);
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern uint GetDpiForWindow(IntPtr hwnd);
+    [LibraryImport("user32.dll", EntryPoint = "GetDpiForWindow", SetLastError = true)]
+    private static partial uint GetDpiForWindow(IntPtr hwnd);
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+    [LibraryImport("user32.dll", EntryPoint = "GetWindowThreadProcessId", SetLastError = true)]
+    private static partial uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
 
-    [DllImport("user32.dll")]
+    [LibraryImport("user32.dll", EntryPoint = "IsWindow")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool IsWindow(IntPtr hwnd);
+    private static partial bool IsWindow(IntPtr hwnd);
 
-    [DllImport("user32.dll")]
+    [LibraryImport("user32.dll", EntryPoint = "IsWindowVisible")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool IsWindowVisible(IntPtr hwnd);
+    private static partial bool IsWindowVisible(IntPtr hwnd);
 
-    [DllImport("user32.dll")]
+    [LibraryImport("user32.dll", EntryPoint = "IsIconic")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool IsIconic(IntPtr hwnd);
+    private static partial bool IsIconic(IntPtr hwnd);
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+    [LibraryImport("user32.dll", EntryPoint = "SetThreadDpiAwarenessContext", SetLastError = true)]
+    private static partial IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
 
     private static void AssertSelectedCueRows(JsonObject response)
     {

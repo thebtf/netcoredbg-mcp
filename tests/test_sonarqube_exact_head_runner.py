@@ -4178,6 +4178,14 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 "host/NetCoreDbg.Mcp.Stateless/obj/Debug/net8.0/Microsoft.Interop.LibraryImportGenerator/"
                 "Microsoft.Interop.LibraryImportGenerator/LibraryImports.g.cs",
             ),
+            "element-test": (
+                "NetCoreDbg.Mcp.Stateless.Tests",
+                "NetCoreDbg.Mcp.Stateless.Tests.NativeScene.ElementCommandsBehaviorTests",
+                "host/NetCoreDbg.Mcp.Stateless.Tests/NativeScene/ElementCommandsBehaviorTests.cs",
+                "host/NetCoreDbg.Mcp.Stateless.Tests/obj/Debug/net8.0/"
+                "Microsoft.Interop.LibraryImportGenerator/Microsoft.Interop.LibraryImportGenerator/"
+                "LibraryImports.g.cs",
+            ),
         }[kind]
         owner = self._write_source(root, owner_relative)
         generated = root / generated_relative
@@ -4272,6 +4280,49 @@ class TestWave3CoverageProducerRedContracts(TestCase):
     def test_stateless_collector_library_import_capture_actual_session_identity(self):
         self._assert_library_import_capture_projection("session")
 
+    def test_stateless_collector_library_import_test_owner_preserves_production_facts(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            capture, _owner, generated = self._library_import_capture(root, "element-test")
+            packages = capture.find("packages")
+            test_package = packages[0]
+            packages.remove(test_package)
+            raw = root / "raw.xml"
+            projected = root / "projected.xml"
+            raw.write_text(
+                runner.ElementTree.tostring(capture, encoding="unicode"), encoding="utf-8"
+            )
+            with patch.object(
+                runner, "is_tracked", side_effect=lambda _root, _env, path: path != generated
+            ):
+                baseline = runner.project_stateless_collector(context, raw, projected)
+                packages.append(test_package)
+                classes = test_package.find("classes")
+                for authored_first in (False, True):
+                    with self.subTest(authored_first=authored_first):
+                        if authored_first:
+                            classes[:] = list(reversed(classes))
+                        original = runner.ElementTree.tostring(capture, encoding="unicode")
+                        raw.write_text(original, encoding="utf-8")
+                        parsed = runner.project_stateless_collector(context, raw, projected)
+                        self.assertEqual(parsed["facts"], baseline["facts"])
+                        self.assertEqual(parsed["source_paths"], baseline["source_paths"])
+                        for key in (
+                            "lines_valid",
+                            "lines_covered",
+                            "branches_valid",
+                            "branches_covered",
+                        ):
+                            self.assertEqual(parsed[key], baseline[key])
+                        self.assertEqual(raw.read_text(encoding="utf-8"), original)
+                        normalized = runner.ElementTree.parse(projected)
+                        self.assertEqual(
+                            [item.get("name") for item in normalized.findall("./packages/package")],
+                            ["NetCoreDbg.Mcp.Stateless"],
+                        )
+            self.assertFalse(generated.exists())
+
     def test_stateless_collector_library_import_capture_rejects_unproven_identity(self):
         variants = (
             "wrong_package",
@@ -4282,12 +4333,13 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             "wrong_owner_filename",
             "foreign_owner_class",
             "wrong_generated_filename",
+            "wrong_generated_directory",
             "foreign_generated_source",
             "other_generated_class",
             "tracked_generated",
             "untracked_owner",
         )
-        for kind in ("screenshot", "session"):
+        for kind in ("screenshot", "session", "element-test"):
             for variant in variants:
                 with (
                     self.subTest(kind=kind, variant=variant),
@@ -4321,6 +4373,11 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                         authored_class.set("name", "Foreign.GeneratedOwner")
                     elif variant == "wrong_generated_filename":
                         generated = generated.with_name("Injected.g.cs")
+                        generated_class.set("filename", str(generated))
+                    elif variant == "wrong_generated_directory":
+                        generated = root / generated.relative_to(root).as_posix().replace(
+                            "/obj/Debug/", "/obj/Release/"
+                        )
                         generated_class.set("filename", str(generated))
                     elif variant == "foreign_generated_source":
                         generated = root.parent / "foreign/LibraryImports.g.cs"

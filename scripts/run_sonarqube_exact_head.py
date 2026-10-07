@@ -2357,6 +2357,36 @@ def _collector_source_relative(
             )
         _safe_coverage_source(context, owner_relative, "dotnet", (context.repository_root,))
         return None
+    if relative.startswith("host/NetCoreDbg.Mcp.Stateless.Tests/obj/"):
+        if (
+            relative
+            != (
+                "host/NetCoreDbg.Mcp.Stateless.Tests/obj/Debug/net8.0/"
+                "Microsoft.Interop.LibraryImportGenerator/Microsoft.Interop.LibraryImportGenerator/"
+                "LibraryImports.g.cs"
+            )
+            or class_name
+            != "NetCoreDbg.Mcp.Stateless.Tests.NativeScene.ElementCommandsBehaviorTests"
+            or is_tracked(context.repository_root, _coverage_environment(), candidate)
+        ):
+            _coverage_failure(
+                "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized generated collector source"
+            )
+        owner_relative = (
+            "host/NetCoreDbg.Mcp.Stateless.Tests/NativeScene/ElementCommandsBehaviorTests.cs"
+        )
+        owner_filename = (context.repository_root / owner_relative).as_posix()
+        if package.get("name") != "NetCoreDbg.Mcp.Stateless.Tests" or not any(
+            owner.get("name") == class_name
+            and owner.get("filename", "").replace("\\", "/") in {owner_relative, owner_filename}
+            for owner in package.findall("./classes/class")
+        ):
+            _coverage_failure(
+                "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized generated collector owner"
+            )
+        return _resolve_coverage_source(
+            context, owner_relative.split("/"), (context.repository_root,)
+        )
     metadata = _scanner_tree_metadata(candidate)
     if (
         not stat.S_ISREG(metadata.st_mode)
@@ -2544,8 +2574,10 @@ def project_stateless_collector(
         if classes is None:
             _coverage_failure("COVERAGE_REPORT_INVALID", "collector package has no classes")
         counts = [0, 0, 0, 0]
-        for item in list(classes):
-            relative = _collector_source_relative(context, package, item)
+        resolved_classes = [
+            (item, _collector_source_relative(context, package, item)) for item in classes
+        ]
+        for item, relative in resolved_classes:
             if relative is None or _collector_test_source(
                 context,
                 package,
