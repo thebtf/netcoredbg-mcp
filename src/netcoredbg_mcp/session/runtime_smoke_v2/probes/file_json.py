@@ -36,7 +36,7 @@ def _resolve_latest_alias(path: Path) -> Path:
     return newest if newest is not None else path
 
 
-async def handle_file_json(
+def handle_file_json(
     probe: dict[str, Any],
     context: Any,
     *,

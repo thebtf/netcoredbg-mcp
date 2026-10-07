@@ -14,8 +14,6 @@ from ._common import (
 async def handle_ui_grid(
     probe: dict[str, Any],
     context: Any,
-    *,
-    phase: str,
 ) -> dict[str, Any]:
     kind = "ui.grid"
     rows = list(probe.get("rows") or [])

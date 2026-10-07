@@ -30,7 +30,7 @@ async def test_latest_alias_resolves_to_newest_diagnostic_snapshot(tmp_path: Pat
     os.utime(older, ns=(1_000_000_000, 1_000_000_000))
     os.utime(newer, ns=(2_000_000_000, 2_000_000_000))
 
-    result = await handle_file_json(
+    result = handle_file_json(
         {
             "name": "latest",
             "path": str(tmp_path / "diagnostic-latest.json"),
@@ -50,7 +50,7 @@ async def test_latest_alias_prefers_literal_file_when_present(tmp_path: Path) ->
     _write(tmp_path / "diagnostic-startup.json", {"value": "stage"})
     _write(tmp_path / "diagnostic-latest.json", {"value": "literal"})
 
-    result = await handle_file_json(
+    result = handle_file_json(
         {
             "name": "latest",
             "path": str(tmp_path / "diagnostic-latest.json"),
@@ -66,7 +66,7 @@ async def test_latest_alias_prefers_literal_file_when_present(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_latest_alias_fails_honestly_when_no_snapshots_exist(tmp_path: Path) -> None:
-    result = await handle_file_json(
+    result = handle_file_json(
         {
             "name": "latest",
             "path": str(tmp_path / "diagnostic-latest.json"),
@@ -84,7 +84,7 @@ async def test_latest_alias_fails_honestly_when_no_snapshots_exist(tmp_path: Pat
 async def test_non_alias_missing_file_still_fails(tmp_path: Path) -> None:
     _write(tmp_path / "diagnostic-startup.json", {"value": "stage"})
 
-    result = await handle_file_json(
+    result = handle_file_json(
         {
             "name": "explicit",
             "path": str(tmp_path / "diagnostic-other.json"),
