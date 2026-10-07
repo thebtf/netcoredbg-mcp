@@ -17,6 +17,7 @@ public static class ClipboardCommands
 {
     private const int ClipboardRetryCount = 3;
     private const int ClipboardRetryDelayMs = 25;
+    private const string ClipboardBusyReason = "clipboard busy";
 
     /// <summary>
     /// The HRESULT returned by Windows when the clipboard is open by another
@@ -103,7 +104,7 @@ public static class ClipboardCommands
                 return new JsonObject
                 {
                     ["success"] = false,
-                    ["reason"] = "clipboard busy"
+                    ["reason"] = ClipboardBusyReason
                 };
             }
 
@@ -156,7 +157,7 @@ public static class ClipboardCommands
             return new JsonObject
             {
                 ["written"] = false,
-                ["reason"] = (string?)writeResult["reason"] ?? "clipboard busy"
+                ["reason"] = (string?)writeResult["reason"] ?? ClipboardBusyReason
             };
         }
 

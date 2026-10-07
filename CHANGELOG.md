@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.23.12] - 2026-09-27
 
 ### Fixed
+- Clipboard retries and write refusal reuse one private busy-reason constant. Whole-source inverse and compiled literal checks preserve the existing reason, retries, STA behavior and errors; no clipboard access or current Sonar closure is claimed.
 - Public Preview symbol-search regression preserves a supplementary Unicode pair spanning the serializer's 128-unit UTF-16 chunk boundary. The real stdio process returns exact authored context in structured and decoded text results within the 256 KiB UTF-8 frame cap; production serialization and limits are unchanged.
 - Runtime-smoke grid operation validation uses one ordered private family helper, retaining selector-first errors, recognized-operation routing, existing scalar/range/row validators, accepted types and original argument/error-list identities. All 51 schema owners and baseline/candidate validator parity pass; Sonar closure remains unmeasured.
 - Grid row drag reuses private status, attempt and dimension keys at twenty-five sites. Full inverse-source and compiled input-free JSON/geometry checks preserve diagnostics, drop/edge/neutral points, bounds signatures and missing-data refusal; input, timing, scrolling and cleanup are unchanged. Sonar closure and a new full physical-drag replay are not claimed.
