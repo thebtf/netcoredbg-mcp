@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.23.12] - 2026-09-27
 
 ### Fixed
+- Keyboard cleanup regressions restore their temporary Win32 last-error mock state through pytest's existing monkeypatch fixture; native event and error assertions are unchanged.
 - Grid commands share one private status-property key at twelve sites; wire values, result order, refusals and input behavior are unchanged. Whole-source inverse and bridge compilation pass; Sonar closure remains unmeasured.
 - Runtime-smoke row identity separates configured cell selection from existing text and stable-field fallbacks, preserving precedence, falsey values, empty string identities and lookup order. Backend calls, input and cleanup are unchanged; Sonar closure remains unmeasured.
 - WPF smoke bridge tests wait for the launched fixture's rendered, visible, non-minimized application main window and loader readiness through a per-launch pipe, rather than the unrelated two-second process-window heuristic. Default fixture startup, calibration, production input/provider behavior and existing startup/request/cleanup budgets are unchanged; Sonar closure is not claimed.

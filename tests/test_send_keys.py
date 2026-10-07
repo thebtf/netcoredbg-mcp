@@ -212,7 +212,9 @@ def test_failed_key_up_attempts_owned_up_only_cleanup(
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
 @pytest.mark.parametrize("sequence", ["^+a", "^+(a)"])
-def test_failed_shift_release_still_attempts_ctrl_release(send_keys, mock_user32, sequence):
+def test_failed_shift_release_still_attempts_ctrl_release(
+    send_keys, mock_user32, monkeypatch, sequence
+):
     events = []
 
     def capture(_count, input_pointer, _size):
@@ -222,7 +224,7 @@ def test_failed_shift_release_still_attempts_ctrl_release(send_keys, mock_user32
         return 0 if key.wVk == 0x10 and key.dwFlags & 0x0002 else 1
 
     mock_user32.SendInput.side_effect = capture
-    ctypes.windll.kernel32.GetLastError.return_value = 5
+    monkeypatch.setattr(ctypes.windll.kernel32.GetLastError, "return_value", 5)
 
     with pytest.raises(OSError, match="SendInput failed") as error:
         send_keys(sequence)
@@ -239,7 +241,7 @@ def test_failed_shift_release_still_attempts_ctrl_release(send_keys, mock_user32
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
-def test_drag_failed_shift_release_still_attempts_ctrl_release(send_keys, mock_user32):
+def test_drag_failed_shift_release_still_attempts_ctrl_release(send_keys, mock_user32, monkeypatch):
     from netcoredbg_mcp.ui.automation import _send_drag
 
     events = []
@@ -251,7 +253,7 @@ def test_drag_failed_shift_release_still_attempts_ctrl_release(send_keys, mock_u
         return 0 if key.wVk == 0x10 and key.dwFlags & 0x0002 else 1
 
     mock_user32.SendInput.side_effect = capture
-    ctypes.windll.kernel32.GetLastError.return_value = 5
+    monkeypatch.setattr(ctypes.windll.kernel32.GetLastError, "return_value", 5)
 
     with pytest.raises(OSError, match="SendInput failed") as error:
         _send_drag(10, 20, 30, 40, speed_ms=20, hold_modifiers=["ctrl", "shift"])
