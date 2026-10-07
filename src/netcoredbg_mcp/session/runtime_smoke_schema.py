@@ -599,6 +599,11 @@ def _validate_unsafe_diagnostic_evidence(
 
 
 def _validate_oracle_pack_schema(payload: dict[str, Any], errors: list[str]) -> None:
+    _validate_oracle_pack_checks(payload, errors)
+    _validate_oracle_pack_sources(payload, errors)
+
+
+def _validate_oracle_pack_checks(payload: dict[str, Any], errors: list[str]) -> None:
     checks = payload.get("checks")
     if isinstance(checks, list):
         for index, check in enumerate(checks):
@@ -614,6 +619,8 @@ def _validate_oracle_pack_schema(payload: dict[str, Any], errors: list[str]) -> 
                 errors.append(f"{prefix}.on_blocked must be an object")
             _validate_next_step(prefix, check.get("on_blocked"), errors)
 
+
+def _validate_oracle_pack_sources(payload: dict[str, Any], errors: list[str]) -> None:
     sources = payload.get("sources")
     if sources is None:
         return
@@ -633,17 +640,24 @@ def _validate_oracle_pack_schema(payload: dict[str, Any], errors: list[str]) -> 
             errors.append(f"{prefix}.id duplicates earlier source id: {source_id}")
         else:
             seen_source_ids.add(source_id)
-        source_probe = source.get("probe")
-        if not isinstance(source_probe, dict):
-            errors.append(f"{prefix}.probe must be an object")
-            continue
-        source_kind = source_probe.get("kind")
-        if source_kind is None:
-            errors.append(f"{prefix}.probe.kind is required")
-        elif source_kind == "oracle_pack":
-            errors.append(f"{prefix}.probe.kind must not be oracle_pack")
-        else:
-            _validate_probe_name(f"{prefix}.probe.kind", source_kind, errors)
+        _validate_oracle_pack_source_probe(prefix, source.get("probe"), errors)
+
+
+def _validate_oracle_pack_source_probe(
+    prefix: str,
+    source_probe: Any,
+    errors: list[str],
+) -> None:
+    if not isinstance(source_probe, dict):
+        errors.append(f"{prefix}.probe must be an object")
+        return
+    source_kind = source_probe.get("kind")
+    if source_kind is None:
+        errors.append(f"{prefix}.probe.kind is required")
+    elif source_kind == "oracle_pack":
+        errors.append(f"{prefix}.probe.kind must not be oracle_pack")
+    else:
+        _validate_probe_name(f"{prefix}.probe.kind", source_kind, errors)
 
 
 def _validate_app_diagnostics_schema(payload: dict[str, Any], errors: list[str]) -> None:
