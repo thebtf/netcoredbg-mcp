@@ -542,6 +542,14 @@ def _validate_diagnostic_field_shapes(
             errors.append(f"{kind}.{field_name} must be a list")
     _validate_diagnostic_limits(kind, payload, errors)
     _validate_unsafe_diagnostic_evidence(kind, payload, errors)
+    _validate_diagnostic_kind_schema(kind, payload, errors)
+
+
+def _validate_diagnostic_kind_schema(
+    kind: str,
+    payload: dict[str, Any],
+    errors: list[str],
+) -> None:
     if kind == "oracle_pack":
         _validate_oracle_pack_schema(payload, errors)
     elif kind == "app_diagnostics":
