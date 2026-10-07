@@ -934,6 +934,9 @@ async def test_host_native_code_search_has_exact_python_catalog_and_call_parity(
     search_source remains Python-owned and is checked through the same host session. The
     route-trap test separately proves the three selected calls are no longer relayed.
     """
+    success_calls = _CODE_SEARCH_SUCCESS_CALLS + (
+        ("partial_references", "find_code_references", {"name": "Cue"}),
+    )
     direct_params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "netcoredbg_mcp", "--project", str(SEARCH_FIXTURE_ROOT)],
@@ -943,7 +946,7 @@ async def test_host_native_code_search_has_exact_python_catalog_and_call_parity(
     direct = await _collect_code_search_calls(
         direct_params,
         tmp_path / "direct-code-search-stderr.log",
-        _CODE_SEARCH_SUCCESS_CALLS + _CODE_SEARCH_ERROR_CALLS,
+        success_calls + _CODE_SEARCH_ERROR_CALLS,
     )
 
     host_env = _clean_code_search_environment()
@@ -957,7 +960,7 @@ async def test_host_native_code_search_has_exact_python_catalog_and_call_parity(
     host = await _collect_code_search_calls(
         host_params,
         tmp_path / "host-code-search-stderr.log",
-        _CODE_SEARCH_SUCCESS_CALLS + _CODE_SEARCH_ERROR_CALLS,
+        success_calls + _CODE_SEARCH_ERROR_CALLS,
     )
 
     assert [tool["name"] for tool in host["catalog"]] == [
@@ -966,13 +969,21 @@ async def test_host_native_code_search_has_exact_python_catalog_and_call_parity(
     assert _native_catalog(host["catalog"]) == _native_catalog(direct["catalog"])
     assert host["serialized"] == direct["serialized"]
 
-    for label, _, _ in _CODE_SEARCH_SUCCESS_CALLS:
+    for label, _, _ in success_calls:
         _assert_code_search_envelope(direct["payloads"][label], error=False)
     for label, _, _ in _CODE_SEARCH_ERROR_CALLS:
         _assert_code_search_envelope(direct["payloads"][label], error=True)
 
     assert direct["payloads"]["symbol"]["data"]["results"] == [FIND_SYMBOL_EXPECTED_RESULT]
-    assert direct["payloads"]["references"]["data"]["count"] >= 2
+    assert {
+        ("ViewModels/MainViewModel.cs", 8),
+        ("Views/MainWindow.xaml", 8),
+    }.issubset(
+        (result["file"], result["line"])
+        for result in host["payloads"]["references"]["data"]["results"]
+    )
+    partial_references = host["payloads"]["partial_references"]["data"]
+    assert partial_references["results"] == [] and partial_references["count"] == 0
     assert direct["payloads"]["context"]["data"]["lines"][2]["line"] == 10
     assert direct["payloads"]["search"]["data"]["results"][0]["file"] == "Views/MainWindow.xaml"
     assert "Symbol name must not be empty" in direct["payloads"]["empty_symbol"]["error"]
