@@ -669,6 +669,14 @@ def _validate_app_diagnostics_freshness_shapes(
     payload: dict[str, Any],
     errors: list[str],
 ) -> None:
+    _validate_app_diagnostics_app_expectations(payload, errors)
+    _validate_app_diagnostics_observed_shapes(payload, errors)
+
+
+def _validate_app_diagnostics_app_expectations(
+    payload: dict[str, Any],
+    errors: list[str],
+) -> None:
     app = payload.get("app")
     if isinstance(app, dict):
         process_id = app.get("process_id") or app.get("expected_process_id")
@@ -682,6 +690,12 @@ def _validate_app_diagnostics_freshness_shapes(
         require_active_process = app.get("require_active_process")
         if require_active_process is not None and not isinstance(require_active_process, bool):
             errors.append("app_diagnostics.app.require_active_process must be a boolean")
+
+
+def _validate_app_diagnostics_observed_shapes(
+    payload: dict[str, Any],
+    errors: list[str],
+) -> None:
     workspace = payload.get("workspace")
     if workspace is not None and not isinstance(workspace, (str, dict)):
         errors.append("app_diagnostics.workspace must be a string or object")
