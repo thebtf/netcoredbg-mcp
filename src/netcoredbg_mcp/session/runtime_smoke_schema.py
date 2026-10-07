@@ -1115,16 +1115,20 @@ def _validate_budgets(plan: dict[str, Any], errors: list[str]) -> None:
             errors.append("budgets.max_actions must be at least 1")
     if "max_elapsed_seconds" in budgets:
         max_elapsed = budgets["max_elapsed_seconds"]
-        if isinstance(max_elapsed, bool) or not isinstance(max_elapsed, (int, float)):
-            errors.append("budgets.max_elapsed_seconds must be a number")
+        _validate_max_elapsed_seconds(max_elapsed, errors)
+
+
+def _validate_max_elapsed_seconds(max_elapsed: Any, errors: list[str]) -> None:
+    if isinstance(max_elapsed, bool) or not isinstance(max_elapsed, (int, float)):
+        errors.append("budgets.max_elapsed_seconds must be a number")
+    else:
+        try:
+            elapsed_value = float(max_elapsed)
+        except OverflowError:
+            errors.append("budgets.max_elapsed_seconds must be positive")
         else:
-            try:
-                elapsed_value = float(max_elapsed)
-            except OverflowError:
+            if not math.isfinite(elapsed_value) or elapsed_value <= 0:
                 errors.append("budgets.max_elapsed_seconds must be positive")
-            else:
-                if not math.isfinite(elapsed_value) or elapsed_value <= 0:
-                    errors.append("budgets.max_elapsed_seconds must be positive")
 
 
 def _validate_step_collections(plan: dict[str, Any], errors: list[str]) -> None:
