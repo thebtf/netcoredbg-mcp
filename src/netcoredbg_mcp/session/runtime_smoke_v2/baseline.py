@@ -104,9 +104,7 @@ async def _execute_step(
         result = await context.call_adapter("launch", **launch_args)
         if isinstance(result, dict) and str(result.get("status", "PASS")) == "PASS":
             _ensure_default_output_checkpoint(context)
-        if effective_diagnostic_launch and isinstance(result, dict):
-            return {**result, "diagnostic_launch": effective_diagnostic_launch}
-        return result
+        return _attach_diagnostic_launch(result, effective_diagnostic_launch)
     if kind == "control_set":
         action = dict(step.get("action") or {})
         return await dispatch_action(action, context)
@@ -123,6 +121,15 @@ async def _execute_step(
         "reason": "unsupported baseline step kind",
         "accepted": {"baseline_step_kinds": _accepted_step_kinds()},
     }
+
+
+def _attach_diagnostic_launch(
+    result: Any,
+    contract: dict[str, Any] | None,
+) -> Any:
+    if contract and isinstance(result, dict):
+        return {**result, "diagnostic_launch": contract}
+    return result
 
 
 def _cleanup_step_for(step: dict[str, Any]) -> dict[str, Any] | None:

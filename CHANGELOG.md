@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.23.12] - 2026-09-27
 
 ### Fixed
+- Baseline diagnostic-launch result enrichment uses one pure helper without changing launch or checkpoint ordering, shallow-copy behavior, or result identity when enrichment is skipped.
 - Runtime-smoke plan validation separates the preflight, launch, freshness, baseline and generate shape checks into one ordered private helper, preserving accepted types, explicit-null rejection, exact errors and validation order.
 - Oracle-pack schema validation separates checks, sources and source-probe checks into ordered private helpers, preserving accepted fields, duplicate-ID handling, exact errors and append order. Sonar closure remains unmeasured.
 - App-diagnostics wait/poll schema validation separates path/pattern and numeric checks into two ordered private helpers, preserving accepted inputs, exact errors and append order. Runtime waits, polling and bounds are unchanged; Sonar closure remains unmeasured.
