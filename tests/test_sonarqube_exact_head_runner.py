@@ -1745,6 +1745,54 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     with self.assertRaises(runner.RunnerError):
                         runner.validate_exact_head_receipt_v3(observed)
 
+    def test_release_intent_version_keeps_ascii_digits(self):
+        for version, accepted in (
+            ("0.23.12", True),
+            ("01.002.0003", True),
+            ("١.23.12", False),
+            ("0.２3.12", False),
+            ("0.23.१२", False),
+            ("0.23.12\n", False),
+        ):
+            metadata = f'[project]\nname = "netcoredbg-mcp"\nversion = "{version}"\n'
+            with (
+                self.subTest(version=version),
+                patch.object(runner, "git_blob_bytes", return_value=metadata.encode("utf-8")),
+            ):
+                if accepted:
+                    self.assertEqual(
+                        runner.release_intent_at_head(RUNNER_PATH.parents[1], {}, "a" * 40),
+                        "v" + version,
+                    )
+                else:
+                    with self.assertRaisesRegex(
+                        runner.RunnerError, "COVERAGE_RELEASE_INTENT_INVALID"
+                    ):
+                        runner.release_intent_at_head(RUNNER_PATH.parents[1], {}, "a" * 40)
+
+    def test_v3_release_intent_keeps_ascii_digits(self):
+        root = RUNNER_PATH.parents[1]
+        context = self.context(root, root)
+        for role in ("candidate", "post-merge"):
+            for intent, accepted in (
+                ("v0.23.12", True),
+                ("v01.002.0003", True),
+                ("v١.23.12", False),
+                ("v0.２3.12", False),
+                ("v0.23.१२", False),
+                ("v0.23.12\n", False),
+            ):
+                with self.subTest(role=role, intent=intent):
+                    receipt = runner.receipt_base(context, role, intent)
+                    if accepted:
+                        runner.validate_exact_head_receipt_v3(receipt)
+                    else:
+                        with self.assertRaisesRegex(
+                            runner.RunnerError,
+                            "EXACT_HEAD_RECEIPT_V3_INVALID: release role has illegal outcome or intent",
+                        ):
+                            runner.validate_exact_head_receipt_v3(receipt)
+
     def test_v3_failure_code_schema_and_validator_reject_non_strings(self):
         schema_path = (
             RUNNER_PATH.parents[1]

@@ -1235,7 +1235,7 @@ def release_intent_at_head(repository_root: Path, environment: Mapping[str, str]
     if (
         names != ["netcoredbg-mcp"]
         or len(versions) != 1
-        or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", versions[0])
+        or not re.fullmatch(r"(?a:\d)+\.(?a:\d)+\.(?a:\d)+", versions[0])
     ):
         raise RunnerError(
             "COVERAGE_RELEASE_INTENT_INVALID: tracked project identity or version is invalid."
@@ -5228,7 +5228,9 @@ def validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None:
         if (
             outcome not in {"PASS", "BLOCKED"}
             or not isinstance(intent, str)
-            or (not unobserved_intent and not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", intent))
+            or (
+                not unobserved_intent and not re.fullmatch(r"v(?a:\d)+\.(?a:\d)+\.(?a:\d)+", intent)
+            )
         ):
             _v3_fail("release role has illegal outcome or intent")
     else:
