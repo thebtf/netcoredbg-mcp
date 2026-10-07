@@ -90,6 +90,49 @@ public sealed class PreviewProcessContractTests
     }
 
     [Fact]
+    public async Task FindCodeSymbol_SurrogatePairAtUtf16ChunkBoundary_PreservesExactContextAndFrameCap()
+    {
+        const int maximumFrameBytes = 256 * 1024;
+        const int highSurrogateOffset = 127;
+        const int supplementaryCodePoint = 0x1F600;
+        const string marker = "SurrogateBoundaryMarker";
+        var prefix = $"public sealed class {marker} {{ }} // ";
+        var authoredContext = prefix + new string('p', highSurrogateOffset - prefix.Length)
+            + char.ConvertFromUtf32(supplementaryCodePoint) + "end";
+
+        Assert.Equal(authoredContext, authoredContext.Trim());
+        Assert.True(char.IsHighSurrogate(authoredContext[highSurrogateOffset]));
+        Assert.True(char.IsLowSurrogate(authoredContext[highSurrogateOffset + 1]));
+        Assert.Equal(supplementaryCodePoint, char.ConvertToUtf32(authoredContext, highSurrogateOffset));
+        Assert.InRange(authoredContext.EnumerateRunes().Count(), 1, 512);
+
+        using var root = TemporaryProject.Create(marker, authoredContext + "\n");
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(root.Path);
+        var requestId = new RequestId("surrogate-boundary-success");
+
+        var response = await driver.CallToolAsync(
+            ToolName,
+            new JsonObject { ["name"] = marker, ["kind"] = "class" },
+            requestId);
+
+        Assert.Equal(requestId, Assert.IsType<JsonRpcResponse>(response).Id);
+        var result = RequireResult(response);
+        Assert.Equal("complete", result["resultType"]!.GetValue<string>());
+        Assert.False(result["isError"]!.GetValue<bool>());
+        var structured = Assert.IsType<JsonObject>(result["structuredContent"]);
+        Assert.Equal("find_code_symbol_success", structured["kind"]!.GetValue<string>());
+        var match = Assert.IsType<JsonObject>(Assert.Single(structured["results"]!.AsArray()));
+        Assert.Equal("Marker.cs", match["file"]!.GetValue<string>());
+        Assert.Equal(1, match["line"]!.GetValue<int>());
+        Assert.Equal(marker, match["name"]!.GetValue<string>());
+        Assert.Equal("class", match["kind"]!.GetValue<string>());
+        Assert.Equal(authoredContext, match["context"]!.GetValue<string>());
+        var decodedText = Assert.IsType<JsonObject>(JsonNode.Parse(SingleText(result)));
+        Assert.True(JsonNode.DeepEquals(structured, decodedText));
+        Assert.True(FrameByteCount(response) <= maximumFrameBytes);
+    }
+
+    [Fact]
     public async Task SupportedMetadataIsPerRequest_AndUnsupportedVersionReturnsExactJsonRpcError()
     {
         await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
