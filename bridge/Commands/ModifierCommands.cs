@@ -8,6 +8,8 @@ namespace FlaUIBridge.Commands;
 
 public static class ModifierCommands
 {
+    private const string ModifiersPropertyName = "modifiers";
+
     private static readonly IReadOnlyDictionary<string, VirtualKeyShort> ModifierMap =
         new Dictionary<string, VirtualKeyShort>(StringComparer.OrdinalIgnoreCase)
         {
@@ -22,7 +24,7 @@ public static class ModifierCommands
 
     public static JsonNode HoldModifiers(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
-        var modifierKeys = ParseModifierArray(@params?["modifiers"]);
+        var modifierKeys = ParseModifierArray(@params?[ModifiersPropertyName]);
 
         lock (JsonRpcHandler.HeldModifiersLock)
         {
@@ -41,13 +43,13 @@ public static class ModifierCommands
         return new JsonObject
         {
             ["held"] = true,
-            ["modifiers"] = ToJsonArray(GetHeldModifierNames())
+            [ModifiersPropertyName] = ToJsonArray(GetHeldModifierNames())
         };
     }
 
     public static JsonNode ReleaseModifiers(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
-        var modifiersNode = @params?["modifiers"]
+        var modifiersNode = @params?[ModifiersPropertyName]
             ?? throw new ArgumentException("Missing required parameter: modifiers");
 
         if (modifiersNode is JsonValue valueNode &&
@@ -57,7 +59,7 @@ public static class ModifierCommands
             return new JsonObject
             {
                 ["released"] = true,
-                ["modifiers"] = new JsonArray()
+                [ModifiersPropertyName] = new JsonArray()
             };
         }
 
@@ -80,7 +82,7 @@ public static class ModifierCommands
         return new JsonObject
         {
             ["released"] = true,
-            ["modifiers"] = ToJsonArray(GetHeldModifierNames())
+            [ModifiersPropertyName] = ToJsonArray(GetHeldModifierNames())
         };
     }
 
@@ -88,7 +90,7 @@ public static class ModifierCommands
     {
         return new JsonObject
         {
-            ["modifiers"] = ToJsonArray(GetHeldModifierNames())
+            [ModifiersPropertyName] = ToJsonArray(GetHeldModifierNames())
         };
     }
 
