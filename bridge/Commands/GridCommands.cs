@@ -19,6 +19,7 @@ public static partial class GridCommands
     private const string BoundsKey = "bounds";
     private const string IndexKey = "index";
     private const string ReasonKey = "reason";
+    private const string StatusKey = "status";
 
     private static readonly string[] CellPlaceholderSubstrings =
     {
@@ -36,7 +37,7 @@ public static partial class GridCommands
         var columns = ReadColumns(@params);
         return new JsonObject
         {
-            ["status"] = PassStatus,
+            [StatusKey] = PassStatus,
             ["row_count"] = gridPattern.RowCount.Value,
             ["grid_bounds"] = SafeRect(grid),
             ["visible_rows"] = BuildRows(grid, rows, columns)
@@ -53,7 +54,7 @@ public static partial class GridCommands
         var columns = ReadColumns(@params);
         return new JsonObject
         {
-            ["status"] = PassStatus,
+            [StatusKey] = PassStatus,
             ["selected_rows"] = BuildSelectedRows(grid, rows, columns)
         };
     }
@@ -142,7 +143,7 @@ public static partial class GridCommands
 
         return new JsonObject
         {
-            ["status"] = failures.Count == 0 ? PassStatus : "FAIL",
+            [StatusKey] = failures.Count == 0 ? PassStatus : "FAIL",
             ["asserted"] = failures.Count == 0,
             [ReasonKey] = reason,
             ["matched_rows"] = matched,
@@ -164,7 +165,7 @@ public static partial class GridCommands
         if (start < 0 || end < start || end >= rows.Length)
             return new JsonObject
             {
-                ["status"] = "AMBIGUOUS",
+                [StatusKey] = "AMBIGUOUS",
                 [ReasonKey] = "row range is outside visible rows",
                 ["selection_mutated"] = false
             };
@@ -193,7 +194,7 @@ public static partial class GridCommands
 
         return new JsonObject
         {
-            ["status"] = PassStatus,
+            [StatusKey] = PassStatus,
             ["selected_range"] = new JsonObject { ["start"] = start, ["end"] = end },
             ["selected_rows"] = BuildSelectedRows(grid, rows, ReadColumns(@params))
         };
@@ -245,7 +246,7 @@ public static partial class GridCommands
 
         var output = new JsonObject
         {
-            ["status"] = PassStatus,
+            [StatusKey] = PassStatus,
             ["clicked"] = true,
             [RowIndexKey] = rowIndex,
             ["x"] = pointResult.Point.X,
@@ -309,7 +310,7 @@ public static partial class GridCommands
 
         var output = new JsonObject
         {
-            ["status"] = PassStatus,
+            [StatusKey] = PassStatus,
             ["clicked"] = true,
             ["right_clicked"] = true,
             ["click_kind"] = "right",
@@ -376,7 +377,7 @@ public static partial class GridCommands
 
         var output = new JsonObject
         {
-            ["status"] = PassStatus,
+            [StatusKey] = PassStatus,
             ["clicked"] = true,
             ["double_clicked"] = true,
             ["click_kind"] = "double",
@@ -407,7 +408,7 @@ public static partial class GridCommands
         if (start < 0 || end < start || end >= rows.Length)
             return new JsonObject
             {
-                ["status"] = "AMBIGUOUS",
+                [StatusKey] = "AMBIGUOUS",
                 [ReasonKey] = "row range is outside visible rows",
                 ["selection_mutated"] = false
             };
@@ -418,7 +419,7 @@ public static partial class GridCommands
 
         return new JsonObject
         {
-            ["status"] = passed ? PassStatus : "FAIL",
+            [StatusKey] = passed ? PassStatus : "FAIL",
             ["asserted"] = passed,
             ["expected_range"] = new JsonObject { ["start"] = start, ["end"] = end },
             ["selected_indices"] = ToJsonArray(selectedRows),
@@ -904,7 +905,7 @@ public static partial class GridCommands
     {
         return new JsonObject
         {
-            ["status"] = "UNSUPPORTED",
+            [StatusKey] = "UNSUPPORTED",
             ["unsupported"] = true,
             [ReasonKey] = $"DataGrid target does not support {pattern}"
         };
@@ -918,7 +919,7 @@ public static partial class GridCommands
     {
         return new JsonObject
         {
-            ["status"] = "BLOCKED",
+            [StatusKey] = "BLOCKED",
             [ReasonKey] = reason,
             ["requested"] = requested,
             ["accepted"] = accepted,
