@@ -1777,8 +1777,7 @@ def test_process_registry_count_blocks_registry_errors() -> None:
     assert result["requested"] == {"adapter": "process.registry.count"}
 
 
-@pytest.mark.asyncio
-async def test_fixture_restore_returns_structured_failure_for_io_errors(
+def test_fixture_restore_returns_structured_failure_for_io_errors(
     tmp_path: Path,
 ) -> None:
     session = FakeRuntimeSmokeSession()
@@ -1788,7 +1787,7 @@ async def test_fixture_restore_returns_structured_failure_for_io_errors(
     target = tmp_path / "settings.json"
 
     adapters = ui_operation_adapters(_no_ui_backend, session=session)
-    result = await adapters["fixture.restore"](
+    result = adapters["fixture.restore"](
         path=str(target),
         baseline_file=str(baseline_dir),
     )
@@ -1798,8 +1797,7 @@ async def test_fixture_restore_returns_structured_failure_for_io_errors(
     assert "fixture baseline read failed" in result["reason"]
 
 
-@pytest.mark.asyncio
-async def test_fixture_restore_returns_structured_failure_for_write_errors(
+def test_fixture_restore_returns_structured_failure_for_write_errors(
     tmp_path: Path,
 ) -> None:
     session = FakeRuntimeSmokeSession()
@@ -1808,7 +1806,7 @@ async def test_fixture_restore_returns_structured_failure_for_write_errors(
     target_dir.mkdir()
 
     adapters = ui_operation_adapters(_no_ui_backend, session=session)
-    result = await adapters["fixture.restore"](
+    result = adapters["fixture.restore"](
         path=str(target_dir),
         baseline_text="baseline",
     )

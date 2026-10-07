@@ -1195,7 +1195,7 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
         alive = [entry for entry in status if bool(entry.get("alive"))]
         return {"status": "PASS", "count": len(alive), "alive": alive}
 
-    async def fixture_restore(**args: Any) -> dict[str, Any]:
+    def fixture_restore(**args: Any) -> dict[str, Any]:
         validate_path = getattr(session, "validate_path", None)
         if validate_path is None:
             return _adapter_blocked(_FIXTURE_RESTORE_ADAPTER, "path validation service unavailable")
