@@ -174,6 +174,37 @@ def test_find_code_references_does_not_match_partial_identifiers() -> None:
     assert results == []
 
 
+@pytest.mark.parametrize(
+    ("name", "expected_lines"),
+    [
+        ("Cue", [1, 8, 9, 10]),
+        ("Cue_9", [1, 8, 9, 10]),
+        ("Cueé", list(range(1, 11))),
+        ("Cue١", list(range(1, 11))),
+        ("CueK", list(range(1, 11))),
+    ],
+)
+def test_find_code_references_preserves_ascii_identifier_boundaries(
+    tmp_path: Path, name: str, expected_lines: list[int]
+) -> None:
+    lines = [
+        name,
+        f"a{name}",
+        f"{name}a",
+        f"_{name}",
+        f"{name}_",
+        f"1{name}",
+        f"{name}1",
+        f"é{name}é",
+        f"١{name}١",
+        f"K{name}K",
+    ]
+    (tmp_path / "References.cs").write_text("\n".join(lines), encoding="utf-8")
+    results = CodeSearchEngine(tmp_path).find_code_references(name)
+    assert [result["line"] for result in results] == expected_lines
+    assert [result["context"] for result in results] == [lines[line - 1] for line in expected_lines]
+
+
 def test_find_code_references_caps_results() -> None:
     engine = CodeSearchEngine(FIXTURE_ROOT)
 
@@ -205,9 +236,7 @@ def test_get_source_context_resolves_unique_basename() -> None:
     context = engine.get_source_context("MainViewModel.cs", line=10, radius=0)
 
     assert context["file"] == "ViewModels/MainViewModel.cs"
-    assert context["lines"] == [
-        {"line": 10, "text": "    public void LoadAssignedCharacter()"}
-    ]
+    assert context["lines"] == [{"line": 10, "text": "    public void LoadAssignedCharacter()"}]
 
 
 def test_get_source_context_rejects_path_traversal() -> None:
