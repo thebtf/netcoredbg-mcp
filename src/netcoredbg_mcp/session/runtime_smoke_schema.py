@@ -733,6 +733,13 @@ def _validate_app_diagnostics_observed_shapes(
     artifacts = payload.get("artifacts")
     if artifacts is not None and not isinstance(artifacts, (list, dict)):
         errors.append("app_diagnostics.artifacts must be a list or object")
+    _validate_app_diagnostics_observed_expectations(payload, errors)
+
+
+def _validate_app_diagnostics_observed_expectations(
+    payload: dict[str, Any],
+    errors: list[str],
+) -> None:
     for field_name in ("modules", "artifacts"):
         field = payload.get(field_name)
         if not isinstance(field, dict):
