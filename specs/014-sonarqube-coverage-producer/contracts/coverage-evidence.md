@@ -64,9 +64,12 @@ cancellation. A retained object followed by runner exit is not operational
 cleanup. Private native-operation failures are outcome data; the exact first
 fatal object is raised at the collector boundary only after physical exit,
 creator-worker join and acknowledged resource release. A physically closed fatal
-collection remains `FAILED`: producer-terminal stays false, scanner end has zero
-calls, and the claimed root is retained. Ambiguous native effects keep the loop,
-cleanup owner and creator worker alive instead of authorizing retry or shutdown.
+collection, or one whose raw Job lifetime count fails exact retained-handle
+reconciliation, remains `FAILED`: producer-terminal stays false, scanner end has
+zero calls, and the claimed root is retained. Physical closure does not repair
+the raw counters or authorize run-root cleanup. Ambiguous native effects keep
+the loop, cleanup owner and creator worker alive instead of authorizing retry
+or shutdown.
 
 First-party Cobertura repeats method line facts under each class and emits a class-level `<lines>` summary. The projection verifies each method line's hit state and covered/valid branch totals against the matching class-summary line before discarding redundant method XML. Class-summary branch totals preserve distinct method outcomes sharing a source line (for example, two lambdas on `bridge/Commands/ElementCommands.cs:1602` contribute 6 and 2 branches to a summary of 8). A missing or disagreeing summary fails closed. Neither the duplicated method rows nor cross-provider ordinals may be unioned into the denominator.
 

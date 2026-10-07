@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.23.12] - 2026-09-27
 
 ### Fixed
+- Collector capture closes proven-exited native resources even when historical Job lifetime reconciliation fails, preserving a terminal FAILED receipt and the original error. Final-snapshot history is revalidated before capability release, and late failed closure cannot authorize producer-terminal status, scanner end or run-root cleanup.
 - Framework numbers, template fields and literal-reference boundaries use locally ASCII-scoped regex shorthands, preserving accepted characters, captures and existing Unicode case-folding outside those scopes.
 - Keyboard cleanup regressions restore their temporary Win32 last-error mock state through pytest's existing monkeypatch fixture; native event and error assertions are unchanged.
 - Grid commands share one private status-property key at twelve sites; wire values, result order, refusals and input behavior are unchanged. Whole-source inverse and bridge compilation pass; Sonar closure remains unmeasured.

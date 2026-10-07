@@ -9,6 +9,7 @@ from contextlib import ExitStack, nullcontext
 from copy import deepcopy
 from dataclasses import replace
 from hashlib import sha256
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -4861,31 +4862,70 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         class Owner:
             fatal_error = None
 
-            def __init__(self):
+            def __init__(self, late_history=False):
+                self.late_history = late_history
+                self.total = 1
+                self.final_snapshot = None
+                self.grace_receipt = None
+                self.close_calls = 0
                 self.stdout = asyncio.StreamReader()
+                self.stdout.feed_data(b"collector stdout\n")
                 self.stdout.feed_eof()
                 self.stderr = asyncio.StreamReader()
+                self.stderr.feed_data(b"collector stderr\n")
                 self.stderr.feed_eof()
                 self.close_entered = asyncio.Event()
                 self.resume_close = asyncio.Event()
                 self.closed = False
 
             async def wait_root(self):
-                return 7
+                return 0 if self.late_history else 7
 
             async def drain_after_grace(self, **_kwargs):
-                return SimpleNamespace(
+                self.grace_receipt = SimpleNamespace(
                     status=owner_module.DrainStatus.DRAINED, forced=False, active_processes=0
                 )
+                return self.grace_receipt
+
+            def drain_snapshot(self, receipt):
+                if self.final_snapshot is not None:
+                    return dict(self.final_snapshot)
+                return {
+                    "status": receipt.status.value,
+                    "forced": receipt.forced,
+                    "root_was_forced": False,
+                    "active_processes": receipt.active_processes,
+                    "total_processes": self.total,
+                    "birth_notifications": 1,
+                    "exit_notifications": 1,
+                    "unverified_membership": False,
+                    "root_birth_seen": True,
+                    "live_members_without_handle": 0,
+                    "retained_exact_handles": 1,
+                    "signaled_exact_handles": 1,
+                    "handle_probe_failed": False,
+                    "failure_stage": "drain" if self.late_history and self.closed else None,
+                    "winerror": None,
+                }
 
             async def aclose(self):
+                self.close_calls += 1
                 self.close_entered.set()
                 await self.resume_close.wait()
                 self.closed = True
-                return await self.drain_after_grace()
+                if self.late_history:
+                    self.total += 1
+                    receipt = SimpleNamespace(
+                        status=owner_module.DrainStatus.FAILED, forced=False, active_processes=0
+                    )
+                    self.final_snapshot = self.drain_snapshot(receipt)
+                    return receipt
+                return self.grace_receipt
 
-        async def exercise(cancel):
-            owner = Owner()
+        async def exercise(cancel, late_history=False):
+            owner = Owner(late_history)
+            stdout, stderr = StringIO(), StringIO()
+            error = None
 
             async def launch(*, capture_process_handles, env, **_kwargs):
                 self.assertTrue(capture_process_handles)
@@ -4895,6 +4935,8 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             with (
                 patch.dict(runner.os.environ, {"SONAR_TOKEN": "not-for-the-child"}),
                 patch.object(owner_module.WindowsOwnedProcess, "launch", launch),
+                patch.object(runner.sys, "stdout", stdout),
+                patch.object(runner.sys, "stderr", stderr),
             ):
                 task = asyncio.create_task(
                     runner._run_owned_vstest(["collector"], RUNNER_PATH.parents[1])
@@ -4902,6 +4944,10 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 try:
                     await asyncio.wait_for(owner.close_entered.wait(), 2)
                     self.assertFalse(task.done(), "collector returned before owner close completed")
+                    self.assertIs(owner.grace_receipt.status, owner_module.DrainStatus.DRAINED)
+                    self.assertFalse(owner.grace_receipt.forced)
+                    self.assertEqual(owner.grace_receipt.active_processes, 0)
+                    self.assertEqual(owner.total, 1)
                     if cancel:
                         task.cancel()
                         await asyncio.sleep(0)
@@ -4910,16 +4956,65 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     if cancel:
                         with self.assertRaises(asyncio.CancelledError):
                             await asyncio.wait_for(task, 2)
+                    elif late_history:
+                        with self.assertRaisesRegex(
+                            runner.RunnerError, "COVERAGE_PROCESS_TREE_NOT_DRAINED"
+                        ) as raised:
+                            await asyncio.wait_for(task, 2)
+                        error = raised.exception
                     else:
                         self.assertEqual(await asyncio.wait_for(task, 2), 7)
-                    self.assertTrue(owner.closed)
                 finally:
                     owner.resume_close.set()
-                    await asyncio.gather(task, return_exceptions=True)
+                    await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 2)
+                    self.assertTrue(owner.closed)
+                    self.assertEqual(owner.close_calls, 1)
+                    self.assertTrue(owner.stdout.at_eof())
+                    self.assertTrue(owner.stderr.at_eof())
+                    self.assertEqual(stdout.getvalue(), "collector stdout\n")
+                    self.assertEqual(stderr.getvalue(), "collector stderr\n")
+            return owner, error
 
         for cancel in (False, True):
             with self.subTest(cancel=cancel):
                 asyncio.run(exercise(cancel))
+
+        owner, error = asyncio.run(exercise(False, late_history=True))
+        diagnostics = json.loads(str(error).split("owner_drain=", 1)[1])
+        self.assertEqual(diagnostics["invariant"], "lifetime_accounting_mismatch")
+        self.assertEqual(diagnostics["first"], owner.final_snapshot)
+        self.assertEqual(diagnostics["first"]["status"], "failed")
+        self.assertEqual(diagnostics["first"]["total_processes"], 2)
+        self.assertEqual(diagnostics["first"]["retained_exact_handles"], 1)
+        self.assertEqual(diagnostics["first"]["signaled_exact_handles"], 1)
+        self.assertEqual(diagnostics["first"]["active_processes"], 0)
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            claimed = root / ".tmp/sonarqube-coverage/claimed"
+            claimed.mkdir(parents=True)
+            evidence = claimed / "coverage-run.json"
+            evidence.write_text("retained", encoding="utf-8")
+            events, receipts, terminals = [], [], []
+            with self.assertRaises(runner.RunnerError):
+                self._transaction_events(
+                    root,
+                    events,
+                    producer_error=error,
+                    producer_terminals=terminals,
+                    real_cleanup=True,
+                    receipts=receipts,
+                )
+            self.assertEqual(terminals, [False])
+            self.assertEqual(evidence.read_text(encoding="utf-8"), "retained")
+            self.assertNotIn("normalize", events)
+            self.assertNotIn("end", events)
+            blocked = receipts[-1]
+            self.assertEqual(blocked["failure"]["code"], "COVERAGE_PROCESS_TREE_NOT_DRAINED")
+            self.assertEqual(blocked["cleanup"]["status"], "FAILED")
+            self.assertFalse(blocked["cleanup"]["producer_terminal"])
+            self.assertEqual(blocked["cleanup"]["removed_paths"], [])
+            self._assert_unproven_producer_receipt(root, blocked)
 
     def test_stateless_collector_cancellation_preserves_cancelled_error(self):
         if runner.os.name != "nt":

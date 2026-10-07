@@ -6177,9 +6177,10 @@ async def _run_owned_vstest(
                         if close_error is None:
                             close_error = error
                     else:
-                        if (
-                            first_drain is None
-                            and receipt.status is not owner_module.DrainStatus.DRAINED
+                        if first_drain is None and (
+                            receipt.status is not owner_module.DrainStatus.DRAINED
+                            or receipt.active_processes != 0
+                            or (not failed and receipt.forced)
                         ):
                             first_drain = owner.drain_snapshot(receipt)
                     if not owner.closed:
@@ -6207,6 +6208,8 @@ async def _run_owned_vstest(
             raise close_error
         if cancelled_during_cleanup and not failed:
             raise asyncio.CancelledError
+        if not failed and first_drain is not None:
+            drain_failure("collector final drain was not verified after owner closure")
 
 
 def resolve_collector_attachment(results: Path, trx: ElementTree.Element, href: str) -> Path:

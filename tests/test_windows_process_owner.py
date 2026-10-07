@@ -2385,8 +2385,20 @@ async def _probe_direct_capture_cleanup_operation_faults(kind):
         monkeypatch.setattr(windows_process_owner._DebugCapture, "_retire_pending_event", retire)
         monkeypatch.setattr(windows_process_owner._NativeEffect, "invoke", invoke)
         if kind == "query":
+            native = api.active_processes
+            monkeypatch.setattr(api, "active_processes", lambda job: readonly_fault(native, job))
+        elif kind == "snapshot":
             native = api.total_processes
+            native_close = api.close_handle
+
+            def close_after_snapshot(handle):
+                if owners and handle in (11, 12, 21):
+                    assert owners[0]._final_snapshot is not None
+                    assert owners[0]._final_snapshot["status"] == "failed"
+                return native_close(handle)
+
             monkeypatch.setattr(api, "total_processes", lambda job: readonly_fault(native, job))
+            monkeypatch.setattr(api, "close_handle", close_after_snapshot)
         elif kind == "wait":
             native = api.wait_for_process
             monkeypatch.setattr(
@@ -2426,6 +2438,13 @@ async def _probe_direct_capture_cleanup_operation_faults(kind):
                 assert not capture.worker_alive
                 assert owner._process_handle is None
                 assert events.count("close:21") == 1
+            elif kind == "snapshot":
+                assert capture._joined and not capture.worker_alive and capture._driver.done()
+                assert capture._shutdown.progress.name == "ACKNOWLEDGED"
+                assert owner._process_handle == 21
+                assert capture.retained_handles() == (21,)
+                assert owner._final_snapshot is None
+                assert not any(f"close:{handle}" in events for handle in (11, 12, 21))
             else:
                 assert capture.worker_alive
                 assert "close:21" not in events
@@ -2435,6 +2454,9 @@ async def _probe_direct_capture_cleanup_operation_faults(kind):
             advance.release()
         assert await asyncio.wait_for(caller, 5) is fatal
         assert owner.closed
+        if kind == "snapshot":
+            assert owner._final_snapshot["status"] == "failed"
+            assert owner._final_snapshot["total_processes"] == 1
         assert owner._debug_capture.failure is first_causal
         assert owner._debug_capture.fatal_error is fatal
         assert owner._debug_capture.root_exit_continued
@@ -2448,7 +2470,7 @@ async def _probe_direct_capture_cleanup_operation_faults(kind):
         print("fatal-lifecycle-proof", flush=True)
 
 
-@pytest.mark.parametrize("kind", ("terminate", "query", "wait", "close"))
+@pytest.mark.parametrize("kind", ("terminate", "query", "wait", "close", "snapshot"))
 def test_direct_capture_native_cleanup_faults_remain_private_until_acknowledged_closure(kind):
     _run_direct_capture_probe("_probe_direct_capture_cleanup_operation_faults", kind)
 
@@ -2606,21 +2628,199 @@ def test_direct_capture_actual_runner_keeps_asyncio_run_alive_until_physical_clo
     _run_direct_capture_probe("_probe_direct_capture_actual_runner", mode)
 
 
+async def _probe_direct_capture_failed_close(total, blocker=None, *, late_history=False):
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        events, releases = [], []
+        idle, release_driver = asyncio.Event(), asyncio.Event()
+        native_entered, release_native = threading.Event(), threading.Event()
+        native_effect = None
+        owner = None
+        api = _DebugApi(events, total=2 if late_history else total)
+        for event in (_debug_event(3, 42, 102), _debug_event(5, 42), _debug_event(5)):
+            api.debug_events.put(event)
+        real_submit = windows_process_owner._DebugCapture._submit
+        real_close = api.close_handle
+        real_active = api.active_processes
+        real_wait = api.wait_for_process
+
+        async def submit(capture, operation):
+            outcome = await real_submit(capture, operation)
+            if operation.__name__ == "_retire_pending_event" and capture.root_exit_continued:
+                # Hold the real driver between effects, not inside a native wait.
+                idle.set()
+                while not capture._stop.is_set() and not release_driver.is_set():
+                    await asyncio.sleep(0.001)
+            return outcome
+
+        def close(handle):
+            if owner is not None and handle in (1002, 21, 11, 12):
+                capture = owner._debug_capture
+                releases.append(
+                    (
+                        handle,
+                        capture._joined and not capture.worker_alive and capture._driver.done(),
+                        dict(owner._final_snapshot or {}),
+                    )
+                )
+            real_close(handle)
+
+        monkeypatch.setattr(windows_process_owner._DebugCapture, "_submit", submit)
+        monkeypatch.setattr(windows_process_owner, "_ADMISSION_CLEANUP_TIMEOUT", 0.1)
+        monkeypatch.setattr(api, "close_handle", close)
+        try:
+            owner = await _launch_debug(monkeypatch, api, events)
+            capture = owner._debug_capture
+            await asyncio.wait_for(idle.wait(), 0.5)
+            assert await asyncio.wait_for(owner.wait_root(), 0.5) == 0
+            assert capture._creation.progress.name == "ACKNOWLEDGED"
+            assert capture.root_seen and capture.root_exit_continued
+            assert not capture.live and capture._pending is None
+            assert capture._wait_effect is None and capture._operation is None
+            assert not capture._unresolved_capture
+            assert capture.failure is capture.fatal_error is None
+            assert len(capture.retained_handles()) == capture._qualified_count == 2
+            first = await owner.drain_after_grace(grace_timeout=0.1, force_timeout=0.1)
+            facts = owner.drain_snapshot(first)
+            assert first.status is (DrainStatus.DRAINED if late_history else DrainStatus.FAILED)
+            assert first.forced is (not late_history) and first.root_was_forced is False
+            assert facts["total_processes"] == (2 if late_history else total)
+            assert facts["active_processes"] == 0
+            assert facts["retained_exact_handles"] == facts["signaled_exact_handles"] == 2
+            counts = (
+                facts["birth_notifications"],
+                facts["exit_notifications"],
+                capture._qualified_count,
+                api.duplicate_count,
+            )
+            if late_history:
+                assert owner._final_snapshot is None
+                api.total = total
+
+            if blocker == "active":
+                monkeypatch.setattr(api, "active_processes", lambda job: 1)
+            elif blocker == "unsignaled":
+                monkeypatch.setattr(
+                    api,
+                    "wait_for_process",
+                    lambda handle, timeout: False if handle == 1002 else real_wait(handle, timeout),
+                )
+            elif blocker == "pending":
+                capture._pending = windows_process_owner._PendingDebugEvent(
+                    _debug_event(1), windows_process_owner._DBG_EXCEPTION_NOT_HANDLED
+                )
+            elif blocker == "inflight":
+
+                def held_query(job):
+                    native_entered.set()
+                    assert release_native.wait(1), "test native query was not released"
+                    return real_active(job)
+
+                native_effect = windows_process_owner._NativeEffect(
+                    held_query, (11,), read_only=True
+                )
+                capture._admission_effects.append(native_effect)
+                native_effect.future = asyncio.get_running_loop().run_in_executor(
+                    None, native_effect.invoke
+                )
+                assert await asyncio.to_thread(native_entered.wait, 0.5)
+                assert native_effect.progress.name == "IN_FLIGHT"
+            elif blocker == "unresolved":
+                capture._unresolved_capture = True
+
+            closed = await asyncio.wait_for(owner.aclose(), 0.5)
+            if blocker is not None:
+                assert not owner.closed
+                assert capture.worker_alive and not capture._joined
+                assert not releases
+                assert owner._process_handle == 21 and owner._job_handle == 11
+                assert owner._port_handle == 12
+                return
+
+            assert owner.closed, "physically exited capture stayed open solely because H failed"
+            assert closed.status is DrainStatus.FAILED
+            assert closed.root_was_forced is False
+            if not late_history:
+                assert closed.forced
+            assert capture._joined and not capture.worker_alive and capture._driver.done()
+            assert capture._shutdown.progress.name == "ACKNOWLEDGED"
+            assert [handle for handle, _, _ in releases] == [1002, 21, 11, 12]
+            for _, joined, snapshot in releases:
+                assert joined
+                assert snapshot["total_processes"] == total
+                assert snapshot["status"] == "failed"
+                assert snapshot["retained_exact_handles"] == snapshot["signaled_exact_handles"] == 2
+            assert owner._process_handle is owner._job_handle is owner._port_handle is None
+            assert not capture.retained_handles() and not capture._extra_process_handles
+            assert not capture._acquisitions and not capture._closes and not capture._image_files
+            assert capture._wait_effect is capture._launch_thread_handle is None
+            assert all(
+                effect.progress.name == "ACKNOWLEDGED"
+                for effect in (*capture._admission_effects, *owner._cleanup_effects.values())
+            )
+            assert owner._captured_observation_future is None
+            assert capture._operation is capture._exit_probe is None
+            assert owner._close_reaper is None or owner._close_reaper.done()
+            final = owner.drain_snapshot(closed)
+            assert final["status"] == "failed"
+            assert final["total_processes"] == total
+            assert final["retained_exact_handles"] == final["signaled_exact_handles"] == 2
+            assert owner._final_snapshot == final
+            if not late_history:
+                assert final == facts
+            assert (
+                final["birth_notifications"],
+                final["exit_notifications"],
+                capture._qualified_count,
+                api.duplicate_count,
+            ) == counts
+            before = list(events), list(api.continued), api.duplicate_count
+            assert await owner.aclose() is closed
+            assert owner.drain_snapshot(closed) == final
+            assert (events, api.continued, api.duplicate_count) == before
+            assert api.total == total and capture._qualified_count == 2
+            for handle in (11, 12, 21, 31, 1001, 1002):
+                assert events.count(f"close:{handle}") == 1
+        finally:
+            # Test-driver escape only: never evidence that the asserted close succeeded.
+            release_native.set()
+            if native_effect is not None:
+                await asyncio.wait_for(asyncio.shield(native_effect.future), 1)
+            if owner is not None and not owner.closed:
+                capture = owner._debug_capture
+                reaper = owner._close_reaper
+                if reaper is not None:
+                    reaper.cancel()
+                    await asyncio.gather(reaper, return_exceptions=True)
+                if owner._close_task is not None:
+                    await asyncio.wait_for(asyncio.shield(owner._close_task), 1)
+                monkeypatch.setattr(api, "active_processes", real_active)
+                monkeypatch.setattr(api, "wait_for_process", real_wait)
+                capture._pending = None
+                capture._unresolved_capture = False
+                capture._stop.set()
+                release_driver.set()
+                assert await capture.join_exited(1), "test driver/executor cleanup did not finish"
+                await asyncio.wait_for(owner.aclose(), 1)
+                assert owner.closed, "test fake capabilities were not released"
+                if owner._close_reaper is not None:
+                    await asyncio.gather(owner._close_reaper, return_exceptions=True)
+
+
 async def _probe_direct_capture_retained_failure(kind, value):
+    if kind == "count":
+        await _probe_direct_capture_failed_close(value)
+        print("fatal-lifecycle-proof", flush=True)
+        return
     with pytest.MonkeyPatch.context() as monkeypatch:
         events = []
-        if kind == "count":
-            api = _DebugApi(events, total=value)
-        else:
-            api = _DebugApi(events, total=2, error=value)
-            api.debug_events.put(_debug_event(3, 42, 0 if value == "null" else 102))
-            api.debug_events.put(_debug_event(5, 42))
+        api = _DebugApi(events, total=2, error=value)
+        api.debug_events.put(_debug_event(3, 42, 0 if value == "null" else 102))
+        api.debug_events.put(_debug_event(5, 42))
         api.debug_events.put(_debug_event(5))
         owner = await _launch_debug(monkeypatch, api, events)
         await asyncio.wait_for(owner.wait_root(), 2)
         first = await owner.drain_after_grace(grace_timeout=0.1, force_timeout=0.1)
         second = await owner.force_and_drain(timeout=0.1)
-        facts = owner.drain_snapshot(first)
         assert first.status is second.status is DrainStatus.FAILED
         capture = owner._debug_capture
         if kind == "api" and value == "continue":
@@ -2638,24 +2838,34 @@ async def _probe_direct_capture_retained_failure(kind, value):
         assert not await capture.join_exited(0.1)
         assert "close:11" not in events
         assert "close:21" not in events
-        if kind == "count":
-            assert facts["total_processes"] == value
-            assert facts["active_processes"] == 0
-            assert facts["retained_exact_handles"] == facts["signaled_exact_handles"] == 1
-        else:
-            assert capture.failure is not None
-            assert (
-                first.winerror
-                == second.winerror
-                == (55 if value in ("duplicate", "null") else None)
-            )
+        assert capture.failure is not None
+        assert first.winerror == second.winerror == (55 if value in ("duplicate", "null") else None)
         print("fatal-lifecycle-proof", flush=True)
         os._exit(0)  # Bounded retention observation, deliberately not product drain evidence.
 
 
-@pytest.mark.parametrize("total", (2, 65537))
+@pytest.mark.parametrize("total", (3, 65537))
 def test_direct_capture_never_repairs_raw_lifetime_count_gaps(total):
     _run_direct_capture_probe("_probe_direct_capture_retained_failure", "count", total)
+
+
+async def _probe_direct_capture_late_history_close():
+    await _probe_direct_capture_failed_close(3, late_history=True)
+    print("fatal-lifecycle-proof", flush=True)
+
+
+def test_direct_capture_close_rejects_history_gap_after_prior_drained_receipt():
+    _run_direct_capture_probe("_probe_direct_capture_late_history_close")
+
+
+@pytest.mark.parametrize("blocker", ("active", "unsignaled", "pending", "inflight", "unresolved"))
+def test_direct_capture_failed_close_retains_owner_without_physical_exit_proof(blocker):
+    _run_direct_capture_probe("_probe_direct_capture_failed_close_blocked", blocker)
+
+
+async def _probe_direct_capture_failed_close_blocked(blocker):
+    await _probe_direct_capture_failed_close(3, blocker)
+    print("fatal-lifecycle-proof", flush=True)
 
 
 @pytest.mark.parametrize("error", ("duplicate", "membership", "identity", "null", "continue"))

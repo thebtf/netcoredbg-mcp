@@ -16,7 +16,7 @@ import time
 import threading
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from concurrent.futures import Future, ThreadPoolExecutor
 from enum import Enum
 from functools import partial
@@ -1226,6 +1226,22 @@ class _DebugCapture:
         return tuple(handle for group in self.handles.values() for handle in group)
 
     def _physical_exit_proven(self) -> bool:
+        """Keep successful drainage bound to exact Job lifetime history."""
+        with self.lock:
+            if not self._physical_exit_for_close_proven():
+                return False
+            if self.known_no_child or not self._resume_possible:
+                return True
+            return (
+                0
+                < self.api.total_processes(self.job_handle)
+                == len(self.retained_handles())
+                == self._qualified_count
+                <= _MAX_JOB_MEMBERS
+            )
+
+    def _physical_exit_for_close_proven(self) -> bool:
+        """Prove physical exit without accepting incomplete lifetime history."""
         with self.lock:
             if any(
                 effect.progress is _EffectProgress.IN_FLIGHT for effect in self._admission_effects
@@ -1260,12 +1276,11 @@ class _DebugCapture:
                 return False
             if not self._resume_possible:
                 return True
-            total = self.api.total_processes(self.job_handle)
             return (
                 not self._unresolved_capture
                 and self.root_seen
                 and self.api.active_processes(self.job_handle) == 0
-                and 0 < total == len(handles) == self._qualified_count <= _MAX_JOB_MEMBERS
+                and 0 < len(handles) == self._qualified_count <= _MAX_JOB_MEMBERS
             )
 
     async def join_exited(self, timeout: float) -> bool:
@@ -1274,7 +1289,9 @@ class _DebugCapture:
         deadline = time.monotonic() + max(timeout, 0.0)
         while not self._stop.is_set():
             if self._exit_probe is None:
-                self._exit_probe = _NativeEffect(self._physical_exit_proven, read_only=True)
+                self._exit_probe = _NativeEffect(
+                    self._physical_exit_for_close_proven, read_only=True
+                )
                 self._exit_probe.future = asyncio.get_running_loop().run_in_executor(
                     None, self._exit_probe.invoke
                 )
@@ -2590,21 +2607,34 @@ class WindowsOwnedProcess:
         capture = self._debug_capture
         assert capture is not None
         receipt = self._drain_receipt
+        prior_failure = (
+            receipt if receipt is not None and receipt.status is DrainStatus.FAILED else None
+        )
         if receipt is None or receipt.status is not DrainStatus.DRAINED:
             receipt = await self.force_and_drain(timeout=_ADMISSION_CLEANUP_TIMEOUT)
+        if prior_failure is not None:
+            receipt = prior_failure
+            self._drain_receipt = receipt
         assert receipt is not None
 
         def incomplete() -> OwnerDrainReceipt:
+            assert receipt is not None
             if capture.failure is not None:
-                failure = self._receipt(
+                failure = replace(
+                    receipt,
                     status=DrainStatus.FAILED,
-                    forced=receipt.forced,
-                    active_processes=receipt.active_processes,
                     failure_stage=capture.failure.stage,
                     winerror=capture.failure.winerror,
-                    root_was_forced=receipt.root_was_forced,
                 )
                 self._drain_receipt = failure
+                if self._final_snapshot is not None:
+                    self._final_snapshot.update(
+                        status=failure.status.value,
+                        failure_stage=failure.failure_stage.value
+                        if failure.failure_stage
+                        else None,
+                        winerror=failure.winerror,
+                    )
             else:
                 failure = receipt
             self._schedule_close_reaper()
@@ -2637,7 +2667,42 @@ class WindowsOwnedProcess:
             if facts.error is not None:
                 capture.record_error(facts.error, AdmissionStage.DRAIN)
                 return incomplete()
-            self._final_snapshot = facts.value
+            snapshot = facts.value
+            total = snapshot["total_processes"]
+            if receipt.status is DrainStatus.DRAINED and (
+                receipt.active_processes != 0
+                or receipt.root_returncode is None
+                or total is None
+                or not (
+                    0
+                    < total
+                    == snapshot["retained_exact_handles"]
+                    == capture._qualified_count
+                    <= _MAX_JOB_MEMBERS
+                )
+                or snapshot["retained_exact_handles"] != snapshot["signaled_exact_handles"]
+                or snapshot["handle_probe_failed"]
+                or snapshot["unverified_membership"]
+                or not snapshot["root_birth_seen"]
+                or snapshot["live_members_without_handle"]
+            ):
+                receipt = replace(
+                    receipt, status=DrainStatus.FAILED, failure_stage=AdmissionStage.DRAIN
+                )
+            if capture.failure is not None:
+                receipt = replace(
+                    receipt,
+                    status=DrainStatus.FAILED,
+                    failure_stage=capture.failure.stage,
+                    winerror=capture.failure.winerror,
+                )
+            self._drain_receipt = receipt
+            snapshot.update(
+                status=receipt.status.value,
+                failure_stage=receipt.failure_stage.value if receipt.failure_stage else None,
+                winerror=receipt.winerror,
+            )
+            self._final_snapshot = snapshot
         if not await capture.release_duplicates():
             return incomplete()
         if self.stdin is not None:
@@ -2658,15 +2723,21 @@ class WindowsOwnedProcess:
                     return incomplete()
                 setattr(self, name, None)
         if capture.failure is not None:
-            receipt = self._receipt(
+            receipt = replace(
+                receipt,
                 status=DrainStatus.FAILED,
-                forced=receipt.forced,
                 active_processes=0,
                 failure_stage=capture.failure.stage,
                 winerror=capture.failure.winerror,
-                root_was_forced=receipt.root_was_forced,
             )
         self._drain_receipt = receipt
+        assert self._final_snapshot is not None
+        self._final_snapshot.update(
+            status=receipt.status.value,
+            active_processes=receipt.active_processes,
+            failure_stage=receipt.failure_stage.value if receipt.failure_stage else None,
+            winerror=receipt.winerror,
+        )
         self._closed = True
         return receipt
 
