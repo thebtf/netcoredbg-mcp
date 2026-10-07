@@ -2734,7 +2734,7 @@ def _row_matches_identity(
     return requested_identity in candidates
 
 
-def _row_identity(row: Mapping[str, Any], identity: Mapping[str, Any] | None = None) -> str:
+def _row_cells_identity(row: Mapping[str, Any], identity: Mapping[str, Any] | None) -> str | None:
     cells = row.get("cells")
     if isinstance(cells, Mapping):
         for key in _viewport_columns(identity or {}):
@@ -2743,6 +2743,13 @@ def _row_identity(row: Mapping[str, Any], identity: Mapping[str, Any] | None = N
         for value in cells.values():
             if value:
                 return str(value)
+    return None
+
+
+def _row_identity(row: Mapping[str, Any], identity: Mapping[str, Any] | None = None) -> str:
+    cell_identity = _row_cells_identity(row, identity)
+    if cell_identity is not None:
+        return cell_identity
     cell_values = row.get("cell_values")
     if isinstance(cell_values, list):
         for cell in cell_values:
