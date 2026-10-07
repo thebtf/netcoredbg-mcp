@@ -6,8 +6,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from netcoredbg_mcp.session.runtime_smoke_v2.probes.file_json import handle_file_json
 
 
@@ -19,8 +17,7 @@ def _write(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-@pytest.mark.asyncio
-async def test_latest_alias_resolves_to_newest_diagnostic_snapshot(tmp_path: Path) -> None:
+def test_latest_alias_resolves_to_newest_diagnostic_snapshot(tmp_path: Path) -> None:
     import os
 
     older = tmp_path / "diagnostic-startup.json"
@@ -45,8 +42,7 @@ async def test_latest_alias_resolves_to_newest_diagnostic_snapshot(tmp_path: Pat
     assert result["resolved_path"].endswith("diagnostic-cue-change.json")
 
 
-@pytest.mark.asyncio
-async def test_latest_alias_prefers_literal_file_when_present(tmp_path: Path) -> None:
+def test_latest_alias_prefers_literal_file_when_present(tmp_path: Path) -> None:
     _write(tmp_path / "diagnostic-startup.json", {"value": "stage"})
     _write(tmp_path / "diagnostic-latest.json", {"value": "literal"})
 
@@ -64,8 +60,7 @@ async def test_latest_alias_prefers_literal_file_when_present(tmp_path: Path) ->
     assert result["value"] == "literal"
 
 
-@pytest.mark.asyncio
-async def test_latest_alias_fails_honestly_when_no_snapshots_exist(tmp_path: Path) -> None:
+def test_latest_alias_fails_honestly_when_no_snapshots_exist(tmp_path: Path) -> None:
     result = handle_file_json(
         {
             "name": "latest",
@@ -80,8 +75,7 @@ async def test_latest_alias_fails_honestly_when_no_snapshots_exist(tmp_path: Pat
     assert result["reason"] == "json file missing"
 
 
-@pytest.mark.asyncio
-async def test_non_alias_missing_file_still_fails(tmp_path: Path) -> None:
+def test_non_alias_missing_file_still_fails(tmp_path: Path) -> None:
     _write(tmp_path / "diagnostic-startup.json", {"value": "stage"})
 
     result = handle_file_json(
