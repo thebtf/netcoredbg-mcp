@@ -261,6 +261,55 @@ public sealed class SymbolSearchEngineTests
     }
 
     [Fact]
+    public void PreviewPolicyRefusesNestedEscapingReparseDirectoryWithoutReturningEarlierMatch()
+    {
+        using var root = TestRoot.Create();
+        using var external = TestRoot.Create();
+        const string marker = "DirectoryBoundaryMarker";
+        root.Write("Z-Earlier.cs", $"public sealed class {marker} {{ }}\n");
+        root.Write("Nested/Escaping/ExternalSecret.cs", "public sealed class ExternalSecretMarker { }\n");
+        external.Write("ExternalSecret.cs", "public sealed class ExternalSecretMarker { }\n");
+        Assert.Equal(
+            "Z-Earlier.cs",
+            Assert.Single(new SymbolSearchEngine(root.Path, PreviewSearchPolicy.Instance)
+                .FindCodeSymbol(marker, "class")).File);
+        var earlierFile = Path.Combine(root.Path, "Z-Earlier.cs");
+        var escapingDirectory = Path.Combine(root.Path, "Nested", "Escaping");
+        var linkedFile = Path.Combine(escapingDirectory, "ExternalSecret.cs");
+        var externalFile = Path.Combine(external.Path, "ExternalSecret.cs");
+        var inspector = new TestStrictPathInspector(new Dictionary<string, StrictPathInfo>(StringComparer.Ordinal)
+        {
+            [escapingDirectory] = new(
+                Exists: true,
+                IsDirectory: true,
+                IsReparsePoint: true,
+                FinalTarget: external.Path),
+        });
+        var opened = new List<string>();
+        var engine = new SymbolSearchEngine(
+            root.Path,
+            PreviewSearchPolicy.Instance,
+            inspector,
+            openRead: path =>
+            {
+                opened.Add(path);
+                return File.OpenRead(path);
+            });
+
+        var failure = Assert.Throws<SearchFailureException>(
+            () => engine.FindCodeSymbol(marker, "class"));
+
+        Assert.Equal(
+            new SearchFailure("preview_path_refused", "PREVIEW_PATH_REFUSED", "find_code_symbol"),
+            failure.Failure);
+        Assert.Equal("PREVIEW_PATH_REFUSED", failure.Message);
+        Assert.Equal([earlierFile], opened);
+        Assert.Contains(escapingDirectory, inspector.InspectedPaths, StringComparer.Ordinal);
+        Assert.DoesNotContain(linkedFile, inspector.InspectedPaths, StringComparer.Ordinal);
+        Assert.DoesNotContain(externalFile, inspector.InspectedPaths, StringComparer.Ordinal);
+    }
+
+    [Fact]
     public void PreviewPolicyRefusesRawReparseComponentBeforeDotNormalization()
     {
         using var root = TestRoot.Create();
