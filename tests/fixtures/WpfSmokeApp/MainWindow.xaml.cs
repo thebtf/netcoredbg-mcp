@@ -149,6 +149,7 @@ public partial class MainWindow : Window
             ContentRendered += OnCalibrationContentRendered;
             Closed += OnCalibrationClosed;
         }
+        ContentRendered += ((App)Application.Current).OnMainWindowContentRendered;
     }
     private void ResetGallery_Click(object sender, RoutedEventArgs e)
     {

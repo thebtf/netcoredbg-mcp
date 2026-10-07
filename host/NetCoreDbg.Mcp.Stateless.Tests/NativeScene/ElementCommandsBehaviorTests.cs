@@ -493,9 +493,31 @@ public sealed class ElementCommandsBehaviorTests
     }
 
     [Fact]
-    public async Task GridSelectRange_ReadsExactlyTwoCueRows()
+    public Task GridSelectRange_ReadsExactlyTwoCueRows() => RunGridSelectionAsync();
+
+    [Fact]
+    public async Task GridSelectRange_StartupBeyondTwoSeconds_ReadsExactlyTwoCueRows()
     {
-        await RunBridgeAsync(async (bridge, _, requestId) =>
+        Assert.True(OperatingSystem.IsWindows(), "ElementCommands behavioral proof requires the Windows desktop.");
+        var barrierName = $"Local\\wpf-smoke-grid-startup-{Guid.NewGuid():N}";
+        using var started = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-started");
+        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, barrierName + "-release");
+        var exercise = RunGridSelectionAsync(barrierName);
+        try
+        {
+            Assert.True(started.WaitOne(StartupTimeout), "WPF fixture did not enter the controlled startup barrier.");
+            // Fault input: hold actual WPF startup beyond the unrelated two-second readiness budget.
+            await Task.Delay(TimeSpan.FromSeconds(3));
+        }
+        finally
+        {
+            release.Set();
+            await exercise;
+        }
+    }
+
+    private Task<JsonObject> RunGridSelectionAsync(string? startupBarrierName = null) =>
+        RunBridgeAsync(async (bridge, _, requestId) =>
         {
             var gallery = await CallBridgeAsync(bridge, "extract_text", new JsonObject
             {
@@ -534,8 +556,7 @@ public sealed class ElementCommandsBehaviorTests
             }, requestId);
             AssertSelectedCueRows(readback);
             return readback;
-        }, fixtureChoice: BridgeFixture.WpfSmokeApp);
-    }
+        }, fixtureChoice: BridgeFixture.WpfSmokeApp, startupBarrierName: startupBarrierName);
 
     [Fact]
     public async Task ExpandCollapse_WpfSmokeApp_TransitionsAreIdempotentAndUnsupportedPatternKeepsConnectionUsable()
@@ -749,6 +770,18 @@ public sealed class ElementCommandsBehaviorTests
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindow(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsIconic(IntPtr hwnd);
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
 
@@ -790,7 +823,7 @@ public sealed class ElementCommandsBehaviorTests
 
     private async Task<JsonObject> RunBridgeAsync(
         Func<Process, int, int, Task<JsonObject>> exercise, string mode = "bridge-elements",
-        BridgeFixture fixtureChoice = BridgeFixture.NativeSceneProbe)
+        BridgeFixture fixtureChoice = BridgeFixture.NativeSceneProbe, string? startupBarrierName = null)
     {
         Assert.True(OperatingSystem.IsWindows(), "ElementCommands behavioral proof requires the Windows desktop.");
         var configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent?.Name
@@ -812,10 +845,8 @@ public sealed class ElementCommandsBehaviorTests
         Task<string>? fixtureError = null;
         try
         {
-            var readinessName = fixtureChoice == BridgeFixture.NativeSceneProbe
-                ? $"element-commands-window-ready-{Guid.NewGuid():N}"
-                : null;
-            using var readiness = readinessName is null ? null : new NamedPipeServerStream(readinessName, PipeDirection.In, 1,
+            var readinessName = $"element-commands-window-ready-{Guid.NewGuid():N}";
+            using var readiness = new NamedPipeServerStream(readinessName, PipeDirection.In, 1,
                 PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
             var fixtureInfo = new ProcessStartInfo(fixturePath)
             {
@@ -825,12 +856,16 @@ public sealed class ElementCommandsBehaviorTests
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             };
-            if (readinessName is not null)
+            fixtureInfo.Environment["CONTROLLED_DAP_WINDOWED_DESCENDANT_READINESS_PIPE"] = readinessName;
+            if (fixtureChoice == BridgeFixture.NativeSceneProbe)
             {
                 fixtureInfo.ArgumentList.Add("--native-scene-probe-test-harness");
                 fixtureInfo.ArgumentList.Add($"--native-scene-probe-mode={mode}");
                 fixtureInfo.Environment["NETCOREDBG_NATIVE_SCENE_PROBE_FIXTURE_MODE"] = mode;
-                fixtureInfo.Environment["CONTROLLED_DAP_WINDOWED_DESCENDANT_READINESS_PIPE"] = readinessName;
+            }
+            if (startupBarrierName is not null)
+            {
+                fixtureInfo.Environment["NETCOREDBG_WPF_SMOKE_FIXTURE_STARTUP_BARRIER"] = startupBarrierName;
             }
             fixture.StartInfo = fixtureInfo;
             if (!fixture.Start())
@@ -838,18 +873,20 @@ public sealed class ElementCommandsBehaviorTests
                 throw new InvalidOperationException("WPF fixture could not be started.");
             }
             fixtureError = fixture.StandardError.ReadToEndAsync();
-            if (readiness is not null)
+            using (var startup = new CancellationTokenSource(StartupTimeout))
             {
-                using var startup = new CancellationTokenSource(StartupTimeout);
                 await readiness.WaitForConnectionAsync(startup.Token);
                 var handle = new byte[sizeof(long)];
                 await readiness.ReadExactlyAsync(handle, startup.Token);
-                Assert.NotEqual(0L, BinaryPrimitives.ReadInt64LittleEndian(handle));
+                var hwnd = new IntPtr(BinaryPrimitives.ReadInt64LittleEndian(handle));
+                fixture.Refresh();
                 Assert.False(fixture.HasExited, "WPF fixture exited before window readiness.");
-            }
-            else
-            {
-                await NativeSceneAtomicityTests.WaitForMainWindowAsync(fixture.Id);
+                Assert.NotEqual(IntPtr.Zero, hwnd);
+                Assert.True(IsWindow(hwnd), "WPF fixture reported an invalid ready window.");
+                Assert.True(IsWindowVisible(hwnd), "WPF fixture reported a hidden ready window.");
+                Assert.False(IsIconic(hwnd), "WPF fixture reported a minimized ready window.");
+                Assert.NotEqual(0u, GetWindowThreadProcessId(hwnd, out var ownerProcessId));
+                Assert.Equal(checked((uint)fixture.Id), ownerProcessId);
             }
 
             var bridgeInfo = new ProcessStartInfo(bridgePath)
