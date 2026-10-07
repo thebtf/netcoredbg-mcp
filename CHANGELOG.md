@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.23.12] - 2026-09-27
 
 ### Fixed
+- Runtime-smoke plan validation separates the preflight, launch, freshness, baseline and generate shape checks into one ordered private helper, preserving accepted types, explicit-null rejection, exact errors and validation order.
 - Oracle-pack schema validation separates checks, sources and source-probe checks into ordered private helpers, preserving accepted fields, duplicate-ID handling, exact errors and append order. Sonar closure remains unmeasured.
 - App-diagnostics wait/poll schema validation separates path/pattern and numeric checks into two ordered private helpers, preserving accepted inputs, exact errors and append order. Runtime waits, polling and bounds are unchanged; Sonar closure remains unmeasured.
 - App-diagnostics freshness shape validation separates app expectations from observed evidence checks in two ordered private helpers, with nested module/artifact expectations checked last by one private helper, preserving falsey process-ID alias precedence, accepted containers, exact errors and append order. Diagnostic field validation separates kind-specific schema and tracepoint mode checks into one private helper after the unchanged common shape, limit and unsafe-evidence checks. Sonar closure remains unmeasured.

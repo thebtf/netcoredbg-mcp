@@ -1067,7 +1067,7 @@ def _validate_list_fields(plan: dict[str, Any], errors: list[str]) -> None:
             errors.append(f"{field_name} must be a list")
 
 
-def _validate_object_fields(plan: dict[str, Any], errors: list[str]) -> None:
+def _validate_setup_object_fields(plan: dict[str, Any], errors: list[str]) -> None:
     if "preflight" in plan and not isinstance(plan["preflight"], (bool, dict, list)):
         errors.append("preflight must be a boolean, object, or list")
     if "launch" in plan and not isinstance(plan["launch"], dict):
@@ -1078,6 +1078,10 @@ def _validate_object_fields(plan: dict[str, Any], errors: list[str]) -> None:
         errors.append("baseline must be an object")
     if "generate" in plan and not isinstance(plan["generate"], dict):
         errors.append("generate must be an object")
+
+
+def _validate_object_fields(plan: dict[str, Any], errors: list[str]) -> None:
+    _validate_setup_object_fields(plan, errors)
     _validate_diagnostics_field(plan, errors)
     if "metrics_thresholds" in plan and not isinstance(plan["metrics_thresholds"], dict):
         errors.append("metrics_thresholds must be an object")
