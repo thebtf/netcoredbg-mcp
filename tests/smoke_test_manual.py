@@ -2995,7 +2995,7 @@ async def test_instrumentation_group_lifecycle():
             TraceEntry(_time.monotonic(), SOURCE, trace_line, "sum", "3", 1, tracepoint_id)
         )
 
-        inspected = (await m.instrumentation.inspect_group("manual_flow")).to_dict()
+        inspected = (m.instrumentation.inspect_group("manual_flow")).to_dict()
         print(f"  evidence: {inspected}")
         check("Instrumentation group created", created["status"] == "PASS", str(created))
         check(

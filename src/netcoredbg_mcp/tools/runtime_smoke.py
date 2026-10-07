@@ -224,13 +224,13 @@ def register_runtime_smoke_tools(
             return build_error_response(str(exc), state=session.state.state)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
-    async def instrumentation_group_inspect(ctx: Context, name: str) -> dict:
+    def instrumentation_group_inspect(ctx: Context, name: str) -> dict:
         """Inspect grouped breakpoint hits and trace logs."""
         try:
             access_error = check_session_access(ctx)
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
-            result = await _instrumentation_service(session).inspect_group(name)
+            result = _instrumentation_service(session).inspect_group(name)
             return _build_runtime_smoke_response(
                 session,
                 result.to_dict(),
