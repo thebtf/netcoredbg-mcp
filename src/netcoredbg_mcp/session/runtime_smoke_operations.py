@@ -1785,6 +1785,31 @@ async def _drag_result_with_selected_payload(
             ),
         }
 
+    return _assemble_drag_result(
+        backend=backend,
+        result=result,
+        expect=expect,
+        selected_payload=selected_payload,
+        modifiers=modifiers,
+        route=route,
+        route_evidence=route_evidence,
+        use_path_drag=use_path_drag,
+        cancel_key=cancel_key,
+    )
+
+
+def _assemble_drag_result(
+    *,
+    backend: Any,
+    result: dict[str, Any],
+    expect: dict[str, Any],
+    selected_payload: dict[str, Any] | None,
+    modifiers: list[str],
+    route: dict[str, int] | None,
+    route_evidence: dict[str, Any] | None,
+    use_path_drag: bool,
+    cancel_key: str | None,
+) -> dict[str, Any]:
     backend_route = _mapping_evidence_from_result(result, "route_evidence") or {}
     path_points = result.get("path_points")
     hold_points = result.get("hold_points")
