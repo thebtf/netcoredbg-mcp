@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.23.12] - 2026-09-27
 
 ### Fixed
+- App-diagnostics progress removes an always-true predicate and unreachable early return. Poll-only updates remain deduplicated, changed evidence still notifies sync/async sinks, and sink errors retain the previous fingerprint; Sonar closure remains unmeasured.
 - Direct file/process probe regressions drop obsolete async wrappers and asyncio markers after the synchronous-handler cutover; their inputs, assertions and error contracts are unchanged.
 - Runtime-smoke case execution explicitly retains the ActionContext type of its dataclass replacement, without changing transition copies, adapter fields, ordering or awaits. Sonar closure remains unmeasured.
 - Evidence-pack manifest construction removes its unused directory argument and trivial helper while retaining relative evidence metadata, deep copies, owner-bound persistence and path-containment validation. Sonar closure remains unmeasured.

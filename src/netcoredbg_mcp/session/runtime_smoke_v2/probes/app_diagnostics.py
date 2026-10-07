@@ -613,8 +613,6 @@ async def _maybe_report_diagnostic_progress(
 ) -> str | None:
     if progress_reporter is None:
         return previous_fingerprint
-    if not _metadata_has_progress_signal(metadata):
-        return previous_fingerprint
     try:
         progress_payload = compact_value(metadata)
         fingerprint = json.dumps(
@@ -630,10 +628,6 @@ async def _maybe_report_diagnostic_progress(
         return fingerprint
     except Exception:
         return previous_fingerprint
-
-
-def _metadata_has_progress_signal(metadata: dict[str, Any]) -> bool:
-    return True
 
 
 def _diagnostic_progress_fingerprint_payload(
