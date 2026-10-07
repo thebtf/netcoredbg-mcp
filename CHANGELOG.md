@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.23.12] - 2026-09-27
 
 ### Fixed
+- Grid ensure-visible reuses its existing private row-index keys at fourteen sites. Full inverse-source comparison and compiled input-free JSON helpers preserve parameter precedence, null/index fallback, row identities and compact payloads; scroll behavior is unchanged and Sonar closure remains unmeasured.
 - Fixture restoration runs synchronously through the existing adapter dispatchers. Real session path refusal, baseline/inline/empty UTF-8 contents and byte counts, missing-baseline errors, and ordered baseline/cleanup behavior are preserved; seven owner cases pass. Sonar closure remains unmeasured.
 - Instrumentation inspection and its registered MCP callback run synchronously through the pinned SDK's existing request path. Group hit/log evidence, missing-group responses, thread affinity and manual callers are preserved; seven owner cases and real registered-handler checks pass. Sonar closure remains unmeasured.
 - Strict symbol-search regression now verifies that a nested escaping reparse directory refuses the search after an earlier real match, without reading linked content or returning partial results. The 58-case Core owner passes. A separate real Windows directory-symlink/public Preview proof observes valid match, closed refusal with no path or partial-result leak, and recovery while retaining the link; both owned processes exit gracefully on stdin EOF. Preview/Core production code is unchanged.
