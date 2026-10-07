@@ -811,6 +811,101 @@ async def _launch(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind",
+    (
+        "value",
+        "ordinary",
+        "base",
+        "system_exit",
+        "keyboard_interrupt",
+        "cancelled_error",
+        "cancelled",
+    ),
+)
+async def test_native_operation_outcome_preserves_value_and_error_identity(kind):
+    future = asyncio.get_running_loop().create_future()
+    value = object()
+    errors = {
+        "ordinary": RuntimeError("native failure"),
+        "base": BaseException("native fatal"),
+        "system_exit": SystemExit(77),
+        "keyboard_interrupt": KeyboardInterrupt("native interrupt"),
+        "cancelled_error": asyncio.CancelledError("native cancellation"),
+    }
+    if kind == "cancelled":
+        future.cancel()
+    elif kind == "value":
+        future.set_result(value)
+    else:
+        future.set_exception(errors[kind])
+
+    outcome = windows_process_owner._operation_outcome(future)
+
+    if kind == "value":
+        assert outcome.value is value
+        assert outcome.error is None
+    elif kind == "cancelled":
+        assert isinstance(outcome.error, RuntimeError)
+        assert str(outcome.error) == "owned native operation was cancelled"
+        assert future.cancelled()
+        assert outcome.value is None
+    else:
+        assert outcome.error is errors[kind]
+        assert outcome.value is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ("done", "pending", "cancelled_observer"))
+async def test_captured_observation_retains_native_future_without_redispatch(monkeypatch, state):
+    events = []
+    owner = await _launch(monkeypatch, _FakeApi(events), events)
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    dispatch = MagicMock(return_value=future)
+    if state == "done":
+        future.set_result((0, True))
+    try:
+        with monkeypatch.context() as observation_patch:
+            observation_patch.setattr(owner, "_debug_capture", SimpleNamespace(failure=None))
+            observation_patch.setattr(loop, "run_in_executor", dispatch)
+            if state == "cancelled_observer":
+                observer = asyncio.create_task(
+                    owner._wait_for_captured(1, forced=False, root_was_forced=False)
+                )
+                try:
+                    await asyncio.sleep(0)
+                    assert owner._captured_observation_future is future
+                    observer.cancel("observer cancelled")
+                    with pytest.raises(asyncio.CancelledError, match="observer cancelled"):
+                        await observer
+                finally:
+                    if not observer.done():
+                        observer.cancel()
+                    await asyncio.gather(observer, return_exceptions=True)
+                assert owner._captured_observation_future is future
+                assert not future.cancelled()
+
+            receipt = await owner._wait_for_captured(0, forced=False, root_was_forced=False)
+            if state != "done":
+                assert receipt.status is DrainStatus.TIMED_OUT
+                assert receipt.active_processes is None
+                assert owner._captured_observation_future is future
+                assert not future.done()
+                dispatch.assert_called_once_with(None, owner._captured_observation)
+                future.set_result((0, True))
+                receipt = await owner._wait_for_captured(0, forced=False, root_was_forced=False)
+
+            assert receipt.status is DrainStatus.DRAINED
+            assert receipt.active_processes == 0
+            assert owner._captured_observation_future is None
+            assert future.result() == (0, True)
+            dispatch.assert_called_once_with(None, owner._captured_observation)
+    finally:
+        await owner.aclose()
+
+
+@pytest.mark.asyncio
 async def test_owner_drain_snapshot_preserves_closed_receipt_without_private_capabilities(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

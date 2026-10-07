@@ -859,12 +859,7 @@ class _NativeEffect:
         return self.value
 
 
-async def _observe_operation(
-    future: asyncio.Future[Any], timeout: float | None = None
-) -> _OperationOutcome | None:
-    done, _ = await asyncio.wait((future,), timeout=timeout)
-    if not done:
-        return None
+def _operation_outcome(future: asyncio.Future[Any]) -> _OperationOutcome:
     if future.cancelled():
         return _OperationOutcome(error=RuntimeError("owned native operation was cancelled"))
     error = future.exception()
@@ -882,8 +877,8 @@ async def _native_effect_outcome(effect: _NativeEffect) -> _OperationOutcome:
         )
     if effect.future is None:
         effect.future = asyncio.get_running_loop().run_in_executor(None, effect.invoke)
-    outcome = await _observe_operation(effect.future)
-    assert outcome is not None
+    await asyncio.wait((effect.future,))
+    outcome = _operation_outcome(effect.future)
     if outcome.error is not None:
         effect.error = outcome.error
         if effect.read_only or effect.progress is _EffectProgress.READY:
@@ -997,8 +992,8 @@ class _DebugCapture:
 
     async def _submit(self, operation: Any) -> _OperationOutcome:
         self._operation = asyncio.get_running_loop().run_in_executor(self._executor, operation)
-        outcome = await _observe_operation(self._operation)
-        assert outcome is not None
+        await asyncio.wait((self._operation,))
+        outcome = _operation_outcome(self._operation)
         self._operation = None
         return outcome
 
@@ -1296,11 +1291,12 @@ class _DebugCapture:
                     None, self._exit_probe.invoke
                 )
             assert self._exit_probe.future is not None
-            proof = await _observe_operation(
-                self._exit_probe.future, max(deadline - time.monotonic(), 0.0)
+            done, _ = await asyncio.wait(
+                (self._exit_probe.future,), timeout=max(deadline - time.monotonic(), 0.0)
             )
-            if proof is None:
+            if not done:
                 return False
+            proof = _operation_outcome(self._exit_probe.future)
             self._exit_probe = None
             if proof.error is not None:
                 self.record_error(proof.error, AdmissionStage.DRAIN)
@@ -1322,11 +1318,12 @@ class _DebugCapture:
                 None, self._shutdown.invoke
             )
         assert self._shutdown.future is not None
-        outcome = await _observe_operation(
-            self._shutdown.future, max(deadline - time.monotonic(), 0.0)
+        done, _ = await asyncio.wait(
+            (self._shutdown.future,), timeout=max(deadline - time.monotonic(), 0.0)
         )
-        if outcome is None:
+        if not done:
             return False
+        outcome = _operation_outcome(self._shutdown.future)
         if outcome.error is not None:
             self.record_error(outcome.error, AdmissionStage.DRAIN)
             return False
@@ -2407,10 +2404,12 @@ class WindowsOwnedProcess:
                     self._captured_observation_future = asyncio.get_running_loop().run_in_executor(
                         None, self._captured_observation
                     )
-                outcome = await _observe_operation(
-                    self._captured_observation_future, max(deadline - time.monotonic(), 0.0)
+                done, _ = await asyncio.wait(
+                    (self._captured_observation_future,),
+                    timeout=max(deadline - time.monotonic(), 0.0),
                 )
-                if outcome is not None:
+                if done:
+                    outcome = _operation_outcome(self._captured_observation_future)
                     self._captured_observation_future = None
                     if outcome.error is not None:
                         capture.record_error(outcome.error, AdmissionStage.DRAIN)
@@ -2650,11 +2649,12 @@ class WindowsOwnedProcess:
         ):
             return incomplete()
         if self._captured_observation_future is not None:
-            observed = await _observe_operation(
-                self._captured_observation_future, _ADMISSION_CLEANUP_TIMEOUT
+            done, _ = await asyncio.wait(
+                (self._captured_observation_future,), timeout=_ADMISSION_CLEANUP_TIMEOUT
             )
-            if observed is None:
+            if not done:
                 return incomplete()
+            observed = _operation_outcome(self._captured_observation_future)
             self._captured_observation_future = None
             if observed.error is not None:
                 capture.record_error(observed.error, AdmissionStage.DRAIN)
