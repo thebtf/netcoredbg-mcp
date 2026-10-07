@@ -736,6 +736,18 @@ def _validate_wait_json_schema(
     if not isinstance(wait_json, dict):
         errors.append(f"app_diagnostics.{field_name} must be an object")
         return
+    _validate_wait_json_path_pattern_schema(wait_json, errors, field_name=field_name)
+    _validate_wait_json_since_schema(wait_json, errors, field_name=field_name)
+    _validate_wait_json_condition_schema(wait_json, errors, field_name=field_name)
+    _validate_wait_json_numeric_schema(wait_json, errors, field_name=field_name)
+
+
+def _validate_wait_json_path_pattern_schema(
+    wait_json: dict[str, Any],
+    errors: list[str],
+    *,
+    field_name: str,
+) -> None:
     path = wait_json.get("path")
     if not isinstance(path, str) or not path:
         errors.append(f"app_diagnostics.{field_name}.path is required")
@@ -745,8 +757,14 @@ def _validate_wait_json_schema(
             errors.append(f"app_diagnostics.{field_name}.pattern must be a string")
         elif "/" in pattern or "\\" in pattern:
             errors.append(f"app_diagnostics.{field_name}.pattern must be a file-name pattern")
-    _validate_wait_json_since_schema(wait_json, errors, field_name=field_name)
-    _validate_wait_json_condition_schema(wait_json, errors, field_name=field_name)
+
+
+def _validate_wait_json_numeric_schema(
+    wait_json: dict[str, Any],
+    errors: list[str],
+    *,
+    field_name: str,
+) -> None:
     for numeric_field in ("timeout_ms", "poll_interval_ms"):
         if numeric_field not in wait_json:
             continue

@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.23.12] - 2026-09-27
 
 ### Fixed
+- App-diagnostics wait/poll schema validation separates path/pattern and numeric checks into two ordered private helpers, preserving accepted inputs, exact errors and append order. Runtime waits, polling and bounds are unchanged; Sonar closure remains unmeasured.
 - App-diagnostics freshness shape validation separates app expectations from observed evidence checks in two ordered private helpers, preserving falsey process-ID alias precedence, accepted containers, exact errors and append order. Sonar closure remains unmeasured.
 - Source distributions exclude local runtime PID files, coverage/TRX outputs and temporary proof directories while retaining maintained package and build inputs.
 - Runtime-smoke drag optional evidence uses one private helper, preserving field conditions and order, mapping copies and selected-payload references.
