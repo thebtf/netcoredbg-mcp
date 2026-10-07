@@ -2537,7 +2537,6 @@ def _runtime_smoke_materialize_pack_manifest(
         manifest = build_pack_manifest(
             pack_id=descriptor["pack_id"],
             run_id=run_id,
-            evidence_dir=evidence_dir,
             sources=sources,
             rollups=rollups,
         )

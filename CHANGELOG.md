@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.23.12] - 2026-09-27
 
 ### Fixed
+- Evidence-pack manifest construction removes its unused directory argument and trivial helper while retaining relative evidence metadata, deep copies, owner-bound persistence and path-containment validation. Sonar closure remains unmeasured.
 - Runtime-smoke output/grid probes remove unused phase arguments; file/process probes run synchronously through the existing async dispatcher. Real JSON before/after expectations and process baseline/delta behavior are preserved; Sonar closure remains unmeasured.
 - Baseline diagnostic-launch result enrichment uses one pure helper without changing launch or checkpoint ordering, shallow-copy behavior, or result identity when enrichment is skipped.
 - Runtime-smoke plan validation separates the preflight, launch, freshness, baseline and generate shape checks into one ordered private helper, preserving accepted types, explicit-null rejection, exact errors and validation order.
