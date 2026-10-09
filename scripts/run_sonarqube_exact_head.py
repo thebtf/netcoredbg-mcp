@@ -3873,7 +3873,7 @@ def validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None:
         ):
             _v3_fail("diagnostic role has illegal outcome or release authority")
     elif role in {"candidate", "post-merge"}:
-        if outcome not in {"PASS", "BLOCKED"} or intent != "v0.23.11":
+        if outcome not in {"PASS", "BLOCKED"} or intent != "v0.23.12":
             _v3_fail("release role has illegal outcome or intent")
     else:
         _v3_fail("receipt role is invalid")
@@ -4329,7 +4329,7 @@ def write_diagnostic_inventory(
 
 
 def _release_intent_for_role(role: str) -> str:
-    return "none" if role == "diagnostic" else "v0.23.11"
+    return "none" if role == "diagnostic" else "v0.23.12"
 
 
 def _blocked_failure(stage: str, error: BaseException) -> dict[str, Any]:

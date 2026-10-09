@@ -484,14 +484,14 @@ def _write_post_merge_scan_receipt(
         _blocked_v3_exact_head_receipt(
             source_commit,
             role="post-merge",
-            release_intent="v0.23.11",
+            release_intent="v0.23.12",
         )
         if outcome == "BLOCKED"
         else _complete_v3_exact_head_receipt(
             source_commit,
             role="post-merge",
             outcome=outcome,
-            release_intent="v0.23.11",
+            release_intent="v0.23.12",
         )
     )
     if outcome != "BLOCKED":
@@ -1710,7 +1710,7 @@ def _write_v3_post_merge_scan_receipt(repository_root: Path, source_commit: str)
                 source_commit,
                 role="post-merge",
                 outcome="PASS",
-                release_intent="v0.23.11",
+                release_intent="v0.23.12",
             )
         )
     )
@@ -1721,8 +1721,8 @@ def _write_v3_post_merge_scan_receipt(repository_root: Path, source_commit: str)
     ("role", "outcome", "release_intent"),
     [
         ("diagnostic", "DIAGNOSTIC_COMPLETE", "none"),
-        ("candidate", "PASS", "v0.23.11"),
-        ("post-merge", "PASS", "v0.23.11"),
+        ("candidate", "PASS", "v0.23.12"),
+        ("post-merge", "PASS", "v0.23.12"),
     ],
 )
 def test_unified_v3_receipt_accepts_each_complete_legal_role_outcome(
@@ -1746,7 +1746,7 @@ def test_unified_v3_receipt_accepts_each_complete_legal_role_outcome(
     ("role", "outcome", "release_intent"),
     [
         ("diagnostic", "PASS", "none"),
-        ("candidate", "DIAGNOSTIC_COMPLETE", "v0.23.11"),
+        ("candidate", "DIAGNOSTIC_COMPLETE", "v0.23.12"),
         ("post-merge", "PASS", "none"),
     ],
 )
@@ -1819,7 +1819,7 @@ def test_unified_v3_pass_refuses_blocking_findings_or_hotspots(
         "a" * 40,
         role=role,
         outcome="PASS",
-        release_intent="v0.23.11",
+        release_intent="v0.23.12",
     )
     assert receipt["release_gate"] is not None
     receipt["release_gate"][field] = 1

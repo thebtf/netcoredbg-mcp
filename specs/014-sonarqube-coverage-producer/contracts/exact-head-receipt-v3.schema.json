@@ -38,7 +38,7 @@
     "release_intent": {
       "enum": [
         "none",
-        "v0.23.11"
+        "v0.23.12"
       ]
     },
     "identity": {
@@ -151,7 +151,7 @@
             ]
           },
           "release_intent": {
-            "const": "v0.23.11"
+            "const": "v0.23.12"
           }
         }
       }
