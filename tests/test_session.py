@@ -139,21 +139,6 @@ class TestPathValidation:
 
         assert manager.validate_path(str(path), must_exist=True) == str(external_file.resolve())
 
-    def test_validate_path_for_project_uses_explicit_base(self, tmp_path, monkeypatch):
-        project = tmp_path / "project"
-        process_cwd = tmp_path / "cwd"
-        project.mkdir()
-        process_cwd.mkdir()
-        external_file = tmp_path / "other.cs"
-        external_file.write_text("// test")
-        monkeypatch.chdir(process_cwd)
-        with patch("netcoredbg_mcp.session.manager.DAPClient"):
-            manager = SessionManager(project_path=str(process_cwd))
-
-        assert manager.validate_path_for_project(
-            os.path.join("..", "other.cs"), str(project), must_exist=True
-        ) == str(external_file.resolve())
-
     def test_validate_path_no_project_scope(self, tmp_path):
         """Test validate_path works without project scope."""
         with patch("netcoredbg_mcp.session.manager.DAPClient"):

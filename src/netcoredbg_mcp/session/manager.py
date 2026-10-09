@@ -485,31 +485,8 @@ class SessionManager:
 
     def validate_path(self, path: str, must_exist: bool = False) -> str:
         """Canonicalize a path relative to process CWD and optionally require existence."""
-        return self._validate_path(path, None, must_exist=must_exist)
-
-    def validate_path_for_project(
-        self,
-        path: str,
-        project_path: str | None,
-        must_exist: bool = False,
-    ) -> str:
-        """Resolve a path using a supplied relative-path base without changing session state."""
-        project_base = os.path.abspath(project_path) if project_path else None
-        return self._validate_path(path, project_base, must_exist=must_exist)
-
-    def _validate_path(
-        self,
-        path: str,
-        project_path: str | None,
-        *,
-        must_exist: bool = False,
-    ) -> str:
-        """Canonicalize a path; project_path is a base, not an admission boundary."""
-        candidate = (
-            os.path.join(project_path, path) if project_path and not os.path.isabs(path) else path
-        )
-        logger.debug(f"[validate_path] resolving: {candidate}")
-        abs_path = os.path.realpath(candidate)
+        logger.debug(f"[validate_path] resolving: {path}")
+        abs_path = os.path.realpath(path)
         logger.debug(f"[validate_path] resolved to: {abs_path}")
 
         # Check existence if required

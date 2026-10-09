@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Compatibility
 - File and .NET target validity checks, plus independent evidence, restore, and source-search guards, remain unchanged. Dependency versions remain locked.
-- Relative debug-target and source-file paths retain their existing process-CWD resolution; only explicit project-base validation uses the supplied project path.
+- Relative debug-target, source-file, and runtime-smoke plan paths retain their existing process-CWD resolution; plan-file containment within the resolved project root remains enforced.
 
 ## [0.23.11] - 2026-08-30
 

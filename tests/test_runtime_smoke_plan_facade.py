@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 from collections import deque
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
+from netcoredbg_mcp.session import SessionManager
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeSession
 from netcoredbg_mcp.session.state import DebugState
 from netcoredbg_mcp.tools.runtime_smoke import register_runtime_smoke_tools
@@ -28,7 +31,6 @@ class PlanFacadeSession:
         self.context_project_path = "D:\\project"
         self.resolved_project_root = False
         self.validated_paths: list[str] = []
-        self.validated_project_paths: list[str | None] = []
         self.path_error: Exception | None = None
 
     async def launch(self, **_: Any) -> dict[str, Any]:
@@ -40,10 +42,6 @@ class PlanFacadeSession:
         if self.path_error is not None:
             raise self.path_error
         return path
-
-    def validate_path_for_project(self, path: str, project_path: str | None) -> str:
-        self.validated_project_paths.append(project_path)
-        return self.validate_path(path)
 
 
 async def _resolve_project_root(_ctx: Any, _session: Any) -> None:
@@ -65,7 +63,7 @@ async def _resolve_project_root_readonly_ok(
 
 def _register(
     capturing_mcp,
-    session: PlanFacadeSession,
+    session: PlanFacadeSession | SessionManager,
     *,
     check_session_access: Any | None = None,
     resolve_project_root: Any | None = None,
@@ -400,8 +398,62 @@ async def test_runtime_smoke_validate_plan_path_does_not_mutate_project_scope(
 
     assert data["status"] == "PASS"
     assert session.project_path == "D:\\owner-project"
-    assert session.validated_project_paths == [str(tmp_path)]
     assert session.launch_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_validate_plan_relative_path_uses_process_cwd_readonly(
+    capturing_mcp,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    project_root = tmp_path.resolve()
+    process_cwd = project_root / "child"
+    process_cwd.mkdir()
+    plan_path = process_cwd / "runtime-smoke-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema": "netcoredbg.runtime_smoke.v2",
+                "name": "relative-readonly-plan",
+                "cases": [{"id": "child-file", "transitions": []}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert not (project_root / plan_path.name).exists()
+    monkeypatch.chdir(process_cwd)
+    with patch("netcoredbg_mcp.session.manager.DAPClient"):
+        session = SessionManager(project_path=str(project_root / "owner-project"))
+    original_project_path = session.project_path
+    original_state = session.state.state
+
+    async def resolve_root_readonly(_ctx: Any, _session: SessionManager) -> str:
+        return str(project_root)
+
+    _register(
+        capturing_mcp,
+        session,
+        resolve_project_root_readonly=resolve_root_readonly,
+    )
+    response = await capturing_mcp.tools["runtime_smoke_validate_plan"](
+        ctx=None,
+        plan_path=plan_path.name,
+    )
+    data = response["data"]
+
+    assert "error" not in response
+    assert data["status"] == "PASS", json.dumps(data, indent=2)
+    assert data["can_run"] is True
+    assert data["case_count"] == 1
+    assert data["plan_source"] == {
+        "kind": "file",
+        "path": str(plan_path),
+        "format": "json",
+    }
+    assert Path(data["plan_source"]["path"]).samefile(plan_path)
+    assert session.project_path == original_project_path
+    assert session.state.state == original_state
 
 
 @pytest.mark.asyncio
