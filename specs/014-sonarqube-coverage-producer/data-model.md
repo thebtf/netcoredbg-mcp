@@ -194,8 +194,8 @@ This makes the artifact sufficient for Wave 4 to derive a fresh manifest and ass
 | Role | Legal outcome | `release_intent` | Completion rule |
 | --- | --- | --- | --- |
 | `diagnostic` | `DIAGNOSTIC_COMPLETE` or `BLOCKED` | `none` | Complete diagnostic requires coverage, analysis, full inventory, successful cleanup, and no failure. |
-| `candidate` | `PASS` or `BLOCKED` | `v0.23.11` | PASS requires the same full evidence plus Quality Gate `OK` and zero blocking issue/hotspot counts. |
-| `post-merge` | `PASS` or `BLOCKED` | `v0.23.11` | PASS requires the same full evidence plus Quality Gate `OK` and zero blocking issue/hotspot counts. |
+| `candidate` | `PASS` or `BLOCKED` | `v0.23.12` | PASS requires the same full evidence plus Quality Gate `OK` and zero blocking issue/hotspot counts. |
+| `post-merge` | `PASS` or `BLOCKED` | `v0.23.12` | PASS requires the same full evidence plus Quality Gate `OK` and zero blocking issue/hotspot counts. |
 
 Schema version is exactly `3`. The runner rejects schema version 2 and has no compatibility branch. A diagnostic can never be a PASS. `scripts/stateless_preview_artifact.py` is a v3 post-merge consumer and must reject schema version 2 in the same cutover.
 
