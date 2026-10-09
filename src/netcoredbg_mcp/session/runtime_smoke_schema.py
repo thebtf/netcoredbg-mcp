@@ -1185,6 +1185,60 @@ def _validate_step(
         _validate_restore_entry(prefix, args, errors)
 
 
+def _validate_grid_state_args(
+    prefix: str,
+    op_name: str,
+    args: dict[str, Any],
+    errors: list[str],
+) -> None:
+    if "rows" in args and not isinstance(args["rows"], dict):
+        errors.append(f"{prefix}.rows must be an object for op {op_name}")
+    _validate_optional_string_list(prefix, op_name, args, "columns", errors)
+    if "identity" in args and not isinstance(args["identity"], dict):
+        errors.append(f"{prefix}.identity must be an object for op {op_name}")
+
+
+def _validate_grid_row_operation_args(
+    prefix: str,
+    op_name: str,
+    args: dict[str, Any],
+    errors: list[str],
+) -> None:
+    if op_name in {
+        _OPERATION_UI_GRID_ENSURE_VISIBLE,
+        _OPERATION_UI_GRID_SELECT_ROW,
+        _OPERATION_UI_GRID_CLICK_ROW,
+        _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
+        _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
+    }:
+        if "row" in args and not isinstance(args["row"], dict):
+            errors.append(f"{prefix}.row must be an object for op {op_name}")
+    if op_name == _OPERATION_UI_GRID_ENSURE_VISIBLE:
+        _validate_int_arg(prefix, op_name, args, "max_scrolls", errors)
+        _validate_int_arg(prefix, op_name, args, "scroll_settle_ms", errors)
+    if op_name in {
+        _OPERATION_UI_GRID_SELECT_ROW,
+        _OPERATION_UI_GRID_CLICK_ROW,
+        _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
+        _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
+    }:
+        if "ensure_visible" in args and not isinstance(args["ensure_visible"], bool):
+            errors.append(f"{prefix}.ensure_visible must be a boolean for op {op_name}")
+        _validate_int_arg(prefix, op_name, args, "max_scrolls", errors)
+        _validate_int_arg(prefix, op_name, args, "scroll_settle_ms", errors)
+    if (
+        op_name
+        in {
+            _OPERATION_UI_GRID_CLICK_ROW,
+            _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
+            _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
+        }
+        and "column" in args
+        and not isinstance(args["column"], str)
+    ):
+        errors.append(f"{prefix}.column must be a string for op {op_name}")
+
+
 def _validate_grid_operation_args(
     prefix: str,
     op_name: str,
@@ -1200,44 +1254,8 @@ def _validate_grid_operation_args(
         _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
         _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
     }:
-        if "rows" in args and not isinstance(args["rows"], dict):
-            errors.append(f"{prefix}.rows must be an object for op {op_name}")
-        _validate_optional_string_list(prefix, op_name, args, "columns", errors)
-        if "identity" in args and not isinstance(args["identity"], dict):
-            errors.append(f"{prefix}.identity must be an object for op {op_name}")
-        if op_name in {
-            _OPERATION_UI_GRID_ENSURE_VISIBLE,
-            _OPERATION_UI_GRID_SELECT_ROW,
-            _OPERATION_UI_GRID_CLICK_ROW,
-            _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
-            _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
-        }:
-            if "row" in args and not isinstance(args["row"], dict):
-                errors.append(f"{prefix}.row must be an object for op {op_name}")
-        if op_name == _OPERATION_UI_GRID_ENSURE_VISIBLE:
-            _validate_int_arg(prefix, op_name, args, "max_scrolls", errors)
-            _validate_int_arg(prefix, op_name, args, "scroll_settle_ms", errors)
-        if op_name in {
-            _OPERATION_UI_GRID_SELECT_ROW,
-            _OPERATION_UI_GRID_CLICK_ROW,
-            _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
-            _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
-        }:
-            if "ensure_visible" in args and not isinstance(args["ensure_visible"], bool):
-                errors.append(f"{prefix}.ensure_visible must be a boolean for op {op_name}")
-            _validate_int_arg(prefix, op_name, args, "max_scrolls", errors)
-            _validate_int_arg(prefix, op_name, args, "scroll_settle_ms", errors)
-        if (
-            op_name
-            in {
-                _OPERATION_UI_GRID_CLICK_ROW,
-                _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
-                _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
-            }
-            and "column" in args
-            and not isinstance(args["column"], str)
-        ):
-            errors.append(f"{prefix}.column must be a string for op {op_name}")
+        _validate_grid_state_args(prefix, op_name, args, errors)
+        _validate_grid_row_operation_args(prefix, op_name, args, errors)
     elif op_name in {"ui.grid.select_range", "ui.grid.assert_range"}:
         _validate_int_arg(prefix, op_name, args, "start_index", errors)
         _validate_int_arg(prefix, op_name, args, "end_index", errors)
@@ -1253,6 +1271,33 @@ def _validate_grid_operation_args(
     return True
 
 
+def _validate_list_operation_args(
+    prefix: str,
+    op_name: str,
+    args: dict[str, Any],
+    errors: list[str],
+) -> None:
+    item = args.get("item")
+    if "item" in args and not isinstance(item, dict):
+        errors.append(f"{prefix}.item must be an object for op {op_name}")
+    elif isinstance(item, dict):
+        _validate_list_item_index(prefix, op_name, item, errors)
+    if op_name == _OPERATION_UI_LIST_TOGGLE_ITEM_CHILD:
+        child = args.get("child")
+        if "child" in args and not isinstance(child, dict):
+            errors.append(f"{prefix}.child must be an object for op {op_name}")
+        elif isinstance(child, dict) and not _has_child_selector(child):
+            errors.append(
+                f"{prefix}.child must include automation_id, name, or control_type for op {op_name}"
+            )
+        if (
+            "target_state" in args
+            and args["target_state"] is not None
+            and not isinstance(args["target_state"], str)
+        ):
+            errors.append(f"{prefix}.target_state must be a string for op {op_name}")
+
+
 def _validate_op_args(
     prefix: str,
     op_name: str,
@@ -1266,26 +1311,7 @@ def _validate_op_args(
         return
 
     if op_name in {"ui.list.invoke_item", _OPERATION_UI_LIST_TOGGLE_ITEM_CHILD}:
-        item = args.get("item")
-        if "item" in args and not isinstance(item, dict):
-            errors.append(f"{prefix}.item must be an object for op {op_name}")
-        elif isinstance(item, dict):
-            _validate_list_item_index(prefix, op_name, item, errors)
-        if op_name == _OPERATION_UI_LIST_TOGGLE_ITEM_CHILD:
-            child = args.get("child")
-            if "child" in args and not isinstance(child, dict):
-                errors.append(f"{prefix}.child must be an object for op {op_name}")
-            elif isinstance(child, dict) and not _has_child_selector(child):
-                errors.append(
-                    f"{prefix}.child must include automation_id, name, or control_type "
-                    f"for op {op_name}"
-                )
-            if (
-                "target_state" in args
-                and args["target_state"] is not None
-                and not isinstance(args["target_state"], str)
-            ):
-                errors.append(f"{prefix}.target_state must be a string for op {op_name}")
+        _validate_list_operation_args(prefix, op_name, args, errors)
     elif op_name == "ui.key_sequence":
         if "keys" in args and not isinstance(args["keys"], list):
             errors.append(f"{prefix}.keys must be a list for op {op_name}")
