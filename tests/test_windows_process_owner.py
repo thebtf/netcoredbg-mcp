@@ -16,7 +16,6 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import psutil
 import pytest
 
 import netcoredbg_mcp.windows_process_owner as windows_process_owner
@@ -39,31 +38,80 @@ FIXTURE_PROJECT = Path(__file__).parent / "fixtures" / "OwnerScopeAdapter"
 FIXTURE_EXE = FIXTURE_PROJECT / "bin" / "Debug" / "net8.0" / "OwnerScopeAdapter.exe"
 
 
-def _child_is_in_job(child_pid: int, job_handle: int) -> bool:
-    """Observe controlled fixture membership; never use a PID as authority."""
+def _duplicate_fixture_handle(handle: int) -> int:
+    """Retain an existing launch capability without opening any numeric PID."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.argtypes = ()
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel32.DuplicateHandle.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_uint32,
+        ctypes.c_int,
+        ctypes.c_uint32,
+    )
+    kernel32.DuplicateHandle.restype = ctypes.c_int
+    current_process = kernel32.GetCurrentProcess()
+    retained = ctypes.c_void_p()
+    if not kernel32.DuplicateHandle(
+        current_process, handle, current_process, ctypes.byref(retained), 0, 0, 0x00000002
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    assert retained.value is not None
+    return retained.value
 
+
+def _retain_fixture_owner(owner: WindowsOwnedProcess) -> WindowsOwnedProcess:
+    """Keep the admitted Job and root alive through production finalizer closure."""
+    assert owner._job_handle is not None and owner._process_handle is not None
+    job_handle = _duplicate_fixture_handle(owner._job_handle)
+    process_handle: int | None = None
+    try:
+        process_handle = _duplicate_fixture_handle(owner._process_handle)
+        return WindowsOwnedProcess(
+            owner=owner.owner,
+            api=owner._api,
+            job_handle=job_handle,
+            process_handle=process_handle,
+            stdin=None,
+            stdout=asyncio.StreamReader(),
+            stderr=asyncio.StreamReader(),
+            transports=(),
+        )
+    except BaseException:
+        if process_handle is not None:
+            owner._api.close_handle(process_handle)
+        owner._api.close_handle(job_handle)
+        raise
+
+
+def _retain_fixture_child(child_pid: int, owner: WindowsOwnedProcess) -> int:
+    """Capture a read-only child handle at readiness and verify its admitted Job."""
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
     kernel32.OpenProcess.restype = ctypes.c_void_p
-    kernel32.IsProcessInJob.argtypes = (
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_int),
-    )
-    kernel32.IsProcessInJob.restype = ctypes.c_int
-    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
-    kernel32.CloseHandle.restype = ctypes.c_int
-
-    process_handle = kernel32.OpenProcess(0x1000, 0, child_pid)
+    process_handle = kernel32.OpenProcess(0x00100000 | 0x1000, 0, child_pid)
     if not process_handle:
         raise ctypes.WinError(ctypes.get_last_error())
     try:
-        in_job = ctypes.c_int()
-        if not kernel32.IsProcessInJob(process_handle, job_handle, ctypes.byref(in_job)):
-            raise ctypes.WinError(ctypes.get_last_error())
-        return bool(in_job.value)
+        assert owner._job_handle is not None
+        assert owner._api.is_process_in_job(process_handle, owner._job_handle) is True
+        return process_handle
+    except BaseException:
+        owner._api.close_handle(process_handle)
+        raise
+
+
+async def _cleanup_fixture_owner(owner: WindowsOwnedProcess) -> None:
+    """Drain only the retained launch Job, including when assertions fail."""
+    try:
+        receipt = await owner.force_and_drain(timeout=5.0)
+        assert receipt.status is DrainStatus.DRAINED
+        assert receipt.active_processes == 0
     finally:
-        kernel32.CloseHandle(process_handle)
+        await owner.aclose()
 
 
 async def _wait_for_path(path: Path) -> None:
@@ -87,12 +135,10 @@ async def _read_marker_pid(path: Path) -> int:
     pytest.fail(f"fixture marker did not contain a PID: {path}")
 
 
-async def _wait_for_pid_exit(pid: int) -> None:
-    for _ in range(300):
-        if not psutil.pid_exists(pid):
-            return
-        await asyncio.sleep(0.01)
-    pytest.fail(f"fixture descendant survived owner drain: {pid}")
+async def _wait_for_fixture_child_exit(process_handle: int) -> None:
+    api = _Kernel32()
+    exited = await asyncio.to_thread(api.wait_for_process, process_handle, 3_000)
+    assert exited, "fixture descendant survived owner drain"
 
 
 class _FakeApi:
@@ -170,9 +216,16 @@ class _FakePipes:
     async def wire(
         self,
         _loop: asyncio.AbstractEventLoop,
+        *,
+        stdout_limit: int | None = None,
     ) -> tuple[None, asyncio.StreamReader, asyncio.StreamReader, tuple[Any, ...]]:
         self.events.append("wire-io")
-        return None, asyncio.StreamReader(), asyncio.StreamReader(), ()
+        stdout = (
+            asyncio.StreamReader()
+            if stdout_limit is None
+            else asyncio.StreamReader(limit=stdout_limit)
+        )
+        return None, stdout, asyncio.StreamReader(), ()
 
 
 def _creator(events: list[str]):
@@ -209,6 +262,51 @@ async def _launch(
         pipe_ends=_FakePipes(events),
         process_creator=_creator(events),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stdout_limit", [None, 256 * 1024 * 1024])
+async def test_pipe_wiring_keeps_large_limit_local_to_bridge_stdout(
+    monkeypatch: pytest.MonkeyPatch, stdout_limit: int | None
+) -> None:
+    protocols: list[asyncio.StreamReaderProtocol] = []
+    loop = asyncio.get_running_loop()
+
+    async def connect_read_pipe(protocol_factory, _handle):
+        protocol = protocol_factory()
+        transport = MagicMock(spec=asyncio.ReadTransport)
+        transport.get_extra_info.return_value = None
+        protocol.connection_made(transport)
+        protocols.append(protocol)
+        return transport, protocol
+
+    monkeypatch.setitem(
+        sys.modules, "asyncio.windows_utils", SimpleNamespace(PipeHandle=lambda handle: handle)
+    )
+    monkeypatch.setattr(loop, "connect_read_pipe", connect_read_pipe)
+    endpoints = windows_process_owner._PipeEnds(
+        stdin_child=0,
+        stdin_parent=None,
+        stdout_parent=21,
+        stdout_child=22,
+        stderr_parent=31,
+        stderr_child=32,
+    )
+    _stdin, stdout, stderr, transports = await endpoints.wire(loop, stdout_limit=stdout_limit)
+    line = b"A" * (64 * 1024 + 1) + b"\n"
+    try:
+        protocols[0].data_received(line)
+        protocols[1].data_received(line)
+        if stdout_limit is None:
+            with pytest.raises(ValueError, match="LimitOverrunError|Separator is found"):
+                await stdout.readline()
+        else:
+            assert await stdout.readline() == line
+        with pytest.raises(ValueError, match="LimitOverrunError|Separator is found"):
+            await stderr.readline()
+    finally:
+        for transport in transports:
+            transport.close()
 
 
 @pytest.mark.asyncio
@@ -787,18 +885,18 @@ async def test_production_dap_path_inherits_descendant_and_drains_job(
         terminal_seen.set()
 
     client.set_transport_terminal_handler(record_terminal)
-    child_pid: int | None = None
+    fixture_owner: WindowsOwnedProcess | None = None
+    child_handle: int | None = None
     try:
         await client.start(generation="real-owner-fixture")
+        run = client._run
+        assert run is not None and run.owner is not None
+        fixture_owner = _retain_fixture_owner(run.owner)
         await asyncio.wait_for(output_seen.wait(), timeout=10.0)
         await _wait_for_path(root_marker)
         await _wait_for_path(child_marker)
         child_pid = await _read_marker_pid(child_marker)
-
-        run = client._run
-        assert run is not None and run.owner is not None
-        assert run.owner._job_handle is not None
-        assert _child_is_in_job(child_pid, run.owner._job_handle) is True
+        child_handle = _retain_fixture_child(child_pid, fixture_owner)
 
         await client.stop()
         await asyncio.wait_for(terminal_seen.wait(), timeout=10.0)
@@ -808,12 +906,18 @@ async def test_production_dap_path_inherits_descendant_and_drains_job(
         assert receipt.status is DrainStatus.DRAINED
         assert receipt.active_processes == 0
         assert b"owner-scope-stderr-ready" in terminals[0].stderr_tail
-        await _wait_for_pid_exit(child_pid)
+        await _wait_for_fixture_child_exit(child_handle)
     finally:
-        if client.is_running:
-            await client.stop()
-        if child_pid is not None and psutil.pid_exists(child_pid):
-            psutil.Process(child_pid).kill()
+        try:
+            if client.is_running:
+                await client.stop()
+        finally:
+            try:
+                if fixture_owner is not None:
+                    await _cleanup_fixture_owner(fixture_owner)
+            finally:
+                if child_handle is not None:
+                    _Kernel32().close_handle(child_handle)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Object proof")
@@ -851,6 +955,8 @@ async def test_real_exit_259_is_natural_when_the_job_forces_its_descendant(
     monkeypatch.setenv("OWNER_SCOPE_ROOT_MARKER", str(root_marker))
     monkeypatch.setenv("OWNER_SCOPE_CHILD_MARKER", str(child_marker))
     monkeypatch.setenv("OWNER_SCOPE_ROOT_EXIT_CODE", "259")
+    root_exit_gate = tmp_path / "root-exit-gate"
+    monkeypatch.setenv("OWNER_SCOPE_ROOT_EXIT_GATE", str(root_exit_gate))
 
     output_seen = asyncio.Event()
     terminal_seen = asyncio.Event()
@@ -865,14 +971,18 @@ async def test_real_exit_259_is_natural_when_the_job_forces_its_descendant(
     client.set_transport_terminal_handler(
         lambda terminal: (terminals.append(terminal), terminal_seen.set())
     )
-    child_pid: int | None = None
+    fixture_owner: WindowsOwnedProcess | None = None
+    child_handle: int | None = None
     try:
         await client.start(generation="real-owner-exit-259")
         run = client._run
         assert run is not None and run.owner is not None
+        fixture_owner = _retain_fixture_owner(run.owner)
         await asyncio.wait_for(output_seen.wait(), timeout=10.0)
         await _wait_for_path(child_marker)
         child_pid = await _read_marker_pid(child_marker)
+        child_handle = _retain_fixture_child(child_pid, fixture_owner)
+        root_exit_gate.touch()
 
         await asyncio.wait_for(terminal_seen.wait(), timeout=10.0)
 
@@ -885,12 +995,18 @@ async def test_real_exit_259_is_natural_when_the_job_forces_its_descendant(
         assert receipt.root_was_forced is False
         assert terminals[0].returncode == 259
         assert terminals[0].cleanup_outcome.value == "natural_exit"
-        await _wait_for_pid_exit(child_pid)
+        await _wait_for_fixture_child_exit(child_handle)
     finally:
-        if client.is_running:
-            await client.stop()
-        if child_pid is not None and psutil.pid_exists(child_pid):
-            psutil.Process(child_pid).kill()
+        try:
+            if client.is_running:
+                await client.stop()
+        finally:
+            try:
+                if fixture_owner is not None:
+                    await _cleanup_fixture_owner(fixture_owner)
+            finally:
+                if child_handle is not None:
+                    _Kernel32().close_handle(child_handle)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Object proof")
@@ -910,36 +1026,50 @@ async def test_real_prebuild_drains_only_captured_owner(
     )
     assert build.returncode == 0, build.stdout + build.stderr
 
+    clients: list[DAPClient] = []
+    fixture_owners: list[WindowsOwnedProcess] = []
+    child_handles: list[int] = []
+
     async def start_client(name: str) -> tuple[DAPClient, int]:
         root_marker = tmp_path / f"{name}-root.json"
         child_marker = tmp_path / f"{name}-child.json"
         monkeypatch.setenv("OWNER_SCOPE_ROOT_MARKER", str(root_marker))
         monkeypatch.setenv("OWNER_SCOPE_CHILD_MARKER", str(child_marker))
         client = DAPClient(str(FIXTURE_EXE))
+        clients.append(client)
         await client.start(generation=name)
+        run = client._run
+        assert run is not None and run.owner is not None
+        fixture_owner = _retain_fixture_owner(run.owner)
+        fixture_owners.append(fixture_owner)
         await _wait_for_path(root_marker)
         await _wait_for_path(child_marker)
         child_pid = await _read_marker_pid(child_marker)
-        return client, child_pid
+        child_handle = _retain_fixture_child(child_pid, fixture_owner)
+        child_handles.append(child_handle)
+        return client, child_handle
 
-    client_a, child_a = await start_client("owner-a")
-    client_b, child_b = await start_client("owner-b")
-
-    sentinel_root_marker = tmp_path / "sentinel-root.json"
-    sentinel_child_marker = tmp_path / "sentinel-child.json"
-    sentinel_env = dict(os.environ)
-    sentinel_env["OWNER_SCOPE_ROOT_MARKER"] = str(sentinel_root_marker)
-    sentinel_env["OWNER_SCOPE_CHILD_MARKER"] = str(sentinel_child_marker)
-    sentinel = subprocess.Popen(
-        [str(FIXTURE_EXE), "--foreign-sentinel"],
-        env=sentinel_env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    sentinel_child: int | None = None
     try:
+        client_a, child_a_handle = await start_client("owner-a")
+        client_b, child_b_handle = await start_client("owner-b")
+
+        sentinel_root_marker = tmp_path / "sentinel-root.json"
+        sentinel_child_marker = tmp_path / "sentinel-child.json"
+        sentinel_env = dict(os.environ)
+        sentinel_env["OWNER_SCOPE_ROOT_MARKER"] = str(sentinel_root_marker)
+        sentinel_env["OWNER_SCOPE_CHILD_MARKER"] = str(sentinel_child_marker)
+        sentinel = await WindowsOwnedProcess.launch(
+            generation=object(),
+            argv=(str(FIXTURE_EXE), "--foreign-sentinel"),
+            cwd=None,
+            env=sentinel_env,
+            stdin_mode="devnull",
+        )
+        fixture_owners.append(sentinel)
         await _wait_for_path(sentinel_child_marker)
         sentinel_child = await _read_marker_pid(sentinel_child_marker)
+        sentinel_child_handle = _retain_fixture_child(sentinel_child, sentinel)
+        child_handles.append(sentinel_child_handle)
 
         with patch("netcoredbg_mcp.session.manager.DAPClient"):
             manager_a = SessionManager()
@@ -961,23 +1091,27 @@ async def test_real_prebuild_drains_only_captured_owner(
         )
 
         assert result.success is True
-        await _wait_for_pid_exit(child_a)
+        await _wait_for_fixture_child_exit(child_a_handle)
         assert client_b.is_running is True
-        assert psutil.pid_exists(child_b) is True
-        assert sentinel.poll() is None
-        assert sentinel_child is not None and psutil.pid_exists(sentinel_child) is True
+        assert _Kernel32().exit_code(child_b_handle) is None
+        assert sentinel.returncode is None
+        assert _Kernel32().exit_code(sentinel_child_handle) is None
         build_session.build.assert_awaited_once()
     finally:
-        if client_a.is_running:
-            await client_a.stop()
-        if client_b.is_running:
-            await client_b.stop()
-        sentinel.terminate()
         try:
-            sentinel.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            sentinel.kill()
-            sentinel.wait(timeout=5)
-        for pid in (sentinel_child, child_b):
-            if pid is not None and psutil.pid_exists(pid):
-                psutil.Process(pid).kill()
+            stop_results = await asyncio.gather(
+                *(client.stop() for client in clients if client.is_running),
+                return_exceptions=True,
+            )
+        finally:
+            try:
+                owner_results = await asyncio.gather(
+                    *(_cleanup_fixture_owner(owner) for owner in fixture_owners),
+                    return_exceptions=True,
+                )
+            finally:
+                for process_handle in child_handles:
+                    _Kernel32().close_handle(process_handle)
+        for result in (*stop_results, *owner_results):
+            if isinstance(result, BaseException):
+                raise result

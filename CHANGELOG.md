@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.13] - 2026-10-10
+
+### Fixed
+- Numeric PID records, DAP process observations, and persisted metadata no longer authorize process termination. Cleanup uses process-local callbacks bound to the actual live owners of server-created debugger adapters and FlaUI bridges.
+- Public cleanup and server shutdown join producer cleanup rather than reopening processes by PID. Failed or cancelled cleanup retains unfinished owners instead of reporting successful registry removal.
+- Stopping or cleaning up an attached debug session detaches rather than terminating the attached target. Explicit `terminate_debug` remains a separate requested action; bridge cleanup does not acquire ownership of the connected UI app.
+- After a successful attach acknowledgement and configuration completion, the current debug generation publishes the target process ID before entering the running state, so lazy UI connection no longer depends on an optional or delayed DAP process event. Failed attach acknowledgements do not publish the target ID.
+
+### Changed
+- Removed PID persistence and the startup orphan sweep. Existing PID files remain untouched and inert; they cannot restore cleanup authority.
+- Windows cleanup retains process/Job ownership. POSIX cleanup uses a private guardian for its own live process group; daemonized or group-escaped descendants are outside that group guarantee. Owned-root counts are not whole-tree process counts.
+
+### Compatibility
+- The v0.23.12 explicit external-path hotfix remains unchanged, including existing file/target validity and independent evidence, restore, source-search, and plan-containment guards.
+- The Python entry point, dependency versions, and tool catalog remain unchanged.
+
 ## [0.23.12] - 2026-10-09
 
 ### Fixed

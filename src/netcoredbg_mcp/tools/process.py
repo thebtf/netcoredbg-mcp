@@ -22,16 +22,15 @@ def register_process_tools(
 
     @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
     async def cleanup_processes(ctx: Context, force: bool = False) -> dict:
-        """View or terminate tracked debug processes.
+        """View process observations or join live trusted-producer cleanup.
 
-        Without force: shows all tracked processes and their status (alive/dead).
-        With force=True: terminates all tracked processes (netcoredbg + debuggees).
-
-        Use this instead of manual taskkill. The server tracks which processes
-        it spawned — no risk of killing unrelated processes.
+        Without force, return observation status. With force=True, stop owned
+        adapters and bridges through their captured finalizers. PID observations
+        and old PID files never authorize termination; attached targets detach.
+        `terminated` counts native-confirmed forced roots, not every exit or tree size.
 
         Args:
-            force: If True, terminate all tracked processes. If False, just show status.
+            force: Join owner cleanup instead of only showing status.
         """
         try:
             if force:
@@ -43,15 +42,30 @@ def register_process_tools(
             status_list = registry.status()
 
             if force:
-                terminated = registry.cleanup_all()
+                result = await registry.cleanup_all()
+                data = {
+                    "action": "cleanup",
+                    "terminated": result.terminated,
+                    "processes": status_list,
+                    "complete": result.complete,
+                    "remaining_owners": result.remaining_owners,
+                    "errors": result.errors,
+                    "tree_terminated": None,
+                }
+                if not result.complete:
+                    response = build_error_response(
+                        "Owner cleanup incomplete; unfinished owners remain registered.",
+                        state=session.state.state,
+                    )
+                    response["data"] = data
+                    return response
                 return build_response(
-                    data={
-                        "action": "cleanup",
-                        "terminated": terminated,
-                        "processes": status_list,
-                    },
+                    data=data,
                     state=session.state.state,
-                    message=f"Terminated {terminated} processes.",
+                    message=(
+                        f"Cleanup complete; confirmed {result.terminated} owned root terminations. "
+                        "Natural or unconfirmed root exits are not counted. Tree count unknown."
+                    ),
                 )
 
             return build_response(

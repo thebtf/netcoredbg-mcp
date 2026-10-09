@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from ..posix_process_owner import PosixCleanupResult, PosixOwnedProcess
 from ..windows_process_owner import (
     DrainStatus,
     OwnedProcessRef,
@@ -225,7 +226,7 @@ class _DapRun:
     """
 
     generation: object
-    process: asyncio.subprocess.Process | WindowsOwnedProcess
+    process: asyncio.subprocess.Process | WindowsOwnedProcess | PosixOwnedProcess
     pending: dict[int, asyncio.Future[DAPResponse]]
     phase: _RunPhase = _RunPhase.ACTIVE
     first_trigger: DapTerminalTrigger | None = None
@@ -243,6 +244,8 @@ class _DapRun:
     cleanup_outcome: DapCleanupOutcome = DapCleanupOutcome.EXIT_UNOBSERVED
     owner: WindowsOwnedProcess | None = None
     owner_drain_receipt: OwnerDrainReceipt | None = None
+    posix_owner: PosixOwnedProcess | None = None
+    posix_cleanup_result: PosixCleanupResult | None = None
     stdout_task: asyncio.Task[None] | None = None
     stderr_task: asyncio.Task[None] | None = None
     process_task: asyncio.Task[None] | None = None
@@ -393,7 +396,9 @@ class DAPClient:
         self._request_lock = asyncio.Lock()
         self._pending: dict[int, asyncio.Future[DAPResponse]] = {}
         self._event_handlers: dict[str, list[Callable[[DAPEvent], None]]] = {}
-        self._process: asyncio.subprocess.Process | WindowsOwnedProcess | None = None
+        self._process: (
+            asyncio.subprocess.Process | WindowsOwnedProcess | PosixOwnedProcess | None
+        ) = None
         self._read_task: asyncio.Task[None] | None = None
         self._capabilities: dict[str, Any] = {}
         self._run: _DapRun | None = None
@@ -451,6 +456,20 @@ class DAPClient:
         run = self._run
         return run.owner.owner if run is not None and run.owner is not None else None
 
+    @property
+    def adapter_cleanup_owner(self) -> WindowsOwnedProcess | PosixOwnedProcess | None:
+        """Return the retained producer object, never an owner reconstructed from PID."""
+        run = self._run
+        return (run.owner or run.posix_owner) if run is not None else None
+
+    @property
+    def adapter_cleanup_result(self) -> OwnerDrainReceipt | PosixCleanupResult | None:
+        """Return native finalizer evidence without converting group results to Job facts."""
+        run = self._run
+        if run is None:
+            return None
+        return run.owner_drain_receipt if run.owner is not None else run.posix_cleanup_result
+
     def set_transport_terminal_handler(self, handler: TransportTerminalHandler | None) -> None:
         """Install the sole synchronous sink for immutable terminal facts.
 
@@ -482,6 +501,7 @@ class DAPClient:
 
         logger.info("Starting netcoredbg: %s", self.netcoredbg_path)
         owner: WindowsOwnedProcess | None = None
+        posix_owner: PosixOwnedProcess | None = None
         if os.name == "nt":
             # Windows must never launch an executing asyncio child and then try
             # to admit it. The private boundary returns only after admission.
@@ -492,17 +512,24 @@ class DAPClient:
                 env=None,
                 stdin_mode="pipe",
             )
-            process: asyncio.subprocess.Process | WindowsOwnedProcess = owner
+            process: asyncio.subprocess.Process | WindowsOwnedProcess | PosixOwnedProcess = owner
         else:
-            process = await asyncio.create_subprocess_exec(
-                self.netcoredbg_path,
-                "--interpreter=vscode",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            posix_owner = await PosixOwnedProcess.launch(
+                generation=generation,
+                argv=(self.netcoredbg_path, "--interpreter=vscode"),
+                cwd=None,
+                env=None,
+                stdin_mode="pipe",
             )
+            process = posix_owner
         pending: dict[int, asyncio.Future[DAPResponse]] = {}
-        run = _DapRun(generation=generation, process=process, pending=pending, owner=owner)
+        run = _DapRun(
+            generation=generation,
+            process=process,
+            pending=pending,
+            owner=owner,
+            posix_owner=posix_owner,
+        )
         self._run = run
         self._process = process
         self._pending = pending
@@ -521,7 +548,7 @@ class DAPClient:
         self,
         *,
         expected_owner: OwnedProcessRef | None = None,
-    ) -> OwnerDrainReceipt | None:
+    ) -> OwnerDrainReceipt | PosixCleanupResult | None:
         """Join the current generation's guarded finalizer.
 
         An expected owner is a stale-call fence, not cleanup authority. The
@@ -548,6 +575,17 @@ class DAPClient:
         finalizer, _ = self._request_finalization(run, DapTerminalTrigger.EXPLICIT_STOP)
         await asyncio.shield(finalizer)
         logger.info("netcoredbg stopped")
+        if run.posix_owner is not None:
+            result = run.posix_cleanup_result
+            if result is None or not result.complete:
+                result = await run.posix_owner.cleanup(
+                    grace_timeout=NATURAL_EXIT_TIMEOUT,
+                    force_timeout=TERMINATE_TIMEOUT + KILL_TIMEOUT,
+                )
+                run.posix_cleanup_result = result
+                if result.complete:
+                    await run.posix_owner.aclose()
+            return result
         owner = run.owner
         if owner is None:
             return None
@@ -651,7 +689,6 @@ class DAPClient:
 
         self._settle_pending(run.pending)
         process = run.process
-        current = asyncio.current_task()
 
         if run.owner is not None:
             # This is deliberately inside the elected Wave-1 finalizer. No
@@ -662,51 +699,27 @@ class DAPClient:
                 force_timeout=TERMINATE_TIMEOUT + KILL_TIMEOUT,
             )
             self._apply_owner_drain_receipt(run, receipt)
+        elif run.posix_owner is not None:
+            result = await run.posix_owner.cleanup(
+                grace_timeout=NATURAL_EXIT_TIMEOUT,
+                force_timeout=TERMINATE_TIMEOUT + KILL_TIMEOUT,
+            )
+            run.posix_cleanup_result = result
+            run.returncode = result.root_returncode
+            run.process_exited = result.root_returncode is not None
+            if result.complete:
+                run.cleanup_outcome = (
+                    DapCleanupOutcome.TERMINATED
+                    if result.group_signal_sent
+                    else DapCleanupOutcome.NATURAL_EXIT
+                )
         else:
-            assert not isinstance(process, WindowsOwnedProcess)
-            if not run.process_exited and process.returncode is None:
-                process_wait = run.process_task
-                if process_wait is not None and process_wait is not current:
-                    try:
-                        await asyncio.wait_for(
-                            asyncio.shield(process_wait), timeout=NATURAL_EXIT_TIMEOUT
-                        )
-                    except asyncio.TimeoutError:
-                        pass
-
-            if not run.process_exited and process.returncode is None:
-                try:
-                    process.terminate()
-                    run.returncode = await asyncio.wait_for(
-                        process.wait(), timeout=TERMINATE_TIMEOUT
-                    )
-                    run.process_exited = True
-                    run.cleanup_outcome = DapCleanupOutcome.TERMINATED
-                except asyncio.TimeoutError:
-                    logger.warning("Process %s did not terminate, killing...", process.pid)
-                    try:
-                        process.kill()
-                    except ProcessLookupError:
-                        run.process_exited = True
-                        run.cleanup_outcome = DapCleanupOutcome.NATURAL_EXIT
-                    else:
-                        try:
-                            run.returncode = await asyncio.wait_for(
-                                process.wait(), timeout=KILL_TIMEOUT
-                            )
-                            run.process_exited = True
-                            run.cleanup_outcome = DapCleanupOutcome.KILLED
-                        except asyncio.TimeoutError:
-                            logger.error("Failed to observe killed process %s", process.pid)
-                except ProcessLookupError:
-                    run.process_exited = True
-                    run.cleanup_outcome = DapCleanupOutcome.NATURAL_EXIT
-            else:
-                run.cleanup_outcome = DapCleanupOutcome.NATURAL_EXIT
-
+            # Direct-reader fixtures have no launch authority. Observe their exit,
+            # but never promote an asyncio process/PID to cleanup capability.
             if process.returncode is not None:
                 run.process_exited = True
                 run.returncode = process.returncode
+                run.cleanup_outcome = DapCleanupOutcome.NATURAL_EXIT
 
         # A process exit or DAP termination can precede buffered stdout EOF.
         # Let the reader contribute those facts within a fixed bound. Raw EOF
@@ -735,6 +748,10 @@ class DAPClient:
             close_receipt = await run.owner.aclose()
             if close_receipt is not None:
                 self._apply_owner_drain_receipt(run, close_receipt)
+        elif run.posix_owner is not None and (
+            run.posix_cleanup_result is not None and run.posix_cleanup_result.complete
+        ):
+            await run.posix_owner.aclose()
 
         terminal = DapTransportTerminal(
             generation=run.generation,

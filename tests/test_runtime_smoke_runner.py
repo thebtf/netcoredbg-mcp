@@ -1776,6 +1776,46 @@ async def test_process_registry_count_blocks_registry_errors() -> None:
 
 
 @pytest.mark.asyncio
+async def test_process_registry_count_refuses_zero_with_retained_owner() -> None:
+    from netcoredbg_mcp.process_registry import CleanupOutcome, ProcessRegistry
+
+    registry = ProcessRegistry()
+
+    async def incomplete():
+        return CleanupOutcome(False, error="guardian exit unobserved")
+
+    registry.register_owner(generation="retained", owner=object(), cleanup=incomplete)
+    session = FakeRuntimeSmokeSession()
+    session.process_registry = registry
+    adapters = ui_operation_adapters(_no_ui_backend, session=session)
+    result = await adapters["process.registry.count"]()
+    assert result["status"] == "FAIL"
+    assert result["remaining_owners"] == 1
+    assert result["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_process_registry_count_preserves_live_observation_status(monkeypatch) -> None:
+    from netcoredbg_mcp import process_registry
+
+    registry = process_registry.ProcessRegistry()
+    registry.observe(44040, "netcoredbg", generation="live")
+    monkeypatch.setattr(process_registry, "_is_pid_alive", lambda pid: True)
+
+    async def cleanup():
+        return process_registry.CleanupOutcome(complete=True)
+
+    registry.register_owner(generation="live", owner=object(), cleanup=cleanup)
+    session = FakeRuntimeSmokeSession()
+    session.process_registry = registry
+    result = await ui_operation_adapters(_no_ui_backend, session=session)[
+        "process.registry.count"
+    ]()
+    assert result["status"] == "PASS" and result["count"] == 1
+    assert result["remaining_owners"] == 1
+
+
+@pytest.mark.asyncio
 async def test_fixture_restore_returns_structured_failure_for_io_errors(
     tmp_path: Path,
 ) -> None:

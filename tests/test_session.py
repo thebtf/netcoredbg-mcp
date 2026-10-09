@@ -812,7 +812,8 @@ class TestSessionManagerTransportFences:
         manager._session_id = "cancelled-stop-session"
         manager._initialized_event.set()
         manager._execution_event.set()
-        manager._process_registry.unregister = MagicMock()
+        manager._observe_process(owner.root_pid, "netcoredbg", generation=generation)
+        manager._observe_process(41020, "debuggee", generation=generation)
         manager._temp_manager.cleanup_session = MagicMock()
         manager._runtime_smoke.reset = MagicMock()
 
@@ -838,10 +839,7 @@ class TestSessionManagerTransportFences:
         assert manager._session_id is None
         manager._temp_manager.cleanup_session.assert_called_once_with("cancelled-stop-session")
         manager._runtime_smoke.reset.assert_called_once_with()
-        assert {call.args[0] for call in manager._process_registry.unregister.call_args_list} == {
-            owner.root_pid,
-            41020,
-        }
+        assert manager.process_registry.get_all() == []
 
     def test_old_run_event_cannot_mutate_current_manager_state(self):
         """Buffered events from an old adapter run cannot revive the current session state."""
@@ -1522,6 +1520,7 @@ class FakeLaunchClient:
         self.events: list[str] = []
         self.hot_reload_enabled: bool | None = None
         self.adapter_owner: OwnedProcessRef | None = None
+        self.adapter_cleanup_owner = None
 
     def set_transport_terminal_handler(self, _handler) -> None:
         pass
@@ -2005,6 +2004,7 @@ class TestOwnerScopedPublicRouteRedMatrix:
         client = MagicMock()
         client.is_running = False
         client.adapter_owner = None
+        client.adapter_cleanup_owner = None
         client.adapter_pid = None
         client.start = start
         client.initialize = AsyncMock()
@@ -2041,6 +2041,7 @@ class TestOwnerScopedPublicRouteRedMatrix:
         assert prebuild_task is not None
         await asyncio.wait_for(prebuild_task, timeout=1.0)
         prebuild.assert_awaited_once()
+        assert manager.process_registry.owner_count == 0
 
     def test_non_windows_active_adapter_has_no_owner_variant(self) -> None:
         """A current generation without an active Windows admission stays no-owner."""
@@ -2103,7 +2104,7 @@ class TestOwnerScopedPublicRouteRedMatrix:
         manager._client = client
         manager._active_dap_run = generation
         manager._state.state = DebugState.RUNNING
-        manager._process_registry.unregister = MagicMock()
+        manager._observe_process(45009, "netcoredbg", generation=generation)
         build_session = manager._build_manager.get_session(str(tmp_path))
         build_session.restore = AsyncMock(
             side_effect=AssertionError("restore invoked after failed owner drain")
@@ -2118,7 +2119,7 @@ class TestOwnerScopedPublicRouteRedMatrix:
         assert manager._active_dap_run == generation
         assert manager._stopping_dap_run is None
         assert manager.state.state is DebugState.RUNNING
-        manager._process_registry.unregister.assert_not_called()
+        assert [entry.pid for entry in manager.process_registry.get_all()] == [45009]
 
         with pytest.raises(PreBuildOwnerError, match="did not drain"):
             await manager.pre_launch_build(str(project))
@@ -2148,17 +2149,15 @@ class TestOwnerScopedPublicRouteRedMatrix:
         manager._client = client
         manager._state.process_id = 45005
         manager._process_registry.cleanup_all = MagicMock()
-        manager._process_registry.unregister = MagicMock()
+        manager._observe_process(45004, "netcoredbg", generation=None)
+        manager._observe_process(45005, "debuggee", generation=None)
 
         result = await manager.stop()
 
         assert result == {"success": True}
 
         manager._process_registry.cleanup_all.assert_not_called()
-        assert {call.args[0] for call in manager._process_registry.unregister.call_args_list} == {
-            45004,
-            45005,
-        }
+        assert manager.process_registry.get_all() == []
 
     def test_terminal_adapter_pid_is_unregistered_without_explicit_stop(self) -> None:
         """Terminal publication clears the exact adapter observation after a crash."""
@@ -2171,13 +2170,11 @@ class TestOwnerScopedPublicRouteRedMatrix:
         manager._active_dap_run = generation
         manager._state.process_id = 41012
 
-        manager._process_registry.unregister = MagicMock()
+        manager._observe_process(41011, "netcoredbg", generation=generation)
+        manager._observe_process(41012, "debuggee", generation=generation)
         manager._process_registry.cleanup_all = MagicMock()
 
         manager._on_transport_terminal(client, _natural_exit_terminal(generation))
 
         manager._process_registry.cleanup_all.assert_not_called()
-        assert {call.args[0] for call in manager._process_registry.unregister.call_args_list} == {
-            41011,
-            41012,
-        }
+        assert manager.process_registry.get_all() == []

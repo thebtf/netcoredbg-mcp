@@ -1814,3 +1814,38 @@ class TestOwnerScopedAdapterRedMatrix:
         assert receipt is not None
         assert receipt.status is DrainStatus.DRAINED
         assert receipt.active_processes == 0
+
+
+@pytest.mark.asyncio
+async def test_posix_adapter_cleanup_joins_guardian_after_root_exit(monkeypatch):
+    from netcoredbg_mcp.posix_process_owner import PosixCleanupResult
+
+    class GuardianOwner:
+        pid = 47001
+        returncode = 0
+        stdin = None
+        stdout = BlockingStream()
+        stderr = BlockingStream()
+
+        async def wait(self):
+            return 0
+
+        async def cleanup(self, grace_timeout, force_timeout):
+            self.cleaned = True
+            return PosixCleanupResult(0, -9, True, True)
+
+        async def aclose(self):
+            self.closed = True
+
+    owner = GuardianOwner()
+    owner.cleaned = owner.closed = False
+    monkeypatch.setattr("netcoredbg_mcp.dap.client.os.name", "posix")
+    monkeypatch.setattr(
+        "netcoredbg_mcp.dap.client.PosixOwnedProcess.launch", AsyncMock(return_value=owner)
+    )
+    client = DAPClient("/private/adapter")
+    await client.start(generation="early-root")
+    result = await client.stop()
+    assert result.complete is True
+    assert owner.cleaned and owner.closed
+    assert client.adapter_owner is None

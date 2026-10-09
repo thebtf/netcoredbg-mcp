@@ -7447,6 +7447,39 @@ async def test_code_search():
     check("search_source", len(matches) > 0, f"count={len(matches)}")
 
 
+async def test_process_owner_cleanup() -> None:
+    """Live-found registry defect: numeric observations cannot authorize cleanup."""
+    import subprocess
+
+    from netcoredbg_mcp.tools.process import register_process_tools
+
+    sentinel = subprocess.Popen(
+        [sys.executable, "-I", "-c", "import sys; sys.stdin.buffer.read(1)"],
+        stdin=subprocess.PIPE,
+    )
+    session = await new_session()
+    try:
+        await session.launch(program=DLL, args=["longrun"], pre_build=False)
+        session.process_registry.observe(
+            sentinel.pid, "debuggee", generation=object(), program="unowned sentinel"
+        )
+        mcp = _CapturingMCP()
+        register_process_tools(mcp, session, lambda ctx: None)
+        response = await mcp.tools["cleanup_processes"](None, force=True)
+        check("Owner cleanup completes", "error" not in response, str(response))
+        check("Unowned sentinel survives", sentinel.poll() is None)
+        check("Adapter owner released", session.process_registry.owner_count == 0)
+        repeated = await mcp.tools["cleanup_processes"](None, force=True)
+        check("Repeated cleanup is idempotent", repeated.get("data", {}).get("terminated") == 0)
+    finally:
+        try:
+            await session.process_registry.cleanup_all()
+        finally:
+            if sentinel.stdin is not None:
+                sentinel.stdin.close()
+            await asyncio.to_thread(sentinel.wait, 5)
+
+
 def _base_scenarios() -> list[tuple[str, Callable[..., Any]]]:
     return [
         ("Hit Counting", test_hit_counting),
@@ -7478,6 +7511,7 @@ def _base_scenarios() -> list[tuple[str, Callable[..., Any]]]:
         ("Screenshot Black Frame Guard", test_screenshot_black_frame_guard),
         ("WPF Smoke Gallery", test_wpf_smoke_gallery),
         ("WinForms Smoke Gallery", test_winforms_smoke_gallery),
+        ("Process Owner Cleanup", test_process_owner_cleanup),
     ]
 
 

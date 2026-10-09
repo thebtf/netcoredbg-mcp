@@ -13,7 +13,10 @@ agent workflow. `netcoredbg-mcp` combines `netcoredbg`, the Debug Adapter
 Protocol, and Windows UI Automation so an agent can observe a running app,
 stop it deliberately, and inspect the state that explains the behavior.
 
-**Python 3.10+ · Windows GUI automation · 135 tools · 8 prompts · 4 resources · v0.23.12**
+**Python 3.10+ · Windows GUI automation · 135 tools · 8 prompts · 4 resources · v0.23.13**
+
+The v0.23.13 PATCH replaces PID-based cleanup with live process-owner cleanup.
+The v0.23.12 fix for explicit paths outside the default project remains unchanged.
 
 ## What it enables
 
@@ -299,6 +302,33 @@ The server also exposes four resources: `debug://state`, `debug://breakpoints`,
 Eight prompts provide guided workflows: `debug`, `debug-gui`,
 `debug-exception`, `debug-visual`, `debug-mistakes`, `investigate`,
 `debug-scenario`, and `dap-escape-hatch`.
+
+### Process cleanup boundary
+
+`cleanup_processes(force=True)` invokes the retained cleanup owners for debugger
+adapters and the FlaUI bridge created by this server. It does not turn a numeric
+PID, a DAP process event, or a saved record into permission to terminate a process.
+Old PID files are left untouched and inert; startup no longer sweeps their PIDs.
+
+Stopping or cleaning up an attached debug session detaches from the target rather
+than terminating it. An explicit `terminate_debug` request remains a separate
+action. Cleaning up the FlaUI bridge does not grant ownership of the UI app.
+Cleanup failures remain incomplete results, not successful removal of records.
+
+On Windows, cleanup uses retained process and Job handles. On POSIX, a private
+guardian controls its own live process group, including ordinary descendants
+that remain in that group. This is not a guarantee for daemonized or group-escaped
+descendants. In the force-cleanup response, `terminated` counts only confirmed
+forced terminations of owned roots caused by cleanup. It excludes natural or
+graceful exits and is not a count of callbacks, all stopped processes, or the
+whole-tree population.
+On POSIX, `terminated` remains `0` because the cleanup result does not establish
+the cause of the root's exit. This excludes unconfirmed causality; it does not
+mean that no processes were stopped. The whole-tree count remains unknown.
+`tree_terminated` is `null` because no whole-tree count is supplied. `complete`,
+`remaining_owners`, and `errors` report completion and unfinished cleanup; a
+failure returns an error with the same cleanup data. An empty observation
+registry alone does not prove that an operating-system tree drained.
 
 ### Code search boundary
 
