@@ -241,6 +241,12 @@ async def test_host_proxies_initialize_tools_list_and_validate_plan(
     # The host must launch Python directly and preserve this literal path in --project.
     session_root = tmp_path / "project&%NETCOREDBG_MCP_ARG_SENTINEL%"
     session_root.mkdir()
+    (session_root / "HostProxySmoke.csproj").write_text(
+        '<Project Sdk="Microsoft.NET.Sdk">'
+        "<PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>"
+        "</Project>\n",
+        encoding="utf-8",
+    )
 
     # A *relative* plan_path: it only resolves to this exact file if the host
     # forwarded --project/--project-from-cwd unchanged AND preserved the
