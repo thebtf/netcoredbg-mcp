@@ -18,7 +18,12 @@ from netcoredbg_mcp.dap.client import (
 from netcoredbg_mcp.dap.protocol import Commands, DAPEvent, DAPRequest, DAPResponse
 from netcoredbg_mcp.resource_updates import STATE_URI, THREADS_URI
 from netcoredbg_mcp.session import DebugState, SessionManager
-from netcoredbg_mcp.windows_process_owner import DrainStatus, OwnedProcessRef, OwnerDrainReceipt
+from netcoredbg_mcp.windows_process_owner import (
+    DrainStatus,
+    OwnedProcessRef,
+    OwnerDrainReceipt,
+    WindowsOwnedProcess,
+)
 from tests.owner_scope_red import BlockingStream, TreeProcess
 
 
@@ -28,6 +33,12 @@ class OwnedTestProcess:
     def __init__(self, process: Any, generation: object = "test") -> None:
         self._process = process
         self.owner = OwnedProcessRef("test-owner", generation, process.pid)
+        self._closed = False
+        self._drain_task = None
+        self._drain_receipt = None
+        self._exit_observer = None
+        self._exit_observed = False
+        self._forced_root = False
 
     @property
     def pid(self) -> int:
@@ -52,47 +63,49 @@ class OwnedTestProcess:
     async def wait(self) -> int | None:
         return await self._process.wait()
 
-    async def drain_after_grace(
-        self,
-        *,
-        grace_timeout: float,
-        force_timeout: float,
-    ) -> OwnerDrainReceipt:
-        forced = False
-        if self._process.returncode is None:
-            try:
-                await asyncio.wait_for(self._process.wait(), grace_timeout)
-            except asyncio.TimeoutError:
-                self._process.terminate()
-                try:
-                    await asyncio.wait_for(self._process.wait(), force_timeout)
-                except asyncio.TimeoutError:
-                    forced = True
-                    try:
-                        self._process.kill()
-                    except ProcessLookupError:
-                        # The root disappeared between the grace deadline and
-                        # the force attempt. A real owner observes zero Job
-                        # accounting before TerminateJobObject and therefore
-                        # records this as a natural drain, not a forced kill.
-                        forced = False
-                    else:
-                        try:
-                            await asyncio.wait_for(self._process.wait(), force_timeout)
-                        except asyncio.TimeoutError:
-                            pass
-        if hasattr(self._process, "child_alive"):
+    async def _join_drain(self, policy) -> OwnerDrainReceipt:
+        return await WindowsOwnedProcess._join_drain(self, policy)
+
+    def start_drain_observation(self):
+        if self._process.returncode is None and not self._exit_observed:
+            if self._exit_observer is None:
+                self._exit_observer = asyncio.create_task(self._process.wait())
+            return self._exit_observer
+        return None
+
+    async def observe_drain(self, *, forced, root_was_forced, previous=None):
+        del root_was_forced, previous
+        if self._exit_observer is not None and self._exit_observer.done():
+            self._exit_observer.result()
+            self._exit_observed = True
+        exited = self._process.returncode is not None or self._exit_observed
+        if exited and hasattr(self._process, "child_alive"):
             self._process.child_alive = False
         return OwnerDrainReceipt(
             owner=self.owner,
-            status=DrainStatus.DRAINED,
-            forced=forced,
+            status=DrainStatus.DRAINED if exited else DrainStatus.TIMED_OUT,
+            forced=self._forced_root if forced else False,
             root_returncode=self._process.returncode,
-            active_processes=0,
-            root_was_forced=forced,
-        )
+            active_processes=0 if exited else 1,
+            root_was_forced=self._forced_root if forced else False,
+        ), not exited
+
+    async def force_job(self):
+        if self._process.returncode is None and not self._exit_observed:
+            self._process.terminate()
+            if self._process.returncode is None:
+                try:
+                    self._process.kill()
+                except ProcessLookupError:
+                    self._exit_observed = True
+                else:
+                    self._forced_root = True
+        return self._forced_root, None
 
     async def aclose(self) -> None:
+        if self._exit_observer is not None and not self._exit_observer.done():
+            self._exit_observer.cancel()
+            await asyncio.gather(self._exit_observer, return_exceptions=True)
         return None
 
 
@@ -1694,13 +1707,7 @@ class TestOwnerScopedAdapterRedMatrix:
         """Forced Job cleanup of a descendant must not relabel an exited root."""
 
         class NaturalRootForcedDescendantOwner(OwnedTestProcess):
-            async def drain_after_grace(
-                self,
-                *,
-                grace_timeout: float,
-                force_timeout: float,
-            ) -> OwnerDrainReceipt:
-                del grace_timeout, force_timeout
+            async def _join_drain(self, _policy) -> OwnerDrainReceipt:
                 self._process.returncode = 0
                 self._process._root_exit.set()
                 self._process.child_alive = False
@@ -1772,13 +1779,7 @@ class TestOwnerScopedAdapterRedMatrix:
         """Ordinary stop returns the final owner receipt after close retries."""
 
         class RetryingCloseOwner(OwnedTestProcess):
-            async def drain_after_grace(
-                self,
-                *,
-                grace_timeout: float,
-                force_timeout: float,
-            ) -> OwnerDrainReceipt:
-                del grace_timeout, force_timeout
+            async def _join_drain(self, _policy) -> OwnerDrainReceipt:
                 return OwnerDrainReceipt(
                     owner=self.owner,
                     status=DrainStatus.TIMED_OUT,
@@ -1824,10 +1825,7 @@ class TestOwnerScopedAdapterRedMatrix:
         class RecoveringOwner(OwnedTestProcess):
             close_calls = 0
 
-            async def drain_after_grace(
-                self, *, grace_timeout: float, force_timeout: float
-            ) -> OwnerDrainReceipt:
-                del grace_timeout, force_timeout
+            async def _join_drain(self, _policy) -> OwnerDrainReceipt:
                 return OwnerDrainReceipt(self.owner, DrainStatus.FAILED, True, None, 1)
 
             async def aclose(self) -> OwnerDrainReceipt:

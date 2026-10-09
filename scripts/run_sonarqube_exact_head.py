@@ -6171,9 +6171,39 @@ async def _run_owned_vstest(
     )
     failed = False
     first_error: BaseException | None = None
+
+    async def collector_policy(*, failed_cleanup: bool = False):
+        root_was_forced = False
+        receipt = None
+        phases = ((False, 0.0), (True, 20.0)) if failed_cleanup else ((False, 10.0), (True, 15.0))
+        for forced, budget in phases:
+            if forced:
+                root_was_forced, failure = await owner.force_job()
+                if failure is not None:
+                    return failure
+            deadline = time.monotonic() + max(budget, 0.0)
+            receipt = None
+            while True:
+                pending = owner.start_drain_observation()
+                if pending is not None:
+                    await asyncio.wait((pending,), timeout=max(deadline - time.monotonic(), 0.0))
+                receipt, retry = await owner.observe_drain(
+                    forced=forced, root_was_forced=root_was_forced, previous=receipt
+                )
+                remaining = deadline - time.monotonic()
+                if not retry or remaining <= 0:
+                    break
+                await asyncio.sleep(min(owner_module._ACCOUNTING_POLL_SECONDS, remaining))
+                if time.monotonic() >= deadline:
+                    break
+            if receipt.status is owner_module.DrainStatus.DRAINED:
+                return receipt
+        assert receipt is not None
+        return receipt
+
     try:
         result = await asyncio.wait_for(owner.wait_root(), timeout_seconds)
-        receipt = await owner.drain_after_grace(grace_timeout=10, force_timeout=15)
+        receipt = await owner._join_drain(collector_policy)
         if (
             receipt.status is not owner_module.DrainStatus.DRAINED
             or receipt.forced
@@ -6195,7 +6225,9 @@ async def _run_owned_vstest(
             try:
                 if failed:
                     try:
-                        receipt = await owner.force_and_drain(timeout=20)
+                        receipt = await owner._join_drain(
+                            lambda: collector_policy(failed_cleanup=True)
+                        )
                     except Exception:
                         pass
                     else:

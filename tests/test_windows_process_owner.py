@@ -25,6 +25,7 @@ import pytest
 
 import netcoredbg_mcp.windows_process_owner as windows_process_owner
 from netcoredbg_mcp.build.manager import BuildManager
+from netcoredbg_mcp.build.session import BuildSession
 from netcoredbg_mcp.dap.client import DAPClient, DapTransportTerminal
 from netcoredbg_mcp.session import SessionManager
 from netcoredbg_mcp.windows_process_owner import (
@@ -97,6 +98,18 @@ async def _wait_for_pid_exit(pid: int) -> None:
             return
         await asyncio.sleep(0.01)
     pytest.fail(f"fixture descendant survived owner drain: {pid}")
+
+
+def _command_deadlines(grace, force):
+    return patch.multiple(
+        "netcoredbg_mcp.build.session",
+        COMMAND_OWNER_GRACE_TIMEOUT=grace,
+        COMMAND_OWNER_FORCE_TIMEOUT=force,
+    )
+
+
+async def _drain_owner(owner, *, force=False):
+    return await BuildSession(".")._drain_windows_owner(owner, force=force)
 
 
 class _FakeApi:
@@ -214,7 +227,8 @@ async def test_zero_accounting_waits_for_exact_descendant_handle(
     api._active_counts = [1, 0, 0, 0]
 
     monkeypatch.setattr(windows_process_owner, "_ADMISSION_CLEANUP_TIMEOUT", 0.0)
-    first = await owner.force_and_drain(timeout=0.0)
+    with _command_deadlines(0.0, 0.0):
+        first = await _drain_owner(owner, force=True)
     assert first.status is DrainStatus.TIMED_OUT
     assert first.active_processes == 0
     assert "wait:22" in events
@@ -243,7 +257,8 @@ async def test_graceful_zero_refuses_historical_unseen_member(
     owner = await _launch(monkeypatch, api, events)
     api._active_counts = [0]
 
-    receipt = await owner.drain_after_grace(grace_timeout=0.0, force_timeout=0.0)
+    with _command_deadlines(0.0, 0.0):
+        receipt = await _drain_owner(owner)
 
     assert receipt.status is DrainStatus.FAILED
     assert receipt.forced is True
@@ -272,11 +287,13 @@ async def test_member_born_during_force_gap_fails_closed(
     owner = await _launch(monkeypatch, api, events)
     api._active_counts = [1, 0]
 
-    receipt = await owner.force_and_drain(timeout=0.0)
+    with _command_deadlines(0.0, 0.0):
+        receipt = await _drain_owner(owner, force=True)
 
     assert receipt.status is DrainStatus.FAILED
     assert receipt.failure_stage is AdmissionStage.DRAIN
-    retried = await owner.force_and_drain(timeout=0.0)
+    with _command_deadlines(0.0, 0.0):
+        retried = await _drain_owner(owner, force=True)
     assert retried.status is DrainStatus.FAILED
     assert events.count("terminate-job") == 2
     closed = await owner.aclose()
@@ -306,7 +323,8 @@ async def test_short_lived_members_reconcile_without_reopening_historical_pids(
     api.messages.extend(((6, 42), (7, 42), (6, 43), (7, 43)))
     api._active_counts = [0]
 
-    receipt = await owner.drain_after_grace(grace_timeout=0.0, force_timeout=0.0)
+    with _command_deadlines(0.0, 0.0):
+        receipt = await _drain_owner(owner)
     assert receipt.status is DrainStatus.DRAINED
     assert not receipt.forced
     assert "terminate-job" not in events
@@ -339,7 +357,8 @@ async def test_high_churn_abnormal_exits_reconcile_every_birth_without_reopening
         api.messages.extend(((6, pid), (8, pid)))
     api._active_counts = [0]
 
-    receipt = await owner.drain_after_grace(grace_timeout=0.0, force_timeout=0.0)
+    with _command_deadlines(0.0, 0.0):
+        receipt = await _drain_owner(owner)
 
     assert receipt.status is DrainStatus.DRAINED, {
         "births": owner._birth_notifications,
@@ -380,7 +399,8 @@ async def test_reused_pid_counts_both_job_births_after_first_retirement(
     api.messages.append((6, 42))
     api._active_counts = [1, 0]
 
-    receipt = await owner.drain_after_grace(grace_timeout=0.1, force_timeout=0.0)
+    with _command_deadlines(0.1, 0.0):
+        receipt = await _drain_owner(owner)
 
     assert receipt.status is DrainStatus.DRAINED
     assert not receipt.forced
@@ -441,7 +461,8 @@ async def test_recycled_pid_notifications_arrive_between_snapshot_and_first_open
     api.messages.append((6, 42))
     api._active_counts = [1, 0]
 
-    receipt = await owner.drain_after_grace(grace_timeout=0.02, force_timeout=0.02)
+    with _command_deadlines(0.02, 0.02):
+        receipt = await _drain_owner(owner)
 
     assert receipt.status is DrainStatus.DRAINED
     assert receipt.forced
@@ -496,7 +517,8 @@ async def test_reused_live_pid_replaces_retired_handle_before_claiming_drain(
     api.messages.append((6, 42))
     api._active_counts = [1, 0]
 
-    receipt = await owner.drain_after_grace(grace_timeout=0.02, force_timeout=0.02)
+    with _command_deadlines(0.02, 0.02):
+        receipt = await _drain_owner(owner)
 
     assert receipt.status is DrainStatus.DRAINED
     assert receipt.forced
@@ -523,7 +545,8 @@ async def test_duplicate_live_birth_refuses_drain_despite_matching_job_total(
     api.messages.extend(((6, 42), (6, 42), (7, 42)))
     api._active_counts = [0]
 
-    receipt = await owner.drain_after_grace(grace_timeout=0.0, force_timeout=0.0)
+    with _command_deadlines(0.0, 0.0):
+        receipt = await _drain_owner(owner)
 
     assert receipt.status is DrainStatus.FAILED
     assert receipt.failure_stage is AdmissionStage.DRAIN
@@ -557,7 +580,8 @@ async def test_open_member_denial_never_prevents_job_force_or_same_owner_recover
     owner = await _launch(monkeypatch, api, events)
     api._active_counts = [0]
 
-    receipt = await owner.force_and_drain(timeout=0.0)
+    with _command_deadlines(0.0, 0.0):
+        receipt = await _drain_owner(owner, force=True)
     assert receipt.status is DrainStatus.DRAINED
     assert receipt.forced
     assert events.count("terminate-job") == 1
@@ -596,7 +620,8 @@ async def test_force_waits_through_denied_open_until_child_retirement(
     api = DelayedNotificationApi(events)
     owner = await _launch(monkeypatch, api, events)
     api._active_counts = [1, 1, 0]
-    receipt = await owner.force_and_drain(timeout=0.1)
+    with _command_deadlines(0.0, 0.1):
+        receipt = await _drain_owner(owner, force=True)
     assert receipt.status is DrainStatus.DRAINED
     assert receipt.forced
     assert api.observations >= 3
@@ -713,7 +738,8 @@ async def test_zero_waits_for_delayed_retirement_notification_within_deadline(
     api = DelayedZeroApi(events)
     owner = await _launch(monkeypatch, api, events)
     api._active_counts = [1, 0]
-    receipt = await owner.force_and_drain(timeout=0.1)
+    with _command_deadlines(0.0, 0.1):
+        receipt = await _drain_owner(owner, force=True)
     assert receipt.status is DrainStatus.DRAINED
     assert api.observations >= 3
     assert (await owner.aclose()).status is DrainStatus.DRAINED
@@ -743,14 +769,16 @@ async def test_forced_zero_waits_for_async_child_termination_and_keeps_owner(
     owner = await _launch(monkeypatch, api, events)
     api.messages.append((6, 42))
     api._active_counts = [1, 0, 0]
-    first = await owner.force_and_drain(timeout=0.0)
+    with _command_deadlines(0.0, 0.0):
+        first = await _drain_owner(owner, force=True)
     assert first.status is DrainStatus.TIMED_OUT
     monkeypatch.setattr(windows_process_owner, "_ADMISSION_CLEANUP_TIMEOUT", 0.0)
     assert (await owner.aclose()).status is DrainStatus.TIMED_OUT
     assert owner._job_handle == 11
     api.exited = True
     api.messages.append((7, 42))
-    recovered = await owner.force_and_drain(timeout=0.0)
+    with _command_deadlines(0.0, 0.0):
+        recovered = await _drain_owner(owner, force=True)
     assert recovered.status is DrainStatus.DRAINED
     assert recovered.owner == first.owner
     assert (await owner.aclose()).status is DrainStatus.DRAINED
@@ -811,6 +839,105 @@ async def _launch(
 
 
 @pytest.mark.asyncio
+async def test_command_drain_keeps_signaled_root_read_outside_zero_deadline(monkeypatch):
+    events = []
+    api = _FakeApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    api._active_counts = [0]
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_wait = owner.wait_root
+
+    async def delayed_root_read():
+        entered.set()
+        await release.wait()
+        return await original_wait()
+
+    monkeypatch.setattr(owner, "wait_root", delayed_root_read)
+    with _command_deadlines(0, 0):
+        observer = asyncio.create_task(_drain_owner(owner))
+        try:
+            await entered.wait()
+            await asyncio.sleep(0)
+            assert not observer.done()
+            assert "terminate-job" not in events
+            release.set()
+            receipt = await observer
+            assert receipt.status is DrainStatus.DRAINED and not receipt.forced
+        finally:
+            release.set()
+            await asyncio.gather(observer, return_exceptions=True)
+            await owner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_command_drain_expiry_keeps_last_receipt_without_fresh_query(monkeypatch):
+    events = []
+    api = _FakeApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    clock = [0.0]
+    probes = []
+
+    def active(job):
+        probes.append(job)
+        return 1
+
+    async def expire_on_poll(_delay):
+        clock[0] = 2.0
+
+    with monkeypatch.context() as boundary:
+        boundary.setattr(api, "active_processes", active)
+        boundary.setattr(time, "monotonic", lambda: clock[0])
+        boundary.setattr(asyncio, "sleep", expire_on_poll)
+        with _command_deadlines(1, 0):
+            receipt = await _drain_owner(owner)
+    assert receipt.status is DrainStatus.TIMED_OUT and receipt.active_processes == 1
+    assert probes == [11, 11]
+    assert events.count("terminate-job") == 1
+    api._active_counts = [0]
+    await owner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_shared_policy_cancellation_keeps_first_policy_and_force_boundary(monkeypatch):
+    events = []
+    api = _FakeApi(events)
+    owner = await _launch(monkeypatch, api, events)
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_force = owner.force_job
+    competing = AsyncMock()
+
+    async def held_force():
+        entered.set()
+        await release.wait()
+        return await original_force()
+
+    monkeypatch.setattr(owner, "force_job", held_force)
+    api._active_counts = [1, 0]
+    with _command_deadlines(0, 0):
+        caller = asyncio.create_task(_drain_owner(owner, force=True))
+        try:
+            await entered.wait()
+            shared = owner._drain_task
+            for _ in range(2):
+                caller.cancel()
+                await asyncio.sleep(0)
+                assert not caller.done() and not shared.cancelled()
+            joined = asyncio.create_task(owner._join_drain(competing))
+            await asyncio.sleep(0)
+            assert owner._drain_task is shared and not joined.done()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+            receipt = await joined
+            assert receipt.status is DrainStatus.DRAINED and receipt.forced
+            competing.assert_not_called()
+        finally:
+            release.set()
+            await asyncio.gather(caller, return_exceptions=True)
+            await owner.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "kind",
     (
@@ -857,7 +984,10 @@ async def test_native_operation_outcome_preserves_value_and_error_identity(kind)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("state", ("done", "pending", "cancelled_observer"))
-async def test_captured_observation_retains_native_future_without_redispatch(monkeypatch, state):
+@pytest.mark.parametrize("last_active", (None, 0, 3))
+async def test_captured_observation_retains_native_future_without_redispatch(
+    monkeypatch, state, last_active
+):
     events = []
     owner = await _launch(monkeypatch, _FakeApi(events), events)
     loop = asyncio.get_running_loop()
@@ -870,9 +1000,13 @@ async def test_captured_observation_retains_native_future_without_redispatch(mon
             observation_patch.setattr(owner, "_debug_capture", SimpleNamespace(failure=None))
             observation_patch.setattr(loop, "run_in_executor", dispatch)
             if state == "cancelled_observer":
-                observer = asyncio.create_task(
-                    owner._wait_for_captured(1, forced=False, root_was_forced=False)
-                )
+
+                async def observe():
+                    pending = owner.start_drain_observation()
+                    await asyncio.wait((pending,), timeout=1)
+                    return await owner.observe_drain(forced=False, root_was_forced=False)
+
+                observer = asyncio.create_task(observe())
                 try:
                     await asyncio.sleep(0)
                     assert owner._captured_observation_future is future
@@ -886,21 +1020,61 @@ async def test_captured_observation_retains_native_future_without_redispatch(mon
                 assert owner._captured_observation_future is future
                 assert not future.cancelled()
 
-            receipt = await owner._wait_for_captured(0, forced=False, root_was_forced=False)
+            pending = owner.start_drain_observation()
+            await asyncio.wait((pending,), timeout=0)
+            previous = windows_process_owner.OwnerDrainReceipt(
+                owner.owner, DrainStatus.TIMED_OUT, False, None, last_active
+            )
+            receipt, _ = await owner.observe_drain(
+                forced=False, root_was_forced=False, previous=previous
+            )
             if state != "done":
-                assert receipt.status is DrainStatus.TIMED_OUT
-                assert receipt.active_processes is None
+                assert receipt.status is (
+                    DrainStatus.FAILED if last_active == 0 else DrainStatus.TIMED_OUT
+                )
+                assert receipt.active_processes == last_active
                 assert owner._captured_observation_future is future
                 assert not future.done()
                 dispatch.assert_called_once_with(None, owner._captured_observation)
                 future.set_result((0, True))
-                receipt = await owner._wait_for_captured(0, forced=False, root_was_forced=False)
+                pending = owner.start_drain_observation()
+                await asyncio.wait((pending,), timeout=0)
+                receipt, _ = await owner.observe_drain(forced=False, root_was_forced=False)
 
             assert receipt.status is DrainStatus.DRAINED
             assert receipt.active_processes == 0
             assert owner._captured_observation_future is None
             assert future.result() == (0, True)
             dispatch.assert_called_once_with(None, owner._captured_observation)
+    finally:
+        await owner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_non_drained_policy_retry_keeps_captured_query_identity(monkeypatch):
+    events = []
+    owner = await _launch(monkeypatch, _FakeApi(events), events)
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    dispatch = MagicMock(return_value=future)
+    force = AsyncMock(return_value=(False, None))
+    try:
+        with monkeypatch.context() as observation_patch:
+            observation_patch.setattr(owner, "_debug_capture", SimpleNamespace(failure=None))
+            observation_patch.setattr(loop, "run_in_executor", dispatch)
+            observation_patch.setattr(owner, "force_job", force)
+            with _command_deadlines(0, 0):
+                first = await _drain_owner(owner, force=True)
+                assert first.status is DrainStatus.TIMED_OUT
+                original_task = owner._drain_task
+                assert owner._captured_observation_future is future
+                future.set_result((0, True))
+                second = await _drain_owner(owner, force=True)
+            assert owner._drain_task is not original_task
+            assert second.status is DrainStatus.DRAINED and not second.forced
+            assert not future.cancelled()
+            dispatch.assert_called_once_with(None, owner._captured_observation)
+            force.assert_awaited_once()
     finally:
         await owner.aclose()
 
@@ -913,7 +1087,8 @@ async def test_owner_drain_snapshot_preserves_closed_receipt_without_private_cap
     api = _FakeApi(events)
     owner = await _launch(monkeypatch, api, events)
     api._active_counts = [0]
-    receipt = await owner.drain_after_grace(grace_timeout=0.1, force_timeout=0.1)
+    with _command_deadlines(0.1, 0.1):
+        receipt = await _drain_owner(owner)
     before = owner.drain_snapshot(receipt)
     assert before["status"] == "drained"
     assert before["retained_exact_handles"] == before["signaled_exact_handles"] == 1
@@ -989,7 +1164,8 @@ async def test_admission_orders_private_job_before_resume(monkeypatch: pytest.Mo
     assert owner.owner.generation == "owner-generation"
     assert owner.owner.root_pid == 41
 
-    receipt = await owner.force_and_drain(timeout=0.1)
+    with _command_deadlines(0.0, 0.1):
+        receipt = await _drain_owner(owner, force=True)
     assert receipt.status is DrainStatus.DRAINED
     assert receipt.active_processes == 0
     assert receipt.forced is True
@@ -1008,7 +1184,8 @@ async def test_forced_job_drain_records_an_already_exited_root(
     api._active_counts = [1, 0]
 
     try:
-        receipt = await owner.drain_after_grace(grace_timeout=0.0, force_timeout=0.1)
+        with _command_deadlines(0.0, 0.1):
+            receipt = await _drain_owner(owner)
 
         assert receipt.status is DrainStatus.DRAINED
         assert receipt.forced is True
@@ -1623,8 +1800,10 @@ async def test_non_drained_receipt_allows_later_force_escalation(
     owner = await _launch(monkeypatch, api, events)
     api._active_counts = [1, 1, 1, 0]
 
-    timed_out = await owner.drain_after_grace(grace_timeout=0.0, force_timeout=0.0)
-    drained = await owner.force_and_drain(timeout=0.1)
+    with _command_deadlines(0.0, 0.0):
+        timed_out = await _drain_owner(owner)
+    with _command_deadlines(0.0, 0.1):
+        drained = await _drain_owner(owner, force=True)
 
     assert timed_out.status is DrainStatus.TIMED_OUT
     assert drained.status is DrainStatus.DRAINED
@@ -1643,7 +1822,8 @@ async def test_aclose_retries_non_drained_receipt_with_force(
     owner = await _launch(monkeypatch, api, events)
     api._active_counts = [1, 1, 1, 0]
 
-    timed_out = await owner.drain_after_grace(grace_timeout=0.0, force_timeout=0.0)
+    with _command_deadlines(0.0, 0.0):
+        timed_out = await _drain_owner(owner)
     await owner.aclose()
 
     assert timed_out.status is DrainStatus.TIMED_OUT
@@ -1931,6 +2111,8 @@ time.sleep(30)
     child_code = f"""
 import asyncio
 from netcoredbg_mcp.windows_process_owner import WindowsOwnedProcess, DrainStatus
+from netcoredbg_mcp.build.session import BuildSession
+from unittest.mock import patch
 async def run():
     for index in range(8):
         inner = await WindowsOwnedProcess.launch(
@@ -1939,7 +2121,11 @@ async def run():
         )
         try:
             assert (await asyncio.wait_for(inner.stdout.readline(), 10)).strip() == b'ready'
-            receipt = await inner.force_and_drain(timeout=10)
+            with patch.multiple(
+                'netcoredbg_mcp.build.session',
+                COMMAND_OWNER_GRACE_TIMEOUT=0.0, COMMAND_OWNER_FORCE_TIMEOUT=10,
+            ):
+                receipt = await BuildSession('.')._drain_windows_owner(inner, force=True)
             assert receipt.status is DrainStatus.DRAINED, inner.drain_snapshot(receipt)
             facts = inner.drain_snapshot(receipt)
             assert facts['retained_exact_handles'] == facts['signaled_exact_handles'] == 4, facts
@@ -1960,7 +2146,8 @@ asyncio.run(run())
     stderr = asyncio.create_task(owner.stderr.read())
     try:
         returncode = await asyncio.wait_for(owner.wait_root(), 120)
-        receipt = await owner.drain_after_grace(grace_timeout=5, force_timeout=5)
+        with _command_deadlines(5, 5):
+            receipt = await _drain_owner(owner)
         facts = owner.drain_snapshot(receipt)
         (tmp_path / "nested-direct-receipt.json").write_text(json.dumps(facts), encoding="utf-8")
         assert returncode == 0, (await stderr).decode(errors="replace")
@@ -2419,7 +2606,8 @@ async def test_direct_capture_counts_distinct_objects_not_reused_pids_or_debug_h
     ):
         api.debug_events.put(event)
     owner = await _launch_debug(monkeypatch, api, events)
-    receipt = await owner.drain_after_grace(grace_timeout=1, force_timeout=1)
+    with _command_deadlines(1, 1):
+        receipt = await _drain_owner(owner)
     facts = owner.drain_snapshot(receipt)
     assert receipt.status is DrainStatus.DRAINED, facts
     assert not receipt.forced, facts
@@ -2824,7 +3012,8 @@ async def _probe_direct_capture_actual_runner(mode):
         assert all(thread is owner._debug_capture._worker for thread in api_threads)
         assert sentinel is not None
         assert sentinel.returncode is None
-        assert (await sentinel.force_and_drain(timeout=5)).status is DrainStatus.DRAINED
+        with _command_deadlines(0.0, 5):
+            assert (await _drain_owner(sentinel, force=True)).status is DrainStatus.DRAINED
         assert (await sentinel.aclose()).status is DrainStatus.DRAINED
         print("fatal-lifecycle-proof", flush=True)
 
@@ -2888,7 +3077,8 @@ async def _probe_direct_capture_failed_close(total, blocker=None, *, late_histor
             assert not capture._unresolved_capture
             assert capture.failure is capture.fatal_error is None
             assert len(capture.retained_handles()) == capture._qualified_count == 2
-            first = await owner.drain_after_grace(grace_timeout=0.1, force_timeout=0.1)
+            with _command_deadlines(0.1, 0.1):
+                first = await _drain_owner(owner)
             facts = owner.drain_snapshot(first)
             assert first.status is (DrainStatus.DRAINED if late_history else DrainStatus.FAILED)
             assert first.forced is (not late_history) and first.root_was_forced is False
@@ -3036,8 +3226,10 @@ async def _probe_direct_capture_retained_failure(kind, value):
         api.debug_events.put(_debug_event(5))
         owner = await _launch_debug(monkeypatch, api, events)
         await asyncio.wait_for(owner.wait_root(), 2)
-        first = await owner.drain_after_grace(grace_timeout=0.1, force_timeout=0.1)
-        second = await owner.force_and_drain(timeout=0.1)
+        with _command_deadlines(0.1, 0.1):
+            first = await _drain_owner(owner)
+        with _command_deadlines(0.0, 0.1):
+            second = await _drain_owner(owner, force=True)
         assert first.status is second.status is DrainStatus.FAILED
         capture = owner._debug_capture
         if kind == "api" and value == "continue":
@@ -3259,7 +3451,8 @@ async def test_direct_capture_exception_forwarding_only_handles_identified_start
     ):
         api.debug_events.put(event)
     owner = await _launch_debug(monkeypatch, api, events)
-    receipt = await owner.drain_after_grace(grace_timeout=1, force_timeout=1)
+    with _command_deadlines(1, 1):
+        receipt = await _drain_owner(owner)
     assert receipt.status is DrainStatus.DRAINED
     assert [status for code, pid, status in api.continued if code == 1] == [
         0x00010002,
@@ -3354,7 +3547,8 @@ async def test_direct_capture_native_suspended_termination_and_app_breakpoint(
     error = asyncio.create_task(owner.stderr.read())
     try:
         assert await asyncio.wait_for(owner.wait_root(), 10) == expected
-        receipt = await owner.drain_after_grace(grace_timeout=1, force_timeout=1)
+        with _command_deadlines(1, 1):
+            receipt = await _drain_owner(owner)
         facts = owner.drain_snapshot(receipt)
         assert receipt.status is DrainStatus.DRAINED, facts
         assert not receipt.forced, facts
@@ -3408,13 +3602,19 @@ def test_direct_capture_native_new_debug_chain_stays_failed_with_zero_accounting
     inner_code = f"""
 import asyncio, json
 from netcoredbg_mcp.windows_process_owner import WindowsOwnedProcess, DrainStatus
+from netcoredbg_mcp.build.session import BuildSession
+from unittest.mock import patch
 async def run():
     owner = await WindowsOwnedProcess.launch(
         generation='independent-chain', argv=({python!r}, '-c', 'pass'),
         cwd=None, env=None, stdin_mode='devnull', capture_process_handles=True,
     )
     await owner.wait_root()
-    receipt = await owner.drain_after_grace(grace_timeout=1, force_timeout=1)
+    with patch.multiple(
+        'netcoredbg_mcp.build.session',
+        COMMAND_OWNER_GRACE_TIMEOUT=1, COMMAND_OWNER_FORCE_TIMEOUT=1,
+    ):
+        receipt = await BuildSession('.')._drain_windows_owner(owner, force=False)
     assert receipt.status is DrainStatus.DRAINED
     print(json.dumps(owner.drain_snapshot(receipt)), flush=True)
     assert (await owner.aclose()).status is DrainStatus.DRAINED
@@ -3423,6 +3623,8 @@ asyncio.run(run())
     probe_code = f"""
 import asyncio, json
 from netcoredbg_mcp.windows_process_owner import WindowsOwnedProcess, DrainStatus
+from netcoredbg_mcp.build.session import BuildSession
+from unittest.mock import patch
 async def run():
     owner = await WindowsOwnedProcess.launch(
         generation='chain-ancestor', argv=({python!r}, '-c', {inner_code!r}),
@@ -3431,7 +3633,11 @@ async def run():
     out = asyncio.create_task(owner.stdout.read())
     err = asyncio.create_task(owner.stderr.read())
     assert await asyncio.wait_for(owner.wait_root(), 10) == 0, (await err).decode()
-    receipt = await owner.drain_after_grace(grace_timeout=0.1, force_timeout=0.1)
+    with patch.multiple(
+        'netcoredbg_mcp.build.session',
+        COMMAND_OWNER_GRACE_TIMEOUT=0.1, COMMAND_OWNER_FORCE_TIMEOUT=0.1,
+    ):
+        receipt = await BuildSession('.')._drain_windows_owner(owner, force=False)
     facts = owner.drain_snapshot(receipt)
     assert receipt.status is DrainStatus.FAILED, facts
     assert facts['total_processes'] == 2 and facts['retained_exact_handles'] == 1, facts

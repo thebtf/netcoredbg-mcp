@@ -38,6 +38,8 @@ Any failure before resume terminates the retained child or Job, waits within the
 
 Each `DAPClient._DapRun` owns one capability for its manager-issued generation. Each `BuildSession` command owns another capability. `SessionManager` captures a one-shot `PreBuildOwner` value and passes it to `BuildManager`. `BuildManager` consumes that value before restore or build. The default route has no selector fallback.
 
+Drain duration belongs to each existing caller's concrete async policy: BuildSession, the elected DAP finalizer, the collector, or the retained close worker. Their local stdlib waits and repeat loops preserve separate grace and post-force deadlines. `WindowsOwnedProcess._join_drain` retains and shields the first policy task, stores its receipt and permits another attempt only after a non-drained result. The owner provides deadline-free native force and single-observation steps; it owns handle authority, pending Future identity and receipt classification, not the retry clock. Zero budget still observes once. Expiry returns the best saved phase receipt without a fresh native query; a proven signaled-root read and opaque force acknowledgement are outside that retry deadline. No timeout closes an ambiguous Job or changes the native-effect ledger, P/H/C predicates or existing failure priority.
+
 ## Caller-first contract
 
 The caller sees capability results and streams. It does not see Win32 structures, handles, PID reopening, Job accounting calls, or pipe inheritance details.
@@ -117,14 +119,19 @@ class WindowsOwnedProcess:
     ) -> "WindowsOwnedProcess": ...
 
     async def wait_root(self) -> int: ...
-    async def drain_after_grace(
+    async def _join_drain(
+        self, policy: Callable[[], Awaitable[OwnerDrainReceipt]]
+    ) -> OwnerDrainReceipt: ...
+    async def force_job(self) -> tuple[bool | None, OwnerDrainReceipt | None]: ...
+    def start_drain_observation(self) -> asyncio.Future[Any] | None: ...
+    async def observe_drain(
         self,
         *,
-        grace_timeout: float,
-        force_timeout: float,
-    ) -> OwnerDrainReceipt: ...
-    async def force_and_drain(self, *, timeout: float) -> OwnerDrainReceipt: ...
-    async def aclose(self) -> None: ...
+        forced: bool,
+        root_was_forced: bool | None,
+        previous: OwnerDrainReceipt | None = None,
+    ) -> tuple[OwnerDrainReceipt, bool]: ...
+    async def aclose(self) -> OwnerDrainReceipt: ...
 
 
 @dataclass(frozen=True, slots=True)

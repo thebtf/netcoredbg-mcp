@@ -4645,13 +4645,10 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             async def wait_root(self):
                 return 0
 
-            async def drain_after_grace(self, **_kwargs):
+            async def _join_drain(self, _policy):
                 return SimpleNamespace(
                     status=owner_module.DrainStatus.FAILED, forced=False, active_processes=0
                 )
-
-            async def force_and_drain(self, **_kwargs):
-                return await self.drain_after_grace()
 
             def drain_snapshot(self, receipt):
                 return {
@@ -4676,7 +4673,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 self.close_entered.set()
                 await self.release_close.wait()
                 self.closed = True
-                return await self.drain_after_grace()
+                return await self._join_drain(None)
 
         async def exercise():
             owner = Owner()
@@ -4722,7 +4719,10 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             async def wait_root(self):
                 return 0
 
-            async def drain_after_grace(self, **_kwargs):
+            async def _join_drain(self, _policy):
+                self.drain_calls = getattr(self, "drain_calls", 0) + 1
+                if self.drain_calls > 1:
+                    self.births = 0
                 return SimpleNamespace(
                     status=owner_module.DrainStatus.FAILED,
                     forced=True,
@@ -4747,10 +4747,6 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     "failure_stage": "drain",
                     "winerror": None,
                 }
-
-            async def force_and_drain(self, **_kwargs):
-                self.births = 0
-                return await self.drain_after_grace()
 
             async def aclose(self):
                 self.close_calls += 1
@@ -4781,7 +4777,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         self.assertEqual(diagnostics["first"]["failure_stage"], "drain")
 
         class ActiveOwner(Owner):
-            async def drain_after_grace(self, **_kwargs):
+            async def _join_drain(self, _policy):
                 return SimpleNamespace(
                     status=owner_module.DrainStatus.TIMED_OUT, forced=True, active_processes=1
                 )
@@ -4986,7 +4982,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             async def wait_root(self):
                 return 0 if self.late_history else 7
 
-            async def drain_after_grace(self, **_kwargs):
+            async def _join_drain(self, _policy):
                 self.grace_receipt = SimpleNamespace(
                     status=owner_module.DrainStatus.DRAINED, forced=False, active_processes=0
                 )
@@ -5142,7 +5138,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 self.entered.set()
                 await asyncio.Event().wait()
 
-            async def force_and_drain(self, **_kwargs):
+            async def _join_drain(self, _policy):
                 return SimpleNamespace(status=owner_module.DrainStatus.DRAINED, active_processes=0)
 
             async def aclose(self):
@@ -5189,7 +5185,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             async def wait_root(self):
                 raise self.wait_error
 
-            async def force_and_drain(self, **_kwargs):
+            async def _join_drain(self, _policy):
                 self.force_calls += 1
                 return SimpleNamespace(status=owner_module.DrainStatus.DRAINED, active_processes=0)
 
@@ -5231,7 +5227,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         sys.path.insert(0, str(RUNNER_PATH.parents[1] / "src"))
         owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
         original_launch = owner_module.WindowsOwnedProcess.launch
-        original_force = owner_module.WindowsOwnedProcess.force_and_drain
+        original_force = owner_module.WindowsOwnedProcess._join_drain
 
         for synchronize in (False, True):
             with self.subTest(readiness=synchronize), TemporaryDirectory() as temporary_directory:
@@ -5290,8 +5286,8 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                         await owner.aclose()
                         raise
 
-                async def record_force(owner, *, timeout):
-                    receipt = await original_force(owner, timeout=timeout)
+                async def record_force(owner, policy):
+                    receipt = await original_force(owner, policy)
                     receipts.append(owner.drain_snapshot(receipt))
                     return receipt
 
@@ -5300,7 +5296,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                         with (
                             patch.object(owner_module.WindowsOwnedProcess, "launch", ready_launch),
                             patch.object(
-                                owner_module.WindowsOwnedProcess, "force_and_drain", record_force
+                                owner_module.WindowsOwnedProcess, "_join_drain", record_force
                             ),
                             self.assertRaises(TimeoutError) as raised,
                         ):
@@ -5428,12 +5424,12 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 )
             )
 
-        original_force = owner_module.WindowsOwnedProcess.force_and_drain
+        original_force = owner_module.WindowsOwnedProcess._join_drain
         original_close = owner_module.WindowsOwnedProcess.aclose
 
-        async def record_force(owner, *, timeout):
+        async def record_force(owner, policy):
             snapshot("before_force")
-            receipt = await original_force(owner, timeout=timeout)
+            receipt = await original_force(owner, policy)
             snapshot("after_force")
             diagnostic = owner.drain_snapshot(receipt)
             receipts.append(("force", diagnostic))
@@ -5515,7 +5511,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             try:
                 with (
                     patch.object(owner_module.WindowsOwnedProcess, "launch", record_launch),
-                    patch.object(owner_module.WindowsOwnedProcess, "force_and_drain", record_force),
+                    patch.object(owner_module.WindowsOwnedProcess, "_join_drain", record_force),
                     patch.object(owner_module.WindowsOwnedProcess, "aclose", record_close),
                 ):
                     asyncio.run(interrupt())
@@ -5600,7 +5596,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 self.wait_entered.set()
                 await asyncio.Event().wait()
 
-            async def force_and_drain(self, **_kwargs):
+            async def _join_drain(self, _policy):
                 self.force_calls += 1
                 self.force_entered.set()
                 await self.resume_force.wait()

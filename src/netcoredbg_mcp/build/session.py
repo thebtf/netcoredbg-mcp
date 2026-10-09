@@ -17,7 +17,12 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
-from ..windows_process_owner import DrainStatus, OwnerDrainReceipt, WindowsOwnedProcess
+from ..windows_process_owner import (
+    DrainStatus,
+    OwnerDrainReceipt,
+    WindowsOwnedProcess,
+    _ACCOUNTING_POLL_SECONDS,
+)
 from .policy import BuildCommand, BuildPolicy
 from .state import BuildError, BuildResult, BuildState
 
@@ -136,15 +141,42 @@ class BuildSession:
         force: bool,
     ) -> OwnerDrainReceipt:
         """Capture one retained-owner receipt without abandoning cleanup on cancellation."""
-        operation = (
-            owner.force_and_drain(timeout=COMMAND_OWNER_FORCE_TIMEOUT)
-            if force
-            else owner.drain_after_grace(
-                grace_timeout=COMMAND_OWNER_GRACE_TIMEOUT,
-                force_timeout=COMMAND_OWNER_FORCE_TIMEOUT,
+
+        async def command_policy() -> OwnerDrainReceipt:
+            root_was_forced: bool | None = False
+            receipt: OwnerDrainReceipt | None = None
+            phases = (
+                (False, 0.0 if force else COMMAND_OWNER_GRACE_TIMEOUT),
+                (True, COMMAND_OWNER_FORCE_TIMEOUT),
             )
-        )
-        drain_task = asyncio.create_task(operation)
+            for forced, budget in phases:
+                if forced:
+                    root_was_forced, failure = await owner.force_job()
+                    if failure is not None:
+                        return failure
+                deadline = time.monotonic() + max(budget, 0.0)
+                receipt = None
+                while True:
+                    pending = owner.start_drain_observation()
+                    if pending is not None:
+                        await asyncio.wait(
+                            (pending,), timeout=max(deadline - time.monotonic(), 0.0)
+                        )
+                    receipt, retry = await owner.observe_drain(
+                        forced=forced, root_was_forced=root_was_forced, previous=receipt
+                    )
+                    remaining = deadline - time.monotonic()
+                    if not retry or remaining <= 0:
+                        break
+                    await asyncio.sleep(min(_ACCOUNTING_POLL_SECONDS, remaining))
+                    if time.monotonic() >= deadline:
+                        break
+                if receipt.status is DrainStatus.DRAINED:
+                    return receipt
+            assert receipt is not None
+            return receipt
+
+        drain_task = asyncio.create_task(owner._join_drain(command_policy))
         cancellation: asyncio.CancelledError | None = None
         while True:
             try:

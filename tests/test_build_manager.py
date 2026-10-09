@@ -98,8 +98,7 @@ class TestBuildManagerSessions:
         owner_a.wait = AsyncMock(return_value=0)
         failed = OwnerDrainReceipt(owner_a.owner, status, True, 0, 1)
         drained_a = OwnerDrainReceipt(owner_a.owner, DrainStatus.DRAINED, True, 0, 0)
-        owner_a.drain_after_grace = AsyncMock(return_value=failed)
-        owner_a.force_and_drain = AsyncMock(side_effect=[failed, drained_a])
+        owner_a._join_drain = AsyncMock(side_effect=[failed, failed, drained_a])
         owner_a.aclose = AsyncMock(side_effect=[failed, drained_a])
 
         owner_b = MagicMock()
@@ -108,7 +107,7 @@ class TestBuildManagerSessions:
         owner_b.stderr.readline = AsyncMock(return_value=b"")
         owner_b.wait = AsyncMock(return_value=0)
         drained_b = OwnerDrainReceipt(owner_b.owner, DrainStatus.DRAINED, False, 0, 0)
-        owner_b.drain_after_grace = AsyncMock(return_value=drained_b)
+        owner_b._join_drain = AsyncMock(return_value=drained_b)
         owner_b.aclose = AsyncMock(return_value=drained_b)
 
         with patch(
@@ -124,14 +123,14 @@ class TestBuildManagerSessions:
             with pytest.raises(BuildError, match="owner did not drain"):
                 await manager.build(str(tmp_path), str(project))
             assert launch.await_count == 1
-            assert owner_a.force_and_drain.await_count == 1
+            assert owner_a._join_drain.await_count == 2
             assert manager.clear_session(str(tmp_path)) is False
 
             result = await manager.build(str(tmp_path), str(project))
 
         assert result.success is True
         assert launch.await_count == 2
-        assert owner_a.force_and_drain.await_count == 2
+        assert owner_a._join_drain.await_count == 3
         assert owner_a.aclose.await_count == 2
         assert session._current_owner is None
         assert manager.clear_session(str(tmp_path)) is True

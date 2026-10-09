@@ -58,13 +58,18 @@ class WindowsOwnedProcess:
     ) -> "WindowsOwnedProcess": ...
 
     async def wait_root(self) -> int: ...
-    async def drain_after_grace(
+    async def _join_drain(
+        self, policy: Callable[[], Awaitable[OwnerDrainReceipt]]
+    ) -> OwnerDrainReceipt: ...
+    async def force_job(self) -> tuple[bool | None, OwnerDrainReceipt | None]: ...
+    def start_drain_observation(self) -> asyncio.Future[Any] | None: ...
+    async def observe_drain(
         self,
         *,
-        grace_timeout: float,
-        force_timeout: float,
-    ) -> OwnerDrainReceipt: ...
-    async def force_and_drain(self, *, timeout: float) -> OwnerDrainReceipt: ...
+        forced: bool,
+        root_was_forced: bool | None,
+        previous: OwnerDrainReceipt | None = None,
+    ) -> tuple[OwnerDrainReceipt, bool]: ...
     async def aclose(self) -> OwnerDrainReceipt: ...
 ```
 
@@ -98,15 +103,17 @@ The boundary never invokes asyncio process launch as a Windows fallback. It neve
 
 ## Drain contract
 
-1. `drain_after_grace()` permits the caller's graceful shutdown policy only for the configured grace bound.
-2. If the tree remains active after that bound, it calls `TerminateJobObject` once for this capability's Job.
-3. `force_and_drain()` may skip the grace wait only for a build-command cancellation or another explicit force policy that the caller already selected.
+1. Build, DAP, collector and owner-close callers select a concrete async policy. That policy owns its local `asyncio.wait` calls and repeat loop, with the original separate grace and post-force observation deadlines. The owner accepts the policy through `_join_drain()`; it does not accept durations.
+2. `start_drain_observation()` retains one captured native query Future, or returns `None` for default-mode observation. The caller bounds only its wait on that Future. `observe_drain()` consumes completed facts and returns the phase's best receipt plus a retry flag; it owns neither a deadline nor a repeat loop. A pending captured Future retains its identity between phases and attempts.
+3. Every phase performs an initial observation, including a zero-budget phase. A non-drained grace result permits the caller's already-selected `force_job()` effect. Native force acknowledgement is unbounded; the force observation deadline starts only afterwards. A default-mode signaled-root read already justified by exact exit proof remains outside the observation retry deadline.
 4. `DRAINED` requires `active_processes == 0`, a signaled retained root handle, and signaled handles for all retained members. Reconcile the Job's lifetime total against recorded member births; each member without a retained handle needs proven retirement. A Job-member retirement notification can prove that fact when a handle cannot be retained, but notifications alone never establish drain. Zero accounting or root exit alone is insufficient.
    Both `JOB_OBJECT_MSG_EXIT_PROCESS` and `JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS` retire a recorded member birth through the same identity/handle checks. Ignoring an abnormal exit must not leave a phantom live birth or reject a later legitimate birth with the recycled PID. Missing or ambiguous lifetime evidence still fails closed.
 5. `forced` records Job-wide escalation. `root_was_forced` records the root outcome separately: `False` means no Job force included the root, `True` means the root was observed active immediately before a successful Job force, and `None` is a legacy or unavailable observation. DAP terminal cleanup maps from this root fact, never from `forced` alone.
 6. A query, member observation, or lifetime-reconciliation failure returns `FAILED`; an unsignaled process at the deadline returns `TIMED_OUT`. Neither permits pre-build continuation, producer-terminal evidence, or run-root cleanup.
-7. Repeated callers join an in-flight operation. Only a proven `DRAINED` receipt memoizes completion; a later explicit force call may retry a non-drained outcome.
+7. Repeated callers join the same shielded policy task; the first caller chooses its policy. Observer cancellation does not cancel that task or any native Future. Only a proven `DRAINED` receipt memoizes completion; a later explicit policy may retry a non-drained outcome. At phase expiry, the caller publishes its saved receipt without starting another potentially blocking native query. A timeout cannot authorize Job closure or redispatch an `IN_FLIGHT` effect.
 8. `aclose() -> OwnerDrainReceipt` keeps the Job, port, and process/member handles on failed close and retries the same owner. It releases them only after proven drain. `KILL_ON_JOB_CLOSE` is crash protection, not a substitute for a drain receipt.
+
+The return from `force_job()` contains the observed root-force fact and an optional immediate failure receipt. `observe_drain()` keeps the existing classifications: unsignaled default-mode handles remain `TIMED_OUT`, even at zero accounting; captured zero accounting without complete history remains `FAILED` at expiry; positive or unknown captured accounting remains `TIMED_OUT` unless the owner has an earlier failure. Native/fatal outcome data, first-error identity and physical-close predicates are unchanged. Build cancellation still yields `OwnerDrainError` when drain is unproven, with cancellation as its cause; only successful cleanup restores `CancelledError` without that higher-priority failure.
 
 ### Collector-only synchronous process-capability capture
 

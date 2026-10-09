@@ -15,7 +15,7 @@ import subprocess
 import time
 import threading
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from concurrent.futures import Future, ThreadPoolExecutor
 from enum import Enum
@@ -2135,26 +2135,10 @@ class WindowsOwnedProcess:
         self._returncode = returncode
         return False
 
-    async def drain_after_grace(
-        self,
-        *,
-        grace_timeout: float,
-        force_timeout: float,
-    ) -> OwnerDrainReceipt:
-        """Join one grace-then-Job-force operation for this capability."""
-
-        return await self._join_drain(grace_timeout, force_timeout)
-
-    async def force_and_drain(self, *, timeout: float) -> OwnerDrainReceipt:
-        """Join one immediate Job-force, handle-confirmed drain."""
-
-        return await self._join_drain(0.0, timeout)
-
     async def _join_drain(
-        self,
-        grace_timeout: float,
-        force_timeout: float,
+        self, policy: Callable[[], Awaitable[OwnerDrainReceipt]]
     ) -> OwnerDrainReceipt:
+        """Retain the first caller's policy until its shared attempt finishes."""
         if self._closed:
             assert self._drain_receipt is not None
             return self._drain_receipt
@@ -2167,205 +2151,174 @@ class WindowsOwnedProcess:
         task = self._drain_task
         if task is None or task.done():
             self._drain_receipt = None
-            task = asyncio.create_task(self._drain(grace_timeout, force_timeout))
+
+            async def run_policy() -> OwnerDrainReceipt:
+                receipt = await policy()
+                self._drain_receipt = receipt
+                return receipt
+
+            task = asyncio.create_task(run_policy())
             self._drain_task = task
         return await asyncio.shield(task)
 
-    async def _drain(self, grace_timeout: float, force_timeout: float) -> OwnerDrainReceipt:
-        if self._debug_capture is not None:
-            return await self._drain_captured(grace_timeout, force_timeout)
-        graceful = await self._wait_for_zero(
-            grace_timeout,
-            forced=False,
-            root_was_forced=False,
-        )
-        if graceful.status is DrainStatus.DRAINED:
-            self._drain_receipt = graceful
-            return graceful
+    async def force_job(self) -> tuple[bool | None, OwnerDrainReceipt | None]:
+        """Acknowledge the retained Job effect without a caller observation deadline."""
+        capture = self._debug_capture
+        if capture is not None:
+            root = await _native_effect_outcome(
+                _NativeEffect(self._root_is_active_before_force, read_only=True)
+            )
+            if root.error is not None:
+                capture.record_error(root.error, AdmissionStage.DRAIN)
+            job = self._job_handle
+            if job is not None:
+                effect = self._cleanup_effects.setdefault(
+                    "terminate-job", _NativeEffect(self._api.terminate_job, (job,))
+                )
+                outcome = await _native_effect_outcome(effect)
+                if outcome.error is not None:
+                    capture.record_error(outcome.error, AdmissionStage.DRAIN)
+            return root.value if root.error is None else None, None
         if self._job_handle is None:
-            receipt = self._receipt(
+            return None, self._receipt(
                 status=DrainStatus.FAILED,
                 forced=False,
                 active_processes=None,
                 failure_stage=AdmissionStage.DRAIN,
                 winerror=None,
             )
-            self._drain_receipt = receipt
-            return receipt
         root_was_forced = self._root_is_active_before_force()
         try:
             self._snapshot_members()
-        except _Win32CallError as error:
+        except _Win32CallError:
             # A denied observation cannot veto termination of the retained Job.
-            if self._debug_capture is not None:
-                self._debug_capture.record_failure(error)
+            pass
         try:
             self._api.terminate_job(self._job_handle)
         except _Win32CallError as error:
-            if self._debug_capture is not None:
-                self._debug_capture.record_failure(error)
-                error = self._debug_capture.failure
-                assert error is not None
-            receipt = self._receipt(
+            return root_was_forced, self._receipt(
                 status=DrainStatus.FAILED,
                 forced=True,
                 active_processes=None,
                 failure_stage=error.stage,
                 winerror=error.winerror,
             )
-            self._drain_receipt = receipt
-            return receipt
-        forced = await self._wait_for_zero(
-            force_timeout,
-            forced=True,
-            root_was_forced=root_was_forced,
-        )
-        self._drain_receipt = forced
-        return forced
+        return root_was_forced, None
 
-    async def _drain_captured(
-        self, grace_timeout: float, force_timeout: float
-    ) -> OwnerDrainReceipt:
+    def start_drain_observation(self) -> asyncio.Future[Any] | None:
+        """Retain one capture query; callers may bound its wait, never its effect."""
         capture = self._debug_capture
-        assert capture is not None
-        receipt = await self._wait_for_captured(grace_timeout, forced=False, root_was_forced=False)
-        if receipt.status is DrainStatus.DRAINED:
-            self._drain_receipt = receipt
-            return receipt
-        root = await _native_effect_outcome(
-            _NativeEffect(self._root_is_active_before_force, read_only=True)
-        )
-        if root.error is not None:
-            capture.record_error(root.error, AdmissionStage.DRAIN)
-        job = self._job_handle
-        if job is not None:
-            effect = self._cleanup_effects.setdefault(
-                "terminate-job", _NativeEffect(self._api.terminate_job, (job,))
+        if capture is None or capture.failure is not None:
+            return None
+        if self._captured_observation_future is None:
+            self._captured_observation_future = asyncio.get_running_loop().run_in_executor(
+                None, self._captured_observation
             )
-            outcome = await _native_effect_outcome(effect)
-            if outcome.error is not None:
-                capture.record_error(outcome.error, AdmissionStage.DRAIN)
-        receipt = await self._wait_for_captured(
-            force_timeout, forced=True, root_was_forced=root.value if root.error is None else None
-        )
-        self._drain_receipt = receipt
-        return receipt
+        return self._captured_observation_future
 
-    async def _wait_for_zero(
+    async def observe_drain(
         self,
-        timeout: float,
         *,
         forced: bool,
-        root_was_forced: bool | None = None,
-    ) -> OwnerDrainReceipt:
+        root_was_forced: bool | None,
+        previous: OwnerDrainReceipt | None = None,
+    ) -> tuple[OwnerDrainReceipt, bool]:
+        """Classify one observation and whether more facts can complete this phase."""
         if self._debug_capture is not None:
-            return await self._wait_for_captured(
-                timeout,
-                forced=forced,
-                root_was_forced=root_was_forced,
-            )
-        deadline = time.monotonic() + max(timeout, 0.0)
-        while True:
-            try:
-                self._snapshot_members()
-            except _Win32CallError as error:
-                if not forced:
-                    return self._receipt(
-                        status=DrainStatus.FAILED,
-                        forced=False,
-                        active_processes=None,
-                        failure_stage=error.stage,
-                        winerror=error.winerror,
-                        root_was_forced=root_was_forced,
-                    )
-                # The Job is already terminating; the child's retirement message
-                # may still supply exact evidence without an OpenProcess handle.
-            try:
-                active_processes = self._query_active_processes()
-                signaled = self._process_handle is not None and self._api.wait_for_process(
-                    self._process_handle, 0
-                )
-                for handle in self._member_handles.values():
-                    signaled = self._api.wait_for_process(handle, 0) and signaled
-                for handle in self._unmatched_member_handles:
-                    signaled = self._api.wait_for_process(handle, 0) and signaled
-            except _Win32CallError as error:
+            return self._read_captured_drain(forced, root_was_forced, previous)
+        try:
+            self._snapshot_members()
+        except _Win32CallError as error:
+            if not forced:
                 return self._receipt(
                     status=DrainStatus.FAILED,
-                    forced=forced,
+                    forced=False,
                     active_processes=None,
                     failure_stage=error.stage,
                     winerror=error.winerror,
                     root_was_forced=root_was_forced,
-                )
-            if active_processes == 0 and signaled:
-                try:
-                    await self.wait_root()
-                except (_Win32CallError, RuntimeError):
-                    return self._receipt(
-                        status=DrainStatus.FAILED,
-                        forced=forced,
-                        active_processes=0,
-                        failure_stage=AdmissionStage.DRAIN,
-                        winerror=None,
-                        root_was_forced=root_was_forced,
-                    )
-                try:
-                    job_handle = self._job_handle
-                    if job_handle is None:
-                        raise _Win32CallError(AdmissionStage.DRAIN, None)
-                    total = self._api.total_processes(job_handle)
-                    self._observe_job_messages()
-                except _Win32CallError as error:
-                    return self._receipt(
-                        status=DrainStatus.FAILED,
-                        forced=forced,
-                        active_processes=0,
-                        failure_stage=AdmissionStage.DRAIN,
-                        winerror=error.winerror,
-                        root_was_forced=root_was_forced,
-                    )
-                if (
-                    self._unverified_membership
-                    or total != self._birth_notifications
-                    or not self._root_birth_seen
-                    or any(
-                        pid not in self._member_handles
-                        for pid in self._live_births
-                        if pid != self.owner.root_pid
-                    )
-                ):
-                    remaining = deadline - time.monotonic()
-                    if not self._unverified_membership and remaining > 0:
-                        await asyncio.sleep(min(_ACCOUNTING_POLL_SECONDS, remaining))
-                        continue
-                    return self._receipt(
-                        status=DrainStatus.FAILED,
-                        forced=forced,
-                        active_processes=0,
-                        failure_stage=AdmissionStage.DRAIN,
-                        winerror=None,
-                        root_was_forced=root_was_forced,
-                    )
+                ), False
+            # The terminating child's retirement may supply exact evidence.
+        try:
+            active_processes = self._query_active_processes()
+            signaled = self._process_handle is not None and self._api.wait_for_process(
+                self._process_handle, 0
+            )
+            for handle in self._member_handles.values():
+                signaled = self._api.wait_for_process(handle, 0) and signaled
+            for handle in self._unmatched_member_handles:
+                signaled = self._api.wait_for_process(handle, 0) and signaled
+        except _Win32CallError as error:
+            return self._receipt(
+                status=DrainStatus.FAILED,
+                forced=forced,
+                active_processes=None,
+                failure_stage=error.stage,
+                winerror=error.winerror,
+                root_was_forced=root_was_forced,
+            ), False
+        if active_processes == 0 and signaled:
+            try:
+                # Exact exit is already proven; this read remains outside retry deadlines.
+                await self.wait_root()
+            except (_Win32CallError, RuntimeError):
                 return self._receipt(
-                    status=DrainStatus.DRAINED,
+                    status=DrainStatus.FAILED,
                     forced=forced,
                     active_processes=0,
-                    failure_stage=None,
+                    failure_stage=AdmissionStage.DRAIN,
                     winerror=None,
                     root_was_forced=root_was_forced,
-                )
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+                ), False
+            try:
+                job_handle = self._job_handle
+                if job_handle is None:
+                    raise _Win32CallError(AdmissionStage.DRAIN, None)
+                total = self._api.total_processes(job_handle)
+                self._observe_job_messages()
+            except _Win32CallError as error:
                 return self._receipt(
-                    status=DrainStatus.TIMED_OUT,
+                    status=DrainStatus.FAILED,
                     forced=forced,
-                    active_processes=active_processes,
-                    failure_stage=None,
+                    active_processes=0,
+                    failure_stage=AdmissionStage.DRAIN,
+                    winerror=error.winerror,
+                    root_was_forced=root_was_forced,
+                ), False
+            if (
+                self._unverified_membership
+                or total != self._birth_notifications
+                or not self._root_birth_seen
+                or any(
+                    pid not in self._member_handles
+                    for pid in self._live_births
+                    if pid != self.owner.root_pid
+                )
+            ):
+                return self._receipt(
+                    status=DrainStatus.FAILED,
+                    forced=forced,
+                    active_processes=0,
+                    failure_stage=AdmissionStage.DRAIN,
                     winerror=None,
                     root_was_forced=root_was_forced,
-                )
-            await asyncio.sleep(min(_ACCOUNTING_POLL_SECONDS, remaining))
+                ), not self._unverified_membership
+            return self._receipt(
+                status=DrainStatus.DRAINED,
+                forced=forced,
+                active_processes=0,
+                failure_stage=None,
+                winerror=None,
+                root_was_forced=root_was_forced,
+            ), False
+        return self._receipt(
+            status=DrainStatus.TIMED_OUT,
+            forced=forced,
+            active_processes=active_processes,
+            failure_stage=None,
+            winerror=None,
+            root_was_forced=root_was_forced,
+        ), True
 
     def _captured_observation(self) -> tuple[int, bool]:
         capture = self._debug_capture
@@ -2383,60 +2336,50 @@ class WindowsOwnedProcess:
                     raise _Win32CallError(AdmissionStage.DRAIN, None)
             return active, complete
 
-    async def _wait_for_captured(
-        self, timeout: float, *, forced: bool, root_was_forced: bool | None
-    ) -> OwnerDrainReceipt:
+    def _read_captured_drain(
+        self,
+        forced: bool,
+        root_was_forced: bool | None,
+        previous: OwnerDrainReceipt | None,
+    ) -> tuple[OwnerDrainReceipt, bool]:
         capture = self._debug_capture
         assert capture is not None
-        deadline = time.monotonic() + max(timeout, 0.0)
-        active: int | None = None
-        while True:
-            complete = False
-            if capture.failure is None:
-                if self._captured_observation_future is None:
-                    self._captured_observation_future = asyncio.get_running_loop().run_in_executor(
-                        None, self._captured_observation
-                    )
-                done, _ = await asyncio.wait(
-                    (self._captured_observation_future,),
-                    timeout=max(deadline - time.monotonic(), 0.0),
-                )
-                if done:
-                    outcome = _operation_outcome(self._captured_observation_future)
-                    self._captured_observation_future = None
-                    if outcome.error is not None:
-                        capture.record_error(outcome.error, AdmissionStage.DRAIN)
-                    else:
-                        active, complete = outcome.value
-            if capture.failure is not None:
-                return self._receipt(
-                    status=DrainStatus.FAILED,
-                    forced=forced,
-                    active_processes=active,
-                    failure_stage=capture.failure.stage,
-                    winerror=capture.failure.winerror,
-                    root_was_forced=root_was_forced,
-                )
-            if active == 0 and complete:
-                return self._receipt(
-                    status=DrainStatus.DRAINED,
-                    forced=forced,
-                    active_processes=0,
-                    failure_stage=None,
-                    winerror=None,
-                    root_was_forced=root_was_forced,
-                )
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return self._receipt(
-                    status=DrainStatus.FAILED if active == 0 else DrainStatus.TIMED_OUT,
-                    forced=forced,
-                    active_processes=active,
-                    failure_stage=AdmissionStage.DRAIN if active == 0 else None,
-                    winerror=None,
-                    root_was_forced=root_was_forced,
-                )
-            await asyncio.sleep(min(_ACCOUNTING_POLL_SECONDS, remaining))
+        active = previous.active_processes if previous is not None else None
+        complete = False
+        future = self._captured_observation_future
+        if capture.failure is None and future is not None and future.done():
+            outcome = _operation_outcome(future)
+            self._captured_observation_future = None
+            if outcome.error is not None:
+                capture.record_error(outcome.error, AdmissionStage.DRAIN)
+            else:
+                active, complete = outcome.value
+        if capture.failure is not None:
+            return self._receipt(
+                status=DrainStatus.FAILED,
+                forced=forced,
+                active_processes=active,
+                failure_stage=capture.failure.stage,
+                winerror=capture.failure.winerror,
+                root_was_forced=root_was_forced,
+            ), False
+        if active == 0 and complete:
+            return self._receipt(
+                status=DrainStatus.DRAINED,
+                forced=forced,
+                active_processes=0,
+                failure_stage=None,
+                winerror=None,
+                root_was_forced=root_was_forced,
+            ), False
+        return self._receipt(
+            status=DrainStatus.FAILED if active == 0 else DrainStatus.TIMED_OUT,
+            forced=forced,
+            active_processes=active,
+            failure_stage=AdmissionStage.DRAIN if active == 0 else None,
+            winerror=None,
+            root_was_forced=root_was_forced,
+        ), True
 
     def drain_snapshot(self, receipt: OwnerDrainReceipt) -> dict[str, object]:
         """Return safe diagnostics, never an independent drain admission oracle."""
@@ -2530,6 +2473,34 @@ class WindowsOwnedProcess:
             root_was_forced=root_was_forced,
         )
 
+    async def _close_drain_policy(self) -> OwnerDrainReceipt:
+        root_was_forced: bool | None = False
+        receipt: OwnerDrainReceipt | None = None
+        for forced, budget in ((False, 0.0), (True, _ADMISSION_CLEANUP_TIMEOUT)):
+            if forced:
+                root_was_forced, failure = await self.force_job()
+                if failure is not None:
+                    return failure
+            deadline = time.monotonic() + max(budget, 0.0)
+            receipt = None
+            while True:
+                pending = self.start_drain_observation()
+                if pending is not None:
+                    await asyncio.wait((pending,), timeout=max(deadline - time.monotonic(), 0.0))
+                receipt, retry = await self.observe_drain(
+                    forced=forced, root_was_forced=root_was_forced, previous=receipt
+                )
+                remaining = deadline - time.monotonic()
+                if not retry or remaining <= 0:
+                    break
+                await asyncio.sleep(min(_ACCOUNTING_POLL_SECONDS, remaining))
+                if time.monotonic() >= deadline:
+                    break
+            if receipt.status is DrainStatus.DRAINED:
+                return receipt
+        assert receipt is not None
+        return receipt
+
     async def aclose(self) -> OwnerDrainReceipt:
         """Join a retained close worker; caller cancellation cannot orphan cleanup."""
 
@@ -2566,7 +2537,7 @@ class WindowsOwnedProcess:
                 or receipt.status is not DrainStatus.DRAINED
                 or receipt.active_processes != 0
             ):
-                receipt = await self.force_and_drain(timeout=_ADMISSION_CLEANUP_TIMEOUT)
+                receipt = await self._join_drain(self._close_drain_policy)
             if receipt.status is not DrainStatus.DRAINED:
                 if self._close_reaper is None:
                     self._close_reaper = asyncio.create_task(self._retry_close())
@@ -2603,7 +2574,7 @@ class WindowsOwnedProcess:
             receipt if receipt is not None and receipt.status is DrainStatus.FAILED else None
         )
         if receipt is None or receipt.status is not DrainStatus.DRAINED:
-            receipt = await self.force_and_drain(timeout=_ADMISSION_CLEANUP_TIMEOUT)
+            receipt = await self._join_drain(self._close_drain_policy)
         if prior_failure is not None:
             receipt = prior_failure
             self._drain_receipt = receipt
