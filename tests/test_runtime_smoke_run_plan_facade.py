@@ -306,7 +306,7 @@ async def _resolve_project_root(_ctx: Any, _session: Any) -> None:
 
 
 async def _resolve_project_root_ok(_ctx: Any, session: RunPlanFacadeSession) -> None:
-    session.project_path = "D:\\project"
+    session.project_path = session.project_path or "D:\\project"
     session.resolved_project_root = True
 
 
@@ -510,6 +510,7 @@ async def test_runtime_smoke_run_plan_accepts_json_plan_path(
     tmp_path,
 ) -> None:
     session = RunPlanFacadeSession()
+    session.project_path = str(tmp_path)
     access_calls = _register(
         capturing_mcp,
         session,
@@ -553,6 +554,7 @@ async def test_runtime_smoke_run_plan_accepts_yaml_plan_path(
     tmp_path,
 ) -> None:
     session = RunPlanFacadeSession()
+    session.project_path = str(tmp_path)
     access_calls = _register(
         capturing_mcp,
         session,
@@ -619,7 +621,9 @@ async def test_runtime_smoke_run_plan_rejects_unvalidated_plan_path(
     tmp_path,
 ) -> None:
     session = RunPlanFacadeSession()
-    session.path_error = ValueError("outside project root")
+    project = tmp_path / "project"
+    project.mkdir()
+    session.project_path = str(project)
     access_calls = _register(
         capturing_mcp,
         session,
@@ -636,7 +640,9 @@ async def test_runtime_smoke_run_plan_rejects_unvalidated_plan_path(
 
     assert data["status"] == "INVALID_SETUP"
     assert data["can_run"] is False
-    assert data["validation_errors"] == ["plan_path validation failed: outside project root"]
+    assert data["validation_errors"] == [
+        "plan_path validation failed: Plan path outside project root"
+    ]
     assert data["plan_source"] == {
         "kind": "file",
         "path": str(plan_path),

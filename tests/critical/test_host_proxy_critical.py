@@ -208,6 +208,13 @@ async def test_host_proxy_critical_initialize_list_call(
     host_dll: Path,
 ) -> None:
     """@critical category: behavioral - real Release host completes a live MCP round trip."""
+    (tmp_path / "HostProxySmoke.csproj").write_text(
+        '<Project Sdk="Microsoft.NET.Sdk">'
+        "<PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>"
+        "</Project>\n",
+        encoding="utf-8",
+    )
+
     env = _backend_env()
     env["NETCOREDBG_MCP_PYTHON_EXECUTABLE"] = sys.executable
 

@@ -2398,8 +2398,8 @@ async def test_tracepoint_auto_resume():
         await m.stop()
 
 
-async def test_path_validation_worktrees():
-    """Scenario 18: Path validation accepts worktree-style paths."""
+async def test_path_validation_external_paths():
+    """Scenario 18: Canonical paths outside project context need no admission."""
     print("\n--- Path Validation ---")
 
     m = await new_session()
@@ -2411,33 +2411,28 @@ async def test_path_validation_worktrees():
     except ValueError as e:
         check("Normal path accepted", False, str(e))
 
-    # Test 2: Env var override
-    old = os.environ.get("NETCOREDBG_ALLOWED_PATHS", "")
-    try:
-        import tempfile
+    import tempfile
+    from pathlib import Path
 
-        tmp = tempfile.mkdtemp()
-        os.environ["NETCOREDBG_ALLOWED_PATHS"] = tmp
-        validated = m.validate_path(os.path.join(tmp, "test.cs"))
-        check("Env allowed path accepted", os.path.isabs(validated))
-    except ValueError as e:
-        check("Env allowed path accepted", False, str(e))
-    finally:
-        os.environ["NETCOREDBG_ALLOWED_PATHS"] = old
-
-    # Test 3: Outside path rejected (only when project_path is set)
-    if m.project_path:
+    with tempfile.TemporaryDirectory() as temporary:
+        external = Path(temporary) / "external"
+        external.mkdir()
+        source = external / "test.cs"
+        source.write_text("// external source", encoding="utf-8")
+        project = Path(temporary) / "project"
+        project.mkdir()
+        m.set_project_path(str(project))
+        original_cwd = os.getcwd()
         try:
-            m.validate_path("C:\\Windows\\System32\\cmd.exe")
-            check("Outside path rejected", False, "should have raised ValueError")
-        except ValueError:
-            check("Outside path rejected", True)
-    else:
-        check(
-            "Outside path rejected (skipped — no project_path)",
-            True,
-            "scope check requires project_path",
-        )
+            os.chdir(project)
+            validated = m.validate_path(str(source), must_exist=True)
+            check("External source accepted", validated == str(source.resolve()))
+            validated = m.validate_path("../external/test.cs", must_exist=True)
+            check("External relative path canonicalized", validated == str(source.resolve()))
+        except ValueError as e:
+            check("External path accepted", False, str(e))
+        finally:
+            os.chdir(original_cwd)
 
 
 async def test_heartbeat_during_wait():
@@ -7469,7 +7464,7 @@ def _base_scenarios() -> list[tuple[str, Callable[..., Any]]]:
         ("Collection + Object Analysis", test_collection_and_object),
         ("Tracepoint Performance", test_tracepoint_performance),
         ("Tracepoint Auto-Resume", test_tracepoint_auto_resume),
-        ("Path Validation", test_path_validation_worktrees),
+        ("Path Validation", test_path_validation_external_paths),
         ("Project Root Timeout Fallback", test_project_root_timeout_fallback),
         ("Managed Bridge Fallback", test_managed_bridge_fallback),
         ("Startup Temp GC Prefix Filter", test_startup_temp_gc_skips_unrelated_entries),

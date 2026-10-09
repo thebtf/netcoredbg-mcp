@@ -165,7 +165,7 @@ def register_debug_tools(
                     state=session.state.state,
                 )
 
-            # Validate program path (security: prevent arbitrary execution)
+            # Canonicalize program path and validate the .NET target format
             # If pre_build=True, don't require file to exist yet (build will create it)
             logger.debug(f"[start_debug] validating program: {program}")
             validated_program = session.validate_program(program, must_exist=not pre_build)

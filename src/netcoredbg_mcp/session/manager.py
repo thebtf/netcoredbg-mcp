@@ -128,7 +128,6 @@ class SessionManager:
         self._lifecycle_lock = asyncio.Lock()
         self._quick_eval_lock = asyncio.Lock()
         self._runtime_smoke = RuntimeSmokeSession()
-        self._worktree_cache_map: dict[str, list[str]] = {}
         self._hygiene = RuntimeHygieneService(self)
         self._instrumentation = InstrumentationGroupService(self)
         self._output_assertions = OutputAssertionService(self)
@@ -485,69 +484,10 @@ class SessionManager:
             return None
 
     def validate_path(self, path: str, must_exist: bool = False) -> str:
-        """Validate path is within the current project scope."""
-        return self._validate_path(path, self._project_path, must_exist=must_exist)
-
-    def validate_path_for_project(
-        self,
-        path: str,
-        project_path: str | None,
-        must_exist: bool = False,
-    ) -> str:
-        """Validate path against a supplied project scope without mutating session state."""
-        project_scope = os.path.abspath(project_path) if project_path else None
-        return self._validate_path(path, project_scope, must_exist=must_exist)
-
-    def _validate_path(
-        self,
-        path: str,
-        project_path: str | None,
-        *,
-        must_exist: bool = False,
-    ) -> str:
-        """Validate path is within the supplied project scope.
-
-        Accepts paths within:
-        1. The project root directory
-        2. Git worktrees of the same repository (auto-detected)
-        3. Paths listed in NETCOREDBG_ALLOWED_PATHS env var (comma-separated)
-
-        Args:
-            path: Path to validate
-            must_exist: If True, path must exist on filesystem
-
-        Returns:
-            Absolute path
-
-        Raises:
-            ValueError: If path is invalid or outside all allowed scopes
-        """
-        # Resolve symlinks and normalize to absolute (security: prevent symlink traversal)
+        """Canonicalize a path relative to process CWD and optionally require existence."""
         logger.debug(f"[validate_path] resolving: {path}")
         abs_path = os.path.realpath(path)
         logger.debug(f"[validate_path] resolved to: {abs_path}")
-
-        # Check within project scope
-        if project_path:
-            project_real = os.path.realpath(project_path)
-
-            # Check 1: within project root
-            if self._is_path_within(abs_path, project_real):
-                logger.debug("[validate_path] within project root")
-            # Check 2: within git worktrees
-            elif any(
-                self._is_path_within(abs_path, wt) for wt in self._get_worktree_paths(project_path)
-            ):
-                logger.debug("[validate_path] within git worktree")
-            # Check 3: within NETCOREDBG_ALLOWED_PATHS
-            elif any(self._is_path_within(abs_path, ap) for ap in self._get_env_allowed_paths()):
-                logger.debug("[validate_path] within NETCOREDBG_ALLOWED_PATHS")
-            else:
-                logger.warning(f"[validate_path] REJECTED: {abs_path} outside all scopes")
-                raise ValueError(
-                    f"Path outside project scope: {path}. "
-                    f"Set NETCOREDBG_ALLOWED_PATHS env var to add allowed path prefixes."
-                )
 
         # Check existence if required
         if must_exist and not os.path.exists(abs_path):
@@ -555,87 +495,8 @@ class SessionManager:
 
         return abs_path
 
-    @staticmethod
-    def _is_path_within(path: str, root: str) -> bool:
-        """Check if path is within root directory."""
-        try:
-            common = os.path.commonpath([path, root])
-            return common == root
-        except ValueError:
-            return False
-
-    def _get_worktree_paths(self, project_path: str | None = None) -> list[str]:
-        """Auto-detect git worktree paths from filesystem (no subprocess).
-
-        Reads .git/worktrees/<name>/gitdir files directly instead of spawning
-        git subprocess. This avoids hangs when running inside daemon processes
-        where inherited stdin/env causes git to block on prompts.
-        """
-        target_scope = project_path or self._project_path
-        target_path = os.path.realpath(target_scope) if target_scope else None
-        if not target_path:
-            return []
-
-        if target_path not in self._worktree_cache_map:
-            worktree_cache: list[str] = []
-            self._worktree_cache_map[target_path] = worktree_cache
-            try:
-                # Find the .git directory (could be file pointing to gitdir for worktrees)
-                git_dir = os.path.join(target_path, ".git")
-                if os.path.isfile(git_dir):
-                    # This is a worktree itself — read the gitdir pointer
-                    with open(git_dir) as f:
-                        content = f.read().strip()
-                    if content.startswith("gitdir: "):
-                        real_git_dir = os.path.abspath(
-                            os.path.join(target_path, content[len("gitdir: ") :])
-                        )
-                        # Navigate up to the main .git directory
-                        # e.g., /main/.git/worktrees/wt-name → /main/.git
-                        git_dir = os.path.dirname(os.path.dirname(real_git_dir))
-
-                worktrees_dir = os.path.join(git_dir, "worktrees")
-                if os.path.isdir(worktrees_dir):
-                    entries = os.listdir(worktrees_dir)
-                    logger.debug(f"[worktree] entries in {worktrees_dir}: {entries}")
-                    for entry in entries:
-                        gitdir_file = os.path.join(worktrees_dir, entry, "gitdir")
-                        if os.path.isfile(gitdir_file):
-                            try:
-                                with open(gitdir_file) as f:
-                                    wt_gitdir = f.read().strip()
-                                # gitdir contains path to <worktree>/.git
-                                wt_path = os.path.dirname(os.path.abspath(wt_gitdir))
-                                logger.debug(
-                                    f"[worktree] {entry}: gitdir={wt_gitdir!r}, "
-                                    f"path={wt_path}, exists={os.path.isdir(wt_path)}"
-                                )
-                                if os.path.isdir(wt_path):
-                                    worktree_cache.append(wt_path)
-                            except (OSError, ValueError) as e:
-                                logger.debug(f"[worktree] {entry}: error reading gitdir: {e}")
-                                continue
-                        else:
-                            logger.debug(f"[worktree] {entry}: no gitdir file")
-                else:
-                    logger.debug(f"[worktree] no worktrees dir at {worktrees_dir}")
-                logger.debug(
-                    f"[worktree] found {len(worktree_cache)} worktrees from {worktrees_dir}"
-                )
-            except OSError as e:
-                logger.debug(f"[worktree] cannot read worktrees: {e}")
-        return self._worktree_cache_map[target_path]
-
-    @staticmethod
-    def _get_env_allowed_paths() -> list[str]:
-        """Get additional allowed paths from NETCOREDBG_ALLOWED_PATHS env var."""
-        raw = os.environ.get("NETCOREDBG_ALLOWED_PATHS", "")
-        if not raw:
-            return []
-        return [os.path.abspath(p.strip()) for p in raw.split(",") if p.strip()]
-
     def validate_program(self, program: str, must_exist: bool = True) -> str:
-        """Validate program is a .NET assembly within scope.
+        """Validate program is a .NET assembly.
 
         For .NET 6+ apps (WPF/WinForms), automatically resolves .exe to .dll
         to avoid assembly name conflicts. .NET 6+ creates both:
@@ -654,7 +515,7 @@ class SessionManager:
             Absolute path to program (resolved to .dll if applicable)
 
         Raises:
-            ValueError: If program is invalid or outside project scope
+            ValueError: If program is invalid or does not exist when required
         """
         path = self.validate_path(program, must_exist=must_exist)
         ext = os.path.splitext(path)[1].lower()
@@ -673,7 +534,7 @@ class SessionManager:
                         f"Resolved .exe to .dll for .NET 6+ debugging: "
                         f"{os.path.basename(path)} → {os.path.basename(dll_path)}"
                     )
-                    return dll_path
+                    return os.path.realpath(dll_path)
 
         return path
 
@@ -682,7 +543,7 @@ class SessionManager:
         program: str,
         project_root: str,
     ) -> str:
-        """Validate an existing launch target inside one exact supplied root."""
+        """Validate an existing launch target using project_root as the relative-path base."""
         if not project_root:
             raise ValueError("Resolved project root is required for launch inspection")
 
@@ -692,8 +553,6 @@ class SessionManager:
 
         candidate = program if os.path.isabs(program) else os.path.join(root_real, program)
         program_real = os.path.realpath(candidate)
-        if not self._is_path_within(program_real, root_real):
-            raise ValueError(f"Program path outside exact project root: {program}")
         if not os.path.isfile(program_real):
             raise ValueError(f"Program path does not exist: {program}")
 
@@ -708,16 +567,6 @@ class SessionManager:
             runtimeconfig_path = f"{base_path}.runtimeconfig.json"
             if os.path.isfile(dll_path) and os.path.isfile(runtimeconfig_path):
                 effective_program = os.path.realpath(dll_path)
-                if not self._is_path_within(effective_program, root_real):
-                    raise ValueError(
-                        f"Program path outside exact project root: {effective_program}"
-                    )
-
-        runtimeconfig_path = f"{os.path.splitext(effective_program)[0]}.runtimeconfig.json"
-        runtimeconfig_real = os.path.realpath(runtimeconfig_path)
-        if not self._is_path_within(runtimeconfig_real, root_real):
-            raise ValueError(f"Runtimeconfig path outside exact project root: {runtimeconfig_path}")
-
         return effective_program
 
     def set_resource_update_callback(

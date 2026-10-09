@@ -75,12 +75,10 @@ async def handle_file_json(
         return blocked_probe(
             probe,
             kind=kind,
-            reason="path outside project scope",
+            reason="invalid file path",
             requested={"path": raw_path},
-            accepted={"path": "project-relative or NETCOREDBG_ALLOWED_PATHS path"},
-            next_step=(
-                "Use project-relative paths or add the directory to NETCOREDBG_ALLOWED_PATHS."
-            ),
+            accepted={"path": "valid file path"},
+            next_step="Provide a valid file path for the file.json probe.",
         ) | {"validation_error": str(exc)}
 
     path = Path(resolved_path)

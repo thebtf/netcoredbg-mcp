@@ -65,7 +65,7 @@ class BuildSession:
             policy: Build policy (created with defaults if not provided)
         """
         self._workspace_root = os.path.abspath(workspace_root)
-        self._policy = policy or BuildPolicy(workspace_root=self._workspace_root)
+        self._policy = policy or BuildPolicy()
         self._state = BuildState.IDLE
         self._lock = asyncio.Lock()
         self._current_process: asyncio.subprocess.Process | WindowsOwnedProcess | None = None

@@ -1,20 +1,23 @@
-# netcoredbg-mcp v0.23.11
+# netcoredbg-mcp v0.23.12
 
-Prepared: 2026-08-30
+Prepared: 2026-10-09
 
 ## Summary
 
-`v0.23.11` is a PATCH hotfix for Engram #448 black-frame evidence repair.
+`v0.23.12` is a PATCH hotfix for explicit build, debug-target, and source paths
+outside the default project or Git worktree.
 
 ## Fixed behavior
 
-1. After a foreground transition, ordinary evidence capture reuses the live FlaUI connection.
-2. A black PrintWindow capture is discarded for exactly one verified BitBlt alternate.
-3. Accepted evidence carries HWND, PID, physical geometry, DPI, stability, and foreground provenance.
-4. If the final capture is black, no evidence artifact is persisted and diagnostics are returned.
+1. Explicit build-project and output paths need no separate debug permission.
+2. Explicit paths to existing DLL/EXE targets and source files need no directory allowlist, including paths outside the default project or worktree.
+3. Configuration and troubleshooting guidance no longer asks users to grant directory access before building or debugging an explicit target.
 
-The existing runtime-smoke safety contract is unchanged: `search_source` now runs regex matching in a bounded dedicated Python subprocess. Source-file enumeration and waiting for that worker remain in the MCP server process. Worker failures are surfaced as tool errors.
+The removed admission check was MCP-wrapper policy, not a native Samsung
+`netcoredbg` operating-system sandbox.
 
 ## Compatibility
 
-There is no intentional breaking change to the published Python API or CLI.
+File and .NET target validity checks remain unchanged. Independent evidence,
+restore, and source-search guards are not relaxed. The published Python entry
+point and locked dependency versions are unchanged.

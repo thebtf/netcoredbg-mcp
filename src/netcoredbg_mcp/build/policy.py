@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import re
 import stat
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Final
@@ -89,34 +89,13 @@ class BuildPolicy:
     """Security policy for build operations.
 
     Validates:
-    - Paths are within allowed workspace
     - No symlinks, junctions, or reparse points
     - No UNC or device paths
     - Arguments are whitelisted
     """
 
-    workspace_root: str
     allow_unc_paths: bool = False
     allow_device_paths: bool = False
-    allowed_output_dirs: list[str] = field(default_factory=list)
-    _worktree_cache: list[str] | None = field(default=None, init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        """Validate and canonicalize workspace root."""
-        self.workspace_root = self._validate_path(
-            self.workspace_root, allow_symlinks=False, context="workspace_root"
-        )
-        # Allowed output directories must be within workspace
-        validated_outputs = []
-        for output_dir in self.allowed_output_dirs:
-            try:
-                validated = self._validate_path(
-                    output_dir, allow_symlinks=False, context="allowed_output_dir"
-                )
-                validated_outputs.append(validated)
-            except ValueError:
-                pass  # Skip invalid output directories
-        self.allowed_output_dirs = validated_outputs
 
     def _validate_path(
         self,
@@ -183,133 +162,12 @@ class BuildPolicy:
         return abs_path
 
     def validate_project_path(self, project_path: str) -> str:
-        """Validate project path is within workspace or allowed paths.
-
-        Accepts paths within:
-        1. The workspace root directory
-        2. Git worktrees of the same repository (auto-detected)
-        3. Paths listed in NETCOREDBG_ALLOWED_PATHS env var (comma-separated)
-
-        Args:
-            project_path: Path to project file or directory
-
-        Returns:
-            Validated absolute path
-
-        Raises:
-            ValueError: If path is invalid or outside all allowed scopes
-        """
-        validated = self._validate_path(project_path, allow_symlinks=False, context="project_path")
-
-        # Check 1: within workspace root
-        if self._is_within(validated, self.workspace_root):
-            return validated
-
-        # Check 2: within git worktree paths
-        for wt_path in self._get_allowed_worktree_paths():
-            if self._is_within(validated, wt_path):
-                return validated
-
-        # Check 3: within NETCOREDBG_ALLOWED_PATHS
-        for allowed in self._get_env_allowed_paths():
-            if self._is_within(validated, allowed):
-                return validated
-
-        raise ValueError(
-            f"Project path outside workspace and allowed paths: {project_path}. "
-            f"Set NETCOREDBG_ALLOWED_PATHS env var to add allowed path prefixes."
-        )
-
-    @staticmethod
-    def _is_within(path: str, root: str) -> bool:
-        """Check if path is within root directory."""
-        try:
-            common = os.path.commonpath([path, root])
-            return common == root
-        except ValueError:
-            return False
-
-    @staticmethod
-    def _get_env_allowed_paths() -> list[str]:
-        """Get additional allowed paths from NETCOREDBG_ALLOWED_PATHS env var."""
-        raw = os.environ.get("NETCOREDBG_ALLOWED_PATHS", "")
-        if not raw:
-            return []
-        return [os.path.abspath(p.strip()) for p in raw.split(",") if p.strip()]
-
-    def _get_allowed_worktree_paths(self) -> list[str]:
-        """Auto-detect git worktree paths from filesystem (no subprocess).
-
-        Reads .git/worktrees/<name>/gitdir files directly instead of spawning
-        git subprocess. This avoids hangs when running inside daemon processes
-        where inherited stdin/env causes git to block.
-
-        Results are cached for the lifetime of the BuildPolicy instance.
-        """
-        if self._worktree_cache is not None:
-            return self._worktree_cache
-
-        paths: list[str] = []
-        try:
-            git_dir = os.path.join(self.workspace_root, ".git")
-            if os.path.isfile(git_dir):
-                with open(git_dir) as f:
-                    content = f.read().strip()
-                if content.startswith("gitdir: "):
-                    real_git_dir = os.path.abspath(
-                        os.path.join(self.workspace_root, content[len("gitdir: ") :])
-                    )
-                    git_dir = os.path.dirname(os.path.dirname(real_git_dir))
-
-            worktrees_dir = os.path.join(git_dir, "worktrees")
-            if os.path.isdir(worktrees_dir):
-                for entry in os.listdir(worktrees_dir):
-                    gitdir_file = os.path.join(worktrees_dir, entry, "gitdir")
-                    if os.path.isfile(gitdir_file):
-                        try:
-                            with open(gitdir_file) as f:
-                                wt_gitdir = f.read().strip()
-                            wt_path = os.path.dirname(os.path.abspath(wt_gitdir))
-                            if os.path.isdir(wt_path):
-                                paths.append(wt_path)
-                        except (OSError, ValueError):
-                            continue
-        except OSError:
-            pass
-
-        self._worktree_cache = paths
-        return self._worktree_cache
+        """Validate and canonicalize a caller-provided project path."""
+        return self._validate_path(project_path, allow_symlinks=False, context="project_path")
 
     def validate_output_path(self, output_path: str) -> str:
-        """Validate output path is within allowed directories.
-
-        Args:
-            output_path: Path to output directory
-
-        Returns:
-            Validated absolute path
-
-        Raises:
-            ValueError: If path is invalid or not in allowed directories
-        """
-        validated = self._validate_path(output_path, allow_symlinks=False, context="output_path")
-
-        # Must be within workspace, explicit allowed directories, worktrees, or env paths
-        allowed_roots = (
-            [self.workspace_root]
-            + self.allowed_output_dirs
-            + self._get_allowed_worktree_paths()
-            + self._get_env_allowed_paths()
-        )
-        for allowed in allowed_roots:
-            try:
-                common = os.path.commonpath([validated, allowed])
-                if common == allowed:
-                    return validated
-            except ValueError:
-                continue
-
-        raise ValueError(f"Output path not in allowed directories: {output_path}")
+        """Validate and canonicalize a caller-provided output path."""
+        return self._validate_path(output_path, allow_symlinks=False, context="output_path")
 
     def validate_arguments(self, args: list[str]) -> list[str]:
         """Validate and filter build arguments.

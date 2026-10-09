@@ -27,7 +27,7 @@ _TRUSTED_BUILD_EVENT = "workflow_dispatch"
 _PREVIEW_EXECUTABLE = "netcoredbg-mcp-stateless-preview.exe"
 _EXACT_HEAD_RUNNER_PATH = Path(__file__).with_name("run_sonarqube_exact_head.py")
 _EXACT_HEAD_RECEIPT_SCHEMA_VERSION = 3
-_POST_MERGE_RELEASE_INTENT = "v0.23.11"
+_POST_MERGE_RELEASE_INTENT = "v0.23.12"
 
 _POLICY_AUTHORITY_PATHS = (
     "AGENTS.md",

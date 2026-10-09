@@ -268,8 +268,8 @@ Before sealing `DIAGNOSTIC_COMPLETE`, the runner writes a create-new inventory a
 | Role | Outcome | Release intent | Required evidence |
 | --- | --- | --- | --- |
 | `diagnostic` | `DIAGNOSTIC_COMPLETE` or `BLOCKED` | `none` | Complete diagnostics require coverage, analysis, full inventory, successful cleanup, and no failure. |
-| `candidate` | `PASS` or `BLOCKED` | `v0.23.11` | PASS requires the same coverage, analysis, full inventory, successful cleanup, and zero-blocking release gate. |
-| `post-merge` | `PASS` or `BLOCKED` | `v0.23.11` | PASS has the same required shape as candidate. |
+| `candidate` | `PASS` or `BLOCKED` | `v0.23.12` | PASS requires the same coverage, analysis, full inventory, successful cleanup, and zero-blocking release gate. |
+| `post-merge` | `PASS` or `BLOCKED` | `v0.23.12` | PASS has the same required shape as candidate. |
 
 `scripts/stateless_preview_artifact.py` is an existing post-merge receipt consumer. T021 migrates it and its focused tests from schema v2 to the unified v3 post-merge contract. This consumer-only change preserves public stateless-preview artifact behavior.
 

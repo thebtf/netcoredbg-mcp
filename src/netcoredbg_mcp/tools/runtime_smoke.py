@@ -941,10 +941,11 @@ async def _runtime_smoke_resolve_plan_input(
             ),
         )
     try:
-        if resolve_project_root_readonly is None:
-            validated_path = session.validate_path(plan_path)
-        else:
-            validated_path = session.validate_path_for_project(plan_path, project_path)
+        validated_path = session.validate_path(plan_path)
+        try:
+            Path(validated_path).resolve().relative_to(Path(project_path).resolve())
+        except ValueError as exc:
+            raise ValueError("Plan path outside project root") from exc
     except ValueError as exc:
         return (
             None,
