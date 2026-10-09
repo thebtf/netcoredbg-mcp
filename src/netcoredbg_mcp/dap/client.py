@@ -532,6 +532,10 @@ class DAPClient:
         logger.info("netcoredbg started with PID %s", process.pid)
         return generation
 
+    @staticmethod
+    def _stop_owner_mismatch(run: _DapRun | None, expected_owner: OwnedProcessRef) -> bool:
+        return run is None or run.owner is None or run.owner.owner != expected_owner
+
     async def stop(
         self,
         *,
@@ -545,9 +549,7 @@ class DAPClient:
         branch.
         """
         run = self._run
-        if expected_owner is not None and (
-            run is None or run.owner is None or run.owner.owner != expected_owner
-        ):
+        if expected_owner is not None and self._stop_owner_mismatch(run, expected_owner):
             return OwnerDrainReceipt(
                 owner=expected_owner,
                 status=DrainStatus.STALE,
