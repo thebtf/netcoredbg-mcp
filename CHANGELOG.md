@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.23.12] - 2026-09-27
 
 ### Fixed
+- Runtime-smoke property validation uses one private helper while retaining `property`/`property_name` alias semantics, selector-first and ordered errors, and caller-owned inputs. The 51-case schema owner, 1,734 baseline/current boundary cases and actual public validate-only smoke pass; Sonar closure remains unmeasured.
 - Generated collector mapping reuses three private reason/XPath constants at nine sites without changing owner admission, path checks or error order. Four existing contracts with 41 subtests, 18 actual repository mapper cases and full byte/AST inverse pass; current Sonar closure is not claimed.
 - Scoped key-sequence delivery isolates the existing focused modifier/key loop without changing order or release behavior. A fresh installed production FlaUI consumer passes all 17 keypad tokens through four public routes plus the scoped Ctrl case; native packet order, empty final modifier state, foreground/NumLock restoration and owned-process cleanup are verified.
 - The WPF keyboard fixture records exact-window message-queue events before accelerator preprocessing. The previous post-dispatch hook missed a delivered Ctrl+NUMPAD1 key-down; an independent queue observation proved the gap, and the unchanged complete keyboard corpus passes with the corrected oracle.
