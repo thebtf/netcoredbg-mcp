@@ -1183,10 +1183,20 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
         try:
             registry.reap_stale()
             status = registry.status()
+            remaining_owners = registry.owner_count
         except Exception as exc:
             return _adapter_blocked("process.registry.count", str(exc))
         alive = [entry for entry in status if bool(entry.get("alive"))]
-        return {"status": "PASS", "count": len(alive), "alive": alive}
+        return {
+            "status": "FAIL" if remaining_owners and not alive else "PASS",
+            "count": len(alive),
+            "alive": alive,
+            "remaining_owners": remaining_owners,
+            **(
+                {"reason": "No live observations, but trusted process owners remain registered"}
+                if remaining_owners and not alive else {}
+            ),
+        }
 
     async def fixture_restore(**args: Any) -> dict[str, Any]:
         validate_path = getattr(session, "validate_path", None)

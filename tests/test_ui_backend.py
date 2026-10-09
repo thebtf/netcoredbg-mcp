@@ -1,5 +1,7 @@
 """Tests for UI backend abstraction layer."""
 
+import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -15,16 +17,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LARGE_JSON_RESPONSE_BYTES = 64 * 1024 + 1
 
 
-def _write_large_response_bridge(tmp_path: Path) -> Path:
+def _write_large_response_bridge(tmp_path: Path, *, stderr_bytes: int = 0) -> Path:
     script = tmp_path / "large_response_bridge.py"
     script.write_text(
         "\n".join(
             (
-                f"#!{sys.executable}",
                 "import json",
                 "import sys",
                 "for line in sys.stdin:",
                 "    request = json.loads(line)",
+                f"    sys.stderr.buffer.write(b'E' * {stderr_bytes})",
+                "    sys.stderr.buffer.flush()",
+                "    if request.get('method') == 'shutdown':",
+                "        break",
                 "    response = {",
                 '        "jsonrpc": "2.0",',
                 '        "id": request["id"],',
@@ -36,14 +41,74 @@ def _write_large_response_bridge(tmp_path: Path) -> Path:
         ),
         encoding="utf-8",
     )
-
-    if os.name == "nt":
-        launcher = tmp_path / "large_response_bridge.cmd"
-        launcher.write_text(f'@"{sys.executable}" -u "{script}"\r\n', encoding="utf-8")
-        return launcher
-
-    script.chmod(0o700)
     return script
+
+
+class _BridgeStdin:
+    def __init__(self) -> None:
+        self.closed = False
+        self.writes: list[bytes] = []
+
+    def is_closing(self) -> bool:
+        return self.closed
+
+    def write(self, data: bytes) -> None:
+        self.writes.append(data)
+
+    async def drain(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _BridgeOwner:
+    def __init__(self, pid: int, *, blocked: bool = False) -> None:
+        from netcoredbg_mcp.windows_process_owner import DrainStatus, OwnedProcessRef
+
+        self.pid = pid
+        self.owner = OwnedProcessRef(str(id(self)), object(), pid)
+        self.stdin = _BridgeStdin()
+        self.stdout = asyncio.StreamReader(limit=256 * 1024 * 1024)
+        self.stderr = asyncio.StreamReader()
+        self.returncode: int | None = None
+        self.drain_started = asyncio.Event()
+        self.drain_release = asyncio.Event()
+        if not blocked:
+            self.drain_release.set()
+        self.status = DrainStatus.DRAINED
+        self.drain_calls = 0
+        self.close_calls = 0
+        self.receipt = None
+
+    async def wait(self) -> int:
+        await self.drain_release.wait()
+        return 0
+
+    async def drain_after_grace(self, *, grace_timeout: float, force_timeout: float):
+        from netcoredbg_mcp.windows_process_owner import DrainStatus, OwnerDrainReceipt
+
+        self.drain_calls += 1
+        self.drain_started.set()
+        await self.drain_release.wait()
+        complete = self.status is DrainStatus.DRAINED
+        if complete:
+            self.returncode = 0
+            self.stdout.feed_eof()
+            self.stderr.feed_eof()
+        self.receipt = OwnerDrainReceipt(
+            owner=self.owner,
+            status=self.status,
+            forced=True,
+            root_returncode=self.returncode,
+            active_processes=0 if complete else 1,
+            root_was_forced=complete,
+        )
+        return self.receipt
+
+    async def aclose(self):
+        self.close_calls += 1
+        return self.receipt
 
 
 class TestFindFlauiBridge:
@@ -274,50 +339,19 @@ class TestFlaUIBackendConnect:
 class TestFlaUIBridgeClient:
     @pytest.mark.asyncio
     async def test_stop_preserves_process_handle_until_cleanup_finishes(self):
-        import asyncio
-
         from netcoredbg_mcp.ui.flaui_client import FlaUIBridgeClient
 
-        class FakeStdin:
-            def __init__(self) -> None:
-                self.closed = False
-
-            def is_closing(self) -> bool:
-                return self.closed
-
-            def write(self, _data: bytes) -> None:
-                pass
-
-            async def drain(self) -> None:
-                pass
-
-            def close(self) -> None:
-                self.closed = True
-
-        class FakeProcess:
-            pid = 123
-
-            def __init__(self) -> None:
-                self.stdin = FakeStdin()
-                self.returncode: int | None = None
-                self.wait_started = asyncio.Event()
-                self.wait_release = asyncio.Event()
-
-            async def wait(self) -> None:
-                self.wait_started.set()
-                await self.wait_release.wait()
-                self.returncode = 0
-
-            def kill(self) -> None:
-                self.returncode = -9
-                self.wait_release.set()
-
-        process = FakeProcess()
+        process = _BridgeOwner(123, blocked=True)
         client = FlaUIBridgeClient("C:/fake/FlaUIBridge.exe")
-        client._process = process  # type: ignore[assignment]
+        with patch(
+            "netcoredbg_mcp.windows_process_owner.WindowsOwnedProcess.launch", return_value=process
+        ):
+            await client.start()
+        captured = client._process
+        assert captured is not None
 
         caller = asyncio.create_task(client.stop())
-        await process.wait_started.wait()
+        await asyncio.wait_for(process.drain_started.wait(), 1.0)
 
         assert client._process is process
         caller.cancel()
@@ -325,63 +359,120 @@ class TestFlaUIBridgeClient:
             await caller
 
         assert client._process is process
-        assert process in client._stop_tasks
-        cleanup_task = client._stop_tasks[process]
-
-        process.wait_release.set()
+        assert captured in client._stop_tasks
+        cleanup_task = client._stop_tasks[captured]
+        process.drain_release.set()
         await cleanup_task
 
         assert client._process is None
+        assert process.close_calls == 1
+        assert process.stdin.closed
+        assert json.loads(process.stdin.writes[0]) == {"jsonrpc": "2.0", "method": "shutdown"}
 
     @pytest.mark.asyncio
     async def test_stop_cleans_current_process_while_old_cleanup_is_running(self):
-        import asyncio
-
         from netcoredbg_mcp.ui.flaui_client import FlaUIBridgeClient
 
-        class FakeProcess:
-            def __init__(self, pid: int) -> None:
-                self.pid = pid
-                self.stdin = None
-                self.returncode: int | None = None
-                self.wait_started = asyncio.Event()
-                self.wait_release = asyncio.Event()
-
-            async def wait(self) -> None:
-                self.wait_started.set()
-                await self.wait_release.wait()
-                self.returncode = 0
-
-            def kill(self) -> None:
-                self.returncode = -9
-                self.wait_release.set()
-
-        old_process = FakeProcess(123)
-        new_process = FakeProcess(456)
+        old_process = _BridgeOwner(123, blocked=True)
+        new_process = _BridgeOwner(456, blocked=True)
         client = FlaUIBridgeClient("C:/fake/FlaUIBridge.exe")
-        client._process = old_process  # type: ignore[assignment]
-
-        old_stop = asyncio.create_task(client.stop())
-        await old_process.wait_started.wait()
-        old_stop.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await old_stop
-
-        client._process = new_process  # type: ignore[assignment]
+        with patch(
+            "netcoredbg_mcp.windows_process_owner.WindowsOwnedProcess.launch",
+            side_effect=[old_process, new_process],
+        ):
+            await client.start()
+            old_captured = client._process
+            assert old_captured is not None
+            old_stop = asyncio.create_task(client.stop())
+            await asyncio.wait_for(old_process.drain_started.wait(), 1.0)
+            old_stop.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await old_stop
+            await client.start()
+            new_captured = client._process
+            assert new_captured is not None
 
         new_stop = asyncio.create_task(client.stop())
-        await new_process.wait_started.wait()
-
-        assert old_process in client._stop_tasks
-        assert new_process in client._stop_tasks
-        old_cleanup = client._stop_tasks[old_process]
-        new_cleanup = client._stop_tasks[new_process]
-
-        old_process.wait_release.set()
-        new_process.wait_release.set()
-        await asyncio.gather(old_cleanup, new_cleanup, return_exceptions=True)
+        await asyncio.wait_for(new_process.drain_started.wait(), 1.0)
+        old_cleanup = client._stop_tasks[old_captured]
+        new_cleanup = client._stop_tasks[new_captured]
+        old_process.drain_release.set()
+        new_process.drain_release.set()
+        await asyncio.gather(old_cleanup, new_cleanup)
         await new_stop
 
+        assert client._process is None
+        assert old_process.drain_calls == new_process.drain_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_old_registry_cleanup_cannot_stop_same_pid_replacement(self):
+        from netcoredbg_mcp.process_registry import ProcessRegistry
+        from netcoredbg_mcp.ui.flaui_client import FlaUIBridgeClient
+
+        registry = ProcessRegistry()
+        invalidated = MagicMock()
+        client = FlaUIBridgeClient("C:/fake/FlaUIBridge.exe", registry, invalidated)
+        old_process = _BridgeOwner(123, blocked=True)
+        new_process = _BridgeOwner(123)
+        with (
+            patch(
+                "netcoredbg_mcp.windows_process_owner.WindowsOwnedProcess.launch",
+                side_effect=[old_process, new_process],
+            ),
+            patch.object(
+                registry, "register_owner", wraps=registry.register_owner
+            ) as register_owner,
+        ):
+            await client.start()
+            assert register_owner.call_args is not None
+            old_callback = register_owner.call_args.kwargs["cleanup"]
+            old_cleanup = asyncio.create_task(old_callback())
+            await asyncio.wait_for(old_process.drain_started.wait(), 1.0)
+            await client.start()
+            invalidated.reset_mock()
+            old_process.drain_release.set()
+            outcome = await old_cleanup
+            await old_callback()
+
+        assert outcome.complete
+        assert client._process is new_process
+        assert client.is_running
+        assert new_process.drain_calls == new_process.close_calls == 0
+        invalidated.assert_not_called()
+        await registry.cleanup_all()
+        assert new_process.close_calls == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["timed_out", "failed"])
+    async def test_incomplete_registry_cleanup_retains_owner_for_retry(self, status: str):
+        from netcoredbg_mcp.process_registry import ProcessRegistry
+        from netcoredbg_mcp.ui.flaui_client import FlaUIBridgeClient
+        from netcoredbg_mcp.windows_process_owner import DrainStatus
+
+        registry = ProcessRegistry()
+        process = _BridgeOwner(123)
+        process.status = DrainStatus(status)
+        client = FlaUIBridgeClient("C:/fake/FlaUIBridge.exe", registry)
+        with patch(
+            "netcoredbg_mcp.windows_process_owner.WindowsOwnedProcess.launch", return_value=process
+        ):
+            await client.start()
+
+        report = await registry.cleanup_all()
+        assert not report.complete
+        assert report.remaining_owners == registry.owner_count == 1
+        assert report.terminated == 0
+        assert client._process is process
+        assert process.close_calls == 0
+        assert process.drain_calls == 1
+        assert not client.is_running
+
+        process.status = DrainStatus.DRAINED
+        report = await registry.cleanup_all()
+        assert report.complete
+        assert report.remaining_owners == registry.owner_count == 0
+        assert process.drain_calls == 2
+        assert process.close_calls == 1
         assert client._process is None
 
     @pytest.mark.asyncio
@@ -483,33 +574,51 @@ class TestFlaUIBridgeClient:
         assert "JsonNode? id = null;" in program
         assert "return CreateErrorResponse(id, -32603" in program
 
+    @pytest.mark.skipif(os.name != "nt", reason="Windows-owned FlaUI transport proof")
     @pytest.mark.asyncio
-    async def test_reads_large_json_line_through_bridge_client(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("stderr_bytes", [0, 2 * 1024 * 1024])
+    async def test_reads_large_json_line_through_bridge_client(
+        self, tmp_path: Path, stderr_bytes: int
+    ) -> None:
         from netcoredbg_mcp.ui.flaui_client import FlaUIBridgeClient
+        from netcoredbg_mcp.windows_process_owner import WindowsOwnedProcess
 
-        client = FlaUIBridgeClient(str(_write_large_response_bridge(tmp_path)))
-        await client.start()
+        script = _write_large_response_bridge(tmp_path, stderr_bytes=stderr_bytes)
+        real_launch = WindowsOwnedProcess.launch
+
+        async def launch_python_bridge(**kwargs):
+            kwargs["argv"] = (sys.executable, "-u", str(script))
+            return await real_launch(**kwargs)
+
+        client = FlaUIBridgeClient(str(script))
+        with patch.object(WindowsOwnedProcess, "launch", side_effect=launch_python_bridge):
+            await client.start()
+        process = client._process
+        assert isinstance(process, WindowsOwnedProcess)
         try:
             response = await client.call("capture_screenshot", timeout=5.0)
         finally:
             await client.stop()
 
         assert len(response["png_base64"]) == LARGE_JSON_RESPONSE_BYTES
+        assert process.returncode == 0
+        assert process._closed
 
     @pytest.mark.asyncio
-    async def test_start_passes_bounded_response_limit_to_subprocess(self) -> None:
-        from netcoredbg_mcp.ui.flaui_client import FlaUIBridgeClient
+    async def test_start_keeps_large_response_limit_on_owned_stdout(self) -> None:
+        from netcoredbg_mcp.ui.flaui_client import BRIDGE_RESPONSE_LINE_LIMIT, FlaUIBridgeClient
 
         client = FlaUIBridgeClient("C:/fake/FlaUIBridge.exe")
-        process = MagicMock(pid=123)
+        process = _BridgeOwner(123)
         with patch(
-            "netcoredbg_mcp.ui.flaui_client.asyncio.create_subprocess_exec",
+            "netcoredbg_mcp.windows_process_owner.WindowsOwnedProcess.launch",
             return_value=process,
-        ) as create_subprocess:
+        ) as launch:
             await client.start()
 
-        assert create_subprocess.await_args is not None
-        assert create_subprocess.await_args.kwargs["limit"] == 256 * 1024 * 1024
+        assert launch.await_args is not None
+        assert launch.await_args.kwargs["stdout_limit"] == BRIDGE_RESPONSE_LINE_LIMIT
+        await client.stop()
 
 
 class TestPywinautoBackend:

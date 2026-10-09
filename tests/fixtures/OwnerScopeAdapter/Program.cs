@@ -47,6 +47,14 @@ internal static class Program
 
         if (int.TryParse(Environment.GetEnvironmentVariable("OWNER_SCOPE_ROOT_EXIT_CODE"), out var exitCode))
         {
+            var exitGate = Environment.GetEnvironmentVariable("OWNER_SCOPE_ROOT_EXIT_GATE");
+            if (!string.IsNullOrWhiteSpace(exitGate))
+            {
+                while (!File.Exists(exitGate))
+                {
+                    await Task.Delay(10);
+                }
+            }
             return exitCode;
         }
 

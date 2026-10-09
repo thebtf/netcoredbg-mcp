@@ -168,14 +168,6 @@ async def main() -> None:
     # The server will also use get_project_root() with Context for dynamic resolution
     mcp = create_server(str(project_path) if project_path else None)
 
-    # Startup: configure process registry PID file and clean up orphans
-    session_obj = get_session()
-    if project_path:
-        pidfile = project_path / ".netcoredbg-mcp.pid"
-        session_obj.process_registry.set_pidfile_path(pidfile)
-        reaped = session_obj.process_registry.load_and_reap()
-        if reaped:
-            logger.info(f"Startup cleanup: reaped {reaped} orphaned processes")
 
     try:
         # Run with x-mux experimental capability for mcp-mux session awareness.
@@ -207,13 +199,29 @@ async def main() -> None:
         logger.exception("Server error")
         raise
     finally:
-        # Cleanup resources
         session_obj = get_session()
-        await session_obj.close_resource_update_notifications()
-        if session_obj.is_active:
-            await session_obj.stop()
-        # Shutdown process registry (terminate tracked processes, delete pidfile)
-        session_obj.process_registry.shutdown()
+        cleanup = asyncio.gather(
+            session_obj.close_resource_update_notifications(),
+            session_obj.stop(),
+            session_obj.process_registry.cleanup_all(),
+            return_exceptions=True,
+        )
+        cancelled = False
+        while True:
+            try:
+                results = await asyncio.shield(cleanup)
+                break
+            except asyncio.CancelledError:
+                if cleanup.cancelled():
+                    raise
+                cancelled = True
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.error("Shutdown cleanup failed: %s", result)
+            elif getattr(result, "complete", True) is False:
+                logger.error("Shutdown owner cleanup incomplete: %s", result)
+        if cancelled:
+            raise asyncio.CancelledError
         logger.info("Server stopped")
 
 

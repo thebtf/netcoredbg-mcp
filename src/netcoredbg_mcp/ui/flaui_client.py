@@ -13,6 +13,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from ..process_registry import CleanupOutcome, ProcessEntry
+from ..windows_process_owner import DrainStatus, WindowsOwnedProcess
 from .hover import hover_selector, validate_hover_evidence, validate_hover_timeout
 
 logger = logging.getLogger(__name__)
@@ -151,90 +153,146 @@ class FlaUIBridgeClient:
         invalidate_connection: Callable[[], None] | None = None,
     ) -> None:
         self._bridge_path = bridge_path
-        self._process: asyncio.subprocess.Process | None = None
+        self._process: WindowsOwnedProcess | None = None
         self._request_id = 0
         self._restart_times: list[float] = []
         self._process_registry = process_registry
         self._lock = asyncio.Lock()
-        self._cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._cleanup_tasks: set[asyncio.Task[Any]] = set()
         self._invalidate_connection = invalidate_connection
-        self._stop_tasks: dict[asyncio.subprocess.Process, asyncio.Task[None]] = {}
+        self._stop_tasks: dict[WindowsOwnedProcess, asyncio.Task[CleanupOutcome]] = {}
+        self._stderr_tasks: dict[WindowsOwnedProcess, asyncio.Task[None]] = {}
+        self._registrations: dict[WindowsOwnedProcess, tuple[object, ProcessEntry]] = {}
 
     def _mark_connection_invalid(self) -> None:
         if self._invalidate_connection is not None:
             self._invalidate_connection()
 
     async def start(self) -> None:
-        """Start the bridge subprocess."""
+        """Start a suspended, privately Job-owned bridge subprocess."""
         if self.is_running:
-            return  # Already running
+            return
 
-        self._process = await asyncio.create_subprocess_exec(
-            self._bridge_path,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-            limit=BRIDGE_RESPONSE_LINE_LIMIT,
+        previous = self._process
+        if previous is not None and previous not in self._stop_tasks:
+            await self._join_stop(previous)
+
+        process = await WindowsOwnedProcess.launch(
+            generation=object(),
+            argv=(self._bridge_path,),
+            cwd=None,
+            env=None,
+            stdin_mode="pipe",
+            stdout_limit=BRIDGE_RESPONSE_LINE_LIMIT,
         )
-        logger.info("FlaUI bridge started (PID %d)", self._process.pid)
+        self._process = process
+        self._stderr_tasks[process] = asyncio.create_task(self._drain_stderr(process))
+        logger.info("FlaUI bridge started (PID %d)", process.pid)
 
-        # Register PID for reaper
-        if self._process_registry and self._process.pid:
-            self._process_registry.register(
-                pid=self._process.pid,
-                role="flaui_bridge",
+        if self._process_registry is not None:
+
+            async def cleanup_captured() -> CleanupOutcome:
+                return await self._join_stop(process)
+
+            owner_token = self._process_registry.register_owner(
+                generation=process.owner.generation,
+                owner=process,
+                cleanup=cleanup_captured,
             )
+            observation = self._process_registry.observe(
+                process.pid,
+                "flaui_bridge",
+                generation=process.owner.generation,
+                program=self._bridge_path,
+            )
+            self._registrations[process] = (owner_token, observation)
+
+    async def _drain_stderr(self, process: WindowsOwnedProcess) -> None:
+        """Discard diagnostics continuously so the private stderr pipe cannot fill."""
+        try:
+            while await process.stderr.read(64 * 1024):
+                pass
+        except Exception:
+            logger.debug("FlaUI bridge stderr reader stopped", exc_info=True)
 
     async def stop(self) -> None:
-        """Stop the bridge subprocess."""
+        """Join cleanup of the currently captured bridge without cancelling it."""
         process = self._process
         if process is None:
             return
+        outcome = await self._join_stop(process)
+        if not outcome.complete:
+            raise RuntimeError(f"FlaUI bridge cleanup incomplete: {outcome.error}")
 
-        self._mark_connection_invalid()
+    async def _join_stop(self, process: WindowsOwnedProcess) -> CleanupOutcome:
+        if self._process is process:
+            self._mark_connection_invalid()
         existing_task = self._stop_tasks.get(process)
         if existing_task is not None and not existing_task.done():
-            await asyncio.shield(existing_task)
-            return
+            return await asyncio.shield(existing_task)
 
         cleanup_task = asyncio.create_task(self._stop_process(process))
         self._stop_tasks[process] = cleanup_task
         self._cleanup_tasks.add(cleanup_task)
         cleanup_task.add_done_callback(self._cleanup_tasks.discard)
-        cleanup_task.add_done_callback(
-            lambda _task, stopped=process: self._stop_tasks.pop(stopped, None)
-        )
-        await asyncio.shield(cleanup_task)
 
-    async def _stop_process(self, process: asyncio.subprocess.Process) -> None:
-        """Stop one captured bridge process and clear state after cleanup."""
-        pid = process.pid
+        def completed(task: asyncio.Task[CleanupOutcome]) -> None:
+            if not task.cancelled() and task.exception() is None and task.result().complete:
+                if self._stop_tasks.get(process) is task:
+                    self._stop_tasks.pop(process, None)
 
+        cleanup_task.add_done_callback(completed)
+        return await asyncio.shield(cleanup_task)
+
+    async def _stop_process(self, process: WindowsOwnedProcess) -> CleanupOutcome:
+        """Clean only this retained Job; incomplete attempts keep its capability."""
+        root_was_running = process.returncode is None
         try:
             try:
-                if process.stdin and not process.stdin.is_closing():
-                    # Send shutdown as notification (no id, no response expected)
-                    shutdown_msg = json.dumps({"jsonrpc": "2.0", "method": "shutdown"}) + "\n"
-                    process.stdin.write(shutdown_msg.encode("utf-8"))
-                    await process.stdin.drain()
-                    process.stdin.close()
+                try:
+                    if process.stdin and not process.stdin.is_closing():
+                        shutdown_msg = json.dumps({"jsonrpc": "2.0", "method": "shutdown"}) + "\n"
+                        process.stdin.write(shutdown_msg.encode("utf-8"))
+                        await asyncio.wait_for(process.stdin.drain(), timeout=5.0)
+                finally:
+                    if process.stdin is not None:
+                        process.stdin.close()
             except Exception:
                 pass
 
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+            receipt = await process.drain_after_grace(grace_timeout=5.0, force_timeout=5.0)
+            if receipt.status is not DrainStatus.DRAINED or receipt.active_processes != 0:
+                return CleanupOutcome(
+                    complete=False,
+                    error=(
+                        f"bridge owner {receipt.status.value}; "
+                        f"active_processes={receipt.active_processes}"
+                    ),
+                )
+            await process.aclose()
+            stderr_task = self._stderr_tasks.pop(process, None)
+            if stderr_task is not None:
+                stderr_task.cancel()
+                await asyncio.gather(stderr_task, return_exceptions=True)
 
-            # Unregister from reaper
-            if self._process_registry and pid:
-                self._process_registry.unregister(pid)
-
-            logger.info("FlaUI bridge stopped")
-        finally:
+            registration = self._registrations.pop(process, None)
+            if registration is not None:
+                owner_token, observation = registration
+                self._process_registry.forget(observation)
+                self._process_registry.release_owner(owner_token)
             if self._process is process:
                 self._process = None
+            logger.info("FlaUI bridge stopped")
+            return CleanupOutcome(
+                complete=True,
+                terminated=int(
+                    root_was_running
+                    and receipt.root_was_forced is True
+                    and receipt.root_returncode is not None
+                ),
+            )
+        except Exception as error:
+            return CleanupOutcome(complete=False, error=str(error))
 
     async def _stop_after_interrupted_call(self) -> None:
         """Stop the bridge without letting caller cancellation cancel cleanup."""

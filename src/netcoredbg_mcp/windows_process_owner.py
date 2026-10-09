@@ -469,6 +469,8 @@ class _PipeEnds:
     async def wire(
         self,
         loop: asyncio.AbstractEventLoop,
+        *,
+        stdout_limit: int | None = None,
     ) -> tuple[
         asyncio.StreamWriter | None,
         asyncio.StreamReader,
@@ -488,7 +490,11 @@ class _PipeEnds:
                 transports.append(transport)
                 stdin = asyncio.StreamWriter(transport, protocol, None, loop)
 
-            stdout = asyncio.StreamReader()
+            stdout = (
+                asyncio.StreamReader()
+                if stdout_limit is None
+                else asyncio.StreamReader(limit=stdout_limit)
+            )
             assert self.stdout_parent is not None
             stdout_handle = PipeHandle(self.stdout_parent)
             self.stdout_parent = None
@@ -789,6 +795,7 @@ class WindowsOwnedProcess:
         cwd: str | None,
         env: Mapping[str, str] | None,
         stdin_mode: Literal["pipe", "devnull"],
+        stdout_limit: int | None = None,
     ) -> WindowsOwnedProcess:
         """Create a suspended child and return only after Job admission succeeds."""
 
@@ -800,6 +807,7 @@ class WindowsOwnedProcess:
             cwd=cwd,
             env=env,
             stdin_mode=stdin_mode,
+            stdout_limit=stdout_limit,
             api=_Kernel32(),
             pipe_ends=None,
             process_creator=_create_suspended_process,
@@ -817,6 +825,7 @@ class WindowsOwnedProcess:
         api: _WindowsApi,
         pipe_ends: _PipeEnds | None,
         process_creator: Any,
+        stdout_limit: int | None = None,
     ) -> WindowsOwnedProcess:
         """Private injection seam for deterministic admission-order coverage."""
 
@@ -847,7 +856,9 @@ class WindowsOwnedProcess:
                 raise _Win32CallError(AdmissionStage.VERIFY, None)
             api.active_processes(job_handle)
             try:
-                stdin, stdout, stderr, transports = await endpoints.wire(asyncio.get_running_loop())
+                stdin, stdout, stderr, transports = await endpoints.wire(
+                    asyncio.get_running_loop(), stdout_limit=stdout_limit
+                )
             except _Win32CallError:
                 raise
             except BaseException as error:

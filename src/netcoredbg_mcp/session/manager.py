@@ -43,7 +43,8 @@ from ..dap.events import (
 )
 from ..dap.protocol import Events
 from ..enc.detect import detect_enc_support
-from ..process_registry import ProcessRegistry
+from ..posix_process_owner import PosixCleanupResult, PosixOwnedProcess
+from ..process_registry import CleanupOutcome, ProcessEntry, ProcessRegistry
 from ..resource_updates import BREAKPOINTS_URI, OUTPUT_URI, STATE_URI, THREADS_URI
 from ..ui.foreground import (
     get_foreground_window,
@@ -150,6 +151,9 @@ class SessionManager:
         self._active_dap_run: object | None = None
         self._stopping_dap_run: object | None = None
         self._windows_adapter_admission_generation: object | None = None
+        self._debuggee_mode: tuple[object | None, str] | None = None
+        self._registry_observations: dict[object | None, list[ProcessEntry]] = {}
+        self._registry_owner_tokens: dict[object, object] = {}
 
     def _create_session_state(self, state: DebugState = DebugState.IDLE) -> SessionState:
         session_state = SessionState(state=state)
@@ -717,6 +721,7 @@ class SessionManager:
         generation = self._dap_generation_counter
         self._active_dap_run = generation
         self._stopping_dap_run = None
+        self._debuggee_mode = None
         self._state.transport_terminal = None
 
         if os.name == "nt":
@@ -731,6 +736,7 @@ class SessionManager:
             if self._windows_adapter_admission_generation == generation:
                 self._windows_adapter_admission_generation = None
 
+        self._register_adapter_cleanup(self._client, generation)
         if returned_generation != generation:
             owner = self._client.adapter_owner
             expected_owner = owner if isinstance(owner, OwnedProcessRef) else None
@@ -740,6 +746,8 @@ class SessionManager:
                 receipt = await self._client.stop()
             if self._owner_receipt_releases_generation(receipt, expected_owner=expected_owner):
                 self._active_dap_run = None
+                self._release_generation_owner(generation)
+                self._forget_generation_observations(generation)
             raise RuntimeError("DAP client returned a mismatched adapter generation")
         if self._state.state == DebugState.TERMINATED:
             owner = self._client.adapter_owner
@@ -751,15 +759,76 @@ class SessionManager:
             if self._owner_receipt_releases_generation(receipt, expected_owner=expected_owner):
                 if self._active_dap_run == generation:
                     self._active_dap_run = None
+                    self._release_generation_owner(generation)
+                    self._forget_generation_observations(generation)
             raise RuntimeError("netcoredbg terminated during startup")
 
         adapter_pid = self._client.adapter_pid
         if adapter_pid is not None:
-            self._process_registry.register(pid=adapter_pid, role="netcoredbg")
+            self._observe_process(adapter_pid, "netcoredbg", generation=generation)
 
         self._set_state(DebugState.INITIALIZING)
         await self._client.initialize()
         logger.info("DAP initialized, waiting for initialized event...")
+
+    def _observe_process(
+        self, pid: int, role: str, *, generation: object | None, program: str | None = None
+    ) -> None:
+        observation = self._process_registry.observe(
+            pid, role, generation=generation, program=program, session_id=self._session_id
+        )
+        self._registry_observations.setdefault(generation, []).append(observation)
+
+    def _forget_generation_observations(self, generation: object | None) -> None:
+        for observation in self._registry_observations.pop(generation, ()):
+            self._process_registry.forget(observation)
+
+    def _release_generation_owner(self, generation: object | None) -> None:
+        token = self._registry_owner_tokens.pop(generation, None)
+        if token is not None:
+            self._process_registry.release_owner(token)
+
+    def _terminate_on_disconnect(self, generation: object | None) -> bool:
+        return self._debuggee_mode != (generation, "attach")
+
+    def _bind_debuggee_mode(self, generation: object | None, mode: str) -> None:
+        if self._debuggee_mode is not None and self._debuggee_mode[0] == generation:
+            raise RuntimeError("Stop the previous launch or attach before selecting another target")
+        self._debuggee_mode = (generation, mode)
+
+    def _register_adapter_cleanup(self, source_client: DAPClient, generation: object) -> None:
+        owner = source_client.adapter_cleanup_owner
+        if owner is None:
+            return
+
+        async def cleanup() -> CleanupOutcome:
+            async with self._lifecycle_lock:
+                if self._registry_owner_tokens.get(generation) is not token:
+                    return CleanupOutcome(complete=True)
+                if (
+                    self._client is not source_client
+                    or self._active_dap_run != generation
+                    or source_client.adapter_cleanup_owner is not owner
+                ):
+                    return CleanupOutcome(False, error="Stale adapter cleanup generation")
+                root_was_running = owner.returncode is None
+                await self._stop_locked()
+                result = source_client.adapter_cleanup_result
+                # POSIX group cleanup reports exit status, not the root's exit cause.
+                root_terminated = (
+                    isinstance(result, OwnerDrainReceipt)
+                    and result.root_was_forced is True
+                    and result.root_returncode is not None
+                )
+                return CleanupOutcome(
+                    complete=True,
+                    terminated=int(root_was_running and root_terminated),
+                )
+
+        token = self._process_registry.register_owner(
+            generation=generation, owner=owner, cleanup=cleanup
+        )
+        self._registry_owner_tokens[generation] = token
 
     def _register_event_handlers(self) -> None:
         """Register DAP events and bind one terminal sink to this client."""
@@ -815,15 +884,7 @@ class SessionManager:
         if active_generation is None:
             self._active_dap_run = terminal.generation
 
-        observed_pids = dict.fromkeys(
-            pid
-            for pid in (terminal.adapter_pid, self._state.process_id)
-            if isinstance(pid, int) and pid > 0
-        )
-        for pid in observed_pids:
-            # Terminal facts identify registry observations only. Unregistering
-            # never reopens a PID or grants termination authority.
-            self._process_registry.unregister(pid)
+        self._forget_generation_observations(terminal.generation)
         last_event_seq: int | None = None
         last_event_name: str | None = None
         if terminal.last_dap_event is not None:
@@ -1125,11 +1186,7 @@ class SessionManager:
 
         if pid is not None:
             logger.info(f"Process started: PID={pid}, name={name or 'unknown'}")
-            self._process_registry.register(
-                pid=pid,
-                role="debuggee",
-                program=name,
-            )
+            self._observe_process(pid, "debuggee", generation=self._active_dap_run, program=name)
 
     def _on_capabilities(self, event: DAPEvent) -> None:
         """Handle dynamic capabilities event."""
@@ -1507,12 +1564,14 @@ class SessionManager:
 
     @staticmethod
     def _owner_receipt_releases_generation(
-        receipt: OwnerDrainReceipt | None,
+        receipt: OwnerDrainReceipt | PosixCleanupResult | None,
         *,
         expected_owner: OwnedProcessRef | None = None,
     ) -> bool:
         """Whether finalization proved that no retained owner remains."""
 
+        if isinstance(receipt, PosixCleanupResult):
+            return expected_owner is None and receipt.complete
         if expected_owner is None:
             return receipt is None or (
                 receipt.status is DrainStatus.DRAINED and receipt.active_processes == 0
@@ -1531,6 +1590,14 @@ class SessionManager:
             return
         owner = self._client.adapter_owner
         if not isinstance(owner, OwnedProcessRef):
+            retained = self._client.adapter_cleanup_owner
+            if isinstance(retained, PosixOwnedProcess):
+                result = await self._client.stop()
+                if not isinstance(result, PosixCleanupResult) or not result.complete:
+                    raise RuntimeError("Retained POSIX adapter cleanup incomplete before admission")
+                self._release_generation_owner(retained_generation)
+                self._forget_generation_observations(retained_generation)
+                self._active_dap_run = None
             return
         if owner.generation != retained_generation:
             raise RuntimeError("Retained adapter owner generation does not match session state")
@@ -1551,6 +1618,8 @@ class SessionManager:
                 f"(status={status}, active={active_processes})"
             )
         if self._active_dap_run == owner.generation:
+            self._release_generation_owner(retained_generation)
+            self._forget_generation_observations(retained_generation)
             self._active_dap_run = None
 
     async def _join_owned_adapter_finalizer(
@@ -1581,7 +1650,9 @@ class SessionManager:
 
         cancelled = False
         if request_disconnect:
-            disconnect_task = asyncio.create_task(source_client.disconnect(terminate=True))
+            disconnect_task = asyncio.create_task(
+                source_client.disconnect(terminate=self._terminate_on_disconnect(generation))
+            )
             while True:
                 try:
                     await asyncio.shield(disconnect_task)
@@ -1648,6 +1719,8 @@ class SessionManager:
         if self._owner_receipt_releases_generation(receipt, expected_owner=expected):
             if self._active_dap_run == generation:
                 self._active_dap_run = None
+                self._release_generation_owner(generation)
+                self._forget_generation_observations(generation)
         if cancelled:
             raise asyncio.CancelledError
         return receipt
@@ -1883,6 +1956,7 @@ class SessionManager:
             await self._start_locked()
 
         dap_generation = self._active_dap_run
+        self._bind_debuggee_mode(dap_generation, "launch")
 
         logger.info("[launch] phase 6/9: waiting for DAP initialization")
         await report(60, 100, "Initializing debug adapter...")
@@ -1971,6 +2045,7 @@ class SessionManager:
             await self._start_locked()
 
         dap_generation = self._active_dap_run
+        self._bind_debuggee_mode(dap_generation, "attach")
 
         try:
             await asyncio.wait_for(self._initialized_event.wait(), timeout=10.0)
@@ -1991,6 +2066,7 @@ class SessionManager:
 
         await self._client.configuration_done()
         self._require_live_dap_generation(dap_generation, "attach")
+        self._state.process_id = process_id
         self._set_state(DebugState.RUNNING)
 
         # Generate session ID for temp dir isolation
@@ -2015,11 +2091,6 @@ class SessionManager:
         joined_and_drained = False
         cancelled = False
         self._stopping_dap_run = stopping_generation
-        observed_pids = tuple(
-            pid
-            for pid in (self._client.adapter_pid, self._state.process_id)
-            if isinstance(pid, int) and pid > 0
-        )
         try:
             # The explicit-stop marker suppresses only this generation's terminal
             # publication. Join foreground work inside the `try` so cancellation
@@ -2051,21 +2122,43 @@ class SessionManager:
                     )
             else:
                 if self._client.is_running:
+                    disconnect_task = asyncio.create_task(
+                        self._client.disconnect(
+                            terminate=self._terminate_on_disconnect(stopping_generation)
+                        )
+                    )
+                    while True:
+                        try:
+                            await asyncio.shield(disconnect_task)
+                            break
+                        except asyncio.CancelledError:
+                            cancelled = True
+                            if disconnect_task.cancelled():
+                                break
+                        except Exception as error:
+                            logger.warning("Error during disconnect: %s", error)
+                            break
+                stop_task = asyncio.create_task(self._client.stop())
+                while True:
                     try:
-                        await self._client.disconnect(terminate=True)
-                    except Exception as error:
-                        logger.warning("Error during disconnect: %s", error)
-                await self._client.stop()
+                        result = await asyncio.shield(stop_task)
+                        break
+                    except asyncio.CancelledError:
+                        if stop_task.cancelled():
+                            raise
+                        cancelled = True
+                if isinstance(result, PosixCleanupResult) and not result.complete:
+                    raise RuntimeError("POSIX adapter owner cleanup incomplete")
+                if isinstance(self._client.adapter_cleanup_owner, PosixOwnedProcess) and (
+                    not isinstance(result, PosixCleanupResult)
+                ):
+                    raise RuntimeError("POSIX adapter cleanup result missing")
 
-            # A no-owner platform path remains compatible. An admitted owner
-            # reaches here only after the finalizer's literal zero accounting.
             joined_and_drained = True
-
-            # Registry records are observations only. Once the retained owner
-            # finalizer has completed, remove these exact status records without
-            # reopening a PID as termination authority.
-            for pid in observed_pids:
-                self._process_registry.unregister(pid)
+            self._forget_generation_observations(stopping_generation)
+            self._release_generation_owner(stopping_generation)
+            if self._debuggee_mode is not None and self._debuggee_mode[0] == stopping_generation:
+                self._debuggee_mode = None
 
             if self._session_id:
                 self._temp_manager.cleanup_session(self._session_id)
