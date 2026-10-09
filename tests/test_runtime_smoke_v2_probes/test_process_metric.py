@@ -211,8 +211,7 @@ async def test_process_metric_probe_blocks_inaccessible_process(
     assert probe["error"] == "process vanished"
 
 
-@pytest.mark.asyncio
-async def test_process_metric_probe_propagates_unexpected_sample_errors(
+def test_process_metric_probe_propagates_unexpected_sample_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_psutil = FakePsutil()
@@ -227,15 +226,14 @@ async def test_process_metric_probe_propagates_unexpected_sample_errors(
     )
 
     with pytest.raises(RuntimeError, match="internal sampler bug"):
-        await handle_process_metric(
+        handle_process_metric(
             {"kind": "process.metric", "name": "process_memory", "pid": 4242},
             context,
             phase="before",
         )
 
 
-@pytest.mark.asyncio
-async def test_process_metric_probe_blocks_after_without_before_baseline(
+def test_process_metric_probe_blocks_after_without_before_baseline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_psutil = FakePsutil()
@@ -248,7 +246,7 @@ async def test_process_metric_probe_blocks_after_without_before_baseline(
         ),
     )
 
-    result = await handle_process_metric(
+    result = handle_process_metric(
         {"kind": "process.metric", "name": "process_memory", "pid": 4242},
         context,
         phase="after",

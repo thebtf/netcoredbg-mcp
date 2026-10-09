@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -20,13 +21,21 @@ import urllib.request
 import uuid
 import xml.etree.ElementTree as ElementTree
 from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, NoReturn
 
 PROJECT_KEY = "thebtf_netcoredbg_mcp"
+SONAR_PROJECT_KEY_PROPERTY = "sonar.projectKey"
+ISSUES_SEARCH_ENDPOINT = "/api/issues/search"
+MALFORMED_GATE_CONDITIONS = "Analysis-bound quality-gate conditions are malformed."
+PR_EVIDENCE_UNAVAILABLE = "first-party PR evidence is unavailable"
+SONAR_METADATA_DIRECTORY = ".sonarqube"
+PYTHON_ENV_DIRECTORY = ".venv"
+AGENT_DIRECTORY = ".agent"
 REQUIRED_ENV = ("SONAR_HOST_URL", "SONAR_TOKEN", "SONAR_READ_TOKEN")
 SONAR_ENV = (*REQUIRED_ENV, "SONAR_ADMIN_TOKEN")
 SIMPLE_DOTENV_ASSIGNMENT_RE = re.compile(r"(?P<name>[A-Z_][A-Z0-9_]*)=(?P<value>[^\r\n]*)\Z")
@@ -44,15 +53,27 @@ SOLUTION_PROJECT_RE = re.compile(
 )
 ISSUE_STATUSES = "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED,FIXED,IN_SANDBOX"
 GENERATED_DIRECTORY_NAMES = {"__pycache__", "bin", "obj"}
-GENERATED_ROOT_NAMES = {".sonarqube", ".scannerwork", ".venv"}
+GENERATED_ROOT_NAMES = {SONAR_METADATA_DIRECTORY, ".scannerwork", PYTHON_ENV_DIRECTORY}
 
 WAVE2_ENTRY_RELATIVE_PATH = "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json"
 WAVE2_RECEIPT_RELATIVE_PATH = "specs/013-owner-scoped-prebuild-cleanup/acceptance-receipt.md"
 COVERAGE_PARENT_RELATIVE_PATH = ".tmp/sonarqube-coverage"
+_FILE_DISPOSITION_INFO_EX_OPERATION = "SetFileInformationByHandle(FileDispositionInfoEx)"
+_PATH_STAT_OPERATION = "Path.stat"
+_PATH_READ_BYTES_OPERATION = "Path.read_bytes"
+_UNRECOGNIZED_GENERATED_COLLECTOR_SOURCE = "unrecognized generated collector source"
+_COLLECTOR_PACKAGE_CLASSES_XPATH = "./classes/class"
+_UNRECOGNIZED_GENERATED_COLLECTOR_OWNER = "unrecognized generated collector owner"
 COVERAGE_PY_VERSION = "7.15.4"
+COVERLET_MSBUILD_PACKAGE = "coverlet.msbuild"
 COVERLET_MSBUILD_VERSION = "10.0.1"
 TEST_SDK_VERSION = "17.12.0"
+CODE_COVERAGE_PACKAGE = "microsoft.codecoverage"
+CODE_COVERAGE_VERSION = "17.14.1"
 COBERTURA_NORMALIZER = "cobertura-merge-normalize-v1"
+DISABLE_MSBUILD_NODE_REUSE = "-nr:false"
+STATELESS_SOURCE_PREFIX = "host/NetCoreDbg.Mcp.Stateless/"
+STATELESS_BINARY_DIRECTORY = "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 RELATIVE_PATH_RE = re.compile(r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._/-]+$")
 WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
@@ -75,7 +96,7 @@ FIXED_COVERAGE_PROJECTS = (
     (
         "stateless",
         "host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj",
-        "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0",
+        STATELESS_BINARY_DIRECTORY,
     ),
     (
         "host-prompts",
@@ -100,7 +121,7 @@ class GeneratedArtifactCleanupError(RunnerError):
         super().__init__(f"Generated artifact cleanup {operation} failed for {path}: {error_type}.")
 
 
-class CredentialsUnavailable(RunnerError):
+class CredentialsUnavailableError(RunnerError):
     """A credential-gate blocker that never includes a credential value."""
 
     def __init__(self, *input_names: str) -> None:
@@ -178,6 +199,7 @@ class CoverageRunClaim:
     marker: Path
     resolved_wave2_entry: Path
     marker_sha256: str
+    root_identity: tuple[int, int]
 
 
 def utc_now() -> str:
@@ -219,7 +241,7 @@ def credential_free_host(value: str) -> str:
         hostname = parsed.hostname
         port = parsed.port
     except ValueError as error:
-        raise CredentialsUnavailable("SONAR_HOST_URL") from error
+        raise CredentialsUnavailableError("SONAR_HOST_URL") from error
     if (
         parsed.scheme not in {"http", "https"}
         or not parsed.netloc
@@ -232,7 +254,7 @@ def credential_free_host(value: str) -> str:
         or port == 0
         or (parsed.netloc.endswith(":") and not parsed.netloc.endswith("]"))
     ):
-        raise CredentialsUnavailable("SONAR_HOST_URL")
+        raise CredentialsUnavailableError("SONAR_HOST_URL")
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
@@ -338,6 +360,119 @@ def _read_posix_verified_primary_dotenv(dotenv_path: Path) -> str:
         os.close(descriptor)
 
 
+def _validate_windows_dotenv_file(
+    ctypes: Any, kernel32: Any, handle: Any, attribute_tag_type: Any, require: Any
+) -> None:
+    file_type_disk = 0x0001
+    file_attribute_tag_info = 9
+    file_attribute_reparse_point = 0x00000400
+    file_attribute_directory = 0x00000010
+    if kernel32.GetFileType(handle) != file_type_disk:
+        raise OSError("The primary .env is not a disk file.")
+    attribute_tag = attribute_tag_type()
+    require(
+        kernel32.GetFileInformationByHandleEx(
+            handle,
+            file_attribute_tag_info,
+            ctypes.byref(attribute_tag),
+            ctypes.sizeof(attribute_tag),
+        )
+    )
+    if attribute_tag.file_attributes & (file_attribute_reparse_point | file_attribute_directory):
+        raise OSError("The primary .env is not a regular non-reparse file.")
+
+
+def _validate_windows_dotenv_descriptor(
+    ctypes: Any,
+    wintypes: Any,
+    advapi32: Any,
+    owner_sid: Any,
+    dacl: Any,
+    security_descriptor: Any,
+    user_sid: Any,
+    require: Any,
+) -> None:
+    se_dacl_protected = 0x1000
+    if (
+        not owner_sid.value
+        or not advapi32.IsValidSid(owner_sid)
+        or not advapi32.EqualSid(owner_sid, user_sid)
+    ):
+        raise PermissionError("The primary .env owner does not match the current token user.")
+    dacl_present = wintypes.BOOL()
+    dacl_defaulted = wintypes.BOOL()
+    descriptor_dacl = ctypes.c_void_p()
+    require(
+        advapi32.GetSecurityDescriptorDacl(
+            security_descriptor,
+            ctypes.byref(dacl_present),
+            ctypes.byref(descriptor_dacl),
+            ctypes.byref(dacl_defaulted),
+        )
+    )
+    if not dacl_present.value or not dacl.value or dacl.value != descriptor_dacl.value:
+        raise PermissionError("The primary .env has no explicit DACL.")
+    control = wintypes.WORD()
+    revision = wintypes.DWORD()
+    require(
+        advapi32.GetSecurityDescriptorControl(
+            security_descriptor,
+            ctypes.byref(control),
+            ctypes.byref(revision),
+        )
+    )
+    if not control.value & se_dacl_protected:
+        raise PermissionError("The primary .env DACL is not protected from inherited access.")
+
+
+def _validate_windows_dotenv_aces(
+    ctypes: Any,
+    advapi32: Any,
+    dacl: Any,
+    user_sid: Any,
+    acl_size_information_type: Any,
+    ace_header_type: Any,
+    sid_offset: int,
+    access_denied_ace_types: Collection[int],
+    require: Any,
+) -> None:
+    access_allowed_ace_type = 0
+    inherited_ace = 0x10
+    acl_size_information = 2
+    acl_information = acl_size_information_type()
+    require(
+        advapi32.GetAclInformation(
+            dacl,
+            ctypes.byref(acl_information),
+            ctypes.sizeof(acl_information),
+            acl_size_information,
+        )
+    )
+    for index in range(acl_information.ace_count):
+        ace = ctypes.c_void_p()
+        require(advapi32.GetAce(dacl, index, ctypes.byref(ace)))
+        ace_address = ace.value
+        if ace_address is None:
+            raise OSError("The primary .env DACL has a null ACE pointer.")
+        header = ctypes.cast(ace, ctypes.POINTER(ace_header_type)).contents
+        if header.ace_type in access_denied_ace_types:
+            continue
+        if (
+            header.ace_type != access_allowed_ace_type
+            or header.ace_flags & inherited_ace
+            or header.ace_size < sid_offset
+        ):
+            raise PermissionError("The primary .env has an unsupported effective DACL ACE.")
+        ace_sid = ctypes.c_void_p(ace_address + sid_offset)
+        if not advapi32.IsValidSid(ace_sid):
+            raise OSError("The primary .env DACL has an invalid allow ACE SID.")
+        sid_length = advapi32.GetLengthSid(ace_sid)
+        if not sid_length or header.ace_size < sid_offset + sid_length:
+            raise OSError("The primary .env DACL allow ACE is malformed.")
+        if not advapi32.EqualSid(ace_sid, user_sid):
+            raise PermissionError("The primary .env grants access outside the current token user.")
+
+
 def _read_windows_verified_primary_dotenv(dotenv_path: Path) -> str:
     import ctypes
     import msvcrt
@@ -374,21 +509,13 @@ def _read_windows_verified_primary_dotenv(dotenv_path: Path) -> str:
     file_share_read = 0x00000001
     open_existing = 3
     file_flag_open_reparse_point = 0x00200000
-    file_attribute_reparse_point = 0x00000400
-    file_attribute_directory = 0x00000010
-    file_type_disk = 0x0001
-    file_attribute_tag_info = 9
     owner_security_information = 0x00000001
     dacl_security_information = 0x00000004
     se_file_object = 1
-    se_dacl_protected = 0x1000
     token_query = 0x0008
     token_user = 1
     error_insufficient_buffer = 122
-    access_allowed_ace_type = 0
     access_denied_ace_types = {1, 6, 10, 12}
-    inherited_ace = 0x10
-    acl_size_information = 2
     sid_offset = ctypes.sizeof(AceHeader) + ctypes.sizeof(wintypes.DWORD)
 
     kernel32.CreateFileW.argtypes = [
@@ -523,21 +650,7 @@ def _read_windows_verified_primary_dotenv(dotenv_path: Path) -> str:
             normalize_windows_handle_for_crt(handle, invalid_handle_value)
         except ValueError as error:
             raise ctypes.WinError(ctypes.get_last_error()) from error
-        if kernel32.GetFileType(handle) != file_type_disk:
-            raise OSError("The primary .env is not a disk file.")
-        attribute_tag = FileAttributeTagInfo()
-        require(
-            kernel32.GetFileInformationByHandleEx(
-                handle,
-                file_attribute_tag_info,
-                ctypes.byref(attribute_tag),
-                ctypes.sizeof(attribute_tag),
-            )
-        )
-        if attribute_tag.file_attributes & (
-            file_attribute_reparse_point | file_attribute_directory
-        ):
-            raise OSError("The primary .env is not a regular non-reparse file.")
+        _validate_windows_dotenv_file(ctypes, kernel32, handle, FileAttributeTagInfo, require)
         owner_sid = ctypes.c_void_p()
         dacl = ctypes.c_void_p()
         security_descriptor = ctypes.c_void_p()
@@ -555,74 +668,20 @@ def _read_windows_verified_primary_dotenv(dotenv_path: Path) -> str:
             raise ctypes.WinError(result)
         try:
             user_sid, user_sid_buffer = current_user_sid()
-            if (
-                not owner_sid.value
-                or not advapi32.IsValidSid(owner_sid)
-                or not advapi32.EqualSid(owner_sid, user_sid)
-            ):
-                raise PermissionError(
-                    "The primary .env owner does not match the current token user."
-                )
-            dacl_present = wintypes.BOOL()
-            dacl_defaulted = wintypes.BOOL()
-            descriptor_dacl = ctypes.c_void_p()
-            require(
-                advapi32.GetSecurityDescriptorDacl(
-                    security_descriptor,
-                    ctypes.byref(dacl_present),
-                    ctypes.byref(descriptor_dacl),
-                    ctypes.byref(dacl_defaulted),
-                )
+            _validate_windows_dotenv_descriptor(
+                ctypes, wintypes, advapi32, owner_sid, dacl, security_descriptor, user_sid, require
             )
-            if not dacl_present.value or not dacl.value or dacl.value != descriptor_dacl.value:
-                raise PermissionError("The primary .env has no explicit DACL.")
-            control = wintypes.WORD()
-            revision = wintypes.DWORD()
-            require(
-                advapi32.GetSecurityDescriptorControl(
-                    security_descriptor,
-                    ctypes.byref(control),
-                    ctypes.byref(revision),
-                )
+            _validate_windows_dotenv_aces(
+                ctypes,
+                advapi32,
+                dacl,
+                user_sid,
+                AclSizeInformation,
+                AceHeader,
+                sid_offset,
+                access_denied_ace_types,
+                require,
             )
-            if not control.value & se_dacl_protected:
-                raise PermissionError(
-                    "The primary .env DACL is not protected from inherited access."
-                )
-            acl_information = AclSizeInformation()
-            require(
-                advapi32.GetAclInformation(
-                    dacl,
-                    ctypes.byref(acl_information),
-                    ctypes.sizeof(acl_information),
-                    acl_size_information,
-                )
-            )
-            for index in range(acl_information.ace_count):
-                ace = ctypes.c_void_p()
-                require(advapi32.GetAce(dacl, index, ctypes.byref(ace)))
-                ace_address = ace.value
-                if ace_address is None:
-                    raise OSError("The primary .env DACL has a null ACE pointer.")
-                header = ctypes.cast(ace, ctypes.POINTER(AceHeader)).contents
-                if header.ace_type in access_denied_ace_types:
-                    continue
-                if (
-                    header.ace_type != access_allowed_ace_type
-                    or header.ace_flags & inherited_ace
-                    or header.ace_size < sid_offset
-                ):
-                    raise PermissionError("The primary .env has an unsupported effective DACL ACE.")
-                ace_sid = ctypes.c_void_p(ace_address + sid_offset)
-                if not advapi32.IsValidSid(ace_sid):
-                    raise OSError("The primary .env DACL has an invalid allow ACE SID.")
-                sid_length = advapi32.GetLengthSid(ace_sid)
-                if not sid_length or header.ace_size < sid_offset + sid_length:
-                    raise OSError("The primary .env DACL allow ACE is malformed.")
-                if not advapi32.EqualSid(ace_sid, user_sid):
-                    raise PermissionError(
-                        "The primary .env grants access outside the current token user."
-                    )
             del user_sid_buffer
         finally:
             if security_descriptor.value:
@@ -681,7 +740,7 @@ def read_verified_primary_dotenv(dotenv_path: Path) -> str:
     except FileNotFoundError:
         raise
     except (OSError, UnicodeError) as error:
-        raise CredentialsUnavailable(*REQUIRED_ENV) from error
+        raise CredentialsUnavailableError(*REQUIRED_ENV) from error
 
 
 def load_dotenv_credentials(
@@ -740,7 +799,7 @@ def load_credentials(
     }
     missing = [name for name, value in credentials.items() if not value]
     if missing:
-        raise CredentialsUnavailable(*missing)
+        raise CredentialsUnavailableError(*missing)
     credentials["SONAR_HOST_URL"] = credential_free_host(credentials["SONAR_HOST_URL"])
     return credentials
 
@@ -763,6 +822,124 @@ def redact(text: str, secrets: Collection[str]) -> str:
         if secret:
             text = text.replace(secret, "[REDACTED]")
     return text
+
+
+def _valid_coverage_drain_state(diagnostic: Mapping[str, Any], first: Mapping[str, Any]) -> bool:
+    return not (
+        type(diagnostic["invariant"]) is not str
+        or type(first["status"]) is not str
+        or (first["failure_stage"] is not None and type(first["failure_stage"]) is not str)
+        or diagnostic["invariant"]
+        not in {
+            "active_processes_nonzero",
+            "exact_handle_exit_unverified",
+            "membership_unverified",
+            "root_birth_missing",
+            "lifetime_notifications_missing",
+            "lifetime_accounting_mismatch",
+            "live_member_handle_missing",
+            "owner_drain_unverified",
+        }
+        or first["status"] not in {"failed", "timed_out", "drained", "stale"}
+        or first["failure_stage"]
+        not in {
+            None,
+            "create_job",
+            "set_limits",
+            "create_process",
+            "assign",
+            "verify",
+            "wire_io",
+            "resume",
+            "drain",
+        }
+        or any(type(first[key]) is not bool for key in ("forced", "handle_probe_failed"))
+        or any(
+            first[key] is not None and type(first[key]) is not bool
+            for key in ("root_was_forced", "unverified_membership", "root_birth_seen")
+        )
+        or type(diagnostic["fallback_awaited_all_exact_handles"]) is not bool
+    )
+
+
+def _valid_coverage_drain_counts(diagnostic: Mapping[str, Any], first: Mapping[str, Any]) -> bool:
+    return not any(
+        value is not None and (type(value) is not int or value < 0)
+        for value in (
+            *(
+                first[key]
+                for key in (
+                    "active_processes",
+                    "total_processes",
+                    "birth_notifications",
+                    "exit_notifications",
+                    "live_members_without_handle",
+                    "retained_exact_handles",
+                    "signaled_exact_handles",
+                    "winerror",
+                )
+            ),
+            diagnostic["fallback_exact_handles_known"],
+            diagnostic["fallback_exact_handles_signaled"],
+        )
+    )
+
+
+def _coverage_drain_diagnostic(line: str, marker: str) -> dict[str, Any] | None:
+    if not line.startswith(marker) or "owner_drain=" not in line or len(line) > 4096:
+        return None
+    try:
+        diagnostic = json.loads(line.split("owner_drain=", 1)[1])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(diagnostic, dict) or set(diagnostic) != {
+        "invariant",
+        "first",
+        "fallback_exact_handles_known",
+        "fallback_exact_handles_signaled",
+        "fallback_awaited_all_exact_handles",
+    }:
+        return None
+    first = diagnostic["first"]
+    if not isinstance(first, dict) or set(first) != {
+        "status",
+        "forced",
+        "root_was_forced",
+        "active_processes",
+        "total_processes",
+        "birth_notifications",
+        "exit_notifications",
+        "unverified_membership",
+        "root_birth_seen",
+        "live_members_without_handle",
+        "retained_exact_handles",
+        "signaled_exact_handles",
+        "handle_probe_failed",
+        "failure_stage",
+        "winerror",
+    }:
+        return None
+    if not _valid_coverage_drain_state(diagnostic, first) or not _valid_coverage_drain_counts(
+        diagnostic, first
+    ):
+        return None
+    return diagnostic
+
+
+def _raise_coverage_process_tree_failure(output: str) -> None:
+    marker = "PROJECT_RELEASE_PROTOCOL_BLOCKED: COVERAGE_PROCESS_TREE_NOT_DRAINED: "
+    for line in reversed(output.splitlines()):
+        if line in (
+            marker + "collector cleanup is unverified; owner retained until runner exit",
+            marker + "collector failed",
+        ):
+            raise RunnerError(line.removeprefix("PROJECT_RELEASE_PROTOCOL_BLOCKED: "))
+        diagnostic = _coverage_drain_diagnostic(line, marker)
+        if diagnostic is not None:
+            raise RunnerError(
+                "COVERAGE_PROCESS_TREE_NOT_DRAINED: collector drain is unverified; "
+                f"owner_drain={json.dumps(diagnostic, sort_keys=True)}"
+            )
 
 
 def run_process(
@@ -798,7 +975,9 @@ def run_process(
         if credential_input_names and re.search(
             r"\b(?:401|403|authenticat|authoriz|forbidden|token)\b", output, re.IGNORECASE
         ):
-            raise CredentialsUnavailable(*credential_input_names)
+            raise CredentialsUnavailableError(*credential_input_names)
+        if label == "Coverage producer":
+            _raise_coverage_process_tree_failure(output)
         raise RunnerError(f"{label} failed with exit code {completed.returncode}.")
 
 
@@ -900,6 +1079,36 @@ def normalized_repository_relative_path(context: GitContext, path: Path) -> str:
         raise RunnerError("Generated artifact path escapes the scanner worktree.") from error
 
 
+def _remove_generated_artifact(
+    context: GitContext,
+    environment: Mapping[str, str],
+    candidate: Path,
+    relative_path: str,
+    removed: list[str],
+) -> None:
+    if not candidate.exists():
+        return
+    if candidate.is_symlink():
+        raise RunnerError("Refusing to remove generated artifacts through a symbolic link.")
+    try:
+        candidate.resolve().relative_to(context.repository_root)
+    except ValueError as error:
+        raise RunnerError("Generated artifact path escapes the scanner worktree.") from error
+    if is_tracked(context.repository_root, environment, candidate):
+        raise RunnerError("Refusing to remove a tracked path as generated scanner output.")
+    operation = "rmtree" if candidate.is_dir() else "unlink"
+    try:
+        if operation == "rmtree":
+            shutil.rmtree(candidate)
+        else:
+            candidate.unlink()
+    except OSError as error:
+        raise GeneratedArtifactCleanupError(
+            relative_path, operation, error.__class__.__name__, removed
+        ) from None
+    removed.append(relative_path)
+
+
 def clear_generated_artifacts(context: GitContext, environment: Mapping[str, str]) -> list[str]:
     """Delete only known ignored scanner/build output from the disposable worktree."""
     candidates = [context.repository_root / name for name in GENERATED_ROOT_NAMES]
@@ -919,27 +1128,7 @@ def clear_generated_artifacts(context: GitContext, environment: Mapping[str, str
         candidate_paths,
         key=lambda item: (-len(item[1].split("/")), item[1].casefold(), item[1]),
     ):
-        if not candidate.exists():
-            continue
-        if candidate.is_symlink():
-            raise RunnerError("Refusing to remove generated artifacts through a symbolic link.")
-        try:
-            candidate.resolve().relative_to(context.repository_root)
-        except ValueError as error:
-            raise RunnerError("Generated artifact path escapes the scanner worktree.") from error
-        if is_tracked(context.repository_root, environment, candidate):
-            raise RunnerError("Refusing to remove a tracked path as generated scanner output.")
-        operation = "rmtree" if candidate.is_dir() else "unlink"
-        try:
-            if operation == "rmtree":
-                shutil.rmtree(candidate)
-            else:
-                candidate.unlink()
-        except OSError as error:
-            raise GeneratedArtifactCleanupError(
-                relative_path, operation, error.__class__.__name__, removed
-            ) from None
-        removed.append(relative_path)
+        _remove_generated_artifact(context, environment, candidate, relative_path, removed)
     return removed
 
 
@@ -950,7 +1139,9 @@ def prepare_worktree_python_environment(
 ) -> None:
     child_environment = scrub_sonar_environment(environment)
     child_environment.pop("VIRTUAL_ENV", None)
-    child_environment["UV_PROJECT_ENVIRONMENT"] = str(context.repository_root / ".venv")
+    child_environment["UV_PROJECT_ENVIRONMENT"] = str(
+        context.repository_root / PYTHON_ENV_DIRECTORY
+    )
     run_process(
         ["uv", "sync", "--locked", "--extra", "dev"],
         cwd=context.repository_root,
@@ -1029,6 +1220,32 @@ def git_blob_bytes(
     return completed.stdout
 
 
+def release_intent_at_head(repository_root: Path, environment: Mapping[str, str], head: str) -> str:
+    raw = git_blob_bytes(repository_root, environment, head, "pyproject.toml")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RunnerError(
+            "COVERAGE_RELEASE_INTENT_INVALID: tracked project metadata is not UTF-8."
+        ) from error
+    sections = re.findall(r"(?ms)^\[project\][ \t]*\r?\n(.*?)(?=^\[|\Z)", text)
+    if len(sections) != 1:
+        raise RunnerError(
+            "COVERAGE_RELEASE_INTENT_INVALID: tracked project section is missing or ambiguous."
+        )
+    names = re.findall(r'(?m)^name[ \t]*=[ \t]*"([^"]+)"[ \t]*\r?$', sections[0])
+    versions = re.findall(r'(?m)^version[ \t]*=[ \t]*"([^"]+)"[ \t]*\r?$', sections[0])
+    if (
+        names != ["netcoredbg-mcp"]
+        or len(versions) != 1
+        or not re.fullmatch(r"(?a:\d)+\.(?a:\d)+\.(?a:\d)+", versions[0])
+    ):
+        raise RunnerError(
+            "COVERAGE_RELEASE_INTENT_INVALID: tracked project identity or version is invalid."
+        )
+    return f"v{versions[0]}"
+
+
 def _git_is_ancestor(
     repository_root: Path, environment: Mapping[str, str], ancestor: str, descendant: str
 ) -> bool:
@@ -1064,14 +1281,7 @@ def _ensure_git_object(
         _wave2_unverified("required first-party PR Git object is unavailable locally")
 
 
-def _github_pull_request_evidence(
-    entry: Mapping[str, Any], environment: Mapping[str, str]
-) -> dict[str, Any]:
-    integration = entry.get("integration")
-    number = integration.get("pull_request") if isinstance(integration, Mapping) else None
-    if type(number) is not int or number <= 0:
-        _wave2_unverified("source does not name a valid pull request")
-    endpoint = f"repos/thebtf/netcoredbg-mcp/pulls/{number}"
+def _github_pull_request_payload(endpoint: str, environment: Mapping[str, str]) -> bytes:
     token = environment.get("GITHUB_TOKEN")
     if token:
         request = urllib.request.Request(
@@ -1087,13 +1297,12 @@ def _github_pull_request_evidence(
                 if response_origin(response.geturl()) != "https://api.github.com":
                     _wave2_unverified("first-party PR response has an unexpected origin")
                 payload = response.read()
-        except (OSError, urllib.error.HTTPError, urllib.error.URLError) as error:
-            _wave2_unverified("first-party PR evidence is unavailable")
-            raise AssertionError("unreachable") from error
+        except OSError:
+            _wave2_unverified(PR_EVIDENCE_UNAVAILABLE)
     else:
         gh = shutil.which("gh")
         if not gh:
-            _wave2_unverified("first-party PR evidence is unavailable")
+            _wave2_unverified(PR_EVIDENCE_UNAVAILABLE)
         try:
             completed = subprocess.run(
                 [gh, "api", endpoint],
@@ -1101,12 +1310,23 @@ def _github_pull_request_evidence(
                 capture_output=True,
                 check=False,
             )
-        except OSError as error:
-            _wave2_unverified("first-party PR evidence is unavailable")
-            raise AssertionError("unreachable") from error
+        except OSError:
+            _wave2_unverified(PR_EVIDENCE_UNAVAILABLE)
         if completed.returncode:
-            _wave2_unverified("first-party PR evidence is unavailable")
+            _wave2_unverified(PR_EVIDENCE_UNAVAILABLE)
         payload = completed.stdout
+    return payload
+
+
+def _github_pull_request_evidence(
+    entry: Mapping[str, Any], environment: Mapping[str, str]
+) -> dict[str, Any]:
+    integration = entry.get("integration")
+    number = integration.get("pull_request") if isinstance(integration, Mapping) else None
+    if type(number) is not int or number <= 0:
+        _wave2_unverified("source does not name a valid pull request")
+    endpoint = f"repos/thebtf/netcoredbg-mcp/pulls/{number}"
+    payload = _github_pull_request_payload(endpoint, environment)
     try:
         response = _load_json_object(payload, "first-party pull-request evidence")
         head = response["head"]
@@ -1226,6 +1446,33 @@ def _runtime_wave2_evidence(
     }
 
 
+def _resolve_wave2_evidence(
+    entry: Mapping[str, Any],
+    evidence_or_context: Mapping[str, Any] | GitContext,
+    environment: Mapping[str, str] | None,
+) -> Mapping[str, Any]:
+    if isinstance(evidence_or_context, GitContext):
+        runtime_environment = (
+            dict(environment)
+            if environment is not None
+            else scrub_sonar_environment(process_environment())
+        )
+        try:
+            evidence: Mapping[str, Any] = _runtime_wave2_evidence(
+                entry, evidence_or_context, runtime_environment
+            )
+        except RunnerError as error:
+            if str(error).startswith("WAVE2_CLOSURE_UNVERIFIED:"):
+                raise
+            _wave2_unverified(str(error))
+            raise AssertionError("unreachable") from error
+    elif isinstance(evidence_or_context, Mapping):
+        evidence = evidence_or_context
+    else:
+        _wave2_unverified("closure evidence is unavailable")
+    return evidence
+
+
 def verify_wave2_entry(
     entry: Mapping[str, Any],
     evidence_or_context: Mapping[str, Any] | GitContext,
@@ -1270,25 +1517,7 @@ def verify_wave2_entry(
         or integration.get("head_sha") != entry.get("accepted_candidate_sha")
     ):
         _wave2_unverified("closure entry source schema or reviewed-head binding is invalid")
-    if isinstance(evidence_or_context, GitContext):
-        runtime_environment = (
-            dict(environment)
-            if environment is not None
-            else scrub_sonar_environment(process_environment())
-        )
-        try:
-            evidence: Mapping[str, Any] = _runtime_wave2_evidence(
-                entry, evidence_or_context, runtime_environment
-            )
-        except RunnerError as error:
-            if str(error).startswith("WAVE2_CLOSURE_UNVERIFIED:"):
-                raise
-            _wave2_unverified(str(error))
-            raise AssertionError("unreachable") from error
-    elif isinstance(evidence_or_context, Mapping):
-        evidence = evidence_or_context
-    else:
-        _wave2_unverified("closure evidence is unavailable")
+    evidence = _resolve_wave2_evidence(entry, evidence_or_context, environment)
     source_blob = evidence.get("source_blob")
     receipt_blob = evidence.get("closure_receipt_blob")
     pull_request = evidence.get("first_party_pull_request")
@@ -1367,6 +1596,62 @@ def _coverage_executable(name: str) -> str | None:
     return shutil.which(name)
 
 
+def _coverage_project_toolchain(
+    context: GitContext, identifier: str, project_relative: str
+) -> dict[str, Any]:
+    project = context.repository_root / project_relative
+    try:
+        root = ElementTree.parse(project).getroot()
+    except (OSError, ElementTree.ParseError) as error:
+        raise RunnerError(
+            "COVERAGE_VSTEST_INCOMPATIBLE: project evaluation is unavailable."
+        ) from error
+    target_framework = next(
+        (
+            element.text.strip()
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "TargetFramework" and element.text
+        ),
+        None,
+    )
+    testing_platform_property = next(
+        (
+            (element.text or "").strip().casefold()
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "TestingPlatformDotnetTestSupport"
+        ),
+        "",
+    )
+    packages = [
+        {
+            "include": element.attrib.get("Include", ""),
+            "version": element.attrib.get("Version", ""),
+            "private_assets": element.attrib.get("PrivateAssets", ""),
+        }
+        for element in root.iter()
+        if element.tag.rsplit("}", 1)[-1] == "PackageReference"
+    ]
+    by_name = {str(package["include"]).casefold(): package for package in packages}
+    coverlet = by_name.get(COVERLET_MSBUILD_PACKAGE)
+    test_sdk = by_name.get("microsoft.net.test.sdk")
+    collector = by_name.get(CODE_COVERAGE_PACKAGE)
+    mtp_active = testing_platform_property in {"true", "1", "yes"} or any(
+        "microsoft.testing.platform" in str(package["include"]).casefold() for package in packages
+    )
+    return {
+        "id": identifier,
+        "project": project_relative,
+        "target_framework": target_framework,
+        "coverlet_msbuild": coverlet["version"] if coverlet else None,
+        "coverlet_private_assets": coverlet["private_assets"] if coverlet else None,
+        "test_sdk": test_sdk["version"] if test_sdk else None,
+        "code_coverage": collector["version"] if collector else None,
+        "code_coverage_private_assets": collector["private_assets"] if collector else None,
+        "test_platform": "vstest",
+        "mtp_active": mtp_active,
+    }
+
+
 def _runtime_coverage_toolchain(
     context: GitContext, environment: Mapping[str, str]
 ) -> dict[str, Any]:
@@ -1392,58 +1677,38 @@ def _runtime_coverage_toolchain(
             executables[name] = None
     projects: list[dict[str, Any]] = []
     for identifier, project_relative, _ in FIXED_COVERAGE_PROJECTS:
-        project = context.repository_root / project_relative
-        try:
-            root = ElementTree.parse(project).getroot()
-        except (OSError, ElementTree.ParseError) as error:
-            raise RunnerError(
-                "COVERAGE_VSTEST_INCOMPATIBLE: project evaluation is unavailable."
-            ) from error
-        target_framework = next(
-            (
-                element.text.strip()
-                for element in root.iter()
-                if element.tag.rsplit("}", 1)[-1] == "TargetFramework" and element.text
-            ),
-            None,
-        )
-        testing_platform_property = next(
-            (
-                (element.text or "").strip().casefold()
-                for element in root.iter()
-                if element.tag.rsplit("}", 1)[-1] == "TestingPlatformDotnetTestSupport"
-            ),
-            "",
-        )
-        packages = [
-            {
-                "include": element.attrib.get("Include", ""),
-                "version": element.attrib.get("Version", ""),
-                "private_assets": element.attrib.get("PrivateAssets", ""),
-            }
-            for element in root.iter()
-            if element.tag.rsplit("}", 1)[-1] == "PackageReference"
-        ]
-        by_name = {str(package["include"]).casefold(): package for package in packages}
-        coverlet = by_name.get("coverlet.msbuild")
-        test_sdk = by_name.get("microsoft.net.test.sdk")
-        mtp_active = testing_platform_property in {"true", "1", "yes"} or any(
-            "microsoft.testing.platform" in str(package["include"]).casefold()
-            for package in packages
-        )
-        projects.append(
-            {
-                "id": identifier,
-                "project": project_relative,
-                "target_framework": target_framework,
-                "coverlet_msbuild": coverlet["version"] if coverlet else None,
-                "coverlet_private_assets": coverlet["private_assets"] if coverlet else None,
-                "test_sdk": test_sdk["version"] if test_sdk else None,
-                "test_platform": "vstest",
-                "mtp_active": mtp_active,
-            }
-        )
+        projects.append(_coverage_project_toolchain(context, identifier, project_relative))
     return {"executables": executables, "projects": projects}
+
+
+def _validate_coverage_project_toolchain(project: Mapping[str, Any]) -> None:
+    if not isinstance(project, Mapping):
+        raise RunnerError("COVERAGE_VSTEST_INCOMPATIBLE: invalid project evidence.")
+    if project.get("mtp_active") is True:
+        raise RunnerError("COVERAGE_MTP_INCOMPATIBLE: Microsoft Testing Platform is unsupported.")
+    if project.get("id") == "stateless":
+        if (
+            project.get("code_coverage") != CODE_COVERAGE_VERSION
+            or str(project.get("code_coverage_private_assets", "")).casefold() != "all"
+            or project.get("coverlet_msbuild") is not None
+        ):
+            raise RunnerError(
+                "COVERAGE_VSTEST_INCOMPATIBLE: Stateless collector is not the sole pinned provider."
+            )
+    elif (
+        project.get("coverlet_msbuild") != COVERLET_MSBUILD_VERSION
+        or str(project.get("coverlet_private_assets", "")).casefold() != "all"
+        or project.get("code_coverage") is not None
+    ):
+        raise RunnerError("COVERAGE_VSTEST_INCOMPATIBLE: Coverlet project provider is not pinned.")
+    if (
+        project.get("target_framework") != "net8.0"
+        or project.get("test_sdk") != TEST_SDK_VERSION
+        or str(project.get("test_platform", "")).casefold() != "vstest"
+    ):
+        raise RunnerError(
+            "COVERAGE_VSTEST_INCOMPATIBLE: project does not satisfy the fixed VSTest tuple."
+        )
 
 
 def preflight_coverage_toolchain(
@@ -1451,7 +1716,7 @@ def preflight_coverage_toolchain(
     context: GitContext | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Validate the exact fixed VSTest/Coverlet tuple before scanner begin."""
+    """Validate the fixed VSTest producers before scanner begin."""
 
     if toolchain is None:
         if context is None:
@@ -1485,28 +1750,9 @@ def preflight_coverage_toolchain(
         (project.get("id"), project.get("project"), FIXED_COVERAGE_PROJECTS[index][2])
         for index, project in enumerate(projects)
     ]
-    try:
-        validate_coverage_project_inventory(inventory)
-    except RunnerError:
-        raise
+    validate_coverage_project_inventory(inventory)
     for project in projects:
-        if not isinstance(project, Mapping):
-            raise RunnerError("COVERAGE_VSTEST_INCOMPATIBLE: invalid project evidence.")
-        if project.get("mtp_active") is True:
-            raise RunnerError(
-                "COVERAGE_MTP_INCOMPATIBLE: Microsoft Testing Platform is not supported "
-                "by coverlet.msbuild."
-            )
-        if (
-            project.get("target_framework") != "net8.0"
-            or project.get("coverlet_msbuild") != COVERLET_MSBUILD_VERSION
-            or str(project.get("coverlet_private_assets", "")).casefold() != "all"
-            or project.get("test_sdk") != TEST_SDK_VERSION
-            or str(project.get("test_platform", "")).casefold() != "vstest"
-        ):
-            raise RunnerError(
-                "COVERAGE_VSTEST_INCOMPATIBLE: project does not satisfy the fixed VSTest tuple."
-            )
+        _validate_coverage_project_toolchain(project)
     return {"executables": dict(executables), "projects": [dict(project) for project in projects]}
 
 
@@ -1619,6 +1865,7 @@ def _coverage_marker(plan: CoveragePlan, resolved_entry: Mapping[str, Any]) -> d
             "coverage_py": COVERAGE_PY_VERSION,
             "coverlet_msbuild": COVERLET_MSBUILD_VERSION,
             "test_sdk": TEST_SDK_VERSION,
+            "code_coverage": CODE_COVERAGE_VERSION,
         },
         "wave2_entry": resolved_copy,
         "final_reports": [
@@ -1641,6 +1888,9 @@ def _coverage_marker(plan: CoveragePlan, resolved_entry: Mapping[str, Any]) -> d
                 "project": spec.project.as_posix(),
                 "raw_cobertura_path": _coverage_relative(plan, spec.raw_cobertura_input),
                 "include_directory": spec.include_directory,
+                "provider": CODE_COVERAGE_PACKAGE
+                if spec.id == "stateless"
+                else COVERLET_MSBUILD_PACKAGE,
             }
             for spec in plan.dotnet_inputs
         ],
@@ -1665,6 +1915,7 @@ def validate_coverage_marker(plan: CoveragePlan, marker: Mapping[str, Any]) -> N
             spec.project.as_posix(),
             _coverage_relative(plan, spec.raw_cobertura_input),
             spec.include_directory,
+            CODE_COVERAGE_PACKAGE if spec.id == "stateless" else COVERLET_MSBUILD_PACKAGE,
         )
         for spec in plan.dotnet_inputs
     ]
@@ -1691,6 +1942,13 @@ def validate_coverage_marker(plan: CoveragePlan, marker: Mapping[str, Any]) -> N
         or marker.get("run_id") != plan.run_id
         or marker.get("captured_head") != plan.head
         or marker.get("project_key") != PROJECT_KEY
+        or marker.get("tool_versions")
+        != {
+            "coverage_py": COVERAGE_PY_VERSION,
+            "coverlet_msbuild": COVERLET_MSBUILD_VERSION,
+            "test_sdk": TEST_SDK_VERSION,
+            "code_coverage": CODE_COVERAGE_VERSION,
+        }
         or not isinstance(reports, list)
         or [
             (item.get("id"), item.get("language"), item.get("relative_path"))
@@ -1705,6 +1963,7 @@ def validate_coverage_marker(plan: CoveragePlan, marker: Mapping[str, Any]) -> N
                 item.get("project"),
                 item.get("raw_cobertura_path"),
                 item.get("include_directory"),
+                item.get("provider"),
             )
             for item in producers
             if isinstance(item, Mapping)
@@ -1723,6 +1982,33 @@ def validate_coverage_marker(plan: CoveragePlan, marker: Mapping[str, Any]) -> N
         raise RunnerError("COVERAGE_MARKER_INVALID: marker does not bind the fixed coverage plan.")
 
 
+def _coverage_directory_guard(plan: CoveragePlan, directory: Path) -> None:
+    repository = plan.repository_root
+    context = GitContext(repository, repository, repository, repository, plan.head)
+    if (
+        repository != Path(os.path.abspath(repository))
+        or repository != repository.resolve(strict=True)
+        or plan != derive_coverage_plan(context, plan.run_id)
+    ):
+        raise RunnerError("COVERAGE_MARKER_INVALID: coverage plan paths are not canonical.")
+    relative = directory.relative_to(repository)
+    current = repository
+    for component in (None, *relative.parts):
+        if component is not None:
+            current /= component
+        try:
+            metadata = current.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise RunnerError(
+                "COVERAGE_MARKER_INVALID: coverage ancestor is not a plain directory."
+            )
+
+
 def claim_coverage_run(
     context: GitContext, plan: CoveragePlan, resolved_entry: Mapping[str, Any]
 ) -> CoverageRunClaim:
@@ -1730,9 +2016,11 @@ def claim_coverage_run(
         raise RunnerError(
             "COVERAGE_MARKER_INVALID: plan does not belong to the captured exact head."
         )
+    _coverage_directory_guard(plan, plan.root.parent)
     try:
         plan.root.parent.mkdir(parents=True, exist_ok=True)
         plan.root.mkdir()
+        root_metadata = plan.root.stat(follow_symlinks=False)
     except FileExistsError as error:
         raise RunnerError(
             "COVERAGE_RUN_ROOT_EXISTS: claimed coverage root already exists."
@@ -1751,6 +2039,7 @@ def claim_coverage_run(
         plan.marker,
         plan.resolved_wave2_entry,
         _sha256_bytes(plan.marker.read_bytes()),
+        (root_metadata.st_dev, root_metadata.st_ino),
     )
 
 
@@ -1765,7 +2054,31 @@ def dotnet_producer_commands(plan: CoveragePlan) -> list[list[str]]:
     commands: list[list[str]] = []
     for spec in plan.dotnet_inputs:
         project = plan.repository_root / spec.project
-        commands.append(["dotnet", "restore", str(project), "-nr:false"])
+        commands.append(["dotnet", "restore", str(project), DISABLE_MSBUILD_NODE_REUSE])
+        if spec.id == "stateless":
+            commands.append(
+                [
+                    "dotnet",
+                    "build",
+                    str(project),
+                    "--configuration",
+                    "Debug",
+                    "--no-restore",
+                    DISABLE_MSBUILD_NODE_REUSE,
+                ]
+            )
+            commands.append(
+                [
+                    "python",
+                    str(plan.repository_root / "scripts/run_sonarqube_exact_head.py"),
+                    "collector-stateless",
+                    str(plan.repository_root),
+                    str(project),
+                    str(spec.raw_cobertura_input),
+                    str(plan.repository_root / str(spec.include_directory)),
+                ]
+            )
+            continue
         command = [
             "dotnet",
             "test",
@@ -1773,17 +2086,11 @@ def dotnet_producer_commands(plan: CoveragePlan) -> list[list[str]]:
             "--configuration",
             "Debug",
             "--no-restore",
-            "-nr:false",
+            DISABLE_MSBUILD_NODE_REUSE,
             "-p:CollectCoverage=true",
             "-p:CoverletOutputFormat=cobertura",
             f"-p:CoverletOutput={_cobertura_output_prefix(spec.raw_cobertura_input)}",
         ]
-        if spec.include_directory is not None:
-            command.append(
-                f"-p:IncludeDirectory={plan.repository_root / Path(spec.include_directory)}"
-            )
-        if spec.id == "stateless":
-            command.extend(["--filter", "Coverage!=Exclude"])
         commands.append(command)
     return commands
 
@@ -1843,6 +2150,36 @@ def _coverage_environment() -> dict[str, str]:
     return scrub_sonar_environment(process_environment())
 
 
+def _cobertura_source_root(context: GitContext, value: str) -> Path:
+    normalized = value.replace("\\", "/")
+    if not normalized or "://" in normalized or normalized.startswith("file:"):
+        _coverage_failure(
+            "COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura source root is absent or a URI"
+        )
+    if normalized == ".":
+        candidate = context.repository_root
+    elif normalized.startswith("/") or WINDOWS_ABSOLUTE_PATH_RE.match(normalized):
+        candidate = Path(normalized)
+    else:
+        parts = normalized.split("/")
+        if any(part in {"", ".", "..", "bin", "obj"} for part in parts):
+            _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura source root is unsafe")
+        candidate = context.repository_root.joinpath(*parts)
+    try:
+        candidate.relative_to(context.repository_root)
+        metadata = _scanner_tree_metadata(candidate)
+    except (ValueError, RunnerError) as error:
+        _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", str(error))
+        raise AssertionError("unreachable") from error
+    attributes = int(getattr(metadata, "st_file_attributes", 0) or 0)
+    if not stat.S_ISDIR(metadata.st_mode) or attributes & 0x0400:
+        _coverage_failure(
+            "COVERAGE_SOURCE_MAPPING_INVALID",
+            "Cobertura source root is not a regular repository directory",
+        )
+    return candidate
+
+
 def _cobertura_source_roots(context: GitContext, root: ElementTree.Element) -> tuple[Path, ...]:
     values = [
         (element.text or "").strip()
@@ -1853,34 +2190,7 @@ def _cobertura_source_roots(context: GitContext, root: ElementTree.Element) -> t
         values = ["."]
     roots: list[Path] = []
     for value in values:
-        normalized = value.replace("\\", "/")
-        if not normalized or "://" in normalized or normalized.startswith("file:"):
-            _coverage_failure(
-                "COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura source root is absent or a URI"
-            )
-        if normalized == ".":
-            candidate = context.repository_root
-        elif normalized.startswith("/") or WINDOWS_ABSOLUTE_PATH_RE.match(normalized):
-            candidate = Path(normalized)
-        else:
-            parts = normalized.split("/")
-            if any(part in {"", ".", "..", "bin", "obj"} for part in parts):
-                _coverage_failure(
-                    "COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura source root is unsafe"
-                )
-            candidate = context.repository_root.joinpath(*parts)
-        try:
-            candidate.relative_to(context.repository_root)
-            metadata = _scanner_tree_metadata(candidate)
-        except (ValueError, RunnerError) as error:
-            _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", str(error))
-            raise AssertionError("unreachable") from error
-        attributes = int(getattr(metadata, "st_file_attributes", 0) or 0)
-        if not stat.S_ISDIR(metadata.st_mode) or attributes & 0x0400:
-            _coverage_failure(
-                "COVERAGE_SOURCE_MAPPING_INVALID",
-                "Cobertura source root is not a regular repository directory",
-            )
+        candidate = _cobertura_source_root(context, value)
         if candidate not in roots:
             roots.append(candidate)
     if context.repository_root not in roots:
@@ -1888,27 +2198,9 @@ def _cobertura_source_roots(context: GitContext, root: ElementTree.Element) -> t
     return tuple(roots)
 
 
-def _safe_coverage_source(
-    context: GitContext,
-    filename: Any,
-    language: str,
-    source_roots: Sequence[Path],
+def _resolve_coverage_source(
+    context: GitContext, parts: Sequence[str], source_roots: Sequence[Path]
 ) -> str:
-    if not isinstance(filename, str) or not filename:
-        _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura class filename is absent")
-    normalized = filename.replace("\\", "/")
-    if (
-        "://" in normalized
-        or normalized.startswith("file:")
-        or normalized.startswith("/")
-        or WINDOWS_ABSOLUTE_PATH_RE.match(normalized)
-    ):
-        _coverage_failure(
-            "COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura source path is absolute or a URI"
-        )
-    parts = normalized.split("/")
-    if any(part in {"", ".", "..", "bin", "obj"} for part in parts):
-        _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura source path is unsafe")
     matches: list[Path] = []
     for source_root in source_roots:
         candidate = source_root.joinpath(*parts)
@@ -1937,12 +2229,22 @@ def _safe_coverage_source(
             "COVERAGE_SOURCE_MAPPING_INVALID",
             "Cobertura source is missing or maps through multiple source roots",
         )
-    relative = matches[0].relative_to(context.repository_root).as_posix()
+    return matches[0].relative_to(context.repository_root).as_posix()
+
+
+def _validate_coverage_source_language(relative: str, language: str) -> None:
     if language == "python":
-        if not relative.startswith("src/netcoredbg_mcp/") or not relative.endswith(".py"):
+        if not relative.endswith(".py") or not (
+            relative.startswith("src/netcoredbg_mcp/")
+            or relative
+            in {
+                "scripts/run_sonarqube_exact_head.py",
+                "scripts/stateless_preview_artifact.py",
+            }
+        ):
             _coverage_failure(
                 "COVERAGE_SOURCE_MAPPING_INVALID",
-                "Python coverage source is outside src/netcoredbg_mcp",
+                "Python coverage source is outside the fixed production source set",
             )
     elif language == "dotnet":
         lowered = [part.casefold() for part in relative.split("/")]
@@ -1956,7 +2258,365 @@ def _safe_coverage_source(
             )
     else:
         _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "coverage language is unknown")
+
+
+def _safe_coverage_source(
+    context: GitContext,
+    filename: Any,
+    language: str,
+    source_roots: Sequence[Path],
+) -> str:
+    if not isinstance(filename, str) or not filename:
+        _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura class filename is absent")
+    normalized = filename.replace("\\", "/")
+    if (
+        "://" in normalized
+        or normalized.startswith("file:")
+        or normalized.startswith("/")
+        or WINDOWS_ABSOLUTE_PATH_RE.match(normalized)
+    ):
+        _coverage_failure(
+            "COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura source path is absolute or a URI"
+        )
+    parts = normalized.split("/")
+    if any(part in {"", ".", "..", "bin", "obj"} for part in parts):
+        _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura source path is unsafe")
+    relative = _resolve_coverage_source(context, parts, source_roots)
+    _validate_coverage_source_language(relative, language)
     return relative
+
+
+def _collector_source_relative(
+    context: GitContext, package: ElementTree.Element, item: ElementTree.Element
+) -> str | None:
+    if item.tag != "class":
+        _coverage_failure("COVERAGE_REPORT_INVALID", "collector class is malformed")
+    raw_filename = item.get("filename", "")
+    spelling = raw_filename.replace("\\", "/")
+    candidate = Path(spelling)
+    if (
+        not candidate.is_absolute()
+        or "://" in spelling
+        or any(part in {"", ".", ".."} for part in spelling.split("/")[1:])
+    ):
+        _coverage_failure(
+            "COVERAGE_SOURCE_MAPPING_INVALID", "collector source is not an absolute path"
+        )
+    try:
+        relative = candidate.relative_to(context.repository_root).as_posix()
+    except ValueError as error:
+        _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "collector source is outside checkout")
+        raise AssertionError("unreachable") from error
+    class_name = item.get("name", "")
+    if relative.startswith("bridge/obj/"):
+        if (
+            relative
+            != "bridge/obj/Debug/net8.0-windows/win-x64/Microsoft.Interop.LibraryImportGenerator/Microsoft.Interop.LibraryImportGenerator/LibraryImports.g.cs"
+            or class_name
+            not in {
+                "FlaUIBridge.Commands.ClickCommands",
+                "FlaUIBridge.Commands.ElementCommands",
+                "FlaUIBridge.Commands.HoverCommands",
+                "FlaUIBridge.Commands.NativeScreenshotCaptureTransport",
+            }
+            or is_tracked(context.repository_root, _coverage_environment(), candidate)
+        ):
+            _coverage_failure(
+                "COVERAGE_SOURCE_MAPPING_INVALID", _UNRECOGNIZED_GENERATED_COLLECTOR_SOURCE
+            )
+        if class_name == "FlaUIBridge.Commands.NativeScreenshotCaptureTransport":
+            owner_relative = "bridge/Commands/ScreenshotCaptureTransport.cs"
+            owner_filename = (context.repository_root / owner_relative).as_posix()
+            if package.get("name") != "FlaUIBridge" or not any(
+                owner.get("name") == class_name
+                and owner.get("filename", "").replace("\\", "/") in {owner_relative, owner_filename}
+                for owner in package.findall(_COLLECTOR_PACKAGE_CLASSES_XPATH)
+            ):
+                _coverage_failure(
+                    "COVERAGE_SOURCE_MAPPING_INVALID", _UNRECOGNIZED_GENERATED_COLLECTOR_OWNER
+                )
+            _safe_coverage_source(context, owner_relative, "dotnet", (context.repository_root,))
+        return None
+    if relative.startswith(STATELESS_SOURCE_PREFIX + "obj/"):
+        if (
+            relative
+            != "host/NetCoreDbg.Mcp.Stateless/obj/Debug/net8.0/Microsoft.Interop.LibraryImportGenerator/Microsoft.Interop.LibraryImportGenerator/LibraryImports.g.cs"
+            or class_name
+            != "NetCoreDbg.Mcp.Stateless.DebugAdapter.NetCoreDbgSession.WindowsProcessTreeOwnership"
+            or is_tracked(context.repository_root, _coverage_environment(), candidate)
+        ):
+            _coverage_failure(
+                "COVERAGE_SOURCE_MAPPING_INVALID", _UNRECOGNIZED_GENERATED_COLLECTOR_SOURCE
+            )
+        owner_relative = "host/NetCoreDbg.Mcp.Stateless/DebugAdapter/NetCoreDbgSession.cs"
+        owner_filename = (context.repository_root / owner_relative).as_posix()
+        if package.get("name") != "NetCoreDbg.Mcp.Stateless" or not any(
+            owner.get("name") == class_name
+            and owner.get("filename", "").replace("\\", "/") in {owner_relative, owner_filename}
+            for owner in package.findall(_COLLECTOR_PACKAGE_CLASSES_XPATH)
+        ):
+            _coverage_failure(
+                "COVERAGE_SOURCE_MAPPING_INVALID", _UNRECOGNIZED_GENERATED_COLLECTOR_OWNER
+            )
+        _safe_coverage_source(context, owner_relative, "dotnet", (context.repository_root,))
+        return None
+    if relative.startswith("host/NetCoreDbg.Mcp.Stateless.Tests/obj/"):
+        if (
+            relative
+            != (
+                "host/NetCoreDbg.Mcp.Stateless.Tests/obj/Debug/net8.0/"
+                "Microsoft.Interop.LibraryImportGenerator/Microsoft.Interop.LibraryImportGenerator/"
+                "LibraryImports.g.cs"
+            )
+            or class_name
+            != "NetCoreDbg.Mcp.Stateless.Tests.NativeScene.ElementCommandsBehaviorTests"
+            or is_tracked(context.repository_root, _coverage_environment(), candidate)
+        ):
+            _coverage_failure(
+                "COVERAGE_SOURCE_MAPPING_INVALID", _UNRECOGNIZED_GENERATED_COLLECTOR_SOURCE
+            )
+        owner_relative = (
+            "host/NetCoreDbg.Mcp.Stateless.Tests/NativeScene/ElementCommandsBehaviorTests.cs"
+        )
+        owner_filename = (context.repository_root / owner_relative).as_posix()
+        if package.get("name") != "NetCoreDbg.Mcp.Stateless.Tests" or not any(
+            owner.get("name") == class_name
+            and owner.get("filename", "").replace("\\", "/") in {owner_relative, owner_filename}
+            for owner in package.findall(_COLLECTOR_PACKAGE_CLASSES_XPATH)
+        ):
+            _coverage_failure(
+                "COVERAGE_SOURCE_MAPPING_INVALID", _UNRECOGNIZED_GENERATED_COLLECTOR_OWNER
+            )
+        return _resolve_coverage_source(
+            context, owner_relative.split("/"), (context.repository_root,)
+        )
+    metadata = _scanner_tree_metadata(candidate)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or int(getattr(metadata, "st_file_attributes", 0) or 0) & 0x0400
+        or candidate.resolve() != context.repository_root / relative
+    ):
+        _coverage_failure(
+            "COVERAGE_SOURCE_MAPPING_INVALID",
+            "collector source is not regular checkout source",
+        )
+    tracked = is_tracked(context.repository_root, _coverage_environment(), candidate)
+    if not tracked:
+        _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "collector source is untracked")
+    return relative
+
+
+def _collector_test_source(
+    context: GitContext,
+    package: ElementTree.Element,
+    class_name: str,
+    relative: str,
+    test_project: Path,
+    test_source_root: str,
+    startup_hook_source: str,
+) -> bool:
+    # The CLR requires a global StartupHook; bind it to its source and test module.
+    global_test_hook = class_name == "StartupHook"
+    if (global_test_hook or relative == startup_hook_source) and (
+        not global_test_hook
+        or relative != startup_hook_source
+        or package.get("name") != test_project.stem
+    ):
+        _coverage_failure(
+            "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized test startup hook origin"
+        )
+    smoke_fixture = "tests/fixtures/WpfSmokeApp/"
+    smoke_namespace = "WpfSmokeApp."
+    if relative.startswith(smoke_fixture):
+        if (
+            not relative.endswith(".cs")
+            or package.get("name") != "WpfSmokeApp"
+            or not class_name.startswith(smoke_namespace)
+            or class_name == smoke_namespace
+        ):
+            _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized fixture source")
+        parts = relative.split("/")
+        if any(part in {"", ".", "..", "bin", "obj"} for part in parts):
+            _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "fixture source path is unsafe")
+        _resolve_coverage_source(context, parts, (context.repository_root,))
+        return True
+    fixtures = "host/NetCoreDbg.Mcp.Stateless.Tests/Fixtures/"
+    if relative.startswith(fixtures):
+        if not relative.endswith(".cs") or not any(
+            relative.startswith(fixtures + project + "/")
+            for project in ("ControlledDapAdapter", "NativeSceneProbe.WpfFixture")
+        ):
+            _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized fixture source")
+        return True
+    if relative.startswith(test_source_root):
+        if (
+            not relative.endswith(".cs")
+            or package.get("name") != test_project.stem
+            or not (class_name.startswith(test_project.stem + ".") or global_test_hook)
+        ):
+            _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized test class origin")
+        return True
+    return False
+
+
+def _collector_method_totals(methods: ElementTree.Element | None) -> dict[int, list[int]]:
+    method_totals: dict[int, list[int]] = {}
+    if methods is not None:
+        if any(method.tag != "method" for method in methods):
+            _coverage_failure("COVERAGE_REPORT_INVALID", "collector methods are malformed")
+        for method in methods:
+            for line in method.findall("./lines/line"):
+                number = _positive_int(
+                    line.get("number"), "COVERAGE_REPORT_INVALID", "collector method line"
+                )
+                hits = _positive_int(
+                    line.get("hits"),
+                    "COVERAGE_REPORT_INVALID",
+                    "collector method hits",
+                    allow_zero=True,
+                )
+                covered, valid, _ = _condition_totals(line)
+                totals_for_line = method_totals.setdefault(number, [0, 0, 0])
+                totals_for_line[0] = max(totals_for_line[0], int(hits > 0))
+                totals_for_line[1] += covered
+                totals_for_line[2] += valid
+    return method_totals
+
+
+def _validate_collector_class_summary(
+    item: ElementTree.Element, method_totals: dict[int, list[int]], counts: list[int]
+) -> None:
+    seen_numbers: set[int] = set()
+    for line in item.findall("./lines/line"):
+        number = _positive_int(
+            line.get("number"), "COVERAGE_REPORT_INVALID", "collector class line"
+        )
+        if number in seen_numbers:
+            _coverage_failure("COVERAGE_REPORT_INVALID", "collector class summary repeats a line")
+        seen_numbers.add(number)
+        hits = _positive_int(
+            line.get("hits"),
+            "COVERAGE_REPORT_INVALID",
+            "collector line hits",
+            allow_zero=True,
+        )
+        covered, valid, _ = _condition_totals(line)
+        method_observation = method_totals.pop(number, None)
+        if method_observation is not None and method_observation != [
+            int(hits > 0),
+            covered,
+            valid,
+        ]:
+            _coverage_failure(
+                "COVERAGE_REPORT_INVALID", "collector class summary disagrees with methods"
+            )
+        counts[0] += 1
+        counts[1] += int(hits > 0)
+        counts[2] += covered
+        counts[3] += valid
+    if method_totals:
+        _coverage_failure(
+            "COVERAGE_REPORT_INVALID", "collector method line is absent from class summary"
+        )
+
+
+def _project_collector_class(
+    context: GitContext,
+    item: ElementTree.Element,
+    relative: str,
+    names: dict[str, str],
+    counts: list[int],
+) -> None:
+    raw_filename = item.get("filename", "")
+    class_name = item.get("name", "")
+    production = (
+        (STATELESS_SOURCE_PREFIX, "NetCoreDbg.Mcp.Stateless."),
+        ("host/NetCoreDbg.Mcp.DesignProbe.Wpf/", "NetCoreDbg.Mcp.DesignProbe.Wpf."),
+        ("bridge/", "FlaUIBridge."),
+    )
+    if not any(
+        relative.startswith(path) and class_name.startswith(namespace)
+        for path, namespace in production
+    ):
+        _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "foreign collector source")
+    _safe_coverage_source(context, relative, "dotnet", (context.repository_root,))
+    if relative in names and names[relative] != raw_filename:
+        _coverage_failure(
+            "COVERAGE_SOURCE_MAPPING_INVALID", "duplicate normalized collector source"
+        )
+    names[relative] = raw_filename
+    item.set("filename", relative)
+    methods = item.find("methods")
+    method_totals = _collector_method_totals(methods)
+    _validate_collector_class_summary(item, method_totals, counts)
+    if methods is not None:
+        item.remove(methods)
+
+
+def project_stateless_collector(
+    context: GitContext, raw_report: Path, output: Path
+) -> dict[str, Any]:
+    """Project one attached collector XML, excluding only identified test classes."""
+    try:
+        tree = ElementTree.parse(raw_report)
+    except (OSError, ElementTree.ParseError) as error:
+        _coverage_failure("COVERAGE_REPORT_INVALID", "collector XML is unavailable or malformed")
+        raise AssertionError("unreachable") from error
+    root = tree.getroot()
+    packages = root.find("packages") if root.tag == "coverage" else None
+    if packages is None:
+        _coverage_failure("COVERAGE_REPORT_INVALID", "collector XML is not Cobertura")
+    test_project = Path(FIXED_COVERAGE_PROJECTS[3][1])
+    test_source_root = test_project.parent.as_posix() + "/"
+    startup_hook_source = test_source_root + "ModernMcp/StartupHook.cs"
+    names: dict[str, str] = {}
+    totals = [0, 0, 0, 0]
+    kept = 0
+    for package in list(packages):
+        classes = package.find("classes")
+        if classes is None:
+            _coverage_failure("COVERAGE_REPORT_INVALID", "collector package has no classes")
+        counts = [0, 0, 0, 0]
+        resolved_classes = [
+            (item, _collector_source_relative(context, package, item)) for item in classes
+        ]
+        for item, relative in resolved_classes:
+            if relative is None or _collector_test_source(
+                context,
+                package,
+                item.get("name", ""),
+                relative,
+                test_project,
+                test_source_root,
+                startup_hook_source,
+            ):
+                classes.remove(item)
+                continue
+            _project_collector_class(context, item, relative, names, counts)
+            kept += 1
+        if not len(classes):
+            packages.remove(package)
+            continue
+        package.set("line-rate", str(counts[1] / counts[0]))
+        package.set("branch-rate", str(counts[2] / counts[3]) if counts[3] else "0")
+        totals = [a + b for a, b in zip(totals, counts)]
+    if not kept or not totals[0] or not totals[3]:
+        _coverage_failure("COVERAGE_DENOMINATOR_INVALID", "collector has no production coverage")
+    root.attrib.update(
+        zip(
+            ("lines-valid", "lines-covered", "branches-covered", "branches-valid"), map(str, totals)
+        )
+    )
+    root.set("line-rate", str(totals[1] / totals[0]))
+    root.set("branch-rate", str(totals[2] / totals[3]))
+    sources = ElementTree.Element("sources")
+    ElementTree.SubElement(sources, "source").text = "."
+    root.insert(0, sources)
+    tree.write(output, encoding="utf-8", xml_declaration=True)
+    parsed = _parse_cobertura(context, output, "dotnet", require_branches=True)
+    if not any(path.startswith(STATELESS_SOURCE_PREFIX) for path in parsed["source_paths"]):
+        _coverage_failure("COVERAGE_SOURCE_MAPPING_INVALID", "collector has no Stateless source")
+    return parsed
 
 
 def _positive_int(value: Any, code: str, detail: str, *, allow_zero: bool = False) -> int:
@@ -1968,6 +2628,62 @@ def _positive_int(value: Any, code: str, detail: str, *, allow_zero: bool = Fals
     if number < 0 or (number == 0 and not allow_zero):
         _coverage_failure(code, detail)
     return number
+
+
+def _branch_condition_facts(
+    conditions: Sequence[ElementTree.Element], covered: int, valid: int
+) -> tuple[int, int, list[dict[str, str | int]]]:
+    parsed: list[tuple[str, str, Decimal]] = []
+    identities: set[tuple[str, str]] = set()
+    for condition in conditions:
+        raw_number = condition.attrib.get("number")
+        condition_type = condition.attrib.get("type")
+        coverage_match = re.fullmatch(r"(\d+(?:\.\d+)?)%", condition.attrib.get("coverage", ""))
+        percentage = Decimal(coverage_match.group(1)) if coverage_match else None
+        if (
+            not isinstance(raw_number, str)
+            or re.fullmatch(r"\d+", raw_number) is None
+            or not isinstance(condition_type, str)
+            or not condition_type
+            or coverage_match is None
+            or percentage is None
+            or percentage > 100
+        ):
+            _coverage_failure("COVERAGE_REPORT_INVALID", "branch condition identity is malformed")
+        number = str(int(raw_number))
+        identity = (condition_type, number)
+        if identity in identities:
+            _coverage_failure(
+                "COVERAGE_REPORT_INVALID", "branch condition identities are ambiguous"
+            )
+        identities.add(identity)
+        parsed.append((number, condition_type, percentage))
+
+    # Coverlet can collapse several switch/jump outcomes into one condition
+    # element (for example 16/17 across six condition identities). Cobertura
+    # does not expose the per-identity denominators in that shape, so retain
+    # only the trustworthy aggregate and let normalization merge it
+    # conservatively. Exact one-outcome identities remain unionable.
+    if valid != len(parsed):
+        return covered, valid, []
+
+    facts: list[dict[str, str | int]] = []
+    for number, condition_type, percentage in parsed:
+        if percentage not in {Decimal(0), Decimal(100)}:
+            _coverage_failure("COVERAGE_REPORT_INVALID", "branch condition coverage is not exact")
+        facts.append(
+            {
+                "number": number,
+                "type": condition_type,
+                "covered": int(percentage == Decimal(100)),
+                "valid": 1,
+            }
+        )
+    if sum(int(fact["covered"]) for fact in facts) != covered:
+        _coverage_failure(
+            "COVERAGE_REPORT_INVALID", "branch condition identities disagree with totals"
+        )
+    return covered, valid, facts
 
 
 def _condition_totals(line: ElementTree.Element) -> tuple[int, int, list[dict[str, str | int]]]:
@@ -1988,56 +2704,91 @@ def _condition_totals(line: ElementTree.Element) -> tuple[int, int, list[dict[st
     conditions = list(containers[0])
     if not conditions or any(child.tag.rsplit("}", 1)[-1] != "condition" for child in conditions):
         _coverage_failure("COVERAGE_REPORT_INVALID", "branch conditions are malformed")
+    return _branch_condition_facts(conditions, covered, valid)
 
-    parsed: list[tuple[str, str, float]] = []
-    identities: set[tuple[str, str]] = set()
-    for condition in conditions:
-        raw_number = condition.attrib.get("number")
-        condition_type = condition.attrib.get("type")
-        coverage_match = re.fullmatch(r"(\d+(?:\.\d+)?)%", condition.attrib.get("coverage", ""))
-        if (
-            not isinstance(raw_number, str)
-            or re.fullmatch(r"\d+", raw_number) is None
-            or not isinstance(condition_type, str)
-            or not condition_type
-            or coverage_match is None
-            or float(coverage_match.group(1)) > 100
-        ):
-            _coverage_failure("COVERAGE_REPORT_INVALID", "branch condition identity is malformed")
-        number = str(int(raw_number))
-        identity = (condition_type, number)
-        if identity in identities:
-            _coverage_failure(
-                "COVERAGE_REPORT_INVALID", "branch condition identities are ambiguous"
-            )
-        identities.add(identity)
-        parsed.append((number, condition_type, float(coverage_match.group(1))))
 
-    # Coverlet can collapse several switch/jump outcomes into one condition
-    # element (for example 16/17 across six condition identities). Cobertura
-    # does not expose the per-identity denominators in that shape, so retain
-    # only the trustworthy aggregate and let normalization merge it
-    # conservatively. Exact one-outcome identities remain unionable.
-    if valid != len(parsed):
-        return covered, valid, []
+def _cobertura_root_evidence(
+    root: ElementTree.Element, raw: bytes, require_branches: bool
+) -> dict[str, Any]:
+    if root.tag.rsplit("}", 1)[-1] != "coverage":
+        _coverage_failure("COVERAGE_REPORT_INVALID", "Cobertura root must be coverage")
+    lines_valid = _positive_int(
+        root.attrib.get("lines-valid"), "COVERAGE_DENOMINATOR_INVALID", "line denominator is absent"
+    )
+    lines_covered = _positive_int(
+        root.attrib.get("lines-covered"),
+        "COVERAGE_REPORT_INVALID",
+        "covered line count is invalid",
+        allow_zero=True,
+    )
+    branches_valid = _positive_int(
+        root.attrib.get("branches-valid"),
+        "COVERAGE_DENOMINATOR_INVALID",
+        "branch denominator is absent",
+        allow_zero=not require_branches,
+    )
+    branches_covered = _positive_int(
+        root.attrib.get("branches-covered"),
+        "COVERAGE_REPORT_INVALID",
+        "covered branch count is invalid",
+        allow_zero=True,
+    )
+    if lines_covered > lines_valid or branches_covered > branches_valid:
+        _coverage_failure("COVERAGE_REPORT_INVALID", "Cobertura covered counts exceed denominators")
+    return {
+        "sha256": _sha256_bytes(raw),
+        "bytes": len(raw),
+        "xml_root": "coverage",
+        "lines_valid": lines_valid,
+        "lines_covered": lines_covered,
+        "branches_valid": branches_valid,
+        "branches_covered": branches_covered,
+    }
 
-    facts: list[dict[str, str | int]] = []
-    for number, condition_type, percentage in parsed:
-        if percentage not in {0.0, 100.0}:
-            _coverage_failure("COVERAGE_REPORT_INVALID", "branch condition coverage is not exact")
-        facts.append(
+
+def _cobertura_class_facts(
+    context: GitContext,
+    class_element: ElementTree.Element,
+    language: str,
+    source_roots: Sequence[Path],
+    source_paths: list[str],
+) -> dict[str, Any]:
+    source_path = _safe_coverage_source(
+        context,
+        class_element.attrib.get("filename"),
+        language,
+        source_roots,
+    )
+    if source_path not in source_paths:
+        source_paths.append(source_path)
+    line_facts: list[dict[str, Any]] = []
+    for line in class_element.iter():
+        if line.tag.rsplit("}", 1)[-1] != "line":
+            continue
+        number = _positive_int(
+            line.attrib.get("number"), "COVERAGE_REPORT_INVALID", "line number is invalid"
+        )
+        hits = _positive_int(
+            line.attrib.get("hits"),
+            "COVERAGE_REPORT_INVALID",
+            "line hits are invalid",
+            allow_zero=True,
+        )
+        branch_covered, branch_valid, conditions = _condition_totals(line)
+        line_facts.append(
             {
                 "number": number,
-                "type": condition_type,
-                "covered": int(percentage == 100.0),
-                "valid": 1,
+                "hits": hits,
+                "branches_covered": branch_covered,
+                "branches_valid": branch_valid,
+                "conditions": conditions,
             }
         )
-    if sum(int(fact["covered"]) for fact in facts) != covered:
-        _coverage_failure(
-            "COVERAGE_REPORT_INVALID", "branch condition identities disagree with totals"
-        )
-    return covered, valid, facts
+    return {
+        "source_path": source_path,
+        "class_name": class_element.get("name"),
+        "lines": line_facts,
+    }
 
 
 def _parse_cobertura(
@@ -2065,86 +2816,25 @@ def _parse_cobertura(
     except ElementTree.ParseError as error:
         _coverage_failure("COVERAGE_REPORT_INVALID", "Cobertura report is malformed XML")
         raise AssertionError("unreachable") from error
-    if root.tag.rsplit("}", 1)[-1] != "coverage":
-        _coverage_failure("COVERAGE_REPORT_INVALID", "Cobertura root must be coverage")
-    lines_valid = _positive_int(
-        root.attrib.get("lines-valid"), "COVERAGE_DENOMINATOR_INVALID", "line denominator is absent"
-    )
-    lines_covered = _positive_int(
-        root.attrib.get("lines-covered"),
-        "COVERAGE_REPORT_INVALID",
-        "covered line count is invalid",
-        allow_zero=True,
-    )
-    branches_valid = _positive_int(
-        root.attrib.get("branches-valid"),
-        "COVERAGE_DENOMINATOR_INVALID",
-        "branch denominator is absent",
-        allow_zero=not require_branches,
-    )
-    branches_covered = _positive_int(
-        root.attrib.get("branches-covered"),
-        "COVERAGE_REPORT_INVALID",
-        "covered branch count is invalid",
-        allow_zero=True,
-    )
-    if lines_covered > lines_valid or branches_covered > branches_valid:
-        _coverage_failure("COVERAGE_REPORT_INVALID", "Cobertura covered counts exceed denominators")
+    parsed = _cobertura_root_evidence(root, raw, require_branches)
     source_roots = _cobertura_source_roots(context, root)
     source_paths: list[str] = []
     facts: list[dict[str, Any]] = []
     for class_element in root.iter():
         if class_element.tag.rsplit("}", 1)[-1] != "class":
             continue
-        source_path = _safe_coverage_source(
-            context,
-            class_element.attrib.get("filename"),
-            language,
-            source_roots,
+        facts.append(
+            _cobertura_class_facts(context, class_element, language, source_roots, source_paths)
         )
-        if source_path not in source_paths:
-            source_paths.append(source_path)
-        line_facts: list[dict[str, Any]] = []
-        for line in class_element.iter():
-            if line.tag.rsplit("}", 1)[-1] != "line":
-                continue
-            number = _positive_int(
-                line.attrib.get("number"), "COVERAGE_REPORT_INVALID", "line number is invalid"
-            )
-            hits = _positive_int(
-                line.attrib.get("hits"),
-                "COVERAGE_REPORT_INVALID",
-                "line hits are invalid",
-                allow_zero=True,
-            )
-            branch_covered, branch_valid, conditions = _condition_totals(line)
-            line_facts.append(
-                {
-                    "number": number,
-                    "hits": hits,
-                    "branches_covered": branch_covered,
-                    "branches_valid": branch_valid,
-                    "conditions": conditions,
-                }
-            )
-        facts.append({"source_path": source_path, "lines": line_facts})
     if not source_paths:
         _coverage_failure(
             "COVERAGE_SOURCE_MAPPING_INVALID", "Cobertura report has no mapped source"
         )
     source_paths.sort()
-    return {
-        "sha256": _sha256_bytes(raw),
-        "bytes": len(raw),
-        "xml_root": "coverage",
-        "lines_valid": lines_valid,
-        "lines_covered": lines_covered,
-        "branches_valid": branches_valid,
-        "branches_covered": branches_covered,
-        "source_paths": source_paths,
-        "source_set_sha256": _sha256_json(source_paths),
-        "facts": facts,
-    }
+    parsed["source_paths"] = source_paths
+    parsed["source_set_sha256"] = _sha256_json(source_paths)
+    parsed["facts"] = facts
+    return parsed
 
 
 def _final_report_evidence(
@@ -2182,7 +2872,7 @@ def validate_dotnet_cobertura_input(
 ) -> dict[str, Any]:
     parsed = _parse_cobertura(context, report, "dotnet", require_branches=False)
     if getattr(spec, "id", None) == "stateless" and not any(
-        path.startswith("host/NetCoreDbg.Mcp.Stateless/") for path in parsed["source_paths"]
+        path.startswith(STATELESS_SOURCE_PREFIX) for path in parsed["source_paths"]
     ):
         _coverage_failure(
             "COVERAGE_SOURCE_MAPPING_INVALID",
@@ -2250,6 +2940,279 @@ def _receipt_dotnet_input(input_evidence: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _validate_collector_normalization_source(source: Any) -> str:
+    if not isinstance(source, Mapping) or not isinstance(source.get("source_path"), str):
+        _coverage_failure(
+            "COVERAGE_DOTNET_NORMALIZATION_FAILED", "collector class facts are malformed"
+        )
+    class_name = source.get("class_name")
+    if (
+        not isinstance(class_name, str)
+        or not class_name
+        or not isinstance(source.get("lines"), list)
+    ):
+        _coverage_failure(
+            "COVERAGE_DOTNET_NORMALIZATION_FAILED", "collector class identity is absent"
+        )
+    return class_name
+
+
+def _collect_stateless_branch_owners(
+    input_evidence: Mapping[str, Any], owners: dict[tuple[str, int], set[str]]
+) -> None:
+    if input_evidence.get("id") != "stateless":
+        return
+    collector_facts = input_evidence.get("facts")
+    if not isinstance(collector_facts, list):
+        _coverage_failure(
+            "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated input facts are absent"
+        )
+    for source in collector_facts:
+        class_name = _validate_collector_normalization_source(source)
+        for line in source["lines"]:
+            if (
+                isinstance(line, Mapping)
+                and type(line.get("number")) is int
+                and type(line.get("branches_valid")) is int
+                and line["branches_valid"] > 0
+            ):
+                owners.setdefault((source["source_path"], line["number"]), set()).add(class_name)
+
+
+def _validate_normalization_condition(condition: Any) -> None:
+    if (
+        not isinstance(condition, Mapping)
+        or set(condition) != {"number", "type", "covered", "valid"}
+        or not isinstance(condition.get("number"), str)
+        or re.fullmatch(r"\d+", condition["number"]) is None
+        or not isinstance(condition.get("type"), str)
+        or not condition["type"]
+        or type(condition.get("covered")) is not int
+        or type(condition.get("valid")) is not int
+        or condition["valid"] <= 0
+        or condition["covered"] < 0
+        or condition["covered"] > condition["valid"]
+    ):
+        _coverage_failure(
+            "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated condition fact is invalid"
+        )
+
+
+def _parse_normalization_conditions(
+    raw_conditions: Sequence[Any],
+    branch_valid: int,
+    branch_covered: int,
+    parsed_conditions: dict[tuple[str, str], tuple[int, int]],
+) -> None:
+    for condition in raw_conditions:
+        _validate_normalization_condition(condition)
+        identity = (condition["type"], str(int(condition["number"])))
+        if identity in parsed_conditions:
+            _coverage_failure(
+                "COVERAGE_DOTNET_NORMALIZATION_FAILED",
+                "validated condition identities are ambiguous",
+            )
+        parsed_conditions[identity] = (condition["valid"], condition["covered"])
+    if (
+        sum(valid for valid, _ in parsed_conditions.values()) != branch_valid
+        or sum(covered for _, covered in parsed_conditions.values()) != branch_covered
+    ):
+        _coverage_failure(
+            "COVERAGE_DOTNET_NORMALIZATION_FAILED",
+            "validated condition facts disagree with line coverage",
+        )
+
+
+def _merge_normalization_branches(
+    key: tuple[str, int],
+    mode: str,
+    parsed_conditions: dict[tuple[str, str], tuple[int, int]],
+    line_definitions: dict[tuple[str, int], tuple[str, tuple[tuple[str, str, int], ...]]],
+    line_conditions: dict[tuple[str, int], dict[tuple[str, str], tuple[int, int]]],
+) -> None:
+    definition = (
+        mode,
+        ()
+        if mode == "multi-class"
+        else tuple(
+            sorted(
+                (condition_type, condition_number, valid)
+                for (condition_type, condition_number), (valid, _) in parsed_conditions.items()
+            )
+        ),
+    )
+    existing_definition = line_definitions.get(key)
+    if existing_definition is not None and existing_definition != definition:
+        _coverage_failure(
+            "COVERAGE_DOTNET_NORMALIZATION_FAILED",
+            "overlapping line has ambiguous condition identities",
+        )
+    line_definitions[key] = definition
+    merged_conditions = line_conditions.setdefault(key, {})
+    for identity, (valid, covered) in parsed_conditions.items():
+        previous = merged_conditions.get(identity)
+        if previous is not None and previous[0] != valid:
+            _coverage_failure(
+                "COVERAGE_DOTNET_NORMALIZATION_FAILED",
+                "condition identity has inconsistent denominator",
+            )
+        merged_conditions[identity] = (valid, max(covered, previous[1] if previous else 0))
+
+
+def _merge_normalization_line(
+    input_evidence: Mapping[str, Any],
+    source: Mapping[str, Any],
+    source_path: str,
+    line: Any,
+    line_hits: dict[tuple[str, int], int],
+    line_conditions: dict[tuple[str, int], dict[tuple[str, str], tuple[int, int]]],
+    line_definitions: dict[tuple[str, int], tuple[str, tuple[tuple[str, str, int], ...]]],
+    providers: dict[tuple[str, int], str],
+    multi_class_branches: set[tuple[str, int]],
+) -> None:
+    if not isinstance(line, Mapping):
+        _coverage_failure(
+            "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated line fact is malformed"
+        )
+    number = line.get("number")
+    hits = line.get("hits")
+    branch_valid = line.get("branches_valid")
+    branch_covered = line.get("branches_covered")
+    if (
+        type(number) is not int
+        or type(hits) is not int
+        or type(branch_valid) is not int
+        or type(branch_covered) is not int
+        or number <= 0
+        or hits < 0
+        or branch_valid < 0
+        or branch_covered < 0
+        or branch_covered > branch_valid
+    ):
+        _coverage_failure("COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated line fact is invalid")
+    key = (source_path, number)
+    provider = (
+        CODE_COVERAGE_PACKAGE if input_evidence["id"] == "stateless" else COVERLET_MSBUILD_PACKAGE
+    )
+    if key in providers and providers[key] != provider:
+        _coverage_failure(
+            "COVERAGE_DOTNET_NORMALIZATION_FAILED",
+            "cross-provider condition identities cannot be unioned",
+        )
+    providers[key] = provider
+    line_hits[key] = max(line_hits.get(key, 0), hits)
+    raw_conditions = line.get("conditions", [])
+    if not isinstance(raw_conditions, list):
+        _coverage_failure(
+            "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated condition facts are malformed"
+        )
+    if branch_valid == 0:
+        if raw_conditions:
+            _coverage_failure(
+                "COVERAGE_DOTNET_NORMALIZATION_FAILED", "nonbranch line has conditions"
+            )
+        return
+    parsed_conditions: dict[tuple[str, str], tuple[int, int]] = {}
+    if raw_conditions:
+        _parse_normalization_conditions(
+            raw_conditions, branch_valid, branch_covered, parsed_conditions
+        )
+        mode = "identified"
+    else:
+        parsed_conditions = {("aggregate", "0"): (branch_valid, branch_covered)}
+        mode = "aggregate"
+    if provider == CODE_COVERAGE_PACKAGE and key in multi_class_branches:
+        parsed_conditions = {("class", source["class_name"]): (branch_valid, branch_covered)}
+        mode = "multi-class"
+    _merge_normalization_branches(key, mode, parsed_conditions, line_definitions, line_conditions)
+
+
+def _merge_normalization_input(
+    input_evidence: Mapping[str, Any],
+    line_hits: dict[tuple[str, int], int],
+    line_conditions: dict[tuple[str, int], dict[tuple[str, str], tuple[int, int]]],
+    line_definitions: dict[tuple[str, int], tuple[str, tuple[tuple[str, str, int], ...]]],
+    source_union: set[str],
+    providers: dict[tuple[str, int], str],
+    multi_class_branches: set[tuple[str, int]],
+) -> None:
+    facts = input_evidence.get("facts")
+    if not isinstance(facts, list):
+        _coverage_failure(
+            "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated input facts are absent"
+        )
+    for source in facts:
+        if not isinstance(source, Mapping) or not isinstance(source.get("source_path"), str):
+            _coverage_failure(
+                "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated input facts are malformed"
+            )
+        source_path = source["source_path"]
+        source_union.add(source_path)
+        lines = source.get("lines")
+        if not isinstance(lines, list):
+            _coverage_failure(
+                "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated line facts are absent"
+            )
+        for line in lines:
+            _merge_normalization_line(
+                input_evidence,
+                source,
+                source_path,
+                line,
+                line_hits,
+                line_conditions,
+                line_definitions,
+                providers,
+                multi_class_branches,
+            )
+
+
+def _append_normalized_source(
+    classes: ElementTree.Element,
+    source_path: str,
+    line_hits: dict[tuple[str, int], int],
+    line_conditions: dict[tuple[str, int], dict[tuple[str, str], tuple[int, int]]],
+    line_definitions: dict[tuple[str, int], tuple[str, tuple[tuple[str, str, int], ...]]],
+) -> None:
+    class_element = ElementTree.SubElement(
+        classes, "class", {"name": source_path.replace("/", "."), "filename": source_path}
+    )
+    ElementTree.SubElement(class_element, "methods")
+    lines_element = ElementTree.SubElement(class_element, "lines")
+    for source, number in sorted(key for key in line_hits if key[0] == source_path):
+        attributes = {"number": str(number), "hits": str(line_hits[(source, number)])}
+        conditions = line_conditions.get((source, number), {})
+        if conditions:
+            condition_values = list(conditions.values())
+            covered = sum(item[1] for item in condition_values)
+            valid = sum(item[0] for item in condition_values)
+            attributes.update(
+                {
+                    "branch": "true",
+                    "condition-coverage": f"{round(covered * 100 / valid)}% ({covered}/{valid})",
+                }
+            )
+        line_element = ElementTree.SubElement(lines_element, "line", attributes)
+        definition = line_definitions.get((source, number))
+        if conditions and definition is not None and definition[0] == "identified":
+            conditions_element = ElementTree.SubElement(line_element, "conditions")
+            for (condition_type, condition_number), (valid, covered) in sorted(conditions.items()):
+                if covered * 100 % valid:
+                    _coverage_failure(
+                        "COVERAGE_DOTNET_NORMALIZATION_FAILED",
+                        "normalized condition coverage is not exact",
+                    )
+                ElementTree.SubElement(
+                    conditions_element,
+                    "condition",
+                    {
+                        "number": condition_number,
+                        "type": condition_type,
+                        "coverage": f"{covered * 100 // valid}%",
+                    },
+                )
+
+
 def normalize_dotnet_cobertura(
     plan: CoveragePlan, inputs: Sequence[Mapping[str, Any]]
 ) -> dict[str, Any]:
@@ -2261,132 +3224,23 @@ def normalize_dotnet_cobertura(
     line_conditions: dict[tuple[str, int], dict[tuple[str, str], tuple[int, int]]] = {}
     line_definitions: dict[tuple[str, int], tuple[str, tuple[tuple[str, str, int], ...]]] = {}
     source_union: set[str] = set()
+    providers: dict[tuple[str, int], str] = {}
+    collector_branch_owners: dict[tuple[str, int], set[str]] = {}
     for input_evidence in inputs:
-        facts = input_evidence.get("facts")
-        if not isinstance(facts, list):
-            _coverage_failure(
-                "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated input facts are absent"
-            )
-        for source in facts:
-            if not isinstance(source, Mapping) or not isinstance(source.get("source_path"), str):
-                _coverage_failure(
-                    "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated input facts are malformed"
-                )
-            source_path = source["source_path"]
-            source_union.add(source_path)
-            lines = source.get("lines")
-            if not isinstance(lines, list):
-                _coverage_failure(
-                    "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated line facts are absent"
-                )
-            for line in lines:
-                if not isinstance(line, Mapping):
-                    _coverage_failure(
-                        "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated line fact is malformed"
-                    )
-                number = line.get("number")
-                hits = line.get("hits")
-                branch_valid = line.get("branches_valid")
-                branch_covered = line.get("branches_covered")
-                if (
-                    type(number) is not int
-                    or type(hits) is not int
-                    or type(branch_valid) is not int
-                    or type(branch_covered) is not int
-                    or number <= 0
-                    or hits < 0
-                    or branch_valid < 0
-                    or branch_covered < 0
-                    or branch_covered > branch_valid
-                ):
-                    _coverage_failure(
-                        "COVERAGE_DOTNET_NORMALIZATION_FAILED", "validated line fact is invalid"
-                    )
-                key = (source_path, number)
-                line_hits[key] = max(line_hits.get(key, 0), hits)
-                raw_conditions = line.get("conditions", [])
-                if not isinstance(raw_conditions, list):
-                    _coverage_failure(
-                        "COVERAGE_DOTNET_NORMALIZATION_FAILED",
-                        "validated condition facts are malformed",
-                    )
-                if branch_valid == 0:
-                    if raw_conditions:
-                        _coverage_failure(
-                            "COVERAGE_DOTNET_NORMALIZATION_FAILED", "nonbranch line has conditions"
-                        )
-                    continue
-                parsed_conditions: dict[tuple[str, str], tuple[int, int]] = {}
-                if raw_conditions:
-                    for condition in raw_conditions:
-                        if (
-                            not isinstance(condition, Mapping)
-                            or set(condition) != {"number", "type", "covered", "valid"}
-                            or not isinstance(condition.get("number"), str)
-                            or re.fullmatch(r"\d+", condition["number"]) is None
-                            or not isinstance(condition.get("type"), str)
-                            or not condition["type"]
-                            or type(condition.get("covered")) is not int
-                            or type(condition.get("valid")) is not int
-                            or condition["valid"] <= 0
-                            or condition["covered"] < 0
-                            or condition["covered"] > condition["valid"]
-                        ):
-                            _coverage_failure(
-                                "COVERAGE_DOTNET_NORMALIZATION_FAILED",
-                                "validated condition fact is invalid",
-                            )
-                        identity = (condition["type"], str(int(condition["number"])))
-                        if identity in parsed_conditions:
-                            _coverage_failure(
-                                "COVERAGE_DOTNET_NORMALIZATION_FAILED",
-                                "validated condition identities are ambiguous",
-                            )
-                        parsed_conditions[identity] = (condition["valid"], condition["covered"])
-                    if (
-                        sum(valid for valid, _ in parsed_conditions.values()) != branch_valid
-                        or sum(covered for _, covered in parsed_conditions.values())
-                        != branch_covered
-                    ):
-                        _coverage_failure(
-                            "COVERAGE_DOTNET_NORMALIZATION_FAILED",
-                            "validated condition facts disagree with line coverage",
-                        )
-                    mode = "identified"
-                else:
-                    parsed_conditions = {("aggregate", "0"): (branch_valid, branch_covered)}
-                    mode = "aggregate"
-                definition = (
-                    mode,
-                    tuple(
-                        sorted(
-                            (condition_type, condition_number, valid)
-                            for (condition_type, condition_number), (
-                                valid,
-                                _,
-                            ) in parsed_conditions.items()
-                        )
-                    ),
-                )
-                existing_definition = line_definitions.get(key)
-                if existing_definition is not None and existing_definition != definition:
-                    _coverage_failure(
-                        "COVERAGE_DOTNET_NORMALIZATION_FAILED",
-                        "overlapping line has ambiguous condition identities",
-                    )
-                line_definitions[key] = definition
-                merged_conditions = line_conditions.setdefault(key, {})
-                for identity, (valid, covered) in parsed_conditions.items():
-                    previous = merged_conditions.get(identity)
-                    if previous is not None and previous[0] != valid:
-                        _coverage_failure(
-                            "COVERAGE_DOTNET_NORMALIZATION_FAILED",
-                            "condition identity has inconsistent denominator",
-                        )
-                    merged_conditions[identity] = (
-                        valid,
-                        max(covered, previous[1] if previous else 0),
-                    )
+        _collect_stateless_branch_owners(input_evidence, collector_branch_owners)
+    multi_class_branches = {
+        key for key, owners in collector_branch_owners.items() if len(owners) > 1
+    }
+    for input_evidence in inputs:
+        _merge_normalization_input(
+            input_evidence,
+            line_hits,
+            line_conditions,
+            line_definitions,
+            source_union,
+            providers,
+            multi_class_branches,
+        )
     if not line_hits or not line_conditions:
         _coverage_failure(
             "COVERAGE_DOTNET_NORMALIZATION_FAILED", "normalized report has a zero denominator"
@@ -2418,47 +3272,9 @@ def normalize_dotnet_cobertura(
     package = ElementTree.SubElement(packages, "package", {"name": "normalized"})
     classes = ElementTree.SubElement(package, "classes")
     for source_path in sorted(source_union):
-        class_element = ElementTree.SubElement(
-            classes, "class", {"name": source_path.replace("/", "."), "filename": source_path}
+        _append_normalized_source(
+            classes, source_path, line_hits, line_conditions, line_definitions
         )
-        ElementTree.SubElement(class_element, "methods")
-        lines_element = ElementTree.SubElement(class_element, "lines")
-        for source, number in sorted(key for key in line_hits if key[0] == source_path):
-            attributes = {"number": str(number), "hits": str(line_hits[(source, number)])}
-            conditions = line_conditions.get((source, number), {})
-            if conditions:
-                condition_values = list(conditions.values())
-                covered = sum(item[1] for item in condition_values)
-                valid = sum(item[0] for item in condition_values)
-                attributes.update(
-                    {
-                        "branch": "true",
-                        "condition-coverage": (
-                            f"{round(covered * 100 / valid)}% ({covered}/{valid})"
-                        ),
-                    }
-                )
-            line_element = ElementTree.SubElement(lines_element, "line", attributes)
-            definition = line_definitions.get((source, number))
-            if conditions and definition is not None and definition[0] == "identified":
-                conditions_element = ElementTree.SubElement(line_element, "conditions")
-                for (condition_type, condition_number), (valid, covered) in sorted(
-                    conditions.items()
-                ):
-                    if covered * 100 % valid:
-                        _coverage_failure(
-                            "COVERAGE_DOTNET_NORMALIZATION_FAILED",
-                            "normalized condition coverage is not exact",
-                        )
-                    ElementTree.SubElement(
-                        conditions_element,
-                        "condition",
-                        {
-                            "number": condition_number,
-                            "type": condition_type,
-                            "coverage": f"{covered * 100 // valid}%",
-                        },
-                    )
     try:
         plan.dotnet_report.parent.mkdir(parents=True, exist_ok=True)
         ElementTree.ElementTree(root).write(
@@ -2504,7 +3320,7 @@ def validate_final_dotnet_cobertura(
 
 
 def capture_stateless_binary_hashes(plan: CoveragePlan) -> dict[str, str]:
-    directory = plan.repository_root / "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0"
+    directory = plan.repository_root / STATELESS_BINARY_DIRECTORY
     dll = directory / "NetCoreDbg.Mcp.Stateless.dll"
     pdb = directory / "NetCoreDbg.Mcp.Stateless.pdb"
     try:
@@ -2586,40 +3402,451 @@ def validate_coverage_reports(
     }
 
 
-def cleanup_coverage_run(plan: CoveragePlan, producer_terminal: bool) -> dict[str, Any]:
-    root_relative = _coverage_relative(plan, plan.root)
-    cleanup = {
-        "claimed_root": root_relative,
-        "producer_terminal": producer_terminal,
-        "removed_paths": [],
-        "parent_removed_if_empty": False,
-        "status": "OK",
-        "failure": None,
-    }
-    if not producer_terminal:
-        cleanup["status"] = "FAILED"
-        cleanup["failure"] = {
-            "code": "COVERAGE_CLEANUP_FAILED",
-            "message": "producer is not terminal",
-        }
-        return cleanup
-    try:
-        if plan.root.exists():
-            metadata = _scanner_tree_metadata(plan.root)
-            if not stat.S_ISDIR(getattr(metadata, "st_mode", 0)):
-                raise OSError("claimed root is not a directory")
-            shutil.rmtree(plan.root)
-            cleanup["removed_paths"] = [root_relative]
-        parent = plan.root.parent
-        if parent.exists() and not any(parent.iterdir()):
-            parent.rmdir()
+def _delete_windows_coverage_run(
+    plan: CoveragePlan, claim: CoverageRunClaim, cleanup: dict[str, Any]
+) -> None:
+    import ctypes
+    from ctypes import wintypes
+    from types import SimpleNamespace
+
+    class FileInformation(ctypes.Structure):
+        _fields_ = [
+            ("attributes", wintypes.DWORD),
+            ("times", wintypes.FILETIME * 3),
+            ("volume", wintypes.DWORD),
+            ("size_high", wintypes.DWORD),
+            ("size_low", wintypes.DWORD),
+            ("links", wintypes.DWORD),
+            ("index_high", wintypes.DWORD),
+            ("index_low", wintypes.DWORD),
+        ]
+
+    class FileIdInformation(ctypes.Structure):
+        _fields_ = [
+            ("volume", ctypes.c_ulonglong),
+            ("index_low", ctypes.c_ulonglong),
+            ("index_high", ctypes.c_ulonglong),
+        ]
+
+    class FileDispositionInformationEx(ctypes.Structure):
+        _fields_ = [("flags", wintypes.DWORD)]
+
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.USHORT),
+            ("maximum", wintypes.USHORT),
+            ("buffer", wintypes.LPWSTR),
+        ]
+
+    class ObjectAttributes(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.ULONG),
+            ("root", wintypes.HANDLE),
+            ("name", ctypes.POINTER(UnicodeString)),
+            ("attributes", wintypes.ULONG),
+            ("security", ctypes.c_void_p),
+            ("quality", ctypes.c_void_p),
+        ]
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = [("status", ctypes.c_void_p), ("information", ctypes.c_size_t)]
+
+    class DirectoryInformation(ctypes.Structure):
+        _fields_ = [
+            ("next", wintypes.ULONG),
+            ("index", wintypes.ULONG),
+            ("times", ctypes.c_longlong * 4),
+            ("sizes", ctypes.c_longlong * 2),
+            ("attributes", wintypes.ULONG),
+            ("name_length", wintypes.ULONG),
+            ("ea_size", wintypes.ULONG),
+            ("tag", wintypes.ULONG),
+            ("id_low", ctypes.c_ulonglong),
+            ("id_high", ctypes.c_ulonglong),
+        ]
+
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    ntdll.NtCreateFile.argtypes = [
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.ULONG,
+        ctypes.POINTER(ObjectAttributes),
+        ctypes.POINTER(IoStatusBlock),
+        ctypes.c_void_p,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        ctypes.c_void_p,
+        wintypes.ULONG,
+    ]
+    ntdll.NtCreateFile.restype = wintypes.LONG
+    ntdll.RtlNtStatusToDosError.argtypes = [wintypes.LONG]
+    ntdll.RtlNtStatusToDosError.restype = wintypes.ULONG
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.GetFileType.argtypes = [wintypes.HANDLE]
+    kernel32.GetFileType.restype = wintypes.DWORD
+    kernel32.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+    kernel32.GetFileInformationByHandleEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    kernel32.GetFileInformationByHandleEx.restype = wintypes.BOOL
+    kernel32.SetFileInformationByHandle.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    invalid_handle = ctypes.c_void_p(-1).value
+    read_attributes = 0x80
+    delete_access = 0x10000
+    open_flags = 0x00200000 | 0x02000000
+
+    @contextmanager
+    def boundary(operation: str, stage: str, path: Path) -> Iterator[None]:
+        try:
+            yield
+        except (OSError, RunnerError) as error:
+            native_error = error if isinstance(error, OSError) else error.__cause__
+            if isinstance(native_error, OSError) and not hasattr(error, "_coverage_cleanup_native"):
+                entry = None
+                if path == plan.root.parent:
+                    entry = "@parent"
+                elif path.is_relative_to(plan.root):
+                    entry = path.relative_to(plan.root).as_posix()
+                elif plan.root.is_relative_to(path):
+                    entry = f"@ancestor/{len(plan.root.relative_to(path).parts)}"
+                setattr(
+                    error,
+                    "_coverage_cleanup_native",
+                    {
+                        "operation": operation,
+                        "stage": stage,
+                        "entry": entry,
+                        "winerror": getattr(native_error, "winerror", None),
+                        "errno": native_error.errno,
+                    },
+                )
+            raise
+
+    def require(operation: str, stage: str, path: Path, function: Any, *args: Any) -> None:
+        with boundary(operation, stage, path):
+            if not function(*args):
+                raise ctypes.WinError(ctypes.get_last_error())
+
+    def close(handle: Any, path: Path) -> None:
+        original = sys.exc_info()[1]
+        try:
+            require("CloseHandle", "CLOSE", path, kernel32.CloseHandle, handle)
+        except BaseException:
+            if original is None:
+                raise
+
+    def information(handle: Any, metadata: Any, path: Path) -> None:
+        if kernel32.GetFileType(handle) != 1:
+            raise RunnerError("COVERAGE_MARKER_INVALID: cleanup handle is not a disk file.")
+        info = FileInformation()
+        require(
+            "GetFileInformationByHandle",
+            "IDENTITY",
+            path,
+            kernel32.GetFileInformationByHandle,
+            handle,
+            ctypes.byref(info),
+        )
+        file_id = FileIdInformation()
+        require(
+            "GetFileInformationByHandleEx(FileIdInfo)",
+            "IDENTITY",
+            path,
+            kernel32.GetFileInformationByHandleEx,
+            handle,
+            18,
+            ctypes.byref(file_id),
+            ctypes.sizeof(file_id),
+        )
+        if sys.version_info >= (3, 12):
+            identity = (file_id.volume, (file_id.index_high << 64) | file_id.index_low)
+        else:
+            index = (info.index_high << 32) | info.index_low
+            if file_id.index_high or file_id.index_low != index:
+                raise RunnerError("COVERAGE_MARKER_INVALID: ambiguous legacy file identity.")
+            identity = (info.volume, index)
+        reparse = bool(info.attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        expected_reparse = bool(
+            getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        )
+        if (
+            identity != (metadata.st_dev, metadata.st_ino)
+            or reparse != expected_reparse
+            or bool(info.attributes & stat.FILE_ATTRIBUTE_DIRECTORY)
+            != bool(metadata.st_file_attributes & stat.FILE_ATTRIBUTE_DIRECTORY)
+            or (not reparse and not stat.S_ISDIR(metadata.st_mode) and info.links != 1)
+        ):
+            raise RunnerError("COVERAGE_MARKER_INVALID: cleanup handle identity changed.")
+        if reparse:
+            tag = (wintypes.DWORD * 2)()
+            require(
+                "GetFileInformationByHandleEx(FileAttributeTagInfo)",
+                "IDENTITY",
+                path,
+                kernel32.GetFileInformationByHandleEx,
+                handle,
+                9,
+                ctypes.byref(tag),
+                ctypes.sizeof(tag),
+            )
+            if tag[1] != metadata.st_reparse_tag or tag[1] not in {
+                stat.IO_REPARSE_TAG_SYMLINK,
+                stat.IO_REPARSE_TAG_MOUNT_POINT,
+            }:
+                raise RunnerError("COVERAGE_MARKER_INVALID: unsupported cleanup reparse point.")
+
+    def pin(
+        stack: ExitStack,
+        path: Path,
+        metadata: Any,
+        access: int,
+        sharing: int,
+        parent: Any = None,
+    ) -> Any:
+        if parent is not None and access & 1:  # FILE_LIST_DIRECTORY
+            access |= 0x100000  # SYNCHRONIZE for directory queries that complete asynchronously.
+        operation = "CreateFileW" if parent is None else "NtCreateFile"
+        with boundary(operation, "OPEN", path):
+            if parent is None:
+                handle = kernel32.CreateFileW(str(path), access, sharing, None, 3, open_flags, None)
+                if handle in (None, invalid_handle):
+                    raise ctypes.WinError(ctypes.get_last_error())
+            else:
+                name_buffer = ctypes.create_unicode_buffer(path.name)
+                length = len(path.name.encode("utf-16-le"))
+                name = UnicodeString(length, length + 2, ctypes.cast(name_buffer, wintypes.LPWSTR))
+                attributes = ObjectAttributes(
+                    ctypes.sizeof(ObjectAttributes), parent, ctypes.pointer(name), 0x40, None, None
+                )
+                result = wintypes.HANDLE()
+                status = IoStatusBlock()
+                code = ntdll.NtCreateFile(
+                    ctypes.byref(result),
+                    access,
+                    ctypes.byref(attributes),
+                    ctypes.byref(status),
+                    None,
+                    0,
+                    sharing,
+                    1,
+                    0x00204000,
+                    None,
+                    0,
+                )
+                if code < 0:
+                    raise ctypes.WinError(ntdll.RtlNtStatusToDosError(code))
+                handle = result.value
+        stack.callback(close, handle, path)
+        information(handle, metadata, path)
+        return handle
+
+    def children(handle: Any, metadata: Any, path: Path) -> Iterator[tuple[str, Any]]:
+        buffer = ctypes.create_string_buffer(65536)
+        kind = 20  # FileIdExtdDirectoryRestartInfo; subsequent pages continue this handle.
+        while True:
+            with boundary(
+                "GetFileInformationByHandleEx(FileIdExtdDirectoryInfo)", "ENUMERATE", path
+            ):
+                if not kernel32.GetFileInformationByHandleEx(handle, kind, buffer, len(buffer)):
+                    error = ctypes.get_last_error()
+                    if error == 18:  # ERROR_NO_MORE_FILES
+                        return
+                    raise ctypes.WinError(error)
+            kind = 19
+            offset = 0
+            while True:
+                info = DirectoryInformation.from_buffer(buffer, offset)
+                name = ctypes.wstring_at(
+                    ctypes.addressof(buffer) + offset + ctypes.sizeof(DirectoryInformation),
+                    info.name_length // 2,
+                )
+                if name not in {".", ".."}:
+                    if not name or "/" in name or "\\" in name:
+                        raise RunnerError("COVERAGE_MARKER_INVALID: invalid cleanup child name.")
+                    index = (info.id_high << 64) | info.id_low
+                    if sys.version_info < (3, 12) and info.id_high:
+                        raise RunnerError(
+                            "COVERAGE_MARKER_INVALID: ambiguous legacy file identity."
+                        )
+                    yield (
+                        name,
+                        SimpleNamespace(
+                            st_dev=metadata.st_dev,
+                            st_ino=index,
+                            st_file_attributes=info.attributes,
+                            st_reparse_tag=info.tag,
+                            st_mode=stat.S_IFDIR
+                            if info.attributes & stat.FILE_ATTRIBUTE_DIRECTORY
+                            else stat.S_IFREG,
+                        ),
+                    )
+                if not info.next:
+                    break
+                offset += info.next
+
+    def dispose(handle: Any, metadata: Any, path: Path) -> None:
+        information(handle, metadata, path)
+        # DELETE | IGNORE_READONLY_ATTRIBUTE never changes a shared file record's attributes.
+        disposition = FileDispositionInformationEx(0x11)
+        try:
+            require(
+                _FILE_DISPOSITION_INFO_EX_OPERATION,
+                "DISPOSITION",
+                path,
+                kernel32.SetFileInformationByHandle,
+                handle,
+                21,
+                ctypes.byref(disposition),
+                ctypes.sizeof(disposition),
+            )
+        except BaseException:
+            disposition.flags = 0
+            try:
+                require(
+                    _FILE_DISPOSITION_INFO_EX_OPERATION,
+                    "DISPOSITION",
+                    path,
+                    kernel32.SetFileInformationByHandle,
+                    handle,
+                    21,
+                    ctypes.byref(disposition),
+                    ctypes.sizeof(disposition),
+                )
+            except BaseException:
+                pass
+            raise
+
+    def descend(path: Path, handle: Any, metadata: Any) -> None:
+        if not metadata.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            if stat.S_ISDIR(metadata.st_mode):
+                for name, child_metadata in children(handle, metadata, path):
+                    child = path / name
+                    directory = stat.S_ISDIR(child_metadata.st_mode)
+                    with ExitStack() as child_pins:
+                        child_handle = pin(
+                            child_pins,
+                            child,
+                            child_metadata,
+                            read_attributes | delete_access | (1 if directory else 0),
+                            1 if directory else 0,
+                            handle,
+                        )
+                        descend(child, child_handle, child_metadata)
+        dispose(handle, metadata, path)
+
+    with ExitStack() as ancestors:
+        current = Path(plan.root.anchor)
+        parent_handle = None
+        parent_metadata = None
+        for component in (None, *plan.root.parent.relative_to(current).parts):
+            if component is not None:
+                current /= component
+            with boundary(_PATH_STAT_OPERATION, "METADATA", current):
+                metadata = _scanner_tree_metadata(current)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise RunnerError("COVERAGE_MARKER_INVALID: cleanup ancestor is not a directory.")
+            access = read_attributes | (delete_access | 1 if current == plan.root.parent else 0)
+            handle = pin(ancestors, current, metadata, access, 1, parent_handle)
+            parent_handle = handle
+            if current == plan.root.parent:
+                parent_handle, parent_metadata = handle, metadata
+        with ExitStack() as root_pin:
+            with boundary(_PATH_STAT_OPERATION, "METADATA", plan.root):
+                metadata = _scanner_tree_metadata(plan.root)
+            root_handle = pin(
+                root_pin, plan.root, metadata, read_attributes | delete_access | 1, 1, parent_handle
+            )
+            _coverage_directory_guard(plan, plan.root)
+            if (
+                not isinstance(claim, CoverageRunClaim)
+                or (claim.root, claim.marker, claim.resolved_wave2_entry)
+                != (plan.root, plan.marker, plan.resolved_wave2_entry)
+                or (metadata.st_dev, metadata.st_ino) != claim.root_identity
+            ):
+                raise RunnerError("COVERAGE_MARKER_INVALID: cleanup claim identity does not match.")
+            with ExitStack() as marker_pins:
+                for path in (plan.marker, plan.resolved_wave2_entry):
+                    with boundary(_PATH_STAT_OPERATION, "METADATA", path):
+                        file_metadata = _scanner_tree_metadata(path)
+                    if not stat.S_ISREG(file_metadata.st_mode):
+                        raise RunnerError("COVERAGE_MARKER_INVALID: cleanup marker is not regular.")
+                    pin(marker_pins, path, file_metadata, 0x80000000 | read_attributes, 1)
+                with boundary(_PATH_READ_BYTES_OPERATION, "MARKER_READ", plan.marker):
+                    raw_marker = plan.marker.read_bytes()
+                if _sha256_bytes(raw_marker) != claim.marker_sha256:
+                    raise RunnerError("COVERAGE_MARKER_INVALID: cleanup marker identity changed.")
+                marker = _load_json_object(raw_marker, "coverage marker")
+                validate_coverage_marker(plan, marker)
+                with boundary(_PATH_READ_BYTES_OPERATION, "MARKER_READ", plan.resolved_wave2_entry):
+                    raw_entry = plan.resolved_wave2_entry.read_bytes()
+                if _load_json_object(raw_entry, "resolved Wave-2 entry") != marker["wave2_entry"]:
+                    raise RunnerError("COVERAGE_MARKER_INVALID: resolved cleanup entry changed.")
+            descend(plan.root, root_handle, metadata)
+        cleanup["removed_paths"] = [_coverage_relative(plan, plan.root)]
+        if next(children(parent_handle, parent_metadata, plan.root.parent), None) is None:
+            dispose(parent_handle, parent_metadata, plan.root.parent)
             cleanup["parent_removed_if_empty"] = True
-    except (OSError, RunnerError) as error:
+
+
+def cleanup_coverage_run(
+    plan: CoveragePlan,
+    producer_terminal: bool,
+    claim: CoverageRunClaim,
+    *,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    cleanup = evidence if evidence is not None else {}
+    cleanup.update(
+        {
+            "claimed_root": _coverage_relative(plan, plan.root),
+            "producer_terminal": producer_terminal,
+            "removed_paths": [],
+            "parent_removed_if_empty": False,
+            "status": "OK",
+            "failure": None,
+        }
+    )
+    try:
+        if producer_terminal is not True:
+            raise RunnerError("COVERAGE_CLEANUP_FAILED: producer is not terminal")
+        if os.name != "nt":
+            raise NotImplementedError("verified final-object deletion is unavailable on POSIX")
+        _delete_windows_coverage_run(plan, claim, cleanup)
+    except BaseException as error:
         cleanup["status"] = "FAILED"
         cleanup["failure"] = {
             "code": "COVERAGE_CLEANUP_FAILED",
             "message": error.__class__.__name__,
         }
+        native = getattr(error, "_coverage_cleanup_native", None)
+        if native is not None:
+            cleanup["failure"]["native"] = native
+        if not isinstance(error, (OSError, RunnerError, NotImplementedError)):
+            raise
     return cleanup
 
 
@@ -2633,7 +3860,7 @@ def project_key_from_xml(path: Path) -> str:
         for element in root.iter()
         if element.tag.rsplit("}", 1)[-1] == "Property"
     ]
-    keys = [value for name, value in properties if name == "sonar.projectKey" and value]
+    keys = [value for name, value in properties if name == SONAR_PROJECT_KEY_PROPERTY and value]
     if keys != [PROJECT_KEY]:
         raise RunnerError("SonarQube.Analysis.xml does not contain the fixed project key.")
     if any(
@@ -2707,9 +3934,9 @@ def project_inventory(repository_root: Path) -> tuple[Path, list[Path], list[Pat
         raise RunnerError("Solution project inventory is incomplete.")
     excluded_parts = {
         ".git",
-        ".agent",
-        ".sonarqube",
-        ".venv",
+        AGENT_DIRECTORY,
+        SONAR_METADATA_DIRECTORY,
+        PYTHON_ENV_DIRECTORY,
         "bin",
         "obj",
         "fixtures",
@@ -2738,11 +3965,35 @@ def project_inventory(repository_root: Path) -> tuple[Path, list[Path], list[Pat
     )
 
 
+def _collect_scanner_xml_metadata(
+    path: Path, relative: str, found: dict[str, list[tuple[str, str]]]
+) -> None:
+    root = ElementTree.parse(path).getroot()
+    for element in root.iter():
+        name = element.attrib.get("Name") or element.attrib.get("name") or element.attrib.get("key")
+        if name in found and element.text:
+            found[name].append((relative, element.text.strip()))
+        if element.tag.rsplit("}", 1)[-1] == "SonarProjectKey" and element.text:
+            found[SONAR_PROJECT_KEY_PROPERTY].append((relative, element.text.strip()))
+
+
+def _collect_scanner_text_metadata(
+    path: Path, relative: str, found: dict[str, list[tuple[str, str]]]
+) -> None:
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        name, separator, value = line.partition("=")
+        if separator and name.strip() in found:
+            found[name.strip()].append((relative, value.strip()))
+
+
 def scanner_metadata(repository_root: Path, expected_head: str) -> dict[str, Any]:
-    metadata_root = repository_root / ".sonarqube"
+    metadata_root = repository_root / SONAR_METADATA_DIRECTORY
     if not metadata_root.is_dir():
         raise RunnerError("SonarScanner did not create metadata.")
-    found: dict[str, list[tuple[str, str]]] = {"sonar.projectKey": [], "sonar.scm.revision": []}
+    found: dict[str, list[tuple[str, str]]] = {
+        SONAR_PROJECT_KEY_PROPERTY: [],
+        "sonar.scm.revision": [],
+    }
     for path in iter_scanner_tree(metadata_root, "*"):
         if (
             not path.is_file()
@@ -2753,25 +4004,12 @@ def scanner_metadata(repository_root: Path, expected_head: str) -> dict[str, Any
         relative = str(path.relative_to(repository_root)).replace("\\", "/")
         try:
             if path.suffix.lower() == ".xml":
-                root = ElementTree.parse(path).getroot()
-                for element in root.iter():
-                    name = (
-                        element.attrib.get("Name")
-                        or element.attrib.get("name")
-                        or element.attrib.get("key")
-                    )
-                    if name in found and element.text:
-                        found[name].append((relative, element.text.strip()))
-                    if element.tag.rsplit("}", 1)[-1] == "SonarProjectKey" and element.text:
-                        found["sonar.projectKey"].append((relative, element.text.strip()))
+                _collect_scanner_xml_metadata(path, relative, found)
             else:
-                for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-                    name, separator, value = line.partition("=")
-                    if separator and name.strip() in found:
-                        found[name.strip()].append((relative, value.strip()))
+                _collect_scanner_text_metadata(path, relative, found)
         except (OSError, ElementTree.ParseError) as error:
             raise RunnerError("SonarScanner metadata could not be parsed.") from error
-    observed_project_keys = {value for _, value in found["sonar.projectKey"]}
+    observed_project_keys = {value for _, value in found[SONAR_PROJECT_KEY_PROPERTY]}
     observed_revisions = {value for _, value in found["sonar.scm.revision"]}
     if observed_project_keys != {PROJECT_KEY} or observed_revisions != {expected_head}:
         raise RunnerError(
@@ -2786,7 +4024,7 @@ def scanner_metadata(repository_root: Path, expected_head: str) -> dict[str, Any
 
 
 def report_task(repository_root: Path, expected_host: str) -> dict[str, Any]:
-    path = repository_root / ".sonarqube" / "out" / ".sonar" / "report-task.txt"
+    path = repository_root / SONAR_METADATA_DIRECTORY / "out" / ".sonar" / "report-task.txt"
     if not path.is_file():
         raise RunnerError("SonarScanner did not create report-task metadata.")
     values: dict[str, str] = {}
@@ -2843,7 +4081,7 @@ def api_json(host: str, endpoint: str, parameters: Mapping[str, str], token: str
     except RunnerError:
         raise
     except (OSError, ValueError) as error:
-        raise CredentialsUnavailable("SONAR_HOST_URL") from error
+        raise CredentialsUnavailableError("SONAR_HOST_URL") from error
     try:
         decoded = json.loads(payload)
     except json.JSONDecodeError as error:
@@ -2851,6 +4089,15 @@ def api_json(host: str, endpoint: str, parameters: Mapping[str, str], token: str
     if not isinstance(decoded, dict):
         raise RunnerError(f"Sonar API {endpoint} returned an invalid payload.")
     return decoded
+
+
+def _validate_ce_task_response(response: Mapping[str, Any], task_id: str) -> dict[str, Any]:
+    task = response.get("task")
+    if not isinstance(task, dict) or not isinstance(task.get("status"), str):
+        raise RunnerError("Submitted Compute Engine task response is malformed.")
+    if task.get("id") != task_id:
+        raise RunnerError("Compute Engine response does not match the submitted task ID.")
+    return task
 
 
 def wait_for_ce_task(host: str, task_id: str, token: str, receipt: dict[str, Any]) -> str:
@@ -2867,11 +4114,7 @@ def wait_for_ce_task(host: str, task_id: str, token: str, receipt: dict[str, Any
     }
     while True:
         response = api_json(host, "/api/ce/task", {"id": task_id}, token)
-        task = response.get("task")
-        if not isinstance(task, dict) or not isinstance(task.get("status"), str):
-            raise RunnerError("Submitted Compute Engine task response is malformed.")
-        if task.get("id") != task_id:
-            raise RunnerError("Compute Engine response does not match the submitted task ID.")
+        task = _validate_ce_task_response(response, task_id)
         receipt["compute_engine"]["returned_task_id"] = task["id"]
         status = task["status"]
         receipt["compute_engine"]["states"].append({"at": utc_now(), "status": status})
@@ -2922,6 +4165,33 @@ def current_analysis_binding(host: str, analysis_id: str, head: str, token: str)
     }
 
 
+def _validated_quality_gate_condition(condition: Any) -> dict[str, str]:
+    if not isinstance(condition, dict):
+        raise RunnerError(MALFORMED_GATE_CONDITIONS)
+    metric_key = condition.get("metricKey")
+    condition_status = condition.get("status")
+    comparator = condition.get("comparator")
+    if (
+        not isinstance(metric_key, str)
+        or not metric_key.strip()
+        or condition_status not in {"OK", "WARN", "ERROR", "NONE"}
+        or comparator not in {"GT", "LT", "EQ", "NE"}
+    ):
+        raise RunnerError(MALFORMED_GATE_CONDITIONS)
+    validated_condition = {
+        "metricKey": metric_key,
+        "status": condition_status,
+        "comparator": comparator,
+    }
+    for key in ("warningThreshold", "errorThreshold", "actualValue"):
+        if key in condition:
+            value = condition[key]
+            if not isinstance(value, str):
+                raise RunnerError(MALFORMED_GATE_CONDITIONS)
+            validated_condition[key] = value
+    return validated_condition
+
+
 def analysis_quality_gate(host: str, analysis_id: str, token: str) -> dict[str, Any]:
     response = api_json(
         host,
@@ -2937,33 +4207,10 @@ def analysis_quality_gate(host: str, analysis_id: str, token: str) -> dict[str, 
         raise RunnerError("Analysis-bound quality-gate response is malformed.")
     conditions = project_status.get("conditions")
     if not isinstance(conditions, list):
-        raise RunnerError("Analysis-bound quality-gate conditions are malformed.")
+        raise RunnerError(MALFORMED_GATE_CONDITIONS)
     validated_conditions: list[dict[str, str]] = []
     for condition in conditions:
-        if not isinstance(condition, dict):
-            raise RunnerError("Analysis-bound quality-gate conditions are malformed.")
-        metric_key = condition.get("metricKey")
-        condition_status = condition.get("status")
-        comparator = condition.get("comparator")
-        if (
-            not isinstance(metric_key, str)
-            or not metric_key.strip()
-            or condition_status not in {"OK", "WARN", "ERROR", "NONE"}
-            or comparator not in {"GT", "LT", "EQ", "NE"}
-        ):
-            raise RunnerError("Analysis-bound quality-gate conditions are malformed.")
-        validated_condition = {
-            "metricKey": metric_key,
-            "status": condition_status,
-            "comparator": comparator,
-        }
-        for key in ("warningThreshold", "errorThreshold", "actualValue"):
-            if key in condition:
-                value = condition[key]
-                if not isinstance(value, str):
-                    raise RunnerError("Analysis-bound quality-gate conditions are malformed.")
-                validated_condition[key] = value
-        validated_conditions.append(validated_condition)
+        validated_conditions.append(_validated_quality_gate_condition(condition))
     return {
         "analysis_id": analysis_id,
         "status": status,
@@ -2991,6 +4238,31 @@ def indexed_api_json(
             time.sleep(POLL_SECONDS)
 
 
+def _validate_inventory_paging(
+    page_index: Any, page_size: Any, page_total: Any, page: int, endpoint: str
+) -> None:
+    if (
+        not isinstance(page_index, int)
+        or not isinstance(page_size, int)
+        or not isinstance(page_total, int)
+        or page_index != page
+        or page_size <= 0
+        or page_total < 0
+    ):
+        raise RunnerError(f"{endpoint} pagination metadata is invalid.")
+    if page_total >= RESULT_CAP:
+        raise RunnerError(f"{endpoint} reached its possible server result cap.")
+
+
+def _append_inventory_records(
+    raw_records: list[Any], fields: Sequence[str], endpoint: str, records: list[dict[str, Any]]
+) -> None:
+    for raw_record in raw_records:
+        if not isinstance(raw_record, dict) or not isinstance(raw_record.get("key"), str):
+            raise RunnerError(f"{endpoint} returned an invalid record.")
+        records.append({field: raw_record.get(field) for field in fields})
+
+
 def paginated_inventory(
     host: str,
     endpoint: str,
@@ -3015,17 +4287,7 @@ def paginated_inventory(
             paging.get("pageSize"),
             paging.get("total"),
         )
-        if (
-            not isinstance(page_index, int)
-            or not isinstance(page_size, int)
-            or not isinstance(page_total, int)
-            or page_index != page
-            or page_size <= 0
-            or page_total < 0
-        ):
-            raise RunnerError(f"{endpoint} pagination metadata is invalid.")
-        if page_total >= RESULT_CAP:
-            raise RunnerError(f"{endpoint} reached its possible server result cap.")
+        _validate_inventory_paging(page_index, page_size, page_total, page, endpoint)
         if total is None:
             total = page_total
         elif total != page_total:
@@ -3033,10 +4295,7 @@ def paginated_inventory(
         if page_index * page_size < total and not raw_records:
             raise RunnerError(f"{endpoint} returned an empty nonterminal page.")
         pages.append({"page_index": page_index, "page_size": page_size, "total": page_total})
-        for raw_record in raw_records:
-            if not isinstance(raw_record, dict) or not isinstance(raw_record.get("key"), str):
-                raise RunnerError(f"{endpoint} returned an invalid record.")
-            records.append({field: raw_record.get(field) for field in fields})
+        _append_inventory_records(raw_records, fields, endpoint, records)
         if page_index * page_size >= total:
             break
         page += 1
@@ -3060,7 +4319,7 @@ def paginated_inventory(
 def issue_inventory(host: str, token: str) -> dict[str, Any]:
     return paginated_inventory(
         host,
-        "/api/issues/search",
+        ISSUES_SEARCH_ENDPOINT,
         "issues",
         {"components": PROJECT_KEY, "issueStatuses": ISSUE_STATUSES},
         token,
@@ -3082,7 +4341,7 @@ def issue_inventory(host: str, token: str) -> dict[str, Any]:
 def new_code_issue_inventory(host: str, token: str) -> dict[str, Any]:
     return paginated_inventory(
         host,
-        "/api/issues/search",
+        ISSUES_SEARCH_ENDPOINT,
         "issues",
         {
             "components": PROJECT_KEY,
@@ -3168,7 +4427,7 @@ def hotspot_dispositions(inventory: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def lock_path(coordination_root: Path) -> Path:
-    return coordination_root / ".agent" / "e" / "sonarqube" / PROJECT_KEY / ".scan.lock"
+    return coordination_root / AGENT_DIRECTORY / "e" / "sonarqube" / PROJECT_KEY / ".scan.lock"
 
 
 def configure_windows_process_api(kernel32: Any, wintypes: Any) -> None:
@@ -3192,10 +4451,18 @@ def windows_owner_is_alive(pid: int) -> bool | None:
     handle = kernel32.OpenProcess(synchronize, False, pid)
     if not handle:
         error = ctypes.get_last_error()
-        return True if error == 5 else False if error == 87 else None
+        if error == 5:
+            return True
+        if error == 87:
+            return False
+        return None
     try:
         result = kernel32.WaitForSingleObject(handle, 0)
-        return True if result == wait_timeout else False if result == wait_object_0 else None
+        if result == wait_timeout:
+            return True
+        if result == wait_object_0:
+            return False
+        return None
     finally:
         kernel32.CloseHandle(handle)
 
@@ -3268,14 +4535,14 @@ def project_lock(coordination_root: Path, role: str, head: str, run_id: str) -> 
             payload = json.loads(path.read_text(encoding="utf-8"))
             if payload.get("run_id") == run_id:
                 path.unlink()
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError):
             pass
 
 
 def receipt_path(context: GitContext, role: str) -> Path:
     return (
         context.coordination_root
-        / ".agent"
+        / AGENT_DIRECTORY
         / "e"
         / "sonarqube"
         / PROJECT_KEY
@@ -3437,50 +4704,7 @@ def validate_hotspot_dispositions(inventory: Mapping[str, Any], dispositions: An
         raise RunnerError("PASS receipt hotspot blocking count does not match observed hotspots.")
 
 
-def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
-    required = (
-        "run_id",
-        "role",
-        "project_key",
-        "analysis_xml_project_key",
-        "captured_head",
-        "completed_at",
-        "worktree",
-        "cleanliness",
-        "scanner_metadata",
-        "task_report",
-        "compute_engine",
-        "analysis_current_before_issues",
-        "analysis_current_after_issues",
-        "analysis_current_final",
-        "quality_gate",
-        "pre_scan_issues",
-        "post_scan_issues",
-        "new_code_issues",
-        "issue_dispositions",
-        "hotspots",
-        "hotspot_dispositions",
-        "cleanup",
-        "post_scan_head",
-    )
-    if (
-        receipt.get("schema_version") != RECEIPT_SCHEMA_VERSION
-        or receipt.get("outcome") != "PASS"
-        or receipt.get("project_key") != PROJECT_KEY
-        or receipt.get("analysis_xml_project_key") != PROJECT_KEY
-        or receipt.get("role") not in {"candidate", "post-merge"}
-        or not isinstance(receipt.get("captured_head"), str)
-        or not SHA_RE.fullmatch(receipt["captured_head"])
-        or not isinstance(receipt.get("completed_at"), str)
-        or not receipt["completed_at"]
-        or any(key not in receipt for key in required)
-    ):
-        raise RunnerError("PASS receipt does not satisfy the exact-head evidence schema.")
-    worktree = receipt["worktree"]
-    cleanliness = receipt["cleanliness"]
-    scanner = receipt["scanner_metadata"]
-    task_report = receipt["task_report"]
-    compute_engine = receipt["compute_engine"]
+def _validate_pass_receipt_worktree(worktree: Any, cleanliness: Any) -> None:
     if (
         not isinstance(worktree, dict)
         or not worktree.get("detached")
@@ -3497,31 +4721,11 @@ def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
         or cleanliness.get("post", {}).get("status") != "clean"
     ):
         raise RunnerError("PASS receipt lacks clean-worktree evidence.")
-    cleanup = receipt["cleanup"]
-    if (
-        not isinstance(cleanup, dict)
-        or cleanup.get("status") != "PASS"
-        or not isinstance(cleanup.get("removed"), list)
-        or any(not isinstance(path, str) or not path for path in cleanup["removed"])
-    ):
-        raise RunnerError("PASS receipt lacks successful generated-artifact cleanup evidence.")
-    removed = cleanup["removed"]
-    if (
-        any(
-            "\\" in path
-            or path.startswith("/")
-            or re.match(r"^[A-Za-z]:", path)
-            or any(part in {"", ".", ".."} for part in path.split("/"))
-            for path in removed
-        )
-        or len(set(removed)) != len(removed)
-        or removed
-        != sorted(
-            removed,
-            key=lambda path: (-len(path.split("/")), path.casefold(), path),
-        )
-    ):
-        raise RunnerError("PASS receipt has invalid generated-artifact cleanup removals.")
+
+
+def _validate_pass_receipt_analysis(
+    receipt: Mapping[str, Any], scanner: Any, task_report: Any, compute_engine: Any
+) -> None:
     if (
         not isinstance(scanner, dict)
         or not scanner.get("observed")
@@ -3590,19 +4794,92 @@ def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
             raise RunnerError(
                 "PASS receipt lacks current fixed-project exact-head analysis binding evidence."
             )
+
+
+def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
+    required = (
+        "run_id",
+        "role",
+        "project_key",
+        "analysis_xml_project_key",
+        "captured_head",
+        "completed_at",
+        "worktree",
+        "cleanliness",
+        "scanner_metadata",
+        "task_report",
+        "compute_engine",
+        "analysis_current_before_issues",
+        "analysis_current_after_issues",
+        "analysis_current_final",
+        "quality_gate",
+        "pre_scan_issues",
+        "post_scan_issues",
+        "new_code_issues",
+        "issue_dispositions",
+        "hotspots",
+        "hotspot_dispositions",
+        "cleanup",
+        "post_scan_head",
+    )
+    if (
+        receipt.get("schema_version") != RECEIPT_SCHEMA_VERSION
+        or receipt.get("outcome") != "PASS"
+        or receipt.get("project_key") != PROJECT_KEY
+        or receipt.get("analysis_xml_project_key") != PROJECT_KEY
+        or receipt.get("role") not in {"candidate", "post-merge"}
+        or not isinstance(receipt.get("captured_head"), str)
+        or not SHA_RE.fullmatch(receipt["captured_head"])
+        or not isinstance(receipt.get("completed_at"), str)
+        or not receipt["completed_at"]
+        or any(key not in receipt for key in required)
+    ):
+        raise RunnerError("PASS receipt does not satisfy the exact-head evidence schema.")
+    worktree = receipt["worktree"]
+    cleanliness = receipt["cleanliness"]
+    scanner = receipt["scanner_metadata"]
+    task_report = receipt["task_report"]
+    compute_engine = receipt["compute_engine"]
+    _validate_pass_receipt_worktree(worktree, cleanliness)
+    cleanup = receipt["cleanup"]
+    if (
+        not isinstance(cleanup, dict)
+        or cleanup.get("status") != "PASS"
+        or not isinstance(cleanup.get("removed"), list)
+        or any(not isinstance(path, str) or not path for path in cleanup["removed"])
+    ):
+        raise RunnerError("PASS receipt lacks successful generated-artifact cleanup evidence.")
+    removed = cleanup["removed"]
+    if (
+        any(
+            "\\" in path
+            or path.startswith("/")
+            or re.match(r"^[A-Za-z]:", path)
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            for path in removed
+        )
+        or len(set(removed)) != len(removed)
+        or removed
+        != sorted(
+            removed,
+            key=lambda path: (-len(path.split("/")), path.casefold(), path),
+        )
+    ):
+        raise RunnerError("PASS receipt has invalid generated-artifact cleanup removals.")
+    _validate_pass_receipt_analysis(receipt, scanner, task_report, compute_engine)
     validate_inventory(
         receipt["pre_scan_issues"],
-        "/api/issues/search",
+        ISSUES_SEARCH_ENDPOINT,
         {"components": PROJECT_KEY, "issueStatuses": ISSUE_STATUSES},
     )
     validate_inventory(
         receipt["post_scan_issues"],
-        "/api/issues/search",
+        ISSUES_SEARCH_ENDPOINT,
         {"components": PROJECT_KEY, "issueStatuses": ISSUE_STATUSES},
     )
     validate_inventory(
         receipt["new_code_issues"],
-        "/api/issues/search",
+        ISSUES_SEARCH_ENDPOINT,
         {
             "components": PROJECT_KEY,
             "issueStatuses": ISSUE_STATUSES,
@@ -3624,7 +4901,10 @@ def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
 
 
 def validate_coverage_analysis_evidence(
-    identity: Mapping[str, Any], observations: Mapping[str, Any]
+    identity: Mapping[str, Any],
+    observations: Mapping[str, Any],
+    *,
+    incomplete: bool = False,
 ) -> dict[str, Any]:
     """Require one canonical analysis identity and positive two-language import proof."""
 
@@ -3644,6 +4924,12 @@ def validate_coverage_analysis_evidence(
         "current_after_measures",
         "current_final",
     ):
+        if (
+            incomplete
+            and field in {"current_after_measures", "current_final"}
+            and observations.get(field) is None
+        ):
+            continue
         if observations.get(field) != identity:
             _coverage_failure(
                 "COVERAGE_ANALYSIS_MISMATCH", f"{field} does not match canonical identity"
@@ -3684,18 +4970,24 @@ def validate_coverage_analysis_evidence(
             _coverage_failure(
                 "COVERAGE_IMPORT_UNPROVEN", f"{language} component import is incomplete"
             )
-    return {
+    evidence = {
         "observations": {
-            "submitted": True,
-            "current_before_measures": True,
-            "current_after_measures": True,
-            "current_final": True,
+            field: True if observations.get(field) == identity else None
+            for field in (
+                "submitted",
+                "current_before_measures",
+                "current_after_measures",
+                "current_final",
+            )
         },
         "aggregate": dict(aggregate),
         "new_coverage_condition": dict(condition),
         "python_components": dict(observations["python_components"]),
         "dotnet_components": dict(observations["dotnet_components"]),
     }
+    if incomplete:
+        evidence["status"] = "INCOMPLETE"
+    return evidence
 
 
 def _v3_fail(detail: str) -> NoReturn:
@@ -3840,6 +5132,89 @@ def _v3_inventory_summary(value: Any) -> None:
         _v3_fail("global inventory is incomplete or count-only")
 
 
+def _v3_analysis(analysis: Any, *, incomplete: bool = False) -> None:
+    if not isinstance(analysis, Mapping):
+        _v3_fail("completed receipt lacks analysis evidence")
+    expected_analysis = {
+        "observations",
+        "aggregate",
+        "new_coverage_condition",
+        "python_components",
+        "dotnet_components",
+    }
+    if incomplete:
+        expected_analysis.add("status")
+        if analysis.get("status") != "INCOMPLETE":
+            _v3_fail("incomplete analysis status is invalid")
+    if set(analysis) != expected_analysis:
+        _v3_fail("analysis evidence has invalid fields")
+    observations = analysis["observations"]
+    aggregate = analysis["aggregate"]
+    condition = analysis["new_coverage_condition"]
+    if (
+        not isinstance(observations, Mapping)
+        or set(observations)
+        != {"submitted", "current_before_measures", "current_after_measures", "current_final"}
+        or (not incomplete and any(value is not True for value in observations.values()))
+        or (
+            incomplete
+            and (
+                observations.get("submitted") is not True
+                or observations.get("current_before_measures") is not True
+                or observations.get("current_after_measures") is not True
+                and observations.get("current_after_measures") is not None
+                or observations.get("current_final") is not None
+            )
+        )
+        or not isinstance(aggregate, Mapping)
+        or set(aggregate) != {"coverage", "lines_to_cover", "new_coverage", "new_lines_to_cover"}
+        or type(aggregate.get("coverage")) not in {int, float}
+        or not 0 < float(aggregate["coverage"]) <= 100
+        or type(aggregate.get("lines_to_cover")) is not int
+        or aggregate["lines_to_cover"] <= 0
+        or type(aggregate.get("new_lines_to_cover")) is not int
+        or aggregate["new_lines_to_cover"] <= 0
+        or type(aggregate.get("new_coverage")) not in {int, float}
+        or not 0 <= float(aggregate["new_coverage"]) <= 100
+        or not isinstance(condition, Mapping)
+        or set(condition) != {"status", "threshold", "actual_value"}
+        or condition.get("status") not in {"OK", "ERROR"}
+        or condition.get("threshold") != 80
+        or type(condition.get("actual_value")) not in {int, float}
+        or not 0 <= float(condition["actual_value"]) <= 100
+    ):
+        _v3_fail("analysis coverage evidence is invalid")
+    for component in (analysis["python_components"], analysis["dotnet_components"]):
+        if (
+            not isinstance(component, Mapping)
+            or set(component)
+            != {
+                "source_set_sha256",
+                "page_count",
+                "complete",
+                "mapped_path_count",
+                "lines_to_cover",
+                "covered_lines",
+                "branch_measure_path_count",
+                "mapped_paths_sha256",
+            }
+            or not _is_sha256(component.get("source_set_sha256"))
+            or not _is_sha256(component.get("mapped_paths_sha256"))
+            or component.get("complete") is not True
+            or any(
+                type(component.get(field)) is not int or component[field] <= 0
+                for field in (
+                    "page_count",
+                    "mapped_path_count",
+                    "lines_to_cover",
+                    "covered_lines",
+                    "branch_measure_path_count",
+                )
+            )
+        ):
+            _v3_fail("two-language component evidence is incomplete")
+
+
 def validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None:
     """Pure v3 discriminator shared by every exact-head receipt consumer."""
 
@@ -3873,7 +5248,25 @@ def validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None:
         ):
             _v3_fail("diagnostic role has illegal outcome or release authority")
     elif role in {"candidate", "post-merge"}:
-        if outcome not in {"PASS", "BLOCKED"} or intent != "v0.23.11":
+        unobserved_intent = (
+            intent == "none"
+            and outcome == "BLOCKED"
+            and isinstance(receipt["failure"], Mapping)
+            and receipt["failure"].get("stage") == "PLANNED"
+            and isinstance(receipt["identity"], Mapping)
+            and receipt["identity"].get("analysis_id") is None
+            and all(
+                receipt[field] is None
+                for field in ("coverage", "analysis", "global_inventory", "release_gate", "cleanup")
+            )
+        )
+        if (
+            outcome not in {"PASS", "BLOCKED"}
+            or not isinstance(intent, str)
+            or (
+                not unobserved_intent and not re.fullmatch(r"v(?a:\d)+\.(?a:\d)+\.(?a:\d)+", intent)
+            )
+        ):
             _v3_fail("release role has illegal outcome or intent")
     else:
         _v3_fail("receipt role is invalid")
@@ -3917,6 +5310,86 @@ def validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None:
             or not failure["safe_message"]
         ):
             _v3_fail("blocked receipt lacks typed failure")
+        cleanup = receipt.get("cleanup")
+        cleanup_failure = cleanup.get("failure") if isinstance(cleanup, Mapping) else None
+        if isinstance(cleanup, Mapping) and type(cleanup.get("producer_terminal")) is not bool:
+            _v3_fail("blocked cleanup producer terminal claim must be a boolean")
+        if isinstance(cleanup, Mapping) and cleanup.get("producer_terminal") is False:
+            if (
+                set(cleanup)
+                != {
+                    "claimed_root",
+                    "producer_terminal",
+                    "removed_paths",
+                    "parent_removed_if_empty",
+                    "status",
+                    "failure",
+                }
+                or not _is_relative_path(cleanup.get("claimed_root"))
+                or cleanup.get("status") != "FAILED"
+                or cleanup.get("removed_paths") != []
+                or cleanup.get("parent_removed_if_empty") is not False
+                or not isinstance(cleanup_failure, Mapping)
+                or not {"code", "message"} <= set(cleanup_failure) <= {"code", "message", "native"}
+                or any(
+                    not isinstance(cleanup_failure.get(field), str) or not cleanup_failure[field]
+                    for field in ("code", "message")
+                )
+            ):
+                _v3_fail("nonterminal producer cleanup must retain the failed claim")
+        if isinstance(cleanup_failure, Mapping) and "native" in cleanup_failure:
+            native = cleanup_failure["native"]
+            if (
+                not isinstance(native, Mapping)
+                or set(native) != {"operation", "stage", "entry", "winerror", "errno"}
+                or not isinstance(native.get("operation"), str)
+                or native.get("operation")
+                not in {
+                    "CreateFileW",
+                    "NtCreateFile",
+                    "CloseHandle",
+                    "GetFileInformationByHandle",
+                    "GetFileInformationByHandleEx(FileIdInfo)",
+                    "GetFileInformationByHandleEx(FileAttributeTagInfo)",
+                    "GetFileInformationByHandleEx(FileIdExtdDirectoryInfo)",
+                    _FILE_DISPOSITION_INFO_EX_OPERATION,
+                    _PATH_STAT_OPERATION,
+                    _PATH_READ_BYTES_OPERATION,
+                }
+                or not isinstance(native.get("stage"), str)
+                or native.get("stage")
+                not in {
+                    "OPEN",
+                    "IDENTITY",
+                    "ENUMERATE",
+                    "DISPOSITION",
+                    "CLOSE",
+                    "METADATA",
+                    "MARKER_READ",
+                }
+                or any(
+                    native.get(field) is not None and type(native[field]) is not int
+                    for field in ("winerror", "errno")
+                )
+                or (
+                    native.get("entry") is not None
+                    and (
+                        not isinstance(native["entry"], str)
+                        or not re.fullmatch(
+                            r"(?!/)(?!.*(?:^|/)\.\.(?:/|$))[^:\\\x00-\x1f]+", native["entry"]
+                        )
+                    )
+                )
+            ):
+                _v3_fail("cleanup native failure discriminator is invalid")
+        analysis = receipt.get("analysis")
+        if analysis is not None:
+            if identity.get("analysis_id") is None:
+                _v3_fail("analysis evidence lacks canonical identity")
+            _v3_analysis(
+                analysis,
+                incomplete=isinstance(analysis, Mapping) and analysis.get("status") == "INCOMPLETE",
+            )
         return
     if receipt.get("failure") is not None or not isinstance(identity.get("analysis_id"), str):
         _v3_fail("completed receipt has no canonical analysis identity")
@@ -3965,70 +5438,7 @@ def validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None:
         or stateless.get("restored") is not True
     ):
         _v3_fail("coverage normalization or Stateless restoration is invalid")
-    analysis = receipt.get("analysis")
-    if not isinstance(analysis, Mapping):
-        _v3_fail("completed receipt lacks analysis evidence")
-    expected_analysis = {
-        "observations",
-        "aggregate",
-        "new_coverage_condition",
-        "python_components",
-        "dotnet_components",
-    }
-    if set(analysis) != expected_analysis:
-        _v3_fail("analysis evidence has invalid fields")
-    observations = analysis["observations"]
-    aggregate = analysis["aggregate"]
-    condition = analysis["new_coverage_condition"]
-    if (
-        not isinstance(observations, Mapping)
-        or set(observations)
-        != {"submitted", "current_before_measures", "current_after_measures", "current_final"}
-        or any(value is not True for value in observations.values())
-        or not isinstance(aggregate, Mapping)
-        or set(aggregate) != {"coverage", "lines_to_cover", "new_coverage", "new_lines_to_cover"}
-        or type(aggregate.get("coverage")) not in {int, float}
-        or float(aggregate["coverage"]) <= 0
-        or type(aggregate.get("lines_to_cover")) is not int
-        or aggregate["lines_to_cover"] <= 0
-        or type(aggregate.get("new_lines_to_cover")) is not int
-        or aggregate["new_lines_to_cover"] <= 0
-        or not isinstance(condition, Mapping)
-        or set(condition) != {"status", "threshold", "actual_value"}
-        or condition.get("status") not in {"OK", "ERROR"}
-        or condition.get("threshold") != 80
-        or type(condition.get("actual_value")) not in {int, float}
-    ):
-        _v3_fail("analysis coverage evidence is invalid")
-    for component in (analysis["python_components"], analysis["dotnet_components"]):
-        if (
-            not isinstance(component, Mapping)
-            or set(component)
-            != {
-                "source_set_sha256",
-                "page_count",
-                "complete",
-                "mapped_path_count",
-                "lines_to_cover",
-                "covered_lines",
-                "branch_measure_path_count",
-                "mapped_paths_sha256",
-            }
-            or not _is_sha256(component.get("source_set_sha256"))
-            or not _is_sha256(component.get("mapped_paths_sha256"))
-            or component.get("complete") is not True
-            or any(
-                type(component.get(field)) is not int or component[field] <= 0
-                for field in (
-                    "page_count",
-                    "mapped_path_count",
-                    "lines_to_cover",
-                    "covered_lines",
-                    "branch_measure_path_count",
-                )
-            )
-        ):
-            _v3_fail("two-language component evidence is incomplete")
+    _v3_analysis(receipt.get("analysis"))
     inventory = receipt.get("global_inventory")
     inventory_path = (
         f".agent/e/sonarqube/{PROJECT_KEY}/{identity['captured_head']}/diagnostic/"
@@ -4243,7 +5653,9 @@ def collect_coverage_analysis_evidence(
             host, token, list(reports[1].get("source_paths", []))
         ),
     }
-    return validate_coverage_analysis_evidence(identity, combined)
+    return validate_coverage_analysis_evidence(
+        identity, combined, incomplete=observations.get("current_final") is None
+    )
 
 
 def _inventory_summary(
@@ -4328,8 +5740,8 @@ def write_diagnostic_inventory(
     }
 
 
-def _release_intent_for_role(role: str) -> str:
-    return "none" if role == "diagnostic" else "v0.23.11"
+def _release_intent_for_role(role: str, release_intent: str) -> str:
+    return "none" if role == "diagnostic" else release_intent
 
 
 def _blocked_failure(stage: str, error: BaseException) -> dict[str, Any]:
@@ -4347,12 +5759,12 @@ def _blocked_failure(stage: str, error: BaseException) -> dict[str, Any]:
     }
 
 
-def receipt_base(context: GitContext, role: str, run_id: str) -> dict[str, Any]:
+def receipt_base(context: GitContext, role: str, release_intent: str) -> dict[str, Any]:
     return {
         "schema_version": EXACT_HEAD_RECEIPT_V3_SCHEMA_VERSION,
         "role": role,
         "outcome": "BLOCKED",
-        "release_intent": _release_intent_for_role(role),
+        "release_intent": _release_intent_for_role(role, release_intent),
         "identity": {
             "captured_head": context.head,
             "project_key": PROJECT_KEY,
@@ -4377,9 +5789,10 @@ def execute(role: str, scanner_override: str | None) -> Path:
     inherited_environment = process_environment()
     clean_environment = scrub_sonar_environment(inherited_environment)
     context = git_context(Path.cwd(), clean_environment)
+    release_intent = "none"
     run_id = str(uuid.uuid4())
     target_receipt = receipt_path(context, role)
-    receipt = receipt_base(context, role, run_id)
+    receipt = receipt_base(context, role, release_intent)
     secrets = sonar_secret_values(inherited_environment)
     stage = "PLANNED"
     plan: CoveragePlan | None = None
@@ -4390,6 +5803,10 @@ def execute(role: str, scanner_override: str | None) -> Path:
         validate_exact_head_receipt_v3(receipt)
         write_receipt(target_receipt, receipt, secrets)
         try:
+            release_intent = release_intent_at_head(
+                context.repository_root, clean_environment, context.head
+            )
+            receipt["release_intent"] = _release_intent_for_role(role, release_intent)
             entry = resolve_wave2_entry(context, clean_environment)
             resolved_wave2 = verify_wave2_entry(entry, context, clean_environment)
             preflight_coverage_toolchain(context=context, environment=clean_environment)
@@ -4427,10 +5844,11 @@ def execute(role: str, scanner_override: str | None) -> Path:
             stage = "SCANNER_BEGUN"
             claim = claim_coverage_run(context, plan, resolved_wave2)
             stage = "RUN_CLAIMED"
+            producer_terminal = True
             prepare_worktree_python_environment(context, inherited_environment, secrets)
             solution, _, standalone_projects = project_inventory(context.repository_root)
             run_process(
-                ["dotnet", "build", str(solution), "-nr:false"],
+                ["dotnet", "build", str(solution), DISABLE_MSBUILD_NODE_REUSE],
                 cwd=context.repository_root,
                 environment=clean_environment,
                 secrets=secrets,
@@ -4438,17 +5856,16 @@ def execute(role: str, scanner_override: str | None) -> Path:
             )
             for project in standalone_projects:
                 run_process(
-                    ["dotnet", "build", str(project), "-nr:false"],
+                    ["dotnet", "build", str(project), DISABLE_MSBUILD_NODE_REUSE],
                     cwd=context.repository_root,
                     environment=clean_environment,
                     secrets=secrets,
                     label=f"Standalone project build ({project.name})",
                 )
             stateless_before = capture_stateless_binary_hashes(plan)
-            try:
-                run_coverage_producer(plan, inherited_environment)
-            finally:
-                producer_terminal = True
+            producer_terminal = False
+            run_coverage_producer(plan, inherited_environment)
+            producer_terminal = True
             stage = "PRODUCING"
             if isinstance(plan, CoveragePlan):
                 dotnet_inputs = validate_dotnet_cobertura_inputs(context, plan)
@@ -4464,6 +5881,9 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 normalization=normalization,
             )
             stage = "REPORTS_VALIDATED"
+            receipt["coverage"] = coverage
+            receipt["failure"]["stage"] = stage
+            write_receipt(target_receipt, receipt, secrets)
             assert_head_unchanged(context, clean_environment)
             run_process(
                 scanner_end_command(scanner, credentials["SONAR_TOKEN"]),
@@ -4487,12 +5907,13 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 "project_key": PROJECT_KEY,
                 "analysis_id": analysis_id,
             }
-            current_before = current_analysis_binding(
+            current_analysis_binding(
                 credentials["SONAR_HOST_URL"],
                 analysis_id,
                 context.head,
                 credentials["SONAR_READ_TOKEN"],
             )
+            receipt["identity"] = identity
             quality_gate = analysis_quality_gate(
                 credentials["SONAR_HOST_URL"], analysis_id, credentials["SONAR_READ_TOKEN"]
             )
@@ -4501,7 +5922,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
             )
             new_code_issue_inventory(credentials["SONAR_HOST_URL"], credentials["SONAR_READ_TOKEN"])
             issue_result = issue_dispositions(pre_scan_issues, post_scan_issues)
-            current_after = current_analysis_binding(
+            current_analysis_binding(
                 credentials["SONAR_HOST_URL"],
                 analysis_id,
                 context.head,
@@ -4520,11 +5941,8 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 issue_result,
                 hotspot_result,
             )
-            clear_generated_artifacts(context, clean_environment)
-            cleanup = cleanup_coverage_run(plan, producer_terminal)
-            stage = "CLEANED"
-            strict_cleanliness(context, clean_environment, "receipt publication")
-            assert_head_unchanged(context, clean_environment)
+            receipt["global_inventory"] = inventory
+            write_receipt(target_receipt, receipt, secrets)
             current_before_measures = current_analysis_binding(
                 credentials["SONAR_HOST_URL"],
                 analysis_id,
@@ -4540,28 +5958,26 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 {
                     "submitted": identity,
                     "current_before_measures": {
-                        "captured_head": current_before.get("revision"),
-                        "project_key": PROJECT_KEY,
-                        "analysis_id": current_before.get("analysis_id"),
-                    },
-                    "current_after_measures": {
-                        "captured_head": current_after.get("revision"),
-                        "project_key": PROJECT_KEY,
-                        "analysis_id": current_after.get("analysis_id"),
-                    },
-                    "current_final": {
                         "captured_head": current_before_measures.get("revision"),
                         "project_key": PROJECT_KEY,
                         "analysis_id": current_before_measures.get("analysis_id"),
                     },
+                    "current_after_measures": None,
+                    "current_final": None,
                 },
             )
-            _current_after_measures = current_analysis_binding(
+            stage = "ANALYSIS_BOUND"
+            receipt["analysis"] = analysis
+            receipt["failure"]["stage"] = stage
+            write_receipt(target_receipt, receipt, secrets)
+            current_analysis_binding(
                 credentials["SONAR_HOST_URL"],
                 analysis_id,
                 context.head,
                 credentials["SONAR_READ_TOKEN"],
             )
+            analysis["observations"]["current_after_measures"] = True
+            write_receipt(target_receipt, receipt, secrets)
             release_gate = None
             outcome = "DIAGNOSTIC_COMPLETE"
             gate_error: RunnerError | None = None
@@ -4581,11 +5997,34 @@ def execute(role: str, scanner_override: str | None) -> Path:
                     gate_error = RunnerError(
                         f"Analysis-bound quality gate is {gate_status}; only OK passes."
                     )
+            receipt["release_gate"] = release_gate
+            receipt["cleanup"] = {}
+            cleanup = cleanup_coverage_run(
+                plan, producer_terminal, claim, evidence=receipt["cleanup"]
+            )
+            receipt["cleanup"] = cleanup
+            write_receipt(target_receipt, receipt, secrets)
+            if cleanup.get("status") == "FAILED":
+                raise gate_error or RunnerError(
+                    "COVERAGE_CLEANUP_FAILED: claimed run cleanup failed."
+                )
+            clear_generated_artifacts(context, clean_environment)
+            stage = "CLEANED"
+            strict_cleanliness(context, clean_environment, "receipt publication")
+            assert_head_unchanged(context, clean_environment)
+            current_analysis_binding(
+                credentials["SONAR_HOST_URL"],
+                analysis_id,
+                context.head,
+                credentials["SONAR_READ_TOKEN"],
+            )
+            analysis["observations"]["current_final"] = True
+            analysis.pop("status", None)
             receipt = {
                 "schema_version": EXACT_HEAD_RECEIPT_V3_SCHEMA_VERSION,
                 "role": role,
                 "outcome": outcome,
-                "release_intent": _release_intent_for_role(role),
+                "release_intent": _release_intent_for_role(role, release_intent),
                 "identity": identity,
                 "coverage": coverage,
                 "analysis": analysis,
@@ -4598,23 +6037,35 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 raise gate_error
             validate_exact_head_receipt_v3(receipt)
             write_receipt(target_receipt, receipt, secrets)
-        except Exception as error:
-            cleanup_result: Any
-            if plan is not None and claim is not None and stage != "CLEANED":
-                cleanup_result = cleanup_coverage_run(plan, producer_terminal)
-            else:
-                cleanup_result = receipt.get("cleanup")
-            try:
-                clear_generated_artifacts(context, clean_environment)
-            except Exception as cleanup_error:
-                error.add_note(
-                    f"Generated-artifact cleanup also failed: {cleanup_error.__class__.__name__}."
-                )
+        except BaseException as error:
+            interruption = error if not isinstance(error, Exception) else None
+            cleanup_result: Any = receipt.get("cleanup")
+            if plan is not None and claim is not None and cleanup_result is None:
+                receipt["cleanup"] = {}
+                try:
+                    cleanup_result = cleanup_coverage_run(
+                        plan, producer_terminal, claim, evidence=receipt["cleanup"]
+                    )
+                    receipt["cleanup"] = cleanup_result
+                except BaseException as cleanup_error:
+                    cleanup_result = receipt["cleanup"]
+                    if not isinstance(cleanup_error, Exception):
+                        interruption = cleanup_error
+            if isinstance(error, Exception) and (
+                not isinstance(cleanup_result, Mapping) or cleanup_result.get("status") != "FAILED"
+            ):
+                try:
+                    clear_generated_artifacts(context, clean_environment)
+                except Exception as cleanup_error:
+                    if hasattr(error, "add_note"):
+                        error.add_note(
+                            f"Generated-artifact cleanup also failed: {cleanup_error.__class__.__name__}."
+                        )
             blocked = {
                 "schema_version": EXACT_HEAD_RECEIPT_V3_SCHEMA_VERSION,
                 "role": role,
                 "outcome": "BLOCKED",
-                "release_intent": _release_intent_for_role(role),
+                "release_intent": _release_intent_for_role(role, release_intent),
                 "identity": receipt.get(
                     "identity",
                     {
@@ -4628,18 +6079,389 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 "global_inventory": receipt.get("global_inventory"),
                 "release_gate": receipt.get("release_gate"),
                 "cleanup": cleanup_result,
-                "failure": _blocked_failure(stage, error),
+                "failure": _blocked_failure(stage, error)
+                if isinstance(error, Exception)
+                else {
+                    "code": "COVERAGE_CLEANUP_FAILED"
+                    if isinstance(cleanup_result, Mapping)
+                    and cleanup_result.get("status") == "FAILED"
+                    else "COVERAGE_RUN_BLOCKED",
+                    "stage": stage,
+                    "language": None,
+                    "project_id": None,
+                    "safe_message": error.__class__.__name__,
+                },
             }
             validate_exact_head_receipt_v3(blocked)
             write_receipt(target_receipt, blocked, secrets)
+            if interruption is not None:
+                raise interruption
             if isinstance(error, RunnerError):
                 raise
             raise RunnerError(blocked["failure"]["safe_message"]) from error
     return target_receipt
 
 
+async def _run_owned_vstest(
+    command: Sequence[str], repository_root: Path, timeout_seconds: float = 2400
+) -> int:
+    """Wait for the exact Job-owned VSTest tree before returning or failing."""
+    if os.name != "nt":
+        _coverage_failure(
+            "COVERAGE_VSTEST_INCOMPATIBLE",
+            "Stateless collector requires Windows process-tree ownership",
+        )
+    sys.path.insert(0, str(repository_root / "src"))
+    from netcoredbg_mcp import windows_process_owner as owner_module
+
+    if (
+        Path(owner_module.__file__).resolve()
+        != repository_root / "src/netcoredbg_mcp/windows_process_owner.py"
+    ):
+        _coverage_failure(
+            "COVERAGE_VSTEST_INCOMPATIBLE", "process-tree owner is not the checkout source"
+        )
+    owner = await owner_module.WindowsOwnedProcess.launch(
+        generation=uuid.uuid4().hex,
+        argv=command,
+        cwd=str(repository_root),
+        env=scrub_sonar_environment(dict(os.environ)),
+        stdin_mode="devnull",
+        capture_process_handles=True,
+    )
+    first_drain: dict[str, object] | None = None
+
+    def drain_failure(detail: str) -> NoReturn:
+        if first_drain is None:
+            _coverage_failure("COVERAGE_PROCESS_TREE_NOT_DRAINED", detail)
+        total = first_drain["total_processes"]
+        if first_drain["active_processes"] not in (0, None):
+            invariant = "active_processes_nonzero"
+        elif first_drain["handle_probe_failed"] or (
+            first_drain["retained_exact_handles"] != first_drain["signaled_exact_handles"]
+        ):
+            invariant = "exact_handle_exit_unverified"
+        elif first_drain["unverified_membership"]:
+            invariant = "membership_unverified"
+        elif first_drain["root_birth_seen"] is False:
+            invariant = "root_birth_missing"
+        elif total is not None and total != first_drain["retained_exact_handles"]:
+            invariant = "lifetime_accounting_mismatch"
+        elif first_drain["live_members_without_handle"]:
+            invariant = "live_member_handle_missing"
+        else:
+            invariant = "owner_drain_unverified"
+        diagnostic = {
+            "invariant": invariant,
+            "first": first_drain,
+            "fallback_exact_handles_known": None,
+            "fallback_exact_handles_signaled": 0,
+            "fallback_awaited_all_exact_handles": False,
+        }
+        _coverage_failure(
+            "COVERAGE_PROCESS_TREE_NOT_DRAINED",
+            f"{detail}; owner_drain={json.dumps(diagnostic, sort_keys=True)}",
+        )
+
+    async def pump(stream: asyncio.StreamReader, destination: Any) -> None:
+        while chunk := await stream.read(65536):
+            destination.write(chunk.decode("utf-8", errors="replace"))
+            destination.flush()
+
+    pumps = (
+        asyncio.create_task(pump(owner.stdout, sys.stdout)),
+        asyncio.create_task(pump(owner.stderr, sys.stderr)),
+    )
+    failed = False
+    first_error: BaseException | None = None
+
+    async def collector_policy(*, failed_cleanup: bool = False):
+        root_was_forced = False
+        receipt = None
+        phases = ((False, 0.0), (True, 20.0)) if failed_cleanup else ((False, 10.0), (True, 15.0))
+        for forced, budget in phases:
+            if forced:
+                root_was_forced, failure = await owner.force_job()
+                if failure is not None:
+                    return failure
+            deadline = time.monotonic() + max(budget, 0.0)
+            receipt = None
+            while True:
+                pending = owner.start_drain_observation()
+                if pending is not None:
+                    await asyncio.wait((pending,), timeout=max(deadline - time.monotonic(), 0.0))
+                receipt, retry = await owner.observe_drain(
+                    forced=forced, root_was_forced=root_was_forced, previous=receipt
+                )
+                remaining = deadline - time.monotonic()
+                if not retry or remaining <= 0:
+                    break
+                await asyncio.sleep(min(owner_module._ACCOUNTING_POLL_SECONDS, remaining))
+                if time.monotonic() >= deadline:
+                    break
+            if receipt.status is owner_module.DrainStatus.DRAINED:
+                return receipt
+        assert receipt is not None
+        return receipt
+
+    try:
+        result = await asyncio.wait_for(owner.wait_root(), timeout_seconds)
+        receipt = await owner._join_drain(collector_policy)
+        if (
+            receipt.status is not owner_module.DrainStatus.DRAINED
+            or receipt.forced
+            or receipt.active_processes != 0
+        ):
+            first_drain = owner.drain_snapshot(receipt)
+            drain_failure("collector drain was not verified after VSTest completion")
+        await asyncio.wait_for(asyncio.gather(*pumps), timeout=10)
+        return result
+    except BaseException as error:
+        failed = True
+        first_error = error
+        raise
+    finally:
+
+        async def finish_owned_cleanup() -> Exception | None:
+            nonlocal first_drain
+            close_error: Exception | None = None
+            try:
+                if failed:
+                    try:
+                        receipt = await owner._join_drain(
+                            lambda: collector_policy(failed_cleanup=True)
+                        )
+                    except Exception:
+                        pass
+                    else:
+                        if first_drain is None and (
+                            receipt.status is not owner_module.DrainStatus.DRAINED
+                            or receipt.active_processes != 0
+                        ):
+                            first_drain = owner.drain_snapshot(receipt)
+                while not owner.closed:
+                    try:
+                        receipt = await owner.aclose()
+                    except Exception as error:
+                        if close_error is None:
+                            close_error = error
+                    else:
+                        if first_drain is None and (
+                            receipt.status is not owner_module.DrainStatus.DRAINED
+                            or receipt.active_processes != 0
+                            or (not failed and receipt.forced)
+                        ):
+                            first_drain = owner.drain_snapshot(receipt)
+                    if not owner.closed:
+                        await asyncio.sleep(0.05)
+                return close_error
+            finally:
+                for task in pumps:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*pumps, return_exceptions=True)
+
+        cleanup = asyncio.create_task(finish_owned_cleanup())
+        cancelled_during_cleanup = False
+        while not cleanup.done():
+            try:
+                await asyncio.wait((cleanup,))
+            except asyncio.CancelledError:
+                cancelled_during_cleanup = True
+        close_error = cleanup.result()
+        if owner.fatal_error is not None:
+            raise owner.fatal_error
+        if close_error is not None and not (
+            first_drain is not None and isinstance(first_error, RunnerError)
+        ):
+            raise close_error
+        if cancelled_during_cleanup and not failed:
+            raise asyncio.CancelledError
+        if not failed and first_drain is not None:
+            drain_failure("collector final drain was not verified after owner closure")
+
+
+def resolve_collector_attachment(results: Path, trx: ElementTree.Element, href: str) -> Path:
+    """Resolve the TRX's sole deployment copy, never a matching basename elsewhere."""
+    deployments = [item for item in trx.iter() if item.tag.rsplit("}", 1)[-1] == "Deployment"]
+    if len(deployments) != 1:
+        _coverage_failure("COVERAGE_REPORT_INVALID", "collector deployment is ambiguous")
+    deployment = deployments[0].get("runDeploymentRoot", "").replace("\\", "/")
+    attachment = href.replace("\\", "/")
+    if (
+        not deployment
+        or not attachment
+        or ":" in deployment
+        or ":" in attachment
+        or "://" in deployment
+        or "://" in attachment
+        or any(part in {"", ".", ".."} for part in (*deployment.split("/"), *attachment.split("/")))
+        or len(deployment.split("/")) != 1
+        or not attachment.endswith(".cobertura.xml")
+    ):
+        _coverage_failure("COVERAGE_REPORT_INVALID", "collector deployment path is unsafe")
+    root = results / deployment / "In"
+    parts = attachment.split("/")
+    report = root.joinpath(*parts)
+    for parent in (
+        results,
+        results / deployment,
+        root,
+        *(root.joinpath(*parts[:i]) for i in range(1, len(parts))),
+    ):
+        metadata = _scanner_tree_metadata(parent)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or int(getattr(metadata, "st_file_attributes", 0) or 0) & 0x0400
+        ):
+            _coverage_failure("COVERAGE_REPORT_INVALID", "collector deployment directory is unsafe")
+    metadata = _scanner_tree_metadata(report)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or int(getattr(metadata, "st_file_attributes", 0) or 0) & 0x0400
+    ):
+        _coverage_failure("COVERAGE_REPORT_INVALID", "collector attachment is nonregular")
+    return report
+
+
+def produce_stateless_collector(
+    repository_root: Path, project: Path, output: Path, include_directory: Path
+) -> dict[str, Any]:
+    """Run the full test assembly with one pinned process-tree collector."""
+    test_output = project.parent / "bin/Debug/net8.0"
+    production_output = repository_root / STATELESS_BINARY_DIRECTORY
+    if (
+        project != repository_root / FIXED_COVERAGE_PROJECTS[3][1]
+        or include_directory != production_output
+        or output.name != "coverage.cobertura.xml"
+        or output.parent.name != "stateless"
+    ):
+        _coverage_failure(
+            "COVERAGE_MARKER_INVALID", "Stateless collector paths differ from fixed plan"
+        )
+    package_root = Path(os.environ.get("NUGET_PACKAGES", str(Path.home() / ".nuget/packages")))
+    adapter = package_root / CODE_COVERAGE_PACKAGE / CODE_COVERAGE_VERSION / "build/netstandard2.0"
+    collector_dll = adapter / "Microsoft.VisualStudio.TraceDataCollector.dll"
+    if not collector_dll.is_file() or collector_dll.is_symlink():
+        _coverage_failure("COVERAGE_VSTEST_INCOMPATIBLE", "pinned collector adapter is unavailable")
+    binaries = (
+        test_output / "NetCoreDbg.Mcp.Stateless.Tests.dll",
+        test_output / "NetCoreDbg.Mcp.Stateless.Tests.pdb",
+        production_output / "NetCoreDbg.Mcp.Stateless.dll",
+        production_output / "NetCoreDbg.Mcp.Stateless.pdb",
+    )
+    try:
+        before = tuple(_sha256_bytes(path.read_bytes()) for path in binaries)
+    except OSError as error:
+        _coverage_failure(
+            "COVERAGE_INSTRUMENTATION_NOT_RESTORED", "test or production DLL/PDB is unavailable"
+        )
+        raise AssertionError("unreachable") from error
+    results = output.parent / "collector-results"
+    results.mkdir(parents=True, exist_ok=False)
+    settings = output.parent / "collector.runsettings"
+    settings.write_text(
+        "<RunSettings><RunConfiguration><MaxCpuCount>1</MaxCpuCount></RunConfiguration>"
+        '<DataCollectionRunSettings><DataCollectors><DataCollector friendlyName="Code Coverage" '
+        'uri="datacollector://Microsoft/CodeCoverage/2.0"><Configuration><Format>cobertura</Format>'
+        "<CodeCoverage><CollectFromChildProcesses>True</CollectFromChildProcesses>"
+        "<EnableDynamicManagedInstrumentation>True</EnableDynamicManagedInstrumentation>"
+        "<EnableStaticManagedInstrumentation>False</EnableStaticManagedInstrumentation>"
+        "</CodeCoverage></Configuration></DataCollector></DataCollectors></DataCollectionRunSettings>"
+        "</RunSettings>",
+        encoding="utf-8",
+    )
+    command = [
+        "dotnet",
+        "vstest",
+        str(binaries[0]),
+        f"/TestAdapterPath:{adapter}",
+        f"/Settings:{settings}",
+        "/Collect:Code Coverage;Format=cobertura",
+        "/Logger:trx;LogFileName=collector.trx",
+        f"/ResultsDirectory:{results}",
+        f"/Diag:{output.parent / 'collector.diag.log'}",
+    ]
+    try:
+        returncode = asyncio.run(_run_owned_vstest(command, repository_root))
+    except TimeoutError as error:
+        _coverage_failure(
+            "COVERAGE_VSTEST_INCOMPATIBLE", "Stateless collector timed out after owned-tree drain"
+        )
+        raise AssertionError("unreachable") from error
+    try:
+        after = tuple(_sha256_bytes(path.read_bytes()) for path in binaries)
+    except OSError as error:
+        _coverage_failure(
+            "COVERAGE_INSTRUMENTATION_NOT_RESTORED", "test or production DLL/PDB disappeared"
+        )
+        raise AssertionError("unreachable") from error
+    if before != after or not all(_is_sha256(value) for value in before):
+        _coverage_failure(
+            "COVERAGE_INSTRUMENTATION_NOT_RESTORED",
+            "test or production DLL/PDB changed during collection",
+        )
+    if returncode:
+        _coverage_failure("COVERAGE_VSTEST_INCOMPATIBLE", "Stateless full test run failed")
+    try:
+        trx = ElementTree.parse(results / "collector.trx").getroot()
+        summary = next(item for item in trx if item.tag.rsplit("}", 1)[-1] == "ResultSummary")
+        counters = next(item for item in summary if item.tag.rsplit("}", 1)[-1] == "Counters")
+        collectors = [item for item in summary.iter() if item.tag.rsplit("}", 1)[-1] == "Collector"]
+        attachments = (
+            [item for item in collectors[0].iter() if item.tag.rsplit("}", 1)[-1] == "A"]
+            if len(collectors) == 1
+            else []
+        )
+        diagnostics = list(output.parent.glob("collector.diag.datacollector.*.log"))
+        diagnostic = (
+            diagnostics[0].read_text(encoding="utf-8", errors="replace")
+            if len(diagnostics) == 1
+            else ""
+        )
+    except (OSError, ElementTree.ParseError, StopIteration) as error:
+        _coverage_failure("COVERAGE_REPORT_INVALID", "collector TRX or diagnostic is missing")
+        raise AssertionError("unreachable") from error
+    loaded = f"Loading assembly '{collector_dll}'".replace("/", "\\").casefold()
+    if (
+        summary.get("outcome") != "Completed"
+        or not int(counters.get("total", "0"))
+        or counters.get("total") != counters.get("passed")
+        or len(attachments) != 1
+        or collectors[0].get("uri", "").casefold() != "datacollector://microsoft/codecoverage/2.0"
+        or loaded not in diagnostic.casefold()
+    ):
+        _coverage_failure(
+            "COVERAGE_REPORT_INVALID", "collector attachment or full passing run is unverified"
+        )
+    report = resolve_collector_attachment(results, trx, attachments[0].get("href", ""))
+    context = GitContext(
+        repository_root, repository_root, repository_root, repository_root, "0" * 40
+    )
+    return project_stateless_collector(context, report, output)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    arguments = parse_args(argv)
+    arguments_list = list(argv if argv is not None else sys.argv[1:])
+    if arguments_list and arguments_list[0] == "collector-stateless":
+        if len(arguments_list) != 5:
+            raise RunnerError(
+                "COVERAGE_MARKER_INVALID: Stateless collector requires four fixed paths"
+            )
+        try:
+            produce_stateless_collector(*(Path(item) for item in arguments_list[1:]))
+        except RunnerError as error:
+            print(f"PROJECT_RELEASE_PROTOCOL_BLOCKED: {error}", file=sys.stderr)
+            return 1
+        except BaseException:
+            print(
+                "PROJECT_RELEASE_PROTOCOL_BLOCKED: COVERAGE_PROCESS_TREE_NOT_DRAINED: "
+                "collector failed",
+                file=sys.stderr,
+            )
+            return 1
+        return 0
+    arguments = parse_args(arguments_list)
     try:
         written_receipt = execute(arguments.role, arguments.scanner)
     except RunnerError as error:

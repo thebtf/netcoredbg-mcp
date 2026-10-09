@@ -31,6 +31,10 @@ public static partial class GridCommands
     private const double RowDragNeutralBandBottomRatio = 0.81;
     private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
     private const uint MOUSEEVENTF_LEFTUP = 0x0004;
+    private const string RowDragBlockedStatus = "BLOCKED";
+    private const string RowDragAttemptsKey = "attempts";
+    private const string RowDragHeightKey = "height";
+    private const string RowDragWidthKey = "width";
 
     public static JsonNode DragRowToRow(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
@@ -186,7 +190,7 @@ public static partial class GridCommands
                 {
                     blockedResult = new JsonObject
                     {
-                        ["status"] = "BLOCKED",
+                        ["status"] = RowDragBlockedStatus,
                         ["reason"] = "target row was not found during active drag edge scroll",
                         ["requested"] = RequestedRow(targetRowIndex, targetRowKey),
                         ["accepted"] = new JsonObject
@@ -194,7 +198,7 @@ public static partial class GridCommands
                             ["target"] = "row that becomes visible through held drag edge scroll",
                             ["max_scrolls"] = maxScrolls
                         },
-                        ["attempts"] = targetScan.Attempts,
+                        [RowDragAttemptsKey] = targetScan.Attempts,
                         ["next_step"] = "Use a nearer drop target or keep the cursor on the drag edge longer."
                     };
                 }
@@ -208,7 +212,7 @@ public static partial class GridCommands
                         ["already_visible"] = false,
                         ["resolved_row"] = CompactRow(targetMatch.Row),
                         ["row"] = targetMatch.Row.DeepClone(),
-                        ["attempts"] = targetScan.Attempts.DeepClone()
+                        [RowDragAttemptsKey] = targetScan.Attempts.DeepClone()
                     };
                 }
             }
@@ -220,7 +224,7 @@ public static partial class GridCommands
                     ["already_visible"] = true,
                     ["resolved_row"] = CompactRow(targetMatch.Row),
                     ["row"] = targetMatch.Row.DeepClone(),
-                    ["attempts"] = targetSearchBeforeDrag.Attempts.DeepClone()
+                    [RowDragAttemptsKey] = targetSearchBeforeDrag.Attempts.DeepClone()
                 };
             }
 
@@ -245,10 +249,10 @@ public static partial class GridCommands
                 {
                     blockedResult = new JsonObject
                     {
-                        ["status"] = "BLOCKED",
+                        ["status"] = RowDragBlockedStatus,
                         ["reason"] = "target row could not be stabilized before mouse-up",
                         ["requested"] = RequestedRow(targetRowIndex, targetRowKey),
-                        ["attempts"] = stabilizationAttempts.DeepClone(),
+                        [RowDragAttemptsKey] = stabilizationAttempts.DeepClone(),
                         ["next_step"] = "Capture stabilization attempts and adjust the final drop strategy."
                     };
                 }
@@ -262,7 +266,7 @@ public static partial class GridCommands
                         ["already_visible"] = false,
                         ["resolved_row"] = CompactRow(targetMatch.Row),
                         ["row"] = targetMatch.Row.DeepClone(),
-                        ["attempts"] = edgeScanAttempts.DeepClone(),
+                        [RowDragAttemptsKey] = edgeScanAttempts.DeepClone(),
                         ["stabilization_attempts"] = stabilizationAttempts.DeepClone()
                     };
                 }
@@ -281,14 +285,14 @@ public static partial class GridCommands
                 {
                     dropPointStrategy = "stabilized-band-adjacent-fallback";
                 }
-                preReleaseTargetBounds = liveTargetRow["bounds"] as JsonObject;
+                preReleaseTargetBounds = liveTargetRow[BoundsKey] as JsonObject;
                 if (targetPoint is null)
                 {
                     dropPointStrategy = "neutral-band-blocked";
                     var dropBandDiagnostics = DropBandDiagnostics(liveTargetRow, gridBounds);
                     blockedResult = new JsonObject
                     {
-                        ["status"] = "BLOCKED",
+                        ["status"] = RowDragBlockedStatus,
                         ["reason"] = "target row remained inside the drag edge-scroll zone",
                         ["requested"] = RequestedRow(targetRowIndex, targetRowKey),
                         ["accepted"] = new JsonObject
@@ -414,7 +418,7 @@ public static partial class GridCommands
     private static Point DragThresholdPoint(JsonObject sourceBounds, Point sourcePoint)
     {
         var top = sourceBounds["y"]?.GetValue<int>() ?? sourcePoint.Y;
-        var height = sourceBounds["height"]?.GetValue<int>() ?? 0;
+        var height = sourceBounds[RowDragHeightKey]?.GetValue<int>() ?? 0;
         var bottom = top + Math.Max(1, height) - 1;
         var targetY = Math.Min(bottom, sourcePoint.Y + RowDragThresholdPixels);
         if (targetY == sourcePoint.Y && sourcePoint.Y > top)
@@ -549,8 +553,8 @@ public static partial class GridCommands
     {
         var x = gridBounds["x"]?.GetValue<int>() ?? 0;
         var y = gridBounds["y"]?.GetValue<int>() ?? 0;
-        var width = Math.Max(1, gridBounds["width"]?.GetValue<int>() ?? 1);
-        var height = Math.Max(1, gridBounds["height"]?.GetValue<int>() ?? 1);
+        var width = Math.Max(1, gridBounds[RowDragWidthKey]?.GetValue<int>() ?? 1);
+        var height = Math.Max(1, gridBounds[RowDragHeightKey]?.GetValue<int>() ?? 1);
         var centerX = x + (width / 2);
         var ratio = direction == DragScrollDirection.Down
             ? RowDragEdgeScrollDownRatio
@@ -570,8 +574,8 @@ public static partial class GridCommands
     {
         var x = gridBounds["x"]?.GetValue<int>() ?? 0;
         var y = gridBounds["y"]?.GetValue<int>() ?? 0;
-        var width = Math.Max(1, gridBounds["width"]?.GetValue<int>() ?? 1);
-        var height = Math.Max(1, gridBounds["height"]?.GetValue<int>() ?? 1);
+        var width = Math.Max(1, gridBounds[RowDragWidthKey]?.GetValue<int>() ?? 1);
+        var height = Math.Max(1, gridBounds[RowDragHeightKey]?.GetValue<int>() ?? 1);
         return new Point(
             x + (width / 2),
             y + (height / 2));
@@ -645,7 +649,7 @@ public static partial class GridCommands
     private static JsonObject RefreshRowBounds(RowMatch match)
     {
         var row = match.Row.DeepClone() as JsonObject ?? new JsonObject();
-        row["bounds"] = SafeRect(match.Element);
+        row[BoundsKey] = SafeRect(match.Element);
         return row;
     }
 
@@ -655,16 +659,16 @@ public static partial class GridCommands
         DragScrollDirection direction,
         bool allowFallback = false)
     {
-        if (row["bounds"] is not JsonObject bounds)
+        if (row[BoundsKey] is not JsonObject bounds)
             return null;
 
         var x = bounds["x"]?.GetValue<int>() ?? 0;
         var y = bounds["y"]?.GetValue<int>() ?? 0;
-        var width = Math.Max(1, bounds["width"]?.GetValue<int>() ?? 1);
-        var height = Math.Max(1, bounds["height"]?.GetValue<int>() ?? 1);
+        var width = Math.Max(1, bounds[RowDragWidthKey]?.GetValue<int>() ?? 1);
+        var height = Math.Max(1, bounds[RowDragHeightKey]?.GetValue<int>() ?? 1);
         var dropX = x + (width / 2);
         var gridY = gridBounds["y"]?.GetValue<int>() ?? y;
-        var gridHeight = Math.Max(1, gridBounds["height"]?.GetValue<int>() ?? height);
+        var gridHeight = Math.Max(1, gridBounds[RowDragHeightKey]?.GetValue<int>() ?? height);
         var neutralTop = gridY + (int)Math.Round(gridHeight * RowDragNeutralBandTopRatio);
         var neutralBottom = gridY + (int)Math.Round(gridHeight * RowDragNeutralBandBottomRatio);
         var rowTop = y;
@@ -700,13 +704,13 @@ public static partial class GridCommands
     private static JsonObject DropBandDiagnostics(JsonObject row, JsonObject gridBounds)
     {
         var output = new JsonObject();
-        if (row["bounds"] is not JsonObject bounds)
+        if (row[BoundsKey] is not JsonObject bounds)
             return output;
 
         var y = bounds["y"]?.GetValue<int>() ?? 0;
-        var height = Math.Max(1, bounds["height"]?.GetValue<int>() ?? 1);
+        var height = Math.Max(1, bounds[RowDragHeightKey]?.GetValue<int>() ?? 1);
         var gridY = gridBounds["y"]?.GetValue<int>() ?? y;
-        var gridHeight = Math.Max(1, gridBounds["height"]?.GetValue<int>() ?? height);
+        var gridHeight = Math.Max(1, gridBounds[RowDragHeightKey]?.GetValue<int>() ?? height);
         var neutralTop = gridY + (int)Math.Round(gridHeight * RowDragNeutralBandTopRatio);
         var neutralBottom = gridY + (int)Math.Round(gridHeight * RowDragNeutralBandBottomRatio);
         var rowTop = y;
@@ -728,15 +732,15 @@ public static partial class GridCommands
 
     private static string RowBoundsSignature(JsonObject row)
     {
-        if (row["bounds"] is not JsonObject bounds)
+        if (row[BoundsKey] is not JsonObject bounds)
             return string.Empty;
         return string.Join(
             "|",
             row["row_index"]?.GetValue<int?>(),
             bounds["x"]?.GetValue<int?>(),
             bounds["y"]?.GetValue<int?>(),
-            bounds["width"]?.GetValue<int?>(),
-            bounds["height"]?.GetValue<int?>());
+            bounds[RowDragWidthKey]?.GetValue<int?>(),
+            bounds[RowDragHeightKey]?.GetValue<int?>());
     }
 
     private static void PulseHeldDragPoint(Point point, int holdMs)

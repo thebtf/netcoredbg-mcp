@@ -84,17 +84,17 @@ async def dispatch_probe(
     if kind == "app_diagnostics":
         return await handle_app_diagnostics(probe, context, phase=phase)
     if kind == "file.json":
-        return await handle_file_json(probe, context, phase=phase)
+        return handle_file_json(probe, context, phase=phase)
     if kind == "oracle_pack":
         return await handle_oracle_pack(probe, context, phase=phase)
     if kind == "output.field":
         return await handle_output_field(probe, context, phase=phase)
     if kind == "output.since":
-        return await handle_output_since(probe, context, phase=phase)
+        return await handle_output_since(probe, context)
     if kind == "process.metric":
-        return await handle_process_metric(probe, context, phase=phase)
+        return handle_process_metric(probe, context, phase=phase)
     if kind == "ui.grid":
-        return await handle_ui_grid(probe, context, phase=phase)
+        return await handle_ui_grid(probe, context)
     if kind == "ui.grid.viewport":
         return await handle_ui_grid_viewport(probe, context, phase=phase)
     if kind == "ui.property":

@@ -101,7 +101,7 @@ class InstrumentationGroupService:
             ),
         )
 
-    async def inspect_group(self, name: str) -> InstrumentationResult:
+    def inspect_group(self, name: str) -> InstrumentationResult:
         record = self._groups.get(name)
         if record is None:
             return self._fail("instrumentation group not found", group=name)

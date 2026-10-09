@@ -542,6 +542,14 @@ def _validate_diagnostic_field_shapes(
             errors.append(f"{kind}.{field_name} must be a list")
     _validate_diagnostic_limits(kind, payload, errors)
     _validate_unsafe_diagnostic_evidence(kind, payload, errors)
+    _validate_diagnostic_kind_schema(kind, payload, errors)
+
+
+def _validate_diagnostic_kind_schema(
+    kind: str,
+    payload: dict[str, Any],
+    errors: list[str],
+) -> None:
     if kind == "oracle_pack":
         _validate_oracle_pack_schema(payload, errors)
     elif kind == "app_diagnostics":
@@ -599,6 +607,11 @@ def _validate_unsafe_diagnostic_evidence(
 
 
 def _validate_oracle_pack_schema(payload: dict[str, Any], errors: list[str]) -> None:
+    _validate_oracle_pack_checks(payload, errors)
+    _validate_oracle_pack_sources(payload, errors)
+
+
+def _validate_oracle_pack_checks(payload: dict[str, Any], errors: list[str]) -> None:
     checks = payload.get("checks")
     if isinstance(checks, list):
         for index, check in enumerate(checks):
@@ -614,6 +627,8 @@ def _validate_oracle_pack_schema(payload: dict[str, Any], errors: list[str]) -> 
                 errors.append(f"{prefix}.on_blocked must be an object")
             _validate_next_step(prefix, check.get("on_blocked"), errors)
 
+
+def _validate_oracle_pack_sources(payload: dict[str, Any], errors: list[str]) -> None:
     sources = payload.get("sources")
     if sources is None:
         return
@@ -633,17 +648,24 @@ def _validate_oracle_pack_schema(payload: dict[str, Any], errors: list[str]) -> 
             errors.append(f"{prefix}.id duplicates earlier source id: {source_id}")
         else:
             seen_source_ids.add(source_id)
-        source_probe = source.get("probe")
-        if not isinstance(source_probe, dict):
-            errors.append(f"{prefix}.probe must be an object")
-            continue
-        source_kind = source_probe.get("kind")
-        if source_kind is None:
-            errors.append(f"{prefix}.probe.kind is required")
-        elif source_kind == "oracle_pack":
-            errors.append(f"{prefix}.probe.kind must not be oracle_pack")
-        else:
-            _validate_probe_name(f"{prefix}.probe.kind", source_kind, errors)
+        _validate_oracle_pack_source_probe(prefix, source.get("probe"), errors)
+
+
+def _validate_oracle_pack_source_probe(
+    prefix: str,
+    source_probe: Any,
+    errors: list[str],
+) -> None:
+    if not isinstance(source_probe, dict):
+        errors.append(f"{prefix}.probe must be an object")
+        return
+    source_kind = source_probe.get("kind")
+    if source_kind is None:
+        errors.append(f"{prefix}.probe.kind is required")
+    elif source_kind == "oracle_pack":
+        errors.append(f"{prefix}.probe.kind must not be oracle_pack")
+    else:
+        _validate_probe_name(f"{prefix}.probe.kind", source_kind, errors)
 
 
 def _validate_app_diagnostics_schema(payload: dict[str, Any], errors: list[str]) -> None:
@@ -669,6 +691,14 @@ def _validate_app_diagnostics_freshness_shapes(
     payload: dict[str, Any],
     errors: list[str],
 ) -> None:
+    _validate_app_diagnostics_app_expectations(payload, errors)
+    _validate_app_diagnostics_observed_shapes(payload, errors)
+
+
+def _validate_app_diagnostics_app_expectations(
+    payload: dict[str, Any],
+    errors: list[str],
+) -> None:
     app = payload.get("app")
     if isinstance(app, dict):
         process_id = app.get("process_id") or app.get("expected_process_id")
@@ -682,6 +712,12 @@ def _validate_app_diagnostics_freshness_shapes(
         require_active_process = app.get("require_active_process")
         if require_active_process is not None and not isinstance(require_active_process, bool):
             errors.append("app_diagnostics.app.require_active_process must be a boolean")
+
+
+def _validate_app_diagnostics_observed_shapes(
+    payload: dict[str, Any],
+    errors: list[str],
+) -> None:
     workspace = payload.get("workspace")
     if workspace is not None and not isinstance(workspace, (str, dict)):
         errors.append("app_diagnostics.workspace must be a string or object")
@@ -697,6 +733,13 @@ def _validate_app_diagnostics_freshness_shapes(
     artifacts = payload.get("artifacts")
     if artifacts is not None and not isinstance(artifacts, (list, dict)):
         errors.append("app_diagnostics.artifacts must be a list or object")
+    _validate_app_diagnostics_observed_expectations(payload, errors)
+
+
+def _validate_app_diagnostics_observed_expectations(
+    payload: dict[str, Any],
+    errors: list[str],
+) -> None:
     for field_name in ("modules", "artifacts"):
         field = payload.get(field_name)
         if not isinstance(field, dict):
@@ -722,6 +765,18 @@ def _validate_wait_json_schema(
     if not isinstance(wait_json, dict):
         errors.append(f"app_diagnostics.{field_name} must be an object")
         return
+    _validate_wait_json_path_pattern_schema(wait_json, errors, field_name=field_name)
+    _validate_wait_json_since_schema(wait_json, errors, field_name=field_name)
+    _validate_wait_json_condition_schema(wait_json, errors, field_name=field_name)
+    _validate_wait_json_numeric_schema(wait_json, errors, field_name=field_name)
+
+
+def _validate_wait_json_path_pattern_schema(
+    wait_json: dict[str, Any],
+    errors: list[str],
+    *,
+    field_name: str,
+) -> None:
     path = wait_json.get("path")
     if not isinstance(path, str) or not path:
         errors.append(f"app_diagnostics.{field_name}.path is required")
@@ -731,8 +786,14 @@ def _validate_wait_json_schema(
             errors.append(f"app_diagnostics.{field_name}.pattern must be a string")
         elif "/" in pattern or "\\" in pattern:
             errors.append(f"app_diagnostics.{field_name}.pattern must be a file-name pattern")
-    _validate_wait_json_since_schema(wait_json, errors, field_name=field_name)
-    _validate_wait_json_condition_schema(wait_json, errors, field_name=field_name)
+
+
+def _validate_wait_json_numeric_schema(
+    wait_json: dict[str, Any],
+    errors: list[str],
+    *,
+    field_name: str,
+) -> None:
     for numeric_field in ("timeout_ms", "poll_interval_ms"):
         if numeric_field not in wait_json:
             continue
@@ -1006,7 +1067,7 @@ def _validate_list_fields(plan: dict[str, Any], errors: list[str]) -> None:
             errors.append(f"{field_name} must be a list")
 
 
-def _validate_object_fields(plan: dict[str, Any], errors: list[str]) -> None:
+def _validate_setup_object_fields(plan: dict[str, Any], errors: list[str]) -> None:
     if "preflight" in plan and not isinstance(plan["preflight"], (bool, dict, list)):
         errors.append("preflight must be a boolean, object, or list")
     if "launch" in plan and not isinstance(plan["launch"], dict):
@@ -1017,6 +1078,10 @@ def _validate_object_fields(plan: dict[str, Any], errors: list[str]) -> None:
         errors.append("baseline must be an object")
     if "generate" in plan and not isinstance(plan["generate"], dict):
         errors.append("generate must be an object")
+
+
+def _validate_object_fields(plan: dict[str, Any], errors: list[str]) -> None:
+    _validate_setup_object_fields(plan, errors)
     _validate_diagnostics_field(plan, errors)
     if "metrics_thresholds" in plan and not isinstance(plan["metrics_thresholds"], dict):
         errors.append("metrics_thresholds must be an object")
@@ -1061,16 +1126,20 @@ def _validate_budgets(plan: dict[str, Any], errors: list[str]) -> None:
             errors.append("budgets.max_actions must be at least 1")
     if "max_elapsed_seconds" in budgets:
         max_elapsed = budgets["max_elapsed_seconds"]
-        if isinstance(max_elapsed, bool) or not isinstance(max_elapsed, (int, float)):
-            errors.append("budgets.max_elapsed_seconds must be a number")
+        _validate_max_elapsed_seconds(max_elapsed, errors)
+
+
+def _validate_max_elapsed_seconds(max_elapsed: Any, errors: list[str]) -> None:
+    if isinstance(max_elapsed, bool) or not isinstance(max_elapsed, (int, float)):
+        errors.append("budgets.max_elapsed_seconds must be a number")
+    else:
+        try:
+            elapsed_value = float(max_elapsed)
+        except OverflowError:
+            errors.append("budgets.max_elapsed_seconds must be positive")
         else:
-            try:
-                elapsed_value = float(max_elapsed)
-            except OverflowError:
+            if not math.isfinite(elapsed_value) or elapsed_value <= 0:
                 errors.append("budgets.max_elapsed_seconds must be positive")
-            else:
-                if not math.isfinite(elapsed_value) or elapsed_value <= 0:
-                    errors.append("budgets.max_elapsed_seconds must be positive")
 
 
 def _validate_step_collections(plan: dict[str, Any], errors: list[str]) -> None:
@@ -1116,15 +1185,66 @@ def _validate_step(
         _validate_restore_entry(prefix, args, errors)
 
 
-def _validate_op_args(
+def _validate_grid_state_args(
     prefix: str,
     op_name: str,
     args: dict[str, Any],
     errors: list[str],
 ) -> None:
-    if "selector" in args and not isinstance(args["selector"], dict):
-        errors.append(f"{prefix}.selector must be an object for op {op_name}")
+    if "rows" in args and not isinstance(args["rows"], dict):
+        errors.append(f"{prefix}.rows must be an object for op {op_name}")
+    _validate_optional_string_list(prefix, op_name, args, "columns", errors)
+    if "identity" in args and not isinstance(args["identity"], dict):
+        errors.append(f"{prefix}.identity must be an object for op {op_name}")
 
+
+def _validate_grid_row_operation_args(
+    prefix: str,
+    op_name: str,
+    args: dict[str, Any],
+    errors: list[str],
+) -> None:
+    if op_name in {
+        _OPERATION_UI_GRID_ENSURE_VISIBLE,
+        _OPERATION_UI_GRID_SELECT_ROW,
+        _OPERATION_UI_GRID_CLICK_ROW,
+        _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
+        _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
+    }:
+        if "row" in args and not isinstance(args["row"], dict):
+            errors.append(f"{prefix}.row must be an object for op {op_name}")
+    if op_name == _OPERATION_UI_GRID_ENSURE_VISIBLE:
+        _validate_int_arg(prefix, op_name, args, "max_scrolls", errors)
+        _validate_int_arg(prefix, op_name, args, "scroll_settle_ms", errors)
+    if op_name in {
+        _OPERATION_UI_GRID_SELECT_ROW,
+        _OPERATION_UI_GRID_CLICK_ROW,
+        _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
+        _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
+    }:
+        if "ensure_visible" in args and not isinstance(args["ensure_visible"], bool):
+            errors.append(f"{prefix}.ensure_visible must be a boolean for op {op_name}")
+        _validate_int_arg(prefix, op_name, args, "max_scrolls", errors)
+        _validate_int_arg(prefix, op_name, args, "scroll_settle_ms", errors)
+    if (
+        op_name
+        in {
+            _OPERATION_UI_GRID_CLICK_ROW,
+            _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
+            _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
+        }
+        and "column" in args
+        and not isinstance(args["column"], str)
+    ):
+        errors.append(f"{prefix}.column must be a string for op {op_name}")
+
+
+def _validate_grid_operation_args(
+    prefix: str,
+    op_name: str,
+    args: dict[str, Any],
+    errors: list[str],
+) -> bool:
     if op_name in {
         "ui.grid.snapshot",
         "ui.grid.get_state",
@@ -1134,44 +1254,8 @@ def _validate_op_args(
         _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
         _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
     }:
-        if "rows" in args and not isinstance(args["rows"], dict):
-            errors.append(f"{prefix}.rows must be an object for op {op_name}")
-        _validate_optional_string_list(prefix, op_name, args, "columns", errors)
-        if "identity" in args and not isinstance(args["identity"], dict):
-            errors.append(f"{prefix}.identity must be an object for op {op_name}")
-        if op_name in {
-            _OPERATION_UI_GRID_ENSURE_VISIBLE,
-            _OPERATION_UI_GRID_SELECT_ROW,
-            _OPERATION_UI_GRID_CLICK_ROW,
-            _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
-            _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
-        }:
-            if "row" in args and not isinstance(args["row"], dict):
-                errors.append(f"{prefix}.row must be an object for op {op_name}")
-        if op_name == _OPERATION_UI_GRID_ENSURE_VISIBLE:
-            _validate_int_arg(prefix, op_name, args, "max_scrolls", errors)
-            _validate_int_arg(prefix, op_name, args, "scroll_settle_ms", errors)
-        if op_name in {
-            _OPERATION_UI_GRID_SELECT_ROW,
-            _OPERATION_UI_GRID_CLICK_ROW,
-            _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
-            _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
-        }:
-            if "ensure_visible" in args and not isinstance(args["ensure_visible"], bool):
-                errors.append(f"{prefix}.ensure_visible must be a boolean for op {op_name}")
-            _validate_int_arg(prefix, op_name, args, "max_scrolls", errors)
-            _validate_int_arg(prefix, op_name, args, "scroll_settle_ms", errors)
-        if (
-            op_name
-            in {
-                _OPERATION_UI_GRID_CLICK_ROW,
-                _OPERATION_UI_GRID_RIGHT_CLICK_ROW,
-                _OPERATION_UI_GRID_DOUBLE_CLICK_ROW,
-            }
-            and "column" in args
-            and not isinstance(args["column"], str)
-        ):
-            errors.append(f"{prefix}.column must be a string for op {op_name}")
+        _validate_grid_state_args(prefix, op_name, args, errors)
+        _validate_grid_row_operation_args(prefix, op_name, args, errors)
     elif op_name in {"ui.grid.select_range", "ui.grid.assert_range"}:
         _validate_int_arg(prefix, op_name, args, "start_index", errors)
         _validate_int_arg(prefix, op_name, args, "end_index", errors)
@@ -1182,27 +1266,73 @@ def _validate_op_args(
             errors.append(f"{prefix}.rows must be a list for op {op_name}")
         elif isinstance(rows, list):
             _validate_grid_row_assertions(prefix, op_name, rows, errors)
-    elif op_name in {"ui.list.invoke_item", _OPERATION_UI_LIST_TOGGLE_ITEM_CHILD}:
-        item = args.get("item")
-        if "item" in args and not isinstance(item, dict):
-            errors.append(f"{prefix}.item must be an object for op {op_name}")
-        elif isinstance(item, dict):
-            _validate_list_item_index(prefix, op_name, item, errors)
-        if op_name == _OPERATION_UI_LIST_TOGGLE_ITEM_CHILD:
-            child = args.get("child")
-            if "child" in args and not isinstance(child, dict):
-                errors.append(f"{prefix}.child must be an object for op {op_name}")
-            elif isinstance(child, dict) and not _has_child_selector(child):
-                errors.append(
-                    f"{prefix}.child must include automation_id, name, or control_type "
-                    f"for op {op_name}"
-                )
-            if (
-                "target_state" in args
-                and args["target_state"] is not None
-                and not isinstance(args["target_state"], str)
-            ):
-                errors.append(f"{prefix}.target_state must be a string for op {op_name}")
+    else:
+        return False
+    return True
+
+
+def _validate_list_operation_args(
+    prefix: str,
+    op_name: str,
+    args: dict[str, Any],
+    errors: list[str],
+) -> None:
+    item = args.get("item")
+    if "item" in args and not isinstance(item, dict):
+        errors.append(f"{prefix}.item must be an object for op {op_name}")
+    elif isinstance(item, dict):
+        _validate_list_item_index(prefix, op_name, item, errors)
+    if op_name == _OPERATION_UI_LIST_TOGGLE_ITEM_CHILD:
+        child = args.get("child")
+        if "child" in args and not isinstance(child, dict):
+            errors.append(f"{prefix}.child must be an object for op {op_name}")
+        elif isinstance(child, dict) and not _has_child_selector(child):
+            errors.append(
+                f"{prefix}.child must include automation_id, name, or control_type for op {op_name}"
+            )
+        if (
+            "target_state" in args
+            and args["target_state"] is not None
+            and not isinstance(args["target_state"], str)
+        ):
+            errors.append(f"{prefix}.target_state must be a string for op {op_name}")
+
+
+def _validate_property_operation_args(
+    prefix: str,
+    op_name: str,
+    args: dict[str, Any],
+    errors: list[str],
+) -> None:
+    has_property_argument = args.get("property") is not None
+    has_property_name_argument = args.get("property_name") is not None
+    if not has_property_argument and not has_property_name_argument:
+        errors.append(f"{prefix}.property or property_name is required for op {op_name}")
+    for field_name in ("property", "property_name"):
+        if (
+            field_name in args
+            and args[field_name] is not None
+            and not isinstance(args[field_name], str)
+        ):
+            errors.append(f"{prefix}.{field_name} must be a string for op {op_name}")
+        elif isinstance(args.get(field_name), str) and not args[field_name].strip():
+            errors.append(f"{prefix}.{field_name} must be a non-empty string for op {op_name}")
+
+
+def _validate_op_args(
+    prefix: str,
+    op_name: str,
+    args: dict[str, Any],
+    errors: list[str],
+) -> None:
+    if "selector" in args and not isinstance(args["selector"], dict):
+        errors.append(f"{prefix}.selector must be an object for op {op_name}")
+
+    if _validate_grid_operation_args(prefix, op_name, args, errors):
+        return
+
+    if op_name in {"ui.list.invoke_item", _OPERATION_UI_LIST_TOGGLE_ITEM_CHILD}:
+        _validate_list_operation_args(prefix, op_name, args, errors)
     elif op_name == "ui.key_sequence":
         if "keys" in args and not isinstance(args["keys"], list):
             errors.append(f"{prefix}.keys must be a list for op {op_name}")
@@ -1217,19 +1347,7 @@ def _validate_op_args(
         if "text" in args and not isinstance(args["text"], str):
             errors.append(f"{prefix}.text must be a string for op {op_name}")
     elif op_name == "ui.get_property":
-        has_property_argument = args.get("property") is not None
-        has_property_name_argument = args.get("property_name") is not None
-        if not has_property_argument and not has_property_name_argument:
-            errors.append(f"{prefix}.property or property_name is required for op {op_name}")
-        for field_name in ("property", "property_name"):
-            if (
-                field_name in args
-                and args[field_name] is not None
-                and not isinstance(args[field_name], str)
-            ):
-                errors.append(f"{prefix}.{field_name} must be a string for op {op_name}")
-            elif isinstance(args.get(field_name), str) and not args[field_name].strip():
-                errors.append(f"{prefix}.{field_name} must be a non-empty string for op {op_name}")
+        _validate_property_operation_args(prefix, op_name, args, errors)
 
 
 def _is_int(value: Any) -> TypeGuard[int]:

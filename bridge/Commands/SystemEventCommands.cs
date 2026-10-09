@@ -16,6 +16,7 @@ public static class SystemEventCommands
     }
 
     private const string ThemeChangeEventName = "theme_change";
+    private const string LightModeName = "light";
     private const string PersonalizeRegistryPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize";
     private const string AppsUseLightThemeValueName = "AppsUseLightTheme";
     private const string SystemUsesLightThemeValueName = "SystemUsesLightTheme";
@@ -45,7 +46,7 @@ public static class SystemEventCommands
         }
 
         var requestedMode = @params?["mode"]?.GetValue<string>()?.Trim().ToLowerInvariant() ?? "toggle";
-        if (requestedMode is not ("light" or "dark" or "toggle"))
+        if (requestedMode is not (LightModeName or "dark" or "toggle"))
         {
             throw new ArgumentException(
                 $"Unsupported mode '{requestedMode}'. Supported modes: light, dark, toggle");
@@ -63,12 +64,12 @@ public static class SystemEventCommands
 
         var currentMode = ReadCurrentMode(key);
         var targetMode = requestedMode == "toggle"
-            ? (currentMode == "dark" ? "light" : "dark")
+            ? (currentMode == "dark" ? LightModeName : "dark")
             : requestedMode;
         var previousAppsTheme = CaptureRegistryValue(key, AppsUseLightThemeValueName);
         var previousSystemTheme = CaptureRegistryValue(key, SystemUsesLightThemeValueName);
 
-        var targetValue = targetMode == "light" ? 1 : 0;
+        var targetValue = targetMode == LightModeName ? 1 : 0;
         key.SetValue(AppsUseLightThemeValueName, targetValue, RegistryValueKind.DWord);
         key.SetValue(SystemUsesLightThemeValueName, targetValue, RegistryValueKind.DWord);
         key.Flush();
@@ -130,15 +131,15 @@ public static class SystemEventCommands
         var currentValue = key.GetValue(AppsUseLightThemeValueName);
         if (currentValue is int intValue)
         {
-            return intValue == 0 ? "dark" : "light";
+            return intValue == 0 ? "dark" : LightModeName;
         }
 
         if (currentValue is long longValue)
         {
-            return longValue == 0 ? "dark" : "light";
+            return longValue == 0 ? "dark" : LightModeName;
         }
 
-        return "light";
+        return LightModeName;
     }
 
     private static RegistryValueSnapshot CaptureRegistryValue(RegistryKey key, string valueName)

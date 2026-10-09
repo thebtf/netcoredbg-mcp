@@ -25,6 +25,67 @@ public sealed class SymbolSearchEngineTests
         Assert.Contains("Symbol name must not be empty", argument.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("Marker", "Marker\nxMarker\nMarker9\n_Marker\néMarkeré\nmarker\n", new int[] { 1, 5 })]
+    [InlineData("_Marker9", "_Marker9\nx_Marker9\n_Marker9x\n9_Marker9\né_Marker9é\n", new int[] { 1, 5 })]
+    [InlineData("9Marker", "9Marker\nx9MarkerSuffix\n_9Marker\n", new int[] { 1, 2, 3 })]
+    [InlineData("Märkér", "Märkér\nxMärkérSuffix\n_Märkér\n", new int[] { 1, 2, 3 })]
+    [InlineData("Marker+9", "Marker+9\nxMarker+9Suffix\nMarker999\n", new int[] { 1, 2 })]
+    public void LegacyReferencesPreserveAsciiBoundariesAndLiteralNonIdentifiers(
+        string name, string source, int[] expectedLines)
+    {
+        using var root = TestRoot.Create();
+        root.Write("References.cs", source);
+        var engine = new SymbolSearchEngine(root.Path, LegacySearchPolicy.Instance);
+
+        var references = engine.FindCodeReferences(name, 100);
+
+        Assert.Equal(expectedLines, references.Select(static match => match.Line));
+        Assert.All(references, static match => Assert.Equal("References.cs", match.File));
+    }
+
+    [Fact]
+    public void LegacyPolicySourceRegexTimeoutRefusesEarlierSymbolResults()
+    {
+        using var root = TestRoot.Create();
+        const string declaration = "public int TimeoutMarker { get; set; }\n";
+        root.Write("Source.cs", declaration);
+        var engine = new SymbolSearchEngine(root.Path, LegacySearchPolicy.Instance);
+        Assert.Equal([1], engine.FindCodeSymbol("TimeoutMarker", "property").Select(static match => match.Line));
+        root.Write("Source.cs", declaration
+            + string.Concat(Enumerable.Repeat("public ", 8192)) + "int TimeoutMarker ;\n");
+        IReadOnlyList<SymbolMatch>? results = null;
+
+        var timeout = Assert.Throws<System.Text.RegularExpressions.RegexMatchTimeoutException>(
+            () => results = engine.FindCodeSymbol("TimeoutMarker", "property"));
+
+        Assert.Null(results);
+        Assert.True(timeout.MatchTimeout > TimeSpan.Zero);
+        Assert.True(timeout.MatchTimeout <= TimeSpan.FromMilliseconds(100));
+        Assert.Equal("public int TimeoutMarker { get; set; }", engine.GetSourceContext("Source.cs", 1, 0).Lines.Single().Text);
+    }
+
+    [Fact]
+    public void LegacyPolicyIgnoreRegexTimeoutRefusesEarlierSymbolResults()
+    {
+        using var root = TestRoot.Create();
+        root.Write(".gitignore", string.Concat(Enumerable.Repeat("*a", 24)) + "[bc].cs\n");
+        const string declaration = "public class TimeoutMarker { }\n";
+        root.Write("A.cs", declaration);
+        var engine = new SymbolSearchEngine(root.Path, LegacySearchPolicy.Instance);
+        Assert.Equal(["A.cs"], engine.FindCodeSymbol("TimeoutMarker", "class").Select(static match => match.File));
+        root.Write(new string('a', 40) + "d.cs", declaration);
+        IReadOnlyList<SymbolMatch>? results = null;
+
+        var timeout = Assert.Throws<System.Text.RegularExpressions.RegexMatchTimeoutException>(
+            () => results = engine.FindCodeSymbol("TimeoutMarker", "class"));
+
+        Assert.Null(results);
+        Assert.True(timeout.MatchTimeout > TimeSpan.Zero);
+        Assert.True(timeout.MatchTimeout <= TimeSpan.FromMilliseconds(100));
+        Assert.Equal("public class TimeoutMarker { }", engine.GetSourceContext("A.cs", 1, 0).Lines.Single().Text);
+    }
+
     [Fact]
     public void LegacyPolicyClampsSourceContextRadiusWithoutIntegerOverflow()
     {
@@ -197,6 +258,55 @@ public sealed class SymbolSearchEngineTests
             failure.Failure);
         Assert.DoesNotContain(root.Path, failure.Message, StringComparison.Ordinal);
         Assert.DoesNotContain(external.Path, failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PreviewPolicyRefusesNestedEscapingReparseDirectoryWithoutReturningEarlierMatch()
+    {
+        using var root = TestRoot.Create();
+        using var external = TestRoot.Create();
+        const string marker = "DirectoryBoundaryMarker";
+        root.Write("Z-Earlier.cs", $"public sealed class {marker} {{ }}\n");
+        root.Write("Nested/Escaping/ExternalSecret.cs", "public sealed class ExternalSecretMarker { }\n");
+        external.Write("ExternalSecret.cs", "public sealed class ExternalSecretMarker { }\n");
+        Assert.Equal(
+            "Z-Earlier.cs",
+            Assert.Single(new SymbolSearchEngine(root.Path, PreviewSearchPolicy.Instance)
+                .FindCodeSymbol(marker, "class")).File);
+        var earlierFile = Path.Combine(root.Path, "Z-Earlier.cs");
+        var escapingDirectory = Path.Combine(root.Path, "Nested", "Escaping");
+        var linkedFile = Path.Combine(escapingDirectory, "ExternalSecret.cs");
+        var externalFile = Path.Combine(external.Path, "ExternalSecret.cs");
+        var inspector = new TestStrictPathInspector(new Dictionary<string, StrictPathInfo>(StringComparer.Ordinal)
+        {
+            [escapingDirectory] = new(
+                Exists: true,
+                IsDirectory: true,
+                IsReparsePoint: true,
+                FinalTarget: external.Path),
+        });
+        var opened = new List<string>();
+        var engine = new SymbolSearchEngine(
+            root.Path,
+            PreviewSearchPolicy.Instance,
+            inspector,
+            openRead: path =>
+            {
+                opened.Add(path);
+                return File.OpenRead(path);
+            });
+
+        var failure = Assert.Throws<SearchFailureException>(
+            () => engine.FindCodeSymbol(marker, "class"));
+
+        Assert.Equal(
+            new SearchFailure("preview_path_refused", "PREVIEW_PATH_REFUSED", "find_code_symbol"),
+            failure.Failure);
+        Assert.Equal("PREVIEW_PATH_REFUSED", failure.Message);
+        Assert.Equal([earlierFile], opened);
+        Assert.Contains(escapingDirectory, inspector.InspectedPaths, StringComparer.Ordinal);
+        Assert.DoesNotContain(linkedFile, inspector.InspectedPaths, StringComparer.Ordinal);
+        Assert.DoesNotContain(externalFile, inspector.InspectedPaths, StringComparer.Ordinal);
     }
 
     [Fact]

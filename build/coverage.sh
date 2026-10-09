@@ -83,6 +83,8 @@ done
 cd "$shell_repo_root"
 mkdir -p "$(dirname "$shell_python_data")" "$(dirname "$shell_python_report")"
 python_cache_directory="$(dirname "$shell_python_data")/.pytest_cache"
+# pytest clears --basetemp; reserve only a fresh child of the claimed Python root.
+python_base_temp="$(mktemp -d "$(dirname "$shell_python_data")/pytest.XXXXXXXX")"
 python_test_paths=(
   tests/test_app_type.py
   tests/test_backends.py
@@ -103,10 +105,13 @@ python_test_paths=(
   tests/test_project_utils.py
   tests/test_protocol.py
   tests/test_resource_updates.py
+  tests/test_runtime_smoke_lifecycle.py
   tests/test_runtime_smoke_runner.py
   tests/test_runtime_smoke_schema.py
   tests/test_runtime_smoke_v2_actions.py
   tests/test_runtime_smoke_v2_cleanup.py
+  tests/test_runtime_smoke_v2_probes/
+  tests/test_send_keys.py
   tests/test_session.py
   tests/test_source_context.py
   tests/test_state.py
@@ -116,9 +121,14 @@ python_test_paths=(
   tests/test_ui_grid_helpers.py
   tests/test_ui_new_tools.py
   tests/test_ui_screenshot.py
+  tests/test_temp_manager.py
+  tests/test_ui_hover.py
+  tests/test_sonarqube_exact_head_runner.py
+  tests/test_stateless_preview_artifact.py
+  tests/test_windows_process_owner.py
 )
-coverage run --source=src/netcoredbg_mcp --data-file="$shell_python_data" -m pytest \
-  --cache-clear -o "cache_dir=$python_cache_directory" "${python_test_paths[@]}"
+coverage run --source=src/netcoredbg_mcp,scripts --data-file="$shell_python_data" -m pytest \
+  --basetemp="$python_base_temp" --cache-clear -o "cache_dir=$python_cache_directory" "${python_test_paths[@]}"
 coverage xml --data-file="$shell_python_data" -o "$shell_python_report"
 
 coverage_root="$(dirname "$(dirname "$shell_python_data")")"
@@ -150,6 +160,12 @@ for index in "${!dotnet_ids[@]}"; do
   fi
   mkdir -p "$(dirname "$output_prefix")"
   dotnet restore "$project" -nr:false
+  if [[ "${dotnet_ids[$index]}" == "stateless" ]]; then
+    dotnet build "$project" --configuration Debug --no-restore -nr:false
+    python "$shell_repo_root/scripts/run_sonarqube_exact_head.py" collector-stateless \
+      "$shell_repo_root" "$project" "$output_prefix.cobertura.xml" "$include_directory"
+    continue
+  fi
 
   test_arguments=(
     "$project"
@@ -163,11 +179,12 @@ for index in "${!dotnet_ids[@]}"; do
   if [[ "$include_directory" != "-" ]]; then
     test_arguments+=("-p:IncludeDirectory=$include_directory")
   fi
-  if [[ "${dotnet_ids[$index]}" == "stateless" ]]; then
-    test_arguments+=(--filter "Coverage!=Exclude")
-  fi
   if [[ "${dotnet_ids[$index]}" == "stateless-preview" ]]; then
     NETCOREDBG_PREVIEW_ARTIFACT_ROOT="$preview_artifact_directory" dotnet test "${test_arguments[@]}"
+  elif [[ "${dotnet_ids[$index]}" == "host" ]]; then
+    # RootsRelay real-Python fixtures allocate fresh children below this claimed input root.
+    # Their child TEMP/TMP/TMPDIR inherit each owned fixture, never global OS TEMP.
+    NETCOREDBG_TEST_SCRATCH_ROOT="$(dirname "$output_prefix")/scratch" dotnet test "${test_arguments[@]}"
   else
     dotnet test "${test_arguments[@]}"
   fi

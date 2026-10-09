@@ -36,7 +36,6 @@ def test_named_pack_manifest_can_be_written_read_and_bounded(
     manifest = build_pack_manifest(
         pack_id="wpf-grid-oracle-pack",
         run_id="run-123",
-        evidence_dir=tmp_path,
         sources=[_source_entry()],
         rollups={
             "cleanup": {"status": "PASS", "source_ids": ["app-diagnostics-main"]},
@@ -116,7 +115,6 @@ def test_named_pack_manifest_rejects_malformed_or_unsafe_refs(
     malformed = build_pack_manifest(
         pack_id="wpf-grid-oracle-pack",
         run_id="run-123",
-        evidence_dir=tmp_path,
         sources=[_source_entry(artifact_path="../secrets/app-diagnostics.json")],
         rollups={
             "cleanup": {"status": "PASS", "source_ids": ["app-diagnostics-main"]},

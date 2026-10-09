@@ -9,15 +9,12 @@ dev_stand: optional
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
-    import tomli as tomllib
 
 import pytest
 
@@ -155,24 +152,129 @@ def test_publish_workflow_uses_node24_compatible_action_pins() -> None:
 
 
 @pytest.mark.critical
-def test_sdist_excludes_agent_and_build_residue() -> None:
+def test_sdist_excludes_agent_and_build_residue(tmp_path: Path) -> None:
     """@critical category: data-consistency — release sdist excludes local residue."""
 
-    assert PYPROJECT.exists(), "pyproject.toml is missing"
-    pyproject_data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
-    exclude = pyproject_data["tool"]["hatch"]["build"]["targets"]["sdist"]["exclude"]
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.fail("ORACLE_ENVIRONMENT: the existing uv build frontend is unavailable")
 
-    for pattern in (
-        "/.agent*",
-        "/.agent*/**",
-        "/.venv/**",
-        "/dist/**",
-        "/**/bin",
-        "/**/bin/**",
-        "/**/obj",
-        "/**/obj/**",
-    ):
-        assert pattern in exclude
+    project = tmp_path / "project"
+    output = tmp_path / "artifacts"
+    project.mkdir()
+    source_paths = [
+        PYPROJECT,
+        *(
+            PROJECT_ROOT / path
+            for path in (
+                "README.md",
+                "LICENSE",
+                ".coveragerc",
+                "uv.lock",
+                "bridge/FlaUIBridge.csproj",
+                "bridge/JsonRpcHandler.cs",
+                "bridge/Program.cs",
+                "bridge/app.manifest",
+                "scripts/build-netcoredbg-enc.ps1",
+                "tools/enc_compiler/EncCompiler.csproj",
+                "tools/enc_compiler/DeltaEmitter.cs",
+                "tools/enc_compiler/Program.cs",
+            )
+        ),
+        *(PROJECT_ROOT / "src/netcoredbg_mcp").rglob("*.py"),
+        *(PROJECT_ROOT / "bridge/Commands").rglob("*.cs"),
+    ]
+    retained = {}
+    for source in source_paths:
+        relative = source.relative_to(PROJECT_ROOT)
+        contents = source.read_bytes()
+        destination = project / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(contents)
+        retained[relative.as_posix()] = contents
+    fixture_xml = "tests/fixtures/packaging/input.xml"
+    retained[fixture_xml] = b"<fixture><input>maintained XML</input></fixture>\n"
+    xml_path = project / fixture_xml
+    xml_path.parent.mkdir(parents=True)
+    xml_path.write_bytes(retained[fixture_xml])
+
+    residue = {
+        ".coverage",
+        ".coverage.worker",
+        ".netcoredbg-mcp.pid",
+        "host/NetCoreDbg.Mcp.Host.Tests/.tmp/host-coverage-focused/coverage.cobertura.xml",
+        "host/NetCoreDbg.Mcp.Host.Tests/.tmp/host-coverage-full/coverage.cobertura.xml",
+        "host/NetCoreDbg.Mcp.Host.Tests/.tmp/host-coverage-isolated/coverage.cobertura.xml",
+        "host/NetCoreDbg.Mcp.Stateless.Preview.Tests/coverage.cobertura.xml",
+        "host/NetCoreDbg.Mcp.Stateless.Tests/TestResults/"
+        "Kirill_Turanskiy_HYPERION_2026-10-03_23_49_22.trx",
+        "tests/dotnet/NetCoreDbg.Mcp.Host.PromptTests/.tmp/"
+        "host-prompts-coverage-focused/coverage.cobertura.xml",
+        "tmp/full-connect-phase-preparation/HANDOFF.md",
+        "tmp/full-connect-phase-preparation/TEMP-overlay.patch",
+        "tmp/full-connect-phase-preparation/TEMP-removal.hashline",
+        "tmp/full-connect-phase-preparation/TEMP-removal.patch",
+        "tmp/full-connect-phase-preparation/postprobe-sha256.json",
+        "tmp/full-connect-phase-preparation/preprobe-sha256.json",
+        "tmp/full-connect-phase-preparation/preprobe/bridge/Commands/ElementCommands.cs",
+        "tmp/full-connect-phase-preparation/preprobe/bridge/JsonRpcHandler.cs",
+        "tmp/full-connect-phase-preparation/preprobe/host/NetCoreDbg.Mcp.Stateless.Tests/"
+        "NativeScene/ElementCommandsBehaviorTests.cs",
+        ".agent/proof.json",
+        ".agent-local/proof.json",
+        ".venv/runtime.txt",
+        ".pytest_cache/cache.txt",
+        ".mypy_cache/cache.txt",
+        ".ruff_cache/cache.txt",
+        ".tmp/proof.json",
+        "build/generated.txt",
+        "dist/old-package.tar.gz",
+        "htmlcov/index.html",
+        "__pycache__/root.pyc",
+        "src/netcoredbg_mcp/__pycache__/runtime.pyc",
+        "bridge/bin/generated.dll",
+        "bridge/obj/project.assets.json",
+    }
+    for relative in residue:
+        destination = project / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"local runtime residue must not ship\n")
+
+    result = subprocess.run(
+        [
+            uv,
+            "build",
+            "--offline",
+            "--sdist",
+            "--python",
+            sys.executable,
+            "--out-dir",
+            str(output),
+            str(project),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "TMP": str(tmp_path), "TEMP": str(tmp_path), "TMPDIR": str(tmp_path)},
+        timeout=60,
+    )
+    assert result.returncode == 0, (
+        "ORACLE_ENVIRONMENT: sdist frontend failed before the archive oracle; "
+        f"this is not contamination RED\n{result.stdout}\n{result.stderr}"
+    )
+    with tarfile.open(output / f"netcoredbg_mcp-{__version__}.tar.gz", "r:gz") as archive:
+        members = {
+            member.name.split("/", 1)[1]: member
+            for member in archive.getmembers()
+            if member.isfile()
+        }
+        assert residue.isdisjoint(members), sorted(residue.intersection(members))
+        assert retained.keys() <= members.keys(), sorted(retained.keys() - members.keys())
+        for relative, expected in retained.items():
+            stream = archive.extractfile(members[relative])
+            assert stream is not None, relative
+            with stream:
+                assert stream.read() == expected, relative
 
 
 @pytest.mark.critical

@@ -22,6 +22,7 @@ public partial class MainWindow : Window
     private readonly MainViewModel _viewModel = new();
     private readonly Stack<Action> _undoStack = new();
     private readonly List<object> _keyEvents = new();
+    private IntPtr _queueKeyEventHwnd;
     private readonly string? _mutableFile;
     private const string CanonicalMutableFileBaseline = "baseline";
     private long _galleryGeneration;
@@ -101,30 +102,39 @@ public partial class MainWindow : Window
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
-        HwndSource.FromHwnd(new WindowInteropHelper(this).Handle)?.AddHook(ObserveKeyMessages);
+        Dispatcher.VerifyAccess();
+        _queueKeyEventHwnd = new WindowInteropHelper(this).Handle;
+        ComponentDispatcher.ThreadFilterMessage += ObserveKeyMessages;
     }
 
-    private IntPtr ObserveKeyMessages(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    private void ObserveKeyMessages(ref MSG msg, ref bool handled)
     {
-        if (msg is not (0x0100 or 0x0101 or 0x0104 or 0x0105))
+        if (msg.hwnd != _queueKeyEventHwnd || msg.message is not (0x0100 or 0x0101 or 0x0104 or 0x0105))
         {
-            return IntPtr.Zero;
+            return;
         }
 
-        var bits = lParam.ToInt64();
+        var bits = msg.lParam.ToInt64();
         _keyEvents.Add(new
         {
-            vk = wParam.ToInt64(),
+            vk = msg.wParam.ToInt64(),
             scan = (bits >> 16) & 0xFF,
             extended = (bits & (1L << 24)) != 0,
-            down = msg is 0x0100 or 0x0104,
+            down = msg.message is 0x0100 or 0x0104,
         });
         if (_keyEvents.Count > 32)
         {
             _keyEvents.RemoveAt(0);
         }
         _viewModel.KeyEventStatusText = JsonSerializer.Serialize(_keyEvents);
-        return IntPtr.Zero;
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        Dispatcher.VerifyAccess();
+        ComponentDispatcher.ThreadFilterMessage -= ObserveKeyMessages;
+        _queueKeyEventHwnd = IntPtr.Zero;
+        base.OnClosed(e);
     }
 
     public MainWindow()
@@ -149,6 +159,7 @@ public partial class MainWindow : Window
             ContentRendered += OnCalibrationContentRendered;
             Closed += OnCalibrationClosed;
         }
+        ContentRendered += ((App)Application.Current).OnMainWindowContentRendered;
     }
     private void ResetGallery_Click(object sender, RoutedEventArgs e)
     {

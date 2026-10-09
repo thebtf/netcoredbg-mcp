@@ -181,6 +181,16 @@ AnalysisEvidence {
 
 For each language, the runner requires complete component paging, at least one mapped path, positive lines to cover, positive covered lines, and a branch measure. A project aggregate never proves both reports were imported.
 
+Only `BLOCKED` may retain an `IncompleteAnalysisEvidence` object: the same
+aggregate, condition, and complete language-component fields plus
+`status: INCOMPLETE`. Its observation fields are exactly `submitted: true`,
+`current_before_measures: true`, `current_after_measures: true | null`, and
+`current_final: null`. Null means no successful matching observation at that
+stage; it is never filled from an earlier query. The after-measure query occurs
+after all aggregate/component reads; final is observed only after successful
+cleanup and post-cleanliness. Completed diagnostic and PASS shapes are unchanged
+and require every observation true, with no incomplete-status field.
+
 ## Diagnostic inventory authority
 
 `DiagnosticInventoryV1` is a create-new artifact. It stores the canonical identity and complete issue and hotspot inventories. Each page summary has `complete: true`, `result_empty`, page size and count, total, record count, full-key SHA-256, blocking-key count, and blocking-key SHA-256. Each issue record retains its key, component, path, rule, status, resolution, type, and severity. Each hotspot record retains its key, component, path, rule, and status.

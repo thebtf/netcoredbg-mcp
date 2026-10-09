@@ -112,7 +112,7 @@ async def test_create_and_inspect_group_returns_hits_and_trace_logs() -> None:
         TraceEntry(time.monotonic(), source, 20, "i", "2", 1, tracepoint_id)
     )
 
-    inspected = (await service.inspect_group("flow")).to_dict()
+    inspected = (service.inspect_group("flow")).to_dict()
 
     assert created_data["status"] == "PASS"
     assert created_data["summary"]["group"] == "flow"
@@ -145,7 +145,7 @@ async def test_duplicate_group_rejected_without_mutating_existing_group() -> Non
     assert first.to_dict()["status"] == "PASS"
     assert duplicate.to_dict()["status"] == "FAIL"
     assert duplicate.to_dict()["reason"] == "instrumentation group already exists"
-    assert (await service.inspect_group("flow")).to_dict()["breakpoints"][0]["line"] == 10
+    assert (service.inspect_group("flow")).to_dict()["breakpoints"][0]["line"] == 10
 
 
 @pytest.mark.asyncio
@@ -164,7 +164,7 @@ async def test_clear_group_reports_leaked_group_owned_breakpoints() -> None:
     assert cleared["leaks"] == [
         {"kind": "breakpoint", "file": os.path.normpath(source), "line": 10}
     ]
-    assert (await service.inspect_group("flow")).to_dict()["status"] == "PASS"
+    assert (service.inspect_group("flow")).to_dict()["status"] == "PASS"
 
 
 @pytest.mark.asyncio
@@ -180,7 +180,7 @@ async def test_unknown_group_clear_fails_without_mutating_other_groups() -> None
 
     assert unknown["status"] == "FAIL"
     assert unknown["reason"] == "instrumentation group not found"
-    assert (await service.inspect_group("flow")).to_dict()["status"] == "PASS"
+    assert (service.inspect_group("flow")).to_dict()["status"] == "PASS"
 
 
 @pytest.mark.asyncio

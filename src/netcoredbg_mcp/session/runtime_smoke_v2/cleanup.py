@@ -5,6 +5,11 @@ from typing import Any
 
 from .actions import ActionContext
 
+_DEBUG_TRACE_LOG_CLEAR = "debug.trace_log.clear"
+_UI_DISCONNECT = "ui.disconnect"
+_DEBUG_STOP = "debug.stop"
+_PROCESS_REGISTRY_ASSERT_EMPTY = "process.registry.assert_empty"
+
 
 async def run_cleanup(
     cleanup_steps: list[dict[str, Any]],
@@ -47,9 +52,9 @@ async def run_cleanup(
                     and result.get("removed") is True
                 ):
                     tracepoints_removed += 1
-            elif kind == "debug.trace_log.clear":
-                attempted.append("debug.trace_log.clear")
-                result = await context.call_adapter("debug.trace_log.clear")
+            elif kind == _DEBUG_TRACE_LOG_CLEAR:
+                attempted.append(_DEBUG_TRACE_LOG_CLEAR)
+                result = await context.call_adapter(_DEBUG_TRACE_LOG_CLEAR)
             elif kind == "isolated_profile.teardown":
                 profile = str(step.get("profile") or "auto")
                 attempted.append(f"isolated_profile.teardown:{profile}")
@@ -59,20 +64,20 @@ async def run_cleanup(
                 )
                 if str(result.get("status", "PASS")) == "PASS":
                     isolated_profiles_torn_down += 1
-            elif kind == "ui.disconnect":
-                attempted.append("ui.disconnect")
-                result = await context.call_adapter("ui.disconnect")
-            elif kind == "debug.stop":
+            elif kind == _UI_DISCONNECT:
+                attempted.append(_UI_DISCONNECT)
+                result = await context.call_adapter(_UI_DISCONNECT)
+            elif kind == _DEBUG_STOP:
                 mode = str(step.get("mode") or "graceful")
                 attempted.append(f"debug.stop:{mode}")
-                result = await context.call_adapter("debug.stop", mode=mode)
+                result = await context.call_adapter(_DEBUG_STOP, mode=mode)
                 debug_stop = {
                     "status": str(result.get("status", "PASS")),
                     "mode": mode,
                     "result": result,
                 }
-            elif kind == "process.registry.assert_empty":
-                attempted.append("process.registry.assert_empty")
+            elif kind == _PROCESS_REGISTRY_ASSERT_EMPTY:
+                attempted.append(_PROCESS_REGISTRY_ASSERT_EMPTY)
                 result = await context.call_adapter("process.registry.count")
                 if str(result.get("status", "PASS")) == "PASS":
                     raw_count = result.get("count", 0)
@@ -100,7 +105,7 @@ async def run_cleanup(
                 }
         except Exception as exc:
             result = _cleanup_adapter_exception_result(exc)
-            if kind == "debug.stop":
+            if kind == _DEBUG_STOP:
                 debug_stop = {
                     "status": "FAIL",
                     "mode": str(step.get("mode") or "graceful"),
@@ -148,14 +153,14 @@ def _cleanup_execution_order(cleanup_steps: list[dict[str, Any]]) -> list[dict[s
     registry_asserts = [
         step
         for step in ordered
-        if str(step.get("kind") or "") == "process.registry.assert_empty"
+        if str(step.get("kind") or "") == _PROCESS_REGISTRY_ASSERT_EMPTY
     ]
     if not registry_asserts:
         return ordered
     non_registry_steps = [
         step
         for step in ordered
-        if str(step.get("kind") or "") != "process.registry.assert_empty"
+        if str(step.get("kind") or "") != _PROCESS_REGISTRY_ASSERT_EMPTY
     ]
     return [*non_registry_steps, *registry_asserts]
 

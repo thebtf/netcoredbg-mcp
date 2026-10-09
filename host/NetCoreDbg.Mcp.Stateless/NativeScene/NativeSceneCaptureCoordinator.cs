@@ -13,6 +13,24 @@ internal sealed class NativeSceneCaptureCoordinator
 {
     private const string ArtifactSchemaVersion = "native-scene-artifact/1";
     private const string NativeSceneMediaType = "application/vnd.netcoredbg.native-scene+json";
+    private const string StableStatus = "STABLE";
+    private const string NotApplicableAuthority = "not_applicable";
+    private const string UnobservableStatus = "UNOBSERVABLE";
+    private const string PartialStatus = "PARTIAL";
+    private const string UiaGuardedAuthority = "uia_guarded";
+    private const string UnobservableState = "unobservable";
+    private const string NodeIdProperty = "nodeId";
+    private const string SchemaVersionProperty = "schemaVersion";
+    private const string StatusProperty = "status";
+    private const string ProcessIdProperty = "processId";
+    private const string AutomationIdProperty = "automationId";
+    private const string RelationsProperty = "relations";
+    private const string ContractIdProperty = "contractId";
+    private const string AccessibilityProperty = "accessibility";
+    private const string TransformProperty = "transform";
+    private const string StateProperty = "state";
+    private const string AuthorityProperty = "authority";
+    private const string IdentityProperty = "identity";
     private const int MaximumNodes = 4_096;
     private const int MaximumArtifactBytes = 16 * 1024 * 1024;
     private static readonly TimeSpan ArtifactRetention = TimeSpan.FromHours(4);
@@ -126,7 +144,7 @@ internal sealed class NativeSceneCaptureCoordinator
             captureId,
             capturedAt,
             isElement
-                ? new JsonObject { ["authority"] = "not_applicable" }
+                ? new JsonObject { [AuthorityProperty] = NotApplicableAuthority }
                 : UnobservableGuardedAtomicity(),
             new JsonArray
             {
@@ -149,23 +167,13 @@ internal sealed class NativeSceneCaptureCoordinator
     {
         if (isElement)
         {
-            var selected = SelectElement(normalized.Nodes, selector);
-            if (selected.Count == 0)
+            var (selected, error) = SelectElement(normalized, selector, tool);
+            if (error is not null)
             {
-                return ToolError(tool, "ELEMENT_NOT_FOUND", "No element matches the requested selector.");
+                return error;
             }
 
-            if (selected.Count > 1)
-            {
-                return ToolError(tool, "ELEMENT_AMBIGUOUS", "The requested selector matches multiple elements.");
-            }
-
-            normalized = normalized with
-            {
-                Nodes = new JsonArray(DeepClone(selected[0])),
-                RootId = selected[0]!["nodeId"]!.GetValue<string>(),
-                Atomicity = new JsonObject { ["authority"] = "not_applicable" },
-            };
+            normalized = selected;
         }
 
         _setCaptureStabilityObservation(normalized.StabilityObservation);
@@ -185,14 +193,14 @@ internal sealed class NativeSceneCaptureCoordinator
         }
 
         if (normalized.Authority == CaptureAuthority.InProcess &&
-            !StringComparer.Ordinal.Equals(ReadString(stability, "status"), "STABLE"))
+            !StringComparer.Ordinal.Equals(ReadString(stability, StatusProperty), StableStatus))
         {
             return ToolError(tool, "UI_NOT_STABLE", "Capture-time stability requirements are not met.");
         }
 
         var status = ClassifyStatus(normalized, stability, isElement);
         var issues = BuildIssues(normalized, stability, isElement);
-        if (status == "UNOBSERVABLE")
+        if (status == UnobservableStatus)
         {
             return CreateUnobservableManifest(
                 isElement,
@@ -313,27 +321,27 @@ internal sealed class NativeSceneCaptureCoordinator
 
     private static string ClassifyStatus(NormalizedCapture capture, JsonObject stability, bool isElement)
     {
-        if (!StringComparer.Ordinal.Equals(ReadString(stability, "status"), "STABLE"))
+        if (!StringComparer.Ordinal.Equals(ReadString(stability, StatusProperty), StableStatus))
         {
-            return capture.Nodes.Count == 0 ? "UNOBSERVABLE" : "PARTIAL";
+            return capture.Nodes.Count == 0 ? UnobservableStatus : PartialStatus;
         }
 
         if (isElement)
         {
-            return capture.Complete ? "COMPLETE" : "PARTIAL";
+            return capture.Complete ? "COMPLETE" : PartialStatus;
         }
 
         return capture.Authority == CaptureAuthority.InProcess &&
                capture.Complete &&
                capture.RevisionBefore == capture.RevisionAfter
             ? "COMPLETE"
-            : "PARTIAL";
+            : PartialStatus;
     }
 
     private static JsonArray BuildIssues(NormalizedCapture capture, JsonObject stability, bool isElement)
     {
         var issues = DeepClone(capture.Issues) as JsonArray ?? new JsonArray();
-        if (!StringComparer.Ordinal.Equals(ReadString(stability, "status"), "STABLE"))
+        if (!StringComparer.Ordinal.Equals(ReadString(stability, StatusProperty), StableStatus))
         {
             AddIssueOnce(issues, "CAPTURE_REVALIDATION_FAILED", "Capture-time stability could not be fully revalidated.");
         }
@@ -380,10 +388,10 @@ internal sealed class NativeSceneCaptureCoordinator
         new()
         {
             ["kind"] = isElement ? "element_snapshot_capture" : "native_scene_capture",
-            ["status"] = status,
+            [StatusProperty] = status,
             ["captureId"] = captureId,
             ["protocolVersion"] = "native-scene-probe/1",
-            ["schemaVersion"] = "native-scene-probe.schema/1",
+            [SchemaVersionProperty] = "native-scene-probe.schema/1",
             ["sceneRequest"] = CloneObject(sceneRequest),
             ["evidenceScope"] = null,
             ["capturedAt"] = Timestamp(capturedAt),
@@ -407,7 +415,7 @@ internal sealed class NativeSceneCaptureCoordinator
         JsonObject? stability = null) =>
         CreateManifest(
             isElement,
-            "UNOBSERVABLE",
+            UnobservableStatus,
             sceneRequest,
             selector,
             candidate,
@@ -433,11 +441,11 @@ internal sealed class NativeSceneCaptureCoordinator
         new()
         {
             ["kind"] = "native_scene_artifact",
-            ["schemaVersion"] = ArtifactSchemaVersion,
+            [SchemaVersionProperty] = ArtifactSchemaVersion,
             ["protocolVersion"] = "native-scene-probe/1",
             ["captureId"] = captureId,
             ["capturedAt"] = Timestamp(capturedAt),
-            ["status"] = status,
+            [StatusProperty] = status,
             ["observationKind"] = observationKind,
             ["sceneRequest"] = CloneObject(sceneRequest),
             ["candidate"] = DeepClone(candidate),
@@ -481,17 +489,17 @@ internal sealed class NativeSceneCaptureCoordinator
         var request = new JsonObject
         {
             ["operation"] = tool,
-            ["processId"] = target.ProcessId,
+            [ProcessIdProperty] = target.ProcessId,
             ["processIdentity"] = target.ProcessIdentity,
             ["hwnd"] = target.ProcessId,
             ["maxNodes"] = MaximumNodes,
         };
         if (selector.ValueKind == JsonValueKind.Object &&
-            selector.TryGetProperty("automationId", out var automationId) &&
+            selector.TryGetProperty(AutomationIdProperty, out var automationId) &&
             automationId.ValueKind == JsonValueKind.String &&
             automationId.GetString() is { Length: > 0 } value)
         {
-            request["selector"] = new JsonObject { ["automationId"] = value };
+            request["selector"] = new JsonObject { [AutomationIdProperty] = value };
         }
 
         return request;
@@ -503,12 +511,12 @@ internal sealed class NativeSceneCaptureCoordinator
     private static bool TryNormalizeProbe(JsonObject source, NativeSceneTargetIdentity target, out NormalizedCapture capture)
     {
         capture = default!;
-        if (!StringComparer.Ordinal.Equals(ReadString(source, "authority"), "in_process_probe") ||
+        if (!StringComparer.Ordinal.Equals(ReadString(source, AuthorityProperty), "in_process_probe") ||
             source["candidate"] is not JsonObject candidate ||
-            !TryReadInt32(candidate, "processId", out var processId) || processId != target.ProcessId ||
+            !TryReadInt32(candidate, ProcessIdProperty, out var processId) || processId != target.ProcessId ||
             !StringComparer.Ordinal.Equals(ReadString(candidate, "processIdentity"), target.ProcessIdentity) ||
             source["process"] is not JsonObject process ||
-            !TryReadInt32(process, "processId", out var observedProcessId) || observedProcessId != target.ProcessId ||
+            !TryReadInt32(process, ProcessIdProperty, out var observedProcessId) || observedProcessId != target.ProcessId ||
             !TryReadInt64(source, "revisionBefore", out var revisionBefore) || revisionBefore < 0 ||
             !TryReadInt64(source, "revisionAfter", out var revisionAfter) || revisionAfter < 0 ||
             !TryReadBoolean(source, "complete", out var complete) ||
@@ -529,7 +537,7 @@ internal sealed class NativeSceneCaptureCoordinator
             CaptureAuthority.InProcess,
             new JsonObject
             {
-                ["authority"] = "in_process_framework_probe",
+                [AuthorityProperty] = "in_process_framework_probe",
                 ["transaction"] = "dispatcher_affine_non_yielding",
                 ["immutableDto"] = true,
                 ["layoutStateRevisionBefore"] = revisionBefore,
@@ -544,10 +552,10 @@ internal sealed class NativeSceneCaptureCoordinator
     {
         capture = default!;
         if (!StringComparer.Ordinal.Equals(ReadString(source, "kind"), "uia_guarded_observation") ||
-            !StringComparer.Ordinal.Equals(ReadString(source, "authority"), "uia_guarded") ||
-            !StringComparer.Ordinal.Equals(ReadString(source, "qualification"), "PARTIAL") ||
+            !StringComparer.Ordinal.Equals(ReadString(source, AuthorityProperty), UiaGuardedAuthority) ||
+            !StringComparer.Ordinal.Equals(ReadString(source, "qualification"), PartialStatus) ||
             source["process"] is not JsonObject process ||
-            !TryReadInt32(process, "processId", out var processId) || processId != target.ProcessId ||
+            !TryReadInt32(process, ProcessIdProperty, out var processId) || processId != target.ProcessId ||
             !StringComparer.Ordinal.Equals(ReadString(process, "processIdentity"), target.ProcessIdentity) ||
             !TryReadLabel(source, "rootId", out var rootId) ||
             !TryReadGuardedNodes(source["nodes"] as JsonArray, rootId, out var nodes) ||
@@ -604,12 +612,12 @@ internal sealed class NativeSceneCaptureCoordinator
 
             nodes.Add(new JsonObject
             {
-                ["nodeId"] = nodeId,
-                ["relations"] = new JsonArray(),
-                ["identity"] = new JsonObject { ["contractId"] = id },
-                ["accessibility"] = new JsonObject
+                [NodeIdProperty] = nodeId,
+                [RelationsProperty] = new JsonArray(),
+                [IdentityProperty] = new JsonObject { [ContractIdProperty] = id },
+                [AccessibilityProperty] = new JsonObject
                 {
-                    ["automationId"] = CloneBoundedArtifactString(node["automationId"]),
+                    [AutomationIdProperty] = CloneBoundedArtifactString(node[AutomationIdProperty]),
                     ["name"] = CloneBoundedArtifactString(node["accessibleName"]),
                     ["controlType"] = null,
                     ["visibility"] = "visible",
@@ -619,7 +627,7 @@ internal sealed class NativeSceneCaptureCoordinator
                     ["logicalBounds"] = Rect(x, y, width, height),
                     ["physicalBounds"] = null,
                     ["dpi"] = null,
-                    ["transform"] = null,
+                    [TransformProperty] = null,
                     ["clip"] = null,
                 },
                 ["adapterEvidence"] = new JsonArray
@@ -627,8 +635,8 @@ internal sealed class NativeSceneCaptureCoordinator
                     new JsonObject
                     {
                         ["namespace"] = "netcoredbg.wpf.probe",
-                        ["schemaVersion"] = "1",
-                        ["authority"] = authority == CaptureAuthority.InProcess ? "in_process_framework_probe" : "uia_guarded",
+                        [SchemaVersionProperty] = "1",
+                        [AuthorityProperty] = authority == CaptureAuthority.InProcess ? "in_process_framework_probe" : UiaGuardedAuthority,
                         ["payload"] = CreateProbeAdapterPayload(node),
                     },
                 },
@@ -644,7 +652,7 @@ internal sealed class NativeSceneCaptureCoordinator
         {
             ["text"] = CloneBoundedArtifactString(node["text"]),
         };
-        AddStringChunks(payload, "automationIdChunks", node["automationId"]);
+        AddStringChunks(payload, "automationIdChunks", node[AutomationIdProperty]);
         AddStringChunks(payload, "accessibleNameChunks", node["accessibleName"]);
         AddStringChunks(payload, "textChunks", node["text"]);
         return payload;
@@ -704,73 +712,99 @@ internal sealed class NativeSceneCaptureCoordinator
             if (item is not JsonObject node ||
                 !TryReadLabel(node, "id", out var id) ||
                 !ids.Add(id) ||
-                node["identity"] is not JsonObject identity ||
-                node["geometry"] is not JsonObject geometry)
+                node[IdentityProperty] is not JsonObject identity ||
+                node["geometry"] is not JsonObject geometry ||
+                !TryMapGuardedNode(node, id, identity, geometry, out var mapped))
             {
                 return false;
             }
 
-            var relations = new JsonArray();
-            if (node["parentId"] is JsonValue parent && parent.TryGetValue<string>(out var parentId))
-            {
-                if (!IsLabel(parentId))
-                {
-                    return false;
-                }
-
-                relations.Add(new JsonObject { ["kind"] = "parent", ["targetNodeId"] = parentId });
-            }
-
-            var visibility = node["accessibility"] is JsonObject accessibility &&
-                             accessibility["isOffscreen"] is JsonValue offscreen &&
-                             offscreen.TryGetValue<bool>(out var isOffscreen)
-                ? isOffscreen ? "hidden" : "visible"
-                : "unobservable";
-            nodes.Add(new JsonObject
-            {
-                ["nodeId"] = id,
-                ["relations"] = relations,
-                ["identity"] = null,
-                ["accessibility"] = new JsonObject
-                {
-                    ["automationId"] = identity["automationId"]?.DeepClone(),
-                    ["name"] = identity["name"]?.DeepClone(),
-                    ["controlType"] = identity["controlType"]?.DeepClone(),
-                    ["visibility"] = visibility,
-                },
-                ["geometry"] = new JsonObject
-                {
-                    ["logicalBounds"] = geometry["logical"]?.DeepClone(),
-                    ["physicalBounds"] = geometry["physical"]?.DeepClone(),
-                    ["dpi"] = TryReadInt32(geometry, "dpi", out var dpi) && dpi > 0
-                        ? new JsonObject { ["x"] = dpi, ["y"] = dpi }
-                        : null,
-                    ["transform"] = null,
-                    ["clip"] = null,
-                },
-                ["adapterEvidence"] = new JsonArray
-                {
-                    new JsonObject
-                    {
-                        ["namespace"] = "netcoredbg.uia",
-                        ["schemaVersion"] = "1",
-                        ["authority"] = "uia_guarded",
-                        ["payload"] = new JsonObject
-                        {
-                            ["transform"] = node["transform"]?.DeepClone(),
-                            ["clip"] = node["clip"]?.DeepClone(),
-                        },
-                    },
-                },
-            });
+            nodes.Add(mapped);
         }
 
-        var knownIds = new HashSet<string>(nodes.Select(static node => node!["nodeId"]!.GetValue<string>()), StringComparer.Ordinal);
+        return HasValidGuardedParentGraph(nodes, rootId);
+    }
+
+    private static bool TryMapGuardedNode(
+        JsonObject node,
+        string id,
+        JsonObject identity,
+        JsonObject geometry,
+        out JsonObject mapped)
+    {
+        mapped = default!;
+        var relations = new JsonArray();
+        if (node["parentId"] is JsonValue parent && parent.TryGetValue<string>(out var parentId))
+        {
+            if (!IsLabel(parentId))
+            {
+                return false;
+            }
+
+            relations.Add(new JsonObject { ["kind"] = "parent", ["targetNodeId"] = parentId });
+        }
+
+        var visibility = ReadGuardedVisibility(node);
+        mapped = new JsonObject
+        {
+            [NodeIdProperty] = id,
+            [RelationsProperty] = relations,
+            [IdentityProperty] = null,
+            [AccessibilityProperty] = new JsonObject
+            {
+                [AutomationIdProperty] = identity[AutomationIdProperty]?.DeepClone(),
+                ["name"] = identity["name"]?.DeepClone(),
+                ["controlType"] = identity["controlType"]?.DeepClone(),
+                ["visibility"] = visibility,
+            },
+            ["geometry"] = new JsonObject
+            {
+                ["logicalBounds"] = geometry["logical"]?.DeepClone(),
+                ["physicalBounds"] = geometry["physical"]?.DeepClone(),
+                ["dpi"] = TryReadInt32(geometry, "dpi", out var dpi) && dpi > 0
+                    ? new JsonObject { ["x"] = dpi, ["y"] = dpi }
+                    : null,
+                [TransformProperty] = null,
+                ["clip"] = null,
+            },
+            ["adapterEvidence"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["namespace"] = "netcoredbg.uia",
+                    [SchemaVersionProperty] = "1",
+                    [AuthorityProperty] = UiaGuardedAuthority,
+                    ["payload"] = new JsonObject
+                    {
+                        [TransformProperty] = node[TransformProperty]?.DeepClone(),
+                        ["clip"] = node["clip"]?.DeepClone(),
+                    },
+                },
+            },
+        };
+        return true;
+    }
+
+    private static string ReadGuardedVisibility(JsonObject node)
+    {
+        if (node[AccessibilityProperty] is JsonObject accessibility &&
+            accessibility["isOffscreen"] is JsonValue offscreen &&
+            offscreen.TryGetValue<bool>(out var isOffscreen))
+        {
+            return isOffscreen ? "hidden" : "visible";
+        }
+
+        return UnobservableState;
+    }
+
+    private static bool HasValidGuardedParentGraph(JsonArray nodes, string rootId)
+    {
+        var knownIds = new HashSet<string>(nodes.Select(static node => node![NodeIdProperty]!.GetValue<string>()), StringComparer.Ordinal);
         var parentByNodeId = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var node in nodes.OfType<JsonObject>())
         {
-            var nodeId = node["nodeId"]!.GetValue<string>();
-            foreach (var relation in node["relations"]!.AsArray().OfType<JsonObject>())
+            var nodeId = node[NodeIdProperty]!.GetValue<string>();
+            foreach (var relation in node[RelationsProperty]!.AsArray().OfType<JsonObject>())
             {
                 var parentId = relation["targetNodeId"]!.GetValue<string>();
                 if (!knownIds.Contains(parentId) || !parentByNodeId.TryAdd(nodeId, parentId))
@@ -785,6 +819,14 @@ internal sealed class NativeSceneCaptureCoordinator
             return false;
         }
 
+        return AllGuardedNodesReachRoot(knownIds, parentByNodeId, rootId);
+    }
+
+    private static bool AllGuardedNodesReachRoot(
+        HashSet<string> knownIds,
+        Dictionary<string, string> parentByNodeId,
+        string rootId)
+    {
         foreach (var nodeId in knownIds)
         {
             var visited = new HashSet<string>(StringComparer.Ordinal);
@@ -808,28 +850,46 @@ internal sealed class NativeSceneCaptureCoordinator
         return true;
     }
 
-    private static List<JsonObject?> SelectElement(JsonArray nodes, JsonElement selector)
+    private static (NormalizedCapture Capture, JsonObject? Error) SelectElement(
+        NormalizedCapture normalized,
+        JsonElement selector,
+        string tool)
     {
         var matches = new List<JsonObject?>();
-        var contractId = ReadOptionalString(selector, "contractId");
-        var automationId = ReadOptionalString(selector, "automationId");
-        foreach (var node in nodes.OfType<JsonObject>())
+        var contractId = ReadOptionalString(selector, ContractIdProperty);
+        var automationId = ReadOptionalString(selector, AutomationIdProperty);
+        foreach (var node in normalized.Nodes.OfType<JsonObject>())
         {
-            var nodeContractId = node["identity"] is JsonObject identity ? ReadString(identity, "contractId") : null;
-            var nodeAutomationId = node["accessibility"] is JsonObject accessibility ? ReadString(accessibility, "automationId") : null;
+            var nodeContractId = node[IdentityProperty] is JsonObject identity ? ReadString(identity, ContractIdProperty) : null;
+            var nodeAutomationId = node[AccessibilityProperty] is JsonObject accessibility ? ReadString(accessibility, AutomationIdProperty) : null;
             if ((contractId is null || StringComparer.Ordinal.Equals(contractId, nodeContractId)) &&
                 (automationId is null || StringComparer.Ordinal.Equals(automationId, nodeAutomationId)))
             {
                 var selected = DeepClone(node) as JsonObject;
                 if (selected is not null)
                 {
-                    selected["relations"] = new JsonArray();
+                    selected[RelationsProperty] = new JsonArray();
                     matches.Add(selected);
                 }
             }
         }
 
-        return matches;
+        if (matches.Count == 0)
+        {
+            return (normalized, ToolError(tool, "ELEMENT_NOT_FOUND", "No element matches the requested selector."));
+        }
+
+        if (matches.Count > 1)
+        {
+            return (normalized, ToolError(tool, "ELEMENT_AMBIGUOUS", "The requested selector matches multiple elements."));
+        }
+
+        return (normalized with
+        {
+            Nodes = new JsonArray(DeepClone(matches[0])),
+            RootId = matches[0]![NodeIdProperty]!.GetValue<string>(),
+            Atomicity = new JsonObject { [AuthorityProperty] = NotApplicableAuthority },
+        }, null);
     }
 
     private static bool HasUnchangedGuards(JsonObject? guards)
@@ -848,18 +908,18 @@ internal sealed class NativeSceneCaptureCoordinator
 
     private static JsonObject GuardedAtomicity(string state) => new()
     {
-        ["authority"] = "uia_guarded",
+        [AuthorityProperty] = UiaGuardedAuthority,
         ["guards"] = GuardStates(state),
     };
 
-    private static JsonObject UnobservableGuardedAtomicity() => GuardedAtomicity("unobservable");
+    private static JsonObject UnobservableGuardedAtomicity() => GuardedAtomicity(UnobservableState);
 
     private static JsonObject GuardStates(string state) => new()
     {
-        ["window"] = new JsonObject { ["state"] = state },
-        ["client"] = new JsonObject { ["state"] = state },
-        ["dpi"] = new JsonObject { ["state"] = state },
-        ["visualTreeFingerprint"] = new JsonObject { ["state"] = state },
+        ["window"] = new JsonObject { [StateProperty] = state },
+        ["client"] = new JsonObject { [StateProperty] = state },
+        ["dpi"] = new JsonObject { [StateProperty] = state },
+        ["visualTreeFingerprint"] = new JsonObject { [StateProperty] = state },
     };
 
     internal static bool TryCloneStabilityObservation(JsonObject? source, out JsonObject observation)
@@ -884,7 +944,7 @@ internal sealed class NativeSceneCaptureCoordinator
                 return false;
             }
 
-            clonedConditions[name] = new JsonObject { ["state"] = state };
+            clonedConditions[name] = new JsonObject { [StateProperty] = state };
         }
 
         observation = new JsonObject
@@ -897,22 +957,22 @@ internal sealed class NativeSceneCaptureCoordinator
 
     private static bool TryReadStabilityState(JsonObject source, out string state)
     {
-        state = ReadString(source, "state") ?? string.Empty;
-        return state is "met" or "not_met" or "unsupported" or "unobservable";
+        state = ReadString(source, StateProperty) ?? string.Empty;
+        return state is "met" or "not_met" or "unsupported" or UnobservableState;
     }
 
     private static JsonObject CreateUnobservableStability() => new()
     {
-        ["status"] = "UNOBSERVABLE",
+        [StatusProperty] = UnobservableStatus,
         ["revalidatedByCapture"] = true,
         ["conditions"] = new JsonObject
         {
-            ["dispatcherIdle"] = new JsonObject { ["state"] = "unobservable" },
-            ["stableLayout"] = new JsonObject { ["state"] = "unobservable" },
-            ["animationState"] = new JsonObject { ["state"] = "unobservable" },
-            ["windowGeometry"] = new JsonObject { ["state"] = "unobservable" },
-            ["contextMaterialization"] = new JsonObject { ["state"] = "unobservable" },
-            ["asyncLoadSettled"] = new JsonObject { ["state"] = "unobservable" },
+            ["dispatcherIdle"] = new JsonObject { [StateProperty] = UnobservableState },
+            ["stableLayout"] = new JsonObject { [StateProperty] = UnobservableState },
+            ["animationState"] = new JsonObject { [StateProperty] = UnobservableState },
+            ["windowGeometry"] = new JsonObject { [StateProperty] = UnobservableState },
+            ["contextMaterialization"] = new JsonObject { [StateProperty] = UnobservableState },
+            ["asyncLoadSettled"] = new JsonObject { [StateProperty] = UnobservableState },
         },
         ["settleDurationMs"] = 0,
         ["observedAt"] = Timestamp(DateTimeOffset.UtcNow),
@@ -946,9 +1006,9 @@ internal sealed class NativeSceneCaptureCoordinator
     {
         foreach (var node in nodes.OfType<JsonObject>())
         {
-            if (node["identity"] is JsonObject identity &&
-                StringComparer.Ordinal.Equals(ReadString(identity, "contractId"), contractId) &&
-                ReadString(node, "nodeId") is { } matched)
+            if (node[IdentityProperty] is JsonObject identity &&
+                StringComparer.Ordinal.Equals(ReadString(identity, ContractIdProperty), contractId) &&
+                ReadString(node, NodeIdProperty) is { } matched)
             {
                 nodeId = matched;
                 return true;
@@ -972,7 +1032,7 @@ internal sealed class NativeSceneCaptureCoordinator
     }
 
     private static bool ContainsNode(JsonArray nodes, string rootId) =>
-        nodes.OfType<JsonObject>().Any(node => StringComparer.Ordinal.Equals(ReadString(node, "nodeId"), rootId));
+        nodes.OfType<JsonObject>().Any(node => StringComparer.Ordinal.Equals(ReadString(node, NodeIdProperty), rootId));
 
     private static JsonObject Rect(double x, double y, double width, double height) => new()
     {

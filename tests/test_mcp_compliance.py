@@ -92,36 +92,3 @@ class TestResourceNotifications:
         if mock_ctx.session:
             await mock_ctx.session.send_resource_updated("debug://state")
         # Test passes if no exception is raised
-
-
-class TestOutputSearchTools:
-    """Tests for output search functionality."""
-
-    def test_search_output_pattern_matching(self):
-        """Test regex pattern matching in output."""
-        import re
-
-        output = """
-        [INFO] Starting application
-        [ERROR] Failed to connect: timeout
-        [INFO] Retrying...
-        [ERROR] Connection refused
-        """
-
-        pattern = r"\[ERROR\].*"
-        matches = re.findall(pattern, output, re.IGNORECASE)
-
-        assert len(matches) == 2
-        assert "Failed to connect" in matches[0]
-        assert "Connection refused" in matches[1]
-
-    def test_get_output_tail_slicing(self):
-        """Test output tail slicing logic."""
-        output_lines = [f"line {i}" for i in range(100)]
-
-        # Get last 10 lines
-        tail = output_lines[-10:]
-
-        assert len(tail) == 10
-        assert tail[0] == "line 90"
-        assert tail[-1] == "line 99"

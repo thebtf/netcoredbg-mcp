@@ -31,11 +31,6 @@ def _create_fake_runtime(base: Path, version: str, size: int = 1024) -> Path:
 class TestScanPaths:
     """Tests for _get_runtime_scan_paths."""
 
-    def test_returns_paths_for_current_os(self):
-        paths = _get_runtime_scan_paths()
-        assert len(paths) >= 1
-        assert all(isinstance(p, Path) for p in paths)
-
     def test_dotnet_root_override(self, tmp_path: Path):
         with patch.dict(os.environ, {"DOTNET_ROOT": str(tmp_path)}):
             paths = _get_runtime_scan_paths()

@@ -1,10 +1,11 @@
 using System.Diagnostics;
-using System.Diagnostics.CodeAnalysis;
+using System.Runtime.ExceptionServices;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using NetCoreDbg.Mcp.Stateless.DebugAdapter;
+using WindowsBridgeProcess = NetCoreDbg.Mcp.Stateless.DebugAdapter.NetCoreDbgSession.WindowsProcessTreeOwnership.WindowsBridgeProcess;
 
 namespace NetCoreDbg.Mcp.Stateless.NativeScene;
 
@@ -33,26 +34,49 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
     private readonly bool _supportsSceneCapture;
     private readonly SemaphoreSlim _gate = new(initialCount: 1, maxCount: 1);
     private readonly NativeSceneProbeChannel _probeChannel = new();
+    private readonly Func<ProcessStartInfo, Process> _launchBridge;
+    private readonly Func<string, IAsyncDisposable> _createBridgeClient;
+    private readonly Func<IAsyncDisposable, ValueTask> _disposeBridgeClient;
+    private readonly Func<Process, CancellationToken, Task> _stopAndWaitBridge;
 
     private NativeSceneBridgeClient? _bridgeClient;
     private Process? _bridgeProcess;
+    private WindowsBridgeProcess? _bridgeOwnership;
     private NativeSceneArtifactStore? _artifactStore;
     private NativeSceneCaptureCoordinator? _captureCoordinator;
     private JsonObject? _captureStabilityObservation;
     private readonly NativeSceneStabilityCoordinator _stabilityCoordinator;
     private int _disposed;
+    private int _disposeCompleted;
 
     internal NativeSceneSessionBinding(
         string debugSessionId,
         string? bridgePath,
         string? artifactRoot,
         bool supportsSceneCapture = true)
+        : this(debugSessionId, bridgePath, artifactRoot, supportsSceneCapture, null, null, null, null)
+    {
+    }
+
+    internal NativeSceneSessionBinding(
+        string debugSessionId,
+        string? bridgePath,
+        string? artifactRoot,
+        bool supportsSceneCapture,
+        Func<ProcessStartInfo, Process>? launchBridge,
+        Func<string, IAsyncDisposable>? createBridgeClient,
+        Func<IAsyncDisposable, ValueTask>? disposeBridgeClient,
+        Func<Process, CancellationToken, Task>? stopAndWaitBridge)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(debugSessionId);
         _debugSessionId = debugSessionId;
         _bridgePath = string.IsNullOrWhiteSpace(bridgePath) ? null : bridgePath;
         _artifactRoot = string.IsNullOrWhiteSpace(artifactRoot) ? null : artifactRoot;
         _supportsSceneCapture = supportsSceneCapture;
+        _launchBridge = launchBridge ?? LaunchBridge;
+        _createBridgeClient = createBridgeClient ?? CreateBridgeClient;
+        _disposeBridgeClient = disposeBridgeClient ?? (static client => client.DisposeAsync());
+        _stopAndWaitBridge = stopAndWaitBridge ?? StopAndWaitBridgeAsync;
         AuthorizationNonce = CreateOpaqueId();
         _stabilityCoordinator = new NativeSceneStabilityCoordinator(TimeProvider.System, ObserveStabilityAsync);
     }
@@ -183,10 +207,11 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
             }
 
             NativeSceneBridgeCallResult bridgeResult;
+            BridgeCleanupOutcome cleanup = default;
             try
             {
-                StartBridge(targetIdentity.ProcessId);
-                bridgeResult = await _bridgeClient.SendAsync(
+                var client = await StartBridgeAsync(targetIdentity.ProcessId).ConfigureAwait(false);
+                bridgeResult = await client.SendAsync(
                     AuthorizationNonce,
                     new JsonObject
                     {
@@ -202,10 +227,10 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
             }
             finally
             {
-                await DisposeBridgeAsync().ConfigureAwait(false);
+                cleanup = await DisposeBridgeAsync().ConfigureAwait(false);
             }
 
-            if (!bridgeResult.IsAvailable ||
+            if (cleanup.Failure is not null || !bridgeResult.IsAvailable ||
                 bridgeResult.Payload is null ||
                 !TryReadPng(bridgeResult.Payload, targetIdentity, out var png))
             {
@@ -285,7 +310,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
         }
     }
 
-    internal async Task<NativeSceneArtifactReadResult> ReadCaptureArtifactAsync(
+    internal async Task<INativeSceneArtifactReadResult> ReadCaptureArtifactAsync(
         string artifactId,
         long offset,
         int maxBytes,
@@ -323,16 +348,30 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        if (Volatile.Read(ref _disposeCompleted) != 0)
         {
             return;
         }
 
+        Interlocked.Exchange(ref _disposed, 1);
         await _gate.WaitAsync().ConfigureAwait(false);
+        Exception? failure = null;
         try
         {
-            await DisposeBridgeAsync().ConfigureAwait(false);
-            await _probeChannel.DisposeAsync().ConfigureAwait(false);
+            if (_disposeCompleted != 0)
+            {
+                return;
+            }
+
+            failure = (await DisposeBridgeAsync().ConfigureAwait(false)).Failure;
+            try
+            {
+                await _probeChannel.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                failure = AddCleanupFailure(failure, exception);
+            }
             if (_artifactStore is { } store)
             {
                 _artifactStore = null;
@@ -340,15 +379,34 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
                 {
                     await store.StopSessionAsync(_debugSessionId, CancellationToken.None).ConfigureAwait(false);
                 }
-                finally
+                catch (Exception exception)
+                {
+                    failure = AddCleanupFailure(failure, exception);
+                }
+
+                try
                 {
                     await store.DisposeAsync().ConfigureAwait(false);
                 }
+                catch (Exception exception)
+                {
+                    failure = AddCleanupFailure(failure, exception);
+                }
+            }
+
+            if (failure is null)
+            {
+                Volatile.Write(ref _disposeCompleted, 1);
             }
         }
         finally
         {
             _gate.Release();
+        }
+
+        if (failure is not null)
+        {
+            ExceptionDispatchInfo.Capture(failure).Throw();
         }
     }
 
@@ -400,7 +458,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
             return stability;
         }
 
-        return await ObserveUnobservableStabilityAsync(default, cancellationToken).ConfigureAwait(false);
+        return await ObserveUnobservableStabilityAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<JsonObject?> CaptureGuardedAsync(
@@ -417,10 +475,11 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
 
         request["hwnd"] = hwnd;
         NativeSceneBridgeCallResult result;
+        BridgeCleanupOutcome cleanup = default;
         try
         {
-            StartBridge(target.ProcessId);
-            result = await _bridgeClient.SendAsync(AuthorizationNonce, request, cancellationToken).ConfigureAwait(false);
+            var client = await StartBridgeAsync(target.ProcessId).ConfigureAwait(false);
+            result = await client.SendAsync(AuthorizationNonce, request, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -432,10 +491,10 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
         }
         finally
         {
-            await DisposeBridgeAsync().ConfigureAwait(false);
+            cleanup = await DisposeBridgeAsync().ConfigureAwait(false);
         }
 
-        return result.IsAvailable &&
+        return cleanup.Failure is null && result.IsAvailable &&
                result.Payload is not null &&
                session.TryGetNativeSceneCaptureTargetIdentity(out var recheckedTarget) &&
                target.Equals(recheckedTarget)
@@ -477,10 +536,10 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
     }
 
 
-    [MemberNotNull(nameof(_bridgeClient))]
-    private void StartBridge(int processId)
+    private async Task<NativeSceneBridgeClient> StartBridgeAsync(int processId)
     {
-        if (_bridgeClient is not null || _bridgeProcess is not null || !TryGetBridgePath(out var bridgePath))
+        if (Volatile.Read(ref _disposed) != 0 || _bridgeClient is not null || _bridgeProcess is not null ||
+            _bridgeOwnership is not null || !TryGetBridgePath(out var bridgePath))
         {
             throw new InvalidOperationException("The local native-scene observer cannot be started.");
         }
@@ -505,79 +564,137 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
         startInfo.ArgumentList.Add(AuthorizationNonce);
         startInfo.ArgumentList.Add(processId.ToString(CultureInfo.InvariantCulture));
 
-        var process = Process.Start(startInfo)
-            ?? throw new InvalidOperationException("The local native-scene observer process did not start.");
+        Process process;
+        try
+        {
+            process = _launchBridge(startInfo);
+        }
+        catch (Exception primary)
+        {
+            _bridgeOwnership ??= WindowsBridgeProcess.TakeFailedLaunchOwnership(primary);
+            _bridgeProcess ??= _bridgeOwnership?.Process;
+            throw;
+        }
         try
         {
             _bridgeProcess = process;
-            _bridgeClient = new NativeSceneBridgeClient(
-                pipeName,
-                BridgeTimeout,
-                BridgeTimeout,
-                BridgeTimeout,
-                MaximumBridgeRequestBytes,
-                MaximumBridgeResponseBytes);
+            _bridgeClient = (NativeSceneBridgeClient)_createBridgeClient(pipeName);
+            return _bridgeClient;
         }
-        catch
+        catch (Exception primary)
         {
-            try
+            var cleanup = await DisposeBridgeAsync().ConfigureAwait(false);
+            if (cleanup.Failure is { } secondary)
             {
-                if (!process.HasExited)
-                {
-                    process.Kill(entireProcessTree: true);
-                }
-            }
-            catch (Exception)
-            {
-            }
-            finally
-            {
-                process.Dispose();
-                _bridgeProcess = null;
+                primary.Data["NativeSceneBridgeCleanupFailure"] = secondary;
             }
 
             throw;
         }
     }
 
-    private async ValueTask DisposeBridgeAsync()
+    private async ValueTask<BridgeCleanupOutcome> DisposeBridgeAsync()
     {
         var client = _bridgeClient;
         var process = _bridgeProcess;
+        var ownership = _bridgeOwnership;
         _bridgeClient = null;
-        _bridgeProcess = null;
+        Exception? failure = null;
+        var exitObserved = false;
+        var handedToKernel = false;
 
         if (client is not null)
         {
             try
             {
-                await client.DisposeAsync().ConfigureAwait(false);
+                await _disposeBridgeClient(client).ConfigureAwait(false);
             }
-            catch (Exception)
+            catch (Exception exception)
             {
+                failure = AddCleanupFailure(failure, exception);
             }
-        }
-
-        if (process is null)
-        {
-            return;
         }
 
         try
         {
-            if (!process.HasExited)
+            if (process is not null)
             {
-                process.Kill(entireProcessTree: true);
                 using var timeout = new CancellationTokenSource(BridgeTimeout);
-                await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+                await _stopAndWaitBridge(process, timeout.Token).ConfigureAwait(false);
+                exitObserved = process.HasExited;
             }
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            failure = AddCleanupFailure(failure, exception);
         }
         finally
         {
-            process.Dispose();
+            if (ownership is not null)
+            {
+                try
+                {
+                    ownership.CloseJob();
+                    handedToKernel = true;
+                }
+                catch (Exception exception)
+                {
+                    failure = AddCleanupFailure(failure, exception);
+                }
+            }
+
+            if (exitObserved || handedToKernel)
+            {
+                _bridgeProcess = null;
+                try
+                {
+                    process?.Dispose();
+                }
+                catch (Exception exception)
+                {
+                    failure = AddCleanupFailure(failure, exception);
+                }
+
+                try
+                {
+                    ownership?.CloseProcessHandle();
+                    if (handedToKernel)
+                    {
+                        _bridgeOwnership = null;
+                    }
+                }
+                catch (Exception exception)
+                {
+                    failure = AddCleanupFailure(failure, exception);
+                }
+            }
+        }
+
+        return new BridgeCleanupOutcome(exitObserved, handedToKernel, failure);
+    }
+
+    private readonly record struct BridgeCleanupOutcome(bool ExitObserved, bool TerminationHandedToKernel, Exception? Failure);
+
+    private static Exception AddCleanupFailure(Exception? failure, Exception exception) =>
+        failure is null ? exception : new AggregateException(failure, exception);
+
+    private Process LaunchBridge(ProcessStartInfo startInfo)
+    {
+        var ownership = WindowsBridgeProcess.Start(startInfo);
+        _bridgeOwnership = ownership;
+        _bridgeProcess = ownership.Process;
+        return ownership.Process ?? throw new InvalidOperationException("The contained native-scene observer process was not initialized.");
+    }
+
+    private static IAsyncDisposable CreateBridgeClient(string pipeName) => new NativeSceneBridgeClient(
+        pipeName, BridgeTimeout, BridgeTimeout, BridgeTimeout, MaximumBridgeRequestBytes, MaximumBridgeResponseBytes);
+
+    private static async Task StopAndWaitBridgeAsync(Process process, CancellationToken cancellationToken)
+    {
+        if (!process.HasExited)
+        {
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -711,7 +828,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
         };
     }
 
-    private static Task<JsonObject> ObserveUnobservableStabilityAsync(JsonElement _, CancellationToken cancellationToken)
+    private static Task<JsonObject> ObserveUnobservableStabilityAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         return Task.FromResult(new JsonObject

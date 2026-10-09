@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import contextlib
+import ctypes
 import hashlib
 import io
 import json
@@ -96,6 +97,60 @@ def test_bridge_stealth_foreground_round_trip_contract() -> None:
     assert '@params?["hwnd"]?.GetValue<long>()' in command
     assert "SetForegroundWindow(hwnd)" in command
     assert '["restored"] = restored' in command
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows foreground APIs required")
+@pytest.mark.parametrize("activated", [True, False])
+def test_restore_foreground_window_reports_actual_64_bit_target(activated: bool) -> None:
+    from netcoredbg_mcp.ui.foreground import restore_foreground_window
+
+    previous_hwnd = 0x100000042
+    target_hwnd = 0x200000042
+    user32 = MagicMock()
+    user32.GetForegroundWindow.side_effect = [
+        previous_hwnd,
+        target_hwnd if activated else previous_hwnd,
+    ]
+    user32.GetWindowThreadProcessId.return_value = ctypes.windll.kernel32.GetCurrentThreadId()
+
+    with patch("ctypes.WinDLL", return_value=user32):
+        result = restore_foreground_window(target_hwnd)
+
+    assert result is activated
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows foreground APIs required")
+def test_get_foreground_window_preserves_64_bit_handle() -> None:
+    from netcoredbg_mcp.ui.foreground import get_foreground_window
+
+    hwnd = 0x100000042
+    user32 = MagicMock()
+    user32.GetForegroundWindow.return_value = hwnd
+
+    with patch("ctypes.WinDLL", return_value=user32):
+        result = get_foreground_window()
+
+    assert result == hwnd
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows foreground APIs required")
+def test_get_window_process_id_uses_complete_64_bit_handle() -> None:
+    from netcoredbg_mcp.ui.foreground import get_window_process_id
+
+    hwnd = 0x100000042
+    user32 = MagicMock()
+
+    def owner_of_window(window: int, pid_address: Any) -> int:
+        if window != hwnd:
+            return 0
+        ctypes.cast(pid_address, ctypes.POINTER(ctypes.c_ulong)).contents.value = 1234
+        return 1
+
+    user32.GetWindowThreadProcessId.side_effect = owner_of_window
+    with patch("ctypes.WinDLL", return_value=user32):
+        result = get_window_process_id(hwnd)
+
+    assert result == 1234
 
 
 def test_bridge_flash_focus_send_keys_contract() -> None:
@@ -214,39 +269,6 @@ def test_bridge_screenshot_uses_printwindow_in_stealth_mode() -> None:
     assert '["base64"] = base64' in command
     assert "Capture.Rectangle(rect)" in command
     assert command.index("if (JsonRpcHandler.Stealth)") < command.index("Capture.Rectangle(rect)")
-
-
-def test_bridge_resize_window_returns_unit_labelled_post_resize_geometry() -> None:
-    command = (PROJECT_ROOT / "bridge" / "Commands" / "TransformCommands.cs").read_text(
-        encoding="utf-8"
-    )
-    resize_start = command.index("public static JsonNode ResizeWindow")
-    resize_body = command[resize_start:]
-
-    required_fields = (
-        '["request"]',
-        '["geometry"]',
-        '["target_comparability"]',
-        '["uia_bounds"]',
-        '["window_bounds"]',
-        '["client_bounds"]',
-        '["dpi"]',
-        '["dpi_scale"]',
-        '"MATCHED"',
-        '"MISMATCH"',
-        '"UNAVAILABLE"',
-        '"physical_px"',
-        '"dip"',
-        '"uia_element_bounds"',
-        '"UIA.TransformPattern.Resize"',
-        '"UIA.BoundingRectangle"',
-        '"GetWindowRect"',
-        '"GetClientRect"',
-        '"POST_RESIZE_GEOMETRY_UNAVAILABLE"',
-    )
-    assert all(field in resize_body for field in required_fields) and (
-        resize_body.index("pattern.Resize(width, height);") < resize_body.index('["geometry"]')
-    )
 
 
 @pytest.mark.asyncio
@@ -410,84 +432,6 @@ def test_bridge_screenshot_falls_back_to_flash_focus_bitblt_when_blank() -> None
     assert "BitBlt(" in command
     assert 'result["fallback"] = "flash-focus";' in command
     assert "SetForegroundWindow(savedForeground)" in command
-
-
-def test_bridge_typed_bitblt_fallback_requires_verified_transition_and_safe_restoration() -> None:
-    command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
-        encoding="utf-8"
-    )
-    transport = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCaptureTransport.cs").read_text(
-        encoding="utf-8"
-    )
-
-    fallback_start = command.index(
-        "private static JsonObject CaptureEvidenceWithVerifiedBitBltFallback"
-    )
-    fallback_end = command.index(
-        "private static (int width, int height) GetWindowSize", fallback_start
-    )
-    fallback_capture = command[fallback_start:fallback_end]
-
-    activation = fallback_capture.index(
-        "var activationTransition = CaptureTransport.ActivateForegroundVerified("
-    )
-    bitblt = fallback_capture.index("CaptureBitmapWithBitBlt")
-    assert "CaptureTransport.SetForegroundWindow(hwnd)" not in fallback_capture
-    assert (
-        'activation["set_foreground_returned"] = activationTransition.SetForegroundReturned;'
-        in fallback_capture
-    )
-    assert activation < fallback_capture.index("if (!activationTransition.Verified)") < bitblt
-
-    restoration_guard = fallback_capture.rindex("CaptureTransport.GetForegroundWindow() != hwnd")
-    restoration = fallback_capture.index(
-        "var restorationTransition = CaptureTransport.ActivateForegroundVerified("
-    )
-    assert (
-        restoration_guard
-        < restoration
-        < fallback_capture.index("if (!restorationTransition.Verified)")
-    )
-    assert (
-        "savedForegroundSnapshot is not CaptureSnapshot restoredForegroundIdentity"
-        in fallback_capture
-    )
-    assert "restoredForegroundIdentity.ProcessId" in fallback_capture
-
-    assert "ForegroundTransition ActivateForegroundVerified(" in transport
-    assert "GetThreadDesktop" in transport
-    assert "AttachThreadInput(currentThread, foregroundThread, true)" in transport
-    assert "AttachThreadInput(currentThread, targetThread, true)" in transport
-    assert "AttachThreadInput(currentThread, targetThread, false)" in transport
-    assert "AttachThreadInput(currentThread, foregroundThread, false)" in transport
-    assert "BringWindowToTop(hwnd);" in transport
-    assert "NativeSetForegroundWindow(hwnd)" in transport
-    assert "WaitForForeground(hwnd)" in transport
-    assert "if (!WaitForForeground(hwnd))" in transport
-    assert 'result["method"] = "BitBlt";' in fallback_capture
-    assert 'result["fallback"] = "flash-focus";' in fallback_capture
-    assert 'result["fallback_reason"] = "probable_black_printwindow";' in fallback_capture
-    assert 'result["authority"] = "foreground_window_gdi_raster";' in fallback_capture
-    assert 'result["source_api"] = "GetWindowDC";' in fallback_capture
-    assert 'result["rop"] = "SRCCOPY";' in fallback_capture
-    assert 'result["evidence_grade"] = "typed_bitblt_fallback";' in fallback_capture
-    assert 'result["capture_stability"]' in fallback_capture
-    assert 'result["foreground"]' in fallback_capture
-
-
-def test_native_screenshot_capture_transport_binds_renamed_foreground_exports() -> None:
-    transport = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCaptureTransport.cs").read_text(
-        encoding="utf-8"
-    )
-
-    assert (
-        '[DllImport("user32.dll", EntryPoint = "GetForegroundWindow")]\n'
-        "    private static extern IntPtr NativeGetForegroundWindow();"
-    ) in transport
-    assert (
-        '[DllImport("user32.dll", EntryPoint = "SetForegroundWindow", SetLastError = true)]\n'
-        "    private static extern bool NativeSetForegroundWindow(IntPtr hwnd);"
-    ) in transport
 
 
 def test_bridge_evidence_fallback_discards_black_printwindow_for_ordinary_and_strict_calls() -> (

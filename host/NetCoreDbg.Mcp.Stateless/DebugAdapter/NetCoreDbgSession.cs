@@ -15,7 +15,7 @@ using NetCoreDbg.Mcp.Stateless.NativeScene;
 
 namespace NetCoreDbg.Mcp.Stateless.DebugAdapter;
 
-internal sealed class NetCoreDbgSession : IAsyncDisposable
+internal sealed partial class NetCoreDbgSession : IAsyncDisposable
 {
     private const int MaximumHeaderBytes = 16 * 1024;
     private const int MaximumPayloadBytes = 16 * 1024 * 1024;
@@ -51,6 +51,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private DapSessionState _state = new(null, null, null);
     private Task? _cleanupTask;
+    private bool _forceCleanupDisposed;
     private Exception? _readerFailure;
     private NativeSceneTargetIdentity? _nativeSceneTargetIdentity;
     private readonly object _nativeSceneTargetIdentityGate = new();
@@ -194,7 +195,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             if (session is not null)
             {
-                session._forceCleanup.Cancel();
+                session.CancelCleanup();
                 await session.EnsureCleanupAsync().ConfigureAwait(false);
             }
             else if (windowsLaunch is not null)
@@ -219,7 +220,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            _forceCleanup.Cancel();
+            CancelCleanup();
             await cleanup.ConfigureAwait(false);
             throw;
         }
@@ -308,9 +309,6 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     }
 
     public ValueTask DisposeAsync() => new(EnsureCleanupAsync());
-
-    private Task StartProtocolAsync(string programPath, TimeSpan initializeTimeout, CancellationToken cancellationToken) =>
-        StartProtocolAsync(programPath, initializeTimeout, launchEnvironment: null, cancellationToken: cancellationToken);
 
     private async Task StartProtocolAsync(
         string programPath,
@@ -770,18 +768,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
-    private void UpdateState(Func<DapSessionState, DapSessionState> update)
-    {
-        lock (_stateGate)
-        {
-            _state = update(_state);
-        }
-    }
     private void HandleStoppedEvent(JsonElement body)
     {
         var allThreadsStopped = ReadOptionalBoolean(body, "allThreadsStopped");
         var threadId = TryGetInt32(body, "threadId");
-        _callStackAdmissionGate.Wait();
+        _callStackAdmissionGate.Wait(CancellationToken.None);
         try
         {
             lock (_stateGate)
@@ -814,7 +805,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             && body.TryGetProperty("allThreadsContinued", out _);
         var allThreadsContinued = ReadOptionalBoolean(body, "allThreadsContinued");
         var threadId = TryGetInt32(body, "threadId");
-        _callStackAdmissionGate.Wait();
+        _callStackAdmissionGate.Wait(CancellationToken.None);
         try
         {
             lock (_stateGate)
@@ -841,7 +832,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private void HandleTerminalEvent(string eventName, JsonElement body)
     {
-        _callStackAdmissionGate.Wait();
+        _callStackAdmissionGate.Wait(CancellationToken.None);
         try
         {
             lock (_stateGate)
@@ -923,7 +914,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             throw new InvalidDataException("DAP stack frame source must be an object.");
         }
 
-        if (!sourceElement.TryGetProperty("path", out var pathElement))
+        if (!sourceElement.TryGetProperty("path", out _))
         {
             return new DapStackFrame(id, name, null, 0, 0);
         }
@@ -935,6 +926,17 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
 
         return new DapStackFrame(id, name, path, line, column);
+    }
+
+    private void CancelCleanup()
+    {
+        lock (_cleanupGate)
+        {
+            if (!_forceCleanupDisposed)
+            {
+                _forceCleanup.Cancel();
+            }
+        }
     }
 
     private Task EnsureCleanupAsync()
@@ -1031,7 +1033,18 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                             }
                             finally
                             {
-                                _processTreeOwnership?.Dispose();
+                                try
+                                {
+                                    _processTreeOwnership?.Dispose();
+                                }
+                                finally
+                                {
+                                    lock (_cleanupGate)
+                                    {
+                                        _forceCleanup.Dispose();
+                                        _forceCleanupDisposed = true;
+                                    }
+                                }
                             }
                         }
                     }
@@ -1062,7 +1075,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         try
         {
-            await _process.WaitForExitAsync().WaitAsync(_stopTimeout).ConfigureAwait(false);
+            await _process.WaitForExitAsync(CancellationToken.None).WaitAsync(_stopTimeout, CancellationToken.None).ConfigureAwait(false);
         }
         catch (TimeoutException)
         {
@@ -1091,7 +1104,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     {
         try
         {
-            await Task.WhenAll(_readerTask, _stderrTask).WaitAsync(_stopTimeout).ConfigureAwait(false);
+            await Task.WhenAll(_readerTask, _stderrTask).WaitAsync(_stopTimeout, CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception)
         {
@@ -1099,13 +1112,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
-    private async Task DrainStandardErrorAsync()
-    {
-        var buffer = new byte[8192];
-        while (await _error.ReadAsync(buffer).ConfigureAwait(false) != 0)
-        {
-        }
-    }
+    private Task DrainStandardErrorAsync() => _error.CopyToAsync(Stream.Null, CancellationToken.None);
 
     private async Task<JsonDocument?> ReadFrameAsync(CancellationToken cancellationToken)
     {
@@ -1306,7 +1313,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 {
                     try
                     {
-                        await process.WaitForExitAsync().WaitAsync(RequirePositiveTimeout(stopTimeout, nameof(stopTimeout))).ConfigureAwait(false);
+                        await process.WaitForExitAsync(CancellationToken.None).WaitAsync(RequirePositiveTimeout(stopTimeout, nameof(stopTimeout)), CancellationToken.None).ConfigureAwait(false);
                     }
                     catch (TimeoutException)
                     {
@@ -1318,7 +1325,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             if (!process.HasExited)
             {
                 process.Kill(entireProcessTree: true);
-                await process.WaitForExitAsync().WaitAsync(RequirePositiveTimeout(stopTimeout, nameof(stopTimeout))).ConfigureAwait(false);
+                await process.WaitForExitAsync(CancellationToken.None).WaitAsync(RequirePositiveTimeout(stopTimeout, nameof(stopTimeout)), CancellationToken.None).ConfigureAwait(false);
             }
         }
         finally
@@ -1335,7 +1342,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
-    private interface IProcessTreeOwnership : IDisposable
+    internal interface IProcessTreeOwnership : IDisposable
     {
         void Terminate();
     }
@@ -1413,7 +1420,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private sealed record UnixProcessGroupLaunch(Process Process, UnixProcessGroupOwnership Ownership);
 
-    private sealed class WindowsProcessTreeOwnership : IProcessTreeOwnership
+    internal sealed partial class WindowsProcessTreeOwnership : IProcessTreeOwnership
     {
         private const uint CreateNoWindow = 0x08000000;
         private const uint CreateSuspended = 0x00000004;
@@ -1454,9 +1461,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 var processInformation = CreateProcessWithStandardHandles(
                     debuggerPath,
                     commandLine,
-                    childInput.DangerousGetHandle(),
-                    childOutput.DangerousGetHandle(),
-                    childError.DangerousGetHandle());
+                    childInput,
+                    childOutput,
+                    childError);
 
                 processHandle = processInformation.Process;
                 threadHandle = processInformation.Thread;
@@ -1467,7 +1474,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 childError.Dispose();
                 childError = null;
 
-                if (!AssignProcessToJobObject(job.DangerousGetHandle(), processHandle))
+                if (!AssignProcessToJobObject(job, processHandle))
                 {
                     throw LastWin32Error("Could not assign the debugger process to its job object.");
                 }
@@ -1531,15 +1538,204 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         public void Terminate()
         {
-            if (!TerminateJobObject(_job.DangerousGetHandle(), 1))
+            if (!TerminateJobObject(_job, 1))
             {
                 throw LastWin32Error("Could not terminate the debugger process job object.");
             }
         }
 
-        private static SafeKernelHandle CreateKillOnCloseJob()
+        internal sealed class WindowsBridgeProcess
         {
-            var job = new SafeKernelHandle(CreateJobObject(IntPtr.Zero, null));
+            private const string TerminationOwnerDataKey = "NativeSceneBridgeTerminationOwner";
+            private const string ProcessHandleDataKey = "NativeSceneBridgeProcessHandle";
+            private readonly SafeKernelHandle _job;
+            private readonly SafeKernelHandle? _processHandle;
+
+            private WindowsBridgeProcess(Process? process, SafeKernelHandle job, SafeKernelHandle? processHandle)
+            {
+                Process = process;
+                _job = job;
+                _processHandle = processHandle;
+            }
+
+            internal Process? Process { get; }
+
+            internal static WindowsBridgeProcess Start(ProcessStartInfo startInfo)
+            {
+                if (!OperatingSystem.IsWindows())
+                {
+                    throw new PlatformNotSupportedException("Native-scene bridge containment requires Windows.");
+                }
+
+                var job = CreateKillOnCloseJob();
+                SafeKernelHandle? processHandle = null;
+                Process? process = null;
+                try
+                {
+                    var information = CreateBridgeProcess(startInfo, job);
+                    processHandle = new SafeKernelHandle(information.Process);
+                    using (var thread = new SafeKernelHandle(information.Thread))
+                    {
+                        process = Process.GetProcessById(checked((int)information.ProcessId));
+                        _ = process.SafeHandle;
+                    }
+
+                    return new WindowsBridgeProcess(process, job, processHandle);
+                }
+                catch (Exception primary)
+                {
+                    var handedToKernel = false;
+                    Exception? cleanupFailure = null;
+                    try
+                    {
+                        job.CloseChecked();
+                        handedToKernel = true;
+                    }
+                    catch (Exception exception)
+                    {
+                        cleanupFailure = exception;
+                        primary.Data[TerminationOwnerDataKey] = job;
+                        if (processHandle is not null)
+                        {
+                            primary.Data[ProcessHandleDataKey] = processHandle;
+                        }
+                        if (process is not null)
+                        {
+                            primary.Data["NativeSceneBridgeProcess"] = process;
+                        }
+                    }
+
+                    if (handedToKernel)
+                    {
+                        try
+                        {
+                            process?.Dispose();
+                        }
+                        catch (Exception exception)
+                        {
+                            cleanupFailure = exception;
+                        }
+
+                        try
+                        {
+                            processHandle?.CloseChecked();
+                        }
+                        catch (Exception exception)
+                        {
+                            cleanupFailure = cleanupFailure is null ? exception : new AggregateException(cleanupFailure, exception);
+                            primary.Data[TerminationOwnerDataKey] = job;
+                            primary.Data[ProcessHandleDataKey] = processHandle;
+                        }
+                    }
+
+                    if (cleanupFailure is not null)
+                    {
+                        primary.Data["NativeSceneBridgeCleanupFailure"] = cleanupFailure;
+                    }
+
+                    throw;
+                }
+            }
+
+            internal static WindowsBridgeProcess? TakeFailedLaunchOwnership(Exception failure)
+            {
+                if (failure.Data[TerminationOwnerDataKey] is not SafeKernelHandle job)
+                {
+                    return null;
+                }
+
+                var ownership = new WindowsBridgeProcess(
+                    failure.Data["NativeSceneBridgeProcess"] as Process,
+                    job,
+                    failure.Data[ProcessHandleDataKey] as SafeKernelHandle);
+                failure.Data.Remove(TerminationOwnerDataKey);
+                failure.Data.Remove(ProcessHandleDataKey);
+                failure.Data.Remove("NativeSceneBridgeProcess");
+                return ownership;
+            }
+
+            internal void CloseJob() => _job.CloseChecked();
+            internal void CloseProcessHandle() => _processHandle?.CloseChecked();
+
+            private static ProcessInformation CreateBridgeProcess(ProcessStartInfo startInfo, SafeKernelHandle job)
+            {
+                var commandLine = new StringBuilder(QuoteCommandLineArgument(startInfo.FileName));
+                foreach (var argument in startInfo.ArgumentList)
+                {
+                    commandLine.Append(' ').Append(QuoteCommandLineArgument(argument));
+                }
+
+                IntPtr attributeList = IntPtr.Zero;
+                IntPtr jobList = IntPtr.Zero;
+                var initialized = false;
+                var referenced = false;
+                try
+                {
+                    job.DangerousAddRef(ref referenced);
+                    var size = IntPtr.Zero;
+                    _ = InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
+                    if (size == IntPtr.Zero)
+                    {
+                        throw LastWin32Error("Could not allocate bridge job attributes.");
+                    }
+
+                    attributeList = Marshal.AllocHGlobal(size);
+                    if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref size))
+                    {
+                        throw LastWin32Error("Could not initialize bridge job attributes.");
+                    }
+
+                    initialized = true;
+                    jobList = Marshal.AllocHGlobal(IntPtr.Size);
+                    Marshal.WriteIntPtr(jobList, job.HandleWhileReferenced);
+                    if (!UpdateProcThreadAttribute(attributeList, 0, new UIntPtr(0x0002000D), jobList,
+                            new UIntPtr((uint)IntPtr.Size), IntPtr.Zero, IntPtr.Zero))
+                    {
+                        throw LastWin32Error("Could not configure creation-time bridge containment.");
+                    }
+
+                    var startupInfo = new StartupInfoEx
+                    {
+                        StartupInfo = new StartupInfo { Size = (uint)Marshal.SizeOf<StartupInfoEx>() },
+                        AttributeList = attributeList,
+                    };
+                    if (!CreateProcess(null, commandLine, IntPtr.Zero, IntPtr.Zero, inheritHandles: false,
+                            CreateNoWindow | ExtendedStartupInfoPresent, IntPtr.Zero, currentDirectory: null,
+                            ref startupInfo, out var information))
+                    {
+                        throw LastWin32Error("Could not create the contained native-scene bridge.");
+                    }
+
+                    return information;
+                }
+                finally
+                {
+                    if (initialized)
+                    {
+                        DeleteProcThreadAttributeList(attributeList);
+                    }
+
+                    if (jobList != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(jobList);
+                    }
+
+                    if (attributeList != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(attributeList);
+                    }
+
+                    if (referenced)
+                    {
+                        job.DangerousRelease();
+                    }
+                }
+            }
+        }
+
+        private static SafeKernelHandle CreateKillOnCloseJob(string? jobName = null)
+        {
+            var job = new SafeKernelHandle(CreateJobObject(IntPtr.Zero, jobName));
             if (job.IsInvalid)
             {
                 var error = Marshal.GetLastWin32Error();
@@ -1555,7 +1751,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 },
             };
             if (!SetInformationJobObject(
-                    job.DangerousGetHandle(),
+                    job,
                     JobObjectExtendedLimitInformationClass,
                     ref limits,
                     (uint)Marshal.SizeOf<JobObjectExtendedLimitInformation>()))
@@ -1576,7 +1772,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             var attributes = new SecurityAttributes
             {
                 Length = Marshal.SizeOf<SecurityAttributes>(),
-                InheritHandle = true,
+                InheritHandle = 1,
             };
             if (!CreatePipe(out var read, out var write, ref attributes, 0))
             {
@@ -1587,7 +1783,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             child = new SafeKernelHandle(parentReads ? write : read);
             try
             {
-                if (!SetHandleInformation(parent.DangerousGetHandle(), HandleFlagInherit, 0))
+                if (!SetHandleInformation(parent, HandleFlagInherit, 0))
                 {
                     throw LastWin32Error("Could not configure a debugger standard I/O pipe.");
                 }
@@ -1603,15 +1799,25 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         private static ProcessInformation CreateProcessWithStandardHandles(
             string debuggerPath,
             StringBuilder commandLine,
-            IntPtr standardInput,
-            IntPtr standardOutput,
-            IntPtr standardError)
+            SafeKernelHandle standardInput,
+            SafeKernelHandle standardOutput,
+            SafeKernelHandle standardError)
         {
             IntPtr attributeList = IntPtr.Zero;
             IntPtr inheritedHandleList = IntPtr.Zero;
             var attributeListInitialized = false;
+            var inputReferenced = false;
+            var outputReferenced = false;
+            var errorReferenced = false;
             try
             {
+                standardInput.DangerousAddRef(ref inputReferenced);
+                standardOutput.DangerousAddRef(ref outputReferenced);
+                standardError.DangerousAddRef(ref errorReferenced);
+                var inputHandle = standardInput.HandleWhileReferenced;
+                var outputHandle = standardOutput.HandleWhileReferenced;
+                var errorHandle = standardError.HandleWhileReferenced;
+
                 var attributeListSize = IntPtr.Zero;
                 _ = InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeListSize);
                 if (attributeListSize == IntPtr.Zero)
@@ -1627,9 +1833,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
                 attributeListInitialized = true;
                 inheritedHandleList = Marshal.AllocHGlobal(IntPtr.Size * 3);
-                Marshal.WriteIntPtr(inheritedHandleList, 0, standardInput);
-                Marshal.WriteIntPtr(inheritedHandleList, IntPtr.Size, standardOutput);
-                Marshal.WriteIntPtr(inheritedHandleList, IntPtr.Size * 2, standardError);
+                Marshal.WriteIntPtr(inheritedHandleList, 0, inputHandle);
+                Marshal.WriteIntPtr(inheritedHandleList, IntPtr.Size, outputHandle);
+                Marshal.WriteIntPtr(inheritedHandleList, IntPtr.Size * 2, errorHandle);
                 if (!UpdateProcThreadAttribute(
                         attributeList,
                         0,
@@ -1648,9 +1854,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     {
                         Size = (uint)Marshal.SizeOf<StartupInfoEx>(),
                         Flags = StartfUseStdHandles,
-                        StandardInput = standardInput,
-                        StandardOutput = standardOutput,
-                        StandardError = standardError,
+                        StandardInput = inputHandle,
+                        StandardOutput = outputHandle,
+                        StandardError = errorHandle,
                     },
                     AttributeList = attributeList,
                 };
@@ -1686,6 +1892,21 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 if (attributeList != IntPtr.Zero)
                 {
                     Marshal.FreeHGlobal(attributeList);
+                }
+
+                if (errorReferenced)
+                {
+                    standardError.DangerousRelease();
+                }
+
+                if (outputReferenced)
+                {
+                    standardOutput.DangerousRelease();
+                }
+
+                if (inputReferenced)
+                {
+                    standardInput.DangerousRelease();
                 }
             }
         }
@@ -1731,7 +1952,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool CreateProcess(
-            string applicationName,
+            string? applicationName,
             StringBuilder commandLine,
             IntPtr processAttributes,
             IntPtr threadAttributes,
@@ -1742,17 +1963,17 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             ref StartupInfoEx startupInfo,
             out ProcessInformation processInformation);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
+        [LibraryImport("kernel32.dll", EntryPoint = "InitializeProcThreadAttributeList", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool InitializeProcThreadAttributeList(
+        private static partial bool InitializeProcThreadAttributeList(
             IntPtr attributeList,
             uint attributeCount,
             uint flags,
             ref IntPtr size);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
+        [LibraryImport("kernel32.dll", EntryPoint = "UpdateProcThreadAttribute", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool UpdateProcThreadAttribute(
+        private static partial bool UpdateProcThreadAttribute(
             IntPtr attributeList,
             uint flags,
             UIntPtr attribute,
@@ -1761,59 +1982,58 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             IntPtr previousValue,
             IntPtr returnSize);
 
-        [DllImport("kernel32.dll")]
-        private static extern void DeleteProcThreadAttributeList(IntPtr attributeList);
+        [LibraryImport("kernel32.dll", EntryPoint = "DeleteProcThreadAttributeList")]
+        private static partial void DeleteProcThreadAttributeList(IntPtr attributeList);
 
 
-        [DllImport("kernel32.dll", SetLastError = true)]
+        [LibraryImport("kernel32.dll", EntryPoint = "CreatePipe", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool CreatePipe(
+        private static partial bool CreatePipe(
             out IntPtr readPipe,
             out IntPtr writePipe,
             ref SecurityAttributes pipeAttributes,
             uint size);
 
-        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern IntPtr CreateJobObject(IntPtr jobAttributes, string? name);
+        [LibraryImport("kernel32.dll", EntryPoint = "CreateJobObjectW", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+        private static partial IntPtr CreateJobObject(IntPtr jobAttributes, string? name);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
+        [LibraryImport("kernel32.dll", EntryPoint = "SetInformationJobObject", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool SetInformationJobObject(
-            IntPtr job,
+        private static partial bool SetInformationJobObject(
+            SafeKernelHandle job,
             uint informationClass,
             ref JobObjectExtendedLimitInformation jobObjectInformation,
             uint jobObjectInformationLength);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
+        [LibraryImport("kernel32.dll", EntryPoint = "AssignProcessToJobObject", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+        private static partial bool AssignProcessToJobObject(SafeKernelHandle job, IntPtr process);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern uint ResumeThread(IntPtr thread);
+        [LibraryImport("kernel32.dll", EntryPoint = "ResumeThread", SetLastError = true)]
+        private static partial uint ResumeThread(IntPtr thread);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
+        [LibraryImport("kernel32.dll", EntryPoint = "TerminateProcess", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+        private static partial bool TerminateProcess(IntPtr process, uint exitCode);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
+        [LibraryImport("kernel32.dll", EntryPoint = "TerminateJobObject", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+        private static partial bool TerminateJobObject(SafeKernelHandle job, uint exitCode);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
+        [LibraryImport("kernel32.dll", EntryPoint = "SetHandleInformation", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
+        private static partial bool SetHandleInformation(SafeFileHandle handle, uint mask, uint flags);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
+        [LibraryImport("kernel32.dll", EntryPoint = "CloseHandle", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool CloseHandle(IntPtr handle);
+        private static partial bool CloseHandle(IntPtr handle);
 
         [StructLayout(LayoutKind.Sequential)]
         private struct SecurityAttributes
         {
             public int Length;
             public IntPtr SecurityDescriptor;
-            [MarshalAs(UnmanagedType.Bool)]
-            public bool InheritHandle;
+            public int InheritHandle;
         }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -1896,11 +2116,40 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             public SafeKernelHandle(IntPtr handle)
                 : base(ownsHandle: true) => SetHandle(handle);
 
+            internal IntPtr HandleWhileReferenced => handle;
+
+            internal void CloseChecked()
+            {
+                if (IsClosed)
+                {
+                    return;
+                }
+
+                var referenced = false;
+                try
+                {
+                    DangerousAddRef(ref referenced);
+                    if (!CloseHandle(handle))
+                    {
+                        throw LastWin32Error("Could not release the native bridge ownership handle.");
+                    }
+
+                    SetHandleAsInvalid();
+                }
+                finally
+                {
+                    if (referenced)
+                    {
+                        DangerousRelease();
+                    }
+                }
+            }
+
             protected override bool ReleaseHandle() => CloseHandle(handle);
         }
     }
 
-    private sealed class WindowsProcessTreeLaunch(
+    internal sealed class WindowsProcessTreeLaunch(
         Process process,
         Stream input,
         Stream output,

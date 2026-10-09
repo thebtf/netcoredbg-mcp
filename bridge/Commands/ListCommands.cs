@@ -11,6 +11,8 @@ namespace FlaUIBridge.Commands;
 
 public static class ListCommands
 {
+    private const string ControlTypeKey = "controlType";
+
     public static JsonNode InvokeItem(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         if (mainWindow is null)
@@ -85,8 +87,8 @@ public static class ListCommands
         var selector = @params?["selector"] as JsonObject
             ?? throw new ArgumentException("Missing required parameter: selector");
         var root = ElementCommands.ResolveSearchRoot(mainWindow, selector, automation);
-        if (!selector.ContainsKey("controlType"))
-            selector["controlType"] = "List";
+        if (!selector.ContainsKey(ControlTypeKey))
+            selector[ControlTypeKey] = "List";
         return ElementCommands.FindElementCascade(root, selector, automation);
     }
 
@@ -108,8 +110,8 @@ public static class ListCommands
             return items[itemIndex.Value];
         }
 
-        if (!item.ContainsKey("controlType"))
-            item["controlType"] = "ListItem";
+        if (!item.ContainsKey(ControlTypeKey))
+            item[ControlTypeKey] = "ListItem";
         return ElementCommands.FindElementCascade(listElement, item, automation);
     }
 
@@ -126,7 +128,7 @@ public static class ListCommands
         var name = child["name"]?.GetValue<string>();
         if (!string.IsNullOrWhiteSpace(name))
             conditions.Add(cf.ByName(name));
-        var controlType = child["controlType"]?.GetValue<string>();
+        var controlType = child[ControlTypeKey]?.GetValue<string>();
         if (!string.IsNullOrWhiteSpace(controlType) &&
             Enum.TryParse<ControlType>(controlType, true, out var ct))
             conditions.Add(cf.ByControlType(ct));

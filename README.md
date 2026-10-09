@@ -13,7 +13,7 @@ agent workflow. `netcoredbg-mcp` combines `netcoredbg`, the Debug Adapter
 Protocol, and Windows UI Automation so an agent can observe a running app,
 stop it deliberately, and inspect the state that explains the behavior.
 
-**Python 3.10+ · Windows GUI automation · 135 tools · 8 prompts · 4 resources · v0.23.11**
+**Python 3.10+ · Windows GUI automation · 135 tools · 8 prompts · 4 resources · v0.23.12**
 
 ## What it enables
 
@@ -216,7 +216,7 @@ ui_click(automation_id="saveButton")
 
 ### Physical numeric keypad input
 
-On the default Python server's Windows FlaUI path,
+On the default Python server's Windows FlaUI and pywinauto input paths,
 `ui_send_keys(keys="{NUMPAD1}", automation_id="myInput")` sends the physical
 keypad 1 key, not the text `"1"` or the top-row digit key.
 `ui_send_keys_focused(keys="{NUMPADENTER}")` sends keypad Enter, distinct from `{ENTER}`.
@@ -228,9 +228,9 @@ accepts names without braces.
 Supported physical keys: `{NUMPAD0}`–`{NUMPAD9}`, `{NUMPADADD}`,
 `{NUMPADSUBTRACT}`, `{NUMPADMULTIPLY}`, `{NUMPADDIVIDE}`, `{NUMPADDECIMAL}`,
 `{NUMPADENTER}`, and `{NUMLOCK}` (17 keys). `{NUMLOCK}` presses and releases
-the lock key; it does not set a chosen lock state. Physical-key delivery is
-scoped to the Windows FlaUI backend, not the alternative UI backend or the
-opt-in .NET preview.
+the physical NumLock key; it does not set a chosen lock state. Digit text output
+depends on the current NumLock state. The scoped `ui_key_sequence` route requires
+FlaUI; it remains unavailable on pywinauto. The opt-in .NET preview is unchanged.
 
 ### Screenshot modes
 

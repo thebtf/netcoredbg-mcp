@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import logging
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from ctypes import wintypes
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -53,73 +56,84 @@ def _runner_input_extra_info() -> int:
     return RUNNER_INPUT_SIGNATURE
 
 
+class _KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", wintypes.WORD),
+        ("wScan", wintypes.WORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", wintypes.LONG),
+        ("dy", wintypes.LONG),
+        ("mouseData", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class _InputUnion(ctypes.Union):
+    _fields_ = [("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT)]
+
+
+class _INPUT(ctypes.Structure):
+    _fields_ = [("type", wintypes.DWORD), ("_input", _InputUnion)]
+
+
+def _send_keyboard_input(vk: int, flags: int = 0, scan: int = 0) -> None:
+    inp = _INPUT()
+    inp.type = 1
+    inp._input.ki.wVk = vk
+    inp._input.ki.wScan = scan
+    inp._input.ki.dwFlags = flags
+    inp._input.ki.dwExtraInfo = _runner_input_extra_info()
+    if ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT)) != 1:
+        error = ctypes.windll.kernel32.GetLastError()
+        raise OSError(
+            error, f"SendInput failed for keyboard event (vk={vk}, scan={scan}, flags={flags})"
+        )
+
+
 def _press(vk: int) -> None:
     """Press a virtual key using SendInput."""
-    import ctypes
-    import ctypes.wintypes as wintypes
-
-    user32 = ctypes.windll.user32
-    input_keyboard = 1
-
-    class KEYBDINPUT(ctypes.Structure):
-        _fields_ = [
-            ("wVk", wintypes.WORD),
-            ("wScan", wintypes.WORD),
-            ("dwFlags", wintypes.DWORD),
-            ("time", wintypes.DWORD),
-            ("dwExtraInfo", ctypes.c_size_t),
-        ]
-
-    class INPUT(ctypes.Structure):
-        class _INPUT(ctypes.Union):
-            _fields_ = [("ki", KEYBDINPUT)]
-
-        _fields_ = [
-            ("type", wintypes.DWORD),
-            ("_input", _INPUT),
-        ]
-
-    inp = INPUT()
-    inp.type = input_keyboard
-    inp._input.ki.wVk = vk
-    inp._input.ki.dwFlags = 0
-    inp._input.ki.dwExtraInfo = _runner_input_extra_info()
-    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+    _send_keyboard_input(vk)
 
 
 def _release(vk: int) -> None:
     """Release a virtual key using SendInput."""
-    import ctypes
-    import ctypes.wintypes as wintypes
+    _send_keyboard_input(vk, flags=0x0002)
 
-    user32 = ctypes.windll.user32
-    input_keyboard = 1
-    keyeventf_keyup = 0x0002
 
-    class KEYBDINPUT(ctypes.Structure):
-        _fields_ = [
-            ("wVk", wintypes.WORD),
-            ("wScan", wintypes.WORD),
-            ("dwFlags", wintypes.DWORD),
-            ("time", wintypes.DWORD),
-            ("dwExtraInfo", ctypes.c_size_t),
-        ]
+def _release_modifiers(pressed_modifiers: list[int]) -> None:
+    import time
 
-    class INPUT(ctypes.Structure):
-        class _INPUT(ctypes.Union):
-            _fields_ = [("ki", KEYBDINPUT)]
+    first_error: Exception | None = None
+    for modifier in reversed(pressed_modifiers):
+        try:
+            _release(modifier)
+        except Exception as error:
+            if first_error is None:
+                first_error = error
+        time.sleep(0.01)
+    if first_error is not None:
+        raise first_error
 
-        _fields_ = [
-            ("type", wintypes.DWORD),
-            ("_input", _INPUT),
-        ]
 
-    inp = INPUT()
-    inp.type = input_keyboard
-    inp._input.ki.wVk = vk
-    inp._input.ki.dwFlags = keyeventf_keyup
-    inp._input.ki.dwExtraInfo = _runner_input_extra_info()
-    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+def _release_tapped_key(vk: int, flags: int = 0, scan: int = 0) -> None:
+    flags |= 0x0002
+    try:
+        _send_keyboard_input(vk, flags=flags, scan=scan)
+    except OSError:
+        try:
+            _send_keyboard_input(vk, flags=flags, scan=scan)
+        except Exception:
+            pass
+        raise
 
 
 def _tap(vk: int) -> None:
@@ -128,7 +142,7 @@ def _tap(vk: int) -> None:
 
     _press(vk)
     time.sleep(0.01)
-    _release(vk)
+    _release_tapped_key(vk)
 
 
 def _send_click(x: int, y: int, button: str = "left") -> None:
@@ -198,6 +212,120 @@ def _send_double_click(x: int, y: int) -> None:
     _send_click(x, y, "left")
 
 
+def _dispatch_special_key(
+    key_name: str,
+    held_modifiers: list[int],
+    vk_map: dict[str, int],
+    literal_special_keys: dict[str, str],
+    type_char: Callable[[str, list[int]], None],
+    tap_keypad: Callable[[str], None],
+) -> None:
+    vk = vk_map.get(key_name)
+    literal = literal_special_keys.get(key_name)
+    if literal is not None:
+        type_char(literal, held_modifiers)
+    elif key_name in _KEYPAD_KEYS:
+        tap_keypad(key_name)
+    elif vk is not None:
+        _tap(vk)
+    else:
+        raise ValueError(f"Unknown special key: {{{key_name}}}")
+
+
+def _send_modified_group(
+    group_chars: str,
+    held_modifiers: list[int],
+    type_char: Callable[[str, list[int]], None],
+) -> None:
+    import time
+
+    pressed_modifiers: list[int] = []
+    try:
+        for mod_vk in held_modifiers:
+            _press(mod_vk)
+            pressed_modifiers.append(mod_vk)
+            time.sleep(0.01)
+        for gch in group_chars:
+            type_char(gch, held_modifiers)
+            time.sleep(0.02)
+    finally:
+        _release_modifiers(pressed_modifiers)
+
+
+def _send_modified_key(
+    keys: str,
+    i: int,
+    held_modifiers: list[int],
+    vk_map: dict[str, int],
+    literal_special_keys: dict[str, str],
+    type_char: Callable[[str, list[int]], None],
+    tap_keypad: Callable[[str], None],
+) -> int:
+    import time
+
+    pressed_modifiers: list[int] = []
+    try:
+        for mod_vk in held_modifiers:
+            _press(mod_vk)
+            pressed_modifiers.append(mod_vk)
+            time.sleep(0.01)
+        if keys[i] == "{":
+            if keys.startswith("{}}", i):
+                type_char("}", held_modifiers)
+                return i + 3
+            end = keys.find("}", i)
+            if end == -1:
+                raise ValueError(f"Unclosed brace in key sequence at position {i}: '{keys[i:]}'")
+            key_name = keys[i + 1 : end].upper()
+            _dispatch_special_key(
+                key_name, held_modifiers, vk_map, literal_special_keys, type_char, tap_keypad
+            )
+            i = end + 1
+        else:
+            type_char(keys[i], held_modifiers)
+            i += 1
+    finally:
+        _release_modifiers(pressed_modifiers)
+
+    time.sleep(0.02)
+    return i
+
+
+def _dispatch_key_sequence(
+    keys: str,
+    vk_map: dict[str, int],
+    modifier_map: dict[str, int],
+    literal_special_keys: dict[str, str],
+    type_char: Callable[[str, list[int]], None],
+    tap_keypad: Callable[[str], None],
+) -> None:
+    import time
+
+    i = 0
+    length = len(keys)
+    while i < length:
+        held_modifiers: list[int] = []
+        while i < length and keys[i] in modifier_map:
+            held_modifiers.append(modifier_map[keys[i]])
+            i += 1
+
+        if i >= length:
+            break
+
+        if keys[i] == "(" and held_modifiers:
+            close = keys.find(")", i)
+            if close == -1:
+                raise ValueError(f"Unclosed parenthesis in key sequence at position {i}")
+            _send_modified_group(keys[i + 1 : close], held_modifiers, type_char)
+            i = close + 1
+            time.sleep(0.02)
+            continue
+
+        i = _send_modified_key(
+            keys, i, held_modifiers, vk_map, literal_special_keys, type_char, tap_keypad
+        )
+
+
 def _send_keys_via_input(keys: str) -> None:
     """Send keyboard input using Win32 SendInput API.
 
@@ -210,8 +338,6 @@ def _send_keys_via_input(keys: str) -> None:
     This replaces pywinauto.keyboard.send_keys() which uses WM_KEYDOWN
     and fails for WPF InputBindings (e.g., Alt+Z).
     """
-    import ctypes
-    import ctypes.wintypes as wintypes
     import time
 
     user32 = ctypes.windll.user32
@@ -268,40 +394,11 @@ def _send_keys_via_input(keys: str) -> None:
         "~": "~",
     }
 
-    # ── KEYBDINPUT / INPUT structs for SendInput ──
-
-    class KEYBDINPUT(ctypes.Structure):
-        _fields_ = [
-            ("wVk", wintypes.WORD),
-            ("wScan", wintypes.WORD),
-            ("dwFlags", wintypes.DWORD),
-            ("time", wintypes.DWORD),
-            ("dwExtraInfo", ctypes.c_size_t),
-        ]
-
-    class INPUT(ctypes.Structure):
-        class _INPUT(ctypes.Union):
-            _fields_ = [("ki", KEYBDINPUT)]
-
-        _fields_ = [
-            ("type", wintypes.DWORD),
-            ("_input", _INPUT),
-        ]
-
     def _tap_keypad(key_name: str) -> None:
         scan, extended = _KEYPAD_KEYS[key_name]
-        for key_up in (False, True):
-            inp = INPUT()
-            inp.type = 1
-            inp._input.ki.wVk = 0
-            inp._input.ki.wScan = scan
-            inp._input.ki.dwFlags = 0x0008 | (0x0001 if extended else 0) | (0x0002 if key_up else 0)
-            inp._input.ki.dwExtraInfo = _runner_input_extra_info()
-            if user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT)) != 1:
-                raise OSError(
-                    f"SendInput failed for {key_name} {'up' if key_up else 'down'}: "
-                    f"Win32 error {ctypes.get_last_error()}"
-                )
+        flags = 0x0008 | (0x0001 if extended else 0)
+        _send_keyboard_input(0, flags=flags, scan=scan)
+        _release_tapped_key(0, flags=flags, scan=scan)
 
     def _char_to_vk(ch: str) -> tuple[int, bool, bool, bool]:
         """Convert a character to (vk_code, needs_shift, needs_ctrl, needs_alt) via VkKeyScanW."""
@@ -326,90 +423,19 @@ def _send_keys_via_input(keys: str) -> None:
             extra_mods.append(VK_CONTROL)
         if needs_alt and VK_MENU not in held_modifiers:
             extra_mods.append(VK_MENU)
-        for m in extra_mods:
-            _press(m)
-            time.sleep(0.01)
-        _tap(vk)
-        for m in reversed(extra_mods):
-            _release(m)
-            time.sleep(0.01)
-
-    i = 0
-    length = len(keys)
-
-    while i < length:
-        # Collect modifier prefixes
-        held_modifiers: list[int] = []
-        while i < length and keys[i] in modifier_map:
-            held_modifiers.append(modifier_map[keys[i]])
-            i += 1
-
-        if i >= length:
-            break
-
-        ch = keys[i]
-
-        # Handle grouped modifier application: ^(abc) holds Ctrl for a, b, c
-        if ch == "(" and held_modifiers:
-            close = keys.find(")", i)
-            if close == -1:
-                raise ValueError(f"Unclosed parenthesis in key sequence at position {i}")
-            group_chars = keys[i + 1 : close]
-            for mod_vk in held_modifiers:
-                _press(mod_vk)
-                time.sleep(0.01)
-            try:
-                for gch in group_chars:
-                    _type_char(gch, held_modifiers)
-                    time.sleep(0.02)
-            finally:
-                for mod_vk in reversed(held_modifiers):
-                    _release(mod_vk)
-                    time.sleep(0.01)
-            i = close + 1
-            time.sleep(0.02)
-            continue
-
-        # Press held modifiers
-        for mod_vk in held_modifiers:
-            _press(mod_vk)
-            time.sleep(0.01)
-
+        pressed_mods: list[int] = []
         try:
-            if ch == "{":
-                # Special key in braces: {ENTER}, {F4}, etc.
-                if keys.startswith("{}}", i):
-                    _type_char("}", held_modifiers)
-                    i += 3
-                    continue
-                end = keys.find("}", i)
-                if end == -1:
-                    raise ValueError(
-                        f"Unclosed brace in key sequence at position {i}: '{keys[i:]}'"
-                    )
-                key_name = keys[i + 1 : end].upper()
-                vk = vk_map.get(key_name)
-                literal = literal_special_keys.get(key_name)
-                if literal is not None:
-                    _type_char(literal, held_modifiers)
-                elif key_name in _KEYPAD_KEYS:
-                    _tap_keypad(key_name)
-                elif vk is not None:
-                    _tap(vk)
-                else:
-                    raise ValueError(f"Unknown special key: {{{key_name}}}")
-                i = end + 1
-            else:
-                # Regular character
-                _type_char(ch, held_modifiers)
-                i += 1
-        finally:
-            # Release held modifiers in reverse order
-            for mod_vk in reversed(held_modifiers):
-                _release(mod_vk)
+            for m in extra_mods:
+                _press(m)
+                pressed_mods.append(m)
                 time.sleep(0.01)
+            _tap(vk)
+        finally:
+            _release_modifiers(pressed_mods)
 
-        time.sleep(0.02)
+    _dispatch_key_sequence(
+        keys, vk_map, modifier_map, literal_special_keys, _type_char, _tap_keypad
+    )
 
 
 def _send_drag(
@@ -487,12 +513,12 @@ def _send_drag(
             if mouse_down_sent:
                 user32.mouse_event(mouseeventf_leftup, 0, 0, 0, RUNNER_INPUT_SIGNATURE)
     finally:
-        for modifier_vk in reversed(pressed_modifier_vks):
-            _release(modifier_vk)
-            time.sleep(0.01)
+        _release_modifiers(pressed_modifier_vks)
 
 
 logger = logging.getLogger(__name__)
+
+_NOT_CONNECTED_MESSAGE = "Not connected to any process"
 
 
 class UIAutomation:
@@ -531,7 +557,7 @@ class UIAutomation:
                 app = Application(backend="uia").connect(process=process_id)
                 return app
             except Exception as e:
-                logger.error(f"Failed to connect to process {process_id}: {e}")
+                logger.exception(f"Failed to connect to process {process_id}: {e}")
                 raise ApplicationNotRespondingError(
                     f"Cannot connect to process {process_id}: {e}"
                 ) from e
@@ -650,7 +676,7 @@ class UIAutomation:
             UIOperationTimeoutError: If operation takes too long
         """
         if self._app is None:
-            raise NoProcessIdError("Not connected to any process")
+            raise NoProcessIdError(_NOT_CONNECTED_MESSAGE)
 
         def _get_tree():
             try:
@@ -658,7 +684,7 @@ class UIAutomation:
                 window = self._app.top_window()
                 return serialize_element(window, max_depth=max_depth, max_children=max_children)
             except Exception as e:
-                logger.error(f"Failed to get window tree: {e}")
+                logger.exception(f"Failed to get window tree: {e}")
                 raise ApplicationNotRespondingError(f"Cannot access window tree: {e}") from e
 
         try:
@@ -700,7 +726,7 @@ class UIAutomation:
             ValueError: If no search criteria provided
         """
         if self._app is None:
-            raise NoProcessIdError("Not connected to any process")
+            raise NoProcessIdError(_NOT_CONNECTED_MESSAGE)
 
         if not any((automation_id, name, control_type)):
             raise ValueError("At least one search criterion must be provided")
@@ -729,7 +755,7 @@ class UIAutomation:
                 return element
 
             except Exception as e:
-                logger.error(f"Failed to find element: {e}")
+                logger.exception(f"Failed to find element: {e}")
                 raise ElementNotFoundError(
                     f"Element not found with criteria {criteria}: {e}"
                 ) from e
@@ -760,9 +786,24 @@ class UIAutomation:
 
         def _get_info():
             try:
-                return serialize_element(element, max_depth=0, max_children=0)
+                import sys
+
+                snapshot_element = element
+                if sys.platform == "win32":
+                    from pywinauto.application import WindowSpecification
+
+                    if isinstance(element, WindowSpecification):
+                        try:
+                            snapshot_element = element.wrapper_object()
+                        except Exception as e:
+                            logger.debug(
+                                "Metadata snapshot resolution failed; retaining best-effort "
+                                "property access on the original specification: %s",
+                                e,
+                            )
+                return serialize_element(snapshot_element, max_depth=0, max_children=0)
             except Exception as e:
-                logger.error(f"Failed to get element info: {e}")
+                logger.exception(f"Failed to get element info: {e}")
                 raise ApplicationNotRespondingError(f"Cannot access element info: {e}") from e
 
         try:
@@ -792,7 +833,7 @@ class UIAutomation:
                 element.set_focus()
                 logger.debug(f"Set focus to element: {element.element_info.name}")
             except Exception as e:
-                logger.error(f"Failed to set focus: {e}")
+                logger.exception(f"Failed to set focus: {e}")
                 raise ApplicationNotRespondingError(f"Cannot set focus to element: {e}") from e
 
         try:
@@ -832,7 +873,7 @@ class UIAutomation:
                     element.type_keys(keys, with_spaces=True)
                 logger.debug(f"Sent keys to element: {keys}")
             except Exception as e:
-                logger.error(f"Failed to send keys: {e}")
+                logger.exception(f"Failed to send keys: {e}")
                 raise ApplicationNotRespondingError(f"Cannot send keys to element: {e}") from e
 
         try:
@@ -859,7 +900,7 @@ class UIAutomation:
                 element.click()
                 logger.debug(f"Clicked element: {element.element_info.name}")
             except Exception as e:
-                logger.error(f"Failed to click element: {e}")
+                logger.exception(f"Failed to click element: {e}")
                 raise ApplicationNotRespondingError(f"Cannot click element: {e}") from e
 
         try:
@@ -888,14 +929,14 @@ class UIAutomation:
             UIOperationTimeoutError: If operation times out
         """
         if self._app is None:
-            raise NoProcessIdError("Not connected to any process")
+            raise NoProcessIdError(_NOT_CONNECTED_MESSAGE)
 
         def _send_keys_focused():
             try:
                 _send_keys_via_input(keys)
                 logger.debug(f"Sent keys to focused element via SendInput: {keys}")
             except Exception as e:
-                logger.error(f"Failed to send keys to focused: {e}")
+                logger.exception(f"Failed to send keys to focused: {e}")
                 raise ApplicationNotRespondingError(
                     f"Cannot send keys to focused element: {e}"
                 ) from e

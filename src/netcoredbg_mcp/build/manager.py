@@ -249,10 +249,16 @@ class BuildManager:
             True if session was removed
         """
         key = self._normalize_path(workspace_root)
-        if key in self._sessions:
-            del self._sessions[key]
-            return True
-        return False
+        session = self._sessions.get(key)
+        if (
+            session is None
+            or session.is_building
+            or session._build_users
+            or session._current_owner is not None
+        ):
+            return False
+        del self._sessions[key]
+        return True
 
     def to_dict(self) -> dict[str, Any]:
         """Get manager status as dictionary.

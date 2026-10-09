@@ -9,6 +9,8 @@ namespace FlaUIBridge.Commands;
 
 public static class VirtualizationCommands
 {
+    private const string RealizedKey = "realized";
+
     public static JsonNode RealizeVirtualizedItem(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         if (mainWindow is null)
@@ -30,7 +32,7 @@ public static class VirtualizationCommands
             Program.Log($"realize_virtualized_item: container '{containerAutomationId}' does not support ItemContainerPattern");
             return new JsonObject
             {
-                ["realized"] = false,
+                [RealizedKey] = false,
                 ["reason"] = "container does not support ItemContainerPattern"
             };
         }
@@ -54,7 +56,7 @@ public static class VirtualizationCommands
             Program.Log($"realize_virtualized_item: FindItemByProperty failed: {ex.Message}");
             return new JsonObject
             {
-                ["realized"] = false,
+                [RealizedKey] = false,
                 ["reason"] = $"item not found (search error: {ex.Message})"
             };
         }
@@ -64,7 +66,7 @@ public static class VirtualizationCommands
             Program.Log($"realize_virtualized_item: item not found (property={propertyName}, value={value})");
             return new JsonObject
             {
-                ["realized"] = false,
+                [RealizedKey] = false,
                 ["reason"] = "item not found"
             };
         }
@@ -115,7 +117,7 @@ public static class VirtualizationCommands
 
         var resultNode = new JsonObject
         {
-            ["realized"] = true,
+            [RealizedKey] = true,
             ["element_id"] = finalElementId,
             ["bounding_rect"] = boundingRectNode
         };

@@ -3,3 +3,4 @@ branch = True
 relative_files = True
 source =
     src/netcoredbg_mcp
+    scripts

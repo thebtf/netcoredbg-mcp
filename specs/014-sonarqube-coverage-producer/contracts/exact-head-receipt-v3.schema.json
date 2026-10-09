@@ -36,9 +36,14 @@
       ]
     },
     "release_intent": {
-      "enum": [
-        "none",
-        "v0.23.11"
+      "oneOf": [
+        {
+          "const": "none"
+        },
+        {
+          "type": "string",
+          "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+        }
       ]
     },
     "identity": {
@@ -58,6 +63,9 @@
       "oneOf": [
         {
           "$ref": "#/$defs/analysis_evidence"
+        },
+        {
+          "$ref": "#/$defs/incomplete_analysis_evidence"
         },
         {
           "type": "null"
@@ -149,11 +157,57 @@
               "PASS",
               "BLOCKED"
             ]
-          },
-          "release_intent": {
-            "const": "v0.23.11"
           }
-        }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "release_intent": {
+                "type": "string",
+                "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+              }
+            }
+          },
+          {
+            "properties": {
+              "outcome": {
+                "const": "BLOCKED"
+              },
+              "release_intent": {
+                "const": "none"
+              },
+              "identity": {
+                "properties": {
+                  "analysis_id": {
+                    "type": "null"
+                  }
+                }
+              },
+              "failure": {
+                "properties": {
+                  "stage": {
+                    "const": "PLANNED"
+                  }
+                }
+              },
+              "coverage": {
+                "type": "null"
+              },
+              "analysis": {
+                "type": "null"
+              },
+              "global_inventory": {
+                "type": "null"
+              },
+              "release_gate": {
+                "type": "null"
+              },
+              "cleanup": {
+                "type": "null"
+              }
+            }
+          }
+        ]
       }
     },
     {
@@ -217,6 +271,22 @@
           },
           "failure": {
             "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "analysis": {
+            "type": "object"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "identity": {
+            "$ref": "#/$defs/completed_identity"
           }
         }
       }
@@ -852,6 +922,84 @@
         }
       }
     },
+    "incomplete_analysis_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "observations",
+        "aggregate",
+        "new_coverage_condition",
+        "python_components",
+        "dotnet_components"
+      ],
+      "properties": {
+        "status": {
+          "const": "INCOMPLETE"
+        },
+        "observations": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "submitted",
+            "current_before_measures",
+            "current_after_measures",
+            "current_final"
+          ],
+          "properties": {
+            "submitted": {
+              "const": true
+            },
+            "current_before_measures": {
+              "const": true
+            },
+            "current_after_measures": {
+              "enum": [
+                true,
+                null
+              ]
+            },
+            "current_final": {
+              "type": "null"
+            }
+          }
+        },
+        "aggregate": {
+          "$ref": "#/$defs/analysis_evidence/properties/aggregate"
+        },
+        "new_coverage_condition": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "threshold",
+            "actual_value"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "OK",
+                "ERROR"
+              ]
+            },
+            "threshold": {
+              "const": 80
+            },
+            "actual_value": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            }
+          }
+        },
+        "python_components": {
+          "$ref": "#/$defs/language_component_evidence"
+        },
+        "dotnet_components": {
+          "$ref": "#/$defs/language_component_evidence"
+        }
+      }
+    },
     "inventory_summary": {
       "type": "object",
       "additionalProperties": false,
@@ -967,7 +1115,7 @@
           "$ref": "#/$defs/relative_path"
         },
         "producer_terminal": {
-          "const": true
+          "type": "boolean"
         },
         "removed_paths": {
           "type": "array",
@@ -995,7 +1143,34 @@
             }
           ]
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "producer_terminal": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": "FAILED"
+              },
+              "failure": {
+                "$ref": "#/$defs/safe_failure"
+              },
+              "removed_paths": {
+                "maxItems": 0
+              },
+              "parent_removed_if_empty": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
     },
     "cleanup_ok": {
       "allOf": [
@@ -1004,6 +1179,9 @@
         },
         {
           "properties": {
+            "producer_terminal": {
+              "const": true
+            },
             "status": {
               "const": "OK"
             },
@@ -1029,6 +1207,66 @@
         "message": {
           "type": "string",
           "minLength": 1
+        },
+        "native": {
+          "$ref": "#/$defs/cleanup_native_failure"
+        }
+      }
+    },
+    "cleanup_native_failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "stage",
+        "entry",
+        "winerror",
+        "errno"
+      ],
+      "properties": {
+        "operation": {
+          "enum": [
+            "CreateFileW",
+            "NtCreateFile",
+            "CloseHandle",
+            "GetFileInformationByHandle",
+            "GetFileInformationByHandleEx(FileIdInfo)",
+            "GetFileInformationByHandleEx(FileAttributeTagInfo)",
+            "GetFileInformationByHandleEx(FileIdExtdDirectoryInfo)",
+            "SetFileInformationByHandle(FileDispositionInfoEx)",
+            "Path.stat",
+            "Path.read_bytes"
+          ]
+        },
+        "stage": {
+          "enum": [
+            "OPEN",
+            "IDENTITY",
+            "ENUMERATE",
+            "DISPOSITION",
+            "CLOSE",
+            "METADATA",
+            "MARKER_READ"
+          ]
+        },
+        "entry": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^:\\\\\\u0000-\\u001f]+$"
+        },
+        "winerror": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "errno": {
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       }
     },

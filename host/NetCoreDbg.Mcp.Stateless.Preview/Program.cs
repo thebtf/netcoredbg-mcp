@@ -5,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Protocol;
+using ModelContextProtocol.Server;
 using NetCoreDbg.Mcp.CodeSearch.Core;
 
 namespace NetCoreDbg.Mcp.Stateless.Preview;
@@ -38,134 +39,127 @@ internal static class Program
             .WithCallToolHandler(tools.CallAsync)
             .WithMessageFilters(filters =>
             {
-                filters.AddIncomingFilter(next => async (context, cancellationToken) =>
-                {
-                    if (context.JsonRpcMessage is JsonRpcRequest { Method: not RequestMethods.Initialize } metadataRequest
-                        && !HasRequiredRequestMetadata(metadataRequest))
-                    {
-                        _ = context.Server.DisposeAsync().AsTask();
-                        return;
-                    }
-
-                    if (context.JsonRpcMessage is JsonRpcRequest versionRequest
-                        && TryGetUnsupportedProtocolVersion(versionRequest, out var requestedVersion))
-                    {
-                        if (!BoundedResponseFrameSerializer.FitsUnsupportedVersionErrorWithinLimit(
-                                versionRequest.Id,
-                                requestedVersion,
-                                ProtocolVersion,
-                                out _))
-                        {
-                            _ = context.Server.DisposeAsync().AsTask();
-                            return;
-                        }
-
-                        await next(context, cancellationToken).ConfigureAwait(false);
-                        return;
-                    }
-
-                    if (context.JsonRpcMessage is JsonRpcRequest { Method: RequestMethods.ToolsCall, Params: null } nullParametersRequest)
-                    {
-                        if (!BoundedResponseFrameSerializer.FitsInvalidToolArgumentsResponseWithinLimit(nullParametersRequest.Id))
-                        {
-                            _ = context.Server.DisposeAsync().AsTask();
-                            return;
-                        }
-
-                        await context.Server.SendMessageAsync(
-                            InvalidToolArgumentsResponse(nullParametersRequest.Id),
-                            cancellationToken).ConfigureAwait(false);
-                        return;
-                    }
-
-                    if (context.JsonRpcMessage is JsonRpcRequest invalidToolArgumentsRequest
-                        && (HasInvalidToolCallName(invalidToolArgumentsRequest)
-                            || HasInvalidKnownToolArguments(invalidToolArgumentsRequest)))
-                    {
-                        if (!BoundedResponseFrameSerializer.FitsInvalidToolArgumentsResponseWithinLimit(invalidToolArgumentsRequest.Id))
-                        {
-                            _ = context.Server.DisposeAsync().AsTask();
-                            return;
-                        }
-
-                        await context.Server.SendMessageAsync(
-                            InvalidToolArgumentsResponse(invalidToolArgumentsRequest.Id),
-                            cancellationToken).ConfigureAwait(false);
-                        return;
-                    }
-
-                    if (context.JsonRpcMessage is JsonRpcRequest { Method: RequestMethods.Initialize } initializeRequest)
-                    {
-                        if (!BoundedResponseFrameSerializer.FitsLegacyInitializeMethodNotFoundErrorWithinLimit(initializeRequest.Id))
-                        {
-                            _ = context.Server.DisposeAsync().AsTask();
-                            return;
-                        }
-
-                        await context.Server.SendMessageAsync(
-                            MethodNotFoundResponse(initializeRequest.Id),
-                            cancellationToken).ConfigureAwait(false);
-                        return;
-                    }
-
-                    if (context.JsonRpcMessage is JsonRpcRequest excludedMethodRequest
-                        && IsExcludedMethod(excludedMethodRequest))
-                    {
-                        if (!BoundedResponseFrameSerializer.FitsLegacyInitializeMethodNotFoundErrorWithinLimit(excludedMethodRequest.Id))
-                        {
-                            _ = context.Server.DisposeAsync().AsTask();
-                            return;
-                        }
-
-                        await context.Server.SendMessageAsync(
-                            MethodNotFoundResponse(excludedMethodRequest.Id),
-                            cancellationToken).ConfigureAwait(false);
-                        return;
-                    }
-
-                    if (context.JsonRpcMessage is JsonRpcRequest incoming
-                        && !IsRequestResponseWithinFrameLimit(incoming))
-                    {
-                        _ = context.Server.DisposeAsync().AsTask();
-                        return;
-                    }
-
-
-                    await next(context, cancellationToken).ConfigureAwait(false);
-                });
-                filters.AddOutgoingFilter(next => async (context, cancellationToken) =>
-                {
-                    if (context.JsonRpcMessage is JsonRpcResponse { Result: JsonObject result }
-                        && result.ContainsKey("supportedVersions")
-                        && result.ContainsKey("capabilities"))
-                    {
-                        result["capabilities"]!.AsObject().Remove("logging");
-                        result["ttlMs"] = (long)PreviewToolCatalog.CacheLifetime.TotalMilliseconds;
-                        result["cacheScope"] = "public";
-                    }
-
-                    NormalizeUnsupportedVersion(context.JsonRpcMessage);
-                    if (!IsCompleteResponseFrameWithinLimit(context.JsonRpcMessage))
-                    {
-                        if (context.JsonRpcMessage is JsonRpcError { Error.Code: -32022 })
-                        {
-                            _ = context.Server.DisposeAsync().AsTask();
-                            return;
-                        }
-
-                        ReplaceOversizedResponse(context.JsonRpcMessage);
-                        if (!IsCompleteResponseFrameWithinLimit(context.JsonRpcMessage))
-                        {
-                            return;
-                        }
-                    }
-
-                    await next(context, cancellationToken).ConfigureAwait(false);
-                });
+                filters.AddIncomingFilter(CreateIncomingMessageHandler);
+                filters.AddOutgoingFilter(CreateOutgoingMessageHandler);
             });
 
         using var host = builder.Build();
         await host.RunAsync().ConfigureAwait(false);
+    }
+
+    private static McpMessageHandler CreateIncomingMessageHandler(McpMessageHandler next) =>
+        async (context, cancellationToken) =>
+        {
+            if (IsMissingRequiredMetadata(context.JsonRpcMessage))
+            {
+                _ = context.Server.DisposeAsync().AsTask();
+                return;
+            }
+
+            if (context.JsonRpcMessage is JsonRpcRequest versionRequest
+                && TryGetUnsupportedProtocolVersion(versionRequest, out var requestedVersion))
+            {
+                if (!BoundedResponseFrameSerializer.FitsUnsupportedVersionErrorWithinLimit(
+                        versionRequest.Id,
+                        requestedVersion,
+                        ProtocolVersion,
+                        out _))
+                {
+                    _ = context.Server.DisposeAsync().AsTask();
+                    return;
+                }
+
+                await next(context, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            if (!TryPrepareIncomingResponse(context.JsonRpcMessage, out var response))
+            {
+                _ = context.Server.DisposeAsync().AsTask();
+                return;
+            }
+
+            if (response is not null)
+            {
+                await context.Server.SendMessageAsync(response, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            await next(context, cancellationToken).ConfigureAwait(false);
+        };
+
+    private static bool IsMissingRequiredMetadata(JsonRpcMessage message) =>
+        message is JsonRpcRequest { Method: not RequestMethods.Initialize } request
+        && !HasRequiredRequestMetadata(request);
+
+    private static bool TryPrepareIncomingResponse(JsonRpcMessage message, out JsonRpcMessage? response)
+    {
+        response = null;
+        if (message is not JsonRpcRequest request)
+        {
+            return true;
+        }
+
+        if (request is { Method: RequestMethods.ToolsCall, Params: null }
+            || HasInvalidToolCallName(request)
+            || HasInvalidKnownToolArguments(request))
+        {
+            if (!BoundedResponseFrameSerializer.FitsInvalidToolArgumentsResponseWithinLimit(request.Id))
+            {
+                return false;
+            }
+
+            response = InvalidToolArgumentsResponse(request.Id);
+            return true;
+        }
+
+        if (request.Method == RequestMethods.Initialize || IsExcludedMethod(request))
+        {
+            if (!BoundedResponseFrameSerializer.FitsLegacyInitializeMethodNotFoundErrorWithinLimit(request.Id))
+            {
+                return false;
+            }
+
+            response = MethodNotFoundResponse(request.Id);
+            return true;
+        }
+
+        return IsRequestResponseWithinFrameLimit(request);
+    }
+
+    private static McpMessageHandler CreateOutgoingMessageHandler(McpMessageHandler next) =>
+        async (context, cancellationToken) =>
+        {
+            NormalizeDiscoveryResponse(context.JsonRpcMessage);
+            NormalizeUnsupportedVersion(context.JsonRpcMessage);
+            if (!IsCompleteResponseFrameWithinLimit(context.JsonRpcMessage))
+            {
+                if (context.JsonRpcMessage is JsonRpcError { Error.Code: -32022 })
+                {
+                    _ = context.Server.DisposeAsync().AsTask();
+                    return;
+                }
+
+                ReplaceOversizedResponse(context.JsonRpcMessage);
+                if (!IsCompleteResponseFrameWithinLimit(context.JsonRpcMessage))
+                {
+                    return;
+                }
+            }
+
+            await next(context, cancellationToken).ConfigureAwait(false);
+        };
+
+    private static void NormalizeDiscoveryResponse(JsonRpcMessage message)
+    {
+        if (message is JsonRpcResponse { Result: JsonObject result }
+            && result.ContainsKey("supportedVersions")
+            && result.ContainsKey("capabilities"))
+        {
+            result["capabilities"]!.AsObject().Remove("logging");
+            result["ttlMs"] = (long)PreviewToolCatalog.CacheLifetime.TotalMilliseconds;
+            result["cacheScope"] = "public";
+        }
     }
 
     private static JsonRpcResponse InvalidToolArgumentsResponse(RequestId id) => new()

@@ -20,6 +20,15 @@ public static class ScreenshotCommands
     private const double BlankFrameVarianceThreshold = 0.01;
     private const int MaximumRasterBytes = 64 * 1024 * 1024;
     private const int MaximumRasterDimension = 8_192;
+    private const string MethodKey = "method";
+    private const string SetForegroundReturnedKey = "set_foreground_returned";
+    private const string VerifiedKey = "verified";
+    private const string ProcessIdKey = "process_id";
+    private const string SourceApiKey = "source_api";
+    private const string RightKey = "right";
+    private const string BottomKey = "bottom";
+    private const string PhysicalPixelsUnit = "physical_px";
+    private const string CoordinateSpaceKey = "coordinate_space";
 
     private static IScreenshotCaptureTransport CaptureTransport =>
         ScopedCaptureTransport.Value ?? ProductionCaptureTransport;
@@ -207,7 +216,7 @@ public static class ScreenshotCommands
                 if (!IsBlankFrame(printWindowBitmap))
                 {
                     var printWindowResult = EncodeBitmap(printWindowBitmap);
-                    printWindowResult["method"] = "PrintWindow";
+                    printWindowResult[MethodKey] = "PrintWindow";
                     printWindowResult["flags"] = (int)PW_RENDERFULLCONTENT;
                     printWindowResult["variance"] = printWindowVariance.Value;
                     return printWindowResult;
@@ -217,7 +226,7 @@ public static class ScreenshotCommands
 
         using var fallbackBitmap = CaptureWithFlashFocusBitBlt(hwnd, width, height);
         var result = EncodeBitmap(fallbackBitmap);
-        result["method"] = "BitBlt";
+        result[MethodKey] = "BitBlt";
         result["fallback"] = "flash-focus";
         if (printWindowVariance is not null)
         {
@@ -262,7 +271,7 @@ public static class ScreenshotCommands
             if (!IsProbablyBlackFrame(printWindowBitmap))
             {
                 var printWindowResult = EncodeBitmap(printWindowBitmap);
-                printWindowResult["method"] = "PrintWindow";
+                printWindowResult[MethodKey] = "PrintWindow";
                 printWindowResult["flags"] = (int)PW_RENDERFULLCONTENT;
                 printWindowResult["variance"] = printWindowVariance;
                 return AddCaptureProvenance(printWindowResult, hwnd, printWindowAfter);
@@ -288,20 +297,20 @@ public static class ScreenshotCommands
         var activation = new JsonObject
         {
             ["attempted"] = true,
-            ["set_foreground_returned"] = false,
+            [SetForegroundReturnedKey] = false,
             ["foreground_hwnd"] = hwnd.ToInt64(),
-            ["verified"] = false,
+            [VerifiedKey] = false,
         };
         var restoration = new JsonObject
         {
             ["required"] = savedForeground != IntPtr.Zero,
             ["attempted"] = false,
-            ["set_foreground_returned"] = false,
+            [SetForegroundReturnedKey] = false,
             ["foreground_hwnd"] = savedForeground.ToInt64(),
-            ["verified"] = false,
+            [VerifiedKey] = false,
         };
         if (savedForegroundSnapshot is CaptureSnapshot savedForegroundIdentity)
-            restoration["process_id"] = checked((int)savedForegroundIdentity.ProcessId);
+            restoration[ProcessIdKey] = checked((int)savedForegroundIdentity.ProcessId);
 
         try
         {
@@ -310,10 +319,10 @@ public static class ScreenshotCommands
                 strictCaptureTarget.ExpectedProcessId,
                 IntPtr.Zero,
                 0);
-            activation["set_foreground_returned"] = activationTransition.SetForegroundReturned;
+            activation[SetForegroundReturnedKey] = activationTransition.SetForegroundReturned;
             if (!activationTransition.Verified)
                 throw new InvalidOperationException("Typed BitBlt fallback could not activate the capture target safely.");
-            activation["verified"] = true;
+            activation[VerifiedKey] = true;
 
             var fallbackBefore = ReadCaptureSnapshot(hwnd);
             EnsureStableCaptureSnapshot(printWindowAfter, fallbackBefore);
@@ -329,12 +338,12 @@ public static class ScreenshotCommands
             EnsureStrictCaptureProcess(fallbackAfter, strictCaptureTarget.ExpectedProcessId);
 
             var result = EncodeBitmap(fallbackBitmap);
-            result["method"] = "BitBlt";
+            result[MethodKey] = "BitBlt";
             result["fallback"] = "flash-focus";
             result["fallback_reason"] = "probable_black_printwindow";
             result["authority"] = "foreground_window_gdi_raster";
             result["capture_authority"] = "foreground_window_gdi_raster";
-            result["source_api"] = "GetWindowDC";
+            result[SourceApiKey] = "GetWindowDC";
             result["rop"] = "SRCCOPY";
             result["evidence_grade"] = "typed_bitblt_fallback";
             result["alternate_attempts"] = 1;
@@ -345,7 +354,7 @@ public static class ScreenshotCommands
                 ["classification"] = "PROBABLE_BLACK_FRAME",
                 ["variance"] = printWindowVariance,
             };
-            result["process_id"] = checked((int)fallbackAfter.ProcessId);
+            result[ProcessIdKey] = checked((int)fallbackAfter.ProcessId);
             result["capture_stability"] = new JsonObject
             {
                 ["before"] = CaptureSnapshotJson(hwnd, fallbackBefore),
@@ -362,7 +371,7 @@ public static class ScreenshotCommands
         {
             if (savedForeground == IntPtr.Zero)
             {
-                restoration["verified"] = true;
+                restoration[VerifiedKey] = true;
             }
             else
             {
@@ -379,8 +388,8 @@ public static class ScreenshotCommands
                     restoredForegroundIdentity.ProcessId,
                     hwnd,
                     printWindowAfter.ProcessId);
-                restoration["set_foreground_returned"] = restorationTransition.SetForegroundReturned;
-                restoration["verified"] = restorationTransition.Verified;
+                restoration[SetForegroundReturnedKey] = restorationTransition.SetForegroundReturned;
+                restoration[VerifiedKey] = restorationTransition.Verified;
                 if (!restorationTransition.Verified)
                     throw new InvalidOperationException("Typed BitBlt fallback could not restore foreground safely.");
             }
@@ -392,26 +401,26 @@ public static class ScreenshotCommands
         return new JsonObject
         {
             ["hwnd"] = hwnd.ToInt64(),
-            ["process_id"] = checked((int)snapshot.ProcessId),
+            [ProcessIdKey] = checked((int)snapshot.ProcessId),
             ["client_rect"] = new JsonObject
             {
                 ["left"] = snapshot.ClientLeft,
                 ["top"] = snapshot.ClientTop,
-                ["right"] = snapshot.ClientRight,
-                ["bottom"] = snapshot.ClientBottom,
-                ["unit"] = "physical_px",
-                ["coordinate_space"] = "client",
-                ["source_api"] = "GetClientRect",
+                [RightKey] = snapshot.ClientRight,
+                [BottomKey] = snapshot.ClientBottom,
+                ["unit"] = PhysicalPixelsUnit,
+                [CoordinateSpaceKey] = "client",
+                [SourceApiKey] = "GetClientRect",
             },
             ["window_bounds"] = new JsonObject
             {
                 ["left"] = snapshot.WindowLeft,
                 ["top"] = snapshot.WindowTop,
-                ["right"] = snapshot.WindowRight,
-                ["bottom"] = snapshot.WindowBottom,
-                ["unit"] = "physical_px",
-                ["coordinate_space"] = "screen",
-                ["source_api"] = "GetWindowRect",
+                [RightKey] = snapshot.WindowRight,
+                [BottomKey] = snapshot.WindowBottom,
+                ["unit"] = PhysicalPixelsUnit,
+                [CoordinateSpaceKey] = "screen",
+                [SourceApiKey] = "GetWindowRect",
             },
             ["dpi"] = checked((int)snapshot.Dpi),
         };
@@ -472,26 +481,26 @@ public static class ScreenshotCommands
     private static JsonObject AddCaptureProvenance(JsonObject result, IntPtr hwnd, CaptureSnapshot snapshot)
     {
         result["hwnd"] = hwnd.ToInt64();
-        result["process_id"] = checked((int)snapshot.ProcessId);
+        result[ProcessIdKey] = checked((int)snapshot.ProcessId);
         result["client_rect"] = new JsonObject
         {
             ["left"] = snapshot.ClientLeft,
             ["top"] = snapshot.ClientTop,
-            ["right"] = snapshot.ClientRight,
-            ["bottom"] = snapshot.ClientBottom,
-            ["unit"] = "physical_px",
-            ["coordinate_space"] = "client",
-            ["source_api"] = "GetClientRect",
+            [RightKey] = snapshot.ClientRight,
+            [BottomKey] = snapshot.ClientBottom,
+            ["unit"] = PhysicalPixelsUnit,
+            [CoordinateSpaceKey] = "client",
+            [SourceApiKey] = "GetClientRect",
         };
         result["window_bounds"] = new JsonObject
         {
             ["left"] = snapshot.WindowLeft,
             ["top"] = snapshot.WindowTop,
-            ["right"] = snapshot.WindowRight,
-            ["bottom"] = snapshot.WindowBottom,
-            ["unit"] = "physical_px",
-            ["coordinate_space"] = "screen",
-            ["source_api"] = "GetWindowRect",
+            [RightKey] = snapshot.WindowRight,
+            [BottomKey] = snapshot.WindowBottom,
+            ["unit"] = PhysicalPixelsUnit,
+            [CoordinateSpaceKey] = "screen",
+            [SourceApiKey] = "GetWindowRect",
         };
         result["dpi"] = (int)snapshot.Dpi;
         result["bridge_assembly"] = GetManagedAssemblyIdentity();

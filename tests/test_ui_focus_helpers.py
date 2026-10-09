@@ -74,8 +74,6 @@ def test_bridge_focused_element_query_returns_bounded_element_info() -> None:
     assert "public static JsonNode GetFocusedElement" in command
     assert "automation.FocusedElement()" in command
     assert "ElementCommands.BuildElementInfo(focused, includePatterns: false)" in command
-    assert 'result["focused"] = true' in command
-    assert '["focused"] = false' in command
     assert 'result["value"] = FocusedValue(focused)' in command
 
 

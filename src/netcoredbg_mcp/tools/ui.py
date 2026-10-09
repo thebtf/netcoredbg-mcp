@@ -20,6 +20,14 @@ _SUPPORTED_THEME_MODES = {"toggle", "light", "dark"}
 UI_TREE_DISCOVERY_TIMEOUT_SECONDS = 10.0
 BRIDGE_NOT_CONNECTED_DIAGNOSTIC = "Not connected. Call 'connect' first."
 BRIDGE_RAW_PNG_INVALID_DIAGNOSTIC = "Bridge screenshot raw PNG is invalid"
+EXACT_AUTOMATION_ID_MISMATCH_DIAGNOSTIC = "selector result did not match exact automation_id"
+AUTOMATION_ID_REQUIRED_DIAGNOSTIC = "automation_id is required"
+
+
+def _screenshot_evidence_grade(*, persist_evidence: bool, typed_bitblt_fallback: bool) -> str:
+    if not persist_evidence:
+        return "preview_only"
+    return "typed_bitblt_fallback" if typed_bitblt_fallback else "lossless_raster"
 
 
 class _PhysicalCaptureProvenanceUnavailableError(ValueError):
@@ -368,7 +376,7 @@ def register_ui_tools(
 
         payload = {
             "status": "BLOCKED",
-            "reason": "selector result did not match exact automation_id",
+            "reason": EXACT_AUTOMATION_ID_MISMATCH_DIAGNOSTIC,
             "action": action,
             "requested": {
                 "automationId": requested_automation_id,
@@ -404,11 +412,11 @@ def register_ui_tools(
         if not requested_automation_id:
             return None
         message = str(error)
-        if "selector result did not match exact automation_id" not in message:
+        if EXACT_AUTOMATION_ID_MISMATCH_DIAGNOSTIC not in message:
             return None
         return {
             "status": "BLOCKED",
-            "reason": "selector result did not match exact automation_id",
+            "reason": EXACT_AUTOMATION_ID_MISMATCH_DIAGNOSTIC,
             "action": action,
             "requested": {
                 "automationId": requested_automation_id,
@@ -2167,12 +2175,9 @@ def register_ui_tools(
                 "height": hd_h,
                 "preview_width": preview_w,
                 "format": safe_format,
-                "evidence_grade": (
-                    "typed_bitblt_fallback"
-                    if persist_evidence and typed_bitblt_fallback
-                    else "lossless_raster"
-                    if persist_evidence
-                    else "preview_only"
+                "evidence_grade": _screenshot_evidence_grade(
+                    persist_evidence=persist_evidence,
+                    typed_bitblt_fallback=typed_bitblt_fallback,
                 ),
                 "state": session.state.state.value
                 if hasattr(session.state.state, "value")
@@ -2533,7 +2538,7 @@ def register_ui_tools(
 
     # -- Advanced interaction tools --
 
-    async def _select_via_clicks(ui_inst, automation_id: str, indices: list[int], mode: str) -> int:
+    async def _select_via_clicks(ui_inst, automation_id: str, indices: list[int]) -> int:
         """Fallback: select items by Ctrl+clicking their cached coordinates.
 
         Does a deeper tree walk (depth=5) to find ListBoxItem/DataItem children,
@@ -2698,7 +2703,7 @@ def register_ui_tools(
 
             # Strategy 2: coordinate Ctrl+click fallback
             if selected < len(indices):
-                selected = await _select_via_clicks(ui, automation_id, indices, mode)
+                selected = await _select_via_clicks(ui, automation_id, indices)
 
             method = "pattern" if selected == len(indices) else "click_fallback"
             return build_response(
@@ -3706,7 +3711,7 @@ def register_ui_tools(
                 return build_error_response(access_error, state=session.state.state)
 
             if not automation_id:
-                raise ValueError("automation_id is required")
+                raise ValueError(AUTOMATION_ID_REQUIRED_DIAGNOSTIC)
 
             ui = await _ensure_ui_connected()
             result = await ui.expand(automation_id=automation_id)
@@ -3740,7 +3745,7 @@ def register_ui_tools(
                 return build_error_response(access_error, state=session.state.state)
 
             if not automation_id:
-                raise ValueError("automation_id is required")
+                raise ValueError(AUTOMATION_ID_REQUIRED_DIAGNOSTIC)
 
             ui = await _ensure_ui_connected()
             result = await ui.collapse(automation_id=automation_id)
@@ -3775,7 +3780,7 @@ def register_ui_tools(
                 return build_error_response(access_error, state=session.state.state)
 
             if not automation_id:
-                raise ValueError("automation_id is required")
+                raise ValueError(AUTOMATION_ID_REQUIRED_DIAGNOSTIC)
 
             ui = await _ensure_ui_connected()
             result = await ui.set_value(automation_id=automation_id, value=value)

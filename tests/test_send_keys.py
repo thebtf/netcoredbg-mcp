@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -106,6 +107,22 @@ def test_keypad_tokens_emit_physical_down_and_up(send_keys, mock_user32, name, v
         assert not flags & 0x0004  # KEYEVENTF_UNICODE
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32" or ctypes.sizeof(ctypes.c_void_p) != 8,
+    reason="64-bit Windows SendInput layout",
+)
+def test_keypad_and_modifier_events_use_native_input_size(send_keys, mock_user32):
+    from netcoredbg_mcp.ui.automation import _press, _release
+
+    send_keys("{NUMPAD1}")
+    _press(0x11)
+    _release(0x11)
+
+    assert mock_user32.SendInput.call_count == 4
+    for call in mock_user32.SendInput.call_args_list:
+        assert call.args[2] == 40  # Win64 INPUT includes the 32-byte MOUSEINPUT union arm.
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
 def test_keypad_events_differ_from_text_digit_and_standard_enter(send_keys, mock_user32):
     keypad_digit = _keyboard_events(send_keys, mock_user32, "{NUMPAD1}")
@@ -143,6 +160,212 @@ def test_unknown_keypad_name_fails_without_sending_an_event(send_keys, mock_user
     with pytest.raises(ValueError, match="Unknown special key"):
         _keyboard_events(send_keys, mock_user32, "{NUMPADNOTAKEY}")
     mock_user32.SendInput.assert_not_called()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
+@pytest.mark.parametrize(
+    ("token", "vk", "scan", "flags"),
+    [
+        ("a", 0x41, 0, 0),
+        ("{ENTER}", 0x0D, 0, 0),
+        ("{NUMPAD1}", 0, 0x4F, 0x0008),
+        ("{NUMPADENTER}", 0, 0x1C, 0x0009),
+        ("{NUMLOCK}", 0, 0x45, 0x0008),
+    ],
+)
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_failed_key_up_attempts_owned_up_only_cleanup(
+    send_keys, mock_user32, token, vk, scan, flags, cleanup_fails
+):
+    events = []
+    key_up = (1, vk, scan, flags | 0x0002)
+
+    def capture(_count, input_pointer, _size):
+        event = input_pointer._obj
+        key = event._input.ki
+        current = (event.type, key.wVk, key.wScan, key.dwFlags)
+        events.append(current)
+        if current == key_up and (events.count(key_up) == 1 or cleanup_fails):
+            return 0
+        return 1
+
+    mock_user32.SendInput.side_effect = capture
+    with (
+        patch("ctypes.windll.kernel32.GetLastError", side_effect=[5, 87]) as last_error,
+        patch("time.sleep"),
+        pytest.raises(OSError, match="SendInput failed") as error,
+    ):
+        send_keys("^+" + token)
+
+    assert error.value.errno == 5
+    assert events == [
+        (1, 0x11, 0, 0),
+        (1, 0x10, 0, 0),
+        (1, vk, scan, flags),
+        key_up,
+        key_up,
+        (1, 0x10, 0, 0x0002),
+        (1, 0x11, 0, 0x0002),
+    ]
+    assert last_error.call_count == (2 if cleanup_fails else 1)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
+@pytest.mark.parametrize("sequence", ["^+a", "^+(a)"])
+def test_failed_shift_release_still_attempts_ctrl_release(
+    send_keys, mock_user32, monkeypatch, sequence
+):
+    events = []
+
+    def capture(_count, input_pointer, _size):
+        event = input_pointer._obj
+        key = event._input.ki
+        events.append((event.type, key.wVk, key.dwFlags))
+        return 0 if key.wVk == 0x10 and key.dwFlags & 0x0002 else 1
+
+    mock_user32.SendInput.side_effect = capture
+    monkeypatch.setattr(ctypes.windll.kernel32.GetLastError, "return_value", 5)
+
+    with pytest.raises(OSError, match="SendInput failed") as error:
+        send_keys(sequence)
+
+    assert error.value.errno == 5
+    assert events == [
+        (1, 0x11, 0),
+        (1, 0x10, 0),
+        (1, 0x41, 0),
+        (1, 0x41, 0x0002),
+        (1, 0x10, 0x0002),
+        (1, 0x11, 0x0002),
+    ]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
+def test_drag_failed_shift_release_still_attempts_ctrl_release(send_keys, mock_user32, monkeypatch):
+    from netcoredbg_mcp.ui.automation import _send_drag
+
+    events = []
+
+    def capture(_count, input_pointer, _size):
+        event = input_pointer._obj
+        key = event._input.ki
+        events.append((event.type, key.wVk, key.dwFlags))
+        return 0 if key.wVk == 0x10 and key.dwFlags & 0x0002 else 1
+
+    mock_user32.SendInput.side_effect = capture
+    monkeypatch.setattr(ctypes.windll.kernel32.GetLastError, "return_value", 5)
+
+    with pytest.raises(OSError, match="SendInput failed") as error:
+        _send_drag(10, 20, 30, 40, speed_ms=20, hold_modifiers=["ctrl", "shift"])
+
+    assert error.value.errno == 5
+    assert events == [
+        (1, 0x11, 0),
+        (1, 0x10, 0),
+        (1, 0x10, 0x0002),
+        (1, 0x11, 0x0002),
+    ]
+    assert [call.args[0] for call in mock_user32.mouse_event.call_args_list] == [0x0002, 0x0004]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
+def test_group_keypad_escape_sequence_preserves_event_and_pause_order(send_keys, mock_user32):
+    events = []
+    scans = {ord("a"): 0x41, ord("b"): 0x42, ord("}"): 0xDD | 0x100, ord("c"): 0x43}
+    mock_user32.VkKeyScanW.side_effect = scans.__getitem__
+
+    def capture(_count, input_pointer, _size):
+        key = input_pointer._obj._input.ki
+        events.append(("key", key.wVk, key.wScan, key.dwFlags))
+        return 1
+
+    mock_user32.SendInput.side_effect = capture
+    with patch("time.sleep", side_effect=lambda delay: events.append(("sleep", delay))):
+        send_keys("^+(ab){NUMPAD1}^{}}c")
+
+    assert events == [
+        ("key", 0x11, 0, 0),
+        ("sleep", 0.01),
+        ("key", 0x10, 0, 0),
+        ("sleep", 0.01),
+        ("key", 0x41, 0, 0),
+        ("sleep", 0.01),
+        ("key", 0x41, 0, 0x0002),
+        ("sleep", 0.02),
+        ("key", 0x42, 0, 0),
+        ("sleep", 0.01),
+        ("key", 0x42, 0, 0x0002),
+        ("sleep", 0.02),
+        ("key", 0x10, 0, 0x0002),
+        ("sleep", 0.01),
+        ("key", 0x11, 0, 0x0002),
+        ("sleep", 0.01),
+        ("sleep", 0.02),
+        ("key", 0, 0x4F, 0x0008),
+        ("key", 0, 0x4F, 0x000A),
+        ("sleep", 0.02),
+        ("key", 0x11, 0, 0),
+        ("sleep", 0.01),
+        ("key", 0x10, 0, 0),
+        ("sleep", 0.01),
+        ("key", 0xDD, 0, 0),
+        ("sleep", 0.01),
+        ("key", 0xDD, 0, 0x0002),
+        ("key", 0x10, 0, 0x0002),
+        ("sleep", 0.01),
+        ("key", 0x11, 0, 0x0002),
+        ("sleep", 0.01),
+        ("key", 0x43, 0, 0),
+        ("sleep", 0.01),
+        ("key", 0x43, 0, 0x0002),
+        ("sleep", 0.02),
+    ]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
+@pytest.mark.parametrize(
+    ("sequence", "message", "expected"),
+    [
+        ("^+{UNKNOWN}", "Unknown special key", [(0x11, 0), (0x10, 0), (0x10, 2), (0x11, 2)]),
+        ("^+{ENTER", "Unclosed brace", [(0x11, 0), (0x10, 0), (0x10, 2), (0x11, 2)]),
+        ("^+(ab", "Unclosed parenthesis", []),
+    ],
+)
+def test_malformed_modified_keys_keep_cleanup_order(
+    send_keys, mock_user32, sequence, message, expected
+):
+    events = []
+
+    def capture(_count, input_pointer, _size):
+        key = input_pointer._obj._input.ki
+        events.append((key.wVk, key.dwFlags))
+        return 1
+
+    mock_user32.SendInput.side_effect = capture
+    with patch("time.sleep"), pytest.raises(ValueError, match=message):
+        send_keys(sequence)
+    assert events == expected
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
+def test_cleanup_error_keeps_precedence_over_parse_error(send_keys, mock_user32):
+    events = []
+
+    def capture(_count, input_pointer, _size):
+        key = input_pointer._obj._input.ki
+        events.append((key.wVk, key.dwFlags))
+        return 0 if key.dwFlags & 0x0002 else 1
+
+    mock_user32.SendInput.side_effect = capture
+    with (
+        patch("ctypes.windll.kernel32.GetLastError", side_effect=[5, 6]),
+        patch("time.sleep"),
+        pytest.raises(OSError, match="SendInput failed") as error,
+    ):
+        send_keys("^+{UNKNOWN}")
+
+    assert error.value.errno == 5
+    assert events == [(0x11, 0), (0x10, 0), (0x10, 2), (0x11, 2)]
 
 
 class TestSendKeysParser:

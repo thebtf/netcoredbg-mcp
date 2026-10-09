@@ -148,7 +148,7 @@ def validate_hover_evidence(result: Any) -> dict[str, Any]:
     return bounded
 
 
-def _malformed_success_fields(result: Mapping[str, Any]) -> list[str]:
+def _malformed_mapping_and_scalar_fields(result: Mapping[str, Any]) -> list[str]:
     malformed: list[str] = []
     for field in ("resolvedSelector", "target", "focusBefore", "focusAfter", "hitElement"):
         if field in result and not isinstance(result[field], Mapping):
@@ -173,6 +173,11 @@ def _malformed_success_fields(result: Mapping[str, Any]) -> list[str]:
     ):
         if field in result and type(result[field]) is not bool:
             malformed.append(field)
+    return malformed
+
+
+def _malformed_success_fields(result: Mapping[str, Any]) -> list[str]:
+    malformed = _malformed_mapping_and_scalar_fields(result)
     for field in ("targetRect", "requestedPoint", "actualPointer"):
         if field in result and not _valid_geometry(result[field], rectangle=field == "targetRect"):
             malformed.append(field)
@@ -196,7 +201,7 @@ def _valid_geometry(value: Any, *, rectangle: bool) -> bool:
     return True
 
 
-def _hover_contradictions(result: Mapping[str, Any]) -> list[str]:
+def _hover_target_contradictions(result: Mapping[str, Any]) -> list[str]:
     contradictions: list[str] = []
     target_hwnd = result["targetRootHwnd"]
     if result["matchCount"] != 1:
@@ -219,6 +224,11 @@ def _hover_contradictions(result: Mapping[str, Any]) -> list[str]:
         for key in focus_identity_keys
     ):
         contradictions.append("focusBefore and focusAfter identities must match")
+    return contradictions
+
+
+def _hover_contradictions(result: Mapping[str, Any]) -> list[str]:
+    contradictions = _hover_target_contradictions(result)
     if result["underPointer"] is not True:
         contradictions.append("underPointer must be true")
     if result["hovered"] is not True:

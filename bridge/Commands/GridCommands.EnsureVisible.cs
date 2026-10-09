@@ -20,12 +20,12 @@ public static partial class GridCommands
             return Unsupported("GridPattern");
 
         var rowKey = StringValue(@params?["row_key"]);
-        var rowIndex = ReadOptionalInt(@params, "row_index");
+        var rowIndex = ReadOptionalInt(@params, RowIndexKey);
         if (rowIndex is null && string.IsNullOrWhiteSpace(rowKey))
         {
             return Blocked(
                 "grid ensure-visible request missing",
-                new JsonObject { ["row_index"] = null, ["row_key"] = rowKey },
+                new JsonObject { [RowIndexKey] = null, ["row_key"] = rowKey },
                 new JsonObject { ["row"] = "row_index or row_key" },
                 "Provide row_key for a unique DataGrid row identity.");
         }
@@ -393,7 +393,7 @@ public static partial class GridCommands
                 return Blocked(
                     "grid row ScrollItemPattern failed",
                     RequestedRow(
-                        IntValue(match.Row["row_index"]) ?? IntValue(match.Row["index"]),
+                        IntValue(match.Row[RowIndexKey]) ?? IntValue(match.Row[IndexKey]),
                         RowIdentity(match.Row)),
                     new JsonObject { ["pattern"] = "working ScrollItemPattern" },
                     "Use a DataGrid row whose ScrollItemPattern can scroll into view or rely on bounded visible row evidence.");
@@ -405,7 +405,7 @@ public static partial class GridCommands
             return Blocked(
                 "grid row does not support ScrollItemPattern and is not visibly bounded",
                 RequestedRow(
-                    IntValue(match.Row["row_index"]) ?? IntValue(match.Row["index"]),
+                    IntValue(match.Row[RowIndexKey]) ?? IntValue(match.Row[IndexKey]),
                     RowIdentity(match.Row)),
                 new JsonObject
                 {
@@ -519,7 +519,7 @@ public static partial class GridCommands
     {
         return new JsonObject
         {
-            ["row_index"] = rowIndex,
+            [RowIndexKey] = rowIndex,
             ["row_key"] = rowKey
         };
     }
@@ -536,11 +536,11 @@ public static partial class GridCommands
     {
         var result = new JsonObject
         {
-            ["index"] = row["index"]?.DeepClone(),
+            [IndexKey] = row[IndexKey]?.DeepClone(),
             ["identity"] = RowIdentity(row)
         };
-        if (row["row_index"] is not null)
-            result["row_index"] = row["row_index"]?.DeepClone();
+        if (row[RowIndexKey] is not null)
+            result[RowIndexKey] = row[RowIndexKey]?.DeepClone();
         return result;
     }
 
@@ -549,7 +549,7 @@ public static partial class GridCommands
         var identity = RowIdentityCandidates(row).FirstOrDefault();
         if (!string.IsNullOrWhiteSpace(identity))
             return identity;
-        var rowIndex = IntValue(row["row_index"]) ?? IntValue(row["index"]);
+        var rowIndex = IntValue(row[RowIndexKey]) ?? IntValue(row[IndexKey]);
         return $"row:{rowIndex}";
     }
 

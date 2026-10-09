@@ -34,6 +34,8 @@ _CANONICAL_SOURCE_REF = "refs/heads/main"
 
 _EXECUTABLE_NAME = "netcoredbg-mcp-stateless-preview.exe"
 _PROTOCOL_VERSION = "2026-07-28"
+_STARTUP_OBSERVATION_SECONDS = 10
+_POST_VALIDATION_EXIT_SECONDS = 2
 _REQUEST_META = {
     "io.modelcontextprotocol/protocolVersion": _PROTOCOL_VERSION,
     "io.modelcontextprotocol/clientInfo": {
@@ -597,17 +599,32 @@ def _run_valid_journey(executable_path: Path, fixture_root: Path) -> None:
 
 def _run_launch_refusal(executable_path: Path, arguments: Sequence[str]) -> None:
     try:
-        process = subprocess.Popen(
+        with subprocess.Popen(
             [str(executable_path), *arguments],
             cwd=executable_path.parent,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-        )
-        stdout, stderr = process.communicate(timeout=2)
+        ) as process:
+            try:
+                if process.stderr is None:
+                    _refuse("invalid launch case stderr is unavailable")
+                try:
+                    validation = _readline_with_timeout(
+                        process.stderr, _STARTUP_OBSERVATION_SECONDS
+                    )
+                except ValueError:
+                    _refuse("invalid launch case did not emit bounded validation")
+                if validation != b"PREVIEW_ROOT_INVALID\n":
+                    _refuse("invalid launch case did not produce the closed observable refusal")
+                stdout, stderr_tail = process.communicate(timeout=_POST_VALIDATION_EXIT_SECONDS)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=_POST_VALIDATION_EXIT_SECONDS)
     except (OSError, subprocess.SubprocessError):
         _refuse("invalid launch case did not complete")
-    if process.returncode != 64 or stdout or stderr != b"PREVIEW_ROOT_INVALID\n":
+    if process.returncode != 64 or stdout or stderr_tail:
         _refuse("invalid launch case did not produce the closed observable refusal")
 
 

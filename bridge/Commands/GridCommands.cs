@@ -11,6 +11,16 @@ namespace FlaUIBridge.Commands;
 
 public static partial class GridCommands
 {
+    private const string GridPatternName = "GridPattern";
+    private const string PassStatus = "PASS";
+    private const string RowIndexKey = "row_index";
+    private const string ColumnKey = "column";
+    private const string MethodKey = "method";
+    private const string BoundsKey = "bounds";
+    private const string IndexKey = "index";
+    private const string ReasonKey = "reason";
+    private const string StatusKey = "status";
+
     private static readonly string[] CellPlaceholderSubstrings =
     {
         "display column index",
@@ -21,13 +31,13 @@ public static partial class GridCommands
     {
         var grid = ResolveGrid(@params, automation, mainWindow);
         if (!grid.Patterns.Grid.TryGetPattern(out var gridPattern))
-            return Unsupported("GridPattern");
+            return Unsupported(GridPatternName);
 
         var rows = GridRows(grid, automation);
         var columns = ReadColumns(@params);
         return new JsonObject
         {
-            ["status"] = "PASS",
+            [StatusKey] = PassStatus,
             ["row_count"] = gridPattern.RowCount.Value,
             ["grid_bounds"] = SafeRect(grid),
             ["visible_rows"] = BuildRows(grid, rows, columns)
@@ -44,7 +54,7 @@ public static partial class GridCommands
         var columns = ReadColumns(@params);
         return new JsonObject
         {
-            ["status"] = "PASS",
+            [StatusKey] = PassStatus,
             ["selected_rows"] = BuildSelectedRows(grid, rows, columns)
         };
     }
@@ -58,7 +68,7 @@ public static partial class GridCommands
     {
         var grid = ResolveGrid(@params, automation, mainWindow);
         if (!grid.Patterns.Grid.TryGetPattern(out _))
-            return Unsupported("GridPattern");
+            return Unsupported(GridPatternName);
 
         var expectedRows = @params?["rows"] as JsonArray
             ?? throw new ArgumentException("Missing required parameter: rows");
@@ -73,7 +83,7 @@ public static partial class GridCommands
         {
             var expected = expectedNode as JsonObject
                 ?? throw new ArgumentException("Each row assertion must be an object");
-            var rowIndex = expected["index"]?.GetValue<int>()
+            var rowIndex = expected[IndexKey]?.GetValue<int>()
                 ?? throw new ArgumentException("Row assertion requires index");
             var contains = expected["contains"] as JsonObject
                 ?? throw new ArgumentException("Row assertion requires contains");
@@ -82,8 +92,8 @@ public static partial class GridCommands
             {
                 failures.Add(new JsonObject
                 {
-                    ["index"] = rowIndex,
-                    ["reason"] = "row not found"
+                    [IndexKey] = rowIndex,
+                    [ReasonKey] = "row not found"
                 });
                 continue;
             }
@@ -93,8 +103,8 @@ public static partial class GridCommands
             {
                 failures.Add(new JsonObject
                 {
-                    ["index"] = rowIndex,
-                    ["reason"] = "row cell evidence unavailable"
+                    [IndexKey] = rowIndex,
+                    [ReasonKey] = "row cell evidence unavailable"
                 });
                 continue;
             }
@@ -113,8 +123,8 @@ public static partial class GridCommands
             {
                 failures.Add(new JsonObject
                 {
-                    ["index"] = rowIndex,
-                    ["reason"] = "row cell assertion failed",
+                    [IndexKey] = rowIndex,
+                    [ReasonKey] = "row cell assertion failed",
                     ["missing"] = missing,
                     ["actual_cells"] = CloneObject(cells)
                 });
@@ -127,15 +137,15 @@ public static partial class GridCommands
         var reason = failures.Count == 0
             ? "row assertions passed"
             : failures.Any(failure =>
-                failure?["reason"]?.GetValue<string>() == "row cell evidence unavailable")
+                failure?[ReasonKey]?.GetValue<string>() == "row cell evidence unavailable")
                 ? "row cell evidence unavailable"
                 : "row cell assertion failed";
 
         return new JsonObject
         {
-            ["status"] = failures.Count == 0 ? "PASS" : "FAIL",
+            [StatusKey] = failures.Count == 0 ? PassStatus : "FAIL",
             ["asserted"] = failures.Count == 0,
-            ["reason"] = reason,
+            [ReasonKey] = reason,
             ["matched_rows"] = matched,
             ["failed_rows"] = failures,
             ["visible_rows"] = visibleRows
@@ -146,7 +156,7 @@ public static partial class GridCommands
     {
         var grid = ResolveGrid(@params, automation, mainWindow);
         if (!grid.Patterns.Grid.TryGetPattern(out _))
-            return Unsupported("GridPattern");
+            return Unsupported(GridPatternName);
         if (!grid.Patterns.Selection.TryGetPattern(out _))
             return Unsupported("SelectionPattern");
 
@@ -155,8 +165,8 @@ public static partial class GridCommands
         if (start < 0 || end < start || end >= rows.Length)
             return new JsonObject
             {
-                ["status"] = "AMBIGUOUS",
-                ["reason"] = "row range is outside visible rows",
+                [StatusKey] = "AMBIGUOUS",
+                [ReasonKey] = "row range is outside visible rows",
                 ["selection_mutated"] = false
             };
 
@@ -184,7 +194,7 @@ public static partial class GridCommands
 
         return new JsonObject
         {
-            ["status"] = "PASS",
+            [StatusKey] = PassStatus,
             ["selected_range"] = new JsonObject { ["start"] = start, ["end"] = end },
             ["selected_rows"] = BuildSelectedRows(grid, rows, ReadColumns(@params))
         };
@@ -203,23 +213,23 @@ public static partial class GridCommands
 
         var grid = ResolveGrid(@params, automation, mainWindow);
         if (!grid.Patterns.Grid.TryGetPattern(out _))
-            return Unsupported("GridPattern");
+            return Unsupported(GridPatternName);
 
-        var rowIndex = @params?["row_index"]?.GetValue<int>()
+        var rowIndex = @params?[RowIndexKey]?.GetValue<int>()
             ?? throw new ArgumentException("Missing required parameter: row_index");
         var rows = GridRows(grid, automation);
         if (rowIndex < 0 || rowIndex >= rows.Length)
         {
             return Blocked(
                 "grid row is outside visible rows",
-                new JsonObject { ["row_index"] = rowIndex, ["visible_count"] = rows.Length },
-                new JsonObject { ["row_index"] = "currently visible row index" },
+                new JsonObject { [RowIndexKey] = rowIndex, ["visible_count"] = rows.Length },
+                new JsonObject { [RowIndexKey] = "currently visible row index" },
                 "Scroll the grid or choose a currently visible row before clicking.");
         }
 
         var row = rows[rowIndex];
         var columns = ReadColumns(@params);
-        var requestedColumn = @params?["column"]?.GetValue<string>();
+        var requestedColumn = @params?[ColumnKey]?.GetValue<string>();
         var targetResult = ResolveClickTarget(grid, row, requestedColumn, columns);
         if (targetResult.Blocked is not null)
             return targetResult.Blocked;
@@ -236,19 +246,19 @@ public static partial class GridCommands
 
         var output = new JsonObject
         {
-            ["status"] = "PASS",
+            [StatusKey] = PassStatus,
             ["clicked"] = true,
-            ["row_index"] = rowIndex,
+            [RowIndexKey] = rowIndex,
             ["x"] = pointResult.Point.X,
             ["y"] = pointResult.Point.Y,
             ["click_result"] = clickResult.DeepClone(),
             ["row"] = BuildRow(row, rowIndex, columns, ColumnHeaders(grid))
         };
         if (clickResult is JsonObject clickObject &&
-            clickObject["method"] is JsonNode methodNode)
-            output["method"] = methodNode.DeepClone();
+            clickObject[MethodKey] is JsonNode methodNode)
+            output[MethodKey] = methodNode.DeepClone();
         if (!string.IsNullOrWhiteSpace(requestedColumn))
-            output["column"] = requestedColumn;
+            output[ColumnKey] = requestedColumn;
         if (!string.IsNullOrWhiteSpace(targetResult.ActualColumn))
             output["actual_column"] = targetResult.ActualColumn;
         return output;
@@ -267,23 +277,23 @@ public static partial class GridCommands
 
         var grid = ResolveGrid(@params, automation, mainWindow);
         if (!grid.Patterns.Grid.TryGetPattern(out _))
-            return Unsupported("GridPattern");
+            return Unsupported(GridPatternName);
 
-        var rowIndex = @params?["row_index"]?.GetValue<int>()
+        var rowIndex = @params?[RowIndexKey]?.GetValue<int>()
             ?? throw new ArgumentException("Missing required parameter: row_index");
         var rows = GridRows(grid, automation);
         if (rowIndex < 0 || rowIndex >= rows.Length)
         {
             return Blocked(
                 "grid row is outside visible rows",
-                new JsonObject { ["row_index"] = rowIndex, ["visible_count"] = rows.Length },
-                new JsonObject { ["row_index"] = "currently visible row index" },
+                new JsonObject { [RowIndexKey] = rowIndex, ["visible_count"] = rows.Length },
+                new JsonObject { [RowIndexKey] = "currently visible row index" },
                 "Scroll the grid or choose a currently visible row before clicking.");
         }
 
         var row = rows[rowIndex];
         var columns = ReadColumns(@params);
-        var requestedColumn = @params?["column"]?.GetValue<string>();
+        var requestedColumn = @params?[ColumnKey]?.GetValue<string>();
         var targetResult = ResolveClickTarget(grid, row, requestedColumn, columns);
         if (targetResult.Blocked is not null)
             return targetResult.Blocked;
@@ -300,21 +310,21 @@ public static partial class GridCommands
 
         var output = new JsonObject
         {
-            ["status"] = "PASS",
+            [StatusKey] = PassStatus,
             ["clicked"] = true,
             ["right_clicked"] = true,
             ["click_kind"] = "right",
-            ["row_index"] = rowIndex,
+            [RowIndexKey] = rowIndex,
             ["x"] = pointResult.Point.X,
             ["y"] = pointResult.Point.Y,
             ["click_result"] = clickResult?.DeepClone(),
             ["row"] = BuildRow(row, rowIndex, columns, ColumnHeaders(grid))
         };
         if (clickResult is JsonObject clickObject &&
-            clickObject["method"] is JsonNode methodNode)
-            output["method"] = methodNode.DeepClone();
+            clickObject[MethodKey] is JsonNode methodNode)
+            output[MethodKey] = methodNode.DeepClone();
         if (!string.IsNullOrWhiteSpace(requestedColumn))
-            output["column"] = requestedColumn;
+            output[ColumnKey] = requestedColumn;
         if (!string.IsNullOrWhiteSpace(targetResult.ActualColumn))
             output["actual_column"] = targetResult.ActualColumn;
         return output;
@@ -333,23 +343,23 @@ public static partial class GridCommands
 
         var grid = ResolveGrid(@params, automation, mainWindow);
         if (!grid.Patterns.Grid.TryGetPattern(out _))
-            return Unsupported("GridPattern");
+            return Unsupported(GridPatternName);
 
-        var rowIndex = @params?["row_index"]?.GetValue<int>()
+        var rowIndex = @params?[RowIndexKey]?.GetValue<int>()
             ?? throw new ArgumentException("Missing required parameter: row_index");
         var rows = GridRows(grid, automation);
         if (rowIndex < 0 || rowIndex >= rows.Length)
         {
             return Blocked(
                 "grid row is outside visible rows",
-                new JsonObject { ["row_index"] = rowIndex, ["visible_count"] = rows.Length },
-                new JsonObject { ["row_index"] = "currently visible row index" },
+                new JsonObject { [RowIndexKey] = rowIndex, ["visible_count"] = rows.Length },
+                new JsonObject { [RowIndexKey] = "currently visible row index" },
                 "Scroll the grid or choose a currently visible row before clicking.");
         }
 
         var row = rows[rowIndex];
         var columns = ReadColumns(@params);
-        var requestedColumn = @params?["column"]?.GetValue<string>();
+        var requestedColumn = @params?[ColumnKey]?.GetValue<string>();
         var targetResult = ResolveClickTarget(grid, row, requestedColumn, columns);
         if (targetResult.Blocked is not null)
             return targetResult.Blocked;
@@ -367,21 +377,21 @@ public static partial class GridCommands
 
         var output = new JsonObject
         {
-            ["status"] = "PASS",
+            [StatusKey] = PassStatus,
             ["clicked"] = true,
             ["double_clicked"] = true,
             ["click_kind"] = "double",
-            ["row_index"] = rowIndex,
+            [RowIndexKey] = rowIndex,
             ["x"] = pointResult.Point.X,
             ["y"] = pointResult.Point.Y,
             ["click_result"] = clickResult?.DeepClone(),
             ["row"] = rowEvidence
         };
         if (clickResult is JsonObject clickObject &&
-            clickObject["method"] is JsonNode methodNode)
-            output["method"] = methodNode.DeepClone();
+            clickObject[MethodKey] is JsonNode methodNode)
+            output[MethodKey] = methodNode.DeepClone();
         if (!string.IsNullOrWhiteSpace(requestedColumn))
-            output["column"] = requestedColumn;
+            output[ColumnKey] = requestedColumn;
         if (!string.IsNullOrWhiteSpace(targetResult.ActualColumn))
             output["actual_column"] = targetResult.ActualColumn;
         return output;
@@ -398,8 +408,8 @@ public static partial class GridCommands
         if (start < 0 || end < start || end >= rows.Length)
             return new JsonObject
             {
-                ["status"] = "AMBIGUOUS",
-                ["reason"] = "row range is outside visible rows",
+                [StatusKey] = "AMBIGUOUS",
+                [ReasonKey] = "row range is outside visible rows",
                 ["selection_mutated"] = false
             };
 
@@ -409,7 +419,7 @@ public static partial class GridCommands
 
         return new JsonObject
         {
-            ["status"] = passed ? "PASS" : "FAIL",
+            [StatusKey] = passed ? PassStatus : "FAIL",
             ["asserted"] = passed,
             ["expected_range"] = new JsonObject { ["start"] = start, ["end"] = end },
             ["selected_indices"] = ToJsonArray(selectedRows),
@@ -590,12 +600,12 @@ public static partial class GridCommands
         var cells = BuildCells(row, columns, headers);
         return new JsonObject
         {
-            ["index"] = index,
-            ["row_index"] = RowIndex(row, index),
+            [IndexKey] = index,
+            [RowIndexKey] = RowIndex(row, index),
             ["automation_id"] = SafeString(() => row.AutomationId),
             ["name"] = SafeString(() => row.Name),
             ["control_type"] = SafeString(() => row.ControlType.ToString()),
-            ["bounds"] = SafeRect(row),
+            [BoundsKey] = SafeRect(row),
             ["selected"] = IsSelected(row),
             ["cells"] = cells.Object,
             ["cell_values"] = cells.Array
@@ -675,7 +685,7 @@ public static partial class GridCommands
             cellMap[key] = text;
             cellValues.Add(new JsonObject
             {
-                ["column"] = key,
+                [ColumnKey] = key,
                 ["text"] = text,
                 ["automation_id"] = SafeString(() => cell.AutomationId),
                 ["name"] = SafeString(() => cell.Name),
@@ -737,7 +747,7 @@ public static partial class GridCommands
     {
         try
         {
-            return cell?["column"]?.GetValue<string>() ?? "";
+            return cell?[ColumnKey]?.GetValue<string>() ?? "";
         }
         catch
         {
@@ -775,7 +785,7 @@ public static partial class GridCommands
                 cellMap[key] = text;
                 cellValues.Add(new JsonObject
                 {
-                    ["column"] = key,
+                    [ColumnKey] = key,
                     ["text"] = text,
                     ["automation_id"] = SafeString(() => cell.AutomationId),
                     ["name"] = SafeString(() => cell.Name),
@@ -877,7 +887,7 @@ public static partial class GridCommands
         {
             if (rowNode is not JsonObject row)
                 continue;
-            if (row["index"]?.GetValue<int>() == index)
+            if (row[IndexKey]?.GetValue<int>() == index)
                 return row;
         }
         return null;
@@ -895,9 +905,9 @@ public static partial class GridCommands
     {
         return new JsonObject
         {
-            ["status"] = "UNSUPPORTED",
+            [StatusKey] = "UNSUPPORTED",
             ["unsupported"] = true,
-            ["reason"] = $"DataGrid target does not support {pattern}"
+            [ReasonKey] = $"DataGrid target does not support {pattern}"
         };
     }
 
@@ -909,8 +919,8 @@ public static partial class GridCommands
     {
         return new JsonObject
         {
-            ["status"] = "BLOCKED",
-            ["reason"] = reason,
+            [StatusKey] = "BLOCKED",
+            [ReasonKey] = reason,
             ["requested"] = requested,
             ["accepted"] = accepted,
             ["next_step"] = nextStep
@@ -940,8 +950,8 @@ public static partial class GridCommands
                 null,
                 Blocked(
                     "grid row column evidence unavailable",
-                    new JsonObject { ["column"] = requestedColumn },
-                    new JsonObject { ["column"] = "visible GridRow cell column" },
+                    new JsonObject { [ColumnKey] = requestedColumn },
+                    new JsonObject { [ColumnKey] = "visible GridRow cell column" },
                     "Use a visible column with GridItem evidence or omit column to click the row."));
         }
 
@@ -959,8 +969,8 @@ public static partial class GridCommands
             null,
             Blocked(
                 "grid row column is not visible",
-                new JsonObject { ["column"] = requestedColumn },
-                new JsonObject { ["column"] = "visible GridRow cell column" },
+                new JsonObject { [ColumnKey] = requestedColumn },
+                new JsonObject { [ColumnKey] = "visible GridRow cell column" },
                 "Choose a visible column name or omit column to click the row."));
     }
 
@@ -987,7 +997,7 @@ public static partial class GridCommands
                         "row bounds are empty",
                         new JsonObject
                         {
-                            ["bounds"] = new JsonObject
+                            [BoundsKey] = new JsonObject
                             {
                                 ["x"] = rect.X,
                                 ["y"] = rect.Y,
@@ -995,7 +1005,7 @@ public static partial class GridCommands
                                 ["height"] = rect.Height
                             }
                         },
-                        new JsonObject { ["bounds"] = "non-empty visible row bounds" },
+                        new JsonObject { [BoundsKey] = "non-empty visible row bounds" },
                         "Ensure the row is visible before clicking it."));
             }
 
@@ -1011,8 +1021,8 @@ public static partial class GridCommands
                 Point.Empty,
                 Blocked(
                     "row bounds are empty",
-                    new JsonObject { ["bounds"] = "unavailable" },
-                    new JsonObject { ["bounds"] = "non-empty visible row bounds" },
+                    new JsonObject { [BoundsKey] = "unavailable" },
+                    new JsonObject { [BoundsKey] = "non-empty visible row bounds" },
                     "Ensure the row is visible before clicking it."));
         }
     }

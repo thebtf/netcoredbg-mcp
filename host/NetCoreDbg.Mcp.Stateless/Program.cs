@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Collections.Concurrent;
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -19,6 +20,7 @@ internal static class Program
 {
     private const string ProtocolVersion = "2026-07-28";
     private const string UnixProcessGroupProxy = "--unix-process-group-proxy";
+    private const string DebugSessionIdKey = "debugSessionId";
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromMinutes(5);
 
     private static async Task Main(string[] arguments)
@@ -249,7 +251,8 @@ internal static class Program
 
             if (string.IsNullOrWhiteSpace(_debuggerPath))
             {
-                return Error("debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
+                RecordStartDiagnostic("debugger-unconfigured", "configuration");
+                return NotFound();
             }
 
             NetCoreDbgSession? session = null;
@@ -272,20 +275,20 @@ internal static class Program
                 slot = new SessionSlot(
                     StopTimeout,
                     session.StopAsync,
-                    () => DisposeSlotResourcesAsync(session, binding),
-                    () => RemoveSlot(token, session, binding, slot!));
+                    () => DisposeSlotResourcesAsync(token, session, binding),
+                    () => RemoveSlot(token, session, slot!));
                 if (!_sessions.TryAdd(token, session)
                     || !_slots.TryAdd(token, slot)
                     || !_nativeSceneBindings.TryAdd(token, binding))
                 {
+                    RecordStartDiagnostic("registration-conflict", "session-started");
                     _slots.TryRemove(new KeyValuePair<string, SessionSlot>(token, slot));
                     _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(token, session));
                     _nativeSceneBindings.TryRemove(new KeyValuePair<string, NativeSceneSessionBinding>(token, binding));
-                    await binding.DisposeAsync().ConfigureAwait(false);
+                    await DisposeUnregisteredResourcesAsync(binding, session).ConfigureAwait(false);
                     binding = null;
-                    await _dispose(session).ConfigureAwait(false);
                     session = null;
-                    return Error("debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
+                    return NotFound();
                 }
 
                 registeredSlot = slot;
@@ -297,65 +300,102 @@ internal static class Program
 
                 return Success("start_debug_success", token, session.State);
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
             {
+                RecordStartDiagnostic("startup-cancelled", StartStage(binding, session, registeredSlot), exception);
                 if (registeredSlot is not null)
                 {
-                    try
-                    {
-                        await registeredSlot.CloseAndDrainAsync().ConfigureAwait(false);
-                    }
-                    catch (Exception)
-                    {
-                    }
+                    await ObserveCloseAsync(registeredSlot).ConfigureAwait(false);
                 }
                 else
                 {
-                    if (binding is not null)
-                    {
-                        await binding.DisposeAsync().ConfigureAwait(false);
-                    }
-
-                    if (session is not null)
-                    {
-                        await _dispose(session).ConfigureAwait(false);
-                    }
+                    await DisposeUnregisteredResourcesAsync(binding, session).ConfigureAwait(false);
                 }
 
                 throw;
             }
-            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
             {
+                RecordStartDiagnostic("startup-exception", StartStage(binding, session, registeredSlot), exception);
                 if (registeredSlot is not null)
                 {
-                    try
-                    {
-                        await registeredSlot.CloseAndDrainAsync().ConfigureAwait(false);
-                    }
-                    catch (Exception)
-                    {
-                    }
+                    await ObserveCloseAsync(registeredSlot).ConfigureAwait(false);
                 }
                 else
                 {
-                    if (binding is not null)
-                    {
-                        await binding.DisposeAsync().ConfigureAwait(false);
-                    }
-
-                    if (session is not null)
-                    {
-                        try
-                        {
-                            await _dispose(session).ConfigureAwait(false);
-                        }
-                        catch (Exception)
-                        {
-                        }
-                    }
+                    await DisposeUnregisteredResourcesAsync(binding, session).ConfigureAwait(false);
                 }
 
-                return Error("debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
+                return NotFound();
+            }
+        }
+
+        private static string StartStage(NativeSceneSessionBinding? binding, NetCoreDbgSession? session, SessionSlot? slot)
+        {
+            if (slot is not null)
+            {
+                return "registered";
+            }
+
+            if (session is not null)
+            {
+                return "session-started";
+            }
+
+            if (binding is not null)
+            {
+                return "adapter-start";
+            }
+
+            return "binding-create";
+        }
+
+        private static string ExceptionClass(Exception exception) => exception switch
+        {
+            OperationCanceledException => nameof(OperationCanceledException),
+            TimeoutException => nameof(TimeoutException),
+            System.ComponentModel.Win32Exception => "Win32Exception",
+            InvalidDataException => nameof(InvalidDataException),
+            IOException => nameof(IOException),
+            UnauthorizedAccessException => nameof(UnauthorizedAccessException),
+            ArgumentException => nameof(ArgumentException),
+            InvalidOperationException => nameof(InvalidOperationException),
+            _ => "OtherException",
+        };
+
+        private static void RecordStartDiagnostic(string reason, string stage, Exception? exception = null)
+        {
+            if (Environment.GetEnvironmentVariable("NETCOREDBG_MCP_PRIVATE_START_DIAGNOSTICS") is not { Length: > 0 } root)
+            {
+                return;
+            }
+
+            try
+            {
+                var transcript = Environment.GetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT");
+                var fixtureCorrelation = transcript is null ? "unbound" : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(transcript)));
+
+                Directory.CreateDirectory(root);
+                using var stream = new FileStream(Path.Combine(root, $"host-start-{fixtureCorrelation}-{Environment.ProcessId}-{Guid.NewGuid():N}.json"), FileMode.CreateNew);
+                JsonSerializer.Serialize(stream, new
+                {
+                    kind = "host-start-failure",
+                    utc = DateTimeOffset.UtcNow,
+                    processId = Environment.ProcessId,
+                    fixtureCorrelation,
+                    reason,
+                    stage,
+                    exceptionClass = exception is null ? null : ExceptionClass(exception),
+                    baseExceptionClass = exception is null ? null : ExceptionClass(exception.GetBaseException()),
+                    hresult = exception?.HResult,
+                    frames = exception is null ? null : new StackTrace(exception, false).GetFrames()?
+                        .Where(static frame => frame.GetMethod()?.DeclaringType?.Assembly == typeof(Program).Assembly)
+                        .Take(12).Select(static frame => $"{frame.GetMethod()?.DeclaringType?.FullName}.{frame.GetMethod()?.Name}").ToArray(),
+                });
+            }
+            catch (Exception)
+            {
+                // Opt-in diagnostics must not alter startup results or cleanup.
             }
         }
 
@@ -384,13 +424,7 @@ internal static class Program
             {
                 if (_slots.TryGetValue(sessionId!, out var slot))
                 {
-                    try
-                    {
-                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
-                    }
-                    catch (Exception)
-                    {
-                    }
+                    await ObserveCloseAsync(slot).ConfigureAwait(false);
                 }
                 else if (_sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(sessionId!, session)))
                 {
@@ -465,13 +499,7 @@ internal static class Program
                 lease.Dispose();
                 if (closeAfterLease)
                 {
-                    try
-                    {
-                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
-                    }
-                    catch (Exception)
-                    {
-                    }
+                    await ObserveCloseAsync(slot).ConfigureAwait(false);
                 }
             }
         }
@@ -543,13 +571,7 @@ internal static class Program
                 lease.Dispose();
                 if (closeAfterLease)
                 {
-                    try
-                    {
-                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
-                    }
-                    catch (Exception)
-                    {
-                    }
+                    await ObserveCloseAsync(slot).ConfigureAwait(false);
                 }
             }
         }
@@ -603,19 +625,45 @@ internal static class Program
 
         public async ValueTask DisposeAsync(CancellationToken cancellationToken)
         {
+            Exception? failure = null;
             var slots = _slots.Values.ToArray();
             try
             {
                 await Task.WhenAll(slots.Select(slot => slot.CloseAndDrainAsync(cancellationToken))).ConfigureAwait(false);
             }
-            finally
+            catch (Exception exception)
             {
-                var sessions = _sessions.ToArray();
-                _sessions.Clear();
-                var bindings = _nativeSceneBindings.ToArray();
-                _nativeSceneBindings.Clear();
-                await Task.WhenAll(bindings.Select(static binding => binding.Value.DisposeAsync().AsTask())).ConfigureAwait(false);
+                failure = exception;
+            }
+
+            var sessions = _sessions.ToArray();
+            _sessions.Clear();
+            var bindings = _nativeSceneBindings.ToArray();
+            try
+            {
+                await Task.WhenAll(bindings.Select(async binding =>
+                {
+                    await binding.Value.DisposeAsync().ConfigureAwait(false);
+                    _nativeSceneBindings.TryRemove(binding);
+                })).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                failure ??= exception;
+            }
+
+            try
+            {
                 await Task.WhenAll(sessions.Select(session => DisposeRemovedSessionAsync(session.Value, cancellationToken))).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                failure ??= exception;
+            }
+
+            if (failure is not null)
+            {
+                ExceptionDispatchInfo.Capture(failure).Throw();
             }
         }
 
@@ -643,25 +691,67 @@ internal static class Program
         private void RemoveSlot(
             string token,
             NetCoreDbgSession session,
-            NativeSceneSessionBinding binding,
             SessionSlot slot)
         {
             _slots.TryRemove(new KeyValuePair<string, SessionSlot>(token, slot));
             _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(token, session));
-            _nativeSceneBindings.TryRemove(new KeyValuePair<string, NativeSceneSessionBinding>(token, binding));
         }
 
         private async ValueTask DisposeSlotResourcesAsync(
+            string token,
             NetCoreDbgSession session,
             NativeSceneSessionBinding binding)
         {
+            Exception? failure = null;
             try
             {
                 await binding.DisposeAsync().ConfigureAwait(false);
+                _nativeSceneBindings.TryRemove(new KeyValuePair<string, NativeSceneSessionBinding>(token, binding));
             }
-            finally
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+
+            try
             {
                 await _dispose(session).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                failure ??= exception;
+            }
+
+            if (failure is not null)
+            {
+                ExceptionDispatchInfo.Capture(failure).Throw();
+            }
+        }
+
+        private async ValueTask DisposeUnregisteredResourcesAsync(NativeSceneSessionBinding? binding, NetCoreDbgSession? session)
+        {
+            try
+            {
+                if (binding is not null)
+                {
+                    await binding.DisposeAsync().ConfigureAwait(false);
+                }
+            }
+            catch (Exception)
+            {
+                // Startup retains its primary exception or not-found result.
+            }
+
+            if (session is not null)
+            {
+                try
+                {
+                    await _dispose(session).ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    // Session cleanup cannot replace the established startup result.
+                }
             }
         }
 
@@ -807,13 +897,7 @@ internal static class Program
             {
                 if (_slots.TryGetValue(sessionId, out var slot))
                 {
-                    try
-                    {
-                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
-                    }
-                    catch (Exception)
-                    {
-                    }
+                    await ObserveCloseAsync(slot).ConfigureAwait(false);
                 }
                 else if (_sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(sessionId, session)))
                 {
@@ -829,9 +913,17 @@ internal static class Program
 
         private async ValueTask RemoveNativeSceneBindingAsync(string sessionId)
         {
-            if (_nativeSceneBindings.TryRemove(sessionId, out var binding))
+            if (_nativeSceneBindings.TryGetValue(sessionId, out var binding))
             {
-                await binding.DisposeAsync().ConfigureAwait(false);
+                try
+                {
+                    await binding.DisposeAsync().ConfigureAwait(false);
+                    _nativeSceneBindings.TryRemove(new KeyValuePair<string, NativeSceneSessionBinding>(sessionId, binding));
+                }
+                catch (Exception)
+                {
+                    // Removal preserves the existing not-found/stop mapping and independent session cleanup.
+                }
             }
         }
 
@@ -884,7 +976,13 @@ internal static class Program
             }
 
             hasProgram = true;
-            if (element.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(program = element.GetString()))
+            if (element.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+
+            program = element.GetString();
+            if (string.IsNullOrWhiteSpace(program))
             {
                 return false;
             }
@@ -904,18 +1002,24 @@ internal static class Program
                 return true;
             }
 
-            if (arguments.Count > 1 || arguments.Keys.Any(static name => name != "debugSessionId"))
+            if (arguments.Count > 1 || arguments.Keys.Any(static name => name != Program.DebugSessionIdKey))
             {
                 return false;
             }
 
-            if (!arguments.TryGetValue("debugSessionId", out var element))
+            if (!arguments.TryGetValue(Program.DebugSessionIdKey, out var element))
             {
                 return true;
             }
 
             hasSessionId = true;
-            if (element.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(sessionId = element.GetString()))
+            if (element.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+
+            sessionId = element.GetString();
+            if (string.IsNullOrWhiteSpace(sessionId))
             {
                 return false;
             }
@@ -929,8 +1033,8 @@ internal static class Program
             result = null!;
             if (arguments is null
                 || arguments.Count is < 2 or > 4
-                || arguments.Keys.Any(static name => name is not "debugSessionId" and not "threadId" and not "startFrame" and not "levels")
-                || !arguments.TryGetValue("debugSessionId", out var sessionIdElement)
+                || arguments.Keys.Any(static name => name is not Program.DebugSessionIdKey and not "threadId" and not "startFrame" and not "levels")
+                || !arguments.TryGetValue(Program.DebugSessionIdKey, out var sessionIdElement)
                 || sessionIdElement.ValueKind != JsonValueKind.String
                 || string.IsNullOrWhiteSpace(sessionIdElement.GetString())
                 || !arguments.TryGetValue("threadId", out var threadIdElement)
@@ -1058,15 +1162,19 @@ internal static class Program
 
     private static class ToolCatalog
     {
+        private const string SchemaPropertiesPrefix = "{\"type\":\"object\",\"properties\":{\"";
+        private const string SchemaRequiredSuffix = "\"],\"additionalProperties\":false}";
+        private const string DebugSessionSchema = SchemaPropertiesPrefix + Program.DebugSessionIdKey + "\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"" + Program.DebugSessionIdKey + SchemaRequiredSuffix;
+
         internal static ListToolsResult List() => new()
         {
             Tools =
             [
                 Tool("start_debug", "Start debugging a program.", "{\"type\":\"object\",\"properties\":{\"program\":{\"type\":\"string\",\"minLength\":1}},\"additionalProperties\":false}"),
-                Tool("get_debug_state", "Get the state of a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
-                Tool("stop_debug", "Stop a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
-                Tool("get_threads", "Get threads in a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
-                Tool("get_call_stack", "Get a bounded stack-frame page for one stopped thread.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647},\"startFrame\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295},\"levels\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":256}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
+                Tool("get_debug_state", "Get the state of a debug session.", DebugSessionSchema),
+                Tool("stop_debug", "Stop a debug session.", DebugSessionSchema),
+                Tool("get_threads", "Get threads in a debug session.", SchemaPropertiesPrefix + Program.DebugSessionIdKey + "\":{\"type\":\"string\",\"minLength\":1}},\"required\":[\"" + Program.DebugSessionIdKey + SchemaRequiredSuffix),
+                Tool("get_call_stack", "Get a bounded stack-frame page for one stopped thread.", SchemaPropertiesPrefix + Program.DebugSessionIdKey + "\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647},\"startFrame\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295},\"levels\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":256}},\"required\":[\"" + Program.DebugSessionIdKey + "\",\"threadId\"],\"additionalProperties\":false}"),
                 .. NativeSceneToolDispatcher.ListTools(),
             ],
             TimeToLive = CacheLifetime,

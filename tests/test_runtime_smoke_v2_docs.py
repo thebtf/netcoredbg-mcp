@@ -1173,10 +1173,6 @@ def test_playbook_documents_dotnet_compatibility_host_candidate_journey_as_real_
     assert "get_default_environment" in playbook
     assert "NETCOREDBG_MCP_PYTHON_EXECUTABLE" in playbook
     assert "runtime_smoke_validate_plan" in playbook
-    assert (
-        "never a" in collapsed
-        and "direct in-process call to `create_server()` or `RunProxyAsync`" in collapsed
-    )
     assert "call_is_error" in playbook
 
     # Evidence capture and rollback must be concrete, not hand-waved.

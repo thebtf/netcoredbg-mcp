@@ -83,35 +83,46 @@ async def handle_debug_tracepoint(
         output["reason"] = classification_reason
         return output
     if "expected_hit_count" in probe:
-        expected, expected_error = _required_int(
-            probe["expected_hit_count"],
-            field_name="expected_hit_count",
-        )
-        if expected_error is not None:
-            output["status"] = "FAIL"
-            output["reason"] = expected_error
-            return output
-        expected_payload: dict[str, Any] = {"hit_count": expected}
-        if probe.get("expected_route"):
-            expected_payload["route"] = str(probe["expected_route"])
-        output["expected"] = expected_payload
-        if (
-            phase == "after"
-            and status == "PASS"
-            and expected > 0
-            and value["hit_count"] == 0
-            and probe.get("expected_route")
-        ):
-            output["status"] = "BLOCKED"
-            output["classification"] = "NO_ROUTE_HIT"
-            output["reason"] = "expected tracepoint route was not hit"
-            output["next_step"] = "Verify handler routing before blaming the debugger."
-            return output
-        if phase == "after" and status == "PASS" and value["hit_count"] != expected:
-            output["status"] = "FAIL"
-            output["reason"] = "tracepoint hit count did not match"
-        return output
+        return _attach_hit_count_expectation(output, probe=probe, phase=phase, status=status)
     return attach_expected_and_status(output, probe=probe, phase=phase, value=value)
+
+
+def _attach_hit_count_expectation(
+    output: dict[str, Any],
+    *,
+    probe: dict[str, Any],
+    phase: str,
+    status: str,
+) -> dict[str, Any]:
+    value = output["value"]
+    expected, expected_error = _required_int(
+        probe["expected_hit_count"],
+        field_name="expected_hit_count",
+    )
+    if expected_error is not None:
+        output["status"] = "FAIL"
+        output["reason"] = expected_error
+        return output
+    expected_payload: dict[str, Any] = {"hit_count": expected}
+    if probe.get("expected_route"):
+        expected_payload["route"] = str(probe["expected_route"])
+    output["expected"] = expected_payload
+    if (
+        phase == "after"
+        and status == "PASS"
+        and expected > 0
+        and value["hit_count"] == 0
+        and probe.get("expected_route")
+    ):
+        output["status"] = "BLOCKED"
+        output["classification"] = "NO_ROUTE_HIT"
+        output["reason"] = "expected tracepoint route was not hit"
+        output["next_step"] = "Verify handler routing before blaming the debugger."
+        return output
+    if phase == "after" and status == "PASS" and value["hit_count"] != expected:
+        output["status"] = "FAIL"
+        output["reason"] = "tracepoint hit count did not match"
+    return output
 
 
 def _optional_int(value: Any, *, field_name: str) -> tuple[int, str | None]:

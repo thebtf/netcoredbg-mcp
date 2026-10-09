@@ -41,7 +41,7 @@ async def execute_case(
             status = "IMPASSE"
             reason = "elapsed time budget exhausted"
             break
-        transition_context = replace(
+        transition_context: ActionContext = replace(
             context,
             case_id=str(case.get("id") or ""),
             transition_index=transition_index,

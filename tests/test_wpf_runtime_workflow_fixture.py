@@ -303,11 +303,19 @@ def test_wpf_submenu_parent_native_enter_rediscovers_popup_child_and_invokes_it(
     framework_dependent = os.environ.get("NETCOREDBG_MCP_TEST_BRIDGE_FRAMEWORK_DEPENDENT") == "1"
     publish_mode = "framework-dependent BridgeTestHost" if framework_dependent else "self-contained"
     print(f"Installed wheel bridge publish mode: {publish_mode}", flush=True)
-    publish_options = (
-        ["--self-contained", "false", "-p:BridgeTestHost=true"]
-        if framework_dependent
-        else ["--self-contained"]
-    )
+    if framework_dependent:
+        publish_options = [
+            "--self-contained",
+            "false",
+            "-p:BridgeTestHost=true",
+            "-p:NuGetAudit=false",
+        ]
+        offline_source = os.environ.get("NETCOREDBG_MCP_TEST_OFFLINE_NUGET_SOURCE")
+        if offline_source:
+            assert Path(offline_source).is_dir(), "offline NuGet source does not exist"
+            publish_options.extend(["--source", offline_source])
+    else:
+        publish_options = ["--self-contained"]
     bridge_publish = subprocess.run(
         [
             "dotnet",

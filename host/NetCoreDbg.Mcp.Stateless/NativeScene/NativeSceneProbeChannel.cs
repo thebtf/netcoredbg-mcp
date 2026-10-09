@@ -67,10 +67,6 @@ internal sealed class NativeSceneProbeChannel : IAsyncDisposable
             await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             enteredGate = true;
         }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
         catch (ObjectDisposedException) when (IsTerminal)
         {
             return null;
@@ -363,11 +359,20 @@ internal sealed class NativeSceneProbeChannel : IAsyncDisposable
     private static bool TryReadToken(JsonElement source, string name, out string value)
     {
         value = string.Empty;
-        return source.TryGetProperty(name, out var property) &&
-               property.ValueKind == JsonValueKind.String &&
-               property.GetString() is { Length: 22 } parsed &&
-               parsed.All(static character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_') &&
-               (value = parsed).Length == 22;
+        if (!source.TryGetProperty(name, out var property) ||
+            property.ValueKind != JsonValueKind.String ||
+            property.GetString() is not { Length: 22 } parsed)
+        {
+            return false;
+        }
+
+        if (!parsed.All(static character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_'))
+        {
+            return false;
+        }
+
+        value = parsed;
+        return true;
     }
 
     private static bool FixedTimeEquals(string expected, string actual) =>

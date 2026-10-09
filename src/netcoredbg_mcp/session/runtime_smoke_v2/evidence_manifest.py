@@ -28,7 +28,6 @@ def build_pack_manifest(
     *,
     pack_id: str,
     run_id: str,
-    evidence_dir: Path | str,
     sources: list[dict[str, Any]],
     rollups: dict[str, Any],
 ) -> dict[str, Any]:
@@ -39,7 +38,7 @@ def build_pack_manifest(
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "pack_id": _required_text(pack_id, "pack_id"),
         "run_id": _required_text(run_id, "run_id"),
-        "evidence_dir": _manifest_evidence_dir_ref(evidence_dir),
+        "evidence_dir": ".",
         "sources": [copy.deepcopy(source) for source in sources],
         "rollups": copy.deepcopy(rollups),
     }
@@ -183,10 +182,6 @@ def _validate_manifest_path(
     if root not in (path, *path.parents):
         raise ValueError("pack manifest path must stay inside evidence_dir")
     return path
-
-
-def _manifest_evidence_dir_ref(evidence_dir: Path | str) -> str:
-    return "."
 
 
 def _required_text(value: Any, field_name: str) -> str:

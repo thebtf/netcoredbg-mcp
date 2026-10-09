@@ -79,6 +79,25 @@ async def handle_oracle_pack(
         "value": bounded_diagnostic_value(value, limits=limits),
         "evidence_ref": f"diagnostic:oracle_pack:{value['id']}",
     }
+    return _annotate_terminal_output(
+        output,
+        source_status=source_status,
+        source_status_drives_pack=source_status_drives_pack,
+        disagreement=disagreement,
+        disagreement_blocks_pack=disagreement_blocks_pack,
+        sources=sources,
+    )
+
+
+def _annotate_terminal_output(
+    output: dict[str, Any],
+    *,
+    source_status: str,
+    source_status_drives_pack: bool,
+    disagreement: dict[str, Any] | None,
+    disagreement_blocks_pack: bool,
+    sources: list[dict[str, Any]],
+) -> dict[str, Any]:
     if disagreement_blocks_pack:
         output["classification"] = "DISAGREEING_SOURCES"
         output.update(
@@ -105,9 +124,9 @@ async def handle_oracle_pack(
             output["reason"] = "oracle source impasse"
         else:
             output["reason"] = "oracle source reported non-PASS"
-    elif status == "BLOCKED":
+    elif output["status"] == "BLOCKED":
         output["reason"] = "oracle pack reported BLOCKED"
-    elif status == "FAIL":
+    elif output["status"] == "FAIL":
         output["reason"] = "oracle pack reported FAIL"
     return output
 

@@ -152,7 +152,7 @@ internal static class ProgressLoggingRelay
             return true;
         }
 
-        public bool IsAuthorized(DeliveryAuthorization authorization) =>
+        public static bool IsAuthorized(DeliveryAuthorization authorization) =>
             authorization.IsValid;
 
         private bool TryAuthorize(
@@ -302,87 +302,101 @@ internal static class ProgressLoggingRelay
         RelaySession session,
         NotificationState notificationState)
     {
-        filters.Message.IncomingFilters.Add(next => async (context, cancellationToken) =>
+        filters.Message.IncomingFilters.Add(next => (context, cancellationToken) =>
+            ProcessIncomingMessageAsync(context, next, session, notificationState, cancellationToken));
+        filters.Message.OutgoingFilters.Add(next => (context, cancellationToken) =>
+            ProcessOutgoingMessageAsync(context, next, session, cancellationToken));
+    }
+
+    private static async Task ProcessIncomingMessageAsync(
+        MessageContext context,
+        McpMessageHandler next,
+        RelaySession session,
+        NotificationState notificationState,
+        CancellationToken cancellationToken)
+    {
+        if (context.JsonRpcMessage is JsonRpcNotification { Method: NotificationMethods.CancelledNotification } cancellation)
         {
-            if (context.JsonRpcMessage is JsonRpcNotification { Method: NotificationMethods.CancelledNotification } cancellation)
-            {
-                notificationState.Cancel(cancellation);
-                session.ObserveDownstreamCancellation(cancellation);
-                await next(context, cancellationToken).ConfigureAwait(false);
-                return;
-            }
+            notificationState.Cancel(cancellation);
+            session.ObserveDownstreamCancellation(cancellation);
+            await next(context, cancellationToken).ConfigureAwait(false);
+            return;
+        }
 
-            if (context.JsonRpcMessage is not JsonRpcRequest request)
-            {
-                await next(context, cancellationToken).ConfigureAwait(false);
-                return;
-            }
-
-            session.CheckAddDownstreamRequestId(request.Id);
-            var progressToken = notificationState.Begin(request);
-            var requestId = request.Id;
-            using var cancellationRegistration = progressToken is null
-                ? default
-                : cancellationToken.Register(() => notificationState.End(requestId));
-            var requestCancellationSuppressedTerminal = false;
-            try
-            {
-                await next(context, cancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                requestCancellationSuppressedTerminal = true;
-                throw;
-            }
-            finally
-            {
-                if (progressToken is not null)
-                {
-                    notificationState.End(requestId);
-                }
-
-                session.CompleteDownstreamRequestHandling(
-                    requestId,
-                    requestCancellationSuppressedTerminal);
-            }
-        });
-
-        filters.Message.OutgoingFilters.Add(next => async (context, cancellationToken) =>
+        if (context.JsonRpcMessage is not JsonRpcRequest request)
         {
-            session.ThrowIfForwardingFailed();
-            if (context.JsonRpcMessage is JsonRpcResponse { Result: JsonObject result }
-                && result.TryGetPropertyValue("capabilities", out var capabilitiesNode)
-                && capabilitiesNode is JsonObject capabilities)
+            await next(context, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        session.CheckAddDownstreamRequestId(request.Id);
+        var progressToken = notificationState.Begin(request);
+        var requestId = request.Id;
+        using var cancellationRegistration = progressToken is null
+            ? default
+            : cancellationToken.Register(() => notificationState.End(requestId));
+        var requestCancellationSuppressedTerminal = false;
+        try
+        {
+            await next(context, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            requestCancellationSuppressedTerminal = true;
+            throw;
+        }
+        finally
+        {
+            if (progressToken is not null)
             {
-                var upstream = await session.UpstreamAsync(cancellationToken).ConfigureAwait(false);
-                if (upstream.ServerCapabilities?.Logging is null)
-                {
-                    capabilities.Remove("logging");
-                }
+                notificationState.End(requestId);
             }
 
-            var hasForwardLeg = session.TryGetForwardLegForDownstreamTerminal(
-                context.JsonRpcMessage,
-                out var forwardLeg);
-            try
-            {
-                await next(context, cancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                session.FailForwarding(ex);
-                throw;
-            }
+            session.CompleteDownstreamRequestHandling(
+                requestId,
+                requestCancellationSuppressedTerminal);
+        }
+    }
 
-            if (hasForwardLeg)
+    private static async Task ProcessOutgoingMessageAsync(
+        MessageContext context,
+        McpMessageHandler next,
+        RelaySession session,
+        CancellationToken cancellationToken)
+    {
+        session.ThrowIfForwardingFailed();
+        if (context.JsonRpcMessage is JsonRpcResponse { Result: JsonObject result }
+            && result.TryGetPropertyValue("capabilities", out var capabilitiesNode)
+            && capabilitiesNode is JsonObject capabilities)
+        {
+            var upstream = await session.UpstreamAsync(cancellationToken).ConfigureAwait(false);
+            if (upstream.ServerCapabilities?.Logging is null)
             {
-                session.CompleteForwardLegSend(forwardLeg!);
+                capabilities.Remove("logging");
             }
-        });
+        }
+
+        var hasForwardLeg = session.TryGetForwardLegForDownstreamTerminal(
+            context.JsonRpcMessage,
+            out var forwardLeg);
+        try
+        {
+            await next(context, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            session.FailForwarding(ex);
+            throw;
+        }
+
+        if (hasForwardLeg)
+        {
+            session.CompleteForwardLegSend(forwardLeg!);
+        }
     }
 
     internal const int MaxPendingMessages = 64;
@@ -658,7 +672,7 @@ internal static class ProgressLoggingRelay
                     switch (item.Kind)
                     {
                         case DeliveryKind.OwnedNotification:
-                            if (!_notificationState.IsAuthorized(item.Authorization))
+                            if (!NotificationState.IsAuthorized(item.Authorization))
                             {
                                 continue;
                             }

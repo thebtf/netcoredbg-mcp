@@ -24,6 +24,8 @@ namespace NetCoreDbg.Mcp.Host;
 /// </summary>
 internal static partial class NativePrompts
 {
+    private const string AppTypeArgumentName = "app_type";
+
     public static void Register(McpServerHandlers handlers)
     {
         handlers.ListPromptsHandler = (_, _) => ValueTask.FromResult(ListPromptsResultInstance);
@@ -117,7 +119,7 @@ internal static partial class NativePrompts
         Arguments = new List<PromptArgument>
         {
             new() { Name = "symptom", Required = true },
-            new() { Name = "app_type", Required = false },
+            new() { Name = AppTypeArgumentName, Required = false },
         },
     };
 
@@ -130,7 +132,7 @@ internal static partial class NativePrompts
         Arguments = new List<PromptArgument>
         {
             new() { Name = "problem", Required = true },
-            new() { Name = "app_type", Required = false },
+            new() { Name = AppTypeArgumentName, Required = false },
             new() { Name = "file_hint", Required = false },
         },
     };
@@ -240,14 +242,14 @@ internal static partial class NativePrompts
     private static List<PromptMessage> InvestigateMessages(IDictionary<string, JsonElement>? arguments)
     {
         var symptom = RequireArgument(arguments, "symptom");
-        var appType = OptionalArgument(arguments, "app_type", "gui");
+        var appType = OptionalArgument(arguments, AppTypeArgumentName, "gui");
         return SingleUserMessage(BuildInvestigationPlan(symptom, appType));
     }
 
     private static List<PromptMessage> DebugScenarioMessages(IDictionary<string, JsonElement>? arguments)
     {
         var problem = RequireArgument(arguments, "problem");
-        var appType = OptionalArgument(arguments, "app_type", "gui");
+        var appType = OptionalArgument(arguments, AppTypeArgumentName, "gui");
         var fileHint = OptionalArgument(arguments, "file_hint", "");
         return SingleUserMessage(BuildScenarioPlan(problem, appType, fileHint));
     }

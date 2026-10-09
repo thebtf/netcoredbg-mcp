@@ -208,6 +208,31 @@ class TestArgumentValidation:
         with pytest.raises(ValueError, match="Invalid framework"):
             policy.validate_arguments(["-f", "../etc/passwd"])
 
+    @pytest.mark.parametrize(
+        ("framework", "accepted"),
+        [
+            ("NET8.0", True),
+            ("netſtandard2.1", True),
+            ("net8.0-wİndows", True),
+            ("net8.0-wındows", True),
+            ("net8.0-ſ", True),
+            ("net8.0-K", True),
+            ("net8.0\n", True),
+            ("net٨.0", False),
+            ("net8.０", False),
+            ("net8.0.१", False),
+        ],
+    )
+    def test_framework_arguments_keep_ascii_digits_and_unicode_casefold(
+        self, tmp_path, framework, accepted
+    ):
+        policy = BuildPolicy(workspace_root=str(tmp_path))
+        if accepted:
+            assert policy.validate_arguments(["-f", framework]) == ["-f", framework]
+        else:
+            with pytest.raises(ValueError, match="Invalid framework"):
+                policy.validate_arguments(["-f", framework])
+
     def test_allowed_runtime(self, tmp_path):
         """Test allowed runtime values."""
         policy = BuildPolicy(workspace_root=str(tmp_path))

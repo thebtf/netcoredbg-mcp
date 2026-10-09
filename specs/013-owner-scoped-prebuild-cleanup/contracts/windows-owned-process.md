@@ -58,13 +58,18 @@ class WindowsOwnedProcess:
     ) -> "WindowsOwnedProcess": ...
 
     async def wait_root(self) -> int: ...
-    async def drain_after_grace(
+    async def _join_drain(
+        self, policy: Callable[[], Awaitable[OwnerDrainReceipt]]
+    ) -> OwnerDrainReceipt: ...
+    async def force_job(self) -> tuple[bool | None, OwnerDrainReceipt | None]: ...
+    def start_drain_observation(self) -> asyncio.Future[Any] | None: ...
+    async def observe_drain(
         self,
         *,
-        grace_timeout: float,
-        force_timeout: float,
-    ) -> OwnerDrainReceipt: ...
-    async def force_and_drain(self, *, timeout: float) -> OwnerDrainReceipt: ...
+        forced: bool,
+        root_was_forced: bool | None,
+        previous: OwnerDrainReceipt | None = None,
+    ) -> tuple[OwnerDrainReceipt, bool]: ...
     async def aclose(self) -> OwnerDrainReceipt: ...
 ```
 
@@ -75,7 +80,7 @@ class WindowsOwnedProcess:
 | Precondition | Boundary action | Postcondition |
 |---|---|---|
 | Valid Windows executable, argv, working directory, and environment are supplied. | Build only private parent/child pipe handles and an explicit environment block. | No Job/process/thread handle is inheritable by the child. |
-| The host can create a private Job. | Use an unnamed non-inheritable Job and set `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. | The Job has no global name or shared owner map. |
+| The host can create a private Job. | Use an unnamed non-inheritable Job with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and an associated private completion port. | The Job and port have no global name or shared owner map; notifications are advisory, not proof of drain. |
 | A child has not executed. | Call `CreateProcessW` with `CREATE_SUSPENDED`; retain both returned process and primary-thread handles. | The state is `suspended_unadmitted`. |
 | The retained root handle is valid. | Call `AssignProcessToJobObject`, `IsProcessInJob`, and initial accounting query. | Only successful assignment, membership, and verification reach I/O setup. |
 | Parent I/O adapters are ready. | Use `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` so only standard input, output, and error child ends are inherited. | The Job/process/thread handles remain private. |
@@ -98,14 +103,102 @@ The boundary never invokes asyncio process launch as a Windows fallback. It neve
 
 ## Drain contract
 
-1. `drain_after_grace()` permits the caller's graceful shutdown policy only for the configured grace bound.
-2. If the tree remains active after that bound, it calls `TerminateJobObject` once for this capability's Job.
-3. `force_and_drain()` may skip the grace wait only for a build-command cancellation or another explicit force policy that the caller already selected.
-4. A successful Windows receipt uses `status == DRAINED` and `active_processes == 0` from `JobObjectBasicAccountingInformation`.
+1. Build, DAP, collector and owner-close callers select a concrete async policy. That policy owns its local `asyncio.wait` calls and repeat loop, with the original separate grace and post-force observation deadlines. The owner accepts the policy through `_join_drain()`; it does not accept durations.
+2. `start_drain_observation()` retains one captured native query Future, or returns `None` for default-mode observation. The caller bounds only its wait on that Future. `observe_drain()` consumes completed facts and returns the phase's best receipt plus a retry flag; it owns neither a deadline nor a repeat loop. A pending captured Future retains its identity between phases and attempts.
+3. Every phase performs an initial observation, including a zero-budget phase. A non-drained grace result permits the caller's already-selected `force_job()` effect. Native force acknowledgement is unbounded; the force observation deadline starts only afterwards. A default-mode signaled-root read already justified by exact exit proof remains outside the observation retry deadline.
+4. `DRAINED` requires `active_processes == 0`, a signaled retained root handle, and signaled handles for all retained members. Reconcile the Job's lifetime total against recorded member births; each member without a retained handle needs proven retirement. A Job-member retirement notification can prove that fact when a handle cannot be retained, but notifications alone never establish drain. Zero accounting or root exit alone is insufficient.
+   Both `JOB_OBJECT_MSG_EXIT_PROCESS` and `JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS` retire a recorded member birth through the same identity/handle checks. Ignoring an abnormal exit must not leave a phantom live birth or reject a later legitimate birth with the recycled PID. Missing or ambiguous lifetime evidence still fails closed.
 5. `forced` records Job-wide escalation. `root_was_forced` records the root outcome separately: `False` means no Job force included the root, `True` means the root was observed active immediately before a successful Job force, and `None` is a legacy or unavailable observation. DAP terminal cleanup maps from this root fact, never from `forced` alone.
-6. A query failure returns `FAILED`. A deadline result returns `TIMED_OUT`. Neither permits a pre-build continuation.
-7. Repeated callers join an in-flight operation. Only a literal-zero `DRAINED` receipt memoizes completion; a later explicit force call may retry a non-drained outcome.
-8. `aclose() -> OwnerDrainReceipt` returns the last truthful receipt before closing resources. `KILL_ON_JOB_CLOSE` is crash protection, not a substitute for a drain receipt.
+6. A query, member observation, or lifetime-reconciliation failure returns `FAILED`; an unsignaled process at the deadline returns `TIMED_OUT`. Neither permits pre-build continuation, producer-terminal evidence, or run-root cleanup.
+7. Repeated callers join the same shielded policy task; the first caller chooses its policy. Observer cancellation does not cancel that task or any native Future. Only a proven `DRAINED` receipt memoizes completion; a later explicit policy may retry a non-drained outcome. At phase expiry, the caller publishes its saved receipt without starting another potentially blocking native query. A timeout cannot authorize Job closure or redispatch an `IN_FLIGHT` effect.
+8. `aclose() -> OwnerDrainReceipt` keeps the Job, port, and process/member handles on failed close and retries the same owner. It releases them only after proven drain. `KILL_ON_JOB_CLOSE` is crash protection, not a substitute for a drain receipt.
+
+The return from `force_job()` contains the observed root-force fact and an optional immediate failure receipt. `observe_drain()` keeps the existing classifications: unsignaled default-mode handles remain `TIMED_OUT`, even at zero accounting; captured zero accounting without complete history remains `FAILED` at expiry; positive or unknown captured accounting remains `TIMED_OUT` unless the owner has an earlier failure. Native/fatal outcome data, first-error identity and physical-close predicates are unchanged. Build cancellation still yields `OwnerDrainError` when drain is unproven, with cancellation as its cause; only successful cleanup restores `CancelledError` without that higher-priority failure.
+
+### Collector-only synchronous process-capability capture
+
+`WindowsOwnedProcess.launch(capture_process_handles=True)` is an opt-in for the
+outer first-party coverage collector only. The default is `False`; adapter,
+build-command, and nested owners retain their existing launch behavior. The
+receipt and public MCP contracts do not change.
+
+One owner thread performs `CreateProcess`, `WaitForDebugEvent`, and
+`ContinueDebugEvent`. The collector adds `DEBUG_PROCESS`, not
+`DEBUG_ONLY_THIS_PROCESS`, while preserving suspended admission, private Job
+containment, restricted handle inheritance, and I/O-before-resume ordering.
+Before continuing a process-creation event, duplicate its process handle as a
+private capability and positively verify membership in this exact Job. Count
+distinct process objects, not PIDs or handle values; the root is counted once.
+Retain every lifetime capability until final exit proof. Close image/DLL file
+handles and respect the system-owned debug process/thread handle lifecycle.
+
+Let `C` be the distinct membership-qualified process-capability count and `T`
+the final raw Job lifetime total. Collector-mode `DRAINED` requires `C == T`,
+zero active processes, a signaled root and every retained member handle, and
+no unresolved admission, capture, identity, or native API failure. Serialize
+the final ledger/accounting observation. `T` can include failed associations;
+equality is a conservative sufficient condition, not a theorem that every
+increment represents an admitted member. A discrepancy, counter ambiguity,
+capacity violation, or broken descendant debug chain remains non-drained.
+Never subtract `TotalTerminatedProcesses` or forgive an unexplained gap.
+
+In this mode, completion-port birth/retirement packets remain diagnostics,
+not the authoritative capability ledger. Missing packets cannot override
+complete direct-handle proof, and received packets cannot fill a missing
+capability. Clause 4's notification reconciliation remains unchanged for the
+default mode, including both ordinary and abnormal retirement handling.
+
+Continue an exit debug event before waiting for its retained process handle.
+Keep the pump operational through root exit, Job termination, cancellation,
+and final handle waits. Forward application exceptions with
+`DBG_EXCEPTION_NOT_HANDLED`; handle only identified debugger-initialization
+events. Do not swallow failures, detach, disable debugger kill-on-thread-exit,
+stop the pump before proven drain, or let the collector close private Job or
+pump resources. Failed cleanup retains the owner and first causal error;
+producer-terminal evidence, scanner completion, and run-root deletion stay
+closed. Debugger/Job crash protection is not an exit receipt.
+
+The collector uses one strongly retained private single-worker executor with
+finite create, resume, capture, continuation and retirement operations. Failed
+operation Futures are inspected without raising their stored exception into an
+asyncio Task. Creation/start phase notifications settle once as outcome data.
+The first non-`Exception` failure and the first causal Win32 diagnostic remain
+separate, immutable facts; only the collector caller receives the identical
+original fatal object, after owned physical closure.
+
+One capture-owned pending record preserves the event, continuation status and
+capture/retirement progress. Continuation moves `READY -> IN_FLIGHT` immediately
+before the opaque native invocation, then `ACKNOWLEDGED` on successful return.
+Finite failures of a submitted operation before dispatch preserve `READY` and
+permit retry of that same event without recapture. An unacknowledged opaque
+effect, including creation, continuation, duplication or close, is ambiguity:
+retain ownership, do not repeat the effect, and withhold public fatal delivery.
+Acknowledged continuation permits retirement only, never a second continuation.
+
+Existing admission reapers and admitted owner close/drain operations alone own
+cleanup. Positive no-child proof is distinct from an unpublished creation
+outcome. A possibly resumed root needs the full positive `C == T`, exact-handle,
+empty live/pending state and acknowledged-root-exit predicate. Physical exit
+authorizes an external, bounded executor shutdown/join; only acknowledged
+releases remove resources. The read-only `closed` fact reports that physical
+closure. Fatal collection remains `FAILED`, even when closed, and never permits
+producer-terminal success. Repeated caller cancellation retains the same
+cleanup owner. These guarantees cover submitted-operation faults, not arbitrary
+instruction-level interruption, executor corruption or interpreter teardown.
+
+`drain_snapshot(receipt)` returns a serialized, bounded, secret-free diagnostic
+value in either mode; it returns no handles and never independently admits
+drain. The collector uses owner operations for cleanup rather than private
+field manipulation.
+
+Acceptance exercises the existing nested-Job fixture without its cooperative
+barrier, delayed event consumption, exact-identity deduplication, missing
+capabilities/count gaps, native capture/continue failures, suspended-child
+termination, and cancellation joins. Adoption also requires the pinned
+first-party provider's filtered compatibility replay and complete unfiltered
+collection with unchanged DLL/PDB bytes and proven whole-tree drainage.
+Spec 014's coverage scope, producer-terminal ordering, and strict Sonar policy
+remain unchanged.
 
 ## Adapter and pre-build integration
 
@@ -123,9 +216,11 @@ result = await build_manager.pre_launch_build(
 | Variant | Meaning | Required BuildManager action |
 |---|---|---|
 | `NoOwnedAdapter` | No current admitted adapter capability exists. | Do not select or discover any process. Continue to restore/build according to ordinary policy. |
-| `OwnedAdapterCleanup` | A source client, current generation, and owner ref were captured. | Validate all three immediately before drain. Continue only after `DRAINED` with zero active processes. |
+| `OwnedAdapterCleanup` | A source client, current generation, and owner ref were captured. | Validate all three immediately before drain. Continue only after that owner's proven `DRAINED` receipt. |
 
 A mismatched source client, generation, or owner ref returns `STALE`. It performs no disconnect, termination, or build command.
+
+`BuildSession` retains a failed command owner and retries its drain before another command; `BuildManager` cannot discard that session while ownership remains. `DAPClient` retains a failed adapter owner and refuses a new adapter generation until same-owner stop recovery drains it. Neither path may turn a failed close into successful cleanup.
 
 ## Forbidden authority paths
 
@@ -136,7 +231,9 @@ The implementation must not add any of the following to launch, drain, retry, pr
 - a singleton, global map, or ProcessRegistry lookup that retrieves an owner;
 - direct `pywin32` use or a new dependency declaration;
 - `BREAKAWAY_OK`, `SILENT_BREAKAWAY_OK`, leaked Job/process/thread handles, or an unbounded inherited-handle set; or
-- a claim that a root PID, root exit, or Job-handle close proves the tree drained.
+- a claim that a root PID, root exit, zero Job accounting, an advisory completion-port notification, or Job-handle close proves the tree drained.
+
+The admitted Job may enumerate its own member PIDs to retain process handles. Those PIDs do not authorize a lookup or termination outside that Job.
 
 ## Observability and privacy
 

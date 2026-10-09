@@ -18,7 +18,12 @@ from netcoredbg_mcp.dap.client import (
 from netcoredbg_mcp.dap.protocol import Commands, DAPEvent, DAPRequest, DAPResponse
 from netcoredbg_mcp.resource_updates import STATE_URI, THREADS_URI
 from netcoredbg_mcp.session import DebugState, SessionManager
-from netcoredbg_mcp.windows_process_owner import DrainStatus, OwnedProcessRef, OwnerDrainReceipt
+from netcoredbg_mcp.windows_process_owner import (
+    DrainStatus,
+    OwnedProcessRef,
+    OwnerDrainReceipt,
+    WindowsOwnedProcess,
+)
 from tests.owner_scope_red import BlockingStream, TreeProcess
 
 
@@ -28,6 +33,12 @@ class OwnedTestProcess:
     def __init__(self, process: Any, generation: object = "test") -> None:
         self._process = process
         self.owner = OwnedProcessRef("test-owner", generation, process.pid)
+        self._closed = False
+        self._drain_task = None
+        self._drain_receipt = None
+        self._exit_observer = None
+        self._exit_observed = False
+        self._forced_root = False
 
     @property
     def pid(self) -> int:
@@ -52,47 +63,49 @@ class OwnedTestProcess:
     async def wait(self) -> int | None:
         return await self._process.wait()
 
-    async def drain_after_grace(
-        self,
-        *,
-        grace_timeout: float,
-        force_timeout: float,
-    ) -> OwnerDrainReceipt:
-        forced = False
-        if self._process.returncode is None:
-            try:
-                await asyncio.wait_for(self._process.wait(), grace_timeout)
-            except asyncio.TimeoutError:
-                self._process.terminate()
-                try:
-                    await asyncio.wait_for(self._process.wait(), force_timeout)
-                except asyncio.TimeoutError:
-                    forced = True
-                    try:
-                        self._process.kill()
-                    except ProcessLookupError:
-                        # The root disappeared between the grace deadline and
-                        # the force attempt. A real owner observes zero Job
-                        # accounting before TerminateJobObject and therefore
-                        # records this as a natural drain, not a forced kill.
-                        forced = False
-                    else:
-                        try:
-                            await asyncio.wait_for(self._process.wait(), force_timeout)
-                        except asyncio.TimeoutError:
-                            pass
-        if hasattr(self._process, "child_alive"):
+    async def _join_drain(self, policy) -> OwnerDrainReceipt:
+        return await WindowsOwnedProcess._join_drain(self, policy)
+
+    def start_drain_observation(self):
+        if self._process.returncode is None and not self._exit_observed:
+            if self._exit_observer is None:
+                self._exit_observer = asyncio.create_task(self._process.wait())
+            return self._exit_observer
+        return None
+
+    async def observe_drain(self, *, forced, root_was_forced, previous=None):
+        del root_was_forced, previous
+        if self._exit_observer is not None and self._exit_observer.done():
+            self._exit_observer.result()
+            self._exit_observed = True
+        exited = self._process.returncode is not None or self._exit_observed
+        if exited and hasattr(self._process, "child_alive"):
             self._process.child_alive = False
         return OwnerDrainReceipt(
             owner=self.owner,
-            status=DrainStatus.DRAINED,
-            forced=forced,
+            status=DrainStatus.DRAINED if exited else DrainStatus.TIMED_OUT,
+            forced=self._forced_root if forced else False,
             root_returncode=self._process.returncode,
-            active_processes=0,
-            root_was_forced=forced,
-        )
+            active_processes=0 if exited else 1,
+            root_was_forced=self._forced_root if forced else False,
+        ), not exited
+
+    async def force_job(self):
+        if self._process.returncode is None and not self._exit_observed:
+            self._process.terminate()
+            if self._process.returncode is None:
+                try:
+                    self._process.kill()
+                except ProcessLookupError:
+                    self._exit_observed = True
+                else:
+                    self._forced_root = True
+        return self._forced_root, None
 
     async def aclose(self) -> None:
+        if self._exit_observer is not None and not self._exit_observer.done():
+            self._exit_observer.cancel()
+            await asyncio.gather(self._exit_observer, return_exceptions=True)
         return None
 
 
@@ -1694,13 +1707,7 @@ class TestOwnerScopedAdapterRedMatrix:
         """Forced Job cleanup of a descendant must not relabel an exited root."""
 
         class NaturalRootForcedDescendantOwner(OwnedTestProcess):
-            async def drain_after_grace(
-                self,
-                *,
-                grace_timeout: float,
-                force_timeout: float,
-            ) -> OwnerDrainReceipt:
-                del grace_timeout, force_timeout
+            async def _join_drain(self, _policy) -> OwnerDrainReceipt:
                 self._process.returncode = 0
                 self._process._root_exit.set()
                 self._process.child_alive = False
@@ -1731,7 +1738,8 @@ class TestOwnerScopedAdapterRedMatrix:
         run = client._run
         assert receipt is not None
         assert receipt.root_was_forced is False
-        assert run is not None and run.terminal is not None
+        assert run is not None
+        assert run.terminal is not None
         assert run.terminal.cleanup_outcome is DapCleanupOutcome.NATURAL_EXIT
 
     @pytest.mark.asyncio
@@ -1759,7 +1767,8 @@ class TestOwnerScopedAdapterRedMatrix:
             stale = await client.stop(expected_owner=foreign)
             receipt = await client.stop(expected_owner=owner.owner)
 
-        assert stale is not None and stale.status is DrainStatus.STALE
+        assert stale is not None
+        assert stale.status is DrainStatus.STALE
         assert process.child_alive is False
         assert receipt is not None
         assert receipt.status is DrainStatus.DRAINED
@@ -1770,13 +1779,7 @@ class TestOwnerScopedAdapterRedMatrix:
         """Ordinary stop returns the final owner receipt after close retries."""
 
         class RetryingCloseOwner(OwnedTestProcess):
-            async def drain_after_grace(
-                self,
-                *,
-                grace_timeout: float,
-                force_timeout: float,
-            ) -> OwnerDrainReceipt:
-                del grace_timeout, force_timeout
+            async def _join_drain(self, _policy) -> OwnerDrainReceipt:
                 return OwnerDrainReceipt(
                     owner=self.owner,
                     status=DrainStatus.TIMED_OUT,
@@ -1814,3 +1817,88 @@ class TestOwnerScopedAdapterRedMatrix:
         assert receipt is not None
         assert receipt.status is DrainStatus.DRAINED
         assert receipt.active_processes == 0
+
+    @pytest.mark.asyncio
+    async def test_failed_finalizer_owner_retries_before_next_admission(self) -> None:
+        """A completed finalizer keeps its owner until a later stop proves drain."""
+
+        class RecoveringOwner(OwnedTestProcess):
+            close_calls = 0
+
+            async def _join_drain(self, _policy) -> OwnerDrainReceipt:
+                return OwnerDrainReceipt(self.owner, DrainStatus.FAILED, True, None, 1)
+
+            async def aclose(self) -> OwnerDrainReceipt:
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    return OwnerDrainReceipt(self.owner, DrainStatus.FAILED, True, None, 1)
+                self._process.kill()
+                self._process.child_alive = False
+                return OwnerDrainReceipt(self.owner, DrainStatus.DRAINED, True, self.returncode, 0)
+
+        process = TreeProcess(pid=43013, stdout=BlockingStream(), stderr=BlockingStream())
+        owner = RecoveringOwner(process, "failed-then-drained")
+        next_process = TreeProcess(pid=43014, stdout=BlockingStream(), stderr=BlockingStream())
+        next_owner = OwnedTestProcess(next_process, "next-generation")
+        records: list[DapTransportTerminal] = []
+        client = DAPClient("/path/to/netcoredbg")
+        client.set_transport_terminal_handler(records.append)
+
+        with patch(
+            "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch",
+            side_effect=[owner, next_owner],
+        ) as launch:
+            await client.start(generation="failed-then-drained")
+            failed = await client.stop(expected_owner=owner.owner)
+            assert failed is not None
+            assert failed.status is DrainStatus.FAILED
+            assert owner.close_calls == 1
+            assert len(records) == 1
+            with pytest.raises(RuntimeError, match="Retained adapter owner did not drain"):
+                await client.start(generation="next-generation")
+            launch.assert_awaited_once()
+
+            recovered = await client.stop(expected_owner=owner.owner)
+            assert recovered is not None
+            assert recovered.status is DrainStatus.DRAINED
+            assert recovered.active_processes == 0
+            assert client._run is not None
+            assert client._run.owner_drain_receipt == recovered
+            assert len(records) == 1
+            assert await client.stop(expected_owner=owner.owner) == recovered
+            assert owner.close_calls == 2
+
+            assert await client.start(generation="next-generation") == "next-generation"
+            assert launch.await_count == 2
+            await client.stop(expected_owner=next_owner.owner)
+        assert len(records) == 2
+
+    @pytest.mark.asyncio
+    async def test_previous_owner_stop_does_not_finalize_new_generation(self) -> None:
+        """A stale owner cannot retry or publish a terminal for the next owner."""
+        first_process = TreeProcess(pid=43015, stdout=BlockingStream(), stderr=BlockingStream())
+        second_process = TreeProcess(pid=43016, stdout=BlockingStream(), stderr=BlockingStream())
+        first_owner = OwnedTestProcess(first_process, "first")
+        second_owner = OwnedTestProcess(second_process, "second")
+        records: list[DapTransportTerminal] = []
+        client = DAPClient("/path/to/netcoredbg")
+        client.set_transport_terminal_handler(records.append)
+
+        with patch(
+            "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch",
+            side_effect=[first_owner, second_owner],
+        ):
+            await client.start(generation="first")
+            await client.stop(expected_owner=first_owner.owner)
+            await client.start(generation="second")
+            current = client._run
+            stale = await client.stop(expected_owner=first_owner.owner)
+            assert stale is not None
+            assert stale.status is DrainStatus.STALE
+            assert current is client._run
+            assert current is not None
+            assert current.finalizer_task is None
+            assert second_process.child_alive is True
+            assert len(records) == 1
+            await client.stop(expected_owner=second_owner.owner)
+        assert [record.generation for record in records] == ["first", "second"]

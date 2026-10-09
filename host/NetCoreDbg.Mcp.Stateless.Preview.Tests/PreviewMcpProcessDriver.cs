@@ -90,6 +90,18 @@ internal sealed class PreviewMcpProcessDriver : IAsyncDisposable
     internal Task<JsonRpcMessage> DiscoverAsync(RequestId id, CancellationToken cancellationToken = default) =>
         SendAsync("server/discover", new JsonObject { ["_meta"] = CurrentMeta() }, id, cancellationToken);
 
+    internal async Task WaitForStartupAsync(TimeSpan observationTimeout, CancellationToken cancellationToken = default)
+    {
+        // Stateless discovery observes startup; subsequent response waits retain their five-second deadline.
+        using var observation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        observation.CancelAfter(observationTimeout);
+        var id = new RequestId("preview-startup-discover");
+        await SendRequestAsync("server/discover", new JsonObject { ["_meta"] = CurrentMeta() }, id, observation.Token).ConfigureAwait(false);
+        var response = Assert.IsType<JsonRpcResponse>(await ReadCorrelatedResponseAsync(id, observation.Token).ConfigureAwait(false));
+        var result = Assert.IsType<JsonObject>(response.Result);
+        Assert.Equal(["tools"], result["capabilities"]!.AsObject().Select(static property => property.Key));
+    }
+
     internal Task<JsonRpcMessage> ListToolsAsync(RequestId id, JsonObject? meta = null, CancellationToken cancellationToken = default) =>
         SendAsync("tools/list", new JsonObject { ["_meta"] = (meta ?? CurrentMeta()).DeepClone() }, id, cancellationToken);
 
@@ -201,9 +213,14 @@ internal sealed class PreviewMcpProcessDriver : IAsyncDisposable
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(RequestTimeout);
+        return await ReadCorrelatedResponseAsync(id, deadline.Token).ConfigureAwait(false);
+    }
+
+    private async Task<JsonRpcMessage> ReadCorrelatedResponseAsync(RequestId id, CancellationToken cancellationToken)
+    {
         while (true)
         {
-            var incoming = await _transport.MessageReader.ReadAsync(deadline.Token).ConfigureAwait(false);
+            var incoming = await _transport.MessageReader.ReadAsync(cancellationToken).ConfigureAwait(false);
             if (incoming is JsonRpcMessageWithId correlated && correlated.Id == id)
             {
                 return incoming;
@@ -248,23 +265,21 @@ internal static class PreviewOutputPathResolver
 {
     internal static PreviewOutputProcess ResolveProcess()
     {
-        var outputDirectory = new DirectoryInfo(AppContext.BaseDirectory);
-        var targetFramework = outputDirectory.Name;
-        var configuration = outputDirectory.Parent?.Name
-            ?? throw new InvalidOperationException($"Test output configuration is absent from '{AppContext.BaseDirectory}'.");
-        var projectDirectory = Path.Combine(PreviewRepositoryLayout.Root, "host", "NetCoreDbg.Mcp.Stateless.Preview");
         var assemblyName = "NetCoreDbg.Mcp.Stateless.Preview";
-        var targetPath = Path.Combine(projectDirectory, "bin", configuration, targetFramework, $"{assemblyName}.dll");
+        var targetPath = Path.Combine(AppContext.BaseDirectory, $"{assemblyName}.dll");
         Assert.True(File.Exists(targetPath), $"Built preview target is absent: '{targetPath}'.");
-        var appHost = Path.Combine(Path.GetDirectoryName(targetPath)!, OperatingSystem.IsWindows() ? $"{assemblyName}.exe" : assemblyName);
+        var appHost = Path.Combine(AppContext.BaseDirectory, OperatingSystem.IsWindows() ? $"{assemblyName}.exe" : assemblyName);
         return File.Exists(appHost)
             ? new PreviewOutputProcess(appHost, [])
             : new PreviewOutputProcess("dotnet", [targetPath]);
     }
 
-    internal static Process StartDirect(params string[] arguments) => StartDirectIn(null, arguments);
+    internal static Process StartDirect(params string[] arguments) => StartDirectIn(null, null, arguments);
 
-    internal static Process StartDirectIn(string? workingDirectory, params string[] arguments)
+    internal static Process StartDirectIn(
+        string? workingDirectory,
+        IReadOnlyDictionary<string, string?>? environment,
+        params string[] arguments)
     {
         var candidate = ResolveProcess();
         var start = new ProcessStartInfo(candidate.Command)
@@ -279,6 +294,13 @@ internal static class PreviewOutputPathResolver
         foreach (var argument in candidate.Arguments.Concat(arguments))
         {
             start.ArgumentList.Add(argument);
+        }
+        if (environment is not null)
+        {
+            foreach (var (name, value) in environment)
+            {
+                start.Environment[name] = value;
+            }
         }
 
         return Process.Start(start) ?? throw new InvalidOperationException("Preview process did not start.");

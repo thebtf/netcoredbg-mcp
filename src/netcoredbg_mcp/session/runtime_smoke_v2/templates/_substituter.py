@@ -5,8 +5,8 @@ from copy import deepcopy
 from string import Formatter
 from typing import Any
 
-_FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_FULL_FIELD = re.compile(r"^\{([A-Za-z_][A-Za-z0-9_]*)\}$")
+_FIELD_NAME = re.compile(r"^[A-Za-z_](?a:\w)*$")
+_FULL_FIELD = re.compile(r"^\{([A-Za-z_](?a:\w)*)\}$")
 
 
 class TemplateRenderError(ValueError):

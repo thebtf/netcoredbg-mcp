@@ -166,6 +166,26 @@ def test_placeholder_substituter_rejects_unknown_without_recursive_rendering() -
         render_template_value("{missing}", {"id": "a"})
 
 
+@pytest.mark.parametrize("field_name", ["value_9", "valueé", "value١", "valueK"])
+def test_placeholder_substituter_preserves_ascii_field_names(field_name: str) -> None:
+    record = {field_name: 7}
+    for template in ("{" + field_name + "}", "prefix-{" + field_name + "}"):
+        if field_name == "value_9":
+            expected = 7 if template.startswith("{") else "prefix-7"
+            assert render_template_value(template, record) == expected
+        else:
+            with pytest.raises(TemplateRenderError, match="unsupported placeholder syntax"):
+                render_template_value(template, record)
+
+
+def test_placeholder_substituter_keeps_native_value_and_final_newline_matching() -> None:
+    value = {"items": [1]}
+    rendered = render_template_value("{value_9}\n", {"value_9": value})
+    assert rendered == value
+    assert rendered is not value
+    assert rendered["items"] is not value["items"]
+
+
 def test_placeholder_substituter_wraps_malformed_template() -> None:
     with pytest.raises(TemplateRenderError, match="malformed template"):
         render_template_value("{broken", {"id": "a"})

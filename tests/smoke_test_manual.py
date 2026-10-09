@@ -1097,6 +1097,63 @@ async def test_wpf_physical_keypad_events():
                     ),
                     str(observed),
                 )
+            from netcoredbg_mcp.ui.foreground import get_foreground_window, get_window_process_id
+            from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
+
+            pid = gallery.session.state.process_id
+            fallback = PywinautoBackend()
+            try:
+                await fallback.connect(pid)
+                element = await fallback.inner.find_element(automation_id="txtOutput")
+                info = await fallback.inner.get_element_info(element)
+                if fallback.process_id != pid or info.automation_id != "txtOutput":
+                    raise RuntimeError(f"pywinauto selected a different target: {info}")
+
+                for keys, scan, virtual_keys, selected in (
+                    ("{NUMPAD1}", 0x4F, (0x61, 0x23), True),
+                    ("{NUMPADADD}", 0x4E, (0x6B,), False),
+                ):
+                    await fallback.inner.set_focus(element)
+                    foreground = get_foreground_window()
+                    focused = await fallback.find_element(automation_id="txtOutput")
+                    if (
+                        get_window_process_id(foreground) != pid
+                        or focused.get("automationId") != "txtOutput"
+                        or focused.get("hasKeyboardFocus") is not True
+                    ):
+                        raise RuntimeError(
+                            f"Unsafe pywinauto {keys} target: pid={pid} "
+                            f"foreground={foreground} focused={focused}"
+                        )
+
+                    before = json.loads(
+                        (await backend.find_element(automation_id="keyEventStatus")).get("name")
+                        or "[]"
+                    )
+                    if selected:
+                        await fallback.inner.send_keys(element, keys)
+                    else:
+                        await fallback.send_keys(keys)
+                    after = json.loads(
+                        (await backend.find_element(automation_id="keyEventStatus"))["name"]
+                    )
+                    observed = after[-2:]
+                    check(
+                        f"WPF pywinauto {'selected' if selected else 'focused'} {keys}",
+                        len(after) == min(32, len(before) + 2)
+                        and after != before
+                        and len(observed) == 2
+                        and all(
+                            event["scan"] == scan
+                            and event["vk"] in virtual_keys
+                            and event["extended"] is False
+                            and event["down"] is down
+                            for event, down in zip(observed, (True, False), strict=True)
+                        ),
+                        str(observed),
+                    )
+            finally:
+                await fallback.disconnect()
     except Exception as exc:
         check("WPF physical keypad events", False, str(exc))
 
@@ -2938,7 +2995,7 @@ async def test_instrumentation_group_lifecycle():
             TraceEntry(_time.monotonic(), SOURCE, trace_line, "sum", "3", 1, tracepoint_id)
         )
 
-        inspected = (await m.instrumentation.inspect_group("manual_flow")).to_dict()
+        inspected = (m.instrumentation.inspect_group("manual_flow")).to_dict()
         print(f"  evidence: {inspected}")
         check("Instrumentation group created", created["status"] == "PASS", str(created))
         check(
@@ -4481,6 +4538,7 @@ def _v2_hover_plan(*, program: str, build_project: str) -> dict[str, Any]:
         "cleanup": {
             "steps": [
                 {"kind": "debug.stop"},
+                {"kind": "ui.disconnect"},
                 {"kind": "process.registry.assert_empty"},
             ]
         },
@@ -4702,6 +4760,7 @@ def _v2_text_probe_missing_selector_plan(
         "cleanup": {
             "steps": [
                 {"kind": "debug.stop"},
+                {"kind": "ui.disconnect"},
                 {"kind": "process.registry.assert_empty"},
             ]
         },
@@ -5313,6 +5372,7 @@ def _v2_visible_row_drag_plan(
         "cleanup": {
             "steps": [
                 {"kind": "debug.stop"},
+                {"kind": "ui.disconnect"},
                 {"kind": "process.registry.assert_empty"},
             ]
         },
@@ -5527,6 +5587,7 @@ def _v2_offscreen_row_target_drag_plan(
         "cleanup": {
             "steps": [
                 {"kind": "debug.stop"},
+                {"kind": "ui.disconnect"},
                 {"kind": "process.registry.assert_empty"},
             ]
         },
@@ -5787,6 +5848,7 @@ def _v2_edge_scroll_drag_plan(
         "cleanup": {
             "steps": [
                 {"kind": "debug.stop"},
+                {"kind": "ui.disconnect"},
                 {"kind": "process.registry.assert_empty"},
             ]
         },
@@ -6152,6 +6214,7 @@ def _v2_multi_row_drag_plan(
         "cleanup": {
             "steps": [
                 {"kind": "debug.stop"},
+                {"kind": "ui.disconnect"},
                 {"kind": "process.registry.assert_empty"},
             ]
         },
@@ -6360,6 +6423,7 @@ def _v2_negative_drag_plan(
         "cleanup": {
             "steps": [
                 {"kind": "debug.stop"},
+                {"kind": "ui.disconnect"},
                 {"kind": "process.registry.assert_empty"},
             ]
         },

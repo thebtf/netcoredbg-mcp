@@ -15,6 +15,12 @@ internal static class NativeSceneEvidenceCommands
     private const string CaptureVisualEvidenceOperation = "capture_visual_evidence";
     private const string CaptureElementSnapshotOperation = "capture_element_snapshot";
     private const string CaptureNativeSceneOperation = "capture_native_scene";
+    private const string WidthProperty = "width";
+    private const string HeightProperty = "height";
+    private const string ProcessIdProperty = "processId";
+    private const string ProcessIdentityProperty = "processIdentity";
+    private const string StateProperty = "state";
+    private const string UnobservableState = "unobservable";
     private const int MaximumPngBytes = 64 * 1024 * 1024;
     private const int MaximumSceneNodes = 4_096;
     private const int MaximumObservedTextLength = 256;
@@ -44,9 +50,9 @@ internal static class NativeSceneEvidenceCommands
     private static JsonObject CaptureVisualEvidence(JsonObject request, int boundProcessId)
     {
         if (request.Count != 3 ||
-            request["processId"] is not JsonValue processIdValue ||
+            request[ProcessIdProperty] is not JsonValue processIdValue ||
             !processIdValue.TryGetValue<int>(out var processId) ||
-            request["processIdentity"] is not JsonValue processIdentityValue ||
+            request[ProcessIdentityProperty] is not JsonValue processIdentityValue ||
             !processIdentityValue.TryGetValue<string>(out var processIdentity) ||
             string.IsNullOrWhiteSpace(processIdentity) ||
             processId != boundProcessId)
@@ -89,11 +95,11 @@ internal static class NativeSceneEvidenceCommands
             ["sha256"] = Convert.ToHexString(SHA256.HashData(capture.Bytes)).ToLowerInvariant(),
             ["provenance"] = new JsonObject
             {
-                ["processId"] = processId,
-                ["processIdentity"] = processIdentity,
+                [ProcessIdProperty] = processId,
+                [ProcessIdentityProperty] = processIdentity,
                 ["hwnd"] = capture.Hwnd,
-                ["width"] = capture.Width,
-                ["height"] = capture.Height,
+                [WidthProperty] = capture.Width,
+                [HeightProperty] = capture.Height,
                 ["clientRect"] = new JsonObject
                 {
                     ["left"] = capture.ClientLeft,
@@ -110,10 +116,10 @@ internal static class NativeSceneEvidenceCommands
 
     private static NativeSceneTarget ReadBoundTarget(JsonObject request, int boundProcessId)
     {
-        if (request["processId"] is not JsonValue processIdValue ||
+        if (request[ProcessIdProperty] is not JsonValue processIdValue ||
             !processIdValue.TryGetValue<int>(out var processId) ||
             processId != boundProcessId ||
-            request["processIdentity"] is not JsonValue processIdentityValue ||
+            request[ProcessIdentityProperty] is not JsonValue processIdentityValue ||
             !processIdentityValue.TryGetValue<string>(out var processIdentity) ||
             string.IsNullOrWhiteSpace(processIdentity) ||
             request["hwnd"] is not JsonValue hwndValue ||
@@ -215,8 +221,8 @@ internal static class NativeSceneEvidenceCommands
                 ["atomicity"] = "unproven",
                 ["process"] = new JsonObject
                 {
-                    ["processId"] = target.ProcessId,
-                    ["processIdentity"] = target.ProcessIdentity,
+                    [ProcessIdProperty] = target.ProcessId,
+                    [ProcessIdentityProperty] = target.ProcessIdentity,
                     ["hwnd"] = target.Hwnd.ToInt64(),
                 },
                 ["guards"] = ToGuardsPayload(beforeSnapshot, after.Snapshot),
@@ -443,7 +449,7 @@ internal static class NativeSceneEvidenceCommands
             ["transform"] = ReadTransform(element),
             ["clip"] = new JsonObject
             {
-                ["status"] = "unobservable",
+                ["status"] = UnobservableState,
                 ["reason"] = "UIA does not expose an effective clip region.",
             },
         };
@@ -479,8 +485,8 @@ internal static class NativeSceneEvidenceCommands
             {
                 ["x"] = (double)rect.X,
                 ["y"] = (double)rect.Y,
-                ["width"] = (double)rect.Width,
-                ["height"] = (double)rect.Height,
+                [WidthProperty] = (double)rect.Width,
+                [HeightProperty] = (double)rect.Height,
             };
         }
         catch
@@ -497,8 +503,8 @@ internal static class NativeSceneEvidenceCommands
         {
             ["x"] = physical["x"]!.GetValue<double>() * 96.0 / dpi,
             ["y"] = physical["y"]!.GetValue<double>() * 96.0 / dpi,
-            ["width"] = physical["width"]!.GetValue<double>() * 96.0 / dpi,
-            ["height"] = physical["height"]!.GetValue<double>() * 96.0 / dpi,
+            [WidthProperty] = physical[WidthProperty]!.GetValue<double>() * 96.0 / dpi,
+            [HeightProperty] = physical[HeightProperty]!.GetValue<double>() * 96.0 / dpi,
         };
     }
 
@@ -507,8 +513,8 @@ internal static class NativeSceneEvidenceCommands
         : string.Concat(
             rect["x"]!.GetValue<double>().ToString("R", CultureInfo.InvariantCulture), ",",
             rect["y"]!.GetValue<double>().ToString("R", CultureInfo.InvariantCulture), ",",
-            rect["width"]!.GetValue<double>().ToString("R", CultureInfo.InvariantCulture), ",",
-            rect["height"]!.GetValue<double>().ToString("R", CultureInfo.InvariantCulture));
+            rect[WidthProperty]!.GetValue<double>().ToString("R", CultureInfo.InvariantCulture), ",",
+            rect[HeightProperty]!.GetValue<double>().ToString("R", CultureInfo.InvariantCulture));
 
     private static BoundedText ReadBoundedText(Func<string?> read)
     {
@@ -615,12 +621,12 @@ internal static class NativeSceneEvidenceCommands
         ["sceneEpoch"] = 0,
         ["conditions"] = new JsonObject
         {
-            ["dispatcherIdle"] = new JsonObject { ["state"] = "unobservable" },
-            ["stableLayout"] = new JsonObject { ["state"] = "unobservable" },
-            ["animationState"] = new JsonObject { ["state"] = "unobservable" },
-            ["windowGeometry"] = new JsonObject { ["state"] = "unobservable" },
-            ["contextMaterialization"] = new JsonObject { ["state"] = "unobservable" },
-            ["asyncLoadSettled"] = new JsonObject { ["state"] = "unobservable" },
+            ["dispatcherIdle"] = new JsonObject { [StateProperty] = UnobservableState },
+            ["stableLayout"] = new JsonObject { [StateProperty] = UnobservableState },
+            ["animationState"] = new JsonObject { [StateProperty] = UnobservableState },
+            ["windowGeometry"] = new JsonObject { [StateProperty] = UnobservableState },
+            ["contextMaterialization"] = new JsonObject { [StateProperty] = UnobservableState },
+            ["asyncLoadSettled"] = new JsonObject { [StateProperty] = UnobservableState },
         },
     };
 

@@ -48,63 +48,7 @@ def register_output_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(
-        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
-    )
-    async def search_output(
-        pattern: str,
-        context_lines: int = 2,
-        category: str | None = None,
-    ) -> dict:
-        """Search program output for a pattern (regex supported).
-
-        Use this instead of get_output when looking for specific messages,
-        errors, or log entries in large output. Returns matching lines with context.
-
-        Args:
-            pattern: Regex pattern to search for (case-insensitive)
-            context_lines: Number of lines before/after each match (default 2)
-            category: Filter by category: "stdout", "stderr", or "console" (default: all)
-
-        Returns:
-            List of matches with line numbers and context
-        """
-        try:
-            entries: Iterable[OutputEntry] = session.state.output_buffer
-            if category:
-                entries = [e for e in entries if e.category == category]
-            output = "".join(e.text for e in entries)
-            lines = output.splitlines()
-            matches = []
-
-            try:
-                regex = re.compile(pattern, re.IGNORECASE)
-            except re.error as e:
-                return {"success": False, "error": f"Invalid regex: {e}"}
-
-            for i, line in enumerate(lines):
-                if regex.search(line):
-                    start = max(0, i - context_lines)
-                    end = min(len(lines), i + context_lines + 1)
-                    context = lines[start:end]
-                    matches.append(
-                        {
-                            "line_number": i + 1,
-                            "match": line,
-                            "context": context,
-                        }
-                    )
-
-            return build_response(
-                data={
-                    "pattern": pattern,
-                    "match_count": len(matches),
-                    "matches": matches[:50],
-                },
-                state=session.state.state,
-            )
-        except Exception as e:
-            return build_error_response(str(e), state=session.state.state)
+    _register_search_output(mcp, session)
 
     @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
@@ -168,6 +112,71 @@ def register_output_tools(
                     f"Build: {build_result.error_count} errors, "
                     f"{build_result.warning_count} warnings"
                 ),
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+
+def _register_search_output(
+    mcp: FastMCP,
+    session: SessionManager,
+) -> None:
+    from mcp.types import ToolAnnotations
+
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
+    async def search_output(
+        pattern: str,
+        context_lines: int = 2,
+        category: str | None = None,
+    ) -> dict:
+        """Search program output for a pattern (regex supported).
+
+        Use this instead of get_output when looking for specific messages,
+        errors, or log entries in large output. Returns matching lines with context.
+
+        Args:
+            pattern: Regex pattern to search for (case-insensitive)
+            context_lines: Number of lines before/after each match (default 2)
+            category: Filter by category: "stdout", "stderr", or "console" (default: all)
+
+        Returns:
+            List of matches with line numbers and context
+        """
+        try:
+            entries: Iterable[OutputEntry] = session.state.output_buffer
+            if category:
+                entries = [e for e in entries if e.category == category]
+            output = "".join(e.text for e in entries)
+            lines = output.splitlines()
+            matches = []
+
+            try:
+                regex = re.compile(pattern, re.IGNORECASE)
+            except re.error as e:
+                return {"success": False, "error": f"Invalid regex: {e}"}
+
+            for i, line in enumerate(lines):
+                if regex.search(line):
+                    start = max(0, i - context_lines)
+                    end = min(len(lines), i + context_lines + 1)
+                    context = lines[start:end]
+                    matches.append(
+                        {
+                            "line_number": i + 1,
+                            "match": line,
+                            "context": context,
+                        }
+                    )
+
+            return build_response(
+                data={
+                    "pattern": pattern,
+                    "match_count": len(matches),
+                    "matches": matches[:50],
+                },
+                state=session.state.state,
             )
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)

@@ -174,12 +174,11 @@ async def test_file_json_probe_blocks_missing_required_jsonpath(tmp_path: Path) 
     assert probe["accepted"]["jsonpath"] == "non-empty JSONPath expression"
 
 
-@pytest.mark.asyncio
-async def test_file_json_probe_without_session_uses_resolved_path(tmp_path: Path) -> None:
+def test_file_json_probe_without_session_uses_resolved_path(tmp_path: Path) -> None:
     path = tmp_path / "diagnostics.json"
     path.write_text(json.dumps({"value": True}), encoding="utf-8")
 
-    result = await handle_file_json(
+    result = handle_file_json(
         {
             "kind": "file.json",
             "name": "sessionless_file",
@@ -196,8 +195,7 @@ async def test_file_json_probe_without_session_uses_resolved_path(tmp_path: Path
     assert result["resolved_path"] == str(path.resolve())
 
 
-@pytest.mark.asyncio
-async def test_file_json_probe_propagates_unexpected_jsonpath_errors(
+def test_file_json_probe_propagates_unexpected_jsonpath_errors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -218,7 +216,7 @@ async def test_file_json_probe_propagates_unexpected_jsonpath_errors(
     }
     context = SimpleNamespace(session=session)
     with pytest.raises(RuntimeError, match="internal jsonpath adapter bug"):
-        await handle_file_json(probe, context, phase="after")
+        handle_file_json(probe, context, phase="after")
 
 
 @pytest.mark.asyncio

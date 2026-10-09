@@ -11,7 +11,7 @@ _MB = 1024 * 1024
 _LOG = logging.getLogger(__name__)
 
 
-async def handle_process_metric(
+def handle_process_metric(
     probe: dict[str, Any],
     context: Any,
     *,

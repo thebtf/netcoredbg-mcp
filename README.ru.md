@@ -13,7 +13,7 @@
 Protocol и Windows UI Automation: агент наблюдает за запущенным приложением,
 намеренно останавливает его и изучает состояние, объясняющее поведение.
 
-**Python 3.10+ · автоматизация Windows GUI · 135 инструментов · 8 промптов · 4 ресурса · v0.23.11**
+**Python 3.10+ · автоматизация Windows GUI · 135 инструментов · 8 промптов · 4 ресурса · v0.23.12**
 
 ## Возможности
 
@@ -213,7 +213,7 @@ ui_click(automation_id="saveButton")
 
 ### Ввод с физического цифрового блока
 
-В стандартном Python-сервере на Windows с FlaUI вызов
+В стандартном Python-сервере на Windows через FlaUI или pywinauto вызов
 `ui_send_keys(keys="{NUMPAD1}", automation_id="myInput")` посылает физическую
 клавишу цифрового блока 1, а не текст `"1"` или клавишу верхнего ряда.
 `ui_send_keys_focused(keys="{NUMPADENTER}")` посылает Enter цифрового блока,
@@ -225,10 +225,10 @@ ui_click(automation_id="saveButton")
 
 Поддерживаются 17 физических клавиш: `{NUMPAD0}`–`{NUMPAD9}`, `{NUMPADADD}`,
 `{NUMPADSUBTRACT}`, `{NUMPADMULTIPLY}`, `{NUMPADDIVIDE}`, `{NUMPADDECIMAL}`,
-`{NUMPADENTER}` и `{NUMLOCK}`. `{NUMLOCK}` нажимает и отпускает клавишу, но
-не задаёт требуемое состояние Num Lock. Физическая доставка доступна только
-через Windows FlaUI backend, а не через альтернативный UI backend или
-опциональный .NET preview.
+`{NUMPADENTER}` и `{NUMLOCK}`. `{NUMLOCK}` физически нажимает и отпускает
+NumLock, но не задаёт требуемое состояние; вывод символов зависит от текущего
+состояния NumLock. Маршрут `ui_key_sequence` требует FlaUI и недоступен через
+pywinauto. Опциональный .NET preview не меняется.
 
 ### Режимы screenshot
 

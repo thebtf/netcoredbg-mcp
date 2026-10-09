@@ -122,31 +122,9 @@ public sealed class SymbolSearchEngine
 
         foreach (var path in SourceFiles(null, rules, operation))
         {
-            var relativeFile = RelativePath(path);
-            var lines = ReadLines(path, operation);
-            for (var index = 0; index < lines.Length; index++)
+            if (CollectFileReferences(path, referencePattern, results, maxResults, limit, policyCeiling, operation))
             {
-                operation.Check();
-                if (!referencePattern.IsMatch(lines[index], _settings.Strict ? operation : null))
-                {
-                    continue;
-                }
-
-                if (_settings.Strict && results.Count == policyCeiling)
-                {
-                    ThrowFailure(SearchFailure.PreviewSearchBudgetExceeded(operation.Tool));
-                }
-
-                results.Add(new ReferenceMatch(relativeFile, index + 1, FormatContext(lines[index])));
-                if (!_settings.Strict && results.Count >= limit)
-                {
-                    return results;
-                }
-                if (_settings.Strict && maxResults < policyCeiling && results.Count == maxResults)
-                {
-                    results.Sort(ReferenceMatchComparer.Instance);
-                    return results;
-                }
+                return results;
             }
         }
 
@@ -156,6 +134,59 @@ public sealed class SymbolSearchEngine
         }
 
         return results;
+    }
+
+    private bool CollectFileReferences(
+        string path,
+        SearchPattern referencePattern,
+        List<ReferenceMatch> results,
+        int maxResults,
+        int limit,
+        int policyCeiling,
+        SearchOperation operation)
+    {
+        var relativeFile = RelativePath(path);
+        var lines = ReadLines(path, operation);
+        for (var index = 0; index < lines.Length; index++)
+        {
+            operation.Check();
+            if (!referencePattern.IsMatch(lines[index], _settings.Strict ? operation : null))
+            {
+                continue;
+            }
+
+            if (_settings.Strict && results.Count == policyCeiling)
+            {
+                ThrowFailure(SearchFailure.PreviewSearchBudgetExceeded(operation.Tool));
+            }
+
+            results.Add(new ReferenceMatch(relativeFile, index + 1, FormatContext(lines[index])));
+            if (ReferenceLimitReached(results, maxResults, limit, policyCeiling))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool ReferenceLimitReached(
+        List<ReferenceMatch> results,
+        int maxResults,
+        int limit,
+        int policyCeiling)
+    {
+        if (!_settings.Strict && results.Count >= limit)
+        {
+            return true;
+        }
+        if (_settings.Strict && maxResults < policyCeiling && results.Count == maxResults)
+        {
+            results.Sort(ReferenceMatchComparer.Instance);
+            return true;
+        }
+
+        return false;
     }
 
     public SourceContext GetSourceContext(
@@ -188,7 +219,7 @@ public sealed class SymbolSearchEngine
 
     private SearchOperation StartOperation(string tool, CancellationToken cancellationToken)
     {
-        var operation = new SearchOperation(_settings, tool, cancellationToken, _timestamp);
+        var operation = new SearchOperation(_settings, tool, _timestamp, cancellationToken);
         if (_settings.Strict)
         {
             operation.Check();
@@ -463,25 +494,40 @@ public sealed class SymbolSearchEngine
             throw new ArgumentException($"Path is outside project root: {rawPath}");
         }
 
+        if (TryResolveDirectProjectFile(candidate, rawPath, rules, operation))
+        {
+            return candidate;
+        }
+
+        if (IsBasenameOnly(rawPath))
+        {
+            return ResolveUniqueBasename(Path.GetFileName(rawPath), rules, operation);
+        }
+
+        ThrowFileNotFoundOrFailure(rawPath, operation.Tool);
+        throw new InvalidOperationException("Unreachable");
+    }
+
+    private bool TryResolveDirectProjectFile(
+        string candidate,
+        string rawPath,
+        IReadOnlyList<GitIgnoreRule> rules,
+        SearchOperation operation)
+    {
         if (_settings.Strict)
         {
             VerifyStrictParentDirectories(candidate, operation);
             var candidateInfo = InspectStrictPath(candidate, expectedDirectory: false, operation);
-            if (candidateInfo.Exists)
+            if (!candidateInfo.Exists)
             {
-                if (candidateInfo.IsDirectory)
-                {
-                    ThrowFailure(SearchFailure.PreviewPathRefused(operation.Tool));
-                }
-
-                VerifyStrictFile(new FileInfo(candidate), operation);
-                if (IsSourceFile(new FileInfo(candidate), rules, operation))
-                {
-                    return candidate;
-                }
-
-                ThrowFileNotFoundOrFailure(rawPath, operation.Tool);
+                return false;
             }
+            if (candidateInfo.IsDirectory)
+            {
+                ThrowFailure(SearchFailure.PreviewPathRefused(operation.Tool));
+            }
+
+            VerifyStrictFile(new FileInfo(candidate), operation);
         }
         else
         {
@@ -489,21 +535,15 @@ public sealed class SymbolSearchEngine
             {
                 throw new IOException($"Path is not a file: {rawPath}");
             }
-            if (File.Exists(candidate))
+            if (!File.Exists(candidate))
             {
-                var file = new FileInfo(candidate);
-                if (IsSourceFile(file, rules, operation))
-                {
-                    return candidate;
-                }
-
-                ThrowFileNotFoundOrFailure(rawPath, operation.Tool);
+                return false;
             }
         }
 
-        if (IsBasenameOnly(rawPath))
+        if (IsSourceFile(new FileInfo(candidate), rules, operation))
         {
-            return ResolveUniqueBasename(Path.GetFileName(rawPath), rules, operation);
+            return true;
         }
 
         ThrowFileNotFoundOrFailure(rawPath, operation.Tool);
@@ -725,10 +765,34 @@ public sealed class SymbolSearchEngine
         return new SearchPattern(pattern, strictRegexMatch);
     }
 
+    private static bool IsAsciiIdentifier(string name)
+    {
+        if (name.Length == 0 || (!char.IsAsciiLetter(name[0]) && name[0] != '_'))
+        {
+            return false;
+        }
+
+        var length = name.Length;
+        // The original '$' anchor also accepts one final LF.
+        if (name[length - 1] == '\n')
+        {
+            length--;
+        }
+        for (var index = 1; index < length; index++)
+        {
+            if (!char.IsAsciiLetterOrDigit(name[index]) && name[index] != '_')
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static SearchPattern CreateReferencePattern(string name, Func<Regex, string, bool>? strictRegexMatch)
     {
         var escaped = Regex.Escape(name);
-        var pattern = Regex.IsMatch(name, "^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.CultureInvariant)
+        var pattern = IsAsciiIdentifier(name)
             ? $@"(?<![A-Za-z0-9_]){escaped}(?![A-Za-z0-9_])"
             : escaped;
         return new SearchPattern(pattern, strictRegexMatch);
@@ -744,7 +808,8 @@ public sealed class SymbolSearchEngine
         strictOperation?.Check();
         var lines = new List<string>();
         var start = 0;
-        for (var index = 0; index < text.Length; index++)
+        var index = 0;
+        while (index < text.Length)
         {
             if ((index & 0x3fff) == 0)
             {
@@ -756,6 +821,7 @@ public sealed class SymbolSearchEngine
                 or '\u001c' or '\u001d' or '\u001e' or '\u0085' or '\u2028' or '\u2029';
             if (!isLineBreak)
             {
+                index++;
                 continue;
             }
 
@@ -764,7 +830,7 @@ public sealed class SymbolSearchEngine
             {
                 index++;
             }
-            start = index + 1;
+            start = ++index;
         }
 
         if (start < text.Length)
@@ -982,7 +1048,8 @@ public sealed class SymbolSearchEngine
     private static Regex CreateGlobRegex(string pattern, SearchOperation? operation = null)
     {
         var expression = new StringBuilder("^");
-        for (var index = 0; index < pattern.Length; index++)
+        var index = 0;
+        while (index < pattern.Length)
         {
             if ((index & 0x3fff) == 0)
             {
@@ -1015,13 +1082,14 @@ public sealed class SymbolSearchEngine
                     expression.Append(Regex.Escape(pattern[index].ToString()));
                     break;
             }
+            index++;
         }
 
         operation?.Check();
         expression.Append('$');
         var source = expression.ToString();
         var regex = operation is null
-            ? new Regex(source, RegexOptions.CultureInvariant)
+            ? new Regex(source, RegexOptions.CultureInvariant, SearchPattern.LegacyMatchTimeout)
             : new Regex(source, RegexOptions.CultureInvariant, operation.GetMatchTimeout());
         operation?.Check();
         return regex;
@@ -1052,17 +1120,6 @@ public sealed class SymbolSearchEngine
             : value;
     }
 
-    private static int CountScalars(string value)
-    {
-        var count = 0;
-        foreach (var _ in value.EnumerateRunes())
-        {
-            count++;
-        }
-
-        return count;
-    }
-
     private static string TruncateToScalars(string value, int maximumScalars)
     {
         var index = 0;
@@ -1084,6 +1141,7 @@ public sealed class SymbolSearchEngine
     private sealed class SearchPattern
     {
         private static readonly TimeSpan StrictMatchSlice = TimeSpan.FromMilliseconds(100);
+        internal static readonly TimeSpan LegacyMatchTimeout = GetLegacyMatchTimeout();
 
         private readonly string _pattern;
         private readonly Regex _legacyRegex;
@@ -1094,8 +1152,17 @@ public sealed class SymbolSearchEngine
         internal SearchPattern(string pattern, Func<Regex, string, bool>? strictRegexMatch)
         {
             _pattern = pattern;
-            _legacyRegex = new Regex(pattern, RegexOptions.CultureInvariant);
+            _legacyRegex = new Regex(pattern, RegexOptions.CultureInvariant, LegacyMatchTimeout);
             _strictRegexMatch = strictRegexMatch;
+        }
+
+        private static TimeSpan GetLegacyMatchTimeout()
+        {
+            // Observe Regex's initialized default, not mutable AppDomain data; no match is performed.
+            var inheritedTimeout = new Regex(string.Empty, RegexOptions.NonBacktracking).MatchTimeout;
+            return inheritedTimeout > TimeSpan.Zero && inheritedTimeout < StrictMatchSlice
+                ? inheritedTimeout
+                : StrictMatchSlice;
         }
 
         internal bool IsMatch(string value, SearchOperation? operation)
@@ -1174,10 +1241,12 @@ public sealed class SymbolSearchEngine
 
         internal void Validate(SearchOperation operation)
         {
-            for (var index = 0; index < Pattern.Length; index++)
+            var index = 0;
+            while (index < Pattern.Length)
             {
                 if (Pattern[index] != '[')
                 {
+                    index++;
                     continue;
                 }
 
@@ -1190,6 +1259,7 @@ public sealed class SymbolSearchEngine
                 {
                     index = closing;
                 }
+                index++;
             }
 
             CreateGlobRegex(Pattern, operation);
@@ -1241,8 +1311,8 @@ public sealed class SymbolSearchEngine
         internal SearchOperation(
             SearchPolicySettings settings,
             string tool,
-            CancellationToken cancellationToken,
-            Func<long>? timestamp)
+            Func<long>? timestamp,
+            CancellationToken cancellationToken)
         {
             _settings = settings;
             Tool = tool;

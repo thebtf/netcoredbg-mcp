@@ -37,6 +37,8 @@ from ..ui.snapshots import (
 )
 from ..ui.text import assert_text_selection, read_textbox_state
 
+_INVALID_SELECTOR_REASON = "invalid selector"
+_UNKNOWN_UI_FIELDS_REASON = "unknown UI fields"
 _GRID_ACTION_ALIASES = {
     "rows": "visible_rows",
     "cells": "snapshot",
@@ -251,7 +253,7 @@ def register_ui_evidence_tools(
             selector = _selector(automation_id, name, control_type, root_id, xpath)
             if not selector:
                 return build_response(
-                    data={"status": "FAIL", "reason": "invalid selector"},
+                    data={"status": "FAIL", "reason": _INVALID_SELECTOR_REASON},
                     state=session.state.state,
                 )
 
@@ -379,7 +381,7 @@ def register_ui_evidence_tools(
             selector = _selector(automation_id, name, control_type, root_id, xpath)
             if not selector:
                 return build_response(
-                    data={"status": "FAIL", "reason": "invalid selector"},
+                    data={"status": "FAIL", "reason": _INVALID_SELECTOR_REASON},
                     state=session.state.state,
                 )
 
@@ -472,7 +474,7 @@ def register_ui_evidence_tools(
             selector = _selector(automation_id, name, control_type, root_id, xpath)
             if not selector:
                 return build_response(
-                    data={"status": "FAIL", "reason": "invalid selector"},
+                    data={"status": "FAIL", "reason": _INVALID_SELECTOR_REASON},
                     state=session.state.state,
                 )
 
@@ -530,7 +532,7 @@ def register_ui_evidence_tools(
             selector = _selector(automation_id, name, control_type, root_id, xpath)
             if not selector:
                 return build_response(
-                    data={"status": "FAIL", "reason": "invalid selector"},
+                    data={"status": "FAIL", "reason": _INVALID_SELECTOR_REASON},
                     state=session.state.state,
                 )
 
@@ -785,7 +787,7 @@ def register_ui_evidence_tools(
                 return build_response(
                     data={
                         "status": "FAIL",
-                        "reason": "unknown UI fields",
+                        "reason": _UNKNOWN_UI_FIELDS_REASON,
                         "invalid_fields": invalid,
                         "allowed_fields": list(ALLOWED_UI_FIELDS),
                     },
@@ -824,7 +826,7 @@ def register_ui_evidence_tools(
                 return build_response(
                     data={
                         "status": "FAIL",
-                        "reason": "unknown UI fields",
+                        "reason": _UNKNOWN_UI_FIELDS_REASON,
                         "invalid_fields": invalid,
                         "allowed_fields": list(ALLOWED_UI_FIELDS),
                     },
@@ -902,7 +904,7 @@ def register_ui_evidence_tools(
                     return build_response(
                         data={
                             "status": "FAIL",
-                            "reason": "unknown UI fields",
+                            "reason": _UNKNOWN_UI_FIELDS_REASON,
                             "invalid_fields": invalid,
                             "allowed_fields": list(ALLOWED_UI_FIELDS),
                         },
@@ -964,7 +966,7 @@ def register_ui_evidence_tools(
                 return build_response(
                     data={
                         "status": "FAIL",
-                        "reason": "unknown UI fields",
+                        "reason": _UNKNOWN_UI_FIELDS_REASON,
                         "invalid_fields": invalid,
                         "allowed_fields": list(ALLOWED_UI_FIELDS),
                     },

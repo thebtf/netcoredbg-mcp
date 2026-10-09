@@ -1,13 +1,15 @@
 """Focused contracts for the dependency-free SonarQube exact-head runner."""
 
+import asyncio
 import importlib.util
 import json
-import re
 import stat
 import sys
 from contextlib import ExitStack, nullcontext
 from copy import deepcopy
+from dataclasses import replace
 from hashlib import sha256
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -15,9 +17,12 @@ from typing import Any
 from unittest import TestCase
 from unittest.mock import patch
 
+from jsonschema import Draft202012Validator, FormatChecker
+
 RUNNER_PATH = Path(__file__).resolve().parents[1] / "scripts" / "run_sonarqube_exact_head.py"
 SPEC = importlib.util.spec_from_file_location("sonarqube_exact_head_runner", RUNNER_PATH)
-assert SPEC is not None and SPEC.loader is not None
+assert SPEC is not None
+assert SPEC.loader is not None
 runner = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = runner
 SPEC.loader.exec_module(runner)
@@ -39,11 +44,39 @@ class TestSonarqubeExactHeadRunner(TestCase):
         )
 
     @staticmethod
+    def analysis_evidence():
+        from tests.test_stateless_preview_artifact import _complete_v3_exact_head_receipt
+
+        analysis = _complete_v3_exact_head_receipt(
+            "a" * 40, role="diagnostic", outcome="DIAGNOSTIC_COMPLETE", release_intent="none"
+        )["analysis"]
+        analysis["status"] = "INCOMPLETE"
+        analysis["observations"]["current_after_measures"] = None
+        analysis["observations"]["current_final"] = None
+        return analysis
+
+    @staticmethod
+    def cleanup_evidence(claimed_root: str, producer_terminal: bool) -> dict[str, Any]:
+        return {
+            "claimed_root": claimed_root,
+            "producer_terminal": producer_terminal,
+            "removed_paths": [claimed_root] if producer_terminal else [],
+            "parent_removed_if_empty": False,
+            "status": "OK" if producer_terminal else "FAILED",
+            "failure": None
+            if producer_terminal
+            else {"code": "COVERAGE_CLEANUP_FAILED", "message": "RunnerError"},
+        }
+
+    @staticmethod
     def patch_wave3_transaction(patches: ExitStack) -> None:
         plan = SimpleNamespace()
         patches.enter_context(patch.object(runner, "resolve_wave2_entry", return_value={}))
         patches.enter_context(patch.object(runner, "verify_wave2_entry", return_value={}))
         patches.enter_context(patch.object(runner, "preflight_coverage_toolchain", return_value={}))
+        patches.enter_context(
+            patch.object(runner, "release_intent_at_head", return_value="v0.23.12")
+        )
         patches.enter_context(patch.object(runner, "derive_coverage_plan", return_value=plan))
         patches.enter_context(patch.object(runner, "coverage_scanner_properties", return_value=()))
         patches.enter_context(
@@ -60,9 +93,23 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 return_value={"dll_sha256": "a" * 64, "pdb_sha256": "b" * 64},
             )
         )
-        patches.enter_context(patch.object(runner, "cleanup_coverage_run", return_value={}))
         patches.enter_context(
-            patch.object(runner, "collect_coverage_analysis_evidence", return_value={})
+            patch.object(
+                runner,
+                "cleanup_coverage_run",
+                side_effect=lambda _plan, terminal, _claim, **_kwargs: (
+                    TestSonarqubeExactHeadRunner.cleanup_evidence(
+                        ".tmp/sonarqube-coverage/fixture", terminal
+                    )
+                ),
+            )
+        )
+        patches.enter_context(
+            patch.object(
+                runner,
+                "collect_coverage_analysis_evidence",
+                return_value=TestSonarqubeExactHeadRunner.analysis_evidence(),
+            )
         )
         patches.enter_context(patch.object(runner, "write_diagnostic_inventory", return_value={}))
 
@@ -263,12 +310,12 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 runner,
                 "read_verified_primary_dotenv",
                 create=True,
-                side_effect=runner.CredentialsUnavailable(*runner.REQUIRED_ENV),
+                side_effect=runner.CredentialsUnavailableError(*runner.REQUIRED_ENV),
             ) as verified_reader:
                 scanner_context = self.context(primary_root, scanner_root)
                 credentials = self.credentials()
                 with self.assertRaisesRegex(
-                    runner.CredentialsUnavailable, "SONAR_CREDENTIALS_UNAVAILABLE"
+                    runner.CredentialsUnavailableError, "SONAR_CREDENTIALS_UNAVAILABLE"
                 ):
                     runner.load_credentials(scanner_context, credentials)
 
@@ -325,7 +372,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     with reader:
                         scanner_context = self.context(primary_root, scanner_root)
                         with self.assertRaisesRegex(
-                            runner.CredentialsUnavailable, "SONAR_CREDENTIALS_UNAVAILABLE"
+                            runner.CredentialsUnavailableError, "SONAR_CREDENTIALS_UNAVAILABLE"
                         ):
                             runner.load_credentials(scanner_context, {})
 
@@ -397,7 +444,8 @@ class TestSonarqubeExactHeadRunner(TestCase):
             credentials = self.credentials()
             process_env = {**credentials, "SONAR_HOST_URL": "sonar.example.test"}
             with self.assertRaisesRegex(
-                runner.CredentialsUnavailable, r"^SONAR_CREDENTIALS_UNAVAILABLE: SONAR_HOST_URL\."
+                runner.CredentialsUnavailableError,
+                r"^SONAR_CREDENTIALS_UNAVAILABLE: SONAR_HOST_URL\.",
             ):
                 runner.load_credentials(scanner_context, process_env)
 
@@ -421,7 +469,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
             "https://sonar.example.test/path",
         ):
             with self.subTest(supplied=supplied):
-                with self.assertRaisesRegex(runner.CredentialsUnavailable, "SONAR_HOST_URL"):
+                with self.assertRaisesRegex(runner.CredentialsUnavailableError, "SONAR_HOST_URL"):
                     runner.credential_free_host(supplied)
 
     def test_scanner_auth_failure_is_a_named_credential_blocker(self):
@@ -432,7 +480,8 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 return_value=runner.subprocess.CompletedProcess([], 1, "HTTP 401 unauthorized"),
             ):
                 with self.assertRaisesRegex(
-                    runner.CredentialsUnavailable, r"^SONAR_CREDENTIALS_UNAVAILABLE: SONAR_TOKEN\."
+                    runner.CredentialsUnavailableError,
+                    r"^SONAR_CREDENTIALS_UNAVAILABLE: SONAR_TOKEN\.",
                 ):
                     runner.run_process(
                         ["scanner", "begin"],
@@ -894,6 +943,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                         "analysis_current_before_issues",
                         "analysis_current_after_issues",
                         "analysis_current_before_measures",
+                        "analysis_current_after_measures",
                         "analysis_current_final",
                     )[binding_calls - 1]
                 )
@@ -913,7 +963,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
 
             def coverage_measures(*_args, **_kwargs):
                 events.append("coverage_measures")
-                return {}
+                return self.analysis_evidence()
 
             def hotspot_inventory(_host, _token):
                 events.append("hotspots")
@@ -1032,9 +1082,10 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 "new_code_issues",
                 "analysis_current_after_issues",
                 "hotspots",
-                "generated_artifacts_removed_after_scan",
                 "analysis_current_before_measures",
                 "coverage_measures",
+                "analysis_current_after_measures",
+                "generated_artifacts_removed_after_scan",
                 "analysis_current_final",
             ],
         )
@@ -1052,9 +1103,18 @@ class TestSonarqubeExactHeadRunner(TestCase):
         )
         self.assertEqual(blocked_receipt["identity"]["analysis_id"], "analysis-1")
         self.assertEqual(blocked_receipt["coverage"], {})
-        self.assertEqual(blocked_receipt["analysis"], {})
         self.assertEqual(blocked_receipt["global_inventory"], {})
-        self.assertEqual(blocked_receipt["cleanup"], {})
+        self.assertEqual(
+            blocked_receipt["cleanup"],
+            {
+                "claimed_root": ".tmp/sonarqube-coverage/fixture",
+                "producer_terminal": True,
+                "removed_paths": [".tmp/sonarqube-coverage/fixture"],
+                "parent_removed_if_empty": False,
+                "status": "OK",
+                "failure": None,
+            },
+        )
         self.assertEqual(new_code_inventory["total"], 2)
 
     def test_execute_disables_msbuild_node_reuse_for_solution_and_standalone_builds(self):
@@ -1204,6 +1264,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                         "analysis_current_before_issues",
                         "analysis_current_after_issues",
                         "analysis_current_before_measures",
+                        "analysis_current_after_measures",
                         "analysis_current_final",
                     )[binding_calls - 1]
                 )
@@ -1221,7 +1282,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 events.append("hotspots")
                 return hotspots
 
-            def fail_cleanup(_plan, _producer_terminal):
+            def fail_cleanup(_plan, _producer_terminal, _claim, **_kwargs):
                 events.append("post_scan_cleanup")
                 return {
                     "claimed_root": ".tmp/sonarqube-coverage/fixture",
@@ -1363,10 +1424,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 "new_code_issues",
                 "analysis_current_after_issues",
                 "hotspots",
-                "generated_artifacts_removed_after_scan",
-                "post_scan_cleanup",
                 "analysis_current_before_measures",
-                "analysis_current_final",
+                "analysis_current_after_measures",
+                "post_scan_cleanup",
             ],
         )
 
@@ -1532,7 +1592,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
             def __init__(self):
                 self.closed_handles = []
 
-            def CloseHandle(self, handle):
+            def CloseHandle(self, handle):  # noqa: N802 - matches the Win32 API name
                 self.closed_handles.append(handle)
                 return True
 
@@ -1561,12 +1621,177 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 "a" * 40,
             )
             runner.write_receipt(
-                receipt_path, runner.receipt_base(context, "candidate", "new-run"), ()
+                receipt_path, runner.receipt_base(context, "candidate", "v0.23.12"), ()
             )
             replacement = json.loads(receipt_path.read_text(encoding="utf-8"))
 
         self.assertEqual(replacement["outcome"], "BLOCKED")
         self.assertEqual(replacement["failure"]["code"], "COVERAGE_RUN_INCOMPLETE")
+
+    def test_release_intent_failure_invalidates_prior_pass_before_scanner_begin(self):
+        from tests.test_stateless_preview_artifact import _complete_v3_exact_head_receipt
+
+        schema_path = (
+            RUNNER_PATH.parents[1]
+            / "specs/014-sonarqube-coverage-producer/contracts/exact-head-receipt-v3.schema.json"
+        )
+        schema = Draft202012Validator(json.loads(schema_path.read_bytes()))
+        failure = runner.RunnerError(
+            "COVERAGE_RELEASE_INTENT_INVALID: controlled tracked metadata lookup failure"
+        )
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root / "primary", root / "scanner")
+            receipt_path = runner.receipt_path(context, "candidate")
+            prior = _complete_v3_exact_head_receipt(
+                context.head, role="candidate", outcome="PASS", release_intent="v0.23.12"
+            )
+            schema.validate(prior)
+            runner.validate_exact_head_receipt_v3(prior)
+            runner.write_receipt(receipt_path, prior, ())
+            lookup_receipts = []
+
+            def fail_lookup(*_args):
+                lookup_receipts.append(json.loads(receipt_path.read_text(encoding="utf-8")))
+                raise failure
+
+            with ExitStack() as patches:
+                patches.enter_context(patch.object(runner, "process_environment", return_value={}))
+                patches.enter_context(patch.object(runner, "git_context", return_value=context))
+                patches.enter_context(
+                    patch.object(runner, "sonar_secret_values", return_value=set())
+                )
+                intent_lookup = patches.enter_context(
+                    patch.object(runner, "release_intent_at_head", side_effect=fail_lookup)
+                )
+                patches.enter_context(patch.object(runner, "clear_generated_artifacts"))
+                not_started = [
+                    patches.enter_context(patch.object(runner, name))
+                    for name in (
+                        "resolve_wave2_entry",
+                        "preflight_coverage_toolchain",
+                        "load_credentials",
+                        "scanner_begin_command",
+                        "scanner_end_command",
+                        "run_process",
+                        "claim_coverage_run",
+                        "run_coverage_producer",
+                        "cleanup_coverage_run",
+                    )
+                ]
+                with self.assertRaises(runner.RunnerError) as raised:
+                    runner.execute("candidate", "scanner")
+                self.assertIs(raised.exception, failure)
+                self.assertEqual(
+                    lookup_receipts, [runner.receipt_base(context, "candidate", "none")]
+                )
+                intent_lookup.assert_called_once_with(context.repository_root, {}, context.head)
+                for operation in not_started:
+                    operation.assert_not_called()
+            replacement = json.loads(receipt_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(replacement["outcome"], "BLOCKED")
+        self.assertEqual(replacement["role"], "candidate")
+        self.assertEqual(replacement["release_intent"], "none")
+        self.assertEqual(
+            replacement["identity"],
+            {"captured_head": context.head, "project_key": runner.PROJECT_KEY, "analysis_id": None},
+        )
+        for field in ("coverage", "analysis", "global_inventory", "release_gate", "cleanup"):
+            self.assertIsNone(replacement[field], field)
+        self.assertEqual(
+            replacement["failure"],
+            {
+                "code": "COVERAGE_RELEASE_INTENT_INVALID",
+                "stage": "PLANNED",
+                "language": None,
+                "project_id": None,
+                "safe_message": str(failure),
+            },
+        )
+        schema.validate(replacement)
+        runner.validate_exact_head_receipt_v3(replacement)
+        for role in ("candidate", "post-merge"):
+            with self.subTest(role=role, state="unobserved"):
+                unobserved = deepcopy(replacement)
+                unobserved["role"] = role
+                schema.validate(unobserved)
+                runner.validate_exact_head_receipt_v3(unobserved)
+            for outcome in ("PASS", "DIAGNOSTIC_COMPLETE"):
+                with self.subTest(role=role, outcome=outcome):
+                    completed = deepcopy(prior)
+                    completed.update(role=role, outcome=outcome, release_intent="none")
+                    self.assertFalse(schema.is_valid(completed))
+                    with self.assertRaises(runner.RunnerError):
+                        runner.validate_exact_head_receipt_v3(completed)
+            for field in ("coverage", "analysis", "global_inventory", "release_gate", "cleanup"):
+                with self.subTest(role=role, observed=field):
+                    observed = deepcopy(unobserved)
+                    observed[field] = deepcopy(prior[field])
+                    self.assertFalse(schema.is_valid(observed))
+                    with self.assertRaises(runner.RunnerError):
+                        runner.validate_exact_head_receipt_v3(observed)
+            with self.subTest(role=role, observed="analysis_id"):
+                observed = deepcopy(unobserved)
+                observed["identity"]["analysis_id"] = prior["identity"]["analysis_id"]
+                self.assertFalse(schema.is_valid(observed))
+                with self.assertRaises(runner.RunnerError):
+                    runner.validate_exact_head_receipt_v3(observed)
+            for stage in ("TOOLCHAIN_READY", "SCANNER_BEGUN", "RUN_CLAIMED", "BLOCKED"):
+                with self.subTest(role=role, stage=stage):
+                    observed = deepcopy(unobserved)
+                    observed["failure"]["stage"] = stage
+                    self.assertFalse(schema.is_valid(observed))
+                    with self.assertRaises(runner.RunnerError):
+                        runner.validate_exact_head_receipt_v3(observed)
+
+    def test_release_intent_version_keeps_ascii_digits(self):
+        for version, accepted in (
+            ("0.23.12", True),
+            ("01.002.0003", True),
+            ("١.23.12", False),
+            ("0.２3.12", False),
+            ("0.23.१२", False),
+            ("0.23.12\n", False),
+        ):
+            metadata = f'[project]\nname = "netcoredbg-mcp"\nversion = "{version}"\n'
+            with (
+                self.subTest(version=version),
+                patch.object(runner, "git_blob_bytes", return_value=metadata.encode("utf-8")),
+            ):
+                if accepted:
+                    self.assertEqual(
+                        runner.release_intent_at_head(RUNNER_PATH.parents[1], {}, "a" * 40),
+                        "v" + version,
+                    )
+                else:
+                    with self.assertRaisesRegex(
+                        runner.RunnerError, "COVERAGE_RELEASE_INTENT_INVALID"
+                    ):
+                        runner.release_intent_at_head(RUNNER_PATH.parents[1], {}, "a" * 40)
+
+    def test_v3_release_intent_keeps_ascii_digits(self):
+        root = RUNNER_PATH.parents[1]
+        context = self.context(root, root)
+        for role in ("candidate", "post-merge"):
+            for intent, accepted in (
+                ("v0.23.12", True),
+                ("v01.002.0003", True),
+                ("v١.23.12", False),
+                ("v0.２3.12", False),
+                ("v0.23.१२", False),
+                ("v0.23.12\n", False),
+            ):
+                with self.subTest(role=role, intent=intent):
+                    receipt = runner.receipt_base(context, role, intent)
+                    if accepted:
+                        runner.validate_exact_head_receipt_v3(receipt)
+                    else:
+                        with self.assertRaisesRegex(
+                            runner.RunnerError,
+                            "EXACT_HEAD_RECEIPT_V3_INVALID: release role has illegal outcome or intent",
+                        ):
+                            runner.validate_exact_head_receipt_v3(receipt)
 
     def test_v3_failure_code_schema_and_validator_reject_non_strings(self):
         schema_path = (
@@ -1581,7 +1806,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
             context = runner.GitContext(root, root, root, root, "a" * 40)
             for invalid_code in (1, True):
                 with self.subTest(invalid_code=invalid_code):
-                    receipt = runner.receipt_base(context, "candidate", "new-run")
+                    receipt = runner.receipt_base(context, "candidate", "v0.23.12")
                     receipt["failure"]["code"] = invalid_code
                     with self.assertRaisesRegex(
                         runner.RunnerError, "EXACT_HEAD_RECEIPT_V3_INVALID"
@@ -2017,9 +2242,11 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     "id": project_id,
                     "project": project,
                     "target_framework": "net8.0",
-                    "coverlet_msbuild": "10.0.1",
-                    "coverlet_private_assets": "all",
+                    "coverlet_msbuild": None if project_id == "stateless" else "10.0.1",
+                    "coverlet_private_assets": None if project_id == "stateless" else "all",
                     "test_sdk": "17.12.0",
+                    "code_coverage": "17.14.1" if project_id == "stateless" else None,
+                    "code_coverage_private_assets": "all" if project_id == "stateless" else None,
                     "test_platform": "vstest",
                     "mtp_active": False,
                 }
@@ -2035,6 +2262,745 @@ class TestWave3CoverageProducerRedContracts(TestCase):
     @classmethod
     def _plan(cls, root: Path):
         return runner.derive_coverage_plan(cls._context(root), cls.RUN_ID)
+
+    @staticmethod
+    def _pytest_git_scratch(plan):
+        scratch = plan.root / "python" / "pytest" / "test_git_fixture0"
+        scratch.mkdir(parents=True)
+        runner.subprocess.run(
+            ["git", "-c", "core.longpaths=true", "init", "--quiet", str(scratch)],
+            check=True,
+            capture_output=True,
+        )
+        result = runner.subprocess.run(
+            ["git", "-C", str(scratch), "hash-object", "-w", "--stdin"],
+            input=b"owned pytest fixture object\n",
+            check=True,
+            capture_output=True,
+        )
+        object_id = result.stdout.decode().strip()
+        return scratch / ".git" / "objects" / object_id[:2] / object_id[2:]
+
+    def test_terminal_claim_cleanup_enumerates_same_volume_root_and_children(self):
+        if runner.os.name != "nt":
+            self.skipTest("Windows native directory enumeration")
+        configured_scratch = runner.os.environ.get("NETCOREDBG_TEST_SCRATCH_ROOT")
+        if configured_scratch:
+            scratch_root = Path(configured_scratch).resolve(strict=True)
+        else:
+            common = runner.resolve_git_path(
+                RUNNER_PATH.parents[1],
+                runner.git_output(
+                    RUNNER_PATH.parents[1], runner.os.environ, "rev-parse", "--git-common-dir"
+                ),
+            )
+            scratch_root = common.parent / ".agent" / "tmp"
+            scratch_root.mkdir(parents=True, exist_ok=True)
+            scratch_root = scratch_root.resolve(strict=True)
+        with TemporaryDirectory(dir=scratch_root) as temporary:
+            repository = Path(temporary).resolve()
+            plan = self._plan(repository)
+            claim = runner.claim_coverage_run(
+                self._context(repository), plan, self._resolved_wave2_entry()
+            )
+            child = plan.root / "owned-child"
+            child.mkdir()
+            (child / "value").write_bytes(b"owned value")
+            external = repository / "external-value"
+            external.write_bytes(b"preserved")
+            cleanup = runner.cleanup_coverage_run(plan, True, claim)
+            print("SAME_VOLUME_ROOT_ENUMERATION", cleanup)
+            self.assertEqual(external.read_bytes(), b"preserved")
+            self.assertEqual(cleanup["status"], "OK", cleanup)
+            self.assertFalse(plan.root.exists())
+            self.assertTrue(cleanup["parent_removed_if_empty"])
+
+    def test_terminal_claim_cleanup_removes_pytest_links_and_readonly_git_objects(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            plan = self._plan(root)
+            claim = runner.claim_coverage_run(context, plan, self._resolved_wave2_entry())
+            external = root / "external"
+            external.mkdir()
+            sentinel = external / "sentinel"
+            sentinel.write_bytes(b"external value")
+            sibling = plan.root.parent / "unclaimed"
+            sibling.mkdir()
+            (sibling / "sentinel").write_bytes(b"unclaimed value")
+            git_object = self._pytest_git_scratch(plan)
+            (git_object.parents[3] / "external-link").symlink_to(external, target_is_directory=True)
+            (plan.root / "file-link").symlink_to(sentinel)
+            (plan.root / "dangling-link").symlink_to(external / "missing")
+            if runner.os.name == "nt":
+                self.assertTrue(
+                    git_object.stat(follow_symlinks=False).st_file_attributes
+                    & stat.FILE_ATTRIBUTE_READONLY
+                )
+                with self.assertRaises(PermissionError) as denied:
+                    git_object.unlink()
+                print("CONTROLLED_PERMISSION_ERROR", denied.exception.filename)
+            with self.assertRaisesRegex(runner.RunnerError, "symbolic link"):
+                runner.clear_generated_artifacts(context, {})
+            cleanup = runner.cleanup_coverage_run(plan, True, claim)
+            if runner.os.name == "nt":
+                self.assertEqual(cleanup["status"], "OK", cleanup)
+                self.assertFalse(plan.root.exists())
+            else:
+                self.assertEqual(cleanup["status"], "FAILED", cleanup)
+                self.assertTrue(plan.root.exists())
+                self.assertTrue(git_object.exists())
+            self.assertEqual(sentinel.read_bytes(), b"external value")
+            self.assertEqual((sibling / "sentinel").read_bytes(), b"unclaimed value")
+            self.assertFalse(cleanup["parent_removed_if_empty"])
+
+    def test_cleanup_preserves_active_and_changed_marker_claims(self):
+        for terminal, corrupt_marker in ((False, False), (True, True)):
+            with self.subTest(terminal=terminal), TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                plan = self._plan(root)
+                claim = runner.claim_coverage_run(
+                    self._context(root), plan, self._resolved_wave2_entry()
+                )
+                if corrupt_marker:
+                    plan.marker.write_text("{}", encoding="utf-8")
+                cleanup = runner.cleanup_coverage_run(plan, terminal, claim)
+                self.assertEqual(cleanup["status"], "FAILED")
+                self.assertTrue(plan.root.exists())
+
+    def test_cleanup_refuses_unclaimed_redirected_or_replaced_roots(self):
+        cases = (
+            "unclaimed",
+            "missing-marker",
+            "resolved-entry",
+            "replaced-root",
+            "root-link",
+            "ancestor-link",
+            "forged-plan",
+            "forged-marker",
+            "marker-link",
+        )
+        for case in cases:
+            with self.subTest(case=case), TemporaryDirectory() as temporary_directory:
+                repository = Path(temporary_directory) / "repository"
+                repository.mkdir()
+                plan = self._plan(repository)
+                claim = runner.claim_coverage_run(
+                    self._context(repository), plan, self._resolved_wave2_entry()
+                )
+                external = repository.parent / "external"
+                external.mkdir()
+                sentinel = external / "sentinel"
+                sentinel.write_bytes(b"external value")
+                marker_bytes = plan.marker.read_bytes()
+                if case == "unclaimed":
+                    claim = None
+                elif case == "missing-marker":
+                    plan.marker.unlink()
+                elif case == "resolved-entry":
+                    plan.resolved_wave2_entry.write_bytes(b"{}")
+                elif case == "replaced-root":
+                    plan.root.rename(plan.root.with_name("preserved-original"))
+                    plan.root.mkdir()
+                    plan.marker.write_bytes(marker_bytes)
+                    plan.resolved_wave2_entry.write_bytes(b"{}")
+                elif case == "root-link":
+                    plan.root.rename(plan.root.with_name("preserved-original"))
+                    plan.root.symlink_to(external, target_is_directory=True)
+                elif case == "ancestor-link":
+                    parent = plan.root.parent
+                    parent.rename(parent.with_name("preserved-original"))
+                    parent.symlink_to(external, target_is_directory=True)
+                elif case == "forged-plan":
+                    plan = replace(plan, root=repository / "valuable")
+                    plan.root.mkdir()
+                elif case == "forged-marker":
+                    plan.marker.write_bytes(b"{}")
+                    claim = replace(claim, marker_sha256=sha256(b"{}").hexdigest())
+                elif case == "marker-link":
+                    plan.marker.unlink()
+                    plan.marker.symlink_to(sentinel)
+                result = runner.cleanup_coverage_run(plan, True, claim)
+                self.assertEqual(result["status"], "FAILED", (case, result))
+                self.assertEqual(result["removed_paths"], [])
+                self.assertEqual(sentinel.read_bytes(), b"external value")
+
+    def test_readonly_cleanup_refuses_to_change_shared_external_hardlink(self):
+        if runner.os.name != "nt":
+            self.skipTest("Windows read-only file deletion")
+        with TemporaryDirectory() as temporary_directory:
+            repository = Path(temporary_directory) / "repository"
+            repository.mkdir()
+            plan = self._plan(repository)
+            claim = runner.claim_coverage_run(
+                self._context(repository), plan, self._resolved_wave2_entry()
+            )
+            git_object = self._pytest_git_scratch(plan)
+            external = repository.parent / "external-object"
+            runner.os.link(git_object, external)
+            metadata = external.stat(follow_symlinks=False)
+            original = external.read_bytes()
+            result = runner.cleanup_coverage_run(plan, True, claim)
+            self.assertEqual(result["status"], "FAILED")
+            self.assertEqual(external.read_bytes(), original)
+            self.assertEqual(
+                external.stat(follow_symlinks=False).st_file_attributes, metadata.st_file_attributes
+            )
+
+    def test_readonly_cleanup_without_native_handle_capability_remains_blocked(self):
+        if runner.os.name != "nt":
+            self.skipTest("Windows read-only file deletion")
+        import ctypes
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            plan = self._plan(root)
+            claim = runner.claim_coverage_run(
+                self._context(root), plan, self._resolved_wave2_entry()
+            )
+            git_object = self._pytest_git_scratch(plan)
+            attributes = git_object.stat(follow_symlinks=False).st_file_attributes
+            original = git_object.read_bytes()
+            with patch.object(
+                ctypes, "WinDLL", side_effect=NotImplementedError("native handle API unavailable")
+            ):
+                cleanup = runner.cleanup_coverage_run(plan, True, claim)
+            self.assertEqual(cleanup["status"], "FAILED")
+            self.assertEqual(
+                cleanup["failure"],
+                {"code": "COVERAGE_CLEANUP_FAILED", "message": "NotImplementedError"},
+            )
+            self.assertTrue(plan.root.exists())
+            self.assertEqual(git_object.read_bytes(), original)
+            self.assertEqual(git_object.stat(follow_symlinks=False).st_file_attributes, attributes)
+
+    def test_post_end_failures_preserve_durable_evidence_and_exact_cleanup_authority(self):
+        for failure in ("guard", "cleanup", "end"):
+            if failure == "cleanup" and runner.os.name != "nt":
+                continue
+            with self.subTest(failure=failure), TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                context = self._context(root)
+                plan = self._plan(root)
+                receipts = []
+                sentinel = root / "external-value"
+                sentinel.write_bytes(b"preserved")
+                external_object = root / "external-object"
+                coverage = {"run_id": plan.run_id, "observed_reports": ["python", "dotnet"]}
+                analysis = TestSonarqubeExactHeadRunner.analysis_evidence()
+                claim_coverage_run = runner.claim_coverage_run
+                cleanup_coverage_run = runner.cleanup_coverage_run
+                write_receipt = runner.write_receipt
+
+                def capture_receipt(path, receipt, secrets):
+                    write_receipt(path, receipt, secrets)
+                    receipts.append((deepcopy(receipt), plan.root.exists()))
+
+                def produce(_plan, _environment):
+                    git_object = self._pytest_git_scratch(plan)
+                    (plan.root / "pytest-current").symlink_to(
+                        plan.root / "python", target_is_directory=True
+                    )
+                    if failure == "guard":
+                        (root / "unknown-link").symlink_to(sentinel)
+                    elif failure == "cleanup":
+                        runner.os.link(git_object, external_object)
+
+                with ExitStack() as patches:
+                    TestSonarqubeExactHeadRunner.patch_wave3_transaction(patches)
+                    values = {
+                        "process_environment": {},
+                        "git_context": context,
+                        "receipt_path": root / "receipt.json",
+                        "sonar_secret_values": set(),
+                        "load_credentials": TestSonarqubeExactHeadRunner.credentials(),
+                        "derive_coverage_plan": plan,
+                        "verify_wave2_entry": self._resolved_wave2_entry(),
+                        "strict_cleanliness": {},
+                        "project_key_from_xml": runner.PROJECT_KEY,
+                        "discover_scanner": ["scanner"],
+                        "scanner_environment": {},
+                        "project_inventory": (root / "solution.sln", [], []),
+                        "issue_inventory": {"records": []},
+                        "new_code_issue_inventory": {},
+                        "report_task": {"ce_task_id": "task-1"},
+                        "wait_for_ce_task": "analysis-1",
+                        "current_analysis_binding": {
+                            "revision": self.HEAD,
+                            "analysis_id": "analysis-1",
+                        },
+                        "analysis_quality_gate": {"status": "OK"},
+                        "issue_dispositions": {"blocking_count": 0},
+                        "hotspot_inventory": {},
+                        "hotspot_dispositions": {"blocking_count": 0},
+                        "validate_coverage_reports": coverage,
+                        "validate_dotnet_cobertura_inputs": [],
+                        "collect_coverage_analysis_evidence": analysis,
+                    }
+                    for name, value in values.items():
+                        patches.enter_context(patch.object(runner, name, return_value=value))
+                    patches.enter_context(
+                        patch.object(runner, "project_lock", return_value=nullcontext())
+                    )
+                    patches.enter_context(patch.object(runner, "run_process"))
+                    patches.enter_context(
+                        patch.object(runner, "prepare_worktree_python_environment")
+                    )
+                    patches.enter_context(
+                        patch.object(
+                            runner,
+                            "scanner_metadata",
+                            side_effect=runner.RunnerError(
+                                "COVERAGE_METADATA_INVALID: injected post-end failure"
+                            )
+                            if failure == "end"
+                            else None,
+                        )
+                    )
+                    patches.enter_context(patch.object(runner, "is_tracked", return_value=False))
+                    patches.enter_context(
+                        patch.object(runner, "run_coverage_producer", side_effect=produce)
+                    )
+                    patches.enter_context(
+                        patch.object(runner, "claim_coverage_run", wraps=claim_coverage_run)
+                    )
+                    patches.enter_context(
+                        patch.object(runner, "cleanup_coverage_run", wraps=cleanup_coverage_run)
+                    )
+                    patches.enter_context(
+                        patch.object(runner, "write_receipt", side_effect=capture_receipt)
+                    )
+                    with self.assertRaises(runner.RunnerError):
+                        runner.execute("diagnostic", "scanner")
+                blocked = json.loads((root / "receipt.json").read_bytes())
+                self.assertEqual(blocked, receipts[-1][0])
+                self.assertEqual(blocked["outcome"], "BLOCKED")
+                self.assertEqual(blocked["coverage"], coverage)
+                self.assertTrue(
+                    any(item["coverage"] == coverage and exists for item, exists in receipts)
+                )
+                self.assertEqual(sentinel.read_bytes(), b"preserved")
+                if failure == "cleanup":
+                    self.assertEqual(blocked["cleanup"]["status"], "FAILED")
+                    self.assertEqual(blocked["failure"]["code"], "COVERAGE_CLEANUP_FAILED")
+                    self.assertTrue(plan.root.exists())
+                    self.assertTrue(
+                        external_object.stat().st_file_attributes & stat.FILE_ATTRIBUTE_READONLY
+                    )
+                elif runner.os.name != "nt":
+                    self.assertEqual(blocked["cleanup"]["status"], "FAILED")
+                    self.assertTrue(plan.root.exists())
+                else:
+                    self.assertEqual(blocked["cleanup"]["status"], "OK")
+                    self.assertFalse(plan.root.exists())
+                if failure == "end":
+                    self.assertIsNone(blocked["analysis"])
+                    self.assertIsNone(blocked["identity"]["analysis_id"])
+                    self.assertEqual(blocked["failure"]["code"], "COVERAGE_METADATA_INVALID")
+                else:
+                    self.assertEqual(blocked["identity"]["analysis_id"], "analysis-1")
+                    self.assertEqual(blocked["analysis"], analysis)
+                    self.assertTrue(
+                        any(item["analysis"] == analysis and exists for item, exists in receipts)
+                    )
+                    self.assertEqual(blocked["global_inventory"], {})
+                if failure == "guard":
+                    self.assertTrue((root / "unknown-link").is_symlink())
+
+    def test_posix_claim_cleanup_blocks_before_any_removal(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            plan = self._plan(root)
+            claim = runner.claim_coverage_run(
+                self._context(root), plan, self._resolved_wave2_entry()
+            )
+            marker = plan.marker.read_bytes()
+            with (
+                patch.object(runner.os, "name", "posix"),
+                patch.object(
+                    runner.shutil,
+                    "rmtree",
+                    side_effect=AssertionError("unclaimed pathname removal"),
+                ),
+            ):
+                result = runner.cleanup_coverage_run(plan, True, claim)
+            self.assertEqual(result["status"], "FAILED")
+            self.assertEqual(result["failure"]["message"], "NotImplementedError")
+            self.assertEqual(result["removed_paths"], [])
+            self.assertEqual(plan.marker.read_bytes(), marker)
+
+    def test_cleanup_native_failure_schema_and_consumer_preserve_blocked_status(self):
+        from tests.test_stateless_preview_artifact import _complete_v3_exact_head_receipt
+
+        schema_path = (
+            RUNNER_PATH.parents[1]
+            / "specs/014-sonarqube-coverage-producer/contracts/exact-head-receipt-v3.schema.json"
+        )
+        schema = Draft202012Validator(json.loads(schema_path.read_bytes()))
+        receipt = _complete_v3_exact_head_receipt(
+            self.HEAD, role="diagnostic", outcome="DIAGNOSTIC_COMPLETE", release_intent="none"
+        )
+        receipt["outcome"] = "BLOCKED"
+        receipt["failure"] = runner._blocked_failure(
+            "ANALYSIS_BOUND", runner.RunnerError("COVERAGE_CLEANUP_FAILED: controlled failure")
+        )
+        receipt["cleanup"]["status"] = "FAILED"
+        receipt["cleanup"]["removed_paths"] = []
+        native = {
+            "operation": "SetFileInformationByHandle(FileDispositionInfoEx)",
+            "stage": "DISPOSITION",
+            "entry": "python/pytest/real-git/.git/objects/ab/object",
+            "winerror": 5,
+            "errno": 13,
+        }
+        receipt["cleanup"]["failure"] = {
+            "code": "COVERAGE_CLEANUP_FAILED",
+            "message": "PermissionError",
+            "native": native,
+        }
+        for entry in (native["entry"], ".", "@parent", "@ancestor/3", None):
+            with self.subTest(entry=entry):
+                native["entry"] = entry
+                schema.validate(receipt)
+                runner.validate_exact_head_receipt_v3(receipt)
+        for field, value in (
+            ("entry", "D:/private/provider-secret"),
+            ("entry", "/private/provider-secret"),
+            ("entry", "../external"),
+            ("entry", "python\\provider-secret"),
+            ("entry", "python\nprovider-secret"),
+            ("operation", "unknown-provider-content"),
+            ("operation", []),
+            ("stage", []),
+            ("winerror", True),
+            ("errno", "13"),
+            ("unexpected", "provider-secret"),
+        ):
+            with self.subTest(field=field, value=value):
+                invalid = deepcopy(receipt)
+                invalid["cleanup"]["failure"]["native"][field] = value
+                self.assertFalse(schema.is_valid(invalid))
+                with self.assertRaises(runner.RunnerError):
+                    runner.validate_exact_head_receipt_v3(invalid)
+        receipt["outcome"] = "DIAGNOSTIC_COMPLETE"
+        receipt["failure"] = None
+        self.assertFalse(schema.is_valid(receipt))
+        with self.assertRaises(runner.RunnerError):
+            runner.validate_exact_head_receipt_v3(receipt)
+
+    def test_incomplete_analysis_is_typed_and_cannot_authorize_completion(self):
+        from tests.test_stateless_preview_artifact import _complete_v3_exact_head_receipt
+
+        schema_path = (
+            RUNNER_PATH.parents[1]
+            / "specs/014-sonarqube-coverage-producer/contracts/exact-head-receipt-v3.schema.json"
+        )
+        schema = Draft202012Validator(json.loads(schema_path.read_bytes()))
+        complete = _complete_v3_exact_head_receipt(
+            self.HEAD, role="diagnostic", outcome="DIAGNOSTIC_COMPLETE", release_intent="none"
+        )
+        partial = deepcopy(complete)
+        partial["analysis"] = TestSonarqubeExactHeadRunner.analysis_evidence()
+        with self.assertRaises(runner.RunnerError):
+            runner.validate_exact_head_receipt_v3(partial)
+        self.assertFalse(schema.is_valid(partial))
+        for role in ("candidate", "post-merge"):
+            invalid = _complete_v3_exact_head_receipt(
+                self.HEAD, role=role, outcome="PASS", release_intent="v0.23.12"
+            )
+            invalid["analysis"] = TestSonarqubeExactHeadRunner.analysis_evidence()
+            with self.assertRaises(runner.RunnerError):
+                runner.validate_exact_head_receipt_v3(invalid)
+            self.assertFalse(schema.is_valid(invalid))
+        partial["outcome"] = "BLOCKED"
+        partial["failure"] = runner._blocked_failure(
+            "ANALYSIS_BOUND", runner.RunnerError("COVERAGE_CLEANUP_FAILED: controlled failure")
+        )
+        runner.validate_exact_head_receipt_v3(partial)
+        schema.validate(partial)
+        for field, value in (
+            ("current_final", True),
+            ("current_after_measures", False),
+            ("current_after_measures", 1),
+        ):
+            with self.subTest(field=field, value=value):
+                invalid = deepcopy(partial)
+                invalid["analysis"]["observations"][field] = value
+                with self.assertRaises(runner.RunnerError):
+                    runner.validate_exact_head_receipt_v3(invalid)
+                self.assertFalse(schema.is_valid(invalid))
+        for field in (
+            "submitted",
+            "current_before_measures",
+            "current_after_measures",
+            "current_final",
+        ):
+            invalid = deepcopy(partial)
+            del invalid["analysis"]["observations"][field]
+            with self.assertRaises(runner.RunnerError):
+                runner.validate_exact_head_receipt_v3(invalid)
+            self.assertFalse(schema.is_valid(invalid))
+        invalid = deepcopy(partial)
+        invalid["identity"]["analysis_id"] = None
+        with self.assertRaises(runner.RunnerError):
+            runner.validate_exact_head_receipt_v3(invalid)
+        self.assertFalse(schema.is_valid(invalid))
+
+    def test_cleanup_security_transaction_reaches_only_actual_analysis_bookends(self):
+        if runner.os.name != "nt":
+            self.skipTest("Windows native transaction proof")
+        import ctypes
+        from ctypes import wintypes
+        from tests.test_stateless_preview_artifact import _complete_v3_exact_head_receipt
+
+        schema_path = (
+            RUNNER_PATH.parents[1]
+            / "specs/014-sonarqube-coverage-producer/contracts/exact-head-receipt-v3.schema.json"
+        )
+        validator = Draft202012Validator(json.loads(schema_path.read_bytes()))
+        for failure in ("interrupt", "finalizer-interrupt", "cleanup", "after-measures", None):
+            with self.subTest(failure=failure), TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                context = self._context(root)
+                fixture = _complete_v3_exact_head_receipt(
+                    self.HEAD,
+                    role="diagnostic",
+                    outcome="DIAGNOSTIC_COMPLETE",
+                    release_intent="none",
+                )
+                plan = runner.derive_coverage_plan(context, fixture["coverage"]["run_id"])
+                analysis_id = fixture["identity"]["analysis_id"]
+                events = []
+                interrupt = KeyboardInterrupt("controlled native transaction interruption")
+                cleanup_calls = []
+                receipts = []
+                native_cleanup = runner.cleanup_coverage_run
+                claim_run = runner.claim_coverage_run
+                persist = runner.write_receipt
+                collect = runner.collect_coverage_analysis_evidence
+                leaf = None
+
+                def produce(*_args):
+                    nonlocal leaf
+                    leaf = self._pytest_git_scratch(plan)
+                    if failure == "cleanup":
+                        runner.os.link(leaf, root / "external-alias")
+
+                def cleanup(*args, **kwargs):
+                    cleanup_calls.append(True)
+                    return native_cleanup(*args, **kwargs)
+
+                def capture(path, receipt, secrets):
+                    persist(path, receipt, secrets)
+                    receipts.append(deepcopy(receipt))
+
+                def binding(*_args):
+                    after = "dotnet-components" in events
+                    events.append("binding-after" if after else "binding-before")
+                    if after and failure in {"after-measures", "finalizer-interrupt"}:
+                        raise runner.RunnerError(
+                            "COVERAGE_ANALYSIS_MISMATCH: controlled supersession after reads"
+                        )
+                    return {"revision": self.HEAD, "analysis_id": analysis_id}
+
+                def api(_host, endpoint, parameters, _token):
+                    if endpoint == "/api/measures/component":
+                        events.append("aggregate")
+                        return {
+                            "component": {
+                                "measures": [
+                                    {"metric": name, "value": str(value)}
+                                    for name, value in fixture["analysis"]["aggregate"].items()
+                                ]
+                            }
+                        }
+                    events.append(
+                        "python-components"
+                        if "python-components" not in events
+                        else "dotnet-components"
+                    )
+                    paths = [
+                        path
+                        for report in fixture["coverage"]["final_reports"]
+                        for path in report["source_paths"]
+                    ]
+                    return {
+                        "paging": {"total": len(paths)},
+                        "components": [
+                            {
+                                "path": path,
+                                "measures": [
+                                    {"metric": "lines_to_cover", "value": "10"},
+                                    {"metric": "uncovered_lines", "value": "2"},
+                                    {"metric": "conditions_to_cover", "value": "4"},
+                                    {"metric": "uncovered_conditions", "value": "1"},
+                                ],
+                            }
+                            for path in paths
+                        ],
+                    }
+
+                native_dll = ctypes.WinDLL
+                kernel = native_dll("kernel32", use_last_error=True)
+                kernel.SetFileInformationByHandle.argtypes = [
+                    wintypes.HANDLE,
+                    ctypes.c_int,
+                    ctypes.c_void_p,
+                    wintypes.DWORD,
+                ]
+                kernel.SetFileInformationByHandle.restype = wintypes.BOOL
+                interrupted = False
+
+                def setter(handle, kind, data, size):
+                    nonlocal interrupted
+                    result = kernel.SetFileInformationByHandle(handle, kind, data, size)
+                    if (
+                        failure in {"interrupt", "finalizer-interrupt"}
+                        and not interrupted
+                        and kind == 21
+                        and ctypes.cast(data, ctypes.POINTER(wintypes.DWORD))[0] & 1
+                    ):
+                        interrupted = True
+                        raise interrupt
+                    return result
+
+                proxy = SimpleNamespace(
+                    **{
+                        name: getattr(kernel, name)
+                        for name in (
+                            "CreateFileW",
+                            "GetFileType",
+                            "GetFileInformationByHandle",
+                            "GetFileInformationByHandleEx",
+                            "CloseHandle",
+                        )
+                    },
+                    SetFileInformationByHandle=setter,
+                )
+                with ExitStack() as patches:
+                    TestSonarqubeExactHeadRunner.patch_wave3_transaction(patches)
+                    values = {
+                        "process_environment": {},
+                        "git_context": context,
+                        "receipt_path": root / "receipt.json",
+                        "sonar_secret_values": set(),
+                        "load_credentials": TestSonarqubeExactHeadRunner.credentials(),
+                        "derive_coverage_plan": plan,
+                        "verify_wave2_entry": self._resolved_wave2_entry(),
+                        "strict_cleanliness": {},
+                        "project_key_from_xml": runner.PROJECT_KEY,
+                        "discover_scanner": ["scanner"],
+                        "scanner_environment": {},
+                        "project_inventory": (root / "solution.sln", [], []),
+                        "issue_inventory": {"records": []},
+                        "new_code_issue_inventory": {},
+                        "report_task": {"ce_task_id": "task"},
+                        "wait_for_ce_task": analysis_id,
+                        "issue_dispositions": {"blocking_count": 0},
+                        "hotspot_inventory": {},
+                        "hotspot_dispositions": {"blocking_count": 0},
+                        "validate_coverage_reports": fixture["coverage"],
+                        "validate_dotnet_cobertura_inputs": [],
+                        "write_diagnostic_inventory": fixture["global_inventory"],
+                        "analysis_quality_gate": {
+                            "status": "OK",
+                            "conditions": [
+                                {
+                                    "metricKey": "new_coverage",
+                                    "status": "OK",
+                                    "errorThreshold": "80",
+                                    "actualValue": "85",
+                                }
+                            ],
+                        },
+                    }
+                    for name, value in values.items():
+                        patches.enter_context(patch.object(runner, name, return_value=value))
+                    patches.enter_context(
+                        patch.object(
+                            runner.uuid, "uuid4", return_value=runner.uuid.UUID(plan.run_id)
+                        )
+                    )
+                    patches.enter_context(
+                        patch.object(runner, "project_lock", return_value=nullcontext())
+                    )
+                    for name in (
+                        "run_process",
+                        "prepare_worktree_python_environment",
+                        "scanner_metadata",
+                        "clear_generated_artifacts",
+                    ):
+                        patches.enter_context(patch.object(runner, name))
+                    patches.enter_context(
+                        patch.object(runner, "claim_coverage_run", wraps=claim_run)
+                    )
+                    patches.enter_context(
+                        patch.object(runner, "run_coverage_producer", side_effect=produce)
+                    )
+                    patches.enter_context(
+                        patch.object(
+                            runner,
+                            "collect_coverage_analysis_evidence",
+                            wraps=collect,
+                        )
+                    )
+                    patches.enter_context(
+                        patch.object(runner, "current_analysis_binding", side_effect=binding)
+                    )
+                    patches.enter_context(patch.object(runner, "api_json", side_effect=api))
+                    patches.enter_context(
+                        patch.object(runner, "cleanup_coverage_run", side_effect=cleanup)
+                    )
+                    patches.enter_context(
+                        patch.object(
+                            ctypes,
+                            "WinDLL",
+                            side_effect=lambda name, **kwargs: proxy
+                            if name == "kernel32"
+                            else native_dll(name, **kwargs),
+                        )
+                    )
+                    patches.enter_context(
+                        patch.object(runner, "write_receipt", side_effect=capture)
+                    )
+                    if failure in {"interrupt", "finalizer-interrupt"}:
+                        with self.assertRaises(KeyboardInterrupt) as caught:
+                            runner.execute("diagnostic", "scanner")
+                        self.assertIs(caught.exception, interrupt)
+                    elif failure is not None:
+                        with self.assertRaises(runner.RunnerError):
+                            runner.execute("diagnostic", "scanner")
+                    else:
+                        runner.execute("diagnostic", "scanner")
+                result = json.loads((root / "receipt.json").read_bytes())
+                validator.validate(result)
+                runner.validate_exact_head_receipt_v3(result)
+                self.assertEqual(cleanup_calls, [True])
+                self.assertEqual(result["coverage"], fixture["coverage"])
+                self.assertEqual(result["analysis"]["aggregate"], fixture["analysis"]["aggregate"])
+                observations = result["analysis"]["observations"]
+                if failure is None:
+                    self.assertEqual(result["outcome"], "DIAGNOSTIC_COMPLETE")
+                    self.assertTrue(all(value is True for value in observations.values()))
+                else:
+                    self.assertEqual(result["outcome"], "BLOCKED")
+                    self.assertEqual(result["analysis"]["status"], "INCOMPLETE")
+                    self.assertIsNone(observations["current_final"])
+                    self.assertIs(
+                        observations["current_after_measures"],
+                        None if failure in {"after-measures", "finalizer-interrupt"} else True,
+                    )
+                    if failure in {"interrupt", "finalizer-interrupt", "cleanup"}:
+                        self.assertEqual(result["cleanup"]["status"], "FAILED")
+                        self.assertEqual(
+                            result["failure"]["code"],
+                            "COVERAGE_ANALYSIS_MISMATCH"
+                            if failure == "finalizer-interrupt"
+                            else "COVERAGE_CLEANUP_FAILED",
+                        )
+                        self.assertTrue(plan.root.exists())
+                self.assertGreater(events.index("binding-after"), events.index("dotnet-components"))
+                print("CONTROLLED_TRANSACTION_RECEIPT", failure, json.dumps(result, sort_keys=True))
 
     @staticmethod
     def _cobertura(
@@ -2067,6 +3033,88 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         source.write_text("# source\n", encoding="utf-8")
         return source
 
+    def _assert_unproven_producer_receipt(self, root: Path, captured: dict[str, Any]) -> None:
+        from tests.test_stateless_preview_artifact import _complete_v3_exact_head_receipt
+
+        schema_path = (
+            RUNNER_PATH.parents[1]
+            / "specs/014-sonarqube-coverage-producer/contracts/exact-head-receipt-v3.schema.json"
+        )
+        schema = Draft202012Validator(
+            json.loads(schema_path.read_bytes()), format_checker=FormatChecker()
+        )
+        receipt = json.loads((root / "receipt.json").read_bytes())
+        self.assertEqual(receipt, captured)
+        self.assertEqual(receipt["outcome"], "BLOCKED")
+        self.assertIs(receipt["cleanup"]["producer_terminal"], False)
+        self.assertEqual(receipt["cleanup"]["status"], "FAILED")
+        self.assertEqual(receipt["cleanup"]["removed_paths"], [])
+        self.assertIs(receipt["cleanup"]["parent_removed_if_empty"], False)
+        self.assertIsNone(receipt["identity"]["analysis_id"])
+        for field in ("coverage", "analysis", "global_inventory", "release_gate"):
+            self.assertIsNone(receipt[field])
+
+        for role in ("diagnostic", "candidate", "post-merge"):
+            blocked = deepcopy(receipt)
+            blocked.update(role=role, release_intent="none" if role == "diagnostic" else "v0.23.12")
+            schema.validate(blocked)
+            runner.validate_exact_head_receipt_v3(blocked)
+            invalid_cleanup = (
+                ("producer_terminal", 0),
+                ("producer_terminal", 1),
+                ("producer_terminal", None),
+                ("producer_terminal", "false"),
+                ("producer_terminal", []),
+                ("producer_terminal", {}),
+                ("status", "OK"),
+                ("removed_paths", [blocked["cleanup"]["claimed_root"]]),
+                ("parent_removed_if_empty", True),
+                ("claimed_root", "/absolute/claim"),
+                ("claimed_root", "C:/absolute/claim"),
+                ("claimed_root", ".tmp/../claim"),
+                ("claimed_root", ""),
+                ("failure", None),
+                ("failure", {}),
+                ("failure", {"code": "", "message": "RunnerError"}),
+                ("failure", {"code": "COVERAGE_CLEANUP_FAILED", "message": ""}),
+            )
+            for field, value in invalid_cleanup:
+                with self.subTest(role=role, field=field, value=value):
+                    invalid = deepcopy(blocked)
+                    invalid["cleanup"][field] = value
+                    self.assertFalse(schema.is_valid(invalid))
+                    with self.assertRaises(runner.RunnerError):
+                        runner.validate_exact_head_receipt_v3(invalid)
+            with self.subTest(role=role, field="producer_terminal", state="missing"):
+                invalid = deepcopy(blocked)
+                del invalid["cleanup"]["producer_terminal"]
+                self.assertFalse(schema.is_valid(invalid))
+                with self.assertRaises(runner.RunnerError):
+                    runner.validate_exact_head_receipt_v3(invalid)
+            with self.subTest(role=role, field="failure", value=None):
+                invalid = deepcopy(blocked)
+                invalid["failure"] = None
+                self.assertFalse(schema.is_valid(invalid))
+                with self.assertRaises(runner.RunnerError):
+                    runner.validate_exact_head_receipt_v3(invalid)
+            outcome = "DIAGNOSTIC_COMPLETE" if role == "diagnostic" else "PASS"
+            with self.subTest(role=role, outcome=outcome, state="promoted-failure"):
+                invalid = deepcopy(blocked)
+                invalid.update(outcome=outcome, failure=None)
+                self.assertFalse(schema.is_valid(invalid))
+                with self.assertRaises(runner.RunnerError):
+                    runner.validate_exact_head_receipt_v3(invalid)
+            complete = _complete_v3_exact_head_receipt(
+                self.HEAD, role=role, outcome=outcome, release_intent=blocked["release_intent"]
+            )
+            schema.validate(complete)
+            runner.validate_exact_head_receipt_v3(complete)
+            with self.subTest(role=role, outcome=outcome, state="complete-nonterminal"):
+                complete["cleanup"]["producer_terminal"] = False
+                self.assertFalse(schema.is_valid(complete))
+                with self.assertRaises(runner.RunnerError):
+                    runner.validate_exact_head_receipt_v3(complete)
+
     def _transaction_events(
         self,
         root: Path,
@@ -2074,14 +3122,21 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         failing_step: str | None = None,
         producer_terminals: list[bool] | None = None,
         generated_cleanup_calls: list[str] | None = None,
+        real_cleanup: bool = False,
+        receipts: list[dict[str, Any]] | None = None,
+        producer_error: Exception | None = None,
     ) -> None:
         context = self._context(root)
-        plan = SimpleNamespace()
+        plan = SimpleNamespace(repository_root=root, root=root / ".tmp/sonarqube-coverage/claimed")
+        cleanup_coverage_run = runner.cleanup_coverage_run
+        persist_receipt = runner.write_receipt
         claim = SimpleNamespace()
 
         def step(name, result=None):
             def invoke(*_args, **_kwargs):
                 events.append(name)
+                if name == "produce" and producer_error is not None:
+                    raise producer_error
                 if failing_step == name:
                     raise runner.RunnerError(f"injected {name} failure")
                 return result
@@ -2099,26 +3154,44 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     raise runner.RunnerError("injected end failure")
                 raise runner.RunnerError("stop after transaction event capture")
 
-        def cleanup(_plan, producer_terminal):
+        def cleanup(_plan, producer_terminal, _claim, **kwargs):
             if producer_terminals is not None:
                 producer_terminals.append(producer_terminal)
-            return {}
+            if real_cleanup:
+                return cleanup_coverage_run(_plan, producer_terminal, _claim, **kwargs)
+            return TestSonarqubeExactHeadRunner.cleanup_evidence(
+                _plan.root.relative_to(_plan.repository_root).as_posix(), producer_terminal
+            )
 
         def clear_generated(_context, _environment):
             if generated_cleanup_calls is not None:
                 generated_cleanup_calls.append("clear")
             return []
 
+        def capture_receipt(path, receipt, secrets):
+            if receipts is not None:
+                persist_receipt(path, receipt, secrets)
+                receipts.append(deepcopy(receipt))
+
         with ExitStack() as patches:
             patches.enter_context(patch.object(runner, "process_environment", return_value={}))
             patches.enter_context(patch.object(runner, "scrub_sonar_environment", return_value={}))
             patches.enter_context(patch.object(runner, "git_context", return_value=context))
             patches.enter_context(
+                patch.object(runner, "release_intent_at_head", return_value="v0.23.12")
+            )
+            patches.enter_context(
                 patch.object(runner, "receipt_path", return_value=root / "receipt.json")
             )
             patches.enter_context(patch.object(runner, "sonar_secret_values", return_value=set()))
             patches.enter_context(patch.object(runner, "project_lock", return_value=nullcontext()))
-            patches.enter_context(patch.object(runner, "write_receipt"))
+            patches.enter_context(
+                patch.object(
+                    runner,
+                    "write_receipt",
+                    side_effect=capture_receipt,
+                )
+            )
             patches.enter_context(
                 patch.object(
                     runner,
@@ -2315,6 +3388,11 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 (
                     "test-sdk",
                     lambda value: value["projects"][0].__setitem__("test_sdk", "17.11.0"),
+                    "COVERAGE_VSTEST_INCOMPATIBLE",
+                ),
+                (
+                    "collector",
+                    lambda value: value["projects"][3].__setitem__("code_coverage", "17.12.0"),
                     "COVERAGE_VSTEST_INCOMPATIBLE",
                 ),
                 (
@@ -2524,6 +3602,70 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 parsed = runner.validate_python_cobertura(context, report)
             self.assertEqual(parsed["source_paths"], ["src/netcoredbg_mcp/module.py"])
 
+    def test_r05c_python_cobertura_accepts_only_the_two_release_scripts(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            runner_script = self._write_source(root, "scripts/run_sonarqube_exact_head.py")
+            artifact_script = self._write_source(root, "scripts/stateless_preview_artifact.py")
+            other_script = self._write_source(root, "scripts/other.py")
+            test_source = self._write_source(root, "tests/test_only.py")
+            report = root / "coverage.xml"
+            trusted = {runner_script, artifact_script, other_script, test_source}
+            with patch.object(
+                runner, "is_tracked", side_effect=lambda _root, _env, path: path in trusted
+            ):
+                report.write_text(
+                    self._cobertura(
+                        [
+                            "scripts/run_sonarqube_exact_head.py",
+                            "scripts/stateless_preview_artifact.py",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                self.assertEqual(
+                    runner.validate_python_cobertura(context, report)["source_paths"],
+                    [
+                        "scripts/run_sonarqube_exact_head.py",
+                        "scripts/stateless_preview_artifact.py",
+                    ],
+                )
+                for name, filename in (
+                    ("other-script", "scripts/other.py"),
+                    ("test-only", "tests/test_only.py"),
+                    ("escape", "scripts/../scripts/run_sonarqube_exact_head.py"),
+                    ("uri", "file:///scripts/run_sonarqube_exact_head.py"),
+                    ("absolute", str(runner_script.resolve())),
+                ):
+                    with self.subTest(name=name):
+                        report.write_text(self._cobertura([filename]), encoding="utf-8")
+                        with self.assertRaisesRegex(
+                            runner.RunnerError, "COVERAGE_SOURCE_MAPPING_INVALID"
+                        ):
+                            runner.validate_python_cobertura(context, report)
+
+            report.write_text(
+                self._cobertura(["scripts/stateless_preview_artifact.py"]), encoding="utf-8"
+            )
+            with patch.object(runner, "is_tracked", return_value=False):
+                with self.assertRaisesRegex(runner.RunnerError, "COVERAGE_SOURCE_MAPPING_INVALID"):
+                    runner.validate_python_cobertura(context, report)
+
+            original_metadata = runner._scanner_tree_metadata
+
+            def metadata(path):
+                if path == artifact_script:
+                    return SimpleNamespace(st_mode=stat.S_IFREG, st_file_attributes=0x0400)
+                return original_metadata(path)
+
+            with (
+                patch.object(runner, "is_tracked", return_value=True),
+                patch.object(runner, "_scanner_tree_metadata", side_effect=metadata),
+            ):
+                with self.assertRaisesRegex(runner.RunnerError, "COVERAGE_SOURCE_MAPPING_INVALID"):
+                    runner.validate_python_cobertura(context, report)
+
     def test_r05b_cobertura_source_roots_canonicalize_relative_and_absolute_inputs(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -2567,6 +3709,13 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             claim = runner.claim_coverage_run(context, plan, self._resolved_wave2_entry())
             marker_path = self._absolute(getattr(claim, "marker", plan.marker))
             marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            schema = json.loads(
+                (
+                    RUNNER_PATH.parents[1]
+                    / "specs/014-sonarqube-coverage-producer/contracts/coverage-run-marker.schema.json"
+                ).read_text(encoding="utf-8")
+            )
+            Draft202012Validator(schema, format_checker=FormatChecker()).validate(marker)
 
         self.assertEqual([report["id"] for report in marker["final_reports"]], ["python", "dotnet"])
         self.assertEqual(
@@ -2640,57 +3789,23 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             plan = self._plan(root)
             commands = runner.dotnet_producer_commands(plan)
             test_commands = [command for command in commands if command[:2] == ["dotnet", "test"]]
+            collector_commands = [
+                command for command in commands if "collector-stateless" in command
+            ]
 
-            self.assertEqual(len(test_commands), 5)
+            self.assertEqual(len(test_commands), 4)
+            self.assertEqual(len(collector_commands), 1)
+            self.assertEqual(
+                collector_commands[0][-1],
+                str(root / "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0"),
+            )
             for command in test_commands:
                 self.assertIn("--no-restore", command)
                 self.assertNotIn("--no-build", command)
                 self.assertIn("-p:CoverletOutputFormat=cobertura", command)
-            filtered = [command for command in test_commands if "--filter" in command]
-            self.assertEqual(len(filtered), 1)
-            self.assertTrue(
-                any("NetCoreDbg.Mcp.Stateless.Tests.csproj" in item for item in filtered[0])
-            )
-            filter_index = filtered[0].index("--filter")
-            self.assertEqual(filtered[0][filter_index + 1], "Coverage!=Exclude")
+                self.assertNotIn("--filter", command)
             with self.assertRaisesRegex(runner.RunnerError, "COVERAGE_REPORT_MISSING"):
                 runner.validate_dotnet_cobertura_inputs(context, plan)
-
-    def test_r09b_every_stateless_process_collection_class_is_excluded_from_coverlet(self):
-        tests_root = RUNNER_PATH.parents[1] / "host" / "NetCoreDbg.Mcp.Stateless.Tests"
-        process_collection = re.compile(
-            r"\[\s*Collection\s*\(\s*(?:(?:global::)?[A-Za-z_]\w*\.)*"
-            r"NetCoreDbgSessionProcessCollection\.Name\s*\)\s*\]"
-        )
-        coverage_exclusion = re.compile(r'\[\s*Trait\s*\(\s*"Coverage"\s*,\s*"Exclude"\s*\)\s*\]')
-        class_declaration = re.compile(
-            r"(?:public|internal)\s+(?:(?:sealed|abstract|partial)\s+)*class\s+"
-            r"(?P<name>[A-Za-z_]\w*)"
-        )
-        process_classes: list[str] = []
-        missing_traits: list[str] = []
-        for path in tests_root.rglob("*.cs"):
-            pending_attributes: list[str] = []
-            for line in path.read_text(encoding="utf-8").splitlines():
-                stripped = line.strip()
-                if stripped.startswith("[") and stripped.endswith("]"):
-                    pending_attributes.append(stripped)
-                    continue
-                declaration = class_declaration.search(stripped)
-                if declaration is not None:
-                    attributes = "\n".join(pending_attributes)
-                    if process_collection.search(attributes) is not None:
-                        class_identity = (
-                            f"{path.relative_to(tests_root).as_posix()}:{declaration['name']}"
-                        )
-                        process_classes.append(class_identity)
-                        if coverage_exclusion.search(attributes) is None:
-                            missing_traits.append(class_identity)
-                if stripped and not stripped.startswith("//"):
-                    pending_attributes.clear()
-
-        self.assertEqual(len(process_classes), 12)
-        self.assertEqual(missing_traits, [])
 
     def test_r10_only_stateless_gets_include_directory_and_restoration_and_mapping_are_required(
         self,
@@ -2700,19 +3815,19 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             context = self._context(root)
             plan = self._plan(root)
             commands = runner.dotnet_producer_commands(plan)
-            include_commands = [
-                command
-                for command in commands
-                if any("IncludeDirectory=" in argument for argument in command)
-            ]
-            self.assertEqual(len(include_commands), 1)
             self.assertTrue(
-                any("NetCoreDbg.Mcp.Stateless.Tests.csproj" in item for item in include_commands[0])
+                any(
+                    command[:2] == ["dotnet", "build"]
+                    and "NetCoreDbg.Mcp.Stateless.Tests.csproj" in command[2]
+                    for command in commands
+                )
             )
-            include_directory = str(
-                root / "host" / "NetCoreDbg.Mcp.Stateless" / "bin" / "Debug" / "net8.0"
+            self.assertEqual(
+                sum(
+                    "IncludeDirectory=" in argument for command in commands for argument in command
+                ),
+                0,
             )
-            self.assertTrue(any(item.endswith(include_directory) for item in include_commands[0]))
 
             stateless = plan.dotnet_inputs[3]
             report = self._absolute(stateless.raw_cobertura_input)
@@ -2730,6 +3845,1855 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 runner.validate_stateless_restoration(
                     plan, {"dll_sha256": "0" * 64, "pdb_sha256": "0" * 64}
                 )
+
+    def test_stateless_collector_projects_absolute_production_and_excludes_test_classes(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            source = self._write_source(root, "host/NetCoreDbg.Mcp.Stateless/Program.cs")
+            test_source = self._write_source(
+                root, "host/NetCoreDbg.Mcp.Stateless.Tests/ProgramTests.cs"
+            )
+            raw = root / "raw.xml"
+            projected = root / "projected.xml"
+            line = (
+                '<line number="26" hits="1" branch="true" condition-coverage="50% (1/2)">'
+                '<conditions><condition number="0" type="jump" coverage="100%"/>'
+                '<condition number="1" type="jump" coverage="0%"/></conditions></line>'
+            )
+            raw.write_text(
+                '<coverage><packages><package name="NetCoreDbg.Mcp.Stateless"><classes>'
+                f'<class name="NetCoreDbg.Mcp.Stateless.Program" filename="{source}"><lines>{line}</lines></class>'
+                '</classes></package><package name="NetCoreDbg.Mcp.Stateless.Tests"><classes>'
+                f'<class name="NetCoreDbg.Mcp.Stateless.Tests.ProgramTests" filename="{test_source}"><lines>'
+                '<line number="1" hits="1"/></lines></class></classes></package></packages></coverage>',
+                encoding="utf-8",
+            )
+            with patch.object(runner, "is_tracked", return_value=True):
+                observed = runner.project_stateless_collector(context, raw, projected)
+            self.assertEqual(observed["source_paths"], ["host/NetCoreDbg.Mcp.Stateless/Program.cs"])
+            self.assertEqual((observed["branches_covered"], observed["branches_valid"]), (1, 2))
+            self.assertEqual(
+                runner.ElementTree.parse(projected).getroot().attrib["lines-valid"], "1"
+            )
+
+    def test_stateless_collector_global_startup_hook_is_test_source_not_production(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            source = self._write_source(root, "host/NetCoreDbg.Mcp.Stateless/Program.cs")
+            hook = self._write_source(
+                root, "host/NetCoreDbg.Mcp.Stateless.Tests/ModernMcp/StartupHook.cs"
+            )
+            hook.write_text(
+                "internal static class StartupHook { public static void Initialize() {} }\n",
+                encoding="utf-8",
+            )
+            raw = root / "raw.xml"
+            projected = root / "projected.xml"
+            raw.write_text(
+                '<coverage><packages><package name="NetCoreDbg.Mcp.Stateless"><classes>'
+                f'<class name="NetCoreDbg.Mcp.Stateless.Program" filename="{source}"><lines>'
+                '<line number="26" hits="0" branch="true" condition-coverage="0% (0/2)"/>'
+                "</lines></class></classes></package>"
+                '<package name="NetCoreDbg.Mcp.Stateless.Tests"><classes>'
+                f'<class name="StartupHook" filename="{hook}"><lines>'
+                '<line number="1" hits="1" branch="true" condition-coverage="100% (2/2)"/>'
+                "</lines></class></classes></package></packages></coverage>",
+                encoding="utf-8",
+            )
+            with patch.object(runner, "is_tracked", return_value=True):
+                parsed = runner.project_stateless_collector(context, raw, projected)
+                plan = replace(self._plan(root), dotnet_inputs=(self._plan(root).dotnet_inputs[3],))
+                inputs = [runner._dotnet_input_evidence(plan, plan.dotnet_inputs[0], parsed)]
+                normalization = runner.normalize_dotnet_cobertura(plan, inputs)
+                final = runner.validate_final_dotnet_cobertura(context, plan, inputs, normalization)
+            self.assertEqual(final["source_paths"], ["host/NetCoreDbg.Mcp.Stateless/Program.cs"])
+            self.assertEqual(
+                tuple(
+                    final[key]
+                    for key in (
+                        "lines_valid",
+                        "lines_covered",
+                        "branches_valid",
+                        "branches_covered",
+                    )
+                ),
+                (1, 0, 2, 0),
+            )
+            self.assertEqual(final["sha256"], sha256(plan.dotnet_report.read_bytes()).hexdigest())
+
+    def test_stateless_collector_test_origin_requires_source_and_module_identity(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            source = self._write_source(root, "host/NetCoreDbg.Mcp.Stateless/Program.cs")
+            hook = "host/NetCoreDbg.Mcp.Stateless.Tests/ModernMcp/StartupHook.cs"
+            test_source = "host/NetCoreDbg.Mcp.Stateless.Tests/ProgramTests.cs"
+            module = "NetCoreDbg.Mcp.Stateless.Tests"
+            raw = root / "raw.xml"
+            cases = (
+                ("wrong-module", hook, "StartupHook", "NetCoreDbg.Mcp.Stateless"),
+                ("foreign-module", hook, "StartupHook", "Foreign.Tests"),
+                ("missing-module", hook, "StartupHook", ""),
+                ("other-test-source", test_source, "StartupHook", module),
+                (
+                    "production-source",
+                    "host/NetCoreDbg.Mcp.Stateless/StartupHook.cs",
+                    "StartupHook",
+                    module,
+                ),
+                ("foreign-source", "host/Foreign/StartupHook.cs", "StartupHook", module),
+                (
+                    "fixture-source",
+                    "host/NetCoreDbg.Mcp.Stateless.Tests/Fixtures/ControlledDapAdapter/StartupHook.cs",
+                    "StartupHook",
+                    "ControlledDapAdapter",
+                ),
+                ("misreported-hook", hook, module + ".ProgramTests", module),
+                ("production-class", test_source, "NetCoreDbg.Mcp.Stateless.Program", module),
+                ("foreign-class", test_source, "Foreign.Tests.ProgramTests", module),
+                (
+                    "namespaced-wrong-module",
+                    test_source,
+                    module + ".ProgramTests",
+                    "NetCoreDbg.Mcp.Stateless",
+                ),
+            )
+            with patch.object(runner, "is_tracked", return_value=True):
+                for name, relative, class_name, package in cases:
+                    with self.subTest(name=name):
+                        reported_source = self._write_source(root, relative)
+                        raw.write_text(
+                            '<coverage><packages><package name="NetCoreDbg.Mcp.Stateless"><classes>'
+                            f'<class name="NetCoreDbg.Mcp.Stateless.Program" filename="{source}"><lines>'
+                            '<line number="26" hits="0" branch="true" condition-coverage="0% (0/2)"/>'
+                            "</lines></class></classes></package>"
+                            f'<package name="{package}"><classes><class name="{class_name}" '
+                            f'filename="{reported_source}"><lines><line number="1" hits="1"/>'
+                            "</lines></class></classes></package></packages></coverage>",
+                            encoding="utf-8",
+                        )
+                        with self.assertRaisesRegex(
+                            runner.RunnerError, "COVERAGE_SOURCE_MAPPING_INVALID"
+                        ):
+                            runner.project_stateless_collector(context, raw, root / "projected.xml")
+
+    def test_stateless_collector_refuses_foreign_and_duplicate_spellings(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            source = self._write_source(root, "host/NetCoreDbg.Mcp.Stateless/Program.cs")
+            foreign = self._write_source(root, "host/Fixture/Foreign.cs")
+            raw = root / "raw.xml"
+            line = '<lines><line number="1" hits="1" branch="true" condition-coverage="100% (1/1)"/></lines>'
+            with patch.object(runner, "is_tracked", return_value=True):
+                for other in (foreign, str(source).replace("\\", "/")):
+                    raw.write_text(
+                        "<coverage><packages><package><classes>"
+                        f'<class name="NetCoreDbg.Mcp.Stateless.Program" filename="{source}">{line}</class>'
+                        f'<class name="NetCoreDbg.Mcp.Stateless.Other" filename="{other}">{line}</class>'
+                        "</classes></package></packages></coverage>",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(
+                        runner.RunnerError, "COVERAGE_SOURCE_MAPPING_INVALID"
+                    ):
+                        runner.project_stateless_collector(context, raw, root / "projected.xml")
+
+    def test_stateless_collector_full_run_maps_bridge_wpf_and_excludes_fixture_and_virtual_obj(
+        self,
+    ):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            stateless = self._write_source(root, "host/NetCoreDbg.Mcp.Stateless/Program.cs")
+            bridge = self._write_source(root, "bridge/Commands/NativeSceneEvidenceCommands.cs")
+            adapter = self._write_source(root, "bridge/Commands/ScreenshotCaptureTransport.cs")
+            adapter_class = "FlaUIBridge.Commands.NativeScreenshotCaptureTransport"
+            wpf = self._write_source(
+                root, "host/NetCoreDbg.Mcp.DesignProbe.Wpf/LocalProbeClient.cs"
+            )
+            fixture = self._write_source(
+                root, "host/NetCoreDbg.Mcp.Stateless.Tests/Fixtures/ControlledDapAdapter/Program.cs"
+            )
+            generated = root / (
+                "bridge/obj/Debug/net8.0-windows/win-x64/Microsoft.Interop.LibraryImportGenerator/"
+                "Microsoft.Interop.LibraryImportGenerator/LibraryImports.g.cs"
+            )
+            sources = (
+                (bridge, "FlaUIBridge.Commands.NativeSceneEvidenceCommands"),
+                (generated, "FlaUIBridge.Commands.ClickCommands"),
+                (generated, adapter_class),
+            )
+            classes = "".join(
+                f'<class name="{name}" filename="{path}"><lines><line number="1" hits="1" '
+                'branch="true" condition-coverage="100% (1/1)"/></lines></class>'
+                for path, name in sources
+            )
+            raw = root / "full.xml"
+            authored_adapter = (
+                f'<class name="{adapter_class}" filename="{adapter}"><lines>'
+                '<line number="123" hits="0" branch="true" condition-coverage="0% (0/2)"/>'
+                "</lines></class>"
+            )
+            other_packages = "".join(
+                f'<package name="{module}"><classes><class name="{name}" filename="{path}">'
+                '<lines><line number="1" hits="1" branch="true" '
+                'condition-coverage="100% (1/1)"/></lines></class></classes></package>'
+                for module, path, name in (
+                    ("NetCoreDbg.Mcp.Stateless", stateless, "NetCoreDbg.Mcp.Stateless.Program"),
+                    (
+                        "NetCoreDbg.Mcp.DesignProbe.Wpf",
+                        wpf,
+                        "NetCoreDbg.Mcp.DesignProbe.Wpf.LocalProbeClient",
+                    ),
+                    ("ControlledDapAdapter", fixture, "ControlledEvidenceWindow"),
+                )
+            )
+            full_xml = (
+                '<coverage><packages><package name="FlaUIBridge"><classes>'
+                f"{classes}{authored_adapter}</classes></package>{other_packages}</packages></coverage>"
+            )
+            raw.write_text(full_xml, encoding="utf-8")
+            with patch.object(
+                runner, "is_tracked", side_effect=lambda _root, _env, path: path != generated
+            ):
+                parsed = runner.project_stateless_collector(context, raw, root / "projected.xml")
+            self.assertEqual(
+                parsed["source_paths"],
+                sorted(
+                    (
+                        "host/NetCoreDbg.Mcp.Stateless/Program.cs",
+                        "bridge/Commands/NativeSceneEvidenceCommands.cs",
+                        "host/NetCoreDbg.Mcp.DesignProbe.Wpf/LocalProbeClient.cs",
+                        "bridge/Commands/ScreenshotCaptureTransport.cs",
+                    )
+                ),
+            )
+            self.assertEqual(
+                tuple(
+                    parsed[key]
+                    for key in (
+                        "lines_valid",
+                        "lines_covered",
+                        "branches_valid",
+                        "branches_covered",
+                    )
+                ),
+                (4, 3, 5, 3),
+            )
+            adapter_fact = next(
+                source
+                for source in parsed["facts"]
+                if source["source_path"] == "bridge/Commands/ScreenshotCaptureTransport.cs"
+            )
+            self.assertEqual(adapter_fact["class_name"], adapter_class)
+            self.assertEqual(
+                adapter_fact["lines"],
+                [
+                    {
+                        "number": 123,
+                        "hits": 0,
+                        "branches_covered": 0,
+                        "branches_valid": 2,
+                        "conditions": [],
+                    }
+                ],
+            )
+            self.assertEqual(raw.read_text(encoding="utf-8"), full_xml)
+            reordered_xml = full_xml.replace(
+                f"{classes}{authored_adapter}", f"{authored_adapter}{classes}"
+            )
+            raw.write_text(reordered_xml, encoding="utf-8")
+            with patch.object(
+                runner, "is_tracked", side_effect=lambda _root, _env, path: path != generated
+            ):
+                reordered = runner.project_stateless_collector(context, raw, root / "projected.xml")
+            self.assertCountEqual(reordered["facts"], parsed["facts"])
+            self.assertEqual(raw.read_text(encoding="utf-8"), reordered_xml)
+            self.assertFalse(generated.exists())
+            raw.write_text(
+                full_xml.replace("LibraryImports.g.cs", "Injected.g.cs"), encoding="utf-8"
+            )
+            with patch.object(
+                runner, "is_tracked", side_effect=lambda _root, _env, path: path != generated
+            ):
+                with self.assertRaisesRegex(runner.RunnerError, "unrecognized generated"):
+                    runner.project_stateless_collector(context, raw, root / "projected.xml")
+            invalid_owners = (
+                full_xml.replace('package name="FlaUIBridge"', 'package name="ForeignModule"'),
+                full_xml.replace('package name="FlaUIBridge"', 'package name="ModuleNamespace"'),
+                full_xml.replace('package name="FlaUIBridge"', 'package name=""'),
+                full_xml.replace(authored_adapter, ""),
+                full_xml.replace(
+                    authored_adapter,
+                    authored_adapter.replace(str(adapter), str(bridge)),
+                ),
+                full_xml.replace(
+                    authored_adapter,
+                    authored_adapter.replace(adapter_class, "Foreign.ScreenshotCaptureTransport"),
+                ),
+                full_xml.replace(adapter_class, "Foreign.ScreenshotCaptureTransport"),
+            )
+            with patch.object(
+                runner, "is_tracked", side_effect=lambda _root, _env, path: path != generated
+            ):
+                for invalid_xml in invalid_owners:
+                    with self.subTest(xml=invalid_xml):
+                        raw.write_text(invalid_xml, encoding="utf-8")
+                        with self.assertRaisesRegex(
+                            runner.RunnerError, "COVERAGE_SOURCE_MAPPING_INVALID"
+                        ):
+                            runner.project_stateless_collector(context, raw, root / "projected.xml")
+            raw.write_text(full_xml, encoding="utf-8")
+            with patch.object(
+                runner,
+                "is_tracked",
+                side_effect=lambda _root, _env, path: path not in {generated, adapter},
+            ):
+                with self.assertRaisesRegex(runner.RunnerError, "untracked"):
+                    runner.project_stateless_collector(context, raw, root / "projected.xml")
+            with patch.object(
+                runner,
+                "is_tracked",
+                side_effect=lambda _root, _env, path: path not in {generated, bridge},
+            ):
+                with self.assertRaisesRegex(runner.RunnerError, "collector source is untracked"):
+                    runner.project_stateless_collector(context, raw, root / "projected.xml")
+
+    def _library_import_capture(self, root: Path, kind: str):
+        module, class_name, owner_relative, generated_relative = {
+            "screenshot": (
+                "FlaUIBridge",
+                "FlaUIBridge.Commands.NativeScreenshotCaptureTransport",
+                "bridge/Commands/ScreenshotCaptureTransport.cs",
+                "bridge/obj/Debug/net8.0-windows/win-x64/Microsoft.Interop.LibraryImportGenerator/"
+                "Microsoft.Interop.LibraryImportGenerator/LibraryImports.g.cs",
+            ),
+            "session": (
+                "NetCoreDbg.Mcp.Stateless",
+                "NetCoreDbg.Mcp.Stateless.DebugAdapter.NetCoreDbgSession.WindowsProcessTreeOwnership",
+                "host/NetCoreDbg.Mcp.Stateless/DebugAdapter/NetCoreDbgSession.cs",
+                "host/NetCoreDbg.Mcp.Stateless/obj/Debug/net8.0/Microsoft.Interop.LibraryImportGenerator/"
+                "Microsoft.Interop.LibraryImportGenerator/LibraryImports.g.cs",
+            ),
+            "element-test": (
+                "NetCoreDbg.Mcp.Stateless.Tests",
+                "NetCoreDbg.Mcp.Stateless.Tests.NativeScene.ElementCommandsBehaviorTests",
+                "host/NetCoreDbg.Mcp.Stateless.Tests/NativeScene/ElementCommandsBehaviorTests.cs",
+                "host/NetCoreDbg.Mcp.Stateless.Tests/obj/Debug/net8.0/"
+                "Microsoft.Interop.LibraryImportGenerator/Microsoft.Interop.LibraryImportGenerator/"
+                "LibraryImports.g.cs",
+            ),
+        }[kind]
+        owner = self._write_source(root, owner_relative)
+        generated = root / generated_relative
+        capture = runner.ElementTree.fromstring(
+            self._cobertura(
+                [owner.as_posix()],
+                line_xml='<line number="123" hits="0" branch="true" condition-coverage="0% (0/2)"/>',
+            )
+        )
+        package = capture.find("./packages/package")
+        package.set("name", module)
+        classes = package.find("classes")
+        classes[0].set("name", class_name)
+        generated_capture = runner.ElementTree.fromstring(
+            self._cobertura(
+                [generated.as_posix()],
+                line_xml='<line number="9" hits="5" branch="true" condition-coverage="100% (1/1)"/>',
+            )
+        )
+        generated_class = generated_capture.find("./packages/package/classes/class")
+        generated_class.set("name", class_name)
+        classes.insert(0, generated_class)
+        program = self._write_source(root, "host/NetCoreDbg.Mcp.Stateless/Program.cs")
+        program_capture = runner.ElementTree.fromstring(self._cobertura([program.as_posix()]))
+        program_package = program_capture.find("./packages/package")
+        program_package.set("name", "NetCoreDbg.Mcp.Stateless")
+        program_class = program_package.find("./classes/class")
+        program_class.set("name", "NetCoreDbg.Mcp.Stateless.Program")
+        if module == "NetCoreDbg.Mcp.Stateless":
+            classes.append(program_class)
+        else:
+            capture.find("packages").append(program_package)
+        return capture, owner, generated
+
+    def _assert_library_import_capture_projection(self, kind: str):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            capture, owner, generated = self._library_import_capture(root, kind)
+            original = runner.ElementTree.tostring(capture, encoding="unicode")
+            raw = root / "raw.xml"
+            raw.write_text(original, encoding="utf-8")
+            with patch.object(
+                runner, "is_tracked", side_effect=lambda _root, _env, path: path != generated
+            ):
+                parsed = runner.project_stateless_collector(
+                    self._context(root), raw, root / "projected.xml"
+                )
+            self.assertEqual(
+                parsed["source_paths"],
+                sorted(
+                    (
+                        owner.relative_to(root).as_posix(),
+                        "host/NetCoreDbg.Mcp.Stateless/Program.cs",
+                    )
+                ),
+            )
+            self.assertEqual(
+                tuple(
+                    parsed[key]
+                    for key in (
+                        "lines_valid",
+                        "lines_covered",
+                        "branches_valid",
+                        "branches_covered",
+                    )
+                ),
+                (2, 1, 4, 1),
+            )
+            owner_fact = next(
+                item
+                for item in parsed["facts"]
+                if item["source_path"] == owner.relative_to(root).as_posix()
+            )
+            self.assertEqual(
+                owner_fact["lines"],
+                [
+                    {
+                        "number": 123,
+                        "hits": 0,
+                        "branches_covered": 0,
+                        "branches_valid": 2,
+                        "conditions": [],
+                    }
+                ],
+            )
+            self.assertEqual(raw.read_text(encoding="utf-8"), original)
+            self.assertFalse(generated.exists())
+
+    def test_stateless_collector_library_import_capture_actual_screenshot_identity(self):
+        self._assert_library_import_capture_projection("screenshot")
+
+    def test_stateless_collector_library_import_capture_actual_session_identity(self):
+        self._assert_library_import_capture_projection("session")
+
+    def test_stateless_collector_library_import_test_owner_preserves_production_facts(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            capture, _owner, generated = self._library_import_capture(root, "element-test")
+            packages = capture.find("packages")
+            test_package = packages[0]
+            packages.remove(test_package)
+            raw = root / "raw.xml"
+            projected = root / "projected.xml"
+            raw.write_text(
+                runner.ElementTree.tostring(capture, encoding="unicode"), encoding="utf-8"
+            )
+            with patch.object(
+                runner, "is_tracked", side_effect=lambda _root, _env, path: path != generated
+            ):
+                baseline = runner.project_stateless_collector(context, raw, projected)
+                packages.append(test_package)
+                classes = test_package.find("classes")
+                for authored_first in (False, True):
+                    with self.subTest(authored_first=authored_first):
+                        if authored_first:
+                            classes[:] = list(reversed(classes))
+                        original = runner.ElementTree.tostring(capture, encoding="unicode")
+                        raw.write_text(original, encoding="utf-8")
+                        parsed = runner.project_stateless_collector(context, raw, projected)
+                        self.assertEqual(parsed["facts"], baseline["facts"])
+                        self.assertEqual(parsed["source_paths"], baseline["source_paths"])
+                        for key in (
+                            "lines_valid",
+                            "lines_covered",
+                            "branches_valid",
+                            "branches_covered",
+                        ):
+                            self.assertEqual(parsed[key], baseline[key])
+                        self.assertEqual(raw.read_text(encoding="utf-8"), original)
+                        normalized = runner.ElementTree.parse(projected)
+                        self.assertEqual(
+                            [item.get("name") for item in normalized.findall("./packages/package")],
+                            ["NetCoreDbg.Mcp.Stateless"],
+                        )
+            self.assertFalse(generated.exists())
+
+    def test_stateless_collector_library_import_capture_rejects_unproven_identity(self):
+        variants = (
+            "wrong_package",
+            "legacy_package",
+            "missing_package",
+            "missing_owner",
+            "owner_other_package",
+            "wrong_owner_filename",
+            "foreign_owner_class",
+            "wrong_generated_filename",
+            "wrong_generated_directory",
+            "foreign_generated_source",
+            "other_generated_class",
+            "tracked_generated",
+            "untracked_owner",
+        )
+        for kind in ("screenshot", "session", "element-test"):
+            for variant in variants:
+                with (
+                    self.subTest(kind=kind, variant=variant),
+                    TemporaryDirectory() as temporary_directory,
+                ):
+                    root = Path(temporary_directory) / "checkout"
+                    root.mkdir()
+                    capture, owner, generated = self._library_import_capture(root, kind)
+                    package = capture.find("./packages/package")
+                    classes = package.find("classes")
+                    generated_class, authored_class = classes[0], classes[1]
+                    if variant == "wrong_package":
+                        package.set("name", "ForeignModule")
+                    elif variant == "legacy_package":
+                        package.set("name", "ModuleNamespace")
+                    elif variant == "missing_package":
+                        package.attrib.pop("name")
+                    elif variant == "missing_owner":
+                        classes.remove(authored_class)
+                    elif variant == "owner_other_package":
+                        classes.remove(authored_class)
+                        other = runner.ElementTree.SubElement(
+                            capture.find("packages"), "package", name="ForeignModule"
+                        )
+                        runner.ElementTree.SubElement(other, "classes").append(authored_class)
+                    elif variant == "wrong_owner_filename":
+                        authored_class.set(
+                            "filename", str(root / "host/NetCoreDbg.Mcp.Stateless/Program.cs")
+                        )
+                    elif variant == "foreign_owner_class":
+                        authored_class.set("name", "Foreign.GeneratedOwner")
+                    elif variant == "wrong_generated_filename":
+                        generated = generated.with_name("Injected.g.cs")
+                        generated_class.set("filename", str(generated))
+                    elif variant == "wrong_generated_directory":
+                        generated = root / generated.relative_to(root).as_posix().replace(
+                            "/obj/Debug/", "/obj/Release/"
+                        )
+                        generated_class.set("filename", str(generated))
+                    elif variant == "foreign_generated_source":
+                        generated = root.parent / "foreign/LibraryImports.g.cs"
+                        generated_class.set("filename", str(generated))
+                    elif variant == "other_generated_class":
+                        other_class = (
+                            generated_class.get("name").rsplit(".", 1)[0] + ".UnregisteredImports"
+                        )
+                        generated_class.set("name", other_class)
+                        authored_class.set("name", other_class)
+                    if generated.is_relative_to(root):
+                        self._write_source(root, generated.relative_to(root).as_posix())
+                    raw = root / "raw.xml"
+                    raw.write_text(
+                        runner.ElementTree.tostring(capture, encoding="unicode"), encoding="utf-8"
+                    )
+                    with patch.object(
+                        runner,
+                        "is_tracked",
+                        side_effect=lambda _root, _env, path: (
+                            variant == "tracked_generated" or path != generated
+                        )
+                        and (variant != "untracked_owner" or path != owner),
+                    ):
+                        with self.assertRaisesRegex(
+                            runner.RunnerError, "COVERAGE_SOURCE_MAPPING_INVALID"
+                        ):
+                            runner.project_stateless_collector(
+                                self._context(root), raw, root / "projected.xml"
+                            )
+
+    def _wpf_smoke_fixture_capture(self, root: Path):
+        program = self._write_source(root, "host/NetCoreDbg.Mcp.Stateless/Program.cs")
+        production = runner.ElementTree.fromstring(self._cobertura([program.as_posix()]))
+        program_package = production.find("./packages/package")
+        program_package.set("name", "NetCoreDbg.Mcp.Stateless")
+        program_package.find("./classes/class").set("name", "NetCoreDbg.Mcp.Stateless.Program")
+        grid = self._write_source(root, "bridge/Commands/GridCommands.cs")
+        bridge_capture = runner.ElementTree.fromstring(
+            self._cobertura(
+                [grid.as_posix()],
+                line_xml='<line number="26" hits="2" branch="true" condition-coverage="100% (1/1)"/>',
+            )
+        )
+        bridge_package = bridge_capture.find("./packages/package")
+        bridge_package.set("name", "FlaUIBridge")
+        bridge_package.find("./classes/class").set("name", "FlaUIBridge.Commands.GridCommands")
+        production.find("packages").append(bridge_package)
+        main = self._write_source(root, "tests/fixtures/WpfSmokeApp/MainWindow.xaml.cs")
+        calibration = self._write_source(
+            root, "tests/fixtures/WpfSmokeApp/NativeCalibrationWindow.cs"
+        )
+        identities = (
+            (main, "WpfSmokeApp.MainWindow"),
+            (main, "WpfSmokeApp.GuardedChildDriftButton"),
+            (main, "WpfSmokeApp.MainViewModel"),
+            (main, "WpfSmokeApp.CueRow"),
+            (main, "WpfSmokeApp.CharacterRow"),
+            (calibration, "WpfSmokeApp.NativeCalibrationWindow"),
+            (main, "WpfSmokeApp.MainWindow.CueDragPayload"),
+            (main, "WpfSmokeApp.MainWindow.CueDropDiagnostics"),
+            (main, "WpfSmokeApp.MainWindow.<>c"),
+            (main, "WpfSmokeApp.MainWindow.<>c__DisplayClass100_0"),
+            (main, "WpfSmokeApp.MainWindow.<>c__DisplayClass101_0"),
+            (main, "WpfSmokeApp.MainWindow.<>c__DisplayClass93_0"),
+            (main, "WpfSmokeApp.MainWindow.<>c__DisplayClass95_0"),
+            (main, "WpfSmokeApp.MainWindow.<>c__DisplayClass98_0"),
+            (main, "WpfSmokeApp.GuardedChildDriftButton.GuardedChildDriftButtonAutomationPeer"),
+            (main, "WpfSmokeApp.MainViewModel.CueRowSeed"),
+            (main, "WpfSmokeApp.MainViewModel.CharacterSeed"),
+        )
+        fixture_capture = runner.ElementTree.fromstring(
+            self._cobertura(
+                [path.as_posix() for path, _name in identities],
+                line_xml='<line number="5" hits="19" branch="true" condition-coverage="100% (3/3)"/>',
+            )
+        )
+        fixture_package = fixture_capture.find("./packages/package")
+        fixture_package.set("name", "WpfSmokeApp")
+        for item, (_path, name) in zip(
+            fixture_package.findall("./classes/class"), identities, strict=True
+        ):
+            item.set("name", name)
+        return production, fixture_package, main
+
+    def test_stateless_collector_wpf_smoke_fixture_actual_capture_preserves_production_facts(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            production, fixture_package, _main = self._wpf_smoke_fixture_capture(root)
+            raw = root / "raw.xml"
+            projected = root / "projected.xml"
+            raw.write_text(
+                runner.ElementTree.tostring(production, encoding="unicode"), encoding="utf-8"
+            )
+            with patch.object(runner, "is_tracked", return_value=True):
+                baseline = runner.project_stateless_collector(context, raw, projected)
+                self.assertEqual(
+                    tuple(
+                        baseline[key]
+                        for key in (
+                            "lines_valid",
+                            "lines_covered",
+                            "branches_valid",
+                            "branches_covered",
+                        )
+                    ),
+                    (2, 2, 3, 2),
+                )
+                production.find("packages").append(fixture_package)
+                captured_xml = runner.ElementTree.tostring(production, encoding="unicode")
+                raw.write_text(captured_xml, encoding="utf-8")
+                observed = runner.project_stateless_collector(context, raw, projected)
+            self.assertEqual(observed["facts"], baseline["facts"])
+            self.assertEqual(observed["source_paths"], baseline["source_paths"])
+            self.assertEqual(
+                tuple(
+                    observed[key]
+                    for key in (
+                        "lines_valid",
+                        "lines_covered",
+                        "branches_valid",
+                        "branches_covered",
+                    )
+                ),
+                (2, 2, 3, 2),
+            )
+            self.assertEqual(raw.read_text(encoding="utf-8"), captured_xml)
+
+    def test_stateless_collector_wpf_smoke_fixture_refuses_unproven_identity(self):
+        variants = (
+            "wrong_module",
+            "missing_module",
+            "module_alias",
+            "foreign_class",
+            "namespace_lookalike",
+            "empty_root_namespace",
+            "sibling_fixture",
+            "namespace_outside_fixture",
+            "untracked_source",
+            "nonregular_source",
+            "unexpected_obj",
+        )
+        for variant in variants:
+            with self.subTest(variant=variant), TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                production, fixture_package, source = self._wpf_smoke_fixture_capture(root)
+                classes = fixture_package.find("classes")
+                item = classes[0]
+                classes[:] = [item]
+                if variant == "wrong_module":
+                    fixture_package.set("name", "ForeignModule")
+                elif variant == "missing_module":
+                    fixture_package.attrib.pop("name")
+                elif variant == "module_alias":
+                    fixture_package.set("name", "ModuleNamespace")
+                elif variant == "foreign_class":
+                    item.set("name", "Foreign.MainWindow")
+                elif variant == "namespace_lookalike":
+                    item.set("name", "WpfSmokeAppForeign.MainWindow")
+                elif variant == "empty_root_namespace":
+                    item.set("name", "WpfSmokeApp.")
+                elif variant == "sibling_fixture":
+                    source = self._write_source(
+                        root, "tests/fixtures/WpfSmokeAppSibling/MainWindow.xaml.cs"
+                    )
+                    item.set("filename", source.as_posix())
+                elif variant == "namespace_outside_fixture":
+                    item.set(
+                        "filename", (root / "host/NetCoreDbg.Mcp.Stateless/Program.cs").as_posix()
+                    )
+                elif variant == "nonregular_source":
+                    source = root / "tests/fixtures/WpfSmokeApp/Directory.cs"
+                    source.mkdir()
+                    item.set("filename", source.as_posix())
+                elif variant == "unexpected_obj":
+                    source = self._write_source(
+                        root, "tests/fixtures/WpfSmokeApp/obj/Debug/net8.0-windows/MainWindow.g.cs"
+                    )
+                    item.set("filename", source.as_posix())
+                production.find("packages").append(fixture_package)
+                raw = root / "raw.xml"
+                raw.write_text(
+                    runner.ElementTree.tostring(production, encoding="unicode"), encoding="utf-8"
+                )
+                with patch.object(
+                    runner,
+                    "is_tracked",
+                    side_effect=lambda _root, _env, path: variant != "untracked_source"
+                    or path != source,
+                ):
+                    with self.assertRaisesRegex(
+                        runner.RunnerError, "COVERAGE_SOURCE_MAPPING_INVALID"
+                    ):
+                        runner.project_stateless_collector(
+                            self._context(root), raw, root / "projected.xml"
+                        )
+
+    def test_stateless_collector_refuses_relative_escape_and_fixture_paths(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "checkout"
+            root.mkdir()
+            context = self._context(root)
+            foreign = self._write_source(root.parent, "outside/Foreign.cs")
+            fixture = self._write_source(
+                root, "host/NetCoreDbg.Mcp.Stateless.Tests/Fixtures/Fixture.cs"
+            )
+            raw = root / "raw.xml"
+            for filename in ("host/NetCoreDbg.Mcp.Stateless/Program.cs", foreign, fixture):
+                raw.write_text(
+                    "<coverage><packages><package><classes>"
+                    f'<class name="NetCoreDbg.Mcp.Stateless.Tests.Fixture" filename="{filename}">'
+                    '<lines><line number="1" hits="1" branch="true" '
+                    'condition-coverage="100% (1/1)"/></lines></class>'
+                    "</classes></package></packages></coverage>",
+                    encoding="utf-8",
+                )
+                with patch.object(runner, "is_tracked", return_value=True):
+                    with self.assertRaisesRegex(
+                        runner.RunnerError, "COVERAGE_SOURCE_MAPPING_INVALID"
+                    ):
+                        runner.project_stateless_collector(context, raw, root / "projected.xml")
+
+    def test_stateless_collector_trx_deployment_resolves_two_copy_layout(self):
+        with TemporaryDirectory() as temporary_directory:
+            results = Path(temporary_directory)
+            trx = runner.ElementTree.fromstring(
+                '<TestRun><TestSettings><Deployment runDeploymentRoot="deployment"/>'
+                "</TestSettings></TestRun>"
+            )
+            deployment_copy = results / "deployment/In/HOST/attached.cobertura.xml"
+            attachment_source = results / "1234/attached.cobertura.xml"
+            for path in (deployment_copy, attachment_source):
+                path.parent.mkdir(parents=True)
+                path.write_text("<coverage/>", encoding="utf-8")
+            self.assertEqual(
+                runner.resolve_collector_attachment(results, trx, "HOST\\attached.cobertura.xml"),
+                deployment_copy,
+            )
+            for href in ("../1234/attached.cobertura.xml", "HOST/../attached.cobertura.xml"):
+                with self.assertRaisesRegex(runner.RunnerError, "COVERAGE_REPORT_INVALID"):
+                    runner.resolve_collector_attachment(results, trx, href)
+
+    def test_stateless_collector_failed_cleanup_keeps_loop_alive_until_failed_owner_closes(self):
+        if runner.os.name != "nt":
+            self.skipTest("Windows Job Object ownership only")
+        sys.path.insert(0, str(RUNNER_PATH.parents[1] / "src"))
+        owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
+
+        class Owner:
+            fatal_error = None
+            closed = False
+
+            def __init__(self):
+                self.stdout = asyncio.StreamReader()
+                self.stdout.feed_eof()
+                self.stderr = asyncio.StreamReader()
+                self.stderr.feed_eof()
+                self.close_entered = asyncio.Event()
+                self.release_close = asyncio.Event()
+
+            def __getattr__(self, name):
+                raise AssertionError(f"collector bypassed owner interface: {name}")
+
+            async def wait_root(self):
+                return 0
+
+            async def _join_drain(self, _policy):
+                return SimpleNamespace(
+                    status=owner_module.DrainStatus.FAILED, forced=False, active_processes=0
+                )
+
+            def drain_snapshot(self, receipt):
+                return {
+                    "status": receipt.status.value,
+                    "forced": receipt.forced,
+                    "root_was_forced": False,
+                    "active_processes": 0,
+                    "total_processes": 2,
+                    "birth_notifications": 2,
+                    "exit_notifications": 1,
+                    "unverified_membership": False,
+                    "root_birth_seen": True,
+                    "live_members_without_handle": 0,
+                    "retained_exact_handles": 1,
+                    "signaled_exact_handles": 1,
+                    "handle_probe_failed": False,
+                    "failure_stage": "drain",
+                    "winerror": None,
+                }
+
+            async def aclose(self):
+                self.close_entered.set()
+                await self.release_close.wait()
+                self.closed = True
+                return await self._join_drain(None)
+
+        async def exercise():
+            owner = Owner()
+            with patch.object(owner_module.WindowsOwnedProcess, "launch", return_value=owner):
+                caller = asyncio.create_task(
+                    runner._run_owned_vstest(["collector"], RUNNER_PATH.parents[1])
+                )
+                await asyncio.wait_for(owner.close_entered.wait(), 2)
+                for _ in range(2):
+                    caller.cancel()
+                    await asyncio.sleep(0)
+                    self.assertFalse(caller.done())
+                    self.assertFalse(owner.closed)
+                owner.release_close.set()
+                with self.assertRaisesRegex(
+                    runner.RunnerError, "COVERAGE_PROCESS_TREE_NOT_DRAINED"
+                ):
+                    await asyncio.wait_for(caller, 2)
+                self.assertTrue(owner.closed)
+
+        asyncio.run(exercise())
+
+    def test_stateless_collector_lifetime_reconciliation_failure_keeps_first_owner_evidence(self):
+        if runner.os.name != "nt":
+            self.skipTest("Windows Job Object ownership only")
+        sys.path.insert(0, str(RUNNER_PATH.parents[1] / "src"))
+        owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
+        secret_path = r"C:\private\scan-token\test.dll"
+
+        class Owner:
+            fatal_error = None
+            closed = False
+
+            def __init__(self):
+                self.births = 2
+                self.close_calls = 0
+                self.stdout = asyncio.StreamReader()
+                self.stdout.feed_eof()
+                self.stderr = asyncio.StreamReader()
+                self.stderr.feed_eof()
+                self.secret_path = secret_path
+
+            async def wait_root(self):
+                return 0
+
+            async def _join_drain(self, _policy):
+                self.drain_calls = getattr(self, "drain_calls", 0) + 1
+                if self.drain_calls > 1:
+                    self.births = 0
+                return SimpleNamespace(
+                    status=owner_module.DrainStatus.FAILED,
+                    forced=True,
+                    active_processes=0,
+                )
+
+            def drain_snapshot(self, receipt):
+                return {
+                    "status": receipt.status.value,
+                    "forced": receipt.forced,
+                    "root_was_forced": False,
+                    "active_processes": receipt.active_processes,
+                    "total_processes": 3,
+                    "birth_notifications": self.births,
+                    "exit_notifications": self.births,
+                    "unverified_membership": False,
+                    "root_birth_seen": True,
+                    "live_members_without_handle": 0,
+                    "retained_exact_handles": 2,
+                    "signaled_exact_handles": 2,
+                    "handle_probe_failed": False,
+                    "failure_stage": "drain",
+                    "winerror": None,
+                }
+
+            async def aclose(self):
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    raise RuntimeError("later cleanup failure")
+                self.closed = True
+                return SimpleNamespace(status=owner_module.DrainStatus.FAILED, active_processes=0)
+
+        with (
+            patch.object(
+                owner_module.WindowsOwnedProcess, "launch", side_effect=lambda **_: Owner()
+            ),
+        ):
+            with self.assertRaises(runner.RunnerError) as raised:
+                asyncio.run(runner._run_owned_vstest(["collector"], RUNNER_PATH.parents[1]))
+        message = str(raised.exception)
+        self.assertIn("COVERAGE_PROCESS_TREE_NOT_DRAINED", message)
+        self.assertNotIn("later cleanup failure", message)
+        diagnostics = json.loads(message.split("owner_drain=", 1)[1])
+        self.assertEqual(diagnostics["invariant"], "lifetime_accounting_mismatch")
+        self.assertEqual(diagnostics["first"]["status"], "failed")
+        self.assertEqual(diagnostics["first"]["total_processes"], 3)
+        self.assertEqual(diagnostics["first"]["birth_notifications"], 2)
+        self.assertEqual(diagnostics["first"]["exit_notifications"], 2)
+        self.assertEqual(diagnostics["first"]["active_processes"], 0)
+        self.assertEqual(diagnostics["first"]["retained_exact_handles"], 2)
+        self.assertEqual(diagnostics["first"]["signaled_exact_handles"], 2)
+        self.assertEqual(diagnostics["first"]["failure_stage"], "drain")
+
+        class ActiveOwner(Owner):
+            async def _join_drain(self, _policy):
+                return SimpleNamespace(
+                    status=owner_module.DrainStatus.TIMED_OUT, forced=True, active_processes=1
+                )
+
+        with (
+            patch.object(
+                owner_module.WindowsOwnedProcess, "launch", side_effect=lambda **_: ActiveOwner()
+            ),
+        ):
+            with self.assertRaises(runner.RunnerError) as active:
+                asyncio.run(runner._run_owned_vstest(["collector"], RUNNER_PATH.parents[1]))
+        live_diagnostic = json.loads(str(active.exception).split("owner_drain=", 1)[1])
+        self.assertEqual(live_diagnostic["invariant"], "active_processes_nonzero")
+        self.assertEqual(live_diagnostic["first"]["active_processes"], 1)
+        self.assertNotIn(secret_path, message)
+        self.assertTrue(diagnostics["first"]["forced"])
+        self.assertFalse(diagnostics["first"]["root_was_forced"])
+        self.assertIsNone(diagnostics["first"]["winerror"])
+        with patch.object(
+            runner.subprocess,
+            "run",
+            return_value=SimpleNamespace(
+                returncode=1,
+                stdout=f"PROJECT_RELEASE_PROTOCOL_BLOCKED: {message}\n",
+            ),
+        ):
+            with self.assertRaises(runner.RunnerError) as producer:
+                runner.run_process(
+                    ["coverage-producer"],
+                    cwd=RUNNER_PATH.parents[1],
+                    environment={},
+                    secrets=(),
+                    label="Coverage producer",
+                )
+        self.assertIn("lifetime_accounting_mismatch", str(producer.exception))
+        self.assertNotIn(secret_path, str(producer.exception))
+
+        for key, value in (("winerror", secret_path), ("root_pid", 4242)):
+            with self.subTest(injected=key):
+                forged = deepcopy(diagnostics)
+                forged["first"][key] = value
+                output = (
+                    "PROJECT_RELEASE_PROTOCOL_BLOCKED: COVERAGE_PROCESS_TREE_NOT_DRAINED: "
+                    f"collector Job failed; owner_drain={json.dumps(forged)}\n"
+                )
+                with patch.object(
+                    runner.subprocess,
+                    "run",
+                    return_value=SimpleNamespace(returncode=1, stdout=output),
+                ):
+                    with self.assertRaises(runner.RunnerError) as refused:
+                        runner.run_process(
+                            ["coverage-producer"],
+                            cwd=RUNNER_PATH.parents[1],
+                            environment={},
+                            secrets=(secret_path,),
+                            label="Coverage producer",
+                        )
+                self.assertEqual(
+                    str(refused.exception), "Coverage producer failed with exit code 1."
+                )
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            claimed = root / ".tmp/sonarqube-coverage/claimed"
+            claimed.mkdir(parents=True)
+            evidence = claimed / "coverage-run.json"
+            evidence.write_text("retained", encoding="utf-8")
+            events: list[str] = []
+            receipts: list[dict[str, Any]] = []
+            with self.assertRaises(runner.RunnerError):
+                self._transaction_events(
+                    root,
+                    events,
+                    failing_step="produce",
+                    producer_error=producer.exception,
+                    real_cleanup=True,
+                    receipts=receipts,
+                )
+            self.assertEqual(evidence.read_text(encoding="utf-8"), "retained")
+            self._assert_unproven_producer_receipt(root, receipts[-1])
+        self.assertNotIn("end", events)
+        blocked = receipts[-1]
+        self.assertEqual(blocked["outcome"], "BLOCKED")
+        self.assertEqual(blocked["failure"]["code"], "COVERAGE_PROCESS_TREE_NOT_DRAINED")
+        self.assertEqual(blocked["cleanup"]["status"], "FAILED")
+        self.assertFalse(blocked["cleanup"]["producer_terminal"])
+        self.assertEqual(blocked["cleanup"]["claimed_root"], ".tmp/sonarqube-coverage/claimed")
+        self.assertIn("lifetime_accounting_mismatch", blocked["failure"]["safe_message"])
+        self.assertNotIn(secret_path, json.dumps(blocked))
+
+    def test_stateless_collector_zero_status_fatal_cli_retains_failed_producer_claim(self):
+        private_detail = "private-collector-fatal-detail"
+        environment = runner.scrub_sonar_environment(dict(runner.os.environ))
+        for exit_code in (0, None):
+            with self.subTest(exit_code=exit_code), TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                claimed = root / ".tmp/sonarqube-coverage/claimed"
+                claimed.mkdir(parents=True)
+                evidence = claimed / "coverage-run.json"
+                evidence.write_text("retained", encoding="utf-8")
+                code = (
+                    "import importlib.util, sys\n"
+                    f"spec = importlib.util.spec_from_file_location('collector_cli_probe', {str(RUNNER_PATH)!r})\n"
+                    "module = importlib.util.module_from_spec(spec)\n"
+                    "sys.modules[spec.name] = module\n"
+                    "spec.loader.exec_module(module)\n"
+                    f"fatal = SystemExit({exit_code!r})\n"
+                    f"fatal.args = ({private_detail!r},)\n"
+                    "def collector(*paths):\n"
+                    "    raise fatal\n"
+                    "module.produce_stateless_collector = collector\n"
+                    "raise SystemExit(module.main(['collector-stateless', 'repo', 'project', 'output', 'include']))\n"
+                )
+                command = [sys.executable, "-c", code]
+                completed = runner.subprocess.run(
+                    command,
+                    cwd=RUNNER_PATH.parents[1],
+                    env=environment,
+                    stdout=runner.subprocess.PIPE,
+                    stderr=runner.subprocess.STDOUT,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                self.assertNotEqual(completed.returncode, 0, completed.stdout)
+                self.assertIn(
+                    "PROJECT_RELEASE_PROTOCOL_BLOCKED: COVERAGE_PROCESS_TREE_NOT_DRAINED:",
+                    completed.stdout,
+                )
+                self.assertNotIn(private_detail, completed.stdout)
+                with patch.object(runner.subprocess, "run", return_value=completed):
+                    with self.assertRaises(runner.RunnerError) as producer:
+                        runner.run_process(
+                            ["coverage-producer"],
+                            cwd=root,
+                            environment=environment,
+                            secrets=(),
+                            label="Coverage producer",
+                        )
+                terminals, receipts, events = [], [], []
+                with self.assertRaises(runner.RunnerError):
+                    self._transaction_events(
+                        root,
+                        events,
+                        producer_error=producer.exception,
+                        producer_terminals=terminals,
+                        real_cleanup=True,
+                        receipts=receipts,
+                    )
+                self.assertEqual(terminals, [False])
+                self.assertEqual(evidence.read_text(encoding="utf-8"), "retained")
+                self.assertNotIn("normalize", events)
+                self.assertNotIn("end", events)
+                blocked = receipts[-1]
+                self.assertEqual(blocked["outcome"], "BLOCKED")
+                self.assertEqual(blocked["failure"]["code"], "COVERAGE_PROCESS_TREE_NOT_DRAINED")
+                self.assertEqual(blocked["cleanup"]["status"], "FAILED")
+                self.assertFalse(blocked["cleanup"]["producer_terminal"])
+                self.assertEqual(blocked["cleanup"]["removed_paths"], [])
+                self.assertNotIn(private_detail, json.dumps(blocked))
+                self._assert_unproven_producer_receipt(root, blocked)
+
+    def test_runner_cli_help_remains_successful(self):
+        completed = runner.subprocess.run(
+            [sys.executable, str(RUNNER_PATH), "--help"],
+            cwd=RUNNER_PATH.parents[1],
+            env=runner.scrub_sonar_environment(dict(runner.os.environ)),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertNotIn("PROJECT_RELEASE_PROTOCOL_BLOCKED", completed.stderr)
+
+    def test_stateless_collector_direct_capture_returns_only_after_owner_close(self):
+        if runner.os.name != "nt":
+            self.skipTest("Windows Job Object ownership only")
+        sys.path.insert(0, str(RUNNER_PATH.parents[1] / "src"))
+        owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
+
+        class Owner:
+            fatal_error = None
+
+            def __init__(self, late_history=False):
+                self.late_history = late_history
+                self.total = 1
+                self.final_snapshot = None
+                self.grace_receipt = None
+                self.close_calls = 0
+                self.stdout = asyncio.StreamReader()
+                self.stdout.feed_data(b"collector stdout\n")
+                self.stdout.feed_eof()
+                self.stderr = asyncio.StreamReader()
+                self.stderr.feed_data(b"collector stderr\n")
+                self.stderr.feed_eof()
+                self.close_entered = asyncio.Event()
+                self.resume_close = asyncio.Event()
+                self.closed = False
+
+            async def wait_root(self):
+                return 0 if self.late_history else 7
+
+            async def _join_drain(self, _policy):
+                self.grace_receipt = SimpleNamespace(
+                    status=owner_module.DrainStatus.DRAINED, forced=False, active_processes=0
+                )
+                return self.grace_receipt
+
+            def drain_snapshot(self, receipt):
+                if self.final_snapshot is not None:
+                    return dict(self.final_snapshot)
+                return {
+                    "status": receipt.status.value,
+                    "forced": receipt.forced,
+                    "root_was_forced": False,
+                    "active_processes": receipt.active_processes,
+                    "total_processes": self.total,
+                    "birth_notifications": 1,
+                    "exit_notifications": 1,
+                    "unverified_membership": False,
+                    "root_birth_seen": True,
+                    "live_members_without_handle": 0,
+                    "retained_exact_handles": 1,
+                    "signaled_exact_handles": 1,
+                    "handle_probe_failed": False,
+                    "failure_stage": "drain" if self.late_history and self.closed else None,
+                    "winerror": None,
+                }
+
+            async def aclose(self):
+                self.close_calls += 1
+                self.close_entered.set()
+                await self.resume_close.wait()
+                self.closed = True
+                if self.late_history:
+                    self.total += 1
+                    receipt = SimpleNamespace(
+                        status=owner_module.DrainStatus.FAILED, forced=False, active_processes=0
+                    )
+                    self.final_snapshot = self.drain_snapshot(receipt)
+                    return receipt
+                return self.grace_receipt
+
+        async def exercise(cancel, late_history=False):
+            owner = Owner(late_history)
+            stdout, stderr = StringIO(), StringIO()
+            error = None
+
+            async def launch(*, capture_process_handles, env, **_kwargs):
+                self.assertTrue(capture_process_handles)
+                self.assertFalse(any(runner.is_sonar_environment_name(name) for name in env))
+                return owner
+
+            with (
+                patch.dict(runner.os.environ, {"SONAR_TOKEN": "not-for-the-child"}),
+                patch.object(owner_module.WindowsOwnedProcess, "launch", launch),
+                patch.object(runner.sys, "stdout", stdout),
+                patch.object(runner.sys, "stderr", stderr),
+            ):
+                task = asyncio.create_task(
+                    runner._run_owned_vstest(["collector"], RUNNER_PATH.parents[1])
+                )
+                try:
+                    await asyncio.wait_for(owner.close_entered.wait(), 2)
+                    self.assertFalse(task.done(), "collector returned before owner close completed")
+                    self.assertIs(owner.grace_receipt.status, owner_module.DrainStatus.DRAINED)
+                    self.assertFalse(owner.grace_receipt.forced)
+                    self.assertEqual(owner.grace_receipt.active_processes, 0)
+                    self.assertEqual(owner.total, 1)
+                    if cancel:
+                        task.cancel()
+                        await asyncio.sleep(0)
+                        self.assertFalse(task.done(), "cleanup cancellation escaped its join")
+                    owner.resume_close.set()
+                    if cancel:
+                        with self.assertRaises(asyncio.CancelledError):
+                            await asyncio.wait_for(task, 2)
+                    elif late_history:
+                        with self.assertRaisesRegex(
+                            runner.RunnerError, "COVERAGE_PROCESS_TREE_NOT_DRAINED"
+                        ) as raised:
+                            await asyncio.wait_for(task, 2)
+                        error = raised.exception
+                    else:
+                        self.assertEqual(await asyncio.wait_for(task, 2), 7)
+                finally:
+                    owner.resume_close.set()
+                    await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 2)
+                    self.assertTrue(owner.closed)
+                    self.assertEqual(owner.close_calls, 1)
+                    self.assertTrue(owner.stdout.at_eof())
+                    self.assertTrue(owner.stderr.at_eof())
+                    self.assertEqual(stdout.getvalue(), "collector stdout\n")
+                    self.assertEqual(stderr.getvalue(), "collector stderr\n")
+            return owner, error
+
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel):
+                asyncio.run(exercise(cancel))
+
+        owner, error = asyncio.run(exercise(False, late_history=True))
+        diagnostics = json.loads(str(error).split("owner_drain=", 1)[1])
+        self.assertEqual(diagnostics["invariant"], "lifetime_accounting_mismatch")
+        self.assertEqual(diagnostics["first"], owner.final_snapshot)
+        self.assertEqual(diagnostics["first"]["status"], "failed")
+        self.assertEqual(diagnostics["first"]["total_processes"], 2)
+        self.assertEqual(diagnostics["first"]["retained_exact_handles"], 1)
+        self.assertEqual(diagnostics["first"]["signaled_exact_handles"], 1)
+        self.assertEqual(diagnostics["first"]["active_processes"], 0)
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            claimed = root / ".tmp/sonarqube-coverage/claimed"
+            claimed.mkdir(parents=True)
+            evidence = claimed / "coverage-run.json"
+            evidence.write_text("retained", encoding="utf-8")
+            events, receipts, terminals = [], [], []
+            with self.assertRaises(runner.RunnerError):
+                self._transaction_events(
+                    root,
+                    events,
+                    producer_error=error,
+                    producer_terminals=terminals,
+                    real_cleanup=True,
+                    receipts=receipts,
+                )
+            self.assertEqual(terminals, [False])
+            self.assertEqual(evidence.read_text(encoding="utf-8"), "retained")
+            self.assertNotIn("normalize", events)
+            self.assertNotIn("end", events)
+            blocked = receipts[-1]
+            self.assertEqual(blocked["failure"]["code"], "COVERAGE_PROCESS_TREE_NOT_DRAINED")
+            self.assertEqual(blocked["cleanup"]["status"], "FAILED")
+            self.assertFalse(blocked["cleanup"]["producer_terminal"])
+            self.assertEqual(blocked["cleanup"]["removed_paths"], [])
+            self._assert_unproven_producer_receipt(root, blocked)
+
+    def test_stateless_collector_cancellation_preserves_cancelled_error(self):
+        if runner.os.name != "nt":
+            self.skipTest("Windows Job Object ownership only")
+        sys.path.insert(0, str(RUNNER_PATH.parents[1] / "src"))
+        owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
+
+        class Owner:
+            fatal_error = None
+            closed = False
+
+            def __init__(self):
+                self.stdout = asyncio.StreamReader()
+                self.stdout.feed_eof()
+                self.stderr = asyncio.StreamReader()
+                self.stderr.feed_eof()
+                self.entered = asyncio.Event()
+
+            async def wait_root(self):
+                self.entered.set()
+                await asyncio.Event().wait()
+
+            async def _join_drain(self, _policy):
+                return SimpleNamespace(status=owner_module.DrainStatus.DRAINED, active_processes=0)
+
+            async def aclose(self):
+                cleanup_calls.append(True)
+                self.closed = True
+                return SimpleNamespace(status=owner_module.DrainStatus.DRAINED, active_processes=0)
+
+        cleanup_calls = []
+
+        async def exercise():
+            owner = Owner()
+            with patch.object(owner_module.WindowsOwnedProcess, "launch", return_value=owner):
+                task = asyncio.create_task(
+                    runner._run_owned_vstest(["collector"], RUNNER_PATH.parents[1])
+                )
+                await owner.entered.wait()
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, 2)
+
+        asyncio.run(exercise())
+        self.assertEqual(cleanup_calls, [True])
+
+    def test_stateless_collector_drained_cleanup_preserves_original_failure_priority(self):
+        if runner.os.name != "nt":
+            self.skipTest("Windows Job Object ownership only")
+        sys.path.insert(0, str(RUNNER_PATH.parents[1] / "src"))
+        owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
+
+        class Owner:
+            fatal_error = None
+            closed = False
+
+            def __init__(self, wait_error, close_error):
+                self.wait_error = wait_error
+                self.close_error = close_error
+                self.close_calls = 0
+                self.force_calls = 0
+                self.stdout = asyncio.StreamReader()
+                self.stdout.feed_eof()
+                self.stderr = asyncio.StreamReader()
+                self.stderr.feed_eof()
+
+            async def wait_root(self):
+                raise self.wait_error
+
+            async def _join_drain(self, _policy):
+                self.force_calls += 1
+                return SimpleNamespace(status=owner_module.DrainStatus.DRAINED, active_processes=0)
+
+            async def aclose(self):
+                self.close_calls += 1
+                if self.close_error is not None and self.close_calls == 1:
+                    raise self.close_error
+                self.closed = True
+                return SimpleNamespace(status=owner_module.DrainStatus.DRAINED, active_processes=0)
+
+        for wait_error, close_error in (
+            (asyncio.CancelledError(), None),
+            (TimeoutError(), None),
+            (asyncio.CancelledError(), RuntimeError("owned close failure")),
+            (TimeoutError(), RuntimeError("owned close failure")),
+        ):
+            with self.subTest(wait=type(wait_error).__name__, close=close_error is not None):
+
+                async def exercise():
+                    owner = Owner(wait_error, close_error)
+                    with patch.object(
+                        owner_module.WindowsOwnedProcess, "launch", return_value=owner
+                    ):
+                        with self.assertRaises(type(close_error or wait_error)) as raised:
+                            await runner._run_owned_vstest(["collector"], RUNNER_PATH.parents[1])
+                    return owner, raised.exception
+
+                owner, observed = asyncio.run(exercise())
+                self.assertIs(observed, close_error or wait_error)
+                self.assertEqual(owner.force_calls, 1)
+                self.assertEqual(owner.close_calls, 2 if close_error else 1)
+
+    def test_stateless_collector_timeout_drains_owned_descendant(self):
+        if runner.os.name != "nt":
+            self.skipTest("Windows Job Object ownership only")
+        import _winapi
+        import psutil
+
+        sys.path.insert(0, str(RUNNER_PATH.parents[1] / "src"))
+        owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
+        original_launch = owner_module.WindowsOwnedProcess.launch
+        original_force = owner_module.WindowsOwnedProcess._join_drain
+
+        for synchronize in (False, True):
+            with self.subTest(readiness=synchronize), TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                pid_file = root / "descendant.pid"
+                startup_gate = root / "startup.release"
+                child = root / "child.py"
+                child.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+                parent = root / "parent.py"
+                parent.write_text(
+                    "import subprocess, sys, time\n"
+                    "from pathlib import Path\n"
+                    "print('starting', flush=True)\n"
+                    f"while not Path({str(startup_gate)!r}).is_file(): time.sleep(0.01)\n"
+                    f"child = subprocess.Popen([sys.executable, {str(child)!r}], creationflags=0)\n"
+                    f"Path({str(pid_file)!r}).write_text(str(child.pid), encoding='utf-8')\n"
+                    "print('ready', flush=True)\n"
+                    "time.sleep(30)\n",
+                    encoding="utf-8",
+                )
+                identity = {}
+                receipts = []
+
+                async def ready_launch(**kwargs):
+                    owner = await original_launch(**kwargs)
+                    identity["owner"] = owner
+                    try:
+                        self.assertEqual(
+                            (await asyncio.wait_for(owner.stdout.readline(), 10)).strip(),
+                            b"starting",
+                        )
+                        # Job admission is not descendant readiness; hold startup past expiry
+                        # or release it and observe the spawn before starting the same 2s wait.
+                        if synchronize:
+                            startup_gate.touch()
+                            self.assertEqual(
+                                (await asyncio.wait_for(owner.stdout.readline(), 10)).strip(),
+                                b"ready",
+                            )
+                            self.assertTrue(pid_file.is_file())
+                            identity["pid"] = int(pid_file.read_text(encoding="utf-8"))
+                            identity["handle"] = _winapi.OpenProcess(
+                                0x101001, False, identity["pid"]
+                            )
+                            self.assertTrue(
+                                owner._api.is_process_in_job(identity["handle"], owner._job_handle)
+                            )
+                            self.assertFalse(owner._api.wait_for_process(identity["handle"], 0))
+                            self.assertTrue(psutil.pid_exists(identity["pid"]))
+                        self.assertTrue(
+                            owner._api.is_process_in_job(owner._process_handle, owner._job_handle)
+                        )
+                        self.assertFalse(owner._api.wait_for_process(owner._process_handle, 0))
+                        return owner
+                    except BaseException:
+                        await owner.aclose()
+                        raise
+
+                async def record_force(owner, policy):
+                    receipt = await original_force(owner, policy)
+                    receipts.append(owner.drain_snapshot(receipt))
+                    return receipt
+
+                async def exercise():
+                    try:
+                        with (
+                            patch.object(owner_module.WindowsOwnedProcess, "launch", ready_launch),
+                            patch.object(
+                                owner_module.WindowsOwnedProcess, "_join_drain", record_force
+                            ),
+                            self.assertRaises(TimeoutError) as raised,
+                        ):
+                            await runner._run_owned_vstest(
+                                [sys.executable, str(parent)],
+                                RUNNER_PATH.parents[1],
+                                timeout_seconds=2,
+                            )
+                        self.assertIs(type(raised.exception), TimeoutError)
+                    finally:
+                        if "owner" in identity:
+                            closed = await identity["owner"].aclose()
+                            self.assertIs(closed.status, owner_module.DrainStatus.DRAINED)
+
+                try:
+                    asyncio.run(exercise())
+                    if synchronize:
+                        self.assertTrue(pid_file.is_file())
+                        self.assertEqual(_winapi.WaitForSingleObject(identity["handle"], 0), 0)
+                        self.assertFalse(psutil.pid_exists(identity["pid"]))
+                    else:
+                        self.assertFalse(pid_file.is_file(), "startup was held until timeout")
+                    self.assertEqual(len(receipts), 1)
+                    facts = receipts[0]
+                    self.assertEqual(facts["status"], "drained", facts)
+                    self.assertTrue(facts["forced"], facts)
+                    self.assertEqual(facts["active_processes"], 0, facts)
+                    self.assertGreaterEqual(
+                        facts["total_processes"], 2 if synchronize else 1, facts
+                    )
+                    self.assertEqual(
+                        facts["total_processes"], facts["retained_exact_handles"], facts
+                    )
+                    self.assertEqual(
+                        facts["retained_exact_handles"], facts["signaled_exact_handles"], facts
+                    )
+                    self.assertTrue(facts["root_birth_seen"], facts)
+                    self.assertFalse(facts["unverified_membership"], facts)
+                    self.assertFalse(facts["handle_probe_failed"], facts)
+                    self.assertEqual(facts["live_members_without_handle"], 0, facts)
+                    print(
+                        f"collector timeout readiness={synchronize} root={identity['owner'].pid} "
+                        f"child={identity.get('pid')} marker={pid_file.is_file()} "
+                        f"drain={json.dumps(facts, sort_keys=True)}"
+                    )
+                finally:
+                    if "handle" in identity:
+                        _winapi.CloseHandle(identity["handle"])
+
+    def test_stateless_collector_interruption_drains_owned_descendant(self):
+        if runner.os.name != "nt":
+            self.skipTest("Windows Job Object ownership only")
+        import _winapi
+        import psutil
+
+        sys.path.insert(0, str(RUNNER_PATH.parents[1] / "src"))
+        owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
+
+        receipts = []
+        membership = []
+        owners = []
+        original_launch = owner_module.WindowsOwnedProcess.launch
+
+        async def record_launch(**kwargs):
+            owner = await original_launch(**kwargs)
+            owners.append(owner)
+            identity["root_handle"] = _winapi.OpenProcess(0x101001, False, owner.pid)
+            self.assertEqual(
+                (await asyncio.wait_for(owner.stdout.readline(), 10)).strip(), b"starting"
+            )
+            loop = asyncio.get_running_loop()
+            held_since = loop.time()
+            await asyncio.sleep(2)
+            self.assertFalse(pid_file.is_file(), "startup is still held past the old 2s assumption")
+            identity["startup_hold_seconds"] = loop.time() - held_since
+            startup_gate.touch()
+            readiness = (await asyncio.wait_for(owner.stdout.readline(), 10)).split()
+            self.assertEqual(len(readiness), 2)
+            self.assertEqual(readiness[0], b"ready")
+            identity["interpreter_pid"] = int(readiness[1])
+            identity["interpreter_handle"] = _winapi.OpenProcess(
+                0x101001, False, identity["interpreter_pid"]
+            )
+            self.assertTrue(pid_file.is_file())
+            identity["marker_before_cancel"] = pid_file.read_text(encoding="utf-8")
+            identity["pid"] = int(identity["marker_before_cancel"])
+            identity["process"] = psutil.Process(identity["pid"])
+            identity["born"] = identity["process"].create_time()
+            identity["before_status"] = identity["process"].status()
+            identity["root_born"] = psutil.Process(owner.pid).create_time()
+            identity["child_parent"] = identity["process"].ppid()
+            identity["handle"] = _winapi.OpenProcess(0x101001, False, identity["pid"])
+            self.assertEqual(psutil.Process(identity["pid"]).create_time(), identity["born"])
+            self.assertEqual(identity["child_parent"], identity["interpreter_pid"])
+            identity["known_pids"] = {owner.pid, identity["interpreter_pid"], identity["pid"]}
+            for key in ("root_handle", "interpreter_handle", "handle"):
+                self.assertTrue(owner._api.is_process_in_job(identity[key], owner._job_handle))
+                self.assertEqual(_winapi.WaitForSingleObject(identity[key], 0), 258)
+            snapshot("before_cancel")
+            print(
+                f"collector ready root={owner.pid} interpreter={identity['interpreter_pid']} "
+                f"child={identity['pid']} startup_hold_seconds={identity['startup_hold_seconds']:.3f} "
+                f"marker_before_cancel={identity['marker_before_cancel']} "
+                f"exact_processes_live={len(identity['known_pids'])}"
+            )
+            loop.call_soon(asyncio.current_task().cancel)
+            return owner
+
+        def snapshot(label):
+            if "handle" not in identity:
+                return
+            owner = owners[0]
+            child_handle = identity["handle"]
+            membership.append(
+                (
+                    label,
+                    owner.pid,
+                    owner._api.is_process_in_job(owner._process_handle, owner._job_handle),
+                    owner._api.is_process_in_job(child_handle, owner._job_handle),
+                    owner._api.is_process_in_job(child_handle, 0),
+                    owner._query_active_processes(),
+                    owner._api.wait_for_process(child_handle, 0),
+                    owner._api.exit_code(child_handle),
+                    identity["process"].is_running(),
+                )
+            )
+
+        original_force = owner_module.WindowsOwnedProcess._join_drain
+        original_close = owner_module.WindowsOwnedProcess.aclose
+
+        async def record_force(owner, policy):
+            snapshot("before_force")
+            receipt = await original_force(owner, policy)
+            snapshot("after_force")
+            diagnostic = owner.drain_snapshot(receipt)
+            receipts.append(("force", diagnostic))
+            return receipt
+
+        async def record_close(owner):
+            snapshot("before_close")
+            receipt = await original_close(owner)
+            receipts.append(("close", owner.drain_snapshot(receipt)))
+            return receipt
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            pid_file = root / "descendant.pid"
+            startup_gate = root / "startup.release"
+            child = root / "child.py"
+            child.write_text("import time\ntime.sleep(40)\n", encoding="utf-8")
+            parent = root / "parent.py"
+            parent.write_text(
+                "import os, subprocess, sys, time\n"
+                "from pathlib import Path\n"
+                "print('starting', flush=True)\n"
+                f"while not Path({str(startup_gate)!r}).is_file(): time.sleep(0.01)\n"
+                f"child = subprocess.Popen([sys.executable, {str(child)!r}], creationflags=0)\n"
+                f"Path({str(pid_file)!r}).write_text(str(child.pid), encoding='utf-8')\n"
+                "print(f'ready {os.getpid()}', flush=True)\n"
+                "time.sleep(30)\n",
+                encoding="utf-8",
+            )
+
+            identity = {}
+
+            async def interrupt() -> None:
+                task = asyncio.create_task(
+                    runner._run_owned_vstest(
+                        [sys.executable, str(parent)],
+                        RUNNER_PATH.parents[1],
+                        timeout_seconds=30,
+                    )
+                )
+                try:
+                    with self.assertRaises(asyncio.CancelledError) as raised:
+                        await task
+                    self.assertIs(type(raised.exception), asyncio.CancelledError)
+                finally:
+                    first_failure = sys.exc_info()[1]
+                    if not task.done():
+                        task.cancel()
+                    outcome = (await asyncio.gather(task, return_exceptions=True))[0]
+                    try:
+                        if owners:
+                            closed = await original_close(owners[0])
+                            self.assertIs(closed.status, owner_module.DrainStatus.DRAINED)
+                            self.assertEqual(closed.active_processes, 0)
+                            self.assertTrue(owners[0]._closed)
+                            for key in ("root_handle", "interpreter_handle", "handle"):
+                                if key in identity:
+                                    self.assertEqual(
+                                        _winapi.WaitForSingleObject(identity[key], 0), 0
+                                    )
+                            print(
+                                "collector fixture joined before asyncio shutdown "
+                                f"root={owners[0].pid} interpreter={identity.get('interpreter_pid')} "
+                                f"marker={pid_file.is_file()} "
+                                f"drain={json.dumps(owners[0].drain_snapshot(closed), sort_keys=True)}"
+                            )
+                        if (
+                            isinstance(outcome, BaseException)
+                            and not isinstance(outcome, asyncio.CancelledError)
+                            and outcome is not first_failure
+                        ):
+                            raise outcome
+                    except BaseException as cleanup_error:
+                        if first_failure is None:
+                            raise
+                        if hasattr(first_failure, "add_note"):
+                            first_failure.add_note(f"fixture cleanup: {cleanup_error!r}")
+
+            try:
+                with (
+                    patch.object(owner_module.WindowsOwnedProcess, "launch", record_launch),
+                    patch.object(owner_module.WindowsOwnedProcess, "_join_drain", record_force),
+                    patch.object(owner_module.WindowsOwnedProcess, "aclose", record_close),
+                ):
+                    asyncio.run(interrupt())
+                self.assertEqual(
+                    pid_file.read_text(encoding="utf-8"), identity["marker_before_cancel"]
+                )
+                self.assertEqual([label for label, _ in receipts], ["force", "close"])
+                self.assertGreaterEqual(identity["startup_hold_seconds"], 2)
+                pid = identity["pid"]
+                original_child_alive = identity["process"].is_running()
+                try:
+                    process = psutil.Process(pid)
+                    observed = (process.create_time(), process.status(), process.is_running())
+                except psutil.NoSuchProcess:
+                    observed = None
+                self.assertEqual(
+                    [item[0] for item in membership],
+                    ["before_cancel", "before_force", "after_force", "before_close"],
+                )
+                self.assertTrue(all(item[2] for item in membership[:2]), membership)
+                self.assertTrue(all(item[3] for item in membership[:2]), membership)
+                self.assertFalse(membership[0][6], membership)
+                self.assertFalse(membership[1][6], membership)
+                self.assertTrue(membership[2][6], membership)
+                self.assertTrue(membership[3][6], membership)
+                for label, facts in receipts:
+                    self.assertEqual(facts["status"], "drained", (label, facts))
+                    self.assertTrue(facts["forced"], (label, facts))
+                    self.assertTrue(facts["root_was_forced"], (label, facts))
+                    self.assertEqual(facts["active_processes"], 0, (label, facts))
+                    self.assertGreaterEqual(
+                        facts["total_processes"], len(identity["known_pids"]), (label, facts)
+                    )
+                    self.assertEqual(
+                        facts["total_processes"], facts["retained_exact_handles"], (label, facts)
+                    )
+                    self.assertEqual(
+                        facts["retained_exact_handles"],
+                        facts["signaled_exact_handles"],
+                        (label, facts),
+                    )
+                    self.assertTrue(facts["root_birth_seen"], (label, facts))
+                    self.assertFalse(facts["unverified_membership"], (label, facts))
+                    self.assertFalse(facts["handle_probe_failed"], (label, facts))
+                    self.assertEqual(facts["live_members_without_handle"], 0, (label, facts))
+                self.assertFalse(
+                    original_child_alive,
+                    f"original child remains active: root={owners[0].pid} "
+                    f"root_born={identity['root_born']} child={pid} born={identity['born']} "
+                    f"ppid={identity['child_parent']} before={identity['before_status']} "
+                    f"after={observed} job={receipts} membership={membership}",
+                )
+            finally:
+                for key in ("handle", "interpreter_handle", "root_handle"):
+                    if key in identity:
+                        _winapi.CloseHandle(identity[key])
+
+    def test_stateless_collector_repeated_cancellation_joins_owned_close(self):
+        if runner.os.name != "nt":
+            self.skipTest("Windows Job Object ownership only")
+        sys.path.insert(0, str(RUNNER_PATH.parents[1] / "src"))
+        owner_module = importlib.import_module("netcoredbg_mcp.windows_process_owner")
+
+        class Owner:
+            fatal_error = None
+
+            def __init__(self):
+                self.stdout = asyncio.StreamReader()
+                self.stdout.feed_eof()
+                self.stderr = asyncio.StreamReader()
+                self.stderr.feed_eof()
+                self.wait_entered = asyncio.Event()
+                self.force_entered = asyncio.Event()
+                self.resume_force = asyncio.Event()
+                self.close_entered = asyncio.Event()
+                self.resume_close = asyncio.Event()
+                self.force_calls = 0
+                self.close_calls = 0
+                self.closed = False
+
+            async def wait_root(self):
+                self.wait_entered.set()
+                await asyncio.Event().wait()
+
+            async def _join_drain(self, _policy):
+                self.force_calls += 1
+                self.force_entered.set()
+                await self.resume_force.wait()
+                return SimpleNamespace(status=owner_module.DrainStatus.DRAINED, active_processes=0)
+
+            async def aclose(self):
+                self.close_calls += 1
+                self.close_entered.set()
+                await self.resume_close.wait()
+                self.closed = True
+                return SimpleNamespace(status=owner_module.DrainStatus.DRAINED, active_processes=0)
+
+        async def exercise():
+            owner = Owner()
+            with patch.object(owner_module.WindowsOwnedProcess, "launch", return_value=owner):
+                task = asyncio.create_task(
+                    runner._run_owned_vstest(["collector"], RUNNER_PATH.parents[1])
+                )
+                try:
+                    await asyncio.wait_for(owner.wait_entered.wait(), 2)
+                    task.cancel()
+                    await asyncio.wait_for(owner.force_entered.wait(), 2)
+                    task.cancel()
+                    await asyncio.sleep(0)
+                    self.assertFalse(task.done(), "second cancel escaped owned force")
+                    owner.resume_force.set()
+                    await asyncio.wait_for(owner.close_entered.wait(), 2)
+                    task.cancel()
+                    await asyncio.sleep(0)
+                    self.assertFalse(task.done(), "close cancellation lost the owner join")
+                    self.assertFalse(owner.closed)
+                    owner.resume_close.set()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await asyncio.wait_for(task, 2)
+                    self.assertTrue(owner.closed)
+                    self.assertEqual((owner.force_calls, owner.close_calls), (1, 1))
+                finally:
+                    owner.resume_force.set()
+                    owner.resume_close.set()
+                    await asyncio.gather(task, return_exceptions=True)
+
+        asyncio.run(exercise())
+
+    def test_stateless_collector_rejects_changed_test_pdb_before_accepting_attachment(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            project = root / runner.FIXED_COVERAGE_PROJECTS[3][1]
+            test_output = project.parent / "bin/Debug/net8.0"
+            production_output = root / "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0"
+            for directory, name in (
+                (test_output, "NetCoreDbg.Mcp.Stateless.Tests"),
+                (production_output, "NetCoreDbg.Mcp.Stateless"),
+            ):
+                directory.mkdir(parents=True)
+                for suffix in (".dll", ".pdb"):
+                    (directory / f"{name}{suffix}").write_bytes(b"before")
+            adapter = root / "microsoft.codecoverage/17.14.1/build/netstandard2.0"
+            adapter.mkdir(parents=True)
+            (adapter / "Microsoft.VisualStudio.TraceDataCollector.dll").write_bytes(b"collector")
+
+            async def mutate_binary(_command, _root):
+                (test_output / "NetCoreDbg.Mcp.Stateless.Tests.pdb").write_bytes(b"after")
+                return 0
+
+            with (
+                patch.dict(runner.os.environ, {"NUGET_PACKAGES": str(root)}),
+                patch.object(runner, "_run_owned_vstest", side_effect=mutate_binary),
+            ):
+                with self.assertRaisesRegex(
+                    runner.RunnerError, "COVERAGE_INSTRUMENTATION_NOT_RESTORED"
+                ):
+                    runner.produce_stateless_collector(
+                        root,
+                        project,
+                        root / "dotnet/inputs/stateless/coverage.cobertura.xml",
+                        production_output,
+                    )
+
+    def test_stateless_collector_never_unions_cross_provider_branch_ordinals(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            plan = self._plan(root)
+            for index, spec in enumerate(plan.dotnet_inputs):
+                source = (
+                    "host/NetCoreDbg.Mcp.Stateless/Program.cs"
+                    if spec.id in {"host", "stateless"}
+                    else f"host/Production{index}/Source.cs"
+                )
+                self._write_source(root, source)
+                report = self._absolute(spec.raw_cobertura_input)
+                report.parent.mkdir(parents=True)
+                report.write_text(self._cobertura([source]), encoding="utf-8")
+            with patch.object(runner, "is_tracked", return_value=True):
+                inputs = runner.validate_dotnet_cobertura_inputs(context, plan)
+            with self.assertRaisesRegex(runner.RunnerError, "cross-provider"):
+                runner.normalize_dotnet_cobertura(plan, inputs)
 
     def test_r11_private_dotnet_cobertura_inputs_require_safe_xml_sources_and_denominators(self):
         with TemporaryDirectory() as temporary_directory:
@@ -2830,6 +5794,130 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         line = parsed["facts"][0]["lines"][0]
         self.assertEqual((line["branches_covered"], line["branches_valid"]), (16, 17))
         self.assertEqual(line["conditions"], [])
+
+    def test_dotnet_cobertura_rejects_rounded_up_condition_percentage(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            source_path = "host/NetCoreDbg.Mcp.Host/Program.cs"
+            source = self._write_source(root, source_path)
+            report = root / "input.xml"
+            report.write_text(
+                self._cobertura(
+                    [source_path],
+                    branches_valid=1,
+                    line_xml=(
+                        '<line number="1" hits="1" branch="true" '
+                        'condition-coverage="100% (1/1)"><conditions>'
+                        '<condition number="0" type="jump" '
+                        'coverage="99.999999999999999999999999999999999999999999999%"/>'
+                        "</conditions></line>"
+                    ),
+                ),
+                encoding="utf-8",
+            )
+            spec = SimpleNamespace(
+                id="host",
+                project="host/NetCoreDbg.Mcp.Host.Tests/NetCoreDbg.Mcp.Host.Tests.csproj",
+                include_directory=None,
+            )
+            with patch.object(
+                runner, "is_tracked", side_effect=lambda _root, _env, path: path == source
+            ):
+                with self.assertRaisesRegex(runner.RunnerError, "COVERAGE_REPORT_INVALID"):
+                    runner.validate_dotnet_cobertura_input(context, spec, report)
+
+    def test_stateless_collector_class_summary_preserves_independent_same_line_branches(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            source = self._write_source(root, "host/NetCoreDbg.Mcp.Stateless/Program.cs")
+            raw = root / "first-party.xml"
+            projected = root / "projected.xml"
+
+            def branch(valid: int, identities: int) -> str:
+                conditions = "".join(
+                    f'<condition number="{index}" type="jump" coverage="0%"/>'
+                    for index in range(identities)
+                )
+                return (
+                    f'<line number="1" hits="0" branch="true" '
+                    f'condition-coverage="0% (0/{valid})"><conditions>{conditions}'
+                    "</conditions></line>"
+                )
+
+            raw.write_text(
+                "<coverage><packages><package><classes>"
+                f'<class name="NetCoreDbg.Mcp.Stateless.Program" filename="{source}">'
+                f'<methods><method name="lambda1"><lines>{branch(6, 3)}</lines></method>'
+                f'<method name="lambda2"><lines>{branch(2, 1)}</lines></method></methods>'
+                f"<lines>{branch(8, 4)}</lines></class>"
+                "</classes></package></packages></coverage>",
+                encoding="utf-8",
+            )
+            with patch.object(runner, "is_tracked", return_value=True):
+                parsed = runner.project_stateless_collector(context, raw, projected)
+            plan = self._plan(root)
+            spec = plan.dotnet_inputs[3]
+            isolated = replace(plan, dotnet_inputs=(spec,))
+            runner.normalize_dotnet_cobertura(
+                isolated, [runner._dotnet_input_evidence(isolated, spec, parsed)]
+            )
+            self.assertEqual((parsed["lines_valid"], parsed["branches_valid"]), (1, 8))
+            self.assertEqual(
+                runner.ElementTree.parse(isolated.dotnet_report).getroot().get("branches-valid"),
+                "8",
+            )
+            raw.write_text(
+                raw.read_text(encoding="utf-8").replace("0% (0/8)", "0% (0/7)"), encoding="utf-8"
+            )
+            with patch.object(runner, "is_tracked", return_value=True):
+                with self.assertRaisesRegex(
+                    runner.RunnerError, "class summary disagrees with methods"
+                ):
+                    runner.project_stateless_collector(context, raw, projected)
+
+    def test_stateless_collector_distinct_classes_same_line_keep_both_branch_sets(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self._context(root)
+            source = self._write_source(root, "bridge/Commands/ClickCommands.cs")
+            stateless = self._write_source(root, "host/NetCoreDbg.Mcp.Stateless/Program.cs")
+            branch = (
+                '<lines><line number="521" hits="0" branch="true" '
+                'condition-coverage="0% (0/2)"><conditions>'
+                '<condition number="0" type="jump" coverage="0%"/>'
+                "</conditions></line></lines>"
+            )
+            classes = "".join(
+                f'<class name="{name}" filename="{source}">{branch}</class>'
+                for name in (
+                    "FlaUIBridge.Commands.ClickCommands",
+                    "FlaUIBridge.Commands.ClickCommands.&lt;&gt;c__DisplayClass41_0",
+                )
+            )
+            classes += (
+                f'<class name="NetCoreDbg.Mcp.Stateless.Program" filename="{stateless}">'
+                '<lines><line number="1" hits="1"/></lines></class>'
+            )
+            raw = root / "collector.xml"
+            raw.write_text(
+                f"<coverage><packages><package><classes>{classes}</classes></package></packages></coverage>",
+                encoding="utf-8",
+            )
+            with patch.object(runner, "is_tracked", return_value=True):
+                parsed = runner.project_stateless_collector(context, raw, root / "projected.xml")
+            plan = self._plan(root)
+            spec = plan.dotnet_inputs[3]
+            isolated = replace(plan, dotnet_inputs=(spec,))
+            runner.normalize_dotnet_cobertura(
+                isolated, [runner._dotnet_input_evidence(isolated, spec, parsed)]
+            )
+            self.assertEqual(parsed["branches_valid"], 4)
+            self.assertEqual(
+                runner.ElementTree.parse(isolated.dotnet_report).getroot().get("branches-valid"),
+                "4",
+            )
 
     def test_r12_dotnet_normalization_is_deterministic_and_final_output_must_equal_input_union(
         self,
@@ -2969,18 +6057,39 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     self._transaction_events(Path(temporary_directory), events, failing_step)
                 self.assertNotIn("end", events)
 
-    def test_r13a_foreground_producer_failure_marks_terminal_before_cleanup(self):
+    def test_r13a_unproven_producer_failure_preserves_claimed_root(self):
         terminals: list[bool] = []
+        receipts: list[dict[str, Any]] = []
+        events: list[str] = []
         with TemporaryDirectory() as temporary_directory:
-            with self.assertRaisesRegex(runner.RunnerError, "injected produce failure"):
+            root = Path(temporary_directory)
+            claimed_root = root / ".tmp/sonarqube-coverage/claimed"
+            claimed_root.mkdir(parents=True)
+            generated_file = claimed_root / "coverage-run.json"
+            generated_file.write_text("evidence", encoding="utf-8")
+            with self.assertRaisesRegex(runner.RunnerError, "COVERAGE_PROCESS_TREE_NOT_DRAINED"):
                 self._transaction_events(
-                    Path(temporary_directory),
-                    [],
+                    root,
+                    events,
                     failing_step="produce",
+                    producer_error=runner.RunnerError(
+                        "COVERAGE_PROCESS_TREE_NOT_DRAINED: "
+                        "collector Job closed without verified drain"
+                    ),
                     producer_terminals=terminals,
+                    real_cleanup=True,
+                    receipts=receipts,
                 )
-
-        self.assertEqual(terminals, [True])
+            self.assertEqual(terminals, [False])
+            self.assertEqual(generated_file.read_text(encoding="utf-8"), "evidence")
+            self._assert_unproven_producer_receipt(root, receipts[-1])
+        self.assertNotIn("end", events)
+        blocked = receipts[-1]
+        self.assertEqual(blocked["outcome"], "BLOCKED")
+        self.assertEqual(blocked["failure"]["code"], "COVERAGE_PROCESS_TREE_NOT_DRAINED")
+        self.assertEqual(blocked["cleanup"]["claimed_root"], ".tmp/sonarqube-coverage/claimed")
+        self.assertEqual(blocked["cleanup"]["status"], "FAILED")
+        self.assertFalse(blocked["cleanup"]["producer_terminal"])
 
     def test_r13b_failure_after_venv_creation_runs_generated_cleanup(self):
         generated_cleanup_calls: list[str] = []
@@ -3116,10 +6225,10 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 return {
                     "component": {
                         "measures": [
-                            {"metric": "coverage", "value": "80"},
+                            {"metric": "coverage", "value": "80", "period": {"value": "0"}},
                             {"metric": "lines_to_cover", "value": "22"},
-                            {"metric": "new_coverage", "value": "79.5"},
-                            {"metric": "new_lines_to_cover", "value": "8"},
+                            {"metric": "new_coverage", "period": {"value": "79.5"}},
+                            {"metric": "new_lines_to_cover", "period": {"value": "8"}},
                         ]
                     }
                 }
@@ -3138,6 +6247,9 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         self.assertEqual(result["new_coverage_condition"]["status"], "ERROR")
         self.assertEqual(result["python_components"]["mapped_path_count"], 1)
         self.assertEqual(result["dotnet_components"]["covered_lines"], 9)
+        self.assertEqual(result["aggregate"]["coverage"], 80.0)
+        self.assertEqual(result["aggregate"]["new_coverage"], 79.5)
+        self.assertEqual(result["aggregate"]["new_lines_to_cover"], 8)
 
     def test_component_coverage_accepts_uncovered_and_empty_files_when_language_is_covered(self):
         expected_paths = [
@@ -3179,6 +6291,66 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         self.assertEqual(summary["lines_to_cover"], 15)
         self.assertEqual(summary["covered_lines"], 8)
         self.assertEqual(summary["branch_measure_path_count"], 1)
+
+    def test_component_coverage_aggregates_mapped_sources_across_pages(self):
+        expected_paths = [
+            "src/netcoredbg_mcp/uncovered.py",
+            "src/netcoredbg_mcp/covered.py",
+        ]
+        pages = {
+            "1": {
+                "paging": {"total": 3},
+                "components": [
+                    {
+                        "path": "unrelated/file.py",
+                        "measures": [
+                            {"metric": "lines_to_cover", "value": "100"},
+                            {"metric": "uncovered_lines", "value": "0"},
+                        ],
+                    },
+                    {
+                        "path": expected_paths[0],
+                        "measures": [
+                            {"metric": "lines_to_cover", "value": "5"},
+                            {"metric": "uncovered_lines", "value": "5"},
+                        ],
+                    },
+                ],
+            },
+            "2": {
+                "paging": {"total": 3},
+                "components": [
+                    {
+                        "path": expected_paths[1],
+                        "measures": [
+                            {"metric": "lines_to_cover", "value": "10"},
+                            {"metric": "uncovered_lines", "value": "2"},
+                            {"metric": "conditions_to_cover", "value": "4"},
+                        ],
+                    },
+                ],
+            },
+        }
+
+        def api_response(_host, _endpoint, parameters, _token):
+            return pages[parameters["p"]]
+
+        with patch.object(runner, "api_json", side_effect=api_response):
+            summary = runner._component_coverage_summary(
+                "https://sonar.example.test", "read-token", expected_paths
+            )
+
+        self.assertEqual(
+            (
+                summary["mapped_path_count"],
+                summary["lines_to_cover"],
+                summary["covered_lines"],
+                summary["branch_measure_path_count"],
+                summary["page_count"],
+                summary["complete"],
+            ),
+            (2, 15, 8, 1, 2, True),
+        )
 
     def test_wave3_inventory_is_create_new_and_hash_bound(self):
         with TemporaryDirectory() as temporary_directory:
@@ -3229,24 +6401,3 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                     {"blocking_count": 0, "items": []},
                     {"blocking_count": 0, "items": []},
                 )
-
-    def test_python_coverage_workload_uses_curated_non_live_suite(self):
-        script = (RUNNER_PATH.parents[1] / "build" / "coverage.sh").read_text(encoding="utf-8")
-
-        self.assertIn("python_test_paths=(", script)
-        for path in (
-            "tests/test_client.py",
-            "tests/test_session.py",
-            "tests/test_runtime_smoke_runner.py",
-            "tests/test_stealth_mode.py",
-            "tests/test_ui_evidence.py",
-        ):
-            self.assertIn(path, script)
-        for excluded in (
-            "tests/critical",
-            "tests/test_wpf_runtime_workflow_fixture.py",
-            "tests/test_windows_process_owner.py",
-            "tests/test_sonarqube_exact_head_runner.py",
-            "tests/test_stateless_preview_artifact.py",
-        ):
-            self.assertNotIn(excluded, script)

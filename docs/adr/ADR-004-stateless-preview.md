@@ -24,10 +24,16 @@ precedence and current parity behavior.
    enforcement. It does **not** select a root or import an MCP SDK.
 2. Define immutable `LegacySearchPolicy` and `PreviewSearchPolicy` values at
    the core seam. The former preserves current compatibility-host extension,
-   ordering, result, and enumeration-error behavior; the latter supplies the
-   strict A1 regular-file/final-target/no-partial/budget behavior. Thus the
-   algorithm has one owner while deliberately different public contracts do
-   not silently overwrite each other.
+   ordering, successful result, and enumeration-error behavior, with one bounded
+   native regex safety exception: each dynamic legacy regex match has an
+   approximate 100 ms ceiling, retaining a shorter positive inherited .NET
+   default. Expensive otherwise-valid matches may now abort the call through
+   the existing native `Error(ex.Message)` envelope without partial results;
+   this is not universal Python/native parity or a whole-search wall-clock
+   bound. Python-owned `search_source` and its `timeout_seconds` are unchanged.
+   The latter supplies the strict A1 regular-file/final-target/no-partial/budget
+   behavior. Thus the algorithm has one owner while deliberately different
+   public contracts do not silently overwrite each other.
 3. Keep `ProjectRootResolver` and all environment/client-root/CWD authority in
    the legacy host adapter. Add a preview-only `--project` parser/validator;
    it selects exactly one strict local root before the preview serves MCP.

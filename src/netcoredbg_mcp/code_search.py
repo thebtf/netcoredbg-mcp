@@ -410,8 +410,8 @@ def _normalize_extension(extension: str) -> str:
 
 def _compile_literal_reference_pattern(name: str) -> re.Pattern[str]:
     escaped_name = re.escape(name)
-    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
-        return re.compile(rf"(?<![A-Za-z0-9_]){escaped_name}(?![A-Za-z0-9_])")
+    if re.fullmatch(r"[A-Za-z_](?a:\w)*", name):
+        return re.compile(rf"(?<!(?a:\w)){escaped_name}(?!(?a:\w))")
     return re.compile(escaped_name)
 
 

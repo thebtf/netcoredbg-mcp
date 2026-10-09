@@ -199,10 +199,16 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         TimeSpan initializeTimeout,
         TimeSpan requestTimeout,
         TimeSpan stopTimeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ICollection<FixtureTranscriptEntry>? failedTranscript = null,
+        TimeProvider? startupTimeProvider = null,
+        Action? initializeResponseReady = null)
     {
-        Assert.True(configuration.EnableConfigurationDoneAfterInitialization);
-        Assert.True(configuration.HoldConfigurationDoneCapabilityDeltaUntilRelease);
+        if (!configuration.SuppressInitializedAfterInitializeResponse)
+        {
+            Assert.True(configuration.EnableConfigurationDoneAfterInitialization);
+            Assert.True(configuration.HoldConfigurationDoneCapabilityDeltaUntilRelease);
+        }
 
         var fixture = FixtureProcess.Create(configuration);
         object? session = null;
@@ -227,7 +233,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                         && parameters[8].ParameterType == typeof(Task);
                 });
             Assert.NotNull(constructor);
-            var startProtocolAsync = RequireTaskMethod(sessionType, "StartProtocolAsync", typeof(string), typeof(TimeSpan), typeof(CancellationToken));
+            var startProtocolAsync = RequireTaskMethod(sessionType, "StartProtocolAsync", typeof(string), typeof(TimeSpan), typeof(IReadOnlyDictionary<string, string>), typeof(CancellationToken));
             var state = RequireProperty(sessionType, "State", stateType);
             var isUsable = RequireInternalProperty(sessionType, "IsUsable", typeof(bool));
             var readerTask = RequirePrivateTaskField(sessionType, "_readerTask");
@@ -241,8 +247,10 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             RequireStateShape(stateType);
             fixture.MarkAdapterStartAttempted();
 
-            using var startupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            startupCancellation.CancelAfter(initializeTimeout + requestTimeout + TimeSpan.FromMilliseconds(500));
+            using var startupDeadline = new CancellationTokenSource(
+                initializeTimeout + requestTimeout + TimeSpan.FromMilliseconds(500),
+                startupTimeProvider ?? TimeProvider.System);
+            using var startupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, startupDeadline.Token);
             var startInfo = new ProcessStartInfo(fixture.ExecutablePath)
             {
                 UseShellExecute = false,
@@ -264,16 +272,31 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                 gate.Reached,
                 gate.Release.Task,
             ]);
-            var started = startProtocolAsync.Invoke(session, [programPath, initializeTimeout, startupCancellation.Token]);
+            var started = startProtocolAsync.Invoke(session, [programPath, initializeTimeout, null, startupCancellation.Token]);
             await gate.Reached.Task.WaitAsync(startupCancellation.Token);
-            fixture.ReleaseConfigurationDoneCapabilityDelta();
-            while (!(bool)(supportsConfigurationDone.GetValue(session) ?? false))
+            if (configuration.SuppressInitializedAfterInitializeResponse)
             {
-                await Task.Delay(TimeSpan.FromMilliseconds(10), startupCancellation.Token);
+                while (!(await fixture.ReadTranscriptAsync()).Any(static entry => entry.Kind == "initialize-gate" && entry.Stage == "before-initialized-event"))
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(10), startupCancellation.Token);
+                }
+                var initialized = Assert.IsType<TaskCompletionSource<bool>>(
+                    RequirePrivateField(sessionType, "_initialized", typeof(TaskCompletionSource<bool>)).GetValue(session));
+                Assert.False(initialized.Task.IsCompleted, "The early initialized event must not satisfy the post-response wait.");
+                startupDeadline.CancelAfter(Timeout.InfiniteTimeSpan);
+                initializeResponseReady?.Invoke();
+            }
+            else
+            {
+                fixture.ReleaseConfigurationDoneCapabilityDelta();
+                while (!(bool)(supportsConfigurationDone.GetValue(session) ?? false))
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(10), startupCancellation.Token);
+                }
             }
 
             gate.Release.TrySetResult(true);
-            await AwaitAsyncResult(started, "StartProtocolAsync", startupCancellation.Token);
+            await AwaitAsyncResult(started, "StartProtocolAsync", CancellationToken.None);
             var activeReaderTask = readerTask.GetValue(session) as Task
                 ?? throw new InvalidOperationException("NetCoreDbgSession._readerTask returned null.");
             var activeWriteGate = Assert.IsType<SemaphoreSlim>(writeGate.GetValue(session));
@@ -283,6 +306,13 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         catch
         {
             gate.Release.TrySetResult(true);
+            if (failedTranscript is not null)
+            {
+                foreach (var entry in await fixture.ReadTranscriptAsync())
+                {
+                    failedTranscript.Add(entry);
+                }
+            }
             if (session is not null)
             {
                 try
@@ -883,6 +913,9 @@ internal sealed record FixtureConfiguration(
 
 internal sealed class FixtureProcess : IAsyncDisposable
 {
+    internal static readonly AsyncLocal<Action<string>?> StartupDiagnosticOutput = new();
+
+    private readonly Action<string>? _startupDiagnosticOutput = StartupDiagnosticOutput.Value;
     private readonly string _scratchDirectory;
     private readonly string _transcriptPath;
     private readonly string _releasePath;
@@ -1112,6 +1145,8 @@ internal sealed class FixtureProcess : IAsyncDisposable
         }
         finally
         {
+            RetainStartupDiagnostics();
+
             try
             {
                 await DeleteScratchDirectoryAsync();
@@ -1138,6 +1173,80 @@ internal sealed class FixtureProcess : IAsyncDisposable
         {
             throw cleanupFailure;
         }
+    }
+
+    private void RetainStartupDiagnostics()
+    {
+        if (Environment.GetEnvironmentVariable("NETCOREDBG_MCP_PRIVATE_START_DIAGNOSTICS") is not { Length: > 0 } root)
+        {
+            return;
+        }
+
+        try
+        {
+            var fixtureId = Path.GetFileName(_scratchDirectory);
+            var fixtureCorrelation = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(_transcriptPath)));
+            var fixtureLines = ReadTranscriptLinesSnapshot().Select(SafeStartupRecord).OfType<string>().ToArray();
+            var records = new List<string>(fixtureLines);
+            if (Directory.Exists(root))
+            {
+                foreach (var path in Directory.EnumerateFiles(root, $"host-start-{fixtureCorrelation}-*.json"))
+                {
+                    if (SafeStartupRecord(File.ReadAllText(path)) is { } record)
+                    {
+                        records.Add(record);
+                    }
+                }
+            }
+
+            try
+            {
+                if (records.Count > 0)
+                {
+                    _startupDiagnosticOutput?.Invoke($"Startup diagnostics ({fixtureId}):{Environment.NewLine}{string.Join(Environment.NewLine, records)}");
+                }
+            }
+            catch (Exception)
+            {
+                // Test output is diagnostic-only; scratch and process cleanup still run.
+            }
+
+            Directory.CreateDirectory(root);
+            File.WriteAllLines(Path.Combine(root, $"{fixtureId}.jsonl"), fixtureLines);
+        }
+        catch (Exception)
+        {
+            // Retention failure must not replace the test failure or prevent scratch deletion.
+        }
+    }
+
+    private static string? SafeStartupRecord(string line)
+    {
+        using var document = JsonDocument.Parse(line);
+        var root = document.RootElement;
+        if (!root.TryGetProperty("kind", out var kind) || kind.GetString() is not
+            ("startup" or "request" or "initialize-response" or "initialized-event" or "launch-gated"
+            or "configuration-done" or "descendant" or "launch-released" or "private-start-failure" or "host-start-failure"))
+        {
+            return null;
+        }
+
+        return JsonSerializer.Serialize(root.EnumerateObject().Where(static property => property.Name switch
+        {
+            "kind" or "stage" or "reason" or "command" or "exceptionClass" or "baseExceptionClass" =>
+                property.Value.ValueKind == JsonValueKind.Null || property.Value.ValueKind == JsonValueKind.String &&
+                property.Value.GetString() is ("startup" or "request" or "initialize-response" or "initialized-event" or "launch-gated"
+                or "configuration-done" or "descendant" or "launch-released" or "private-start-failure" or "host-start-failure"
+                or "adapter-handler" or "initialize" or "launch" or "configurationDone" or "descendant-start" or "window-readiness"
+                or "launch-response" or "running" or "configuration" or "registered" or "session-started" or "adapter-start" or "binding-create"
+                or "debugger-unconfigured" or "registration-conflict" or "startup-cancelled" or "startup-exception"
+                or "OperationCanceledException" or "TimeoutException" or "Win32Exception" or "InvalidDataException" or "IOException"
+                or "UnauthorizedAccessException" or "ArgumentException" or "InvalidOperationException" or "OtherException"),
+            "sequence" or "processId" or "hresult" or "descendantExitCode" =>
+                property.Value.ValueKind == JsonValueKind.Null || property.Value.ValueKind == JsonValueKind.Number && property.Value.TryGetInt32(out _),
+            "descendantExited" => property.Value.ValueKind is JsonValueKind.Null or JsonValueKind.True or JsonValueKind.False,
+            _ => false,
+        }).ToDictionary(static property => property.Name, static property => property.Value.Clone()));
     }
 
     private async Task KillRecordedAdapterTreeAsync()

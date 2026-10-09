@@ -5,6 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+_GRID_ROW_NOT_VISIBLE = "grid row is not visible"
+_GRID_ROW_NO_VISIBLE_INDEX = "resolved row has no visible index"
+_GRID_ROW_CELL_EVIDENCE_UNAVAILABLE = "row cell evidence unavailable"
+
 
 async def read_grid_visible_rows(
     backend: Any,
@@ -132,7 +136,7 @@ async def ensure_grid_row_visible(
             before=before_viewport,
             after=before_viewport,
         )
-    if blocked.get("reason") != "grid row is not visible":
+    if blocked.get("reason") != _GRID_ROW_NOT_VISIBLE:
         return blocked
 
     ensure_visible = getattr(backend, "grid_ensure_visible", None)
@@ -188,7 +192,7 @@ async def ensure_grid_row_visible(
     if confirm_blocked is not None:
         result = dict(confirm_blocked)
         result["status"] = _blocked_status(result)
-        if result.get("reason") == "grid row is not visible":
+        if result.get("reason") == _GRID_ROW_NOT_VISIBLE:
             result["reason"] = "grid row is not visible after ensure_visible"
         result["requested"] = requested
         result["ensure_result"] = ensure_result
@@ -263,7 +267,7 @@ async def select_grid_row(
     if visible_index is None:
         return {
             "status": "BLOCKED",
-            "reason": "resolved row has no visible index",
+            "reason": _GRID_ROW_NO_VISIBLE_INDEX,
             "resolved_row": _compact_row_ref(resolved, identity_payload),
         }
 
@@ -614,7 +618,7 @@ async def click_grid_row(
     if visible_index is None:
         return {
             "status": "BLOCKED",
-            "reason": "resolved row has no visible index",
+            "reason": _GRID_ROW_NO_VISIBLE_INDEX,
             "resolved_row": _compact_row_ref(resolved, identity_payload),
         }
 
@@ -702,7 +706,7 @@ async def right_click_grid_row(
     if visible_index is None:
         return {
             "status": "BLOCKED",
-            "reason": "resolved row has no visible index",
+            "reason": _GRID_ROW_NO_VISIBLE_INDEX,
             "resolved_row": _compact_row_ref(resolved, identity_payload),
         }
 
@@ -790,7 +794,7 @@ async def double_click_grid_row(
     if visible_index is None:
         return {
             "status": "BLOCKED",
-            "reason": "resolved row has no visible index",
+            "reason": _GRID_ROW_NO_VISIBLE_INDEX,
             "resolved_row": _compact_row_ref(resolved, identity_payload),
         }
 
@@ -876,7 +880,7 @@ async def assert_grid_rows(
             failures.append(
                 {
                     "index": index,
-                    "reason": "row cell evidence unavailable",
+                    "reason": _GRID_ROW_CELL_EVIDENCE_UNAVAILABLE,
                 }
             )
             continue
@@ -900,8 +904,8 @@ async def assert_grid_rows(
 
     if failures:
         reason = (
-            "row cell evidence unavailable"
-            if any(item["reason"] == "row cell evidence unavailable" for item in failures)
+            _GRID_ROW_CELL_EVIDENCE_UNAVAILABLE
+            if any(item["reason"] == _GRID_ROW_CELL_EVIDENCE_UNAVAILABLE for item in failures)
             else "row cell assertion failed"
         )
         return {
@@ -1017,7 +1021,7 @@ async def _resolve_visible_grid_row_snapshot(
     if not matches:
         return {}, {
             "status": "BLOCKED",
-            "reason": "grid row is not visible",
+            "reason": _GRID_ROW_NOT_VISIBLE,
             "requested": {"row_index": row_index, "row_key": row_key},
             "accepted": {"row": "currently visible row index or unique row key"},
             "next_step": "Scroll the grid or choose a currently visible row before acting.",

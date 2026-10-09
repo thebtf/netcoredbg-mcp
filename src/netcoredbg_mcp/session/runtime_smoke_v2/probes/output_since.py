@@ -9,8 +9,6 @@ from ._common import blocked_probe, evidence_ref, probe_name, service_available
 async def handle_output_since(
     probe: dict[str, Any],
     context: Any,
-    *,
-    phase: str,
 ) -> dict[str, Any]:
     kind = "output.since"
     checkpoint = str(probe.get("checkpoint") or "default")

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import time
 import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ from ..windows_process_owner import (
     OwnedProcessRef,
     OwnerDrainReceipt,
     WindowsOwnedProcess,
+    _ACCOUNTING_POLL_SECONDS,
 )
 from .protocol import (
     Commands,
@@ -44,7 +46,7 @@ TERMINAL_CONTAINER_ITEM_LIMIT = 64
 TERMINAL_CONTAINER_DEPTH_LIMIT = 8
 
 _SENSITIVE_KEY_RE = re.compile(
-    r"(?i)(?:[A-Za-z0-9]+[_-])*(?:authorization|access[_-]?token|token|password|secret|api[_-]?key)"
+    r"(?i)(?:[a-z0-9]+[_-])*(?:authorization|access[_-]?token|token|password|secret|api[_-]?key)"
 )
 
 # Authorization headers are multi-word and diagnostics often quote values with
@@ -68,7 +70,7 @@ _ESCAPED_JSON_CREDENTIAL_VALUE_RE = re.compile(
     r'(?i)((?:\\+)"(?:[A-Za-z0-9]+[_-])*(?:authorization|access[_-]?token|token|password|secret|api[_-]?key)'
     r'(?:\\+)"\s*:\s*(?:\\+)")([^"\\]*)((?:\\+)")'
 )
-_BEARER_VALUE_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+_BEARER_VALUE_RE = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]+")
 _POSIX_PATH_RE = re.compile(r"(?<![\w:/])/(?!/)[^\s\"']+")
 _WINDOWS_PATH_RE = re.compile(r"(?i)(?:[A-Z]:[\\/]|\\\\)[^\s\"'<>|]+")
 
@@ -247,6 +249,7 @@ class _DapRun:
     stderr_task: asyncio.Task[None] | None = None
     process_task: asyncio.Task[None] | None = None
     finalizer_task: asyncio.Task[DapTransportTerminal] | None = None
+    owner_retry_task: asyncio.Task[OwnerDrainReceipt] | None = None
     terminal: DapTransportTerminal | None = None
 
 
@@ -473,6 +476,18 @@ class DAPClient:
             The exact identity bound to the new adapter run.
         """
 
+        previous = self._run
+        if previous is not None and previous.owner is not None:
+            if previous.finalizer_task is not None and not previous.finalizer_task.done():
+                raise RuntimeError("Retained adapter owner finalization is still in progress")
+            receipt = previous.owner_drain_receipt
+            if (previous.phase is not _RunPhase.ACTIVE or not self.is_running) and not (
+                receipt is not None
+                and receipt.owner == previous.owner.owner
+                and receipt.status is DrainStatus.DRAINED
+                and receipt.active_processes == 0
+            ):
+                raise RuntimeError("Retained adapter owner did not drain before admission")
         if self.is_running and self._run is not None:
             return self._run.generation
 
@@ -517,6 +532,10 @@ class DAPClient:
         logger.info("netcoredbg started with PID %s", process.pid)
         return generation
 
+    @staticmethod
+    def _stop_owner_mismatch(run: _DapRun | None, expected_owner: OwnedProcessRef) -> bool:
+        return run is None or run.owner is None or run.owner.owner != expected_owner
+
     async def stop(
         self,
         *,
@@ -530,9 +549,7 @@ class DAPClient:
         branch.
         """
         run = self._run
-        if expected_owner is not None and (
-            run is None or run.owner is None or run.owner.owner != expected_owner
-        ):
+        if expected_owner is not None and self._stop_owner_mismatch(run, expected_owner):
             return OwnerDrainReceipt(
                 owner=expected_owner,
                 status=DrainStatus.STALE,
@@ -546,6 +563,7 @@ class DAPClient:
             return None
 
         finalizer, _ = self._request_finalization(run, DapTerminalTrigger.EXPLICIT_STOP)
+        already_finalized = finalizer.done()
         await asyncio.shield(finalizer)
         logger.info("netcoredbg stopped")
         owner = run.owner
@@ -553,6 +571,28 @@ class DAPClient:
             return None
 
         receipt = run.owner_drain_receipt
+        if already_finalized and not (
+            receipt is not None
+            and receipt.owner == owner.owner
+            and receipt.status is DrainStatus.DRAINED
+            and receipt.active_processes == 0
+        ):
+            retry = run.owner_retry_task
+            if retry is None or retry.done():
+                retry = asyncio.create_task(owner.aclose())
+                run.owner_retry_task = retry
+            refreshed = await asyncio.shield(retry)
+            if self._run is run and owner.owner == refreshed.owner:
+                run.owner_drain_receipt = refreshed
+                receipt = refreshed
+            else:
+                return OwnerDrainReceipt(
+                    owner=owner.owner,
+                    status=DrainStatus.STALE,
+                    forced=False,
+                    root_returncode=None,
+                    active_processes=None,
+                )
         if receipt is not None:
             return receipt
         return OwnerDrainReceipt(
@@ -657,10 +697,42 @@ class DAPClient:
             # This is deliberately inside the elected Wave-1 finalizer. No
             # observer or manager branch can publish terminal state before the
             # retained Job has reported its accounting drain outcome.
-            receipt = await run.owner.drain_after_grace(
-                grace_timeout=NATURAL_EXIT_TIMEOUT,
-                force_timeout=TERMINATE_TIMEOUT + KILL_TIMEOUT,
-            )
+            owner = run.owner
+
+            async def adapter_policy() -> OwnerDrainReceipt:
+                root_was_forced: bool | None = False
+                receipt: OwnerDrainReceipt | None = None
+                for forced, budget in (
+                    (False, NATURAL_EXIT_TIMEOUT),
+                    (True, TERMINATE_TIMEOUT + KILL_TIMEOUT),
+                ):
+                    if forced:
+                        root_was_forced, failure = await owner.force_job()
+                        if failure is not None:
+                            return failure
+                    deadline = time.monotonic() + max(budget, 0.0)
+                    receipt = None
+                    while True:
+                        pending = owner.start_drain_observation()
+                        if pending is not None:
+                            await asyncio.wait(
+                                (pending,), timeout=max(deadline - time.monotonic(), 0.0)
+                            )
+                        receipt, retry = await owner.observe_drain(
+                            forced=forced, root_was_forced=root_was_forced, previous=receipt
+                        )
+                        remaining = deadline - time.monotonic()
+                        if not retry or remaining <= 0:
+                            break
+                        await asyncio.sleep(min(_ACCOUNTING_POLL_SECONDS, remaining))
+                        if time.monotonic() >= deadline:
+                            break
+                    if receipt.status is DrainStatus.DRAINED:
+                        return receipt
+                assert receipt is not None
+                return receipt
+
+            receipt = await owner._join_drain(adapter_policy)
             self._apply_owner_drain_receipt(run, receipt)
         else:
             assert not isinstance(process, WindowsOwnedProcess)
@@ -932,57 +1004,68 @@ class DAPClient:
                     future.set_result(message)
 
             elif isinstance(message, DAPEvent):
-                event_name = sanitize_terminal_text(message.event, TERMINAL_EVENT_NAME_LIMIT)
-                body_json = json.dumps(
-                    _sanitize_terminal_value(message.body),
-                    default=str,
-                    separators=(",", ":"),
-                )
-                body_preview = _bounded_text(body_json)
-                logger.debug("<<< Event %s: %s", event_name, body_preview)
-                if run is not None:
-                    event_seq = (
-                        message.seq
-                        if type(message.seq) is int and 0 <= message.seq <= TERMINAL_EVENT_SEQ_MAX
-                        else None
-                    )
-                    run.last_dap_event = (event_seq, event_name)
-                    run.last_dap_event_body_preview = body_preview
-                    if message.event == "terminated":
-                        run.protocol_terminated = True
-                    elif message.event == "exited":
-                        exit_code = message.body.get("exitCode")
-                        if type(exit_code) is int:
-                            run.debuggee_exit_code = exit_code
-
-                if run is not None and run is not self._run:
-                    # A former reader may finish after `start` installs a newer
-                    # run. Retain its local terminal facts above, but never call
-                    # handlers: manager callbacks have no generation argument,
-                    # so they would otherwise let old transport state mutate the
-                    # current session solely because the client object matches.
-                    return
-
-                handlers = (
-                    self._event_handlers.get(message.event, [])
-                    if isinstance(message.event, str)
-                    else []
-                )
-                if not handlers:
-                    logger.warning(
-                        "Unhandled DAP event '%s' dropped: body_size=%d body_preview=%s",
-                        event_name,
-                        len(body_json.encode("utf-8")),
-                        body_preview,
-                    )
-                for handler in handlers:
-                    try:
-                        handler(message)
-                    except Exception:
-                        logger.exception("Event handler error")
+                self._handle_event(message, run)
 
         except Exception:
             logger.exception("Error handling message, data: %s", data)
+
+    def _handle_event(self, message: DAPEvent, run: _DapRun | None) -> None:
+        """Retain bounded event facts before dispatching current-generation callbacks."""
+
+        event_name = sanitize_terminal_text(message.event, TERMINAL_EVENT_NAME_LIMIT)
+        body_json = json.dumps(
+            _sanitize_terminal_value(message.body),
+            default=str,
+            separators=(",", ":"),
+        )
+        body_preview = _bounded_text(body_json)
+        logger.debug("<<< Event %s: %s", event_name, body_preview)
+        if run is not None:
+            self._retain_terminal_event_facts(run, message, event_name, body_preview)
+
+        if run is not None and run is not self._run:
+            # A former reader may finish after `start` installs a newer
+            # run. Retain its local terminal facts above, but never call
+            # handlers: manager callbacks have no generation argument,
+            # so they would otherwise let old transport state mutate the
+            # current session solely because the client object matches.
+            return
+
+        handlers = (
+            self._event_handlers.get(message.event, []) if isinstance(message.event, str) else []
+        )
+        if not handlers:
+            logger.warning(
+                "Unhandled DAP event '%s' dropped: body_size=%d body_preview=%s",
+                event_name,
+                len(body_json.encode("utf-8")),
+                body_preview,
+            )
+        for handler in handlers:
+            try:
+                handler(message)
+            except Exception:
+                logger.exception("Event handler error")
+
+    @staticmethod
+    def _retain_terminal_event_facts(
+        run: _DapRun, message: DAPEvent, event_name: str, body_preview: str
+    ) -> None:
+        """Retain protocol metadata on its originating adapter run."""
+
+        event_seq = (
+            message.seq
+            if type(message.seq) is int and 0 <= message.seq <= TERMINAL_EVENT_SEQ_MAX
+            else None
+        )
+        run.last_dap_event = (event_seq, event_name)
+        run.last_dap_event_body_preview = body_preview
+        if message.event == "terminated":
+            run.protocol_terminated = True
+        elif message.event == "exited":
+            exit_code = message.body.get("exitCode")
+            if type(exit_code) is int:
+                run.debuggee_exit_code = exit_code
 
     # High-level DAP commands
 

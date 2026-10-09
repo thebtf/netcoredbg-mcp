@@ -10,7 +10,12 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from netcoredbg_mcp.windows_process_owner import DrainStatus, OwnedProcessRef, OwnerDrainReceipt
+from netcoredbg_mcp.windows_process_owner import (
+    DrainStatus,
+    OwnedProcessRef,
+    OwnerDrainReceipt,
+    WindowsOwnedProcess,
+)
 
 
 class ImmediateEofStream:
@@ -126,6 +131,9 @@ class OwnedCommandProcess:
         self.drain_calls: list[str] = []
         self.drain_operation_count = 0
         self.aclose_calls = 0
+        self._closed = False
+        self._drain_task = None
+        self._drain_receipt = None
 
     @property
     def pid(self) -> int:
@@ -147,20 +155,23 @@ class OwnedCommandProcess:
         result = await self._process.wait()
         return 0 if result is None else int(result)
 
-    async def drain_after_grace(
-        self,
-        *,
-        grace_timeout: float,
-        force_timeout: float,
-    ) -> OwnerDrainReceipt:
-        del grace_timeout, force_timeout
-        self.drain_calls.append("grace")
-        return self._record_drain(forced=False)
+    async def _join_drain(self, policy) -> OwnerDrainReceipt:
+        return await WindowsOwnedProcess._join_drain(self, policy)
 
-    async def force_and_drain(self, *, timeout: float) -> OwnerDrainReceipt:
-        del timeout
+    def start_drain_observation(self):
+        return None
+
+    async def observe_drain(self, *, forced, root_was_forced, previous=None):
+        del root_was_forced, previous
+        if not forced and self.returncode is None:
+            return OwnerDrainReceipt(self.owner, DrainStatus.TIMED_OUT, False, None, None), False
+        if not forced and self.receipt is None:
+            self.drain_calls.append("grace")
+        return self._record_drain(forced=forced), False
+
+    async def force_job(self):
         self.drain_calls.append("force")
-        return self._record_drain(forced=True)
+        return self.returncode is None, None
 
     def _record_drain(self, *, forced: bool) -> OwnerDrainReceipt:
         if self.receipt is not None:
