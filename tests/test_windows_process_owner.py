@@ -1202,7 +1202,15 @@ async def test_pre_admission_terminate_failure_retains_controlling_handles(
     assert failure.cleanup_winerror == 55
     assert "wait-process" in events
     assert {"close:11", "close:21", "close:31"}.isdisjoint(events)
-    assert await failure.wait_for_cleanup(timeout=1.0) is True
+    observer = asyncio.create_task(failure.wait_for_cleanup())
+    try:
+        done, _ = await asyncio.wait({observer}, timeout=max(1.0, 0.0))
+        completed = observer.result() if observer in done else False
+        assert completed is True
+    finally:
+        if not observer.done():
+            observer.cancel()
+        await asyncio.gather(observer, return_exceptions=True)
     assert {"close:11", "close:21", "close:31"}.issubset(events)
 
 
@@ -1261,7 +1269,15 @@ async def test_pre_admission_wait_timeout_retains_controlling_handles(
     assert failure.cleanup_winerror is None
     assert events.index("terminate-process") < events.index("wait-process")
     assert {"close:11", "close:21", "close:31"}.isdisjoint(events)
-    assert await failure.wait_for_cleanup(timeout=1.0) is True
+    observer = asyncio.create_task(failure.wait_for_cleanup())
+    try:
+        done, _ = await asyncio.wait({observer}, timeout=max(1.0, 0.0))
+        completed = observer.result() if observer in done else False
+        assert completed is True
+    finally:
+        if not observer.done():
+            observer.cancel()
+        await asyncio.gather(observer, return_exceptions=True)
     assert {"close:11", "close:21", "close:31"}.issubset(events)
 
 
@@ -1296,11 +1312,85 @@ async def test_failed_admission_reaper_retries_until_root_exit_then_closes_handl
 
     failure = raised.value
     assert failure.controlling_handles_retained is True
-    assert await failure.wait_for_cleanup(timeout=1.0) is True
+    observer = asyncio.create_task(failure.wait_for_cleanup())
+    try:
+        done, _ = await asyncio.wait({observer}, timeout=max(1.0, 0.0))
+        completed = observer.result() if observer in done else False
+        assert completed is True
+    finally:
+        if not observer.done():
+            observer.cancel()
+        await asyncio.gather(observer, return_exceptions=True)
     assert api.terminate_attempts >= 2
     assert api.wait_attempts >= 2
     assert {"close:11", "close:21", "close:31"}.issubset(events)
     assert len(events) - 1 - events[::-1].index("wait-process") < events.index("close:31")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("budget", (-1.0, 0.0, None), ids=("negative", "zero", "cancelled"))
+async def test_failed_admission_completion_observer_leaves_producer_running(budget):
+    events = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    class HeldExitApi(_FakeApi):
+        def wait_for_process(self, _process, _timeout_ms):
+            entered.set()
+            return release.wait(5)
+
+    reaper = _FailedAdmissionReaper(
+        api=HeldExitApi(events),
+        job_handle=11,
+        process_handle=21,
+        thread_handle=31,
+        port_handle=None,
+        pipe_ends=None,
+        transports=(),
+        admitted=False,
+    )
+    failure = AdmissionCleanupError(
+        owner_id="completion-observer",
+        admission_stage=AdmissionStage.ASSIGN,
+        admission_winerror=5,
+        cleanup_stage=AdmissionStage.DRAIN,
+        cleanup_winerror=None,
+        reaper=reaper,
+    )
+    reaper.schedule()
+    producer = reaper._task
+    assert producer is not None
+    observer = asyncio.create_task(failure.wait_for_cleanup())
+    try:
+        assert await asyncio.to_thread(entered.wait, 1.0)
+        if budget is None:
+            observer.cancel("completion observer cancelled")
+            with pytest.raises(asyncio.CancelledError, match="completion observer cancelled"):
+                await observer
+        else:
+            done, _ = await asyncio.wait({observer}, timeout=max(budget, 0.0))
+            completed = observer.result() if observer in done else False
+            assert completed is False
+            assert not observer.done()
+            observer.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await observer
+        assert not producer.done()
+        assert producer.cancelling() == 0
+        assert not reaper.closed
+        assert {"close:11", "close:21", "close:31"}.isdisjoint(events)
+    finally:
+        if not observer.done():
+            observer.cancel()
+        await asyncio.gather(observer, return_exceptions=True)
+        release.set()
+        done, _ = await asyncio.wait({producer}, timeout=max(1.0, 0.0))
+        assert producer in done
+        producer.result()
+    assert producer.cancelling() == 0
+    assert await failure.wait_for_cleanup() is True
+    assert await reaper.wait_for_completion() is True
+    assert {"close:11", "close:21", "close:31"}.issubset(events)
 
 
 @pytest.mark.asyncio
@@ -1351,7 +1441,15 @@ async def test_failed_admission_reaper_backs_off_and_logs_failures(
 
     with caplog.at_level(logging.WARNING, logger=windows_process_owner.__name__):
         reaper.schedule()
-        assert await reaper.wait_for_completion(timeout=1.0) is True
+        observer = asyncio.create_task(reaper.wait_for_completion())
+        try:
+            done, _ = await asyncio.wait({observer}, timeout=max(1.0, 0.0))
+            completed = observer.result() if observer in done else False
+            assert completed is True
+        finally:
+            if not observer.done():
+                observer.cancel()
+            await asyncio.gather(observer, return_exceptions=True)
 
     messages = [record.getMessage() for record in caplog.records]
     assert delays == pytest.approx([0.01, 0.02, 0.04, 0.04, 0.04])
@@ -2177,7 +2275,15 @@ async def _probe_direct_capture_fatal_lifecycle(
 
         if ambiguous_effect is not None:
             # A bounded observation on the real owner loop, not a drain receipt.
-            assert not await reaper.wait_for_completion(0.25), "ambiguous effect allowed closure"
+            observer = asyncio.create_task(reaper.wait_for_completion())
+            try:
+                done, _ = await asyncio.wait({observer}, timeout=max(0.25, 0.0))
+                completed = observer.result() if observer in done else False
+                assert not completed, "ambiguous effect allowed closure"
+            finally:
+                if not observer.done():
+                    observer.cancel()
+                await asyncio.gather(observer, return_exceptions=True)
             assert api.exit_attempts == 1, "unacknowledged ContinueDebugEvent was repeated"
             assert not caller.done(), "fatal escaped while native-effect ownership was unresolved"
             assert worker.is_alive()
@@ -2404,7 +2510,15 @@ async def _probe_direct_capture_creation_fatal(mode):
             await asyncio.sleep(0.01)
         assert reapers
         capture = reapers[0]._debug_capture
-        assert not await reapers[0].wait_for_completion(0.1)
+        observer = asyncio.create_task(reapers[0].wait_for_completion())
+        try:
+            done, _ = await asyncio.wait({observer}, timeout=max(0.1, 0.0))
+            completed = observer.result() if observer in done else False
+            assert not completed
+        finally:
+            if not observer.done():
+                observer.cancel()
+            await asyncio.gather(observer, return_exceptions=True)
         assert not caller.done()
         assert not capture.known_no_child
         assert capture.worker_alive

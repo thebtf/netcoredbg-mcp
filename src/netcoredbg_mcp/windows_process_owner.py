@@ -161,9 +161,9 @@ class AdmissionCleanupError(RuntimeError):
             detail = f"{detail} (winerror {cleanup_winerror})"
         super().__init__(detail)
 
-    async def wait_for_cleanup(self, timeout: float) -> bool:
-        """Return whether the retained-owner reaper closes within ``timeout`` seconds."""
-        return await self._reaper.wait_for_completion(timeout)
+    async def wait_for_cleanup(self) -> bool:
+        """Observe retained-owner closure without a deadline or cancelling its reaper."""
+        return await self._reaper.wait_for_completion()
 
 
 class _Win32CallError(RuntimeError):
@@ -1410,14 +1410,11 @@ class _FailedAdmissionReaper:
             return
         self._task = asyncio.create_task(self._retry_until_root_exit())
 
-    async def wait_for_completion(self, timeout: float) -> bool:
-        """Await only a bounded completion fact; never expose retained handle values."""
+    async def wait_for_completion(self) -> bool:
+        """Await the closure event without a deadline or cancelling the cleanup producer."""
         if self._closed:
             return True
-        try:
-            await asyncio.wait_for(self._completed.wait(), timeout=max(timeout, 0.0))
-        except asyncio.TimeoutError:
-            return False
+        await self._completed.wait()
         return self._closed
 
     async def _retry_until_root_exit(self) -> None:
