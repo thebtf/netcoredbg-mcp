@@ -177,22 +177,7 @@ public static class KeySequenceCommands
         {
             if (focusVerified)
             {
-                foreach (var modifier in modifierKeys)
-                {
-                    if (TryAcquireScopedModifier(modifier))
-                        scopedHeld.Add(modifier);
-                }
-                if (scopedHeld.Count > 0)
-                    Thread.Sleep(INPUT_SETTLE_MS);
-
-                foreach (var key in parsedKeys)
-                {
-                    SendSignedKeyDown(key.Key, key.Name == "NUMPADENTER");
-                    SendSignedKeyUp(key.Key, key.Name == "NUMPADENTER");
-                    sent.Add(key.Name);
-                }
-                if (scopedHeld.Count > 0 && sent.Count > 0)
-                    Thread.Sleep(MODIFIER_OBSERVATION_MS);
+                DeliverFocusedKeySequence(modifierKeys, parsedKeys, scopedHeld, sent);
             }
         }
         catch (Exception ex)
@@ -244,6 +229,30 @@ public static class KeySequenceCommands
         if (failureReason is not null)
             result["reason"] = failureReason;
         return result;
+    }
+
+    private static void DeliverFocusedKeySequence(
+        List<(string Name, VirtualKeyShort Key)> modifierKeys,
+        List<(string Name, VirtualKeyShort Key)> parsedKeys,
+        List<(string Name, VirtualKeyShort Key)> scopedHeld,
+        JsonArray sent)
+    {
+        foreach (var modifier in modifierKeys)
+        {
+            if (TryAcquireScopedModifier(modifier))
+                scopedHeld.Add(modifier);
+        }
+        if (scopedHeld.Count > 0)
+            Thread.Sleep(INPUT_SETTLE_MS);
+
+        foreach (var key in parsedKeys)
+        {
+            SendSignedKeyDown(key.Key, key.Name == "NUMPADENTER");
+            SendSignedKeyUp(key.Key, key.Name == "NUMPADENTER");
+            sent.Add(key.Name);
+        }
+        if (scopedHeld.Count > 0 && sent.Count > 0)
+            Thread.Sleep(MODIFIER_OBSERVATION_MS);
     }
 
     private static JsonObject FocusTarget(
