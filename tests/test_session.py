@@ -139,6 +139,21 @@ class TestPathValidation:
 
         assert manager.validate_path(str(path), must_exist=True) == str(external_file.resolve())
 
+    def test_validate_path_for_project_uses_explicit_base(self, tmp_path, monkeypatch):
+        project = tmp_path / "project"
+        process_cwd = tmp_path / "cwd"
+        project.mkdir()
+        process_cwd.mkdir()
+        external_file = tmp_path / "other.cs"
+        external_file.write_text("// test")
+        monkeypatch.chdir(process_cwd)
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(process_cwd))
+
+        assert manager.validate_path_for_project(
+            os.path.join("..", "other.cs"), str(project), must_exist=True
+        ) == str(external_file.resolve())
+
     def test_validate_path_no_project_scope(self, tmp_path):
         """Test validate_path works without project scope."""
         with patch("netcoredbg_mcp.session.manager.DAPClient"):
@@ -172,6 +187,19 @@ class TestPathValidation:
 
             assert manager.validate_program(str(dll_file)) == str(dll_file.resolve())
             assert manager.validate_program(str(exe_file)) == str(exe_file.resolve())
+
+    def test_validate_program_relative_path_uses_process_cwd(self, tmp_path, monkeypatch):
+        repo_root = tmp_path / "repo"
+        fixture_root = repo_root / "tests" / "fixtures" / "WpfSmokeApp"
+        relative_program = os.path.join("bin", "Debug", "net8.0-windows", "WpfSmokeApp.dll")
+        program = fixture_root / relative_program
+        program.parent.mkdir(parents=True)
+        program.write_bytes(b"")
+        monkeypatch.chdir(fixture_root)
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(repo_root))
+
+        assert manager.validate_program(relative_program) == str(program.resolve())
 
     @pytest.mark.parametrize("program_kind", ["dll", "exe", "exe_to_dll"])
     def test_validate_program_accepts_external_target_without_allowed_paths(

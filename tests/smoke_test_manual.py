@@ -2419,14 +2419,20 @@ async def test_path_validation_external_paths():
         external.mkdir()
         source = external / "test.cs"
         source.write_text("// external source", encoding="utf-8")
-        m.set_project_path(str(Path(temporary) / "project"))
+        project = Path(temporary) / "project"
+        project.mkdir()
+        m.set_project_path(str(project))
+        original_cwd = os.getcwd()
         try:
+            os.chdir(project)
             validated = m.validate_path(str(source), must_exist=True)
             check("External source accepted", validated == str(source.resolve()))
             validated = m.validate_path("../external/test.cs", must_exist=True)
             check("External relative path canonicalized", validated == str(source.resolve()))
         except ValueError as e:
             check("External path accepted", False, str(e))
+        finally:
+            os.chdir(original_cwd)
 
 
 async def test_heartbeat_during_wait():

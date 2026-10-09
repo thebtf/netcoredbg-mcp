@@ -619,7 +619,7 @@ class TestSessionManagerIntegration:
             session.set_project_path(None)
             assert session.project_path is None
 
-    def test_validate_path_after_set_project_path(self, tmp_path):
+    def test_validate_path_after_set_project_path(self, tmp_path, monkeypatch):
         """Test path validation works after updating project path."""
         from netcoredbg_mcp.session import SessionManager
 
@@ -641,7 +641,7 @@ class TestSessionManagerIntegration:
             result = session.validate_path(str(test_file), must_exist=True)
             assert result == str(test_file)
 
-            # Project context supplies the relative-path base
+            # Project context does not change the process-relative path base
             session.set_project_path(str(project_dir))
 
             # Path within project should work
@@ -651,6 +651,7 @@ class TestSessionManagerIntegration:
             # Existing external paths do not need path admission
             result = session.validate_path(str(outside_file), must_exist=True)
             assert result == str(outside_file.resolve())
+            monkeypatch.chdir(project_dir)
             assert session.validate_path("test.cs", must_exist=True) == str(test_file.resolve())
             assert session.validate_path("../outside.cs", must_exist=True) == str(
                 outside_file.resolve()

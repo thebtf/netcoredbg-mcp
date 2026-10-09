@@ -484,8 +484,8 @@ class SessionManager:
             return None
 
     def validate_path(self, path: str, must_exist: bool = False) -> str:
-        """Canonicalize a path relative to project context and optionally require existence."""
-        return self._validate_path(path, self._project_path, must_exist=must_exist)
+        """Canonicalize a path relative to process CWD and optionally require existence."""
+        return self._validate_path(path, None, must_exist=must_exist)
 
     def validate_path_for_project(
         self,
