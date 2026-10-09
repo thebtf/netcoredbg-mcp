@@ -498,7 +498,16 @@ class RuntimeSmokeRunner:
         validate_path = getattr(self._session, "validate_path", None)
         if validate_path is None:
             raise RuntimeError("path validation service unavailable")
-        return str(validate_path(path, must_exist=must_exist))
+        validated_path = str(validate_path(path, must_exist=must_exist))
+        if not must_exist:
+            project_path = getattr(self._session, "project_path", None)
+            if not project_path:
+                raise ValueError("Project root is required for fixture restore")
+            try:
+                Path(validated_path).resolve().relative_to(Path(project_path).resolve())
+            except ValueError as exc:
+                raise ValueError(f"Restore path outside project root: {path}") from exc
+        return validated_path
 
     def _restore_file(self, entry: dict[str, Any]) -> dict[str, Any]:
         target_path, source, baseline_file, content = self._restore_file_inputs(entry)

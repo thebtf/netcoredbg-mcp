@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -662,86 +661,27 @@ def test_validate_program_for_project_root_rejects_invalid_extension(
         manager.validate_program_for_project_root(str(invalid), str(project))
 
 
-@pytest.mark.parametrize("program_kind", ["traversal", "outside_absolute"])
-def test_validate_program_for_project_root_rejects_outside_paths(
+@pytest.mark.parametrize("program_kind", ["dll", "exe", "exe_to_dll", "traversal"])
+def test_validate_program_for_project_root_accepts_external_target_without_allowed_paths(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     program_kind: str,
 ) -> None:
+    monkeypatch.delenv("NETCOREDBG_ALLOWED_PATHS", raising=False)
     project = tmp_path / "project"
     outside = tmp_path / "outside"
     project.mkdir()
-    outside.mkdir()
-    outside_program = _write_program(outside)
-    manager = _manager(project)
-    program = (
-        str(project / ".." / "outside" / "App.dll")
-        if program_kind == "traversal"
-        else str(outside_program)
+    name = "App.exe" if program_kind in {"exe", "exe_to_dll"} else "App.dll"
+    program = _write_program(outside, name)
+    expected = _write_program(outside) if program_kind == "exe_to_dll" else program
+    candidate = (
+        str(project / ".." / "outside" / "App.dll") if program_kind == "traversal" else str(program)
     )
-
-    with pytest.raises(ValueError, match="outside exact project root"):
-        manager.validate_program_for_project_root(program, str(project))
-
-
-def test_validate_program_for_project_root_ignores_worktrees_and_allowlist(
-    tmp_path: Path,
-) -> None:
-    project = tmp_path / "project"
-    outside = tmp_path / "related-worktree"
-    project.mkdir()
-    outside.mkdir()
-    outside_program = _write_program(outside)
     manager = _manager(project)
 
-    with (
-        patch.object(manager, "_get_worktree_paths", return_value=[str(outside)]) as worktrees,
-        patch.dict(os.environ, {"NETCOREDBG_ALLOWED_PATHS": str(outside)}),
-        pytest.raises(ValueError, match="outside exact project root"),
-    ):
-        manager.validate_program_for_project_root(str(outside_program), str(project))
-
-    worktrees.assert_not_called()
-
-
-def test_validate_program_for_project_root_rejects_program_symlink_escape(
-    tmp_path: Path,
-) -> None:
-    project = tmp_path / "project"
-    outside = tmp_path / "outside"
-    project.mkdir()
-    outside.mkdir()
-    outside_program = _write_program(outside)
-    linked_program = project / "Linked.dll"
-    try:
-        linked_program.symlink_to(outside_program)
-    except (NotImplementedError, OSError) as exc:
-        pytest.skip(f"file symlinks are unavailable in this environment: {exc}")
-    manager = _manager(project)
-
-    with pytest.raises(ValueError, match="outside exact project root"):
-        manager.validate_program_for_project_root(str(linked_program), str(project))
-
-
-def test_validate_program_for_project_root_rejects_runtimeconfig_symlink_escape(
-    tmp_path: Path,
-) -> None:
-    project = tmp_path / "project"
-    outside = tmp_path / "outside"
-    project.mkdir()
-    outside.mkdir()
-    program = project / "App.dll"
-    program.write_bytes(b"program")
-    outside_runtimeconfig = outside / "App.runtimeconfig.json"
-    outside_runtimeconfig.write_text("{}", encoding="utf-8")
-    runtimeconfig_link = program.with_suffix(".runtimeconfig.json")
-    try:
-        runtimeconfig_link.symlink_to(outside_runtimeconfig)
-    except (NotImplementedError, OSError) as exc:
-        pytest.skip(f"file symlinks are unavailable in this environment: {exc}")
-    manager = _manager(project)
-
-    with pytest.raises(ValueError, match="[Rr]untimeconfig.*outside exact project root"):
-        manager.validate_program_for_project_root(str(program), str(project))
+    assert manager.validate_program_for_project_root(candidate, str(project)) == str(
+        expected.resolve()
+    )
 
 
 def _snapshot_tree(path: Path) -> dict[str, object]:
@@ -967,6 +907,47 @@ async def test_preflight_uses_readonly_root_without_mutating_session_scope(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("program_kind", ["dll", "exe", "exe_to_dll"])
+async def test_preflight_inspects_external_target_without_allowed_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    program_kind: str,
+) -> None:
+    monkeypatch.delenv("NETCOREDBG_ALLOWED_PATHS", raising=False)
+    owner = tmp_path / "owner"
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    owner.mkdir()
+    project.mkdir()
+    name = "App.dll" if program_kind == "dll" else "App.exe"
+    program = _write_program(outside, name)
+    expected = _write_program(outside) if program_kind == "exe_to_dll" else program
+    manager = _manager(owner, tmp_path / "netcoredbg.exe")
+    registry, *_ = _register_preflight(
+        manager,
+        ownership=object(),
+        resolve_project_root_readonly=AsyncMock(return_value=project),
+    )
+
+    with patch.object(Path, "home", return_value=tmp_path / "missing-home"):
+        response = await registry.tools["inspect_debug_launch_compatibility"](
+            SimpleNamespace(), str(program)
+        )
+
+    data = response.get("data", {})
+    assert (data.get("program"), data.get("targetRuntime")) == (
+        str(expected.resolve()),
+        {
+            "version": "10.0.1",
+            "major": 10,
+            "runtimeconfigPath": str(expected.with_suffix(".runtimeconfig.json").resolve()),
+            "source": "runtimeconfig_framework",
+            "status": "known",
+        },
+    )
+
+
+@pytest.mark.asyncio
 async def test_readonly_root_resolver_does_not_fallback_to_fixed_session_path(
     tmp_path: Path,
 ) -> None:
@@ -1010,22 +991,20 @@ async def test_preflight_fails_closed_when_root_is_unresolved(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("invalid_kind", ["invalid_extension", "outside_root"])
+@pytest.mark.parametrize("invalid_kind", ["invalid_extension", "missing_file"])
 async def test_preflight_rejects_invalid_program_before_inspection(
     tmp_path: Path,
     invalid_kind: str,
 ) -> None:
     project = tmp_path / "project"
-    outside = tmp_path / "outside"
     debugger = tmp_path / "debugger"
     project.mkdir()
-    outside.mkdir()
     debugger.mkdir()
     if invalid_kind == "invalid_extension":
         program = project / "App.txt"
         program.write_text("not an assembly", encoding="utf-8")
     else:
-        program = _write_program(outside)
+        program = project / "Missing.dll"
     manager = _manager(project, debugger / "netcoredbg.exe")
     registry, mutable_resolver, access_check, notify, execute = _register_preflight(
         manager,

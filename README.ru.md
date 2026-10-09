@@ -13,7 +13,7 @@
 Protocol и Windows UI Automation: агент наблюдает за запущенным приложением,
 намеренно останавливает его и изучает состояние, объясняющее поведение.
 
-**Python 3.10+ · автоматизация Windows GUI · 135 инструментов · 8 промптов · 4 ресурса · v0.23.11**
+**Python 3.10+ · автоматизация Windows GUI · 135 инструментов · 8 промптов · 4 ресурса · v0.23.12**
 
 ## Возможности
 
@@ -349,7 +349,7 @@ foreign input либо получает некорректные или неат
 | `netcoredbg-mcp --version` | Печатает версию установленного пакета. |
 | `netcoredbg-mcp --setup` | Подготавливает или находит необходимые компоненты отладчика и выводит фрагмент конфигурации клиента. |
 | `netcoredbg-mcp setup --enc` | Устанавливает предсобранный Edit-and-Continue debugger с `ncdbhook.dll` для Windows x64; сборка из исходников включается отдельно. |
-| `netcoredbg-mcp --project C:\Work\MyApp` | Закрепляет все debug operations за одним project root. |
+| `netcoredbg-mcp --project C:\Work\MyApp` | Задаёт корневой каталог проекта по умолчанию для определения путей и поиска по исходникам. |
 | `netcoredbg-mcp --project-from-cwd` | Определяет project по startup directory и совместимым local MCP roots. |
 
 `--project` и `--project-from-cwd` взаимоисключающие. `--enc` используйте
@@ -361,7 +361,6 @@ foreign input либо получает некорректные или неат
 |---|---|
 | `NETCOREDBG_PATH` | Явный путь к `netcoredbg`. |
 | `NETCOREDBG_PROJECT_ROOT` / `MCP_PROJECT_ROOT` | Авторитетный запасной project root. |
-| `NETCOREDBG_ALLOWED_PATHS` | Дополнительные comma-separated path prefixes, доступные серверу. |
 | `FLAUI_BRIDGE_PATH` | Явный путь к FlaUI bridge executable. |
 | `NETCOREDBG_SCREENSHOT_MAX_WIDTH` / `NETCOREDBG_SCREENSHOT_QUALITY` | Размер inline preview и WebP quality. |
 | `NETCOREDBG_SESSION_TIMEOUT` | Тайм-аут неактивности при multi-agent ownership. |
@@ -369,6 +368,14 @@ foreign input либо получает некорректные или неат
 
 Явный `--project` или project-root environment variable имеет приоритет над MCP
 client roots. Сетевые/UNC client roots отклоняются.
+
+Явные пути к существующим DLL/EXE, исходным файлам и проектам сборки, а также
+пути вывода сборки не требуют отдельного разрешения на отладку. Это относится
+и к путям вне проекта по умолчанию или worktree. Выбор корневого каталога задаёт
+контекст, а не список разрешённых каталогов. Удалено ограничение MCP-обёртки,
+а не встроенная песочница ОС в Samsung `netcoredbg`. Проверки файлов и
+совместимости .NET-приложения сохраняются. Независимые ограничения для сбора
+доказательств, восстановления и поиска по исходникам также остаются в силе.
 
 ## Архитектура
 
@@ -385,7 +392,7 @@ graph TB
 
 Публичный console script запускает FastMCP stdio server. Его tool modules
 используют общий session manager, который владеет состоянием отладчика,
-проверенной областью проекта, очисткой процессов, выводом, снимками и trace evidence.
+контекстом проекта по умолчанию, очисткой процессов, выводом, снимками и trace evidence.
 DAP client работает с `netcoredbg`; Windows UI operations используют FlaUI bridge,
 когда он доступен, и pywinauto fallback для поддерживаемых операций.
 
@@ -429,18 +436,6 @@ DAP-adjusted locations.
 
 **Проверка:** `get_debug_state()` возвращает `running`, а свежие screenshots
 обновляются.
-
-### Отклонён путь к worktree
-
-**Симптом:** запуск или build сообщает об ошибке path validation.
-
-**Причина:** сервер определил другой project root либо worktree находится за
-пределами разрешённых paths.
-
-**Решение:** запустите сервер из этого worktree с `--project-from-cwd` или
-добавьте его prefix в `NETCOREDBG_ALLOWED_PATHS`.
-
-**Проверка:** `start_debug` принимает build и program paths внутри worktree.
 
 ## Ограничения
 

@@ -124,22 +124,20 @@ class TestPathValidation:
             result = manager.validate_path(str(test_file), must_exist=True)
             assert result == str(test_file.resolve())
 
-    def test_validate_path_outside_project_raises(self, tmp_path):
-        """Test validate_path rejects paths outside project."""
+    @pytest.mark.parametrize("relative_to_project", [False, True])
+    def test_validate_path_accepts_external_file_without_allowed_paths(
+        self, tmp_path, monkeypatch, relative_to_project
+    ):
+        monkeypatch.delenv("NETCOREDBG_ALLOWED_PATHS", raising=False)
+        project = tmp_path / "project"
+        project.mkdir()
+        external_file = tmp_path / "other.cs"
+        external_file.write_text("// test")
+        path = project / ".." / "other.cs" if relative_to_project else external_file
         with patch("netcoredbg_mcp.session.manager.DAPClient"):
-            manager = SessionManager(project_path=str(tmp_path))
+            manager = SessionManager(project_path=str(project))
 
-            with pytest.raises(ValueError, match="outside project scope"):
-                # Attempt to access parent directory
-                manager.validate_path(str(tmp_path.parent / "other.cs"))
-
-    def test_validate_path_traversal_blocked(self, tmp_path):
-        """Test validate_path blocks path traversal attempts."""
-        with patch("netcoredbg_mcp.session.manager.DAPClient"):
-            manager = SessionManager(project_path=str(tmp_path))
-
-            with pytest.raises(ValueError, match="outside project scope"):
-                manager.validate_path(str(tmp_path / ".." / "other.cs"))
+        assert manager.validate_path(str(path), must_exist=True) == str(external_file.resolve())
 
     def test_validate_path_no_project_scope(self, tmp_path):
         """Test validate_path works without project scope."""
@@ -161,37 +159,6 @@ class TestPathValidation:
             with pytest.raises(ValueError, match="does not exist"):
                 manager.validate_path(str(tmp_path / "nonexistent.cs"), must_exist=True)
 
-    def test_validate_path_for_project_uses_supplied_worktree_scope(self, tmp_path):
-        """validate_path_for_project uses supplied project worktrees, not session scope."""
-        owner_project = tmp_path / "owner"
-        observer_project = tmp_path / "observer"
-        observer_worktree = tmp_path / "observer-wt"
-        owner_project.mkdir()
-        observer_project.mkdir()
-        observer_worktree.mkdir()
-        (observer_worktree / ".git").mkdir()
-        plan_file = observer_worktree / "runtime-smoke-plan.json"
-        plan_file.write_text("{}", encoding="utf-8")
-
-        worktrees_dir = observer_project / ".git" / "worktrees" / "observer-wt"
-        worktrees_dir.mkdir(parents=True)
-        (worktrees_dir / "gitdir").write_text(
-            str(observer_worktree / ".git"),
-            encoding="utf-8",
-        )
-
-        with patch("netcoredbg_mcp.session.manager.DAPClient"):
-            manager = SessionManager(project_path=str(owner_project))
-
-            with pytest.raises(ValueError, match="outside project scope"):
-                manager.validate_path(str(plan_file))
-
-            assert manager.validate_path_for_project(
-                str(plan_file),
-                str(observer_project),
-            ) == str(plan_file.resolve())
-            assert manager.project_path == str(owner_project.resolve())
-
     def test_validate_program_valid(self, tmp_path):
         """Test validate_program accepts .dll and .exe files."""
         with patch("netcoredbg_mcp.session.manager.DAPClient"):
@@ -205,6 +172,27 @@ class TestPathValidation:
 
             assert manager.validate_program(str(dll_file)) == str(dll_file.resolve())
             assert manager.validate_program(str(exe_file)) == str(exe_file.resolve())
+
+    @pytest.mark.parametrize("program_kind", ["dll", "exe", "exe_to_dll"])
+    def test_validate_program_accepts_external_target_without_allowed_paths(
+        self, tmp_path, monkeypatch, program_kind
+    ):
+        monkeypatch.delenv("NETCOREDBG_ALLOWED_PATHS", raising=False)
+        project = tmp_path / "project"
+        external = tmp_path / "external"
+        project.mkdir()
+        external.mkdir()
+        program = external / ("App.dll" if program_kind == "dll" else "App.exe")
+        program.write_bytes(b"")
+        program.with_suffix(".runtimeconfig.json").write_text('{"runtimeOptions":{}}')
+        expected = program
+        if program_kind == "exe_to_dll":
+            expected = program.with_suffix(".dll")
+            expected.write_bytes(b"")
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(project))
+
+        assert manager.validate_program(str(program)) == str(expected.resolve())
 
     def test_validate_program_invalid_extension(self, tmp_path):
         """Test validate_program rejects non-.NET files."""

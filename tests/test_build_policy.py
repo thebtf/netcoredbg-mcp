@@ -97,31 +97,6 @@ class TestPatterns:
             assert not RUNTIME_PATTERN.match(rid), f"Should not match: {rid}"
 
 
-class TestBuildPolicyInit:
-    """Tests for BuildPolicy initialization."""
-
-    def test_init_with_valid_workspace(self, tmp_path):
-        """Test initialization with valid workspace."""
-        policy = BuildPolicy(workspace_root=str(tmp_path))
-        assert policy.workspace_root == str(tmp_path)
-
-    def test_init_normalizes_path(self, tmp_path):
-        """Test that workspace path is normalized."""
-        # Add trailing slash
-        policy = BuildPolicy(workspace_root=str(tmp_path) + os.sep)
-        assert not policy.workspace_root.endswith(os.sep)
-
-    def test_init_with_allowed_outputs(self, tmp_path):
-        """Test initialization with allowed output directories."""
-        output_dir = tmp_path / "bin"
-        output_dir.mkdir()
-        policy = BuildPolicy(
-            workspace_root=str(tmp_path),
-            allowed_output_dirs=[str(output_dir)],
-        )
-        assert str(output_dir) in policy.allowed_output_dirs
-
-
 class TestPathValidation:
     """Tests for path validation security."""
 
@@ -131,28 +106,37 @@ class TestPathValidation:
         project.parent.mkdir(parents=True)
         project.touch()
 
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+        policy = BuildPolicy()
         result = policy.validate_project_path(str(project))
         assert result == str(project)
 
-    def test_validate_project_path_outside_workspace(self, tmp_path):
-        """Test rejection of path outside workspace."""
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+    def test_validate_project_path_outside_workspace_without_env(self, tmp_path, monkeypatch):
+        """An explicit sibling project needs no directory admission."""
+        monkeypatch.delenv("NETCOREDBG_ALLOWED_PATHS", raising=False)
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        project = tmp_path / "other" / "App.csproj"
+        project.parent.mkdir()
+        project.touch()
+        policy = BuildPolicy()
 
-        with pytest.raises(ValueError, match="outside workspace"):
-            policy.validate_project_path("/etc/passwd")
+        assert policy.validate_project_path(str(project)) == str(project)
 
-    def test_validate_path_traversal_rejected(self, tmp_path):
-        """Test rejection of path traversal."""
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+    def test_validate_output_path_outside_workspace_without_env(self, tmp_path, monkeypatch):
+        """An explicit sibling output is accepted and canonicalized without grants."""
+        monkeypatch.delenv("NETCOREDBG_ALLOWED_PATHS", raising=False)
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        output = tmp_path / "output"
+        output.mkdir()
+        policy = BuildPolicy()
 
-        with pytest.raises(ValueError, match="outside workspace"):
-            policy.validate_project_path(str(tmp_path / ".." / "etc" / "passwd"))
+        assert policy.validate_output_path(str(workspace / ".." / "output")) == str(output)
 
     @pytest.mark.skipif(os.name != "nt", reason="Windows-only test")
     def test_validate_unc_path_rejected(self, tmp_path):
         """Test rejection of UNC paths by default."""
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+        policy = BuildPolicy()
 
         with pytest.raises(ValueError, match="UNC paths not allowed"):
             policy.validate_project_path("\\\\server\\share\\project.csproj")
@@ -160,14 +144,14 @@ class TestPathValidation:
     @pytest.mark.skipif(os.name != "nt", reason="Windows-only test")
     def test_validate_device_path_rejected(self, tmp_path):
         """Test rejection of device paths."""
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+        policy = BuildPolicy()
 
         with pytest.raises(ValueError, match="Device paths not allowed"):
             policy.validate_project_path("\\\\.\\C:\\project.csproj")
 
     def test_validate_empty_path(self, tmp_path):
         """Test rejection of empty path."""
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+        policy = BuildPolicy()
 
         with pytest.raises(ValueError, match="Empty"):
             policy.validate_project_path("")
@@ -178,7 +162,7 @@ class TestArgumentValidation:
 
     def test_allowed_configuration(self, tmp_path):
         """Test allowed configuration values."""
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+        policy = BuildPolicy()
 
         result = policy.validate_arguments(["-c", "Debug"])
         assert result == ["-c", "Debug"]
@@ -188,14 +172,14 @@ class TestArgumentValidation:
 
     def test_invalid_configuration_rejected(self, tmp_path):
         """Test rejection of invalid configuration."""
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+        policy = BuildPolicy()
 
         with pytest.raises(ValueError, match="Invalid configuration"):
             policy.validate_arguments(["-c", "MaliciousConfig"])
 
     def test_allowed_framework(self, tmp_path):
         """Test allowed framework values."""
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+        policy = BuildPolicy()
 
         result = policy.validate_arguments(["-f", "net8.0"])
         assert "-f" in result
@@ -203,14 +187,14 @@ class TestArgumentValidation:
 
     def test_invalid_framework_rejected(self, tmp_path):
         """Test rejection of invalid framework."""
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+        policy = BuildPolicy()
 
         with pytest.raises(ValueError, match="Invalid framework"):
             policy.validate_arguments(["-f", "../etc/passwd"])
 
     def test_allowed_runtime(self, tmp_path):
         """Test allowed runtime values."""
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+        policy = BuildPolicy()
 
         result = policy.validate_arguments(["-r", "win-x64"])
         assert "-r" in result
@@ -218,14 +202,14 @@ class TestArgumentValidation:
 
     def test_invalid_runtime_rejected(self, tmp_path):
         """Test rejection of invalid runtime."""
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+        policy = BuildPolicy()
 
         with pytest.raises(ValueError, match="Invalid runtime"):
             policy.validate_arguments(["-r", "malicious-runtime"])
 
     def test_boolean_flags(self, tmp_path):
         """Test boolean flag arguments."""
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+        policy = BuildPolicy()
 
         result = policy.validate_arguments(["--no-restore", "--force"])
         assert "--no-restore" in result
@@ -233,14 +217,14 @@ class TestArgumentValidation:
 
     def test_unknown_argument_rejected(self, tmp_path):
         """Test rejection of unknown arguments."""
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+        policy = BuildPolicy()
 
         with pytest.raises(ValueError, match="not allowed"):
             policy.validate_arguments(["--malicious-flag"])
 
     def test_property_argument_rejected(self, tmp_path):
         """Test rejection of /p: arguments (security risk)."""
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+        policy = BuildPolicy()
 
         # /p: is not in allowed list
         with pytest.raises(ValueError, match="not allowed"):
@@ -248,7 +232,7 @@ class TestArgumentValidation:
 
     def test_verbosity_validation(self, tmp_path):
         """Test verbosity argument validation."""
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+        policy = BuildPolicy()
 
         result = policy.validate_arguments(["-v", "minimal"])
         assert "-v" in result
@@ -256,6 +240,22 @@ class TestArgumentValidation:
 
         with pytest.raises(ValueError, match="Invalid verbosity"):
             policy.validate_arguments(["-v", "super-verbose"])
+
+    @pytest.mark.parametrize("flag", ["-o", "--output"])
+    def test_output_argument_outside_workspace_preserved_without_env(
+        self, tmp_path, monkeypatch, flag
+    ):
+        """Explicit sibling output arguments are accepted without changing their spelling."""
+        monkeypatch.delenv("NETCOREDBG_ALLOWED_PATHS", raising=False)
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        output = tmp_path / "output"
+        output.mkdir()
+        policy = BuildPolicy()
+
+        output_arg = str(workspace / ".." / "output")
+
+        assert policy.validate_arguments([flag, output_arg]) == [flag, output_arg]
 
 
 class TestGetDotnetCommand:
@@ -265,7 +265,7 @@ class TestGetDotnetCommand:
         """Test build command generation."""
         project = tmp_path / "Test.csproj"
         project.touch()
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+        policy = BuildPolicy()
 
         cmd = policy.get_dotnet_command(BuildCommand.BUILD, str(project), "Release")
 
@@ -280,7 +280,7 @@ class TestGetDotnetCommand:
         """Test clean command generation."""
         project = tmp_path / "Test.csproj"
         project.touch()
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+        policy = BuildPolicy()
 
         cmd = policy.get_dotnet_command(BuildCommand.CLEAN, str(project))
 
@@ -291,7 +291,7 @@ class TestGetDotnetCommand:
         """Test restore command generation."""
         project = tmp_path / "Test.csproj"
         project.touch()
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+        policy = BuildPolicy()
 
         cmd = policy.get_dotnet_command(BuildCommand.RESTORE, str(project))
 
@@ -305,7 +305,7 @@ class TestGetDotnetCommand:
         """Test rebuild returns build command (caller handles clean)."""
         project = tmp_path / "Test.csproj"
         project.touch()
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+        policy = BuildPolicy()
 
         cmd = policy.get_dotnet_command(BuildCommand.REBUILD, str(project))
 
@@ -316,7 +316,7 @@ class TestGetDotnetCommand:
         """Test extra arguments are validated."""
         project = tmp_path / "Test.csproj"
         project.touch()
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+        policy = BuildPolicy()
 
         cmd = policy.get_dotnet_command(
             BuildCommand.BUILD, str(project), extra_args=["-v", "minimal"]
@@ -329,171 +329,7 @@ class TestGetDotnetCommand:
         """Test invalid extra arguments rejected."""
         project = tmp_path / "Test.csproj"
         project.touch()
-        policy = BuildPolicy(workspace_root=str(tmp_path))
+        policy = BuildPolicy()
 
         with pytest.raises(ValueError):
             policy.get_dotnet_command(BuildCommand.BUILD, str(project), extra_args=["--evil-flag"])
-
-
-class TestWorktreeAndEnvPaths:
-    """Tests for git worktree and NETCOREDBG_ALLOWED_PATHS support."""
-
-    def test_path_within_workspace_accepted(self, tmp_path):
-        """Path inside workspace root is always accepted."""
-        workspace = tmp_path / "project"
-        workspace.mkdir()
-        project = workspace / "App.csproj"
-        project.touch()
-        policy = BuildPolicy(workspace_root=str(workspace))
-        result = policy.validate_project_path(str(project))
-        assert result == str(project)
-
-    def test_path_outside_workspace_rejected(self, tmp_path):
-        """Path outside workspace is rejected without env/worktree."""
-        workspace = tmp_path / "project"
-        workspace.mkdir()
-        other = tmp_path / "other" / "App.csproj"
-        other.parent.mkdir()
-        other.touch()
-        policy = BuildPolicy(workspace_root=str(workspace))
-        with pytest.raises(ValueError, match="outside workspace"):
-            policy.validate_project_path(str(other))
-
-    def test_env_allowed_paths(self, tmp_path, monkeypatch):
-        """NETCOREDBG_ALLOWED_PATHS env var adds allowed prefixes."""
-        workspace = tmp_path / "project"
-        workspace.mkdir()
-        worktree = tmp_path / "worktree"
-        worktree.mkdir()
-        project = worktree / "App.csproj"
-        project.touch()
-        monkeypatch.setenv("NETCOREDBG_ALLOWED_PATHS", str(worktree))
-        policy = BuildPolicy(workspace_root=str(workspace))
-        result = policy.validate_project_path(str(project))
-        assert result == str(project)
-
-    def test_env_allowed_paths_comma_separated(self, tmp_path, monkeypatch):
-        """Multiple paths separated by commas."""
-        workspace = tmp_path / "project"
-        workspace.mkdir()
-        wt1 = tmp_path / "wt1"
-        wt1.mkdir()
-        wt2 = tmp_path / "wt2"
-        wt2.mkdir()
-        project = wt2 / "App.csproj"
-        project.touch()
-        monkeypatch.setenv("NETCOREDBG_ALLOWED_PATHS", f"{wt1},{wt2}")
-        policy = BuildPolicy(workspace_root=str(workspace))
-        result = policy.validate_project_path(str(project))
-        assert result == str(project)
-
-    def test_is_within_helper(self, tmp_path):
-        """_is_within correctly checks path containment."""
-        root = str(tmp_path / "root")
-        child = str(tmp_path / "root" / "sub")
-        sibling = str(tmp_path / "root2")
-        assert BuildPolicy._is_within(child, root) is True
-        assert BuildPolicy._is_within(root, root) is True
-        assert BuildPolicy._is_within(sibling, root) is False
-
-    def test_output_path_in_env_allowed(self, tmp_path, monkeypatch):
-        """Output paths in NETCOREDBG_ALLOWED_PATHS are accepted."""
-        workspace = tmp_path / "project"
-        workspace.mkdir()
-        worktree = tmp_path / "worktree"
-        worktree.mkdir()
-        output = worktree / "bin" / "Debug"
-        output.mkdir(parents=True)
-        monkeypatch.setenv("NETCOREDBG_ALLOWED_PATHS", str(worktree))
-        policy = BuildPolicy(workspace_root=str(workspace))
-        result = policy.validate_output_path(str(output))
-        assert result == str(output)
-
-    def test_git_worktree_auto_detection(self, tmp_path):
-        """Paths in auto-detected git worktrees are accepted."""
-        workspace = tmp_path / "project"
-        workspace.mkdir()
-        worktree = tmp_path / "wt-feature"
-        worktree.mkdir()
-        project = worktree / "App.csproj"
-        project.touch()
-
-        # Create .git/worktrees/<name>/gitdir structure
-        git_dir = workspace / ".git"
-        git_dir.mkdir()
-        worktrees_dir = git_dir / "worktrees"
-        worktrees_dir.mkdir()
-        wt_entry = worktrees_dir / "wt-feature"
-        wt_entry.mkdir()
-        (wt_entry / "gitdir").write_text(str(worktree / ".git"))
-
-        policy = BuildPolicy(workspace_root=str(workspace))
-        result = policy.validate_project_path(str(project))
-        assert result == str(project)
-
-    def test_worktree_cache(self, tmp_path):
-        """Worktree paths are cached after first call."""
-        workspace = tmp_path / "project"
-        workspace.mkdir()
-        git_dir = workspace / ".git"
-        git_dir.mkdir()
-        (git_dir / "worktrees").mkdir()
-
-        policy = BuildPolicy(workspace_root=str(workspace))
-        result1 = policy._get_allowed_worktree_paths()
-        result2 = policy._get_allowed_worktree_paths()
-        # Same object returned (cached)
-        assert result1 is result2
-
-    def test_git_not_available(self, tmp_path):
-        """Graceful fallback when .git directory doesn't exist."""
-        workspace = tmp_path / "project"
-        workspace.mkdir()
-        # No .git directory
-        policy = BuildPolicy(workspace_root=str(workspace))
-        paths = policy._get_allowed_worktree_paths()
-        assert paths == []
-
-    def test_multiple_worktrees_detected(self, tmp_path):
-        """Multiple worktrees are detected from .git/worktrees."""
-        workspace = tmp_path / "project"
-        workspace.mkdir()
-        wt1 = tmp_path / "wt-feature"
-        wt1.mkdir()
-        wt2 = tmp_path / "wt-bugfix"
-        wt2.mkdir()
-
-        git_dir = workspace / ".git"
-        git_dir.mkdir()
-        worktrees_dir = git_dir / "worktrees"
-        worktrees_dir.mkdir()
-        entry1 = worktrees_dir / "wt-feature"
-        entry1.mkdir()
-        (entry1 / "gitdir").write_text(str(wt1 / ".git"))
-        entry2 = worktrees_dir / "wt-bugfix"
-        entry2.mkdir()
-        (entry2 / "gitdir").write_text(str(wt2 / ".git"))
-
-        policy = BuildPolicy(workspace_root=str(workspace))
-        paths = policy._get_allowed_worktree_paths()
-        abs_paths = [os.path.abspath(p) for p in paths]
-        assert str(wt1) in abs_paths
-        assert str(wt2) in abs_paths
-
-    def test_nonexistent_worktree_dir_excluded(self, tmp_path):
-        """Worktrees pointing to non-existent directories are filtered out."""
-        workspace = tmp_path / "project"
-        workspace.mkdir()
-        ghost_wt = tmp_path / "wt-ghost"  # NOT created — doesn't exist
-
-        git_dir = workspace / ".git"
-        git_dir.mkdir()
-        worktrees_dir = git_dir / "worktrees"
-        worktrees_dir.mkdir()
-        entry = worktrees_dir / "wt-ghost"
-        entry.mkdir()
-        (entry / "gitdir").write_text(str(ghost_wt / ".git"))
-
-        policy = BuildPolicy(workspace_root=str(workspace))
-        paths = policy._get_allowed_worktree_paths()
-        assert str(ghost_wt) not in [os.path.abspath(p) for p in paths]

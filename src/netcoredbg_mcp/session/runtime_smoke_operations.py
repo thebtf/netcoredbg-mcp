@@ -1194,6 +1194,13 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
             return _adapter_blocked("fixture.restore", "path validation service unavailable")
         try:
             target_path = str(validate_path(str(args.get("path") or ""), must_exist=False))
+            project_path = getattr(session, "project_path", None)
+            if not project_path:
+                raise ValueError("Project root is required for fixture restore")
+            try:
+                Path(target_path).resolve().relative_to(Path(project_path).resolve())
+            except ValueError as exc:
+                raise ValueError("Restore path outside project root") from exc
         except ValueError as exc:
             return _adapter_blocked("fixture.restore", str(exc))
         baseline_file = args.get("baseline_file")

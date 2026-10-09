@@ -56,7 +56,7 @@ def register_breakpoint_tools(
             # Resolve project root from MCP context
             await resolve_project_root(ctx, session)
 
-            # Validate file path (security: prevent path traversal)
+            # Canonicalize the source path and require the file to exist
             validated_file = session.validate_path(file, must_exist=True)
             bp = await session.add_breakpoint(validated_file, line, condition, hit_condition)
             await notify_breakpoints_changed(ctx)
@@ -86,7 +86,7 @@ def register_breakpoint_tools(
             # Resolve project root from MCP context
             await resolve_project_root(ctx, session)
 
-            # Validate file path (security: prevent path traversal)
+            # Canonicalize the source path for breakpoint lookup
             validated_file = session.validate_path(file)
             removed = await session.remove_breakpoint(validated_file, line)
             await notify_breakpoints_changed(ctx)

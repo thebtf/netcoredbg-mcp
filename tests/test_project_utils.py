@@ -637,17 +637,21 @@ class TestSessionManagerIntegration:
         ):
             session = SessionManager()
 
-            # Initially no scope - should allow any path
+            # Without project context, absolute paths still resolve
             result = session.validate_path(str(test_file), must_exist=True)
             assert result == str(test_file)
 
-            # Set project path
+            # Project context supplies the relative-path base
             session.set_project_path(str(project_dir))
 
             # Path within project should work
             result = session.validate_path(str(test_file), must_exist=True)
             assert result == str(test_file)
 
-            # Path outside project should fail
-            with pytest.raises(ValueError, match="outside project scope"):
-                session.validate_path(str(outside_file))
+            # Existing external paths do not need path admission
+            result = session.validate_path(str(outside_file), must_exist=True)
+            assert result == str(outside_file.resolve())
+            assert session.validate_path("test.cs", must_exist=True) == str(test_file.resolve())
+            assert session.validate_path("../outside.cs", must_exist=True) == str(
+                outside_file.resolve()
+            )

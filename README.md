@@ -13,7 +13,7 @@ agent workflow. `netcoredbg-mcp` combines `netcoredbg`, the Debug Adapter
 Protocol, and Windows UI Automation so an agent can observe a running app,
 stop it deliberately, and inspect the state that explains the behavior.
 
-**Python 3.10+ · Windows GUI automation · 135 tools · 8 prompts · 4 resources · v0.23.11**
+**Python 3.10+ · Windows GUI automation · 135 tools · 8 prompts · 4 resources · v0.23.12**
 
 ## What it enables
 
@@ -351,7 +351,7 @@ yields `DIRTY_UNPROVEN`; the caller must not treat that run as a product verdict
 | `netcoredbg-mcp --version` | Print the installed package version. |
 | `netcoredbg-mcp --setup` | Provision or discover debugger prerequisites, then print a client configuration snippet. |
 | `netcoredbg-mcp setup --enc` | Install the default prebuilt Edit-and-Continue debugger with `ncdbhook.dll` on Windows x64; a source build is opt-in. |
-| `netcoredbg-mcp --project C:\Work\MyApp` | Pin all debug operations to one project root. |
+| `netcoredbg-mcp --project C:\Work\MyApp` | Set the default project root for path resolution and source search. |
 | `netcoredbg-mcp --project-from-cwd` | Resolve the project from the startup directory and compatible local MCP roots. |
 
 `--project` and `--project-from-cwd` are mutually exclusive. `--enc` must be
@@ -363,7 +363,6 @@ used with `setup` or `--setup`.
 |---|---|
 | `NETCOREDBG_PATH` | Explicit path to `netcoredbg`. |
 | `NETCOREDBG_PROJECT_ROOT` / `MCP_PROJECT_ROOT` | Authoritative project-root fallback. |
-| `NETCOREDBG_ALLOWED_PATHS` | Additional comma-separated path prefixes the server may access. |
 | `FLAUI_BRIDGE_PATH` | Explicit FlaUI bridge executable path. |
 | `NETCOREDBG_SCREENSHOT_MAX_WIDTH` / `NETCOREDBG_SCREENSHOT_QUALITY` | Inline preview dimensions and WebP quality. |
 | `NETCOREDBG_SESSION_TIMEOUT` | Multi-agent ownership inactivity timeout. |
@@ -371,6 +370,13 @@ used with `setup` or `--setup`.
 
 An explicit `--project` or project-root environment variable takes precedence
 over MCP client roots. Network/UNC client roots are rejected.
+
+Explicit paths to existing DLL/EXE targets, source files, and build projects,
+plus output paths, need no separate debug permission, even outside the default
+project or worktree. Project-root selection provides context, not a directory
+allowlist. This removes MCP-wrapper policy, not a native Samsung `netcoredbg`
+operating-system sandbox. File and .NET target validity checks remain, as do
+the independent evidence, restore, and source-search guards.
 
 ## Architecture
 
@@ -386,7 +392,7 @@ graph TB
 ```
 
 The public console script starts a FastMCP stdio server. Its tool modules share
-one session manager, which owns debugger state, validated project scope,
+one session manager, which owns debugger state, default project context,
 process cleanup, output, snapshots, and trace evidence. The DAP client talks to
 `netcoredbg`; Windows UI operations use the FlaUI bridge when available, with a
 pywinauto fallback for supported operations.
@@ -430,19 +436,6 @@ command.
 expecting the window to accept UI input.
 
 **Verify:** `get_debug_state()` reports `running` and fresh screenshots update.
-
-### A worktree path is rejected
-
-**Symptom:** launch or build reports a path-validation error.
-
-**Cause:** the server resolved a different project root, or the worktree lies
-outside the allowed path set.
-
-**Fix:** start the server from that worktree with `--project-from-cwd`, or add
-its prefix to `NETCOREDBG_ALLOWED_PATHS`.
-
-**Verify:** `start_debug` accepts the build and program paths under the
-worktree.
 
 ## Limitations
 

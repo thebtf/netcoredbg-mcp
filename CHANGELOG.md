@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.12] - 2026-10-09
+
+### Fixed
+- Explicit build-project and output paths, DLL/EXE debug targets, and source-file paths no longer require directory admission under the default project, a Git worktree, or a configured allowlist.
+- Removed obsolete directory-allowlist configuration and troubleshooting guidance. This was MCP-wrapper policy, not a native Samsung `netcoredbg` operating-system sandbox.
+
+### Compatibility
+- File and .NET target validity checks, plus independent evidence, restore, and source-search guards, remain unchanged. Dependency versions remain locked.
+
 ## [0.23.11] - 2026-08-30
 
 ### Fixed

@@ -61,7 +61,7 @@ class FakeRuntimeSmokeSession:
         self.process_registry = None
         self.stop_calls = 0
         self.launch_calls = 0
-        self.allowed_root: Path | None = None
+        self.project_path: Path | None = None
         self.validation_failure: str | None = None
         self.validated_paths: list[tuple[str, bool]] = []
 
@@ -146,13 +146,10 @@ class FakeRuntimeSmokeSession:
         self.validated_paths.append((path, must_exist))
         if self.validation_failure:
             raise ValueError(self.validation_failure)
-        candidate = Path(path).resolve()
-        if self.allowed_root is not None:
-            root = self.allowed_root.resolve()
-            try:
-                candidate.relative_to(root)
-            except ValueError as exc:
-                raise ValueError("Path outside project root") from exc
+        candidate = Path(path)
+        if self.project_path is not None and not candidate.is_absolute():
+            candidate = self.project_path / candidate
+        candidate = candidate.resolve()
         if must_exist and not candidate.exists():
             raise ValueError(f"Path does not exist: {path}")
         return str(candidate)
@@ -1783,7 +1780,7 @@ async def test_fixture_restore_returns_structured_failure_for_io_errors(
     tmp_path: Path,
 ) -> None:
     session = FakeRuntimeSmokeSession()
-    session.allowed_root = tmp_path
+    session.project_path = tmp_path
     baseline_dir = tmp_path / "baseline-dir"
     baseline_dir.mkdir()
     target = tmp_path / "settings.json"
@@ -1804,7 +1801,7 @@ async def test_fixture_restore_returns_structured_failure_for_write_errors(
     tmp_path: Path,
 ) -> None:
     session = FakeRuntimeSmokeSession()
-    session.allowed_root = tmp_path
+    session.project_path = tmp_path
     target_dir = tmp_path / "target-dir"
     target_dir.mkdir()
 
@@ -5416,7 +5413,7 @@ async def test_runner_restores_files_on_every_terminal_status(
     expected_status: str,
 ) -> None:
     session = FakeRuntimeSmokeSession()
-    session.allowed_root = tmp_path
+    session.project_path = tmp_path
     fixture = tmp_path / f"{case}.txt"
     fixture.write_text("mutated", encoding="utf-8")
     actions: list[dict[str, Any]]
@@ -5472,9 +5469,9 @@ async def test_runner_restores_files_on_every_terminal_status(
 @pytest.mark.asyncio
 async def test_runner_restores_from_validated_baseline_file(tmp_path: Path) -> None:
     session = FakeRuntimeSmokeSession()
-    session.allowed_root = tmp_path
+    session.project_path = tmp_path
     fixture = tmp_path / "fixture.txt"
-    baseline = tmp_path / "baseline.txt"
+    baseline = tmp_path.parent / f"{tmp_path.name}-baseline.txt"
     fixture.write_text("mutated", encoding="utf-8")
     baseline.write_text("restored from file", encoding="utf-8")
 
@@ -5499,7 +5496,7 @@ async def test_runner_restores_hidden_windows_file_and_preserves_attribute(
     tmp_path: Path,
 ) -> None:
     session = FakeRuntimeSmokeSession()
-    session.allowed_root = tmp_path
+    session.project_path = tmp_path
     fixture = tmp_path / "fixture.txt"
     fixture.write_text("mutated", encoding="utf-8")
     original_attributes = fixture.stat().st_file_attributes
@@ -5528,7 +5525,7 @@ async def test_runner_retries_transient_restore_permission_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = FakeRuntimeSmokeSession()
-    session.allowed_root = tmp_path
+    session.project_path = tmp_path
     fixture = tmp_path / "fixture.txt"
     fixture.write_text("mutated", encoding="utf-8")
     runner = _runner(session)
@@ -5566,7 +5563,7 @@ async def test_runner_accepts_already_matched_file_after_restore_write_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = FakeRuntimeSmokeSession()
-    session.allowed_root = tmp_path
+    session.project_path = tmp_path
     fixture = tmp_path / "fixture.txt"
     fixture.write_text("baseline", encoding="utf-8")
     original_write_text = Path.write_text
@@ -5596,7 +5593,7 @@ async def test_runner_cleanup_failure_changes_success_to_fail_for_restore_error(
     tmp_path: Path,
 ) -> None:
     session = FakeRuntimeSmokeSession()
-    session.allowed_root = tmp_path
+    session.project_path = tmp_path
     directory_target = tmp_path / "fixture-dir"
     directory_target.mkdir()
 
@@ -5640,21 +5637,34 @@ async def test_runner_records_graceful_debug_stop_when_requested() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path_kind", ["absolute", "relative", "symlink"])
 async def test_runner_rejects_restore_path_outside_project_before_steps(
     tmp_path: Path,
+    path_kind: str,
 ) -> None:
     session = FakeRuntimeSmokeSession()
     allowed = tmp_path / "allowed"
     allowed.mkdir()
-    session.allowed_root = allowed
+    session.project_path = allowed
     outside = tmp_path / "outside.txt"
     outside.write_text("mutated", encoding="utf-8")
+    restore_path = outside
+    if path_kind == "relative":
+        restore_path = Path("../outside.txt")
+    elif path_kind == "symlink":
+        restore_path = allowed / "linked.txt"
+        try:
+            restore_path.symlink_to(outside)
+        except OSError as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
 
     result = await _runner(session).run(
         {
             "name": "unsafe-restore",
             "actions": [{"name": "append_output", "args": {"text": "must not run\n"}}],
-            "cleanup": {"restore_files": [{"path": str(outside), "baseline_text": "baseline"}]},
+            "cleanup": {
+                "restore_files": [{"path": str(restore_path), "baseline_text": "baseline"}]
+            },
         }
     )
 
@@ -5668,11 +5678,66 @@ async def test_runner_rejects_restore_path_outside_project_before_steps(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path_kind", ["absolute", "relative", "symlink", "no_project"])
+async def test_fixture_restore_adapter_keeps_project_write_boundary(
+    tmp_path: Path,
+    path_kind: str,
+) -> None:
+    session = FakeRuntimeSmokeSession()
+    project = tmp_path / "project"
+    project.mkdir()
+    session.project_path = None if path_kind == "no_project" else project
+    outside = tmp_path / "outside.txt"
+    outside.write_text("unchanged", encoding="utf-8")
+    restore_path = outside
+    if path_kind == "relative":
+        restore_path = Path("../outside.txt")
+    elif path_kind == "symlink":
+        restore_path = project / "linked.txt"
+        try:
+            restore_path.symlink_to(outside)
+        except OSError as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
+
+    adapters = ui_operation_adapters(_no_ui_backend, session=session)
+    result = await adapters["fixture.restore"](
+        path=str(restore_path),
+        baseline_text="must not overwrite",
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert "project root" in result["reason"].lower()
+    assert outside.read_text(encoding="utf-8") == "unchanged"
+
+
+@pytest.mark.asyncio
+async def test_fixture_restore_adapter_reads_external_baseline_for_project_target(
+    tmp_path: Path,
+) -> None:
+    session = FakeRuntimeSmokeSession()
+    project = tmp_path / "project"
+    project.mkdir()
+    session.project_path = project
+    baseline = tmp_path / "external-baseline.txt"
+    baseline.write_text("baseline", encoding="utf-8")
+
+    adapters = ui_operation_adapters(_no_ui_backend, session=session)
+    result = await adapters["fixture.restore"](
+        path="settings.txt",
+        baseline_file=str(baseline),
+    )
+
+    assert result["status"] == "PASS"
+    assert result["path"] == str((project / "settings.txt").resolve())
+    assert (project / "settings.txt").read_text(encoding="utf-8") == "baseline"
+
+
+@pytest.mark.asyncio
 async def test_runner_rejects_restore_without_explicit_baseline_before_steps(
     tmp_path: Path,
 ) -> None:
     session = FakeRuntimeSmokeSession()
-    session.allowed_root = tmp_path
+    session.project_path = tmp_path
     fixture = tmp_path / "fixture.txt"
     fixture.write_text("mutated", encoding="utf-8")
 
@@ -5698,7 +5763,7 @@ async def test_runner_skips_plan_owned_cleanup_when_restore_schema_is_invalid(
     tmp_path: Path,
 ) -> None:
     session = FakeRuntimeSmokeSession()
-    session.allowed_root = tmp_path
+    session.project_path = tmp_path
     fixture = tmp_path / "fixture.txt"
     fixture.write_text("mutated", encoding="utf-8")
 

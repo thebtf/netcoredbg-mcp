@@ -435,7 +435,7 @@ async def _read_wait_json(
     try:
         path = _resolve_wait_json_path(raw_path, context)
     except ValueError as exc:
-        metadata["reason"] = "diagnostic JSON path is outside allowed scope"
+        metadata["reason"] = "diagnostic JSON path is invalid"
         metadata["validation_error"] = str(exc)
         return None, metadata
 
@@ -460,7 +460,7 @@ async def _read_wait_json(
                 metadata["cursor"] = _diagnostic_cursor_payload(cursor)
                 file_text = await asyncio.to_thread(_read_file_if_present, candidate)
         except ValueError as exc:
-            metadata["reason"] = "matched diagnostic JSON is outside allowed scope"
+            metadata["reason"] = "matched diagnostic JSON path is invalid"
             metadata["validation_error"] = str(exc)
             file_text = None
         except OSError as exc:

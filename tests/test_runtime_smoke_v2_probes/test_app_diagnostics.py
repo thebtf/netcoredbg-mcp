@@ -6,9 +6,11 @@ from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
+from netcoredbg_mcp.session import SessionManager
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner
 from netcoredbg_mcp.session.runtime_smoke_schema import (
     DIAGNOSTIC_EVIDENCE_LIMITS,
@@ -133,23 +135,6 @@ class LaunchDiagnosticSmokeSession(ProbeSmokeSession):
         if self.on_launch is not None:
             self.on_launch()
         return {"status": "PASS", "profile": kwargs.get("profile", "isolated")}
-
-
-class CandidateValidationProbeSmokeSession(ProbeSmokeSession):
-    def __init__(self, project_root: Path, rejected_path: Path) -> None:
-        super().__init__()
-        self.project_root = project_root.resolve()
-        self.rejected_path = rejected_path.resolve()
-        self.validated_paths: list[tuple[Path, bool]] = []
-
-    def validate_path(self, path: str, must_exist: bool = False) -> str:
-        resolved = Path(path).resolve()
-        self.validated_paths.append((resolved, must_exist))
-        if must_exist and resolved == self.rejected_path:
-            raise ValueError("Path outside project scope")
-        if self.project_root not in (resolved, *resolved.parents):
-            raise ValueError("Path outside project scope")
-        return str(resolved)
 
 
 def _session_with_debug_freshness(
@@ -1846,9 +1831,11 @@ async def test_app_diagnostics_poll_publishes_progress_before_artifact_arrives(
 
 
 @pytest.mark.asyncio
-async def test_app_diagnostics_poll_revalidates_matched_directory_candidate(
+async def test_app_diagnostics_poll_reads_matched_candidate_outside_project(
     tmp_path: Path,
 ) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
     diagnostic_dir = tmp_path / "novascript-evidence"
     diagnostic_dir.mkdir()
     diagnostic_path = diagnostic_dir / "diagnostic-cue-change.json"
@@ -1862,37 +1849,36 @@ async def test_app_diagnostics_poll_revalidates_matched_directory_candidate(
         ),
         encoding="utf-8",
     )
-    session = CandidateValidationProbeSmokeSession(
-        project_root=tmp_path,
-        rejected_path=diagnostic_path,
-    )
+    with patch("netcoredbg_mcp.session.manager.DAPClient"):
+        session = SessionManager(project_path=str(project))
 
-    result = await runner(session).run(
-        one_probe_plan(
-            _app_diagnostics(
-                phase="after",
-                app={"name": "PlaceholderApp"},
-                status="PASS",
-                observations=[],
-                poll={
-                    "path": str(diagnostic_dir),
-                    "pattern": "diagnostic-*.json",
-                    "timeout_ms": 0,
-                    "poll_interval_ms": 0,
-                },
+    probe = await handle_app_diagnostics(
+        _app_diagnostics(
+            phase="after",
+            app={"name": "PlaceholderApp"},
+            status="PASS",
+            observations=[],
+            poll={
+                "path": str(diagnostic_dir),
+                "pattern": "diagnostic-*.json",
+                "timeout_ms": 0,
+                "poll_interval_ms": 0,
+            },
+        ),
+        ProbeContext(
+            action_context=ActionContext(
+                service_adapters={},
+                clock=lambda: 0.0,
+                session=session,
             )
-        )
+        ),
+        phase="after",
     )
 
-    probe = after_probe(result)
-    assert result["status"] == "BLOCKED"
-    assert probe["status"] == "BLOCKED"
-    assert probe["reason"] == "matched diagnostic JSON is outside allowed scope"
+    assert probe["status"] == "PASS"
+    assert probe["value"]["app"]["name"] == "NovaScript"
     assert probe["value"]["poll"]["matched_path"] == str(diagnostic_path.resolve())
-    assert probe["value"]["poll"]["observed"] is False
-    assert probe["value"]["poll"]["validation_error"] == "Path outside project scope"
-    assert (diagnostic_dir.resolve(), False) in session.validated_paths
-    assert (diagnostic_path.resolve(), True) in session.validated_paths
+    assert probe["value"]["poll"]["observed"] is True
 
 
 @pytest.mark.asyncio

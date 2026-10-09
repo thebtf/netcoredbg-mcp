@@ -85,8 +85,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--project",
         type=str,
         default=None,
-        help="Project root path for debugging. "
-        "All debug operations will be constrained to this path.",
+        help="Default project root for resolving relative paths and source search. "
+        "Explicit debug and build paths need no directory admission.",
     )
     parser.add_argument(
         "--project-from-cwd",

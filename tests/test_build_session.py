@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from netcoredbg_mcp.build.session import BuildSession
-from netcoredbg_mcp.build.state import BuildError, BuildState
+from netcoredbg_mcp.build.state import BuildState
 from netcoredbg_mcp.windows_process_owner import AdmissionStage, DrainStatus, ProcessAdmissionError
 from tests.owner_scope_red import (
     BlockingStream,
@@ -42,7 +42,8 @@ class TestBuildSessionInit:
         """Test that policy is created if not provided."""
         session = BuildSession(workspace_root=str(tmp_path))
         assert session._policy is not None
-        assert session._policy.workspace_root == str(tmp_path)
+        assert session._policy.allow_unc_paths is False
+        assert session._policy.allow_device_paths is False
 
 
 class TestBuildSessionProperties:
@@ -190,14 +191,6 @@ class TestBuildSessionBuild:
 
         assert session.last_result is not None
         assert session.last_result.success is True
-
-    @pytest.mark.asyncio
-    async def test_build_invalid_project_raises_error(self, tmp_path):
-        """Test that invalid project path raises BuildError."""
-        session = BuildSession(workspace_root=str(tmp_path))
-
-        with pytest.raises(BuildError, match="outside workspace"):
-            await session.build("/etc/passwd")
 
     @pytest.mark.asyncio
     async def test_build_uses_configuration(self, tmp_path):

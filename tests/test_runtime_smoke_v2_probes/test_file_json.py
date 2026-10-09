@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import jsonpath_ng
 import pytest
 
+from netcoredbg_mcp.session import SessionManager
 from netcoredbg_mcp.session.runtime_smoke_v2.probes.file_json import handle_file_json
 
 from .helpers import ProbeSmokeSession, after_probe, one_probe_plan, runner
@@ -18,10 +20,13 @@ class FileJsonProbeSession(ProbeSmokeSession):
         self.project_root = project_root.resolve()
 
     def validate_path(self, path: str, must_exist: bool = False) -> str:
-        resolved = Path(path).resolve()
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            candidate = self.project_root / candidate
+        resolved = candidate.resolve()
         self.calls.append(("validate_path", str(resolved), must_exist))
-        if self.project_root not in (resolved, *resolved.parents):
-            raise ValueError("Path outside project scope")
+        if must_exist and not resolved.exists():
+            raise ValueError(f"Path does not exist: {path}")
         return str(resolved)
 
 
@@ -107,27 +112,29 @@ async def test_file_json_after_only_probe_can_run_without_action(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_file_json_probe_blocks_path_outside_project(tmp_path: Path) -> None:
-    session = FileJsonProbeSession(tmp_path / "project")
+async def test_file_json_probe_reads_path_outside_project(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
     outside_path = tmp_path / "outside.json"
+    outside_path.write_text(json.dumps({"value": True}), encoding="utf-8")
+    with patch("netcoredbg_mcp.session.manager.DAPClient"):
+        session = SessionManager(project_path=str(project))
 
-    result = await runner(session).run(
-        one_probe_plan(
-            {
-                "kind": "file.json",
-                "name": "outside_file",
-                "path": str(outside_path),
-                "jsonpath": "$.value",
-            }
-        )
+    probe = await handle_file_json(
+        {
+            "kind": "file.json",
+            "name": "outside_file",
+            "path": str(outside_path),
+            "jsonpath": "$.value",
+            "expected": True,
+        },
+        SimpleNamespace(session=session),
+        phase="after",
     )
 
-    probe = after_probe(result)
-    assert result["status"] == "BLOCKED"
-    assert probe["status"] == "BLOCKED"
-    assert probe["reason"] == "path outside project scope"
-    assert probe["requested"]["path"] == str(outside_path)
-    assert "project-relative" in probe["next_step"]
+    assert probe["status"] == "PASS"
+    assert probe["value"] is True
+    assert probe["resolved_path"] == str(outside_path.resolve())
 
 
 @pytest.mark.asyncio
