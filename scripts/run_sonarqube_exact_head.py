@@ -61,6 +61,9 @@ COVERAGE_PARENT_RELATIVE_PATH = ".tmp/sonarqube-coverage"
 _FILE_DISPOSITION_INFO_EX_OPERATION = "SetFileInformationByHandle(FileDispositionInfoEx)"
 _PATH_STAT_OPERATION = "Path.stat"
 _PATH_READ_BYTES_OPERATION = "Path.read_bytes"
+_UNRECOGNIZED_GENERATED_COLLECTOR_SOURCE = "unrecognized generated collector source"
+_COLLECTOR_PACKAGE_CLASSES_XPATH = "./classes/class"
+_UNRECOGNIZED_GENERATED_COLLECTOR_OWNER = "unrecognized generated collector owner"
 COVERAGE_PY_VERSION = "7.15.4"
 COVERLET_MSBUILD_PACKAGE = "coverlet.msbuild"
 COVERLET_MSBUILD_VERSION = "10.0.1"
@@ -2319,7 +2322,7 @@ def _collector_source_relative(
             or is_tracked(context.repository_root, _coverage_environment(), candidate)
         ):
             _coverage_failure(
-                "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized generated collector source"
+                "COVERAGE_SOURCE_MAPPING_INVALID", _UNRECOGNIZED_GENERATED_COLLECTOR_SOURCE
             )
         if class_name == "FlaUIBridge.Commands.NativeScreenshotCaptureTransport":
             owner_relative = "bridge/Commands/ScreenshotCaptureTransport.cs"
@@ -2327,10 +2330,10 @@ def _collector_source_relative(
             if package.get("name") != "FlaUIBridge" or not any(
                 owner.get("name") == class_name
                 and owner.get("filename", "").replace("\\", "/") in {owner_relative, owner_filename}
-                for owner in package.findall("./classes/class")
+                for owner in package.findall(_COLLECTOR_PACKAGE_CLASSES_XPATH)
             ):
                 _coverage_failure(
-                    "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized generated collector owner"
+                    "COVERAGE_SOURCE_MAPPING_INVALID", _UNRECOGNIZED_GENERATED_COLLECTOR_OWNER
                 )
             _safe_coverage_source(context, owner_relative, "dotnet", (context.repository_root,))
         return None
@@ -2343,17 +2346,17 @@ def _collector_source_relative(
             or is_tracked(context.repository_root, _coverage_environment(), candidate)
         ):
             _coverage_failure(
-                "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized generated collector source"
+                "COVERAGE_SOURCE_MAPPING_INVALID", _UNRECOGNIZED_GENERATED_COLLECTOR_SOURCE
             )
         owner_relative = "host/NetCoreDbg.Mcp.Stateless/DebugAdapter/NetCoreDbgSession.cs"
         owner_filename = (context.repository_root / owner_relative).as_posix()
         if package.get("name") != "NetCoreDbg.Mcp.Stateless" or not any(
             owner.get("name") == class_name
             and owner.get("filename", "").replace("\\", "/") in {owner_relative, owner_filename}
-            for owner in package.findall("./classes/class")
+            for owner in package.findall(_COLLECTOR_PACKAGE_CLASSES_XPATH)
         ):
             _coverage_failure(
-                "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized generated collector owner"
+                "COVERAGE_SOURCE_MAPPING_INVALID", _UNRECOGNIZED_GENERATED_COLLECTOR_OWNER
             )
         _safe_coverage_source(context, owner_relative, "dotnet", (context.repository_root,))
         return None
@@ -2370,7 +2373,7 @@ def _collector_source_relative(
             or is_tracked(context.repository_root, _coverage_environment(), candidate)
         ):
             _coverage_failure(
-                "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized generated collector source"
+                "COVERAGE_SOURCE_MAPPING_INVALID", _UNRECOGNIZED_GENERATED_COLLECTOR_SOURCE
             )
         owner_relative = (
             "host/NetCoreDbg.Mcp.Stateless.Tests/NativeScene/ElementCommandsBehaviorTests.cs"
@@ -2379,10 +2382,10 @@ def _collector_source_relative(
         if package.get("name") != "NetCoreDbg.Mcp.Stateless.Tests" or not any(
             owner.get("name") == class_name
             and owner.get("filename", "").replace("\\", "/") in {owner_relative, owner_filename}
-            for owner in package.findall("./classes/class")
+            for owner in package.findall(_COLLECTOR_PACKAGE_CLASSES_XPATH)
         ):
             _coverage_failure(
-                "COVERAGE_SOURCE_MAPPING_INVALID", "unrecognized generated collector owner"
+                "COVERAGE_SOURCE_MAPPING_INVALID", _UNRECOGNIZED_GENERATED_COLLECTOR_OWNER
             )
         return _resolve_coverage_source(
             context, owner_relative.split("/"), (context.repository_root,)
