@@ -196,7 +196,7 @@ def _valid_geometry(value: Any, *, rectangle: bool) -> bool:
     return True
 
 
-def _hover_contradictions(result: Mapping[str, Any]) -> list[str]:
+def _hover_target_contradictions(result: Mapping[str, Any]) -> list[str]:
     contradictions: list[str] = []
     target_hwnd = result["targetRootHwnd"]
     if result["matchCount"] != 1:
@@ -219,6 +219,11 @@ def _hover_contradictions(result: Mapping[str, Any]) -> list[str]:
         for key in focus_identity_keys
     ):
         contradictions.append("focusBefore and focusAfter identities must match")
+    return contradictions
+
+
+def _hover_contradictions(result: Mapping[str, Any]) -> list[str]:
+    contradictions = _hover_target_contradictions(result)
     if result["underPointer"] is not True:
         contradictions.append("underPointer must be true")
     if result["hovered"] is not True:
