@@ -1278,10 +1278,9 @@ class _DebugCapture:
                 and 0 < len(handles) == self._qualified_count <= _MAX_JOB_MEMBERS
             )
 
-    async def join_exited(self, timeout: float) -> bool:
+    async def join_exited(self) -> bool:
         if self._joined:
             return True
-        deadline = time.monotonic() + max(timeout, 0.0)
         while not self._stop.is_set():
             if self._exit_probe is None:
                 self._exit_probe = _NativeEffect(
@@ -1291,11 +1290,8 @@ class _DebugCapture:
                     None, self._exit_probe.invoke
                 )
             assert self._exit_probe.future is not None
-            done, _ = await asyncio.wait(
-                (self._exit_probe.future,), timeout=max(deadline - time.monotonic(), 0.0)
-            )
-            if not done:
-                return False
+            if not self._exit_probe.future.done():
+                await asyncio.wait((self._exit_probe.future,))
             proof = _operation_outcome(self._exit_probe.future)
             self._exit_probe = None
             if proof.error is not None:
@@ -1303,26 +1299,17 @@ class _DebugCapture:
             elif proof.value:
                 self._stop.set()
                 break
-            if time.monotonic() >= deadline:
-                return False
             await asyncio.sleep(_ACCOUNTING_POLL_SECONDS)
-        if self._driver is not None:
-            done, _ = await asyncio.wait(
-                (self._driver,), timeout=max(deadline - time.monotonic(), 0.0)
-            )
-            if not done:
-                return False
+        if self._driver is not None and not self._driver.done():
+            await asyncio.wait((self._driver,))
         if self._shutdown is None:
             self._shutdown = _NativeEffect(partial(self._executor.shutdown, wait=True))
             self._shutdown.future = asyncio.get_running_loop().run_in_executor(
                 None, self._shutdown.invoke
             )
         assert self._shutdown.future is not None
-        done, _ = await asyncio.wait(
-            (self._shutdown.future,), timeout=max(deadline - time.monotonic(), 0.0)
-        )
-        if not done:
-            return False
+        if not self._shutdown.future.done():
+            await asyncio.wait((self._shutdown.future,))
         outcome = _operation_outcome(self._shutdown.future)
         if outcome.error is not None:
             self.record_error(outcome.error, AdmissionStage.DRAIN)
@@ -1513,7 +1500,16 @@ class _FailedAdmissionReaper:
                 )
         if any(effect.progress is _EffectProgress.IN_FLIGHT for effect in self._effects.values()):
             return capture.failure or _Win32CallError(AdmissionStage.DRAIN, None)
-        if not await capture.join_exited(_ADMISSION_CLEANUP_TIMEOUT):
+        deadline = time.monotonic() + max(_ADMISSION_CLEANUP_TIMEOUT, 0.0)
+        observer = asyncio.create_task(capture.join_exited())
+        try:
+            done, _ = await asyncio.wait((observer,), timeout=max(deadline - time.monotonic(), 0.0))
+            joined = observer.result() if observer in done else False
+        finally:
+            if not observer.done():
+                observer.cancel()
+            observer.add_done_callback(_operation_outcome)
+        if not joined:
             return capture.failure or _Win32CallError(AdmissionStage.DRAIN, None)
         if not await capture.release_duplicates():
             return capture.failure
@@ -2655,7 +2651,16 @@ class WindowsOwnedProcess:
             self._captured_observation_future = None
             if observed.error is not None:
                 capture.record_error(observed.error, AdmissionStage.DRAIN)
-        if not await capture.join_exited(_ADMISSION_CLEANUP_TIMEOUT):
+        deadline = time.monotonic() + max(_ADMISSION_CLEANUP_TIMEOUT, 0.0)
+        observer = asyncio.create_task(capture.join_exited())
+        try:
+            done, _ = await asyncio.wait((observer,), timeout=max(deadline - time.monotonic(), 0.0))
+            joined = observer.result() if observer in done else False
+        finally:
+            if not observer.done():
+                observer.cancel()
+            observer.add_done_callback(_operation_outcome)
+        if not joined:
             return incomplete()
         if self._final_snapshot is None:
             facts = await _native_effect_outcome(

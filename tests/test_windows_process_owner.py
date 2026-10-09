@@ -3008,7 +3008,15 @@ async def _probe_direct_capture_failed_close(total, blocker=None, *, late_histor
                 capture._unresolved_capture = False
                 capture._stop.set()
                 release_driver.set()
-                assert await capture.join_exited(1), "test driver/executor cleanup did not finish"
+                observer = asyncio.create_task(capture.join_exited())
+                try:
+                    done, _ = await asyncio.wait((observer,), timeout=max(1.0, 0.0))
+                    joined = observer.result() if observer in done else False
+                    assert joined, "test driver/executor cleanup did not finish"
+                finally:
+                    if not observer.done():
+                        observer.cancel()
+                    await asyncio.gather(observer, return_exceptions=True)
                 await asyncio.wait_for(owner.aclose(), 1)
                 assert owner.closed, "test fake capabilities were not released"
                 if owner._close_reaper is not None:
@@ -3044,7 +3052,15 @@ async def _probe_direct_capture_retained_failure(kind, value):
             return
         assert not owner.closed
         assert capture.worker_alive
-        assert not await capture.join_exited(0.1)
+        observer = asyncio.create_task(capture.join_exited())
+        try:
+            done, _ = await asyncio.wait((observer,), timeout=max(0.1, 0.0))
+            joined = observer.result() if observer in done else False
+            assert not joined
+        finally:
+            if not observer.done():
+                observer.cancel()
+            await asyncio.gather(observer, return_exceptions=True)
         assert "close:11" not in events
         assert "close:21" not in events
         assert capture.failure is not None
@@ -3080,6 +3096,149 @@ async def _probe_direct_capture_failed_close_blocked(blocker):
 @pytest.mark.parametrize("error", ("duplicate", "membership", "identity", "null", "continue"))
 def test_direct_capture_api_identity_and_continue_failures_remain_causal(error):
     _run_direct_capture_probe("_probe_direct_capture_retained_failure", "api", error)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ("probe", "driver", "shutdown"))
+@pytest.mark.parametrize("budget", (-1.0, 0.0, None), ids=("negative", "zero", "cancelled"))
+async def test_direct_capture_join_observer_retains_worker_and_native_effects(
+    monkeypatch, boundary, budget
+):
+    events = []
+    api = _DebugApi(events)
+    idle, release_driver = asyncio.Event(), asyncio.Event()
+    entered, release_native = threading.Event(), threading.Event()
+    real_submit = windows_process_owner._DebugCapture._submit
+
+    async def submit(capture, operation):
+        outcome = await real_submit(capture, operation)
+        if operation.__name__ == "_retire_pending_event" and capture.root_exit_continued:
+            idle.set()
+            if boundary == "driver":
+                await release_driver.wait()
+            else:
+                while not capture._stop.is_set() and not release_driver.is_set():
+                    await asyncio.sleep(0.001)
+        return outcome
+
+    monkeypatch.setattr(windows_process_owner._DebugCapture, "_submit", submit)
+    owner = await _launch_debug(monkeypatch, api, events)
+    capture = owner._debug_capture
+    api._queue_root_exit()
+    observer = None
+    try:
+        await asyncio.wait_for(idle.wait(), 1)
+        assert await asyncio.wait_for(owner.wait_root(), 1) == 0
+        if boundary == "probe":
+            physical_exit = capture._physical_exit_for_close_proven
+
+            def probe():
+                entered.set()
+                assert release_native.wait(2), "test exit probe was not released"
+                return physical_exit()
+
+            monkeypatch.setattr(capture, "_physical_exit_for_close_proven", probe)
+        elif boundary == "shutdown":
+            shutdown = capture._executor.shutdown
+
+            def held_shutdown(*, wait):
+                entered.set()
+                assert release_native.wait(2), "test executor shutdown was not released"
+                return shutdown(wait=wait)
+
+            monkeypatch.setattr(capture._executor, "shutdown", held_shutdown)
+
+        observer = asyncio.create_task(capture.join_exited())
+        if boundary == "driver":
+            assert await asyncio.to_thread(capture._stop.wait, 1)
+            retained = capture._driver
+        else:
+            assert await asyncio.to_thread(entered.wait, 1)
+            effect = capture._exit_probe if boundary == "probe" else capture._shutdown
+            retained = effect.future
+        assert retained is not None and not retained.done()
+        assert capture.worker_alive and not capture._joined
+        if budget is not None:
+            done, _ = await asyncio.wait((observer,), timeout=max(budget, 0.0))
+            joined = observer.result() if observer in done else False
+            assert not joined
+            assert not observer.done()
+        observer.cancel("join observer cancelled")
+        with pytest.raises(asyncio.CancelledError, match="join observer cancelled"):
+            await observer
+        assert not retained.done() and not retained.cancelled()
+        assert capture._driver.cancelling() == 0
+        if boundary == "probe":
+            assert capture._exit_probe is effect and effect.future is retained
+            assert not capture._stop.is_set()
+        elif boundary == "shutdown":
+            assert capture._shutdown is effect and effect.future is retained
+        else:
+            assert capture._driver is retained
+        assert capture.worker_alive and not capture._joined
+        assert not owner.closed
+        assert {"close:11", "close:12", "close:21"}.isdisjoint(events)
+    finally:
+        release_native.set()
+        release_driver.set()
+        if observer is not None:
+            if not observer.done():
+                observer.cancel()
+            await asyncio.gather(observer, return_exceptions=True)
+        observer = asyncio.create_task(capture.join_exited())
+        try:
+            done, _ = await asyncio.wait((observer,), timeout=max(1.0, 0.0))
+            joined = observer.result() if observer in done else False
+            assert joined, "test retained worker/executor cleanup did not finish"
+        finally:
+            if not observer.done():
+                observer.cancel()
+            await asyncio.gather(observer, return_exceptions=True)
+        assert capture._joined and not capture.worker_alive and capture._driver.done()
+        assert (await asyncio.wait_for(owner.aclose(), 1)).status is DrainStatus.DRAINED
+        assert owner.closed
+        for handle in (11, 12, 21):
+            assert events.count(f"close:{handle}") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ("done", "ordinary", "fatal", "native_cancelled"))
+async def test_direct_capture_join_zero_budget_preserves_completed_outcomes(kind):
+    capture = windows_process_owner._DebugCapture(_FakeApi([]), 11)
+    loop = asyncio.get_running_loop()
+    probe = windows_process_owner._NativeEffect(lambda: True, read_only=True)
+    probe.future = loop.create_future()
+    probe.future.set_result(True)
+    capture._exit_probe = probe
+    shutdown = windows_process_owner._NativeEffect(capture._executor.shutdown)
+    shutdown.future = loop.create_future()
+    capture._shutdown = shutdown
+    error = BaseException("native join fatal") if kind == "fatal" else RuntimeError("native join")
+    if kind == "done":
+        shutdown.future.set_result(None)
+    elif kind == "native_cancelled":
+        shutdown.future.cancel()
+    else:
+        shutdown.future.set_exception(error)
+    observer = asyncio.create_task(capture.join_exited())
+    try:
+        done, _ = await asyncio.wait((observer,), timeout=max(0.0, 0.0))
+        joined = observer.result() if observer in done else False
+        assert observer in done
+        assert joined is (kind == "done")
+        assert capture._joined is joined
+        assert capture._stop.is_set() and capture._exit_probe is None
+        assert capture._shutdown is shutdown
+        assert capture.fatal_error is (error if kind == "fatal" else None)
+        if kind != "done":
+            assert capture.failure.stage is AdmissionStage.DRAIN
+        if kind in ("ordinary", "fatal"):
+            assert shutdown.future.exception() is error
+    finally:
+        if not observer.done():
+            observer.cancel()
+        await asyncio.gather(observer, return_exceptions=True)
+        capture._executor.shutdown(wait=True)
 
 
 @pytest.mark.asyncio
