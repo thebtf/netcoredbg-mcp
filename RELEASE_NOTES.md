@@ -1,3 +1,36 @@
+# netcoredbg-mcp v0.23.14
+
+Prepared: 2026-10-11
+
+## Summary
+
+`v0.23.14` is a PATCH for failed pre-launch restore/build diagnostics.
+A failed prebuild remains a failed launch; its result is retained for inspection
+through the public `get_build_diagnostics` tool.
+
+## Failed-prebuild diagnostics
+
+- When a restore or build process completes with a failure, the retained result
+  exposes the failed stage, actual executed argument array (`commandLine`),
+  working directory (`workingDirectory`), nonzero `exitCode`, and captured
+  `stdout`/`stderr`, even when no MSBuild diagnostics were parsed.
+- Partial process output from timeout or cancellation is not retained by the
+  existing build runner; this PATCH does not change that behavior.
+- Validation failures and interrupted attempts do not substitute a result from
+  a previous build. A prior success cannot stand in for the current failure.
+- Successful-result serialization remains compact. No environment dump is added.
+
+## Compatibility and scope
+
+The Python entry point, locked dependency versions, and public catalog remain
+unchanged: 135 tools, 8 prompts, and 4 resources. Existing process-owner cleanup
+and explicit external-path behavior are preserved.
+
+This PATCH does not change the screenshot backend and does not fix the separate
+Novascript capture that returned the desktop instead of the target window.
+
+---
+
 # netcoredbg-mcp v0.23.13
 
 Prepared: 2026-10-10
