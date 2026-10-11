@@ -2,8 +2,14 @@
 
 This repository uses the fixed SonarQube project key
 `thebtf_netcoredbg_mcp`. The tracked runner is
-`scripts/run_sonarqube_exact_head.py`; it is the required release-scan command.
-It writes only secret-free receipts and redacted logs.
+`scripts/run_sonarqube_exact_head.py`; it is the required post-release audit
+command. It writes only secret-free receipts and redacted logs. User decision
+of 2026-10-09: publish after installed consumer journeys, focused functional
+checks, independent review, and non-Sonar release checks pass; run Sonar only
+after actual publication, optionally asynchronously. Scanner or credential
+availability, quality-gate status, coverage percentage, and findings do not gate
+merge, tagging, publication, or release completion and do not create a release
+Ask. Artifact-build workflow completion is not consumer publication.
 
 ## One-time local onboarding
 
@@ -75,9 +81,9 @@ environments. It supplies the analysis token only to the scanner `begin` and
 `end` processes. It never writes a token, configured origin, or dashboard URL
 to Git, a tracked file, a receipt, or an unredacted log.
 
-## Release scans
+## Post-release audit
 
-Run both roles from a new clean detached linked worktree at the role's exact SHA.
+After publication, run the audit from a new clean detached linked worktree at the recorded exact SHA.
 That worktree must not contain `.env`; the runner obtains credentials only from
 the coordination-root `.env` and explicit process overrides described above.
 The runner checks clean status before and after scanning, uses the committed
@@ -101,37 +107,40 @@ scanner-submitted CE task's required `componentKey` equal to that key, correlate
 to the same `analysisId`/analysis `key` and exact revision. The issue inventory
 enumerates the live `OPEN`, `CONFIRMED`, `FALSE_POSITIVE`, `ACCEPTED`, `FIXED`,
 and `IN_SANDBOX` states and records resolutions such as `WONTFIX` and
-`FALSE-POSITIVE`; all non-`FIXED` dispositions block release.
+`FALSE-POSITIVE`; all non-`FIXED` dispositions prevent a passing audit receipt,
+not release. Confirmed substantial defects receive a subsequent corrective
+patch; other findings go to the backlog. Retain original red receipts and their
+source SHA. Do not suppress findings or fabricate a pass.
 
 The live issue search uses `components=thebtf_netcoredbg_mcp`; it does not use
 the legacy `componentKeys` filter.
 
-After the final pre-merge correction, create the candidate scanner worktree at
-`CANDIDATE_SHA` and run:
-
-```powershell
-python scripts/run_sonarqube_exact_head.py --role candidate
-```
-
-After merge, fetch `origin/main`, create a new clean detached scanner worktree
-at its exact commit, and run:
+After publication, capture the intended published source SHA, create a new clean
+detached scanner worktree at that exact commit, and run:
 
 ```powershell
 python scripts/run_sonarqube_exact_head.py --role post-merge
 ```
 
-The `post-merge` role additionally refuses unless `HEAD == origin/main`. A
-candidate receipt never authorizes a tag. Only a passing post-merge receipt
-allows the tag gate to proceed.
+The `post-merge` role additionally refuses unless `HEAD == origin/main`. If that
+guard cannot hold for the intended published target, preserve the blocked audit;
+do not substitute another SHA or delay publication. The historical `candidate`
+role and existing role-named receipt paths remain analysis metadata only. No
+candidate or post-merge receipt authorizes tagging or is a required gate,
+release-seal, or release PASS dependency. Do not schedule a pre-merge scan or
+attach an audit job to a build-only workflow as a release prerequisite.
 
 The runner serializes local scans for this project, requires a clean detached
 linked worktree before and after scanning, polls only the scanner-submitted CE
 task for at most 10 minutes, and queries the gate with that task's analysis ID.
-It fails closed unless the gate status is `OK`; `WARN`, `ERROR`, `NONE`, API
-denial, a head/revision/current-analysis mismatch, unexpected ignored state,
-incomplete issue/hotspot paging, prohibited issue disposition, or any hotspot
-blocks the release. The all-hotspot block is this runner's conservative release
-policy; SonarQube's native REVIEWED outcomes remain recorded as facts.
+It fails closed for a passing audit receipt unless the gate status is `OK`;
+`WARN`, `ERROR`, `NONE`, API denial, a head/revision/current-analysis mismatch,
+unexpected ignored state, incomplete issue/hotspot paging, prohibited issue
+disposition, or any hotspot prevents a passing audit receipt, not release.
+The all-hotspot block is this runner's conservative audit classification;
+SonarQube's native REVIEWED outcomes remain recorded as facts. Retain real red,
+failed, and blocked outcomes, including legacy `PROJECT_RELEASE_PROTOCOL_BLOCKED`
+labels, without turning them into release blockers.
 
 The runner validates every reported gate condition. A condition needs a
 nonempty `metricKey`, an `OK`, `WARN`, `ERROR`, or `NONE` status, and a `GT`,
@@ -145,7 +154,7 @@ normal issue types, including security and vulnerability issues, through
 `/api/issues/search`. The live 26.8 hotspot schema requires
 `project=thebtf_netcoredbg_mcp`; an empty response to `projectKey` is not evidence
 that that legacy-looking parameter scoped the request. Endpoint removal or an
-inaccessible endpoint is incomplete evidence and blocks the release.
+inaccessible endpoint is incomplete audit evidence and prevents a passing receipt.
 
 Receipts are atomically written beneath the Git common directory's parent so
 all worktrees share one evidence root:
@@ -158,3 +167,8 @@ all worktrees share one evidence root:
 Receipts never record credential values, the configured origin, or raw
 dashboard URLs. A failed receipt records only identifiers, statuses, and the
 safe failure reason.
+
+`SONAR_CREDENTIALS_UNAVAILABLE` and `SONAR_SCANNER_UNAVAILABLE` hold only the
+audit. Record unavailable input names, never their values; do not infer a scan
+or pass. Never replace original failure evidence with a stale/latest-project
+result or treat a later corrective patch's analysis as proof for an older SHA.

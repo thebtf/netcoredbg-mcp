@@ -124,7 +124,7 @@ contains `.env`, a symbolic link, or another reparse point, including the root.
 Never set `SONAR_ADMIN_TOKEN`: the runner rejects that source. See
 [`docs/SONARQUBE-ONBOARDING.md`](docs/SONARQUBE-ONBOARDING.md) for one-time
 project-token creation, configured-origin and scanner-argv redaction, and the
-two required scan roles.
+post-release exact-SHA audit command and role metadata.
 
 ## Coding expectations
 
@@ -176,7 +176,13 @@ Only then merge it into `main`; create the annotated `vX.Y.Z` tag from the
 verified merged commit and monitor its publish workflow. Do not create a release
 tag from an unmerged pull request.
 
-For the mandatory two exact-head SonarQube scans, follow
-[`docs/SONARQUBE-ONBOARDING.md`](docs/SONARQUBE-ONBOARDING.md). It defines the
-project-local credential names and the candidate/post-merge runner commands;
-neither an unavailable credential nor a candidate receipt permits tag creation.
+After actual publication, run or schedule the exact-SHA SonarQube audit described
+in [`docs/SONARQUBE-ONBOARDING.md`](docs/SONARQUBE-ONBOARDING.md), when the scanner
+and safe credentials are available. User decision of 2026-10-09: scanner or
+credential availability, quality-gate status, coverage, and findings are not
+merge/tag/publication gates and do not create a release Ask. Preserve real red
+or blocked receipts and their exact source SHA; confirmed substantial defects
+receive a subsequent corrective patch, and other findings go to the backlog.
+No candidate or post-merge Sonar receipt authorizes tagging or contributes a
+required release gate/seal/PASS dependency. Consumer, functional, review,
+version, tag, and publication checks above remain mandatory.

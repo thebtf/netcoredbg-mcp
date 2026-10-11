@@ -293,62 +293,6 @@
         }
       ]
     },
-    "candidate_exact_head_sonar": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/gate_evidence"
-        },
-        {
-          "properties": {
-            "stage": {
-              "const": "pre-decision"
-            },
-            "gate_id": {
-              "const": "candidate-exact-head-sonar"
-            },
-            "record_type": {
-              "const": "sonarqube-exact-head"
-            },
-            "evidence_requirements": {
-              "const": [
-                "CANDIDATE_IDENTITY_MATCH",
-                "CANONICAL_MAIN_PROVENANCE",
-                "PASSING_OUTCOME",
-                "CANDIDATE_EXACT_HEAD_SONAR"
-              ]
-            }
-          }
-        }
-      ]
-    },
-    "post_merge_exact_head_sonar": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/gate_evidence"
-        },
-        {
-          "properties": {
-            "stage": {
-              "const": "pre-publication"
-            },
-            "gate_id": {
-              "const": "post-merge-exact-head-sonar"
-            },
-            "record_type": {
-              "const": "sonarqube-exact-head"
-            },
-            "evidence_requirements": {
-              "const": [
-                "CANDIDATE_IDENTITY_MATCH",
-                "CANONICAL_MAIN_PROVENANCE",
-                "PASSING_OUTCOME",
-                "POST_MERGE_MAIN_TARGET_SONAR"
-              ]
-            }
-          }
-        }
-      ]
-    },
     "remote_downloaded_consumer_proof": {
       "allOf": [
         {
@@ -379,8 +323,8 @@
     },
     "pre_decision_gate_evidence": {
       "type": "array",
-      "minItems": 4,
-      "maxItems": 4,
+      "minItems": 3,
+      "maxItems": 3,
       "prefixItems": [
         {
           "$ref": "#/$defs/retained_downloaded_consumer_proof"
@@ -390,22 +334,14 @@
         },
         {
           "$ref": "#/$defs/independent_pr_review"
-        },
-        {
-          "$ref": "#/$defs/candidate_exact_head_sonar"
         }
       ],
       "items": false
     },
     "pre_publication_gate_evidence": {
       "type": "array",
-      "minItems": 1,
-      "maxItems": 1,
-      "prefixItems": [
-        {
-          "$ref": "#/$defs/post_merge_exact_head_sonar"
-        }
-      ],
+      "minItems": 0,
+      "maxItems": 0,
       "items": false
     },
     "post_publication_gate_evidence": {

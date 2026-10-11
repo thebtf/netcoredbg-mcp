@@ -13,6 +13,8 @@ description: "Dependency-ordered implementation tasks for the A1 opt-in preview 
 
 **Scope boundary**: This plan adds an opt-in Windows x64 preview artifact runway only. `pyproject.toml`, `src/netcoredbg_mcp/**`, `.github/workflows/publish.yml`, the public Python command/default selector, and Program B/C remain unchanged or separately authorized; no task below changes them.
 
+**Current Sonar policy (2026-10-09)**: Run exact-SHA analysis only after actual consumer publication/asynchronously when the scanner and safe credentials are available. Preserve real red/blocked receipts; confirmed substantial defects receive a subsequent corrective patch and other findings go to the backlog. Sonar is not a candidate identity, consumer proof, gate-catalog, stage-seal, merge/tag/publication, or release PASS prerequisite. All non-Sonar functional, consumer, review, source-provenance, and publication guards remain required.
+
 ## Format: `[ID] [P?] [Story] Description`
 
 - **[P]**: Can proceed after its stated prerequisites alongside another task because it owns different files.
@@ -39,7 +41,9 @@ description: "Dependency-ordered implementation tasks for the A1 opt-in preview 
 - [ ] T005 [P] Implement canonical-main Candidate Identity Record assembly, inherited-manifest equality checks, raw-byte hashing, and fixed Release Gate Catalog resolution in `scripts/stateless_preview_artifact.py` so the RED cases in `tests/test_stateless_preview_artifact.py` pass.
 - [x] T006 Implement manual `build` admission in `.github/workflows/stateless-preview.yml`: require canonical merged `main`, verify trusted source/build provenance, publish the self-contained preview payload, and refuse Python-channel inputs.
 - [ ] T007 [P] Extend `host/NetCoreDbg.Mcp.Stateless.Preview.Tests/PreviewMcpProcessDriver.cs` with an explicit extracted-executable launch path while preserving the existing source-output resolver and every current source-run caller.
-- [x] T008 Wire `.github/workflows/stateless-preview.yml` to invoke `scripts/stateless_preview_artifact.py` and retain separate non-overwritable post-merge exact-head receipt, archive/raw manifest payload, Candidate Identity Record, and Release Gate Catalog artifacts that later proof stages can download by exact reference.
+- [x] T008 Wire `.github/workflows/stateless-preview.yml` to invoke `scripts/stateless_preview_artifact.py` and retain separate non-overwritable archive/raw manifest payload, Candidate Identity Record, and Release Gate Catalog artifacts that later proof stages can download by exact reference.
+
+**Historical T008 requirement (superseded 2026-10-09)**: The build also retained a separate post-merge exact-head Sonar receipt. Existing historical receipts remain unchanged; that receipt is no longer build or candidate authority.
 
 **Checkpoint**: A canonical-main retained candidate can be formed, identified, and launched through a dedicated artifact path; the existing Python route remains untouched.
 
@@ -72,7 +76,7 @@ description: "Dependency-ordered implementation tasks for the A1 opt-in preview 
 - [ ] T016 [US2] Implement `seal_s2_s3_lens_result`, `seal_s2_s3_review_aggregate`, and `seal_independent_pr_review` semantic admission in `scripts/stateless_preview_artifact.py`, deriving the required `7/7/0` coverage rather than trusting supplied counts.
 - [ ] T017 [US2] Implement ordered Stage Gate Evidence derivation and outcome recomputation for `pre-decision`, `pre-publication`, and `post-publication` in `scripts/stateless_preview_artifact.py` from `specs/010-a1-preview-artifact/contracts/stage-gate-evidence.schema.json` and the closed catalog.
 - [ ] T018 [US2] Run the seven independent S2/S3 lenses defined by `specs/010-a1-preview-artifact/contracts/s2-s3-review.schema.json` and the distinct review defined by `specs/010-a1-preview-artifact/contracts/independent-pr-review.schema.json` against the exact retained candidate; preserve their receipts outside tracked source.
-- [ ] T019 [US2] Seal candidate-bound pre-decision Stage Gate Evidence with `scripts/stateless_preview_artifact.py` only after the retained proof, seven-lens aggregate, independent PR review, and candidate exact-head Sonar receipt pass.
+- [ ] T019 [US2] Seal candidate-bound pre-decision Stage Gate Evidence with `scripts/stateless_preview_artifact.py` only after the retained proof, seven-lens aggregate, and independent PR review pass; no Sonar receipt is required.
 - [ ] T020 [US2] Run the semantic refusal and closure suite in `tests/test_stateless_preview_artifact.py` after T016 through T019, including policy-snapshot drift and every required pre-decision evidence mutation.
 
 **Checkpoint**: US2 produces a closed exact-candidate review/evidence set that can support one later decision but cannot authorize a different candidate or dispatcher.
@@ -96,7 +100,7 @@ description: "Dependency-ordered implementation tasks for the A1 opt-in preview 
 - [ ] T029 [P] [US3] Implement the `remote` mode of `tests/preview/validate_preview_artifact.py` to use a fresh directory and fresh public archive/manifest download before sealing remote Consumer Proof.
 - [ ] T030 [US3] Add the exact preview artifact consumer journey and non-mutating rollback verification to `docs/PRODUCTION-TESTING-PLAYBOOK.md`, keeping Python/PyPI deployment instructions intact.
 - [ ] T031 [US3] At the exact candidate release boundary, record one `APPROVE` or `DECLINE` through `specs/010-a1-preview-artifact/contracts/promotion-decision.schema.json`; treat `DECLINE` as a safe terminal outcome with no publication.
-- [ ] T032 [US3] After an approved decision and the matching post-merge exact-head Sonar receipt, seal passing pre-publication Stage Gate Evidence through `scripts/stateless_preview_artifact.py` before any remote mutation.
+- [ ] T032 [US3] After an approved decision, seal passing pre-publication Stage Gate Evidence for the current catalog subset through `scripts/stateless_preview_artifact.py` before any remote mutation; no Sonar receipt is required.
 - [ ] T033 [US3] Only after passing pre-decision and pre-publication Stage Gate Evidence, execute the matching promotion attempt defined by `.github/workflows/stateless-preview.yml`; do not overwrite tags, releases, or assets.
 - [ ] T034 [US3] After a published matching prerelease exists, run fresh remote proof through `tests/preview/validate_preview_artifact.py` and seal the matching Remote Verification record.
 - [ ] T035 [US3] Seal passing post-publication Stage Gate Evidence and the non-authorizing Program B Handoff through `scripts/stateless_preview_artifact.py` and `specs/010-a1-preview-artifact/contracts/program-b-handoff.schema.json` only after T034 passes.

@@ -11,7 +11,6 @@ The resolver accepts a candidate only when all of these values match:
 - `candidate.source.ref`, `candidate.build.ref`, and `catalog.source_ref` are `refs/heads/main`.
 - `candidate.source.commit`, `candidate.source.origin_main_target`, `candidate.build.commit`, and `catalog.source_commit` are the same commit.
 - The trusted build workflow ran from that ref and commit.
-- The candidate's post-merge exact-head receipt is `PASS`, and both its scanned commit and tag target equal that commit.
 
 The catalog snapshots these tracked files at that exact commit:
 
@@ -23,7 +22,7 @@ The catalog snapshots these tracked files at that exact commit:
 
 An untracked `.agent` file, a current-branch readback, a later main commit, a URL, or an arbitrary JSON document is not catalog authority.
 
-## Define the six gates
+## Define the four gates
 
 The catalog contains exactly these descriptors. Each descriptor has a fixed stage, record type, authority-rule set, and evidence requirement set.
 
@@ -32,11 +31,17 @@ The catalog contains exactly these descriptors. Each descriptor has a fixed stag
 | `pre-decision` | `retained-downloaded-consumer-proof` | `artifact-consumer-proof` | The retained archive proves the local opt-in consumer, denial, EOF, and Python rollback journey. |
 | `pre-decision` | `s2-s3-seven-lens-evidence` | `s2-s3-seven-lens-aggregate` | The sealed aggregate proves all seven required S2/S3 lenses. |
 | `pre-decision` | `independent-review` | `independent-pr-review` | The distinct project release obligation for an independent PR review. It does not duplicate an S2/S3 lens. |
-| `pre-decision` | `candidate-exact-head-sonar` | `sonarqube-exact-head` | Candidate exact-head Sonar evidence binds the canonical candidate commit. |
-| `pre-publication` | `post-merge-exact-head-sonar` | `sonarqube-exact-head` | Post-merge Sonar scans and tags the same canonical main commit before the first remote mutation. |
 | `post-publication` | `remote-downloaded-consumer-proof` | `artifact-consumer-proof` | Fresh public prerelease bytes prove the consumer, denial, EOF, and Python rollback journey. |
 
 The resolver also records an explicit release-protocol disposition for every relevant rule. A rule is either mapped to one descriptor above or marked inapplicable with a bounded reason. The preview channel never treats a Python-wheel, PyPI, or default-selector rule as silently absent. Those rules are inapplicable because this feature does not invoke `.github/workflows/publish.yml`, build a Python wheel, publish to PyPI, or change the public Python selector.
+
+Sonar is a separate asynchronous audit after actual publication. It has no gate
+descriptor and is not a required `PASS` receipt, candidate seal, Decision, or
+Promotion Attempt dependency. Preserve its real red or blocked receipt without
+changing the functional or review outcomes. The current `pre-publication`
+descriptor subset is empty; its stage record still binds the candidate and
+catalog, and the fresh attempt still enforces source, provenance, permission,
+and remote-state guards.
 
 ## Seal evidence by stage
 
@@ -51,6 +56,6 @@ The catalog never requires post-publication proof before publication. A stage re
 
 ## Resolve and test the catalog
 
-`scripts/stateless_preview_artifact.py` owns `resolve_release_gate_catalog`. Before it seals a catalog, it resolves and hashes the Candidate Identity Record, verifies canonical-main and post-merge provenance, hashes every tracked policy file, derives the fixed descriptors, and records every release-protocol disposition.
+`scripts/stateless_preview_artifact.py` owns `resolve_release_gate_catalog`. Before it seals a catalog, it validates the Candidate Identity Record, verifies canonical-main and trusted build provenance, hashes every tracked policy file, and derives the fixed descriptors.
 
-`tests/test_stateless_preview_artifact.py` must refuse policy drift, a wrong ref or commit, an untrusted build run, a failed or unrelated post-merge receipt, a missing or extra descriptor, an omitted release-protocol disposition, a wrong typed record, and a catalog supplied by a caller rather than the resolver. No test run publishes a release.
+`tests/test_stateless_preview_artifact.py` must refuse policy drift, a wrong ref or commit, an untrusted build run, a missing or extra descriptor, a wrong typed record, and a catalog supplied by a caller rather than the resolver. A missing or red Sonar audit does not block functional candidate admission. No test run publishes a release.

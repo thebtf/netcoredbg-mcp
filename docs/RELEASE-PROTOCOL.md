@@ -20,7 +20,8 @@ Release decisions use this order; later evidence cannot overrule an earlier fail
 
 1. **Primary UXDD consumer-mode release gate.** Build and install the release candidate, then exercise every user journey claimed by the release through the same public CLI/MCP entry point and packaging shape a consumer receives. Every claimed journey must reach `PRODUCT_WORKS`.
 2. **Supporting — test protocols.** Run the required unit, integration, critical, runtime-smoke, build, and packaging checks. They are mandatory evidence, but green tests cannot turn `PARTIALLY_WORKS` or `BROKEN` consumer behavior into a releasable product.
-3. **Supporting — independent review, SonarQube, and release mechanics.** Resolve blocking review findings, obtain the exact-head SonarQube scanner/quality-gate/finding-remediation receipt, prove version parity, and complete git, tag, publication, and post-publication checks.
+3. **Supporting — independent review and release mechanics.** Resolve blocking review findings, prove version parity, and complete non-Sonar git, tag, publication, and post-publication checks.
+4. **After publication — SonarQube audit.** User decision of 2026-10-09: run exact-SHA analysis afterward/asynchronously when the scanner and safe credentials are available. Quality-gate status, coverage percentage, findings backlog, scanner, and credentials are not merge/tag/publication gates and do not create a release Ask. Preserve real red or blocked receipts; confirmed substantial defects receive a subsequent corrective patch, and other findings go to the backlog. Never suppress findings or fabricate a pass.
 
 A planned PATCH/MINOR release inside a legitimate run is autonomous. A legitimate run is a bounded spec, PRD, ADR, or active run contract with explicit acceptance criteria and release intent. User review, approval, and a separate `release` / `go ahead` command are not routine gates. If the governing artifact omits release intent or marks release out of scope, do not infer a release from implementation alone.
 
@@ -82,8 +83,9 @@ PyPI publication, or post-publication local workstation deploy evidence. The
 built-wheel install smoke row remains mandatory before tagging.
 
 Post-publication verification rows confirm publication after the tag is pushed.
-Any failed gate or verification row stops release completion; failed
-pre-publication gates also block tag creation.
+Any failed non-Sonar gate or verification row stops release completion; failed
+pre-publication gates also block tag creation. Sonar audit outcomes are recorded
+separately and do not reopen approval or invalidate a completed working release.
 
 ### Pre-publication gates
 
@@ -94,7 +96,6 @@ pre-publication gates also block tag creation.
 | Version parity | Check `pyproject.toml`, `src/netcoredbg_mcp/__init__.py`, `uv.lock`, README release copy, changelog, and release notes | Any public version surface disagrees with `X.Y.Z` / `vX.Y.Z` |
 | Changelog and release notes | `CHANGELOG.md` has a dated `X.Y.Z` section; `RELEASE_NOTES.md` has user-facing notes | Either file missing or contains only generic placeholder text |
 | Documentation refresh | README and README.ru reflect the current tool/test counts and release highlights; docs examples touched since last tag have matching tests | Public docs still describe an older released surface |
-| SonarQube exact-head gate | Follow the exact-head SonarQube procedure below using `SonarQube.Analysis.xml`; retain the scanner, Compute Engine, quality-gate, and finding-disposition receipt | Credentials or scanner are unavailable; the scan does not bind the current release head; Compute Engine or quality gate is not `SUCCESS`/`OK`; any finding is open or not fixed on that exact head |
 | Critical suite | `uv run --locked --extra dev pytest tests/critical -m critical` | Any `@critical` test fails or the suite cannot run |
 | Runtime-smoke docs/examples | `uv run --locked --extra dev pytest tests/test_runtime_smoke_v2_docs.py tests/test_runtime_smoke_diagnostics_schema.py tests/critical/test_runtime_smoke_v2_critical.py` or a narrower documented equivalent | Docs examples, diagnostic schemas, or v2 critical guards fail |
 | Package build | `uv build` | Wheel or sdist build fails |
@@ -103,21 +104,27 @@ pre-publication gates also block tag creation.
 | MCP PR review | Release-prep PR summary reports zero unresolved blocking findings, and reviewer status is clean enough for merge | Any `fix_now` or unresolved mandatory review thread remains |
 | Tag collision check | `git ls-remote --tags origin refs/tags/vX.Y.Z` returns empty before tag creation | Target tag already exists on origin |
 
-### SonarQube exact-head gate
+### Post-release SonarQube exact-head audit (not a release gate)
 
-Run this gate **twice** for every release. The two independent scan targets are:
+Run this audit only after actual consumer publication, optionally asynchronously.
+An artifact-build workflow is not publication and must not spend an audit job
+before release merely by naming it post-release. Capture the intended published
+source SHA as `HEAD_SHA` and use a clean detached scanner worktree at that SHA.
+Neither a candidate receipt nor a post-merge receipt authorizes merge, tagging,
+publication, a required-gate catalog entry, or a release seal/PASS receipt.
 
-1. **Release-candidate pre-merge scan.** After the final release-prep/review correction, capture `CANDIDATE_SHA` with `git rev-parse HEAD` and produce a complete receipt for that exact candidate.
-2. **Actual post-merge scan.** After merge, fetch `origin/main`, fast-forward local `main` to that commit, capture the actual `origin/main` SHA, and produce a fresh complete receipt for that SHA **before tag creation**.
+Any mismatch between the captured target and scanner worktree HEAD, scanner
+metadata, analysis, receipt, or post-scan HEAD invalidates that analysis evidence.
+Recreate a clean scanner worktree and rescan the captured target. The legacy
+runner label `PROJECT_RELEASE_PROTOCOL_BLOCKED` holds only this audit, not the
+release. Never substitute a stale/latest-project result or relabel an older red
+receipt as passing evidence.
 
-A candidate receipt must never authorize a tag. Any mismatch between the captured target and the scanner worktree HEAD, scanner metadata, receipt, or post-scan HEAD is `PROJECT_RELEASE_PROTOCOL_BLOCKED`; recreate a clean scanner worktree and rescan the mismatched target. The post-merge `origin/main` receipt is the only SonarQube evidence eligible for the tag gate. The annotated tag's target must equal that receipt's captured SHA; otherwise tag creation blocks.
-
-For each scan below, `HEAD_SHA` means that scan's captured target: `CANDIDATE_SHA` for the pre-merge scan or the captured `origin/main` SHA for the post-merge scan.
 #### Repository runner
 
 Install and credential ownership are defined in
 [`SONARQUBE-ONBOARDING.md`](./SONARQUBE-ONBOARDING.md). The only runnable
-exact-head gate is `python scripts/run_sonarqube_exact_head.py`. It derives the
+exact-head audit command is `python scripts/run_sonarqube_exact_head.py`. It derives the
 only dotenv path as `<coordination-root>/.env`, where `coordination-root` is
 the parent of `git rev-parse --git-common-dir`. It verifies and reads the same
 no-follow file object, requiring owner-only access. On Windows, this includes a
@@ -133,31 +140,32 @@ point, including the root. It scrubs every `SONAR_*` case variant from build/tes
 children, redacts the configured origin and tokens from scanner argv/output, and
 writes the role-aware secret-free receipt under the coordination root.
 
-Run the candidate role from the clean detached `CANDIDATE_SHA` worktree after
-the final review correction:
-
-```powershell
-python scripts/run_sonarqube_exact_head.py --role candidate
-```
-
-After fast-forwarding/fetching `origin/main`, use a new clean detached worktree
-at that exact commit. The runner also requires `HEAD == origin/main` for this
-role:
+After publication, create a clean detached worktree at the captured source SHA
+and use the existing post-merge role. Its name is analysis metadata, not a tag
+authorization. The unchanged STRICT runner requires `HEAD == origin/main` against
+the current `origin/main`; a delayed audit of an older published tag can
+therefore truthfully block. Retain that blocked audit rather than substituting
+a different SHA or making it a publication gate:
 
 ```powershell
 python scripts/run_sonarqube_exact_head.py --role post-merge
 ```
 
-The candidate receipt never authorizes tag creation; only the completed
-post-merge receipt does.
-
-For **each** scan, perform and record all of the following:
+The historical candidate role remains analysis metadata only; neither role is
+a release prerequisite. The unchanged runner and receipt validator hardcode
+nondiagnostic `release_intent` to `v0.23.12`. Actual audit receipts MUST retain
+the captured source SHA and existing real metadata; do not relabel that intent
+or claim a version-correct audit for later releases. Both limitations remain
+analysis-only debt in NCD7, next patch `immutable-published-sonar-audit`. Its
+implementation and RED/GREEN acceptance contract is recorded in the primary
+coordination receipt `.agent/reports/sonar-policy-runner-nextpatch-native.json`.
+For each post-release scan, perform and record all of the following:
 
 1. Create a new detached scanner worktree at the captured target SHA, outside the permanent release checkout, before scanner begin. It must contain the committed `SonarQube.Analysis.xml` from that exact head and no `.env`, symbolic link, or reparse point anywhere in the scanner tree, including the root. The primary coordination root, resolved from the Git common directory, retains the sole allowed `.env`. Before scanning, require `git rev-parse HEAD` to equal the captured SHA and require `git status --porcelain=v1 --untracked-files=all --ignored` to report no tracked, untracked, or ignored entry within the configured scan scope. Refuse the scan otherwise. Run the scanner only in this isolated worktree; never treat permanent root `.agent` coordination residue as scanner source. The XML exclusions complement this check but do not replace it.
-2. Read `sonar.projectKey` from that worktree's `SonarQube.Analysis.xml`. The XML key, scanner metadata key, submitted task-report key, and the submitted Compute Engine task's required `componentKey` MUST all equal the fixed repository project key `thebtf_netcoredbg_mcp`. Because the returned analysis item has no project field, its recorded `project=thebtf_netcoredbg_mcp` request, `analysis.key == task.analysisId`, and `revision == HEAD_SHA` are the project/revision proof. A candidate must not redirect release analysis by changing XML. Invoke the repository-configured .NET scanner with that XML, the credential-free `SONAR_HOST_URL` origin, and `sonar.scm.revision=$HEAD_SHA`; the runner provides `SONAR_TOKEN` to `begin` and `end` only, with redacted display, then builds the repository between them. Preserve scanner metadata and task-report evidence without token values.
-3. Poll **only** the submitted Compute Engine task every five seconds for no more than **10 minutes**. It must terminate as `SUCCESS`, resolve exactly one analysis ID for `thebtf_netcoredbg_mcp`, and yield an analysis-bound `OK` quality-gate readback. A latest-project quality-gate result is not evidence. If the deadline expires, write the terminal timeout receipt with the target SHA, submitted task ID, polling start/deadline, and last observed task state (or no response), then stop as `PROJECT_RELEASE_PROTOCOL_BLOCKED`. A failed task or any nonterminal result at that deadline is also `PROJECT_RELEASE_PROTOCOL_BLOCKED`.
-4. Before scanner begin, create a baseline finding-key inventory by retrieving **every page** of current project findings. Record the fixed project key, query, total, page sequence, and every unique key; do not accept a first page, server result cap, or missing page as complete. After the exact-head analysis, **serialize all analysis activity for the fixed project** from the submitted Compute Engine task through the final receipt: no other scan may submit or complete for that project during this interval. Before and after the exact-head finding pagination, read the **current project analysis ID and revision** and require both to equal the **submitted analysis ID and `HEAD_SHA`**. Retrieve every finding page only between those matching readbacks. A mismatch, concurrent analysis, missing readback, or changed project analysis is `PROJECT_RELEASE_PROTOCOL_BLOCKED`; rescan the captured target after the project is quiescent. The receipt must track the union of baseline keys and keys discovered by any exact-head readback. If either readback contains a current key, fix the code and repeat the affected scan; the final receipt requires every baseline or discovered key to be absent from current findings or explicitly `FIXED_IN_CURRENT_HEAD` by analysis of the captured SHA. It must state an explicit empty-result and `pagination_complete=true` result for the final current-findings query. Live `OPEN`, `CONFIRMED`, `FALSE_POSITIVE`, `ACCEPTED`, and `IN_SANDBOX` statuses, plus `WONTFIX`, `FALSE-POSITIVE`, accepted risk, `NOSONAR`, issue suppression, and quality-profile exclusion are not release dispositions and block release. Do not suppress, accept, or mark a finding false-positive to satisfy this gate.
-5. Write one secret-free receipt per scan containing the scan role, captured SHA, post-scan SHA, scanner-worktree cleanliness evidence, fixed project-key comparisons, task-report task evidence plus server-origin-match and dashboard-presence evidence, scanner revision, submitted task, bounded Compute Engine polling outcome, analysis ID, analysis-bound quality gate, serialized project-analysis ID/revision readbacks before and after the exact-head finding pagination, baseline/discovered finding-key inventories, complete page evidence, and final empty-result/pagination-complete result.
+2. Read `sonar.projectKey` from that worktree's `SonarQube.Analysis.xml`. The XML key, scanner metadata key, submitted task-report key, and the submitted Compute Engine task's required `componentKey` MUST all equal the fixed repository project key `thebtf_netcoredbg_mcp`. Because the returned analysis item has no project field, its recorded `project=thebtf_netcoredbg_mcp` request, `analysis.key == task.analysisId`, and `revision == HEAD_SHA` are the project/revision proof. A candidate must not redirect analysis by changing XML. Invoke the repository-configured .NET scanner with that XML, the credential-free `SONAR_HOST_URL` origin, and `sonar.scm.revision=$HEAD_SHA`; the runner provides `SONAR_TOKEN` to `begin` and `end` only, with redacted display, then builds the repository between them. Preserve scanner metadata and task-report evidence without token values.
+3. Poll **only** the submitted Compute Engine task every five seconds for no more than **10 minutes**. A completed analysis must terminate as `SUCCESS` and resolve exactly one analysis ID for `thebtf_netcoredbg_mcp`; record its real analysis-bound quality-gate status. Only `OK` can support a passing audit receipt. A latest-project quality-gate result is not evidence. If the deadline expires, write the terminal timeout receipt with the target SHA, submitted task ID, polling start/deadline, and last observed task state (or no response). A failed task or any nonterminal result at that deadline is `PROJECT_RELEASE_PROTOCOL_BLOCKED` for this audit only.
+4. Before scanner begin, create a baseline finding-key inventory by retrieving **every page** of current project findings. Record the fixed project key, query, total, page sequence, and every unique key; do not accept a first page, server result cap, or missing page as complete. After the exact-head analysis, **serialize all analysis activity for the fixed project** from the submitted Compute Engine task through the final receipt: no other scan may submit or complete for that project during this interval. Before and after the exact-head finding pagination, read the **current project analysis ID and revision** and require both to equal the **submitted analysis ID and `HEAD_SHA`**. Retrieve every finding page only between those matching readbacks. A mismatch, concurrent analysis, missing readback, or changed project analysis is `PROJECT_RELEASE_PROTOCOL_BLOCKED` for the audit; rescan the captured target after the project is quiescent. Preserve the union of baseline keys and keys discovered by any exact-head readback, their actual dispositions, and explicit empty-result and `pagination_complete=true` results when the inventory is complete. An unresolved finding makes the audit receipt non-passing, not the release. Live `OPEN`, `CONFIRMED`, `FALSE_POSITIVE`, `ACCEPTED`, and `IN_SANDBOX` statuses, plus `WONTFIX`, `FALSE-POSITIVE`, accepted risk, `NOSONAR`, issue suppression, and quality-profile exclusion do not establish `FIXED_IN_CURRENT_HEAD`. Do not suppress, accept, or mark a finding false-positive to fabricate a passing receipt. Route confirmed substantial defects to a subsequent corrective patch and other findings to the backlog; retain the original red evidence.
+5. Write one secret-free receipt per scan containing the scan role, captured SHA, post-scan SHA, scanner-worktree cleanliness evidence, fixed project-key comparisons, task-report task evidence plus server-origin-match and dashboard-presence evidence, scanner revision, submitted task, bounded Compute Engine polling outcome, analysis ID, analysis-bound quality gate, serialized project-analysis ID/revision readbacks before and after the exact-head finding pagination, baseline/discovered finding-key inventories, complete page evidence, and actual empty-result/pagination-complete result. On failure, retain collected evidence and the real failure reason; do not claim missing evidence or a pass.
 
 #### Exact analysis identity clarifications
 
@@ -166,11 +174,15 @@ For **each** scan, perform and record all of the following:
 - Re-read `git rev-parse HEAD` after scanner end and before final receipt publication. A changed target invalidates the scan.
 - Paginate the complete project issue inventory for `issueStatuses=OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED,FIXED,IN_SANDBOX` (and the same status set with `inNewCodePeriod=true`) plus the project-scoped hotspot inventory. Require `pagination_complete=true`; a zero-total inventory must have `result_empty=true`. Treat an issue as `FIXED_IN_CURRENT_HEAD` only when it is absent from the post-scan inventory or has `issueStatus=FIXED` with omitted or `FIXED` resolution; every other current issue is `BLOCKING_DISPOSITION`, and every hotspot is `BLOCKING_HOTSPOT`.
 
-`SONAR_HOST_URL` and `SONAR_TOKEN` are required credential inputs. If either is missing, blank, inaccessible, rejected, unusable, or cannot be used without exposing it, record `SONAR_CREDENTIALS_UNAVAILABLE` with the missing/unavailable input name only (never its value), do not start a scan, and stop as `PROJECT_RELEASE_PROTOCOL_BLOCKED`. A missing or unusable configured scanner is separately `SONAR_SCANNER_UNAVAILABLE` blocker evidence; do not misclassify it as a credential failure. Do not infer a scan, pass, merge, tag, or publish from either blocker. Likewise, a non-clean scanner worktree, task/analysis/project/server/revision mismatch, nonterminal or failed Compute Engine task, terminal timeout, non-`OK` quality gate, incomplete pagination, or incomplete finding disposition is a fail-closed pre-publication blocker—not an inferred pass, merge, tag, or publish.
+`BLOCKING_DISPOSITION`, `BLOCKING_HOTSPOT`, and other runner blocker labels
+describe the audit receipt only. Preserve their real values; no such label is
+a merge, tag, publication, release-seal, or release-completion dependency.
+
+`SONAR_HOST_URL` and `SONAR_TOKEN` are required analysis credential inputs. If either is missing, blank, inaccessible, rejected, unusable, or cannot be used without exposing it, record `SONAR_CREDENTIALS_UNAVAILABLE` with the missing/unavailable input name only (never its value), do not start a scan, and retain `PROJECT_RELEASE_PROTOCOL_BLOCKED` for the audit only. A missing or unusable configured scanner is separately `SONAR_SCANNER_UNAVAILABLE`; do not misclassify it as a credential failure. Neither condition permits an inferred scan or pass, and neither holds an otherwise working release. Likewise, a non-clean scanner worktree, task/analysis/project/server/revision mismatch, nonterminal or failed Compute Engine task, terminal timeout, non-`OK` quality gate, incomplete pagination, or incomplete finding disposition prevents a passing audit receipt—not merge, tagging, publication, or release completion.
 
 `SONAR_READ_TOKEN` is also mandatory for the analysis-bound gate, current-analysis
 bookends, full issue inventory, and full hotspot inventory. Its absence, rejection,
-or incomplete readback is the same fail-closed credential/evidence blocker.
+or incomplete readback holds only the audit and prevents an inferred passing receipt.
 ### Post-publication verification
 
 | Verification | Command / evidence | Blocks release completion when |
@@ -187,8 +199,8 @@ or incomplete readback is the same fail-closed credential/evidence blocker.
 | --- | --- | --- | --- |
 | Local release-prep branch and commit | Automatic | Sensitive content, incoherent diff, or unrelated dirty state | Git status, diff, and gate output |
 | Release-prep PR creation | Automatic | Unreviewed broad product change outside release-owned files | PR URL and changed-file list |
-| PR merge | Automatic after the primary UXDD consumer-mode release gate, independent MCP PR review, the exact `CANDIDATE_SHA` SonarQube receipt, and required checks are clean | `PARTIALLY_WORKS`, `BROKEN`, `fix_now`, unresolved mandatory review threads, missing/stale/non-`OK` candidate SonarQube receipt, unresolved candidate SonarQube finding, failed checks, or high-risk scope expansion | UXDD run report, MCP PR summary, candidate SonarQube task/analysis/quality-gate/finding receipt, GitHub merge state, status checks |
-| Planned PATCH or MINOR tag and remote publication | Automatic only after the completed integration scope is on `main`, no dependent slice in the same integration wave remains active, every claimed consumer journey is `PRODUCT_WORKS`, every pre-publication gate passes, and the post-merge `origin/main` exact-head SonarQube receipt is clean | MAJOR/breaking change, tag collision, failed gate, missing/stale/non-`OK` post-merge Sonar receipt, unresolved finding, ambiguous scope, production/customer deployment outside this workstation, secrets, or destructive cleanup with unpreserved work | Governing run artifact, UXDD evidence, pre-publication evidence, post-merge Sonar receipt, annotated tag target, post-publication remote tag/workflow/release/package smoke |
+| PR merge | Automatic after the primary UXDD consumer-mode release gate, independent MCP PR review, and required non-Sonar checks are clean | `PARTIALLY_WORKS`, `BROKEN`, `fix_now`, unresolved mandatory review threads, failed non-Sonar checks, or high-risk scope expansion | UXDD run report, MCP PR summary, GitHub merge state, non-Sonar status checks |
+| Planned PATCH or MINOR tag and remote publication | Automatic only after the completed integration scope is on `main`, no dependent slice in the same integration wave remains active, every claimed consumer journey is `PRODUCT_WORKS`, and every non-Sonar pre-publication gate passes | MAJOR/breaking change, tag collision, failed non-Sonar gate, ambiguous scope, production/customer deployment outside this workstation, secrets, or destructive cleanup with unpreserved work | Governing run artifact, UXDD evidence, non-Sonar pre-publication evidence, annotated tag target, post-publication remote tag/workflow/release/package smoke |
 | MAJOR or breaking release | Approval required | Always | Explicit user approval naming the version |
 | Production/customer deployment outside this workstation | Approval required | Always | Named target, deploy plan, health checks |
 
@@ -236,9 +248,9 @@ as the only release-note source for a milestone release.
 
 1. Prepare release-owned files on a branch named `work/release-vX.Y.Z-prep`.
 2. Build and install the release candidate; run the primary UXDD consumer-mode release gate through the public package/CLI/MCP entry point; then run the remaining local pre-PR protocol gates and write evidence paths into the release report. PR review waits for step 3, and post-publication verification waits for step 6.
-3. Open a PR, run MCP PR review, fix or resolve findings, then run the pre-merge `CANDIDATE_SHA` SonarQube gate after the final source change. If SonarQube requires a code correction, re-run affected review/required checks and obtain a new candidate receipt. Merge automatically only after the primary UXDD consumer-mode release gate reports `PRODUCT_WORKS` for every claimed journey and all supporting gates, including the candidate SonarQube receipt, are clean.
-4. Fast-forward local `main` to `origin/main`; capture the actual merge/tag target SHA and run the second exact-head SonarQube gate in a new clean scanner worktree. If it finds a defect or its SHA does not equal the intended tag target, fix through a new PR and restart the applicable release gate sequence.
-5. After the completed integration scope is on `main`, no dependent slice in the same integration wave remains active, and every pre-publication gate passes—including the post-merge SonarQube receipt—create an annotated tag with `git tag -a vX.Y.Z -m "Release vX.Y.Z"` and push it with `git push origin vX.Y.Z`.
+3. Open a PR, run MCP PR review, fix or resolve blocking findings, and run required non-Sonar checks. Merge automatically only after the primary UXDD consumer-mode release gate reports `PRODUCT_WORKS` for every claimed journey and all supporting non-Sonar gates are clean. Do not add a pre-merge Sonar gate.
+4. Fast-forward local `main` to `origin/main`; capture the actual merge/tag target SHA for source and publication provenance. No Sonar receipt is required before tagging.
+5. After the completed integration scope is on `main`, no dependent slice in the same integration wave remains active, and every non-Sonar pre-publication gate passes, create an annotated tag with `git tag -a vX.Y.Z -m "Release vX.Y.Z"` and push it with `git push origin vX.Y.Z`.
 6. Run all five post-publication verification rows from Required Gates: remote tag
    visibility, exact tag workflow completion, GitHub Release, PyPI publication,
    and Local deploy smoke. Any failed row blocks release completion and the final
@@ -246,7 +258,8 @@ as the only release-note source for a milestone release.
 7. For the required Local deploy smoke row: install the released wheel/package
    on this workstation, then verify `netcoredbg-mcp --version` reports `X.Y.Z`
    and a package import smoke.
-8. Update `.agent/CONTINUITY.md` and the live dashboard with the final verdict.
+8. After actual publication, run or schedule the exact-SHA Sonar audit above when the scanner and safe credentials are available. Retain red, failed, or unavailable-input evidence independently of release completion; do not rerun publication because of an audit outcome.
+9. Update `.agent/CONTINUITY.md` and the live dashboard with the final release verdict and the separate Sonar audit status.
 
 ## Recovery After Tag Push
 
@@ -269,10 +282,11 @@ approval trigger applies.
 ## Terminal Verdict
 
 - `PROJECT_RELEASE_PROTOCOL_PASS`: the primary UXDD consumer-mode release gate
-  reports `PRODUCT_WORKS` for every claimed journey and all supporting mandatory rows
-  have current passing evidence.
+  reports `PRODUCT_WORKS` for every claimed journey and all supporting mandatory
+  non-Sonar rows have current passing evidence; Sonar audit status is separate.
 - `PROJECT_RELEASE_PROTOCOL_BLOCKED`: a claimed journey is `PARTIALLY_WORKS` or
-  `BROKEN`, or at least one supporting mandatory row is missing, stale, failed,
-  or cannot be verified.
+  `BROKEN`, or at least one supporting mandatory non-Sonar row is missing, stale,
+  failed, or cannot be verified. A Sonar-only red or blocked result is not this
+  release verdict.
 - `PROJECT_RELEASE_PROTOCOL_DRY_RUN`: intended actions are fully described and
   no mutation was performed.

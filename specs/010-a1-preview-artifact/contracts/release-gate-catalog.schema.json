@@ -2,8 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "release-gate-catalog.schema.json",
   "title": "A1 preview Release Gate Catalog",
-  "description": "Immutable, closed exact-head catalog for one A1 preview Candidate Identity Record. It contains only the tracked policy-authority snapshots and the six fixed gate descriptors. It contains no evidence-record reference, gate outcome, future-stage proof, mutable remote observation, or release authorization.",
-  "$comment": "Semantic validation resolves candidate_identity_record by repository, run_id, artifact_id, path, and raw-byte SHA-256; validates the Candidate Identity Record; and requires canonical refs/heads/main equality among source_ref, candidate.source.ref, and candidate.build.ref; commit equality among source_commit, candidate.source.commit, candidate.source.origin_main_target, and candidate.build.commit; trusted build-workflow provenance; and a passing post-merge exact-head receipt whose scanned_commit and tag_target equal source_commit. POLICY_SNAPSHOT_CLOSURE re-hashes exactly the five allowed authority paths at source_commit. FIXED_DESCRIPTOR_CLOSURE derives the exact ordered six descriptors and rejects any changed stage, gate ID, record type, authority rule, or evidence requirement. Stage-specific record references and outcomes belong only to stage-gate-evidence.schema.json.",
+  "description": "Immutable, closed exact-head catalog for one A1 preview Candidate Identity Record. It contains only the tracked policy-authority snapshots and the four fixed functional and review gate descriptors. It contains no evidence-record reference, gate outcome, future-stage proof, mutable remote observation, or release authorization. Sonar is separate post-publication audit evidence, not a required gate.",
+  "$comment": "Semantic validation admits the supplied Candidate Identity Record and requires canonical refs/heads/main equality among source_ref, candidate.source.ref, and candidate.build.ref; commit equality among source_commit, candidate.source.commit, candidate.source.origin_main_target, and candidate.build.commit; and trusted build-workflow provenance. The catalog is sealed before the Candidate Identity Record is uploaded, so it contains no future uploaded identity-record reference. Consumer proof and later stage evidence independently resolve and hash their actual Candidate Identity Record references. POLICY_SNAPSHOT_CLOSURE re-hashes exactly the five allowed authority paths at source_commit. FIXED_DESCRIPTOR_CLOSURE derives the exact ordered four descriptors and rejects any changed stage, gate ID, record type, authority rule, or evidence requirement. Stage-specific record references and outcomes belong only to stage-gate-evidence.schema.json.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -185,8 +185,6 @@
         "retained-downloaded-consumer-proof",
         "s2-s3-seven-lens-evidence",
         "independent-review",
-        "candidate-exact-head-sonar",
-        "post-merge-exact-head-sonar",
         "remote-downloaded-consumer-proof"
       ]
     },
@@ -194,8 +192,7 @@
       "enum": [
         "artifact-consumer-proof",
         "s2-s3-seven-lens-aggregate",
-        "independent-pr-review",
-        "sonarqube-exact-head"
+        "independent-pr-review"
       ]
     },
     "authority_rule_code": {
@@ -238,8 +235,6 @@
         "RETAINED_ARTIFACT_PROOF",
         "S2_S3_SEVEN_LENS_AGGREGATE",
         "INDEPENDENT_PR_REVIEW",
-        "CANDIDATE_EXACT_HEAD_SONAR",
-        "POST_MERGE_MAIN_TARGET_SONAR",
         "REMOTE_CONSUMER_PROOF"
       ]
     },
@@ -360,62 +355,6 @@
         }
       ]
     },
-    "candidate_exact_head_sonar_descriptor": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/gate_descriptor"
-        },
-        {
-          "properties": {
-            "stage": {
-              "const": "pre-decision"
-            },
-            "gate_id": {
-              "const": "candidate-exact-head-sonar"
-            },
-            "record_type": {
-              "const": "sonarqube-exact-head"
-            },
-            "evidence_requirements": {
-              "const": [
-                "CANDIDATE_IDENTITY_MATCH",
-                "CANONICAL_MAIN_PROVENANCE",
-                "PASSING_OUTCOME",
-                "CANDIDATE_EXACT_HEAD_SONAR"
-              ]
-            }
-          }
-        }
-      ]
-    },
-    "post_merge_exact_head_sonar_descriptor": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/gate_descriptor"
-        },
-        {
-          "properties": {
-            "stage": {
-              "const": "pre-publication"
-            },
-            "gate_id": {
-              "const": "post-merge-exact-head-sonar"
-            },
-            "record_type": {
-              "const": "sonarqube-exact-head"
-            },
-            "evidence_requirements": {
-              "const": [
-                "CANDIDATE_IDENTITY_MATCH",
-                "CANONICAL_MAIN_PROVENANCE",
-                "PASSING_OUTCOME",
-                "POST_MERGE_MAIN_TARGET_SONAR"
-              ]
-            }
-          }
-        }
-      ]
-    },
     "remote_downloaded_consumer_proof_descriptor": {
       "allOf": [
         {
@@ -444,10 +383,10 @@
         }
       ]
     },
-    "six_gate_descriptors": {
+    "fixed_gate_descriptors": {
       "type": "array",
-      "minItems": 6,
-      "maxItems": 6,
+      "minItems": 4,
+      "maxItems": 4,
       "prefixItems": [
         {
           "$ref": "#/$defs/retained_downloaded_consumer_proof_descriptor"
@@ -457,12 +396,6 @@
         },
         {
           "$ref": "#/$defs/independent_pr_review_descriptor"
-        },
-        {
-          "$ref": "#/$defs/candidate_exact_head_sonar_descriptor"
-        },
-        {
-          "$ref": "#/$defs/post_merge_exact_head_sonar_descriptor"
         },
         {
           "$ref": "#/$defs/remote_downloaded_consumer_proof_descriptor"
@@ -475,7 +408,6 @@
       "additionalProperties": false,
       "required": [
         "producer",
-        "candidate_identity_record",
         "source_ref",
         "source_commit",
         "policy_authority_snapshots",
@@ -485,9 +417,6 @@
       "properties": {
         "producer": {
           "$ref": "#/$defs/producer"
-        },
-        "candidate_identity_record": {
-          "$ref": "#/$defs/github_artifact_file_reference"
         },
         "source_ref": {
           "$ref": "#/$defs/source_ref"
@@ -499,7 +428,7 @@
           "$ref": "#/$defs/policy_authority_snapshots"
         },
         "gate_descriptors": {
-          "$ref": "#/$defs/six_gate_descriptors"
+          "$ref": "#/$defs/fixed_gate_descriptors"
         },
         "resolved_at": {
           "type": "string",

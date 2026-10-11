@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import io
 import json
 import os
@@ -25,9 +24,6 @@ _TRUSTED_WORKFLOW_PATH = ".github/workflows/stateless-preview.yml"
 _TRUSTED_BUILD_MODE = "build"
 _TRUSTED_BUILD_EVENT = "workflow_dispatch"
 _PREVIEW_EXECUTABLE = "netcoredbg-mcp-stateless-preview.exe"
-_EXACT_HEAD_RUNNER_PATH = Path(__file__).with_name("run_sonarqube_exact_head.py")
-_EXACT_HEAD_RECEIPT_SCHEMA_VERSION = 3
-_POST_MERGE_RELEASE_INTENT = "v0.23.12"
 
 _POLICY_AUTHORITY_PATHS = (
     "AGENTS.md",
@@ -294,7 +290,7 @@ def _validate_candidate_identity(value: Any) -> dict[str, Any]:
     source = _expect_mapping(
         candidate["source"],
         "candidate.source",
-        ("repository", "ref", "commit", "origin_main_target", "post_merge_exact_head_receipt"),
+        ("repository", "ref", "commit", "origin_main_target"),
     )
     source_repository = _expect_repository(source["repository"], "candidate.source.repository")
     if source["ref"] != _CANONICAL_SOURCE_REF:
@@ -302,32 +298,6 @@ def _validate_candidate_identity(value: Any) -> dict[str, Any]:
     source_commit = _expect_commit(source["commit"], "candidate.source.commit")
     origin_main_target = _expect_commit(
         source["origin_main_target"], "candidate.source.origin_main_target"
-    )
-
-    post_merge_receipt = _expect_mapping(
-        source["post_merge_exact_head_receipt"],
-        "candidate.source.post_merge_exact_head_receipt",
-        ("record_reference", "stage", "record_type", "scanned_commit", "tag_target", "outcome"),
-    )
-    post_merge_reference = _validate_artifact_file_reference(
-        post_merge_receipt["record_reference"],
-        "candidate.source.post_merge_exact_head_receipt.record_reference",
-    )
-    if post_merge_reference["repository"] != source_repository:
-        _refuse("candidate post-merge receipt has a different repository")
-    if (
-        post_merge_receipt["stage"] != "post-merge"
-        or post_merge_receipt["record_type"] != "sonarqube-exact-head"
-        or post_merge_receipt["outcome"] != "PASS"
-    ):
-        _refuse("candidate post-merge receipt is not a passing exact-head receipt")
-    scanned_commit = _expect_commit(
-        post_merge_receipt["scanned_commit"],
-        "candidate.source.post_merge_exact_head_receipt.scanned_commit",
-    )
-    tag_target = _expect_commit(
-        post_merge_receipt["tag_target"],
-        "candidate.source.post_merge_exact_head_receipt.tag_target",
     )
 
     build = _expect_mapping(
@@ -413,7 +383,7 @@ def _validate_candidate_identity(value: Any) -> dict[str, Any]:
     if destination["tag"] != manifest_contents["tag"] or destination["prerelease"] is not True:
         _refuse("candidate destination does not match the preview manifest")
 
-    if len({source_commit, origin_main_target, build_commit, scanned_commit, tag_target}) != 1:
+    if len({source_commit, origin_main_target, build_commit}) != 1:
         _refuse("candidate commits do not bind one canonical main target")
 
     return identity
@@ -673,16 +643,12 @@ def _fixed_gate_descriptors() -> list[dict[str, Any]]:
         "retained-downloaded-consumer-proof": "RETAINED_ARTIFACT_PROOF",
         "s2-s3-seven-lens-evidence": "S2_S3_SEVEN_LENS_AGGREGATE",
         "independent-review": "INDEPENDENT_PR_REVIEW",
-        "candidate-exact-head-sonar": "CANDIDATE_EXACT_HEAD_SONAR",
-        "post-merge-exact-head-sonar": "POST_MERGE_MAIN_TARGET_SONAR",
         "remote-downloaded-consumer-proof": "REMOTE_CONSUMER_PROOF",
     }
     rows = (
         ("pre-decision", "retained-downloaded-consumer-proof", "artifact-consumer-proof"),
         ("pre-decision", "s2-s3-seven-lens-evidence", "s2-s3-seven-lens-aggregate"),
         ("pre-decision", "independent-review", "independent-pr-review"),
-        ("pre-decision", "candidate-exact-head-sonar", "sonarqube-exact-head"),
-        ("pre-publication", "post-merge-exact-head-sonar", "sonarqube-exact-head"),
         ("post-publication", "remote-downloaded-consumer-proof", "artifact-consumer-proof"),
     )
     return [
@@ -742,10 +708,8 @@ def resolve_release_gate_catalog(
     )
 
 
-_SONAR_PROJECT_KEY = "thebtf_netcoredbg_mcp"
 _PREVIEW_ARTIFACT_ROOT = Path("artifacts") / "stateless-preview"
 _MAX_ACTIONS_RETENTION_DAYS = 90
-_POST_MERGE_RECEIPT_FILENAME = "post-merge-exact-head.json"
 _CANDIDATE_IDENTITY_FILENAME = "candidate-identity.json"
 _RELEASE_GATE_CATALOG_FILENAME = "release-gate-catalog.json"
 
@@ -773,7 +737,6 @@ def _artifact_names(version: str, run_id: str, run_attempt: int) -> dict[str, st
     suffix = f"{version}-{run_id}-{run_attempt}"
     return {
         "payload": f"stateless-preview-payload-{suffix}",
-        "post_merge_receipt": f"stateless-preview-post-merge-receipt-{suffix}",
         "candidate_identity": f"stateless-preview-candidate-identity-{suffix}",
         "release_gate_catalog": f"stateless-preview-release-gate-catalog-{suffix}",
     }
@@ -965,21 +928,6 @@ def prepare_preview_payload(
     )
 
 
-def _coordination_root(repository_root: Path) -> Path:
-    reported_common_dir = _git_text(repository_root, "rev-parse", "--git-common-dir")
-    common_dir = Path(reported_common_dir)
-    if not common_dir.is_absolute():
-        common_dir = repository_root / common_dir
-    try:
-        resolved_common_dir = common_dir.resolve(strict=True)
-        coordination_root = resolved_common_dir.parent
-    except OSError:
-        _refuse("canonical coordination root is unavailable")
-    if not coordination_root.is_dir():
-        _refuse("canonical coordination root is unavailable")
-    return coordination_root
-
-
 def _load_json_object(raw: bytes, name: str) -> dict[str, Any]:
     def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -1003,96 +951,6 @@ def _load_json_object(raw: bytes, name: str) -> dict[str, Any]:
     if not isinstance(result, dict):
         _refuse(f"{name} must contain an object")
     return result
-
-
-def _load_exact_head_receipt_validator() -> Callable[[Mapping[str, Any]], None]:
-    specification = importlib.util.spec_from_file_location(
-        "_stateless_preview_exact_head_runner", _EXACT_HEAD_RUNNER_PATH
-    )
-    if specification is None or specification.loader is None:
-        _refuse("exact-head receipt authority is unavailable")
-    runner = importlib.util.module_from_spec(specification)
-    sys.modules[specification.name] = runner
-    try:
-        specification.loader.exec_module(runner)
-    except Exception:
-        _refuse("exact-head receipt authority is unavailable")
-    validator = getattr(runner, "validate_exact_head_receipt_v3", None)
-    if not callable(validator):
-        _refuse("exact-head receipt authority is unavailable")
-    return validator
-
-
-def _validate_post_merge_scan_receipt(receipt: Mapping[str, Any], source_commit: str) -> None:
-    validator = _load_exact_head_receipt_validator()
-    try:
-        validator(receipt)
-    except Exception:
-        _refuse("post-merge exact-head scan receipt is not trusted")
-    identity = receipt.get("identity")
-    if (
-        receipt.get("role") != "post-merge"
-        or receipt.get("outcome") != "PASS"
-        or receipt.get("release_intent") != _POST_MERGE_RELEASE_INTENT
-        or not isinstance(identity, Mapping)
-        or identity.get("captured_head") != source_commit
-        or identity.get("project_key") != _SONAR_PROJECT_KEY
-    ):
-        _refuse("post-merge exact-head scan receipt is not trusted")
-
-
-def _post_merge_scan_receipt_path(repository_root: Path, source_commit: str) -> Path:
-    return (
-        _coordination_root(repository_root)
-        / ".agent"
-        / "e"
-        / "sonarqube"
-        / _SONAR_PROJECT_KEY
-        / source_commit
-        / "post-merge.json"
-    )
-
-
-def produce_post_merge_exact_head_receipt(
-    repository_root: str | PathLike[str], environment: Mapping[str, str]
-) -> Mapping[str, Any]:
-    """Seal the sole repository-run post-merge scan result for this build."""
-
-    root = _resolve_repository_root(repository_root)
-    admission = admit_build(root, environment)
-    source = admission["source"]
-    raw_receipt_path = _post_merge_scan_receipt_path(root, source["commit"])
-    raw_receipt = _read_regular_bytes(raw_receipt_path, "post-merge scan receipt")
-    _validate_post_merge_scan_receipt(
-        _load_json_object(raw_receipt, "post-merge scan receipt"), source["commit"]
-    )
-    record = {
-        "receipt_schema_version": "1.0",
-        "record_type": "sonarqube-exact-head",
-        "repository": source["repository"],
-        "source_ref": source["ref"],
-        "stage": "post-merge",
-        "scanned_commit": source["commit"],
-        "tag_target": source["commit"],
-        "outcome": "PASS",
-        "source_runner": {
-            "script": "scripts/run_sonarqube_exact_head.py",
-            "role": "post-merge",
-            "receipt_schema_version": _EXACT_HEAD_RECEIPT_SCHEMA_VERSION,
-            "project_key": _SONAR_PROJECT_KEY,
-            "receipt_sha256": _sha256_bytes(raw_receipt),
-        },
-        "recorded_at": _utc_timestamp(),
-    }
-    receipt_directory = _artifact_root(root) / "post-merge-receipt"
-    if receipt_directory.exists() or receipt_directory.is_symlink():
-        _refuse("post-merge receipt directory already exists")
-    _write_bytes_once(
-        receipt_directory / _POST_MERGE_RECEIPT_FILENAME,
-        _canonical_json_bytes(record, "post-merge receipt"),
-        "post-merge receipt",
-    )
-    return _freeze(record)
 
 
 def _read_github_artifact(repository: str, artifact_id: str, token: str) -> Mapping[str, Any]:
@@ -1136,54 +994,6 @@ def _validate_uploaded_artifact(
     return {"id": artifact_id, "name": expected_name, "expires_at": expires_at}
 
 
-def _validate_produced_post_merge_record(
-    record: Mapping[str, Any], source: Mapping[str, Any]
-) -> None:
-    source_runner = record.get("source_runner")
-    if (
-        set(record)
-        != {
-            "receipt_schema_version",
-            "record_type",
-            "repository",
-            "source_ref",
-            "stage",
-            "scanned_commit",
-            "tag_target",
-            "outcome",
-            "source_runner",
-            "recorded_at",
-        }
-        or record.get("receipt_schema_version") != "1.0"
-        or record.get("record_type") != "sonarqube-exact-head"
-        or record.get("repository") != source["repository"]
-        or record.get("source_ref") != _CANONICAL_SOURCE_REF
-        or record.get("stage") != "post-merge"
-        or record.get("scanned_commit") != source["commit"]
-        or record.get("tag_target") != source["commit"]
-        or record.get("outcome") != "PASS"
-        or not isinstance(source_runner, Mapping)
-        or set(source_runner)
-        != {"script", "role", "receipt_schema_version", "project_key", "receipt_sha256"}
-        or source_runner.get("script") != "scripts/run_sonarqube_exact_head.py"
-        or source_runner.get("role") != "post-merge"
-        or type(source_runner.get("receipt_schema_version")) is not int
-        or source_runner.get("receipt_schema_version") != _EXACT_HEAD_RECEIPT_SCHEMA_VERSION
-        or source_runner.get("project_key") != _SONAR_PROJECT_KEY
-    ):
-        _refuse("post-merge receipt record is not trusted")
-    _expect_sha256(source_runner["receipt_sha256"], "post-merge receipt source hash")
-    _expect_datetime(record.get("recorded_at"), "post-merge receipt recorded_at")
-
-
-def validate_post_merge_receipt_record(
-    record: Mapping[str, Any], source: Mapping[str, Any]
-) -> None:
-    """Validate the sealed post-merge receipt wrapper against its source."""
-
-    _validate_produced_post_merge_record(record, source)
-
-
 def seal_build_records(
     repository_root: str | PathLike[str],
     environment: Mapping[str, str],
@@ -1200,9 +1010,6 @@ def seal_build_records(
     names = admission["artifacts"]
     token = _environment_value(environment, "GITHUB_TOKEN")
     payload_artifact_id = _expect_environment_identifier(environment, "A1_PAYLOAD_ARTIFACT_ID")
-    receipt_artifact_id = _expect_environment_identifier(
-        environment, "A1_POST_MERGE_RECEIPT_ARTIFACT_ID"
-    )
     reader = artifact_reader or _read_github_artifact
     payload_artifact = _validate_uploaded_artifact(
         reader(source["repository"], payload_artifact_id, token),
@@ -1210,13 +1017,6 @@ def seal_build_records(
         expected_name=names["payload"],
         current_run_id=run["id"],
     )
-    receipt_artifact = _validate_uploaded_artifact(
-        reader(source["repository"], receipt_artifact_id, token),
-        artifact_id=receipt_artifact_id,
-        expected_name=names["post_merge_receipt"],
-        current_run_id=run["id"],
-    )
-
     payload_directory = _artifact_root(root) / "payload"
     archive_name = f"netcoredbg-mcp-stateless-preview-win-x64-{preview['version']}.zip"
     manifest_name = f"netcoredbg-mcp-stateless-preview-win-x64-{preview['version']}.manifest.json"
@@ -1250,25 +1050,6 @@ def seal_build_records(
         "sha256": _sha256_bytes(manifest_bytes),
     }
 
-    receipt_path = _artifact_root(root) / "post-merge-receipt" / _POST_MERGE_RECEIPT_FILENAME
-    receipt_bytes = _read_regular_bytes(receipt_path, "post-merge receipt")
-    receipt_record = _load_json_object(receipt_bytes, "post-merge receipt")
-    _validate_produced_post_merge_record(receipt_record, source)
-    raw_scan_receipt = _read_regular_bytes(
-        _post_merge_scan_receipt_path(root, source["commit"]), "post-merge scan receipt"
-    )
-    _validate_post_merge_scan_receipt(
-        _load_json_object(raw_scan_receipt, "post-merge scan receipt"), source["commit"]
-    )
-    if receipt_record["source_runner"]["receipt_sha256"] != _sha256_bytes(raw_scan_receipt):
-        _refuse("post-merge receipt does not bind the repository scan result")
-    receipt_reference = {
-        "repository": source["repository"],
-        "run_id": run["id"],
-        "artifact_id": receipt_artifact["id"],
-        "path": _POST_MERGE_RECEIPT_FILENAME,
-        "sha256": _sha256_bytes(receipt_bytes),
-    }
     payload_retention = {
         "configured_days": preview["retention_days"],
         "expires_at": payload_artifact["expires_at"],
@@ -1281,14 +1062,6 @@ def seal_build_records(
                 "ref": _CANONICAL_SOURCE_REF,
                 "commit": source["commit"],
                 "origin_main_target": source["commit"],
-                "post_merge_exact_head_receipt": {
-                    "record_reference": receipt_reference,
-                    "stage": "post-merge",
-                    "record_type": "sonarqube-exact-head",
-                    "scanned_commit": source["commit"],
-                    "tag_target": source["commit"],
-                    "outcome": "PASS",
-                },
             },
             "build": {
                 "repository": source["repository"],
@@ -1764,7 +1537,6 @@ def seal_artifact_consumer_proof(
             "python_rollback_result",
             "outcome",
             "recorded_at",
-            "receipt_provenance",
         ),
     )
     if record["receipt_schema_version"] != _CONSUMER_PROOF_SCHEMA_VERSION:
@@ -1799,9 +1571,6 @@ def seal_artifact_consumer_proof(
     _validate_scenario_matrix(record["scenario_matrix"])
     _validate_runtime_results(record["runtime_results"])
     _validate_python_rollback(record["python_rollback_result"])
-    _validate_consumer_proof_reference(
-        record["receipt_provenance"], "consumer proof receipt provenance"
-    )
     return _freeze(value)
 
 
@@ -1814,7 +1583,6 @@ def _write_admission_outputs(admission: Mapping[str, Any], environment: Mapping[
         "preview_tag": preview["tag"],
         "retention_days": str(preview["retention_days"]),
         "payload_artifact_name": artifacts["payload"],
-        "post_merge_receipt_artifact_name": artifacts["post_merge_receipt"],
         "candidate_identity_artifact_name": artifacts["candidate_identity"],
         "release_gate_catalog_artifact_name": artifacts["release_gate_catalog"],
     }
@@ -1832,7 +1600,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     for command in (
         "admit-build",
         "prepare-payload",
-        "produce-post-merge-receipt",
         "seal-build-records",
     ):
         commands.add_parser(command)
@@ -1846,8 +1613,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             _write_admission_outputs(admit_build(Path.cwd(), os.environ), os.environ)
         elif arguments.command == "prepare-payload":
             prepare_preview_payload(Path.cwd(), os.environ)
-        elif arguments.command == "produce-post-merge-receipt":
-            produce_post_merge_exact_head_receipt(Path.cwd(), os.environ)
         elif arguments.command == "seal-build-records":
             seal_build_records(Path.cwd(), os.environ)
         else:
@@ -1866,12 +1631,10 @@ __all__ = [
     "main",
     "parse_args",
     "prepare_preview_payload",
-    "produce_post_merge_exact_head_receipt",
     "resolve_release_gate_catalog",
     "seal_artifact_consumer_proof",
     "seal_build_records",
     "validate_artifact_consumer_proof_reference",
-    "validate_post_merge_receipt_record",
     "verify_and_extract_retained_artifact",
     "verify_retained_artifact",
     "verify_retained_artifact_inputs",

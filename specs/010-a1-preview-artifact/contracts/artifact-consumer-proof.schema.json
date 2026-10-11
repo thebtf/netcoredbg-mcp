@@ -18,8 +18,7 @@
     "runtime_results",
     "python_rollback_result",
     "outcome",
-    "recorded_at",
-    "receipt_provenance"
+    "recorded_at"
   ],
   "properties": {
     "receipt_schema_version": {
@@ -62,9 +61,6 @@
     "recorded_at": {
       "type": "string",
       "format": "date-time"
-    },
-    "receipt_provenance": {
-      "$ref": "#/$defs/github_artifact_file_reference"
     }
   },
   "allOf": [
