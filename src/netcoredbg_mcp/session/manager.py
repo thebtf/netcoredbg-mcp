@@ -12,7 +12,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
-from ..build import BuildManager, BuildResult
+from ..build import BuildError, BuildManager, BuildResult
 from ..build.cleanup import (
     NoOwnedAdapter,
     OwnedAdapterCleanup,
@@ -450,6 +450,11 @@ class SessionManager:
     def last_build_result(self) -> BuildResult | None:
         """Get last build result."""
         return self._last_build_result
+
+    async def clear_build_result(self) -> None:
+        """Clear prior diagnostics before validating an authorized pre-build request."""
+        async with self._lifecycle_lock:
+            self._last_build_result = None
 
     @property
     def netcoredbg_path(self) -> str:
@@ -1752,6 +1757,7 @@ class SessionManager:
         """
 
         async with self._lifecycle_lock:
+            self._last_build_result = None
             owner = self.capture_prebuild_owner()
             return await self._pre_launch_build_with_owner_locked(
                 project_file=project_file,
@@ -1772,21 +1778,32 @@ class SessionManager:
         timeout: float,
         output_callback: Callable[[str, str], Awaitable[None]] | None,
     ) -> BuildResult:
-        """Run pre-build with an owner captured before any session state reset."""
+        """Run pre-build with the owner captured by the guarded entry point."""
 
         if not self._project_path:
             raise ValueError("Project path not set for pre-launch build")
 
         validated_project = self.validate_path(project_file, must_exist=True)
-        result = await self._build_manager.pre_launch_build(
-            workspace_root=self._project_path,
-            project_path=validated_project,
-            owner=owner,
-            configuration=configuration,
-            restore_first=restore_first,
-            timeout=timeout,
-            output_callback=output_callback,
-        )
+        previous_result = self._build_manager.get_last_result(self._project_path)
+        try:
+            result = await self._build_manager.pre_launch_build(
+                workspace_root=self._project_path,
+                project_path=validated_project,
+                owner=owner,
+                configuration=configuration,
+                restore_first=restore_first,
+                timeout=timeout,
+                output_callback=output_callback,
+            )
+        except BuildError:
+            failed_result = self._build_manager.get_last_result(self._project_path)
+            if (
+                failed_result is not None
+                and failed_result is not previous_result
+                and not failed_result.success
+            ):
+                self._last_build_result = failed_result
+            raise
         self._last_build_result = result
         return result
 
@@ -1906,6 +1923,9 @@ class SessionManager:
             RuntimeError: If launch fails
             BuildError: If pre-build fails
         """
+
+        if pre_build and _prebuilt_program is None:
+            self._last_build_result = None
 
         # Helper to report progress (safely handles None callback)
         async def report(progress: float, total: float, message: str) -> None:
@@ -2206,6 +2226,8 @@ class SessionManager:
             BuildError: If rebuild fails
         """
         async with self._lifecycle_lock:
+            if rebuild or (self._last_launch_config and self._last_launch_config.get("pre_build")):
+                self._last_build_result = None
             if not self._last_launch_config:
                 raise RuntimeError("No previous launch configuration for restart")
 
