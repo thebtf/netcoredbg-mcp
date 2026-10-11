@@ -451,6 +451,11 @@ class SessionManager:
         """Get last build result."""
         return self._last_build_result
 
+    async def clear_build_result(self) -> None:
+        """Clear prior diagnostics before validating an authorized pre-build request."""
+        async with self._lifecycle_lock:
+            self._last_build_result = None
+
     @property
     def netcoredbg_path(self) -> str:
         """Get netcoredbg executable path."""
@@ -1813,7 +1818,6 @@ class SessionManager:
     ) -> str:
         """Drain the captured owner and finish restore/build before another admission."""
 
-        self._last_build_result = None
         prebuild_owner = self.capture_prebuild_owner()
         was_active = self.is_active
         validated_owner_receipt: OwnerDrainReceipt | None = None
@@ -1919,6 +1923,9 @@ class SessionManager:
             RuntimeError: If launch fails
             BuildError: If pre-build fails
         """
+
+        if pre_build and _prebuilt_program is None:
+            self._last_build_result = None
 
         # Helper to report progress (safely handles None callback)
         async def report(progress: float, total: float, message: str) -> None:
@@ -2219,6 +2226,8 @@ class SessionManager:
             BuildError: If rebuild fails
         """
         async with self._lifecycle_lock:
+            if rebuild or (self._last_launch_config and self._last_launch_config.get("pre_build")):
+                self._last_build_result = None
             if not self._last_launch_config:
                 raise RuntimeError("No previous launch configuration for restart")
 

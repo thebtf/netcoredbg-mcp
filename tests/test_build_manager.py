@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -18,6 +19,7 @@ from netcoredbg_mcp.build.policy import BuildCommand
 from netcoredbg_mcp.build.session import BuildSession
 from netcoredbg_mcp.build.state import BuildError, BuildState
 from netcoredbg_mcp.session import SessionManager
+from netcoredbg_mcp.tools.debug import register_debug_tools
 from netcoredbg_mcp.tools.output import register_output_tools
 from netcoredbg_mcp.windows_process_owner import DrainStatus, OwnedProcessRef, OwnerDrainReceipt
 
@@ -636,3 +638,113 @@ class TestFailedPreBuildDiagnostics:
         response = await capturing_mcp.tools["get_build_diagnostics"]()
         assert manager.last_build_result is None
         assert response["data"] == {"message": "No build has been performed yet."}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("entry_point", "rejection", "requested_build", "access_error", "clear_result"),
+        [
+            ("start_debug", "missing_project", True, None, True),
+            ("start_debug", "invalid_program", True, None, True),
+            ("start_debug", "missing_project_path", True, None, True),
+            ("start_debug", "root_resolution", True, None, True),
+            ("restart_debug", "missing_config", True, None, True),
+            ("restart_debug", "missing_project", True, None, True),
+            ("restart_debug", "missing_project_path", True, None, True),
+            ("restart_debug", "saved_prebuild_stop", False, None, True),
+            ("start_debug", "missing_project", True, "Foreign session", False),
+            ("restart_debug", "missing_config", True, "Foreign session", False),
+            ("start_debug", "missing_program", False, None, False),
+            ("restart_debug", "missing_config", False, None, False),
+        ],
+    )
+    async def test_public_prebuild_validation_does_not_publish_previous_result(
+        self,
+        prebuild_diagnostics_session,
+        capturing_mcp,
+        monkeypatch,
+        entry_point,
+        rejection,
+        requested_build,
+        access_error,
+        clear_result,
+    ):
+        manager, project, _failed_commands, commands = prebuild_diagnostics_session
+        previous = await manager.pre_launch_build(str(project), restore_first=False)
+        assert previous.success is True
+        resolve_root = AsyncMock()
+        if rejection == "root_resolution":
+            resolve_root.side_effect = ValueError("Project root rejected")
+        register_debug_tools(
+            capturing_mcp,
+            manager,
+            ownership=SimpleNamespace(release=MagicMock()),
+            notify_state_changed=AsyncMock(),
+            check_session_access=lambda _ctx: access_error,
+            execute_and_wait=AsyncMock(),
+            resolve_project_root=resolve_root,
+        )
+        register_output_tools(capturing_mcp, manager)
+        ctx = SimpleNamespace(report_progress=AsyncMock())
+        if entry_point == "start_debug":
+            program = project.parent / ("App.txt" if rejection == "invalid_program" else "App.dll")
+            build_project = None if rejection == "missing_project" else str(project)
+            if rejection == "missing_project_path":
+                build_project = str(project.parent / "Missing.csproj")
+            response = await capturing_mcp.tools[entry_point](
+                ctx,
+                program=str(program),
+                pre_build=requested_build,
+                build_project=build_project,
+            )
+        else:
+            if rejection != "missing_config":
+                manager._last_launch_config = {
+                    "program": str(project.parent / "App.dll"),
+                    "build_project": None if rejection == "missing_project" else str(project),
+                    "build_configuration": "Debug",
+                    "pre_build": rejection == "saved_prebuild_stop",
+                }
+                if rejection == "missing_project_path":
+                    manager._last_launch_config["build_project"] = str(
+                        project.parent / "Missing.csproj"
+                    )
+                if rejection == "saved_prebuild_stop":
+                    monkeypatch.setattr(
+                        manager, "_stop_locked", AsyncMock(side_effect=RuntimeError("Stop refused"))
+                    )
+            response = await capturing_mcp.tools[entry_point](ctx, rebuild=requested_build)
+
+        assert response["error"]
+        assert commands == ["build"]
+        assert manager._build_manager.get_last_result(str(project.parent)) is previous
+        diagnostics = await capturing_mcp.tools["get_build_diagnostics"]()
+        if clear_result:
+            assert manager.last_build_result is None
+            assert diagnostics["data"] == {"message": "No build has been performed yet."}
+        else:
+            assert manager.last_build_result is previous
+            assert diagnostics["data"] == previous.to_dict()
+        if access_error:
+            resolve_root.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("entry_point", ["launch", "restart"])
+    async def test_direct_prebuild_validation_does_not_publish_previous_result(
+        self,
+        prebuild_diagnostics_session,
+        capturing_mcp,
+        entry_point,
+    ):
+        manager, project, _failed_commands, commands = prebuild_diagnostics_session
+        previous = await manager.pre_launch_build(str(project), restore_first=False)
+        register_output_tools(capturing_mcp, manager)
+        with pytest.raises((ValueError, RuntimeError)):
+            if entry_point == "launch":
+                await manager.launch(str(project.parent / "App.dll"), pre_build=True)
+            else:
+                await manager.restart(rebuild=True)
+        assert commands == ["build"]
+        assert manager._build_manager.get_last_result(str(project.parent)) is previous
+        diagnostics = await capturing_mcp.tools["get_build_diagnostics"]()
+        assert manager.last_build_result is None
+        assert diagnostics["data"] == {"message": "No build has been performed yet."}

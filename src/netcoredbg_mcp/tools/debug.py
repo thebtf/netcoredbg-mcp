@@ -34,6 +34,7 @@ async def _safe_notify(coro: Any) -> bool:
     except (asyncio.TimeoutError, Exception):
         return False
 
+
 async def _noop_resource_notification(_ctx: Any) -> None:
     return None
 
@@ -52,6 +53,7 @@ def register_debug_tools(
 ) -> None:
     """Register debug session control tools on the MCP server."""
     from mcp.types import ToolAnnotations
+
     notify_threads = notify_threads_changed or _noop_resource_notification
     notify_output = notify_output_changed or _noop_resource_notification
 
@@ -146,6 +148,9 @@ def register_debug_tools(
             access_error = check_session_access(ctx)
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
+
+            if pre_build:
+                await session.clear_build_result()
 
             # Resolve project root from MCP context (may update session)
             logger.debug("[start_debug] resolving project root...")
