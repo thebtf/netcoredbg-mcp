@@ -10,9 +10,12 @@ through the public `get_build_diagnostics` tool.
 
 ## Failed-prebuild diagnostics
 
-- The retained failure exposes the failed stage, actual executed argument array
-  (`commandLine`), working directory (`workingDirectory`), nonzero `exitCode`,
-  and captured `stdout`/`stderr`, even when no MSBuild diagnostics were parsed.
+- When a restore or build process completes with a failure, the retained result
+  exposes the failed stage, actual executed argument array (`commandLine`),
+  working directory (`workingDirectory`), nonzero `exitCode`, and captured
+  `stdout`/`stderr`, even when no MSBuild diagnostics were parsed.
+- Partial process output from timeout or cancellation is not retained by the
+  existing build runner; this PATCH does not change that behavior.
 - Validation failures and interrupted attempts do not substitute a result from
   a previous build. A prior success cannot stand in for the current failure.
 - Successful-result serialization remains compact. No environment dump is added.

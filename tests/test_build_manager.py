@@ -583,3 +583,56 @@ class TestFailedPreBuildDiagnostics:
         assert "command" not in response["data"]
         assert "stdout" not in response["data"]
         assert "stderr" not in response["data"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("entry_point", ["pre_launch", "launch"])
+    @pytest.mark.parametrize("refusal", ["capture", "drain"])
+    async def test_owner_refusal_does_not_publish_previous_result(
+        self, prebuild_diagnostics_session, capturing_mcp, monkeypatch, entry_point, refusal
+    ):
+        manager, project, _failed_commands, commands = prebuild_diagnostics_session
+        register_output_tools(capturing_mcp, manager)
+        previous = await manager.pre_launch_build(str(project), restore_first=False)
+        assert previous.success is True
+        assert manager.last_build_result is previous
+
+        generation = "rejected-prebuild-generation"
+        owner = OwnedProcessRef("rejected-prebuild-owner", generation, 44001)
+        client = MagicMock(adapter_owner=None if refusal == "capture" else owner)
+        manager._client = client
+        manager._active_dap_run = generation
+        if refusal == "capture":
+            manager._windows_adapter_admission_generation = generation
+            exception = RuntimeError
+            message = "adapter admission is in progress"
+        else:
+            receipt = OwnerDrainReceipt(
+                owner=owner,
+                status=DrainStatus.FAILED,
+                forced=False,
+                root_returncode=None,
+                active_processes=None,
+            )
+            monkeypatch.setattr(manager, "_stop_owned_adapter", AsyncMock(return_value=receipt))
+            exception = PreBuildOwnerError
+            message = None
+
+        with pytest.raises(exception, match=message) as error:
+            if entry_point == "pre_launch":
+                await manager.pre_launch_build(str(project), restore_first=False)
+            else:
+                await manager.launch(
+                    program=str(project.parent / "App.dll"),
+                    pre_build=True,
+                    build_project=str(project),
+                )
+
+        if refusal == "drain":
+            assert error.value.outcome.receipt is receipt
+        assert manager._client is client
+        assert manager._active_dap_run == generation
+        assert commands == ["build"]
+        assert manager._build_manager.get_last_result(str(project.parent)) is previous
+        response = await capturing_mcp.tools["get_build_diagnostics"]()
+        assert manager.last_build_result is None
+        assert response["data"] == {"message": "No build has been performed yet."}

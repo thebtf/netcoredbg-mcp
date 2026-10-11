@@ -150,12 +150,13 @@ def register_output_tools(
         - Checking nullable reference, deprecation, or platform warnings
         - Debugging "it compiles but doesn't work" situations
 
-        After a failed restore or build, the result includes its stage (command),
-        actual argv (commandLine), workingDirectory, exit code, and captured
-        stdout/stderr even when no MSBuild diagnostics were parsed.
-        include_warnings filters structured diagnostics only; captured failure
-        output is preserved unchanged. Command metadata is omitted when no
-        process command was executed.
+        After a restore or build process completes with a failure, the result
+        includes its stage (command), actual argv (commandLine), workingDirectory,
+        exit code, and captured stdout/stderr even when no MSBuild diagnostics
+        were parsed. Partial process output from timeout or cancellation is not
+        retained. include_warnings filters structured diagnostics only; captured
+        failure output is preserved unchanged. Command metadata is omitted when
+        no process command was executed.
 
         Args:
             include_warnings: Include warning details (default True, the point of this tool)

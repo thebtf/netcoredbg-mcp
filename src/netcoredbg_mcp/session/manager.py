@@ -1752,6 +1752,7 @@ class SessionManager:
         """
 
         async with self._lifecycle_lock:
+            self._last_build_result = None
             owner = self.capture_prebuild_owner()
             return await self._pre_launch_build_with_owner_locked(
                 project_file=project_file,
@@ -1772,8 +1773,7 @@ class SessionManager:
         timeout: float,
         output_callback: Callable[[str, str], Awaitable[None]] | None,
     ) -> BuildResult:
-        """Run pre-build with an owner captured before any session state reset."""
-        self._last_build_result = None
+        """Run pre-build with the owner captured by the guarded entry point."""
 
         if not self._project_path:
             raise ValueError("Project path not set for pre-launch build")
@@ -1813,6 +1813,7 @@ class SessionManager:
     ) -> str:
         """Drain the captured owner and finish restore/build before another admission."""
 
+        self._last_build_result = None
         prebuild_owner = self.capture_prebuild_owner()
         was_active = self.is_active
         validated_owner_receipt: OwnerDrainReceipt | None = None
