@@ -14,7 +14,7 @@ local, ordinary (non-reparse) fixture directory containing the contained C#
 marker `PreviewMarker`. Create an empty ordinary download root, for example
 `C:\preview-validation\downloads`.
 
-Obtain the five structural references from the sealed candidate evidence; do
+Obtain the four structural references from the sealed candidate evidence; do
 not construct them from local files, source output, a rebuilt archive, or a
 later Actions run. Save them as `C:\preview-validation\candidate-references.json`:
 
@@ -38,23 +38,27 @@ later Actions run. Save them as `C:\preview-validation\candidate-references.json
   },
   "archive": "<complete-retained-payload-file-reference>",
   "manifest": "<complete-retained-payload-file-reference>",
-  "release_gate_catalog": "<complete-retained-catalog-file-reference>",
-  "receipt_provenance": "<complete-retained-receipt-provenance-file-reference>"
+  "release_gate_catalog": "<complete-retained-catalog-file-reference>"
 }
 ```
 
-The `archive`, `manifest`, `release_gate_catalog`, and `receipt_provenance`
+The `archive`, `manifest`, and `release_gate_catalog`
 placeholders each stand for a complete object with the same reference shape as
 `candidate_identity`: `repository`, `run_id`, `artifact` (`id`, `name`,
 `sha256`, and `retention`), artifact-relative `path`, and file `sha256`.
 Replace every placeholder with its sealed value. `archive` and `manifest` must
 name the same retained payload artifact. The candidate identity, archive,
-manifest, catalog, and receipt-provenance references must retain their exact
-repository, run, artifact, retention, path, and SHA-256 values.
+manifest, and catalog references must retain their exact repository, run,
+artifact, retention, path, and SHA-256 values.
 
 The validator resolves every reference itself with GitHub Actions metadata and
 artifact downloads. A manually downloaded archive, manifest, extracted
 executable, or source-tree executable is not an input and cannot be proof.
+
+Sonar receipts are not inputs to build admission, candidate sealing, or consumer
+proof. Run the separate exact-head audit only after actual publication, as
+described in [SonarQube onboarding](../../docs/SONARQUBE-ONBOARDING.md). Preserve
+its real red or blocked outcome; it does not change the functional proof result.
 
 ## Prepare the unchanged Python rollback oracle
 
@@ -84,8 +88,8 @@ python tests/preview/validate_preview_artifact.py candidate `
   --python-rollback-argument .agent/tmp/t001-retained-python-consumer.py
 ```
 
-Candidate mode downloads the identity record, archive, manifest, release-gate
-catalog, and receipt-provenance files into a fresh child of `--download-root`.
+Candidate mode downloads the identity record, archive, manifest, and release-gate
+catalog into a fresh child of `--download-root`.
 Before extracting anything, it verifies retained-artifact metadata and every
 referenced raw file hash; it then verifies the Candidate Identity Record,
 archive, manifest, and extracted executable equations. The extracted executable

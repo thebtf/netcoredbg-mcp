@@ -60,65 +60,90 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      - name: Install the repository-required SonarScanner
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install the repository Python runner
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          dotnet tool install --global dotnet-sonarscanner
+          python -m pip install uv
           if ($LASTEXITCODE -ne 0) {
-            throw "Unable to install the required SonarScanner."
+            throw "Unable to install the repository Python runner."
           }
 
-      - name: Produce the repository post-merge exact-head receipt
+      - name: Run required builds and functional producers
         shell: pwsh
         env:
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_READ_TOKEN: ${{ secrets.SONAR_READ_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
-          $scanWorktree = Join-Path $env:RUNNER_TEMP "stateless-preview-post-merge-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          git -C $env:GITHUB_WORKSPACE worktree add --detach $scanWorktree $env:GITHUB_SHA
+          $functionalWorktree = Join-Path $env:RUNNER_TEMP "stateless-preview-functional-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          git -C $env:GITHUB_WORKSPACE worktree add --detach $functionalWorktree $env:GITHUB_SHA
           if ($LASTEXITCODE -ne 0) {
-            throw "Unable to create the exact-head scanner worktree."
+            throw "Unable to create the exact-head functional worktree."
           }
           $entered = $false
           try {
-            Push-Location $scanWorktree
+            Push-Location $functionalWorktree
             $entered = $true
             @'
-            from pathlib import Path
+          import uuid
+          from pathlib import Path
 
-            from scripts import run_sonarqube_exact_head as runner
+          from scripts import run_sonarqube_exact_head as runner
 
-            environment = runner.scrub_sonar_environment(runner.process_environment())
-            context = runner.git_context(Path.cwd(), environment)
-            entry = runner.resolve_wave2_entry(context, environment)
-            runner.verify_wave2_entry(entry, context, environment)
-            runner.assert_post_merge_target(context, environment)
-            '@ | python -
+          environment = runner.scrub_sonar_environment(runner.process_environment())
+          context = runner.git_context(Path.cwd(), environment)
+          runner.assert_no_in_tree_dotenv(context.repository_root)
+          entry = runner.resolve_wave2_entry(context, environment)
+          resolved_wave2 = runner.verify_wave2_entry(entry, context, environment)
+          runner.assert_post_merge_target(context, environment)
+          runner.clear_generated_artifacts(context, environment)
+          runner.strict_cleanliness(context, environment, "functional producer start")
+          runner.preflight_coverage_toolchain(context=context, environment=environment)
+          runner.prepare_worktree_python_environment(context, environment, ())
+          solution, _, standalone_projects = runner.project_inventory(context.repository_root)
+          for project in (solution, *standalone_projects):
+              runner.run_process(
+                  ["dotnet", "build", str(project), "-nr:false"],
+                  cwd=context.repository_root,
+                  environment=environment,
+                  secrets=(),
+                  label=f"Required build ({project.name})",
+              )
+          plan = runner.derive_coverage_plan(context, str(uuid.uuid4()))
+          claim = runner.claim_coverage_run(context, plan, resolved_wave2)
+          stateless_before = runner.capture_stateless_binary_hashes(plan)
+          runner.run_coverage_producer(plan, environment)
+          dotnet_inputs = runner.validate_dotnet_cobertura_inputs(context, plan)
+          normalization = runner.normalize_dotnet_cobertura(plan, dotnet_inputs)
+          runner.validate_coverage_reports(
+              context, plan, claim, stateless_before,
+              dotnet_inputs=dotnet_inputs, normalization=normalization,
+          )
+          runner.clear_generated_artifacts(context, environment)
+          cleanup = runner.cleanup_coverage_run(plan, True)
+          if cleanup["status"] != "OK":
+              raise runner.RunnerError("Functional producer cleanup failed.")
+          runner.strict_cleanliness(context, environment, "functional producer completion")
+          runner.assert_head_unchanged(context, environment)
+          '@ | python -
             if ($LASTEXITCODE -ne 0) {
-              throw "Tracked Wave2 coverage entry verification failed."
-            }
-            python scripts/run_sonarqube_exact_head.py --role post-merge
-            if ($LASTEXITCODE -ne 0) {
-              throw "Post-merge exact-head receipt production failed."
+              throw "Required build or functional producer failed."
             }
           }
           finally {
             if ($entered) {
               Pop-Location
             }
-            git -C $env:GITHUB_WORKSPACE worktree remove --force $scanWorktree
+            git -C $env:GITHUB_WORKSPACE worktree remove --force $functionalWorktree
             if ($LASTEXITCODE -ne 0) {
-              throw "Unable to remove the exact-head scanner worktree."
+              throw "Unable to remove the exact-head functional worktree."
             }
           }
-
-      - name: Seal the post-merge receipt for this build
-        shell: pwsh
-        run: python scripts/stateless_preview_artifact.py produce-post-merge-receipt
 
       - name: Publish the self-contained win-x64 preview
         shell: pwsh
@@ -132,16 +157,6 @@ jobs:
       - name: Archive and manifest the preview payload
         shell: pwsh
         run: python scripts/stateless_preview_artifact.py prepare-payload
-
-      - name: Retain the immutable post-merge receipt
-        id: upload_post_merge_receipt
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ steps.admit.outputs.post_merge_receipt_artifact_name }}
-          path: artifacts/stateless-preview/post-merge-receipt/
-          if-no-files-found: error
-          overwrite: false
-          retention-days: ${{ steps.admit.outputs.retention_days }}
 
       - name: Retain the immutable preview payload
         id: upload_payload
@@ -158,7 +173,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           A1_PAYLOAD_ARTIFACT_ID: ${{ steps.upload_payload.outputs.artifact-id }}
-          A1_POST_MERGE_RECEIPT_ARTIFACT_ID: ${{ steps.upload_post_merge_receipt.outputs.artifact-id }}
         run: python scripts/stateless_preview_artifact.py seal-build-records
 
       - name: Retain the immutable Candidate Identity Record

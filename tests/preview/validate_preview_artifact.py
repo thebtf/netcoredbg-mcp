@@ -30,7 +30,6 @@ from typing import Any, NoReturn
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ARTIFACT_HELPER_PATH = _PROJECT_ROOT / "scripts" / "stateless_preview_artifact.py"
-_CANONICAL_SOURCE_REF = "refs/heads/main"
 
 _EXECUTABLE_NAME = "netcoredbg-mcp-stateless-preview.exe"
 _PROTOCOL_VERSION = "2026-07-28"
@@ -60,24 +59,10 @@ consumer_proof_scenario_catalog = _artifact.consumer_proof_scenario_catalog
 seal_artifact_consumer_proof = _artifact.seal_artifact_consumer_proof
 validate_artifact_consumer_proof_reference = _artifact.validate_artifact_consumer_proof_reference
 verify_and_extract_retained_artifact = _artifact.verify_and_extract_retained_artifact
-validate_post_merge_receipt_record = _artifact.validate_post_merge_receipt_record
 
 
 def _refuse(message: str) -> NoReturn:
     raise ValueError(message)
-
-
-def _validate_downloaded_post_merge_receipt(
-    receipt: Mapping[str, Any], candidate_source: Mapping[str, Any]
-) -> None:
-    try:
-        validate_post_merge_receipt_record(receipt, candidate_source)
-    except Exception as error:
-        raise ValueError(
-            "downloaded receipt provenance does not match the candidate exact-head receipt"
-        ) from error
-    if candidate_source.get("ref") != _CANONICAL_SOURCE_REF:
-        _refuse("downloaded receipt provenance does not match the candidate exact-head receipt")
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -214,7 +199,6 @@ class CandidateReferences:
     archive: ArtifactFileReference
     manifest: ArtifactFileReference
     release_gate_catalog: ArtifactFileReference
-    receipt_provenance: ArtifactFileReference
 
     @classmethod
     def load(cls, path_value: str | Path) -> CandidateReferences:
@@ -228,7 +212,6 @@ class CandidateReferences:
                 "archive",
                 "manifest",
                 "release_gate_catalog",
-                "receipt_provenance",
             }
             or value["reference_schema_version"] != "1.0"
         ):
@@ -240,7 +223,6 @@ class CandidateReferences:
                 "archive",
                 "manifest",
                 "release_gate_catalog",
-                "receipt_provenance",
             )
         }
         if not fields["archive"].same_artifact(fields["manifest"]):
@@ -390,25 +372,6 @@ def _require_candidate_file_reference(
         or actual.sha256 != expected["sha256"]
     ):
         _refuse(f"{name} reference does not bind the downloaded candidate")
-
-
-def _download_and_validate_receipt_provenance(
-    downloader: ArtifactDownloader,
-    reference: ArtifactFileReference,
-    candidate_source: Mapping[str, Any],
-) -> ArtifactFileReference:
-    provenance_path = downloader.download_file(reference)
-    provenance_bytes = _read_regular_bytes(provenance_path, "downloaded receipt provenance")
-    if _sha256_bytes(provenance_bytes) != reference.sha256:
-        _refuse("downloaded receipt provenance hash is wrong")
-    _require_candidate_file_reference(
-        reference,
-        candidate_source["post_merge_exact_head_receipt"]["record_reference"],
-        "receipt provenance",
-    )
-    record = _load_json_object(provenance_bytes, "downloaded receipt provenance")
-    _validate_downloaded_post_merge_receipt(record, candidate_source)
-    return reference
 
 
 def _fixture_identity(fixture_root: Path) -> dict[str, str]:
@@ -986,11 +949,6 @@ def run_candidate(arguments: argparse.Namespace) -> Mapping[str, Any]:
         identity = _load_json_object(identity_bytes, "downloaded candidate identity")
         validated_identity = assemble_candidate_identity(identity)
         candidate = validated_identity["candidate"]
-        receipt_provenance = _download_and_validate_receipt_provenance(
-            downloader,
-            references.receipt_provenance,
-            candidate["source"],
-        )
         manifest_binding = candidate["preview_manifest"]
         _require_candidate_file_reference(
             references.archive, manifest_binding["archive_reference"], "archive"
@@ -1092,7 +1050,6 @@ def run_candidate(arguments: argparse.Namespace) -> Mapping[str, Any]:
             "python_rollback_result": rollback_result,
             "outcome": "PASS",
             "recorded_at": arguments.recorded_at,
-            "receipt_provenance": receipt_provenance.as_mapping(),
         }
         sealed = seal_artifact_consumer_proof(
             receipt,

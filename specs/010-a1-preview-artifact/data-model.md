@@ -45,8 +45,8 @@ The Candidate Identity Record is the durable association between the retained pa
 
 - The record is valid only when the retained archive and raw manifest are available from the recorded trusted build run, which executed from canonical `refs/heads/main` at the exact candidate commit.
 - The manifest bytes validate against the inherited schema. Its cross-field equations bind the preview version, tag, archive name, manifest filename, executable member, sizes, and SHA-256 values.
-- `candidate.source`, canonical main target, build-run head SHA/ref, preview version, tag, RID, archive identity, executable identity, and any post-merge tag/scan target must exactly equal the manifest/candidate source commit.
-- The build run, artifact ID, artifact digest, archive bytes, manifest bytes, and executable member must all describe the same candidate. A local rebuild, source-tree output, later workflow run, replacement artifact, arbitrary reachable commit, unmerged branch commit, or unrelated post-merge receipt fails validation.
+- `candidate.source`, canonical main target, build-run head SHA/ref, preview version, tag, RID, archive identity, executable identity, and any post-merge tag target must exactly equal the manifest/candidate source commit.
+- The build run, artifact ID, artifact digest, archive bytes, manifest bytes, and executable member must all describe the same candidate. A local rebuild, source-tree output, later workflow run, replacement artifact, arbitrary reachable commit, or unmerged branch commit fails validation. Sonar analysis receipts are separate audit evidence, not candidate or consumer-proof identity fields.
 - Retention metadata records the actual GitHub configuration. It does not impose a repository retention period.
 - The destination is a separate opt-in GitHub prerelease destination. The record must not point to `.github/workflows/publish.yml`, PyPI, the Python `v*` namespace, or the default Python route.
 - A sealed record is immutable. Corrected inputs require a new Candidate Identity Record and, when the version or tag changes, a new preview namespace value.
@@ -153,8 +153,8 @@ Stage Gate Evidence is the sealed exact-candidate record defined by [stage-gate-
 
 - The catalog is static applicability. Stage Gate Evidence is the later proof that one stage's descriptors are satisfied. The catalog does not require a future stage record before it exists.
 - The resolver derives the descriptor subset for `stage` and requires exact ordered equality. It rejects missing, duplicate, extra, stale, wrong-type, wrong-stage, candidate-mismatched, or failed entries.
-- The `pre-decision` set includes retained downloaded consumer proof, the sealed seven-lens aggregate, the distinct independent PR review, and candidate exact-head Sonar. It admits an `APPROVE` Decision only when every entry passes.
-- The `pre-publication` set includes post-merge exact-head Sonar for the canonical candidate commit. The fresh Promotion Attempt requires it before the first remote mutation.
+- The `pre-decision` set includes retained downloaded consumer proof, the sealed seven-lens aggregate, and the distinct independent PR review. It admits an `APPROVE` Decision only when every entry passes; no Sonar receipt is required.
+- The current `pre-publication` descriptor subset is empty. The fresh Promotion Attempt still requires its exact-stage evidence record before the first remote mutation, without weakening candidate, dispatcher, permission, tag, or collision guards. Sonar is not a stage descriptor or passing-record prerequisite.
 - The `post-publication` set includes freshly downloaded remote consumer/byte proof. Only closeout and Program B Handoff require it.
 
 ### State transitions
@@ -176,13 +176,13 @@ The Release Gate Catalog is the exact-head applicability record defined by [rele
 | `catalog_schema_version`, producer, and resolution time | Closed catalog format, resolver operation, and audit time. |
 | `candidate_identity_record`, `source_ref`, and `source_commit` | The same structural candidate reference, literal `refs/heads/main`, and exact canonical candidate commit. |
 | `policy_authority_snapshots` | Exactly five raw-byte SHA-256 snapshots at that commit: `AGENTS.md`, `CONTRIBUTING.md`, `docs/RELEASE-PROTOCOL.md`, `docs/adr/ADR-004-stateless-preview.md`, and this feature's `spec.md`. |
-| `gate_descriptors` | Exactly six fixed descriptor rows. Each names one stage, gate ID, typed record, authority rule codes, and evidence requirement codes. |
+| `gate_descriptors` | Exactly four fixed non-Sonar descriptor rows. Each names one stage, gate ID, typed record, authority rule codes, and evidence requirement codes. |
 
 ### Validation rules
 
-- Candidate source/build ref, canonical main target, post-merge scan/tag target, catalog source commit, and every authority snapshot head must agree exactly.
-- The independent `resolve_release_gate_catalog` operation re-derives all five policy hashes, six descriptor rows, typed record shapes, and requirement/rule codes. A caller list, count, same-repository JSON, untracked `.agent` file, or newer branch readback is never catalog authority.
-- The catalog maps each current release-protocol obligation to a descriptor or to a named, bounded inapplicability disposition. The implementation tests reject an omitted or silent disposition.
+- Candidate source/build ref, canonical main target, tag target, catalog source commit, and every authority snapshot head must agree exactly.
+- The independent `resolve_release_gate_catalog` operation re-derives all five policy hashes, four descriptor rows, typed record shapes, and requirement/rule codes. A caller list, count, same-repository JSON, untracked `.agent` file, or newer branch readback is never catalog authority.
+- The catalog maps each applicable non-Sonar release-protocol obligation to a descriptor or to a named, bounded inapplicability disposition. The implementation tests reject an omitted or silent disposition. Sonar runs only after actual publication/asynchronously; its real exact-SHA red, blocked, or passing evidence remains outside the catalog, stage seals, and release PASS dependencies.
 
 ### State transitions
 
@@ -208,7 +208,7 @@ The Promotion Decision is the candidate-approval record defined by [promotion-de
 
 ### Validation rules
 
-- `APPROVE` requires passing retained proof, the closed `7/7/0` aggregate, distinct independent PR review, and candidate exact-head Sonar through the pre-decision Stage Gate Evidence set.
+- `APPROVE` requires passing retained proof, the closed `7/7/0` aggregate, and distinct independent PR review through the pre-decision Stage Gate Evidence set. No Sonar receipt is required.
 - `APPROVE` does not require post-merge or remote proof. Those facts do not exist at this stage.
 - The Decision is not a permission readback. Only its named dispatcher may create a fresh Promotion Attempt.
 - `DECLINE` can preserve negative evidence but never admits mutation.

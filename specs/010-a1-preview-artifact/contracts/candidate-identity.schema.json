@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "A1 preview Candidate Identity Record",
   "description": "Immutable identity for one retained A1 preview candidate. The candidate source is admitted only from the canonical merged main ref and its authenticated build-workflow provenance. The embedded preview manifest remains governed by the inherited manifest schema; all retained-file provenance is a closed GitHub repository, run, artifact, safe-relative-path, and hash reference.",
-  "$comment": "Semantic validator obligations: CANONICAL_MAIN_SOURCE_PROVENANCE requires source.repository, build.repository, and destination.repository to be equal; source.ref and build.ref to be refs/heads/main; source.commit, source.origin_main_target, build.commit, source.post_merge_exact_head_receipt.scanned_commit, and source.post_merge_exact_head_receipt.tag_target to be equal; and the build workflow run resolved from GitHub to authenticate repository, workflow path, mode, event, run ID, run attempt, ref, and head SHA. The post-merge exact-head receipt reference must resolve and hash to a passing post-merge receipt whose scanned and tag targets are that same commit. At build admission, the workflow reads origin/main and requires that live ref target to equal source.commit before checkout; a later main advance does not rewrite this sealed source fact. The resolved build workflow run must later conclude successfully before proof or promotion. CANDIDATE_ARTIFACT_REFERENCE_EQUALITY requires both retained-file references to equal the recorded build repository, run_id, and artifact.id. CANDIDATE_MANIFEST_BINDING_EQUALITY requires the manifest reference path and hash to equal file.name and file.sha256, the archive reference path and hash to equal contents.archive.name and contents.archive.sha256, source.commit to equal contents.commit, and destination.tag to equal contents.tag. JSON Schema cannot compare those dynamic values.",
+  "$comment": "Semantic validator obligations: CANONICAL_MAIN_SOURCE_PROVENANCE requires source.repository, build.repository, and destination.repository to be equal; source.ref and build.ref to be refs/heads/main; source.commit, source.origin_main_target, and build.commit to be equal; and the build workflow run resolved from GitHub to authenticate repository, workflow path, mode, event, run ID, run attempt, ref, and head SHA. At build admission, the workflow reads origin/main and requires that live ref target to equal source.commit before checkout; a later main advance does not rewrite this sealed source fact. The resolved build workflow run must later conclude successfully before proof or promotion. CANDIDATE_ARTIFACT_REFERENCE_EQUALITY requires both retained-file references to equal the recorded build repository, run_id, and artifact.id. CANDIDATE_MANIFEST_BINDING_EQUALITY requires the manifest reference path and hash to equal file.name and file.sha256, the archive reference path and hash to equal contents.archive.name and contents.archive.sha256, source.commit to equal contents.commit, and destination.tag to equal contents.tag. Sonar receipts are separate post-publication audit evidence, not candidate identity or promotion prerequisites. JSON Schema cannot compare those dynamic values.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -121,41 +121,6 @@
         }
       ]
     },
-    "post_merge_exact_head_receipt": {
-      "description": "A sealed post-merge receipt that proves the exact canonical main target admitted to the build.",
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "record_reference",
-        "stage",
-        "record_type",
-        "scanned_commit",
-        "tag_target",
-        "outcome"
-      ],
-      "properties": {
-        "record_reference": {
-          "$ref": "#/$defs/github_artifact_file_reference"
-        },
-        "stage": {
-          "const": "post-merge"
-        },
-        "record_type": {
-          "const": "sonarqube-exact-head"
-        },
-        "scanned_commit": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{40}$"
-        },
-        "tag_target": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{40}$"
-        },
-        "outcome": {
-          "const": "PASS"
-        }
-      }
-    },
     "candidate_binding": {
       "type": "object",
       "additionalProperties": false,
@@ -173,8 +138,7 @@
             "repository",
             "ref",
             "commit",
-            "origin_main_target",
-            "post_merge_exact_head_receipt"
+            "origin_main_target"
           ],
           "properties": {
             "repository": {
@@ -191,9 +155,6 @@
               "description": "The immutable build-admission readback of canonical origin/main, not a later mutable branch lookup.",
               "type": "string",
               "pattern": "^[0-9a-f]{40}$"
-            },
-            "post_merge_exact_head_receipt": {
-              "$ref": "#/$defs/post_merge_exact_head_receipt"
             }
           }
         },

@@ -25,20 +25,31 @@ The workflow has one concurrency group per preview tag and `cancel-in-progress: 
 The build job must do the following in order:
 
 1. Fetch live `origin/main`. Require `github.ref`, the workflow ref, `github.sha`, checkout `HEAD`, and the resolved `origin/main` target to bind one canonical `refs/heads/main` commit.
-2. In a clean detached scanner worktree at that commit, invoke only `scripts/run_sonarqube_exact_head.py --role post-merge`. The repository-owned producer discovers its fixed receipt location, requires repository/main/stage=`post-merge`/`PASS`/scanned-commit/tag-target equality, and seals a path-free post-merge receipt.
+2. In a clean detached functional worktree at that commit, use the existing Sonar-free `build/coverage.sh` producer through its supported `run_coverage_producer` owner. Require the solution and standalone builds, Python functional suite, and all five .NET producer suites to pass; validate the reports and restored stateless binary hashes. Preserve exact-head, tracked Wave2 entry, source-cleanliness, and cleanup guards. Do not start a scanner, load Sonar credentials, or produce a Sonar receipt in this build-only workflow.
 3. Publish only `NetCoreDbg.Mcp.Stateless.Preview` as a self-contained, single-file Windows x64 executable.
 4. Create the archive and inherited manifest. Validate its equations and hash archive, manifest, and extracted executable.
-5. Upload the sealed post-merge receipt and the payload as separate new Actions artifacts with `if-no-files-found: error`, bounded retention, and `overwrite: false`.
-6. Discover those current-run artifact IDs and expiry facts through the GitHub Actions API, then seal the Candidate Identity Record and static Release Gate Catalog through `scripts/stateless_preview_artifact.py`.
+5. Upload the payload as a new Actions artifact with `if-no-files-found: error`, bounded retention, and `overwrite: false`.
+6. Discover its current-run artifact ID and expiry facts through the GitHub Actions API, then seal the Candidate Identity Record and static Release Gate Catalog through `scripts/stateless_preview_artifact.py` without a Sonar receipt.
 7. Upload Candidate Identity and Release Gate Catalog as separate new immutable Actions artifacts with the same bounded retention and `overwrite: false`.
 
 The build job must not build a Python wheel, call `publish.yml`, use PyPI tooling, change the default selector, accept an arbitrary source or receipt, or create a promotion input.
+
+This workflow is not publication. Do not rename a pre-publication scan to
+"postrelease" or run it asynchronously from this build. The existing standalone
+`scripts/run_sonarqube_exact_head.py --role post-merge` route is a strict audit
+only after actual publication, as described in
+[`docs/SONARQUBE-ONBOARDING.md`](../../../docs/SONARQUBE-ONBOARDING.md). Preserve
+its real red or blocked outcome; it does not authorize or block promotion.
 
 ## Future promotion boundary (not implemented)
 
 A later separately authorized consuming surface may admit promotion only after a Promotion Decision consumes a passing `pre-decision` Stage Gate Evidence record. The Decision must name one authorized GitHub dispatcher, but it must not name a historical consuming run or require future-stage evidence.
 
 Before any later remote mutation, that future surface must create a fresh Promotion Attempt and verify current actor, run ID, run attempt, canonical main ref/SHA, current permission readback, Decision, and pre-decision Stage Gate Evidence. It must also require passing `pre-publication` Stage Gate Evidence. A different dispatcher, old attempt, static-equivalent permission, arbitrary commit, failed stage record, or changed source must refuse before mutation.
+
+The current `pre-publication` descriptor subset is empty. Its stage evidence
+still binds the candidate and catalog. Sonar is not a seal or `PASS` dependency;
+the fresh source, provenance, permission, and remote-state checks remain required.
 
 The future attempt must not require `post-publication` evidence. That evidence can exist only after a prerelease is public.
 
@@ -58,4 +69,4 @@ A Program B Handoff requires passing evidence for all three stages, `published_c
 
 ## Test the workflow contract
 
-`tests/test_stateless_preview_artifact.py` must reject arbitrary/unmerged source admission, origin-main or post-merge receipt mismatch, catalog policy drift, an omitted release-protocol disposition, missing or duplicate stage evidence, an aggregate with fewer than seven lenses, a duplicate lens, a stale review, a different dispatcher, a reused attempt, missing pre-publication evidence, premature post-publication evidence, nonmatching remote state, a rebuild, a clobber/delete operation, Python-channel use, secret/path leakage, and a false handoff seal.
+`tests/test_stateless_preview_artifact.py` must reject arbitrary/unmerged source admission, origin-main mismatch, catalog policy drift, an omitted functional or review gate, missing or duplicate stage evidence, an aggregate with fewer than seven lenses, a duplicate lens, a stale review, a different dispatcher, a reused attempt, missing pre-publication evidence, premature post-publication evidence, nonmatching remote state, a rebuild, a clobber/delete operation, Python-channel use, secret/path leakage, and a false handoff seal. Sonar audit absence or a real red outcome must not reject an otherwise valid functional candidate.
