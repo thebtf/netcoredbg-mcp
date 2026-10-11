@@ -488,6 +488,49 @@ def prebuild_diagnostics_session(tmp_path, monkeypatch, mock_netcoredbg_path):
 class TestFailedPreBuildDiagnostics:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("failed_stage", ["restore", "build"])
+    async def test_failed_process_reaches_start_debug_response(
+        self, prebuild_diagnostics_session, capturing_mcp, monkeypatch, failed_stage
+    ):
+        manager, project, failed_commands, commands = prebuild_diagnostics_session
+        failed_commands.add(failed_stage)
+        start_debugger = AsyncMock(side_effect=AssertionError("Debugger must not start"))
+        monkeypatch.setattr(manager.client, "start", start_debugger)
+        register_debug_tools(
+            capturing_mcp,
+            manager,
+            ownership=SimpleNamespace(release=MagicMock()),
+            notify_state_changed=AsyncMock(),
+            check_session_access=lambda _ctx: None,
+            execute_and_wait=AsyncMock(),
+            resolve_project_root=AsyncMock(),
+        )
+        ctx = SimpleNamespace(report_progress=AsyncMock(), info=AsyncMock(), warning=AsyncMock())
+
+        response = await capturing_mcp.tools["start_debug"](
+            ctx,
+            program=str(project.parent / "App.dll"),
+            pre_build=True,
+            build_project=str(project),
+        )
+
+        actual = manager.last_build_result
+        assert actual is not None
+        assert actual.success is False
+        assert actual.command == failed_stage
+        assert actual.exit_code == 1
+        assert actual.diagnostics == []
+        process_identity = json.loads(actual.stdout.splitlines()[0])
+        assert actual.command_line == tuple(process_identity["argv"])
+        assert os.path.samefile(actual.working_directory, process_identity["cwd"])
+        assert "SyntaxError" in actual.stderr
+        assert commands == (["restore"] if failed_stage == "restore" else ["restore", "build"])
+        start_debugger.assert_not_awaited()
+        assert response["error"]
+        assert response["state"] == "idle"
+        assert response["data"] == actual.to_dict()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failed_stage", ["restore", "build"])
     async def test_failed_process_reaches_public_diagnostics(
         self, prebuild_diagnostics_session, capturing_mcp, monkeypatch, failed_stage
     ):
@@ -668,9 +711,17 @@ class TestFailedPreBuildDiagnostics:
         access_error,
         clear_result,
     ):
-        manager, project, _failed_commands, commands = prebuild_diagnostics_session
-        previous = await manager.pre_launch_build(str(project), restore_first=False)
-        assert previous.success is True
+        manager, project, failed_commands, commands = prebuild_diagnostics_session
+        if rejection in {"invalid_program", "missing_program"}:
+            failed_commands.add("build")
+            with pytest.raises(BuildError):
+                await manager.pre_launch_build(str(project), restore_first=False)
+            previous = manager.last_build_result
+            assert previous is not None
+            assert previous.success is False
+        else:
+            previous = await manager.pre_launch_build(str(project), restore_first=False)
+            assert previous.success is True
         resolve_root = AsyncMock()
         if rejection == "root_resolution":
             resolve_root.side_effect = ValueError("Project root rejected")
@@ -715,6 +766,7 @@ class TestFailedPreBuildDiagnostics:
             response = await capturing_mcp.tools[entry_point](ctx, rebuild=requested_build)
 
         assert response["error"]
+        assert "data" not in response
         assert commands == ["build"]
         assert manager._build_manager.get_last_result(str(project.parent)) is previous
         diagnostics = await capturing_mcp.tools["get_build_diagnostics"]()

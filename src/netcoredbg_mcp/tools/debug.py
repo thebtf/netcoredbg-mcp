@@ -9,6 +9,7 @@ from typing import Annotated, Any
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import Field
 
+from ..build.state import BuildError
 from ..launch_profiles import resolve_launch_environment
 from ..mux import SessionOwnership
 from ..response import build_error_response, build_response
@@ -123,6 +124,11 @@ def register_debug_tools(
         PRE-BUILD: By default, builds the project before launching to ensure you're
         debugging the latest code. Provide build_project path to .csproj file.
         Set pre_build=False to skip building (e.g., for pre-built binaries).
+
+        BUILD FAILURE: A completed failed restore/build is included in the first
+        error response's data: failed stage, executed argv, working directory,
+        exit code, stdout/stderr, and parsed diagnostics. No debugger is launched.
+        Validation failures and attempts without a completed build omit this data.
 
         BUILD WARNINGS: Hidden by default to reduce noise. If the build succeeds
         but the app behaves unexpectedly, call get_build_diagnostics() to see
@@ -268,7 +274,15 @@ def register_debug_tools(
                 message=message,
             )
         except Exception as e:
-            return build_error_response(str(e), state=session.state.state)
+            response = build_error_response(str(e), state=session.state.state)
+            failed_result = session.last_build_result
+            if (
+                isinstance(e, BuildError)
+                and failed_result is not None
+                and not failed_result.success
+            ):
+                response["data"] = failed_result.to_dict()
+            return response
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def attach_debug(ctx: Context, process_id: int) -> dict:
