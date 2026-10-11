@@ -1,5 +1,7 @@
 """Tests for build state and result types."""
 
+import pytest
+
 from netcoredbg_mcp.build.state import (
     BuildDiagnostic,
     BuildError,
@@ -297,6 +299,78 @@ C:\\C.cs(3,3): error CS0003: Error 2 [C:\\Test.csproj]
         assert d["configuration"] == "Debug"
         assert d["exitCode"] == 0
         assert d["durationMs"] == 1234.56
+
+    def test_failed_process_output_survives_without_parsed_diagnostics(self):
+        result = BuildResult(
+            success=False,
+            state=BuildState.FAILED,
+            command="restore",
+            project_path="/test/Project.csproj",
+            configuration="Debug",
+            exit_code=1,
+            stdout="Determining projects to restore...\n",
+            stderr="No compatible SDK was found.\n",
+            command_line=("dotnet", "restore", "/test/Project.csproj", "--interactive", "false"),
+            working_directory="/test",
+        )
+
+        data = result.to_dict()
+
+        assert data["success"] is False
+        assert data["state"] == "failed"
+        assert data["command"] == "restore"
+        assert data["exitCode"] == 1
+        assert data["errorCount"] == 0
+        assert data["stdout"] == result.stdout
+        assert data["stderr"] == result.stderr
+        assert data["commandLine"] == list(result.command_line)
+        assert data["workingDirectory"] == "/test"
+
+    @pytest.mark.parametrize("include_warnings", [False, True])
+    def test_failure_output_preserves_structured_warning_filter(self, include_warnings):
+        result = BuildResult(
+            success=False,
+            state=BuildState.FAILED,
+            command="build",
+            project_path="/test/Project.csproj",
+            configuration="Debug",
+            exit_code=1,
+            stdout="warning CS0168: Variable unused\nerror CS1002: ; expected\n",
+            stderr="Build failed.\n",
+        )
+
+        data = result.to_dict(include_warnings=include_warnings)
+
+        assert data["errorCount"] == data["warningCount"] == 1
+        assert [diagnostic["severity"] for diagnostic in data["diagnostics"]] == (
+            ["warning", "error"] if include_warnings else ["error"]
+        )
+        assert ("warningHint" in data) is not include_warnings
+        assert data["stdout"] == result.stdout
+        assert data["stderr"] == result.stderr
+
+    def test_successful_output_remains_omitted_from_compact_result(self):
+        result = BuildResult(
+            success=True,
+            state=BuildState.READY,
+            command="build",
+            project_path="/test/Project.csproj",
+            configuration="Debug",
+            exit_code=0,
+            stdout="warning CS0168: Variable unused\nBuild succeeded.\n",
+            command_line=("dotnet", "build", "/test/Project.csproj"),
+            working_directory="/test",
+        )
+
+        data = result.to_dict()
+
+        assert "stdout" not in data
+        assert "stderr" not in data
+        assert "commandLine" not in data
+        assert "workingDirectory" not in data
+        assert "diagnostics" not in data
+        assert data["warningCount"] == 1
+        assert "warningHint" in data
 
     def test_to_summary_success(self):
         """Test summary for successful build."""

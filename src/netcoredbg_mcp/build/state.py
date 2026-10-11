@@ -166,6 +166,8 @@ class BuildResult:
     diagnostics: list[BuildDiagnostic] = field(default_factory=list)
     duration_ms: float = 0.0
     cancelled: bool = False
+    command_line: tuple[str, ...] | None = None
+    working_directory: str | None = None
 
     def __post_init__(self) -> None:
         """Parse diagnostics from output if not provided."""
@@ -200,6 +202,11 @@ class BuildResult:
         but their details are omitted to reduce agent context noise.
         Use include_warnings=True or get_build_diagnostics tool for full details.
 
+        Failed results also include captured stdout/stderr and, when available,
+        the executed argv and working directory, even when no MSBuild diagnostics
+        were parsed. include_warnings filters structured diagnostics only;
+        captured process output is preserved unchanged.
+
         Args:
             include_warnings: If True, include warning details in diagnostics.
         """
@@ -215,6 +222,13 @@ class BuildResult:
         }
         if self.exit_code is not None:
             result["exitCode"] = self.exit_code
+        if not self.success:
+            result["stdout"] = self.stdout
+            result["stderr"] = self.stderr
+            if self.command_line is not None:
+                result["commandLine"] = list(self.command_line)
+            if self.working_directory is not None:
+                result["workingDirectory"] = self.working_directory
 
         if include_warnings:
             # Full diagnostics (errors + warnings)

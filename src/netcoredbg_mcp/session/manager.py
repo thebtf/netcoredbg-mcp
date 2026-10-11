@@ -12,7 +12,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
-from ..build import BuildManager, BuildResult
+from ..build import BuildError, BuildManager, BuildResult
 from ..build.cleanup import (
     NoOwnedAdapter,
     OwnedAdapterCleanup,
@@ -1773,20 +1773,32 @@ class SessionManager:
         output_callback: Callable[[str, str], Awaitable[None]] | None,
     ) -> BuildResult:
         """Run pre-build with an owner captured before any session state reset."""
+        self._last_build_result = None
 
         if not self._project_path:
             raise ValueError("Project path not set for pre-launch build")
 
         validated_project = self.validate_path(project_file, must_exist=True)
-        result = await self._build_manager.pre_launch_build(
-            workspace_root=self._project_path,
-            project_path=validated_project,
-            owner=owner,
-            configuration=configuration,
-            restore_first=restore_first,
-            timeout=timeout,
-            output_callback=output_callback,
-        )
+        previous_result = self._build_manager.get_last_result(self._project_path)
+        try:
+            result = await self._build_manager.pre_launch_build(
+                workspace_root=self._project_path,
+                project_path=validated_project,
+                owner=owner,
+                configuration=configuration,
+                restore_first=restore_first,
+                timeout=timeout,
+                output_callback=output_callback,
+            )
+        except BuildError:
+            failed_result = self._build_manager.get_last_result(self._project_path)
+            if (
+                failed_result is not None
+                and failed_result is not previous_result
+                and not failed_result.success
+            ):
+                self._last_build_result = failed_result
+            raise
         self._last_build_result = result
         return result
 

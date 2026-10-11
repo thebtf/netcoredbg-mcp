@@ -417,6 +417,7 @@ class BuildSession:
             self._cancel_requested = False
             self._set_state(BuildState.BUILDING)
             start_time = time.perf_counter()
+            command_line: tuple[str, ...] | None = None
 
             try:
                 # Validate project path
@@ -428,6 +429,7 @@ class BuildSession:
                         BuildCommand.CLEAN, validated_path, configuration
                     )
                     logger.info(f"Running clean: {' '.join(clean_cmd)}")
+                    command_line = tuple(clean_cmd)
                     exit_code, stdout, stderr = await self._run_command(
                         clean_cmd,
                         cwd=self._workspace_root,
@@ -446,6 +448,8 @@ class BuildSession:
                             stdout=stdout,
                             stderr=stderr,
                             duration_ms=duration,
+                            command_line=command_line,
+                            working_directory=self._workspace_root,
                         )
                         self._last_result = result
                         self._set_state(BuildState.FAILED)
@@ -456,6 +460,7 @@ class BuildSession:
                     command, validated_path, configuration, extra_args
                 )
                 logger.info(f"Running: {' '.join(cmd)}")
+                command_line = tuple(cmd)
 
                 exit_code, stdout, stderr = await self._run_build_with_retry(
                     cmd=cmd,
@@ -477,6 +482,8 @@ class BuildSession:
                     stdout=stdout,
                     stderr=stderr,
                     duration_ms=duration,
+                    command_line=command_line,
+                    working_directory=self._workspace_root,
                 )
                 self._last_result = result
                 self._set_state(result.state)
@@ -492,6 +499,8 @@ class BuildSession:
                     configuration=configuration,
                     duration_ms=duration,
                     cancelled=True,
+                    command_line=command_line,
+                    working_directory=self._workspace_root if command_line is not None else None,
                 )
                 self._last_result = result
                 self._set_state(BuildState.CANCELLED)
@@ -507,6 +516,8 @@ class BuildSession:
                     configuration=configuration,
                     duration_ms=duration,
                     stderr=f"Build timeout after {timeout}s",
+                    command_line=command_line,
+                    working_directory=self._workspace_root if command_line is not None else None,
                 )
                 self._last_result = result
                 self._set_state(BuildState.FAILED)

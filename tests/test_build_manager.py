@@ -1,5 +1,9 @@
 """Tests for build manager."""
 
+import asyncio
+import json
+import os
+import sys
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -13,6 +17,8 @@ from netcoredbg_mcp.build.manager import BuildManager
 from netcoredbg_mcp.build.policy import BuildCommand
 from netcoredbg_mcp.build.session import BuildSession
 from netcoredbg_mcp.build.state import BuildError, BuildState
+from netcoredbg_mcp.session import SessionManager
+from netcoredbg_mcp.tools.output import register_output_tools
 from netcoredbg_mcp.windows_process_owner import DrainStatus, OwnedProcessRef, OwnerDrainReceipt
 
 
@@ -448,3 +454,132 @@ class TestOwnerScopedPreBuild:
         assert error.value.outcome.receipt is receipt
         session.restore.assert_not_awaited()
         session.build.assert_not_awaited()
+
+
+@pytest.fixture
+def prebuild_diagnostics_session(tmp_path, monkeypatch, mock_netcoredbg_path):
+    project = tmp_path / "App.csproj"
+    project.write_text("answer = 42\n", encoding="utf-8")
+    invalid_source = tmp_path / "Invalid.py"
+    invalid_source.write_text("def broken(:\n", encoding="utf-8")
+    manager = SessionManager(project_path=str(tmp_path))
+    build_session = manager._build_manager.get_session(str(tmp_path))
+    failed_commands: set[str] = set()
+    commands: list[str] = []
+
+    def command_line(command, project_path, configuration="Debug", extra_args=None):
+        commands.append(command.value)
+        source = str(invalid_source) if command.value in failed_commands else project_path
+        return [
+            sys.executable,
+            "-c",
+            "import json, os, py_compile, sys; "
+            "print(json.dumps({'argv': sys.orig_argv, 'cwd': os.getcwd()}), flush=True); "
+            "py_compile.compile(sys.argv[1], doraise=True)",
+            source,
+        ]
+
+    monkeypatch.setattr(build_session._policy, "get_dotnet_command", command_line)
+    return manager, project, failed_commands, commands
+
+
+class TestFailedPreBuildDiagnostics:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failed_stage", ["restore", "build"])
+    async def test_failed_process_reaches_public_diagnostics(
+        self, prebuild_diagnostics_session, capturing_mcp, monkeypatch, failed_stage
+    ):
+        manager, project, failed_commands, commands = prebuild_diagnostics_session
+        failed_commands.add(failed_stage)
+        monkeypatch.setenv("NCD3_TEST_SECRET", "not-for-build-diagnostics")
+        register_output_tools(capturing_mcp, manager)
+
+        with pytest.raises(BuildError, match=f"{failed_stage.title()} failed: 0 errors") as error:
+            await manager.pre_launch_build(str(project))
+
+        actual = manager._build_manager.get_last_result(str(project.parent))
+        assert actual is not None
+        assert actual.success is False
+        assert actual.command == failed_stage
+        assert actual.exit_code == error.value.exit_code == 1
+        assert actual.diagnostics == []
+        process_identity = json.loads(actual.stdout.splitlines()[0])
+        assert "SyntaxError" in actual.stderr
+        response = await capturing_mcp.tools["get_build_diagnostics"]()
+        data = response["data"]
+        assert data["success"] is False
+        assert data["state"] == "failed"
+        assert data["command"] == failed_stage
+        assert data["projectPath"] == str(project.resolve())
+        assert data["configuration"] == "Debug"
+        assert data["exitCode"] == actual.exit_code
+        assert data["errorCount"] == 0
+        assert data["stdout"] == actual.stdout
+        assert data["stderr"] == actual.stderr
+        assert data["commandLine"] == process_identity["argv"]
+        assert os.path.samefile(data["workingDirectory"], process_identity["cwd"])
+        assert actual.command_line == tuple(process_identity["argv"])
+        assert actual.working_directory == str(project.parent)
+        assert manager.last_build_result is actual
+        assert commands == (["restore"] if failed_stage == "restore" else ["restore", "build"])
+        assert "not-for-build-diagnostics" not in str(response)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failed_stage", ["clean", "rebuild"])
+    async def test_failed_rebuild_preserves_executed_command(
+        self, prebuild_diagnostics_session, failed_stage
+    ):
+        manager, project, failed_commands, commands = prebuild_diagnostics_session
+        failed_commands.add(failed_stage)
+
+        result = await manager._build_manager.build(
+            str(project.parent), str(project), command=BuildCommand.REBUILD
+        )
+
+        process_identity = json.loads(result.stdout.splitlines()[0])
+        data = result.to_dict()
+        assert result.success is False
+        assert result.exit_code == 1
+        assert result.command == failed_stage
+        assert result.command_line == tuple(process_identity["argv"])
+        assert data["commandLine"] == process_identity["argv"]
+        assert os.path.samefile(data["workingDirectory"], process_identity["cwd"])
+        assert commands == (["clean"] if failed_stage == "clean" else ["clean", "rebuild"])
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("rejected_attempt", ["missing_project", "spawn_failure", "cancelled"])
+    async def test_rejected_attempt_does_not_publish_previous_result(
+        self, prebuild_diagnostics_session, capturing_mcp, monkeypatch, rejected_attempt
+    ):
+        manager, project, _failed_commands, _commands = prebuild_diagnostics_session
+        register_output_tools(capturing_mcp, manager)
+        previous = await manager.pre_launch_build(str(project), restore_first=False)
+        assert manager.last_build_result is previous
+
+        if rejected_attempt == "missing_project":
+            exception = ValueError
+            project = project.parent / "Missing.csproj"
+        elif rejected_attempt == "spawn_failure":
+            exception = BuildError
+            build_session = manager._build_manager.get_session(str(project.parent))
+            monkeypatch.setattr(
+                build_session._policy,
+                "get_dotnet_command",
+                lambda *_args, **_kwargs: [str(project.parent / "missing-build-command")],
+            )
+        else:
+            exception = asyncio.CancelledError
+
+            async def cancel_owner(_owner):
+                raise asyncio.CancelledError
+
+            monkeypatch.setattr("netcoredbg_mcp.build.manager.consume_prebuild_owner", cancel_owner)
+
+        with pytest.raises(exception):
+            await manager.pre_launch_build(str(project), restore_first=False)
+
+        response = await capturing_mcp.tools["get_build_diagnostics"]()
+        assert manager.last_build_result is None
+        assert "command" not in response["data"]
+        assert "stdout" not in response["data"]
+        assert "stderr" not in response["data"]
