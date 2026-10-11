@@ -142,17 +142,24 @@ writes the role-aware secret-free receipt under the coordination root.
 
 After publication, create a clean detached worktree at the captured source SHA
 and use the existing post-merge role. Its name is analysis metadata, not a tag
-authorization. The runner still requires `HEAD == origin/main`; if that guard
-cannot hold for the intended published target, retain the blocked audit rather
-than substituting a different SHA or delaying the release:
+authorization. The unchanged STRICT runner requires `HEAD == origin/main` against
+the current `origin/main`; a delayed audit of an older published tag can
+therefore truthfully block. Retain that blocked audit rather than substituting
+a different SHA or making it a publication gate:
 
 ```powershell
 python scripts/run_sonarqube_exact_head.py --role post-merge
 ```
 
 The historical candidate role remains analysis metadata only; neither role is
-a release prerequisite. For each post-release scan, perform and record all of
-the following:
+a release prerequisite. The unchanged runner and receipt validator hardcode
+nondiagnostic `release_intent` to `v0.23.12`. Actual audit receipts MUST retain
+the captured source SHA and existing real metadata; do not relabel that intent
+or claim a version-correct audit for later releases. Both limitations remain
+analysis-only debt in NCD7, next patch `immutable-published-sonar-audit`. Its
+implementation and RED/GREEN acceptance contract is recorded in the primary
+coordination receipt `.agent/reports/sonar-policy-runner-nextpatch-native.json`.
+For each post-release scan, perform and record all of the following:
 
 1. Create a new detached scanner worktree at the captured target SHA, outside the permanent release checkout, before scanner begin. It must contain the committed `SonarQube.Analysis.xml` from that exact head and no `.env`, symbolic link, or reparse point anywhere in the scanner tree, including the root. The primary coordination root, resolved from the Git common directory, retains the sole allowed `.env`. Before scanning, require `git rev-parse HEAD` to equal the captured SHA and require `git status --porcelain=v1 --untracked-files=all --ignored` to report no tracked, untracked, or ignored entry within the configured scan scope. Refuse the scan otherwise. Run the scanner only in this isolated worktree; never treat permanent root `.agent` coordination residue as scanner source. The XML exclusions complement this check but do not replace it.
 2. Read `sonar.projectKey` from that worktree's `SonarQube.Analysis.xml`. The XML key, scanner metadata key, submitted task-report key, and the submitted Compute Engine task's required `componentKey` MUST all equal the fixed repository project key `thebtf_netcoredbg_mcp`. Because the returned analysis item has no project field, its recorded `project=thebtf_netcoredbg_mcp` request, `analysis.key == task.analysisId`, and `revision == HEAD_SHA` are the project/revision proof. A candidate must not redirect analysis by changing XML. Invoke the repository-configured .NET scanner with that XML, the credential-free `SONAR_HOST_URL` origin, and `sonar.scm.revision=$HEAD_SHA`; the runner provides `SONAR_TOKEN` to `begin` and `end` only, with redacted display, then builds the repository between them. Preserve scanner metadata and task-report evidence without token values.
