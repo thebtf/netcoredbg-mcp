@@ -481,6 +481,158 @@ async def test_startup_temp_gc_skips_unrelated_entries():
         )
 
 
+async def test_failed_prebuild_response_data(
+    *, server_python: str = sys.executable, server_env: dict[str, str] | None = None
+):
+    """Keep completed failure evidence in the first serialized public MCP response."""
+    import subprocess
+    from datetime import timedelta
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    print("\nFAILED PRE-BUILD RESPONSE DATA (PUBLIC MCP)")
+    with TemporaryDirectory(prefix="failed-prebuild-smoke-", dir=Path.home()) as workspace:
+        root = Path(workspace).resolve()
+        project = root / "FailedPrebuildSmoke.csproj"
+        project.write_text(
+            '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup>'
+            "<OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework>"
+            "</PropertyGroup></Project>\n",
+            encoding="utf-8",
+        )
+        (root / "Program.cs").write_text(
+            'System.Console.WriteLine("Pre-build must fail before launch.");\n',
+            encoding="utf-8",
+        )
+        (root / "global.json").write_text(
+            json.dumps({"sdk": {"version": "99.0.100", "rollForward": "disable"}}),
+            encoding="utf-8",
+        )
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in ("PYTHONPATH", "MCP_PROJECT_ROOT")
+            and (not key.startswith("NETCOREDBG_") or key == "NETCOREDBG_PATH")
+        }
+        if server_env is not None:
+            environment.update(server_env)
+        environment.update(
+            NETCOREDBG_PROJECT_ROOT=str(root),
+            NETCOREDBG_ALLOWED_PATHS=str(root),
+            LOG_LEVEL="ERROR",
+            DOTNET_CLI_TELEMETRY_OPTOUT="1",
+            DOTNET_NOLOGO="1",
+            DOTNET_SKIP_FIRST_TIME_EXPERIENCE="1",
+            DOTNET_CLI_HOME=str(root / "dotnet-home"),
+            TEMP=str(root),
+            TMP=str(root),
+            TMPDIR=str(root),
+        )
+        argv = ["dotnet", "restore", str(project), "--interactive", "false"]
+        original = await asyncio.to_thread(
+            subprocess.run,
+            argv,
+            cwd=str(root),
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        stdout = original.stdout.decode("utf-8", errors="replace")
+        stderr = original.stderr.decode("utf-8", errors="replace")
+        assert original.returncode != 0 and "99.0.100" in stdout + stderr, (
+            f"SDK pin did not cause the required real restore failure: {stdout}{stderr}"
+        )
+        params = StdioServerParameters(
+            command=server_python,
+            args=["-m", "netcoredbg_mcp", "--project-from-cwd"],
+            cwd=str(root),
+            env=environment,
+        )
+        # A separate server keeps any existing suite/debug session untouched.
+        async with stdio_client(params) as (read_stream, write_stream):
+            async with ClientSession(
+                read_stream, write_stream, read_timeout_seconds=timedelta(seconds=90)
+            ) as client:
+
+                async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+                    result = await client.call_tool(name, arguments)
+                    assert not result.isError, result
+                    texts = [item.text for item in result.content if item.type == "text"]
+                    assert texts, f"{name} omitted serialized JSON text"
+                    payload = json.loads(texts[-1])
+                    assert isinstance(payload, dict), payload
+                    return payload
+
+                await client.initialize()
+                try:
+                    started = await call(
+                        "start_debug",
+                        {
+                            "program": str(root / "bin/Debug/net8.0/FailedPrebuildSmoke.dll"),
+                            "cwd": str(root),
+                            "build_project": str(project),
+                            "pre_build": True,
+                            "stealth_mode": True,
+                        },
+                    )
+                    print("  start_debug: " + json.dumps(started, ensure_ascii=False))
+                    data = started.get("data") or {}
+                    check(
+                        "First response retains completed failed restore",
+                        bool(started.get("error"))
+                        and data.get("success") is False
+                        and data.get("state") == "failed"
+                        and data.get("command") == "restore",
+                    )
+                    check(
+                        "Failed restore has zero parsed MSBuild errors",
+                        data.get("errorCount") == 0
+                        and data.get("warningCount") == 0
+                        and not data.get("diagnostics"),
+                    )
+                    check(
+                        "First response preserves actual argv/cwd/exit/stdout/stderr",
+                        data.get("commandLine") == argv
+                        and data.get("workingDirectory") == str(root)
+                        and data.get("exitCode") == original.returncode != 0
+                        and data.get("stdout") == stdout
+                        and data.get("stderr") == stderr,
+                    )
+                    diagnostics = await call("get_build_diagnostics", {"include_warnings": True})
+                    print("  get_build_diagnostics: " + json.dumps(diagnostics, ensure_ascii=False))
+                    check(
+                        "Subsequent diagnostics retain the same current failure",
+                        not diagnostics.get("error") and diagnostics.get("data") == data,
+                    )
+                    state = await call("get_debug_state", {})
+                    processes = await call("cleanup_processes", {"force": False})
+                    state_data = state.get("data", {})
+                    process_data = processes.get("data", {})
+                    check(
+                        "Failed pre-build launches no DAP/debuggee or live owned process",
+                        not state.get("error")
+                        and state_data.get("state") == "idle"
+                        and state_data.get("processId") is None
+                        and state_data.get("debuggeePid") is None
+                        and state_data.get("debuggeeAlive") is False
+                        and state_data.get("threads") == []
+                        and not processes.get("error")
+                        and process_data.get("total") == 0
+                        and process_data.get("alive") == 0
+                        and process_data.get("processes") == [],
+                    )
+                finally:
+                    stopped = await call("stop_debug", {})
+                    check(
+                        "Isolated failed pre-build session stops cleanly", not stopped.get("error")
+                    )
+
+
 # ─────────────────────────────────────────────────────────────
 # Scenario 1: Hit counting + breakpoint fundamentals
 # ─────────────────────────────────────────────────────────────
@@ -7501,6 +7653,7 @@ def _base_scenarios() -> list[tuple[str, Callable[..., Any]]]:
         ("Project Root Timeout Fallback", test_project_root_timeout_fallback),
         ("Managed Bridge Fallback", test_managed_bridge_fallback),
         ("Startup Temp GC Prefix Filter", test_startup_temp_gc_skips_unrelated_entries),
+        ("Failed Pre-build Response Data", test_failed_prebuild_response_data),
         ("Heartbeat During Wait", test_heartbeat_during_wait),
         ("Runtime Hygiene Preflight", test_runtime_hygiene_preflight),
         ("Instrumentation Group Lifecycle", test_instrumentation_group_lifecycle),

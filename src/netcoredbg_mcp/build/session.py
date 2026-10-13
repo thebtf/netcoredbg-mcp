@@ -173,6 +173,46 @@ class BuildSession:
         # tree is drained, so timeout and cancellation must fail closed as well.
         raise OwnerDrainError(receipt)
 
+    async def _reap_ordinary_process(
+        self,
+        process: asyncio.subprocess.Process,
+        readers: list[asyncio.Task[None]],
+    ) -> None:
+        """Settle cancelled readers, drain remaining PIPEs, and reap the launched root."""
+
+        async def discard_stream(stream: asyncio.StreamReader | None) -> None:
+            if stream is not None:
+                while await stream.read(65536):
+                    pass
+
+        async def drain_and_reap() -> None:
+            if process.returncode is None:
+                process.kill()
+            for reader in readers:
+                reader.cancel()
+            await asyncio.gather(*readers, return_exceptions=True)
+            # wait() alone can stall after root exit while a PIPE is paused.
+            # Discard fixed-size chunks instead of collecting unbounded cleanup output.
+            await asyncio.gather(discard_stream(process.stdout), discard_stream(process.stderr))
+            await process.wait()
+
+        drain_task = asyncio.create_task(
+            asyncio.wait_for(drain_and_reap(), timeout=COMMAND_OWNER_FORCE_TIMEOUT)
+        )
+        cancellation: asyncio.CancelledError | None = None
+        while True:
+            try:
+                await asyncio.shield(drain_task)
+                break
+            except asyncio.TimeoutError as error:
+                raise RuntimeError("Build command pipe drain/reap timed out") from error
+            except asyncio.CancelledError as error:
+                if drain_task.cancelled():
+                    raise RuntimeError("Build command pipe drain/reap was cancelled") from error
+                cancellation = error
+        if cancellation is not None:
+            raise cancellation
+
     async def _run_command(
         self,
         command: list[str],
@@ -195,6 +235,8 @@ class BuildSession:
             asyncio.TimeoutError: If timeout exceeded
         """
         owner: WindowsOwnedProcess | None = None
+        process: asyncio.subprocess.Process | WindowsOwnedProcess | None = None
+        readers: list[asyncio.Task[None]] = []
         try:
             if _IS_WINDOWS:
                 # Windows must not launch an executing asyncio child and then
@@ -208,7 +250,7 @@ class BuildSession:
                     env=None,
                     stdin_mode="devnull",
                 )
-                process: asyncio.subprocess.Process | WindowsOwnedProcess = owner
+                process = owner
                 self._current_owner = owner
                 self._last_owner_drain_receipt = None
             else:
@@ -264,14 +306,16 @@ class BuildSession:
             stdout_counter = [0]
             stderr_counter = [0]
 
+            readers = [
+                asyncio.create_task(
+                    read_stream(process.stdout, stdout_lines, stdout_counter, "stdout")
+                ),
+                asyncio.create_task(
+                    read_stream(process.stderr, stderr_lines, stderr_counter, "stderr")
+                ),
+            ]
             try:
-                await asyncio.wait_for(
-                    asyncio.gather(
-                        read_stream(process.stdout, stdout_lines, stdout_counter, "stdout"),
-                        read_stream(process.stderr, stderr_lines, stderr_counter, "stderr"),
-                    ),
-                    timeout=timeout,
-                )
+                await asyncio.wait_for(asyncio.gather(*readers), timeout=timeout)
             except asyncio.TimeoutError as timeout_error:
                 logger.warning(f"Build timeout after {timeout}s")
                 if owner is not None:
@@ -285,13 +329,15 @@ class BuildSession:
                         raise error from timeout_error
                 else:
                     assert not isinstance(process, WindowsOwnedProcess)
-                    process.kill()
+                    await self._reap_ordinary_process(process, readers)
                 raise
 
             exit_code = await process.wait()
             if owner is not None:
                 receipt = await self._drain_windows_owner(owner, force=False)
                 self._require_drained_owner_receipt(receipt)
+            if self._cancel_requested:
+                raise asyncio.CancelledError()
             return exit_code, "".join(stdout_lines), "".join(stderr_lines)
 
         except asyncio.CancelledError as cancellation:
@@ -304,6 +350,9 @@ class BuildSession:
                     self._require_drained_owner_receipt(receipt)
                 except OwnerDrainError as error:
                     raise error from cancellation
+            elif process is not None:
+                assert not isinstance(process, WindowsOwnedProcess)
+                await self._reap_ordinary_process(process, readers)
             raise
         finally:
             self._current_process = None

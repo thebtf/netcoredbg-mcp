@@ -487,6 +487,293 @@ def prebuild_diagnostics_session(tmp_path, monkeypatch, mock_netcoredbg_path):
 
 class TestFailedPreBuildDiagnostics:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("interrupted_stage", ["restore", "build"])
+    @pytest.mark.parametrize("interruption", ["task_cancel", "manager_cancel_eof", "timeout"])
+    @pytest.mark.parametrize(
+        "command_backend",
+        [
+            "ordinary",
+            pytest.param(
+                "windows_owner",
+                marks=pytest.mark.skipif(os.name != "nt", reason="Windows private-Job proof"),
+            ),
+        ],
+    )
+    async def test_interrupted_prebuild_omits_first_response_data(
+        self,
+        prebuild_diagnostics_session,
+        capturing_mcp,
+        monkeypatch,
+        interrupted_stage,
+        interruption,
+        command_backend,
+        burst_stdout=False,
+    ):
+        manager, project, _failed_commands, commands = prebuild_diagnostics_session
+        build_session = manager._build_manager.get_session(str(project.parent))
+        monkeypatch.setattr(
+            "netcoredbg_mcp.build.session._IS_WINDOWS", command_backend == "windows_owner"
+        )
+        original_command_line = build_session._policy.get_dotnet_command
+
+        def command_line(command, *args, **kwargs):
+            if command.value != interrupted_stage:
+                return original_command_line(command, *args, **kwargs)
+            commands.append(command.value)
+            return [
+                sys.executable,
+                "-c",
+                "import sys, time; "
+                "print('interrupted-stdout', flush=True); "
+                "print('interrupted-stderr', file=sys.stderr, flush=True); "
+                + (
+                    "sys.stdout.buffer.write(b'x\\n' * 131072); sys.stdout.flush(); "
+                    if burst_stdout
+                    else ""
+                )
+                + "time.sleep(60)",
+            ]
+
+        monkeypatch.setattr(build_session._policy, "get_dotnet_command", command_line)
+        if interruption == "timeout":
+            build = build_session.build
+
+            async def timed_build(project_path, command=BuildCommand.BUILD, *args, **kwargs):
+                if command.value == interrupted_stage:
+                    kwargs["timeout"] = 2.0
+                return await build(project_path, command, *args, **kwargs)
+
+            monkeypatch.setattr(build_session, "build", timed_build)
+
+        ready = asyncio.Event()
+        release = asyncio.Event()
+        streams: set[str] = set()
+
+        async def command_output(line):
+            if line not in {"interrupted-stdout", "interrupted-stderr"}:
+                return
+            streams.add(line)
+            if len(streams) == 2:
+                ready.set()
+            if interruption != "timeout":
+                # Hold both readers between lines so explicit cancellation reaches EOF,
+                # rather than relying on a readline timeout to classify the command.
+                await release.wait()
+
+        start_debugger = AsyncMock(side_effect=AssertionError("Debugger must not start"))
+        monkeypatch.setattr(manager.client, "start", start_debugger)
+        register_debug_tools(
+            capturing_mcp,
+            manager,
+            ownership=SimpleNamespace(release=MagicMock()),
+            notify_state_changed=AsyncMock(),
+            check_session_access=lambda _ctx: None,
+            execute_and_wait=AsyncMock(),
+            resolve_project_root=AsyncMock(),
+        )
+        register_output_tools(capturing_mcp, manager)
+        ctx = SimpleNamespace(
+            report_progress=AsyncMock(),
+            info=AsyncMock(side_effect=command_output),
+            warning=AsyncMock(side_effect=command_output),
+        )
+        task = asyncio.create_task(
+            capturing_mcp.tools["start_debug"](
+                ctx,
+                program=str(project.parent / "App.dll"),
+                pre_build=True,
+                build_project=str(project),
+            )
+        )
+        process = None
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=10.0)
+            process = build_session._current_process
+            assert process is not None
+            if command_backend == "ordinary":
+                assert isinstance(process, asyncio.subprocess.Process)
+                if burst_stdout:
+
+                    async def wait_for_paused_stdout():
+                        while not process.stdout._paused:
+                            await asyncio.sleep(0.01)
+
+                    await asyncio.wait_for(wait_for_paused_stdout(), timeout=10.0)
+                    print(
+                        json.dumps(
+                            {
+                                "burst_stdout_bytes": 262144,
+                                "paused_stdout_buffer_bytes": len(process.stdout._buffer),
+                            }
+                        )
+                    )
+            if interruption == "task_cancel":
+                task.cancel()
+            elif interruption == "manager_cancel_eof":
+                assert await manager._build_manager.cancel(str(project.parent)) is True
+                release.set()
+            response = await asyncio.wait_for(asyncio.shield(task), timeout=10.0)
+            if command_backend == "ordinary":
+                print(
+                    json.dumps(
+                        {
+                            "interruption": interruption,
+                            "stage": interrupted_stage,
+                            "child_returncode_at_public_return": process.returncode,
+                        }
+                    )
+                )
+                assert process.returncode is not None, "Child survived public start_debug return"
+        except BaseException:
+            release.set()
+            print(
+                json.dumps(
+                    {
+                        "public_task_done_before_failure_hygiene": task.done(),
+                        "child_returncode_before_failure_hygiene": (
+                            process.returncode if process is not None else None
+                        ),
+                    }
+                )
+            )
+            if command_backend == "ordinary" and process is not None:
+                if process.returncode is None:
+                    print(
+                        "Failure-only hygiene: killing retained creator-owned child, not product PASS"
+                    )
+                    process.kill()
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10.0)
+                print(f"Failure-only pipe drain: stdout={len(stdout)} stderr={len(stderr)}")
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            raise
+        finally:
+            release.set()
+
+        actual = manager.last_build_result
+        assert actual is not None
+        print(
+            json.dumps(
+                {"interruption": interruption, "result": actual.to_dict(), "response": response}
+            )
+        )
+        assert actual is build_session.last_result
+        assert actual.success is False
+        assert actual.command == interrupted_stage
+        assert commands == (["restore"] if interrupted_stage == "restore" else ["restore", "build"])
+        start_debugger.assert_not_awaited()
+        assert build_session._current_process is None
+        assert build_session._current_owner is None
+        if command_backend == "windows_owner":
+            receipt = build_session._last_owner_drain_receipt
+            assert receipt is not None
+            assert receipt.status is DrainStatus.DRAINED
+            assert receipt.active_processes == 0
+        assert actual.state is (
+            BuildState.FAILED if interruption == "timeout" else BuildState.CANCELLED
+        )
+        assert actual.cancelled is (interruption != "timeout")
+        assert actual.exit_code is None
+        assert response["error"]
+        assert response["state"] == "idle"
+        assert "data" not in response
+        diagnostics = await capturing_mcp.tools["get_build_diagnostics"]()
+        assert diagnostics["data"] == actual.to_dict()
+
+    @pytest.mark.asyncio
+    async def test_interrupted_prebuild_drains_paused_stdout(
+        self, prebuild_diagnostics_session, capturing_mcp, monkeypatch
+    ):
+        await self.test_interrupted_prebuild_omits_first_response_data(
+            prebuild_diagnostics_session,
+            capturing_mcp,
+            monkeypatch,
+            interrupted_stage="build",
+            interruption="task_cancel",
+            command_backend="ordinary",
+            burst_stdout=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_unrelated_exception_omits_retained_failed_result(
+        self, prebuild_diagnostics_session, capturing_mcp, monkeypatch
+    ):
+        manager, project, failed_commands, commands = prebuild_diagnostics_session
+        failed_commands.add("build")
+        with pytest.raises(BuildError):
+            await manager.pre_launch_build(str(project), restore_first=False)
+        previous = manager.last_build_result
+        assert previous is not None
+        assert previous.success is False
+        register_debug_tools(
+            capturing_mcp,
+            manager,
+            ownership=SimpleNamespace(release=MagicMock()),
+            notify_state_changed=AsyncMock(),
+            check_session_access=lambda _ctx: None,
+            execute_and_wait=AsyncMock(),
+            resolve_project_root=AsyncMock(
+                side_effect=RuntimeError("Unrelated root resolution failure")
+            ),
+        )
+        register_output_tools(capturing_mcp, manager)
+
+        response = await capturing_mcp.tools["start_debug"](
+            SimpleNamespace(), program=str(project.parent / "App.dll"), pre_build=False
+        )
+
+        assert response["error"] == "Unrelated root resolution failure"
+        assert "data" not in response
+        assert commands == ["build"]
+        assert manager.last_build_result is previous
+        diagnostics = await capturing_mcp.tools["get_build_diagnostics"]()
+        assert diagnostics["data"] == previous.to_dict()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failed_stage", ["restore", "build"])
+    async def test_failed_process_reaches_start_debug_response(
+        self, prebuild_diagnostics_session, capturing_mcp, monkeypatch, failed_stage
+    ):
+        manager, project, failed_commands, commands = prebuild_diagnostics_session
+        failed_commands.add(failed_stage)
+        start_debugger = AsyncMock(side_effect=AssertionError("Debugger must not start"))
+        monkeypatch.setattr(manager.client, "start", start_debugger)
+        register_debug_tools(
+            capturing_mcp,
+            manager,
+            ownership=SimpleNamespace(release=MagicMock()),
+            notify_state_changed=AsyncMock(),
+            check_session_access=lambda _ctx: None,
+            execute_and_wait=AsyncMock(),
+            resolve_project_root=AsyncMock(),
+        )
+        ctx = SimpleNamespace(report_progress=AsyncMock(), info=AsyncMock(), warning=AsyncMock())
+
+        response = await capturing_mcp.tools["start_debug"](
+            ctx,
+            program=str(project.parent / "App.dll"),
+            pre_build=True,
+            build_project=str(project),
+        )
+
+        actual = manager.last_build_result
+        assert actual is not None
+        assert actual.success is False
+        assert actual.command == failed_stage
+        assert actual.exit_code == 1
+        assert actual.diagnostics == []
+        process_identity = json.loads(actual.stdout.splitlines()[0])
+        assert actual.command_line == tuple(process_identity["argv"])
+        assert os.path.samefile(actual.working_directory, process_identity["cwd"])
+        assert "SyntaxError" in actual.stderr
+        assert commands == (["restore"] if failed_stage == "restore" else ["restore", "build"])
+        start_debugger.assert_not_awaited()
+        assert response["error"]
+        assert response["state"] == "idle"
+        assert response["data"] == actual.to_dict()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("failed_stage", ["restore", "build"])
     async def test_failed_process_reaches_public_diagnostics(
         self, prebuild_diagnostics_session, capturing_mcp, monkeypatch, failed_stage
@@ -668,9 +955,17 @@ class TestFailedPreBuildDiagnostics:
         access_error,
         clear_result,
     ):
-        manager, project, _failed_commands, commands = prebuild_diagnostics_session
-        previous = await manager.pre_launch_build(str(project), restore_first=False)
-        assert previous.success is True
+        manager, project, failed_commands, commands = prebuild_diagnostics_session
+        if rejection in {"invalid_program", "missing_program"}:
+            failed_commands.add("build")
+            with pytest.raises(BuildError):
+                await manager.pre_launch_build(str(project), restore_first=False)
+            previous = manager.last_build_result
+            assert previous is not None
+            assert previous.success is False
+        else:
+            previous = await manager.pre_launch_build(str(project), restore_first=False)
+            assert previous.success is True
         resolve_root = AsyncMock()
         if rejection == "root_resolution":
             resolve_root.side_effect = ValueError("Project root rejected")
@@ -715,6 +1010,7 @@ class TestFailedPreBuildDiagnostics:
             response = await capturing_mcp.tools[entry_point](ctx, rebuild=requested_build)
 
         assert response["error"]
+        assert "data" not in response
         assert commands == ["build"]
         assert manager._build_manager.get_last_result(str(project.parent)) is previous
         diagnostics = await capturing_mcp.tools["get_build_diagnostics"]()
