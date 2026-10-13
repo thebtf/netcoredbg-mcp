@@ -195,6 +195,7 @@ class BuildSession:
             asyncio.TimeoutError: If timeout exceeded
         """
         owner: WindowsOwnedProcess | None = None
+        process: asyncio.subprocess.Process | WindowsOwnedProcess | None = None
         try:
             if _IS_WINDOWS:
                 # Windows must not launch an executing asyncio child and then
@@ -208,7 +209,7 @@ class BuildSession:
                     env=None,
                     stdin_mode="devnull",
                 )
-                process: asyncio.subprocess.Process | WindowsOwnedProcess = owner
+                process = owner
                 self._current_owner = owner
                 self._last_owner_drain_receipt = None
             else:
@@ -285,7 +286,9 @@ class BuildSession:
                         raise error from timeout_error
                 else:
                     assert not isinstance(process, WindowsOwnedProcess)
-                    process.kill()
+                    if process.returncode is None:
+                        process.kill()
+                    await process.wait()
                 raise
 
             exit_code = await process.wait()
@@ -306,6 +309,10 @@ class BuildSession:
                     self._require_drained_owner_receipt(receipt)
                 except OwnerDrainError as error:
                     raise error from cancellation
+            elif process is not None:
+                if process.returncode is None:
+                    process.kill()
+                await process.wait()
             raise
         finally:
             self._current_process = None

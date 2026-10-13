@@ -489,6 +489,16 @@ class TestFailedPreBuildDiagnostics:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("interrupted_stage", ["restore", "build"])
     @pytest.mark.parametrize("interruption", ["task_cancel", "manager_cancel_eof", "timeout"])
+    @pytest.mark.parametrize(
+        "command_backend",
+        [
+            "ordinary",
+            pytest.param(
+                "windows_owner",
+                marks=pytest.mark.skipif(os.name != "nt", reason="Windows private-Job proof"),
+            ),
+        ],
+    )
     async def test_interrupted_prebuild_omits_first_response_data(
         self,
         prebuild_diagnostics_session,
@@ -496,9 +506,13 @@ class TestFailedPreBuildDiagnostics:
         monkeypatch,
         interrupted_stage,
         interruption,
+        command_backend,
     ):
         manager, project, _failed_commands, commands = prebuild_diagnostics_session
         build_session = manager._build_manager.get_session(str(project.parent))
+        monkeypatch.setattr(
+            "netcoredbg_mcp.build.session._IS_WINDOWS", command_backend == "windows_owner"
+        )
         original_command_line = build_session._policy.get_dotnet_command
 
         def command_line(command, *args, **kwargs):
@@ -566,23 +580,47 @@ class TestFailedPreBuildDiagnostics:
         )
         process = None
         try:
-            if interruption != "timeout":
-                await asyncio.wait_for(ready.wait(), timeout=10.0)
-                process = build_session._current_process
-                if interruption == "task_cancel":
-                    task.cancel()
-                else:
-                    assert await manager._build_manager.cancel(str(project.parent)) is True
-                    release.set()
+            await asyncio.wait_for(ready.wait(), timeout=10.0)
+            process = build_session._current_process
+            assert process is not None
+            if command_backend == "ordinary":
+                assert isinstance(process, asyncio.subprocess.Process)
+                process_wait = AsyncMock(wraps=process.wait)
+                monkeypatch.setattr(process, "wait", process_wait)
+            if interruption == "task_cancel":
+                task.cancel()
+            elif interruption == "manager_cancel_eof":
+                assert await manager._build_manager.cancel(str(project.parent)) is True
+                release.set()
             response = await asyncio.wait_for(task, timeout=10.0)
-        finally:
+            if command_backend == "ordinary":
+                print(
+                    json.dumps(
+                        {
+                            "interruption": interruption,
+                            "stage": interrupted_stage,
+                            "child_returncode_at_public_return": process.returncode,
+                            "child_wait_awaits_at_public_return": process_wait.await_count,
+                        }
+                    )
+                )
+                assert process.returncode is not None, "Child survived public start_debug return"
+                process_wait.assert_awaited()
+        except BaseException:
             release.set()
             if not task.done():
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
-            if os.name != "nt" and process is not None and process.returncode is None:
-                process.kill()
+            if command_backend == "ordinary" and process is not None:
+                if process.returncode is None:
+                    print(
+                        "Failure-only hygiene: killing retained creator-owned child, not product PASS"
+                    )
+                    process.kill()
                 await process.wait()
+            raise
+        finally:
+            release.set()
 
         actual = manager.last_build_result
         assert actual is not None
@@ -598,7 +636,7 @@ class TestFailedPreBuildDiagnostics:
         start_debugger.assert_not_awaited()
         assert build_session._current_process is None
         assert build_session._current_owner is None
-        if os.name == "nt":
+        if command_backend == "windows_owner":
             receipt = build_session._last_owner_drain_receipt
             assert receipt is not None
             assert receipt.status is DrainStatus.DRAINED
