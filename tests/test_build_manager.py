@@ -507,6 +507,7 @@ class TestFailedPreBuildDiagnostics:
         interrupted_stage,
         interruption,
         command_backend,
+        burst_stdout=False,
     ):
         manager, project, _failed_commands, commands = prebuild_diagnostics_session
         build_session = manager._build_manager.get_session(str(project.parent))
@@ -525,18 +526,24 @@ class TestFailedPreBuildDiagnostics:
                 "import sys, time; "
                 "print('interrupted-stdout', flush=True); "
                 "print('interrupted-stderr', file=sys.stderr, flush=True); "
-                "time.sleep(60)",
+                + (
+                    "sys.stdout.buffer.write(b'x\\n' * 131072); sys.stdout.flush(); "
+                    if burst_stdout
+                    else ""
+                )
+                + "time.sleep(60)",
             ]
 
         monkeypatch.setattr(build_session._policy, "get_dotnet_command", command_line)
         if interruption == "timeout":
-            pre_launch_build = manager._build_manager.pre_launch_build
+            build = build_session.build
 
-            async def timed_pre_launch_build(*args, **kwargs):
-                kwargs["timeout"] = 2.0
-                return await pre_launch_build(*args, **kwargs)
+            async def timed_build(project_path, command=BuildCommand.BUILD, *args, **kwargs):
+                if command.value == interrupted_stage:
+                    kwargs["timeout"] = 2.0
+                return await build(project_path, command, *args, **kwargs)
 
-            monkeypatch.setattr(manager._build_manager, "pre_launch_build", timed_pre_launch_build)
+            monkeypatch.setattr(build_session, "build", timed_build)
 
         ready = asyncio.Event()
         release = asyncio.Event()
@@ -585,14 +592,27 @@ class TestFailedPreBuildDiagnostics:
             assert process is not None
             if command_backend == "ordinary":
                 assert isinstance(process, asyncio.subprocess.Process)
-                process_wait = AsyncMock(wraps=process.wait)
-                monkeypatch.setattr(process, "wait", process_wait)
+                if burst_stdout:
+
+                    async def wait_for_paused_stdout():
+                        while not process.stdout._paused:
+                            await asyncio.sleep(0.01)
+
+                    await asyncio.wait_for(wait_for_paused_stdout(), timeout=10.0)
+                    print(
+                        json.dumps(
+                            {
+                                "burst_stdout_bytes": 262144,
+                                "paused_stdout_buffer_bytes": len(process.stdout._buffer),
+                            }
+                        )
+                    )
             if interruption == "task_cancel":
                 task.cancel()
             elif interruption == "manager_cancel_eof":
                 assert await manager._build_manager.cancel(str(project.parent)) is True
                 release.set()
-            response = await asyncio.wait_for(task, timeout=10.0)
+            response = await asyncio.wait_for(asyncio.shield(task), timeout=10.0)
             if command_backend == "ordinary":
                 print(
                     json.dumps(
@@ -600,24 +620,33 @@ class TestFailedPreBuildDiagnostics:
                             "interruption": interruption,
                             "stage": interrupted_stage,
                             "child_returncode_at_public_return": process.returncode,
-                            "child_wait_awaits_at_public_return": process_wait.await_count,
                         }
                     )
                 )
                 assert process.returncode is not None, "Child survived public start_debug return"
-                process_wait.assert_awaited()
         except BaseException:
             release.set()
-            if not task.done():
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+            print(
+                json.dumps(
+                    {
+                        "public_task_done_before_failure_hygiene": task.done(),
+                        "child_returncode_before_failure_hygiene": (
+                            process.returncode if process is not None else None
+                        ),
+                    }
+                )
+            )
             if command_backend == "ordinary" and process is not None:
                 if process.returncode is None:
                     print(
                         "Failure-only hygiene: killing retained creator-owned child, not product PASS"
                     )
                     process.kill()
-                await process.wait()
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10.0)
+                print(f"Failure-only pipe drain: stdout={len(stdout)} stderr={len(stderr)}")
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
             raise
         finally:
             release.set()
@@ -651,6 +680,20 @@ class TestFailedPreBuildDiagnostics:
         assert "data" not in response
         diagnostics = await capturing_mcp.tools["get_build_diagnostics"]()
         assert diagnostics["data"] == actual.to_dict()
+
+    @pytest.mark.asyncio
+    async def test_interrupted_prebuild_drains_paused_stdout(
+        self, prebuild_diagnostics_session, capturing_mcp, monkeypatch
+    ):
+        await self.test_interrupted_prebuild_omits_first_response_data(
+            prebuild_diagnostics_session,
+            capturing_mcp,
+            monkeypatch,
+            interrupted_stage="build",
+            interruption="task_cancel",
+            command_backend="ordinary",
+            burst_stdout=True,
+        )
 
     @pytest.mark.asyncio
     async def test_unrelated_exception_omits_retained_failed_result(

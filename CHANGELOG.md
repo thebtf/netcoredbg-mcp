@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Completed failed pre-launch restore/build results are included in the first `start_debug` failure response's `data` and remain available through `get_build_diagnostics`, including the failed stage, actual executed argv and working directory, nonzero exit code, and captured stdout/stderr when no MSBuild diagnostics were parsed. Cancelled or timed-out attempts omit first-response `data`, including explicit cancellation followed by stream EOF. Validation failures do not attach an older build result, unrelated exceptions do not attach retained build diagnostics, and a failed pre-build does not launch the debugger. Successful-result serialization remains compact, and no environment dump is added.
-- Ordinary subprocess cancellation and timeout terminate and await the exact launched build root before returning.
+- Ordinary subprocess cancellation and timeout settle cancelled output readers, drain remaining stdout/stderr pipes, and reap the exact launched build root within the existing cleanup budget before returning. Repeated cancellation does not abandon cleanup; a failed drain remains a build failure.
 - Removed the obsolete pre-publication Sonar gate regression to match the accepted postrelease audit policy and mandatory runtime-smoke release command.
 
 ### Compatibility
