@@ -517,7 +517,6 @@ async def test_failed_prebuild_response_data(
             if key not in ("PYTHONPATH", "MCP_PROJECT_ROOT")
             and (not key.startswith("NETCOREDBG_") or key == "NETCOREDBG_PATH")
         }
-        environment["PYTHONPATH"] = os.path.join(BASE, "src")
         if server_env is not None:
             environment.update(server_env)
         environment.update(
