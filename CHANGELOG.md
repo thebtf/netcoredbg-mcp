@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Failed pre-launch restore/build results are included in the first `start_debug` failure response's `data` and remain available through `get_build_diagnostics`, including the failed stage, actual executed argv and working directory, exit code, and captured stdout/stderr when no MSBuild diagnostics were parsed. Validation failures and interrupted attempts do not attach an older build result, and a failed pre-build does not launch the debugger. Successful-result serialization remains compact, and no environment dump is added.
+- Removed the obsolete pre-publication Sonar gate regression to match the accepted postrelease audit policy and mandatory runtime-smoke release command.
 
 ### Compatibility
 - The Python entry point, locked dependency versions, and public tool catalog remain unchanged. This PATCH does not change the screenshot backend or fix the separate Novascript desktop-capture defect.
