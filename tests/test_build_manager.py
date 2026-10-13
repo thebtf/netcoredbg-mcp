@@ -487,6 +487,169 @@ def prebuild_diagnostics_session(tmp_path, monkeypatch, mock_netcoredbg_path):
 
 class TestFailedPreBuildDiagnostics:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("interrupted_stage", ["restore", "build"])
+    @pytest.mark.parametrize("interruption", ["task_cancel", "manager_cancel_eof", "timeout"])
+    async def test_interrupted_prebuild_omits_first_response_data(
+        self,
+        prebuild_diagnostics_session,
+        capturing_mcp,
+        monkeypatch,
+        interrupted_stage,
+        interruption,
+    ):
+        manager, project, _failed_commands, commands = prebuild_diagnostics_session
+        build_session = manager._build_manager.get_session(str(project.parent))
+        original_command_line = build_session._policy.get_dotnet_command
+
+        def command_line(command, *args, **kwargs):
+            if command.value != interrupted_stage:
+                return original_command_line(command, *args, **kwargs)
+            commands.append(command.value)
+            return [
+                sys.executable,
+                "-c",
+                "import sys, time; "
+                "print('interrupted-stdout', flush=True); "
+                "print('interrupted-stderr', file=sys.stderr, flush=True); "
+                "time.sleep(60)",
+            ]
+
+        monkeypatch.setattr(build_session._policy, "get_dotnet_command", command_line)
+        if interruption == "timeout":
+            pre_launch_build = manager._build_manager.pre_launch_build
+
+            async def timed_pre_launch_build(*args, **kwargs):
+                kwargs["timeout"] = 2.0
+                return await pre_launch_build(*args, **kwargs)
+
+            monkeypatch.setattr(manager._build_manager, "pre_launch_build", timed_pre_launch_build)
+
+        ready = asyncio.Event()
+        release = asyncio.Event()
+        streams: set[str] = set()
+
+        async def command_output(line):
+            if line not in {"interrupted-stdout", "interrupted-stderr"}:
+                return
+            streams.add(line)
+            if len(streams) == 2:
+                ready.set()
+            if interruption != "timeout":
+                # Hold both readers between lines so explicit cancellation reaches EOF,
+                # rather than relying on a readline timeout to classify the command.
+                await release.wait()
+
+        start_debugger = AsyncMock(side_effect=AssertionError("Debugger must not start"))
+        monkeypatch.setattr(manager.client, "start", start_debugger)
+        register_debug_tools(
+            capturing_mcp,
+            manager,
+            ownership=SimpleNamespace(release=MagicMock()),
+            notify_state_changed=AsyncMock(),
+            check_session_access=lambda _ctx: None,
+            execute_and_wait=AsyncMock(),
+            resolve_project_root=AsyncMock(),
+        )
+        register_output_tools(capturing_mcp, manager)
+        ctx = SimpleNamespace(
+            report_progress=AsyncMock(),
+            info=AsyncMock(side_effect=command_output),
+            warning=AsyncMock(side_effect=command_output),
+        )
+        task = asyncio.create_task(
+            capturing_mcp.tools["start_debug"](
+                ctx,
+                program=str(project.parent / "App.dll"),
+                pre_build=True,
+                build_project=str(project),
+            )
+        )
+        process = None
+        try:
+            if interruption != "timeout":
+                await asyncio.wait_for(ready.wait(), timeout=10.0)
+                process = build_session._current_process
+                if interruption == "task_cancel":
+                    task.cancel()
+                else:
+                    assert await manager._build_manager.cancel(str(project.parent)) is True
+                    release.set()
+            response = await asyncio.wait_for(task, timeout=10.0)
+        finally:
+            release.set()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            if os.name != "nt" and process is not None and process.returncode is None:
+                process.kill()
+                await process.wait()
+
+        actual = manager.last_build_result
+        assert actual is not None
+        print(
+            json.dumps(
+                {"interruption": interruption, "result": actual.to_dict(), "response": response}
+            )
+        )
+        assert actual is build_session.last_result
+        assert actual.success is False
+        assert actual.command == interrupted_stage
+        assert commands == (["restore"] if interrupted_stage == "restore" else ["restore", "build"])
+        start_debugger.assert_not_awaited()
+        assert build_session._current_process is None
+        assert build_session._current_owner is None
+        if os.name == "nt":
+            receipt = build_session._last_owner_drain_receipt
+            assert receipt is not None
+            assert receipt.status is DrainStatus.DRAINED
+            assert receipt.active_processes == 0
+        assert actual.state is (
+            BuildState.FAILED if interruption == "timeout" else BuildState.CANCELLED
+        )
+        assert actual.cancelled is (interruption != "timeout")
+        assert actual.exit_code is None
+        assert response["error"]
+        assert response["state"] == "idle"
+        assert "data" not in response
+        diagnostics = await capturing_mcp.tools["get_build_diagnostics"]()
+        assert diagnostics["data"] == actual.to_dict()
+
+    @pytest.mark.asyncio
+    async def test_unrelated_exception_omits_retained_failed_result(
+        self, prebuild_diagnostics_session, capturing_mcp, monkeypatch
+    ):
+        manager, project, failed_commands, commands = prebuild_diagnostics_session
+        failed_commands.add("build")
+        with pytest.raises(BuildError):
+            await manager.pre_launch_build(str(project), restore_first=False)
+        previous = manager.last_build_result
+        assert previous is not None
+        assert previous.success is False
+        register_debug_tools(
+            capturing_mcp,
+            manager,
+            ownership=SimpleNamespace(release=MagicMock()),
+            notify_state_changed=AsyncMock(),
+            check_session_access=lambda _ctx: None,
+            execute_and_wait=AsyncMock(),
+            resolve_project_root=AsyncMock(
+                side_effect=RuntimeError("Unrelated root resolution failure")
+            ),
+        )
+        register_output_tools(capturing_mcp, manager)
+
+        response = await capturing_mcp.tools["start_debug"](
+            SimpleNamespace(), program=str(project.parent / "App.dll"), pre_build=False
+        )
+
+        assert response["error"] == "Unrelated root resolution failure"
+        assert "data" not in response
+        assert commands == ["build"]
+        assert manager.last_build_result is previous
+        diagnostics = await capturing_mcp.tools["get_build_diagnostics"]()
+        assert diagnostics["data"] == previous.to_dict()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("failed_stage", ["restore", "build"])
     async def test_failed_process_reaches_start_debug_response(
         self, prebuild_diagnostics_session, capturing_mcp, monkeypatch, failed_stage

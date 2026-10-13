@@ -292,6 +292,8 @@ class BuildSession:
             if owner is not None:
                 receipt = await self._drain_windows_owner(owner, force=False)
                 self._require_drained_owner_receipt(receipt)
+            if self._cancel_requested:
+                raise asyncio.CancelledError()
             return exit_code, "".join(stdout_lines), "".join(stderr_lines)
 
         except asyncio.CancelledError as cancellation:

@@ -9,7 +9,7 @@ from typing import Annotated, Any
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import Field
 
-from ..build.state import BuildError
+from ..build.state import BuildError, BuildState
 from ..launch_profiles import resolve_launch_environment
 from ..mux import SessionOwnership
 from ..response import build_error_response, build_response
@@ -280,6 +280,10 @@ def register_debug_tools(
                 isinstance(e, BuildError)
                 and failed_result is not None
                 and not failed_result.success
+                and failed_result.state == BuildState.FAILED
+                and not failed_result.cancelled
+                and failed_result.exit_code is not None
+                and failed_result.exit_code != 0
             ):
                 response["data"] = failed_result.to_dict()
             return response
