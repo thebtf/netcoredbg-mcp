@@ -107,15 +107,17 @@ jobs:
           })
           $managedFiles = @($files | Where-Object { $_.path -in @(
             'bin/TypedBitBltFallbackBridgeHost/debug_win-x64/FlaUIBridge.dll',
+            'bin/TypedBitBltFallbackBridgeHost/debug_win-x64/FlaUIBridge.exe',
             'bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.dll',
+            'bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.exe',
             'bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.deps.json',
             'bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.runtimeconfig.json',
             'bin/WpfSmokeApp/debug/WpfSmokeApp.dll',
             'bin/WpfSmokeApp/debug/WpfSmokeApp.deps.json',
             'bin/WpfSmokeApp/debug/WpfSmokeApp.runtimeconfig.json'
           ) })
-          if ($managedFiles.Count -ne 7 -or ($managedFiles | Measure-Object -Property size -Sum).Sum -ge 1MB) {
-            throw "Expected seven managed runtime files totaling less than 1 MiB."
+          if ($managedFiles.Count -ne 9 -or ($managedFiles | Measure-Object -Property size -Sum).Sum -ge 1MB) {
+            throw "Expected nine managed runtime files totaling less than 1 MiB."
           }
           [ordered]@{
             source_sha = $sourceSha
@@ -136,7 +138,9 @@ jobs:
           name: bridge-verify-managed-${{ github.sha }}
           path: |
             .artifacts/bridge-verify/bin/TypedBitBltFallbackBridgeHost/debug_win-x64/FlaUIBridge.dll
+            .artifacts/bridge-verify/bin/TypedBitBltFallbackBridgeHost/debug_win-x64/FlaUIBridge.exe
             .artifacts/bridge-verify/bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.dll
+            .artifacts/bridge-verify/bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.exe
             .artifacts/bridge-verify/bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.deps.json
             .artifacts/bridge-verify/bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.runtimeconfig.json
             .artifacts/bridge-verify/bin/WpfSmokeApp/debug/WpfSmokeApp.dll
