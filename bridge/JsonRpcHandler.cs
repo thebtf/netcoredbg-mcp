@@ -52,6 +52,9 @@ public static class JsonRpcHandler
         set => _processId = value;
     }
 
+    internal static long ProcessCreationTicks { get; set; }
+    internal static uint ProcessSessionId { get; set; }
+
     internal static bool Stealth
     {
         get => _stealth;
@@ -162,6 +165,8 @@ public static class JsonRpcHandler
         _automation = null;
         _mainWindow = null;
         _processId = 0;
+        ProcessCreationTicks = 0;
+        ProcessSessionId = 0;
         _stealth = false;
     }
 }

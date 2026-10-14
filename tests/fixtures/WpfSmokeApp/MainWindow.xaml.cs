@@ -144,7 +144,7 @@ public partial class MainWindow : Window
         SetHoverState("closed", surfaceVisible: false);
         UpdateGuardedChildGestureStatus();
         PublishGalleryReadyStatus();
-        if (_captureCalibrationMode is "marker" or "black")
+        if (_captureCalibrationMode is "marker" or "black" or "compositor-marker")
         {
             ContentRendered += OnCalibrationContentRendered;
             Closed += OnCalibrationClosed;
@@ -257,7 +257,8 @@ public partial class MainWindow : Window
         ContentRendered -= OnCalibrationContentRendered;
         Hide();
         _captureCalibrationWindow = new NativeCalibrationWindow(
-            drawMarker: _captureCalibrationMode == "marker");
+            drawMarker: _captureCalibrationMode is "marker" or "compositor-marker",
+            compositorMarker: _captureCalibrationMode == "compositor-marker");
         _captureCalibrationWindow.Show();
     }
 
