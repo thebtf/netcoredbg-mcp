@@ -84,6 +84,68 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      - name: Record runtime file hashes
+        shell: pwsh
+        run: |
+          $sourceSha = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to read the checked-out source revision."
+          }
+          $artifactRoot = (Resolve-Path .artifacts/bridge-verify).Path
+          $runtimeFiles = @(Get-ChildItem -LiteralPath "$artifactRoot/bin", "$artifactRoot/publish" -Recurse -File |
+            Where-Object { $_.Name -match '\.(exe|dll|deps\.json|runtimeconfig\.json)$' } |
+            Sort-Object FullName)
+          if ($runtimeFiles.Count -eq 0 -or $runtimeFiles.Count -gt 517) {
+            throw "Expected between 1 and 517 runtime files, found $($runtimeFiles.Count)."
+          }
+          $files = @(foreach ($file in $runtimeFiles) {
+            [ordered]@{
+              path = [System.IO.Path]::GetRelativePath($artifactRoot, $file.FullName).Replace('\', '/')
+              size = $file.Length
+              sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+          })
+          $managedFiles = @($files | Where-Object { $_.path -in @(
+            'bin/TypedBitBltFallbackBridgeHost/debug_win-x64/FlaUIBridge.dll',
+            'bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.dll',
+            'bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.deps.json',
+            'bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.runtimeconfig.json',
+            'bin/WpfSmokeApp/debug/WpfSmokeApp.dll',
+            'bin/WpfSmokeApp/debug/WpfSmokeApp.deps.json',
+            'bin/WpfSmokeApp/debug/WpfSmokeApp.runtimeconfig.json'
+          ) })
+          if ($managedFiles.Count -ne 7 -or ($managedFiles | Measure-Object -Property size -Sum).Sum -ge 1MB) {
+            throw "Expected seven managed runtime files totaling less than 1 MiB."
+          }
+          [ordered]@{
+            source_sha = $sourceSha
+            github_sha = $env:GITHUB_SHA
+            repository = $env:GITHUB_REPOSITORY
+            workflow = $env:GITHUB_WORKFLOW
+            workflow_ref = $env:GITHUB_WORKFLOW_REF
+            workflow_sha = $env:GITHUB_WORKFLOW_SHA
+            run_id = $env:GITHUB_RUN_ID
+            run_attempt = $env:GITHUB_RUN_ATTEMPT
+            job = $env:GITHUB_JOB
+            files = $files
+          } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "$artifactRoot/runtime-files.json" -Encoding utf8
+
+      - name: Upload managed runtime artifacts and hashes
+        uses: actions/upload-artifact@v7
+        with:
+          name: bridge-verify-managed-${{ github.sha }}
+          path: |
+            .artifacts/bridge-verify/bin/TypedBitBltFallbackBridgeHost/debug_win-x64/FlaUIBridge.dll
+            .artifacts/bridge-verify/bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.dll
+            .artifacts/bridge-verify/bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.deps.json
+            .artifacts/bridge-verify/bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.runtimeconfig.json
+            .artifacts/bridge-verify/bin/WpfSmokeApp/debug/WpfSmokeApp.dll
+            .artifacts/bridge-verify/bin/WpfSmokeApp/debug/WpfSmokeApp.deps.json
+            .artifacts/bridge-verify/bin/WpfSmokeApp/debug/WpfSmokeApp.runtimeconfig.json
+            .artifacts/bridge-verify/runtime-files.json
+          retention-days: 1
+          if-no-files-found: error
+
   source-verify:
     name: Build exact source package
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'source-build'
