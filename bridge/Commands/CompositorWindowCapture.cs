@@ -49,8 +49,7 @@ internal static class CompositorWindowCapture
     internal static CompositorCapture Capture(
         IntPtr hwnd, CaptureSnapshot expected, IScreenshotCaptureTransport transport,
         CancellationToken cancellationToken,
-        Action<IntPtr, Func<bool>>? beforeAcceptanceForTesting = null,
-        Action<string>? progressForTesting = null)
+        Action<IntPtr, Func<bool>>? beforeAcceptanceForTesting = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 18362))
@@ -60,8 +59,7 @@ internal static class CompositorWindowCapture
             Marshal.ThrowExceptionForHR(initialization);
         try
         {
-            return CaptureInitialized(hwnd, expected, transport, cancellationToken,
-                beforeAcceptanceForTesting, progressForTesting);
+            return CaptureInitialized(hwnd, expected, transport, cancellationToken, beforeAcceptanceForTesting);
         }
         finally
         {
@@ -72,8 +70,7 @@ internal static class CompositorWindowCapture
 
     private static CompositorCapture CaptureInitialized(
         IntPtr hwnd, CaptureSnapshot expected, IScreenshotCaptureTransport transport,
-        CancellationToken cancellationToken, Action<IntPtr, Func<bool>>? beforeAcceptanceForTesting,
-        Action<string>? progressForTesting)
+        CancellationToken cancellationToken, Action<IntPtr, Func<bool>>? beforeAcceptanceForTesting)
     {
         if (!ApiInformation.IsTypePresent("Windows.Graphics.Capture.GraphicsCaptureItem") ||
             !ApiInformation.IsMethodPresent("Windows.Graphics.Capture.Direct3D11CaptureFramePool", "CreateFreeThreaded") ||
@@ -90,10 +87,8 @@ internal static class CompositorWindowCapture
         CompositorCapture? result = null;
         try
         {
-            progressForTesting?.Invoke("device-create-start");
             using var device = CreateDevice();
-            progressForTesting?.Invoke("device-create-complete");
-            var item = CreateWindowItem(hwnd, stopwatch, cancellationToken, out var dispatcher, progressForTesting);
+            var item = CreateWindowItem(hwnd, stopwatch, cancellationToken, out var dispatcher);
             var closed = 0;
             TypedEventHandler<GraphicsCaptureItem, object> onClosed = (_, _) => Interlocked.Exchange(ref closed, 1);
             try
@@ -102,7 +97,6 @@ internal static class CompositorWindowCapture
                 var itemSize = item.Size;
                 EnsureSize(itemSize, expected);
                 EnsureTarget(hwnd, expected, transport);
-                progressForTesting?.Invoke("capture-session-create-start");
                 CheckWait(stopwatch, cancellationToken, Volatile.Read(ref closed));
                 using var pool = Direct3D11CaptureFramePool.CreateFreeThreaded(
                     device, DirectXPixelFormat.B8G8R8A8UIntNormalized, 1, itemSize);
@@ -110,7 +104,6 @@ internal static class CompositorWindowCapture
                 if (ApiInformation.IsPropertyPresent("Windows.Graphics.Capture.GraphicsCaptureSession", "IsCursorCaptureEnabled"))
                     session.IsCursorCaptureEnabled = false;
                 session.StartCapture();
-                progressForTesting?.Invoke("capture-started");
                 Direct3D11CaptureFrame? frame = null;
                 while (frame is null)
                 {
@@ -123,7 +116,6 @@ internal static class CompositorWindowCapture
                 using (frame)
                 {
                     CheckWait(stopwatch, cancellationToken, Volatile.Read(ref closed));
-                    progressForTesting?.Invoke("frame-arrived");
                     var contentSize = frame.ContentSize;
                     EnsureSize(contentSize, expected);
                     EnsureSize(item.Size, expected);
@@ -134,9 +126,7 @@ internal static class CompositorWindowCapture
                     var surface = frame.Surface;
                     try
                     {
-                        progressForTesting?.Invoke("readback-start");
                         using var softwareBitmap = Readback(surface, stopwatch, cancellationToken, ref closed);
-                        progressForTesting?.Invoke("readback-complete");
                         CheckWait(stopwatch, cancellationToken, Volatile.Read(ref closed));
                         EnsureTarget(hwnd, expected, transport);
                         EnsureSize(item.Size, expected);
@@ -164,31 +154,25 @@ internal static class CompositorWindowCapture
                 if (beforeAcceptanceForTesting is not null)
                     beforeAcceptanceForTesting(hwnd, () => Volatile.Read(ref closed) != 0);
                 cancellationToken.ThrowIfCancellationRequested();
-                progressForTesting?.Invoke("final-validation-start");
                 EnsureTarget(hwnd, expected, transport);
                 if (Volatile.Read(ref closed) != 0)
                     throw new InvalidOperationException("Compositor capture item closed during final target validation.");
-                progressForTesting?.Invoke("final-validation-complete");
             }
             finally
             {
                 try
                 {
-                    progressForTesting?.Invoke("item-unsubscribe-start");
                     item.Closed -= onClosed;
-                    progressForTesting?.Invoke("item-unsubscribe-complete");
                 }
                 finally
                 {
                     try
                     {
-                        progressForTesting?.Invoke("item-release-start");
                         ((IWinRTObject)item).NativeObject.Dispose();
-                        progressForTesting?.Invoke("item-release-complete");
                     }
                     finally
                     {
-                        ShutdownDispatcher(dispatcher, progressForTesting);
+                        ShutdownDispatcher(dispatcher);
                     }
                 }
             }
@@ -317,13 +301,11 @@ internal static class CompositorWindowCapture
 
     private static GraphicsCaptureItem CreateWindowItem(
         IntPtr hwnd, Stopwatch stopwatch, CancellationToken cancellationToken,
-        out DispatcherQueueController dispatcher, Action<string>? progressForTesting)
+        out DispatcherQueueController dispatcher)
     {
         // Closed requires the item-creation thread's dispatcher, even with a free-threaded frame pool.
         var created = new TaskCompletionSource<GraphicsCaptureItem>();
-        progressForTesting?.Invoke("dispatcher-create-start");
         dispatcher = DispatcherQueueController.CreateOnDedicatedThread();
-        progressForTesting?.Invoke("dispatcher-create-complete");
         try
         {
             var queue = dispatcher.DispatcherQueue;
@@ -334,10 +316,7 @@ internal static class CompositorWindowCapture
                     try
                     {
                         CheckWait(stopwatch, cancellationToken, 0);
-                        progressForTesting?.Invoke("native-item-create-start");
-                        var item = CreateWindowItem(hwnd);
-                        progressForTesting?.Invoke("native-item-create-complete");
-                        created.SetResult(item);
+                        created.SetResult(CreateWindowItem(hwnd));
                     }
                     catch (Exception ex)
                     {
@@ -345,26 +324,21 @@ internal static class CompositorWindowCapture
                     }
                 }))
                     throw new InvalidOperationException("The capture-item dispatcher refused creation.");
-                progressForTesting?.Invoke("native-item-create-queued");
                 CheckWait(stopwatch, cancellationToken, 0);
-                var item = created.Task.WaitAsync(TimeSpan.FromMilliseconds(Math.Max(0,
+                return created.Task.WaitAsync(TimeSpan.FromMilliseconds(Math.Max(0,
                     AcquisitionDeadlineMilliseconds - stopwatch.ElapsedMilliseconds)), cancellationToken)
                     .GetAwaiter().GetResult();
-                progressForTesting?.Invoke("native-item-create-joined");
-                return item;
             }
             finally
             {
-                progressForTesting?.Invoke("dispatcher-queue-release-start");
                 ((IWinRTObject)queue).NativeObject.Dispose();
-                progressForTesting?.Invoke("dispatcher-queue-release-complete");
             }
         }
         catch
         {
             try
             {
-                ShutdownDispatcher(dispatcher, progressForTesting);
+                ShutdownDispatcher(dispatcher);
             }
             finally
             {
@@ -375,32 +349,23 @@ internal static class CompositorWindowCapture
         }
     }
 
-    private static void ShutdownDispatcher(DispatcherQueueController dispatcher, Action<string>? progressForTesting)
+    private static void ShutdownDispatcher(DispatcherQueueController dispatcher)
     {
         try
         {
-            progressForTesting?.Invoke("dispatcher-shutdown-start");
             var shutdown = dispatcher.ShutdownQueueAsync();
-            progressForTesting?.Invoke("dispatcher-shutdown-requested");
             try
             {
-                var task = shutdown.AsTask();
-                progressForTesting?.Invoke("dispatcher-shutdown-task-created");
-                task.GetAwaiter().GetResult();
-                progressForTesting?.Invoke("dispatcher-shutdown-complete");
+                shutdown.AsTask().GetAwaiter().GetResult();
             }
             finally
             {
-                progressForTesting?.Invoke("dispatcher-shutdown-action-close-start");
                 shutdown.Close();
-                progressForTesting?.Invoke("dispatcher-shutdown-action-close-complete");
             }
         }
         finally
         {
-            progressForTesting?.Invoke("dispatcher-controller-release-start");
             ((IWinRTObject)dispatcher).NativeObject.Dispose();
-            progressForTesting?.Invoke("dispatcher-controller-release-complete");
         }
     }
 
