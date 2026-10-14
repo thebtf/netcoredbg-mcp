@@ -9,6 +9,7 @@ using Windows.Graphics.Capture;
 using Windows.Graphics.DirectX;
 using Windows.Graphics.DirectX.Direct3D11;
 using Windows.Graphics.Imaging;
+using Windows.System;
 using WinRT;
 
 namespace FlaUIBridge.Commands;
@@ -87,7 +88,7 @@ internal static class CompositorWindowCapture
         try
         {
             using var device = CreateDevice();
-            var item = CreateWindowItem(hwnd);
+            var item = CreateWindowItem(hwnd, stopwatch, cancellationToken, out var dispatcher);
             var closed = 0;
             TypedEventHandler<GraphicsCaptureItem, object> onClosed = (_, _) => Interlocked.Exchange(ref closed, 1);
             try
@@ -165,7 +166,14 @@ internal static class CompositorWindowCapture
                 }
                 finally
                 {
-                    ((IWinRTObject)item).NativeObject.Dispose();
+                    try
+                    {
+                        ((IWinRTObject)item).NativeObject.Dispose();
+                    }
+                    finally
+                    {
+                        ShutdownDispatcher(dispatcher);
+                    }
                 }
             }
             return result ?? throw new InvalidOperationException("Compositor capture did not return a frame.");
@@ -288,6 +296,76 @@ internal static class CompositorWindowCapture
             if (dxgi != IntPtr.Zero) Marshal.Release(dxgi);
             if (context != IntPtr.Zero) Marshal.Release(context);
             if (device != IntPtr.Zero) Marshal.Release(device);
+        }
+    }
+
+    private static GraphicsCaptureItem CreateWindowItem(
+        IntPtr hwnd, Stopwatch stopwatch, CancellationToken cancellationToken,
+        out DispatcherQueueController dispatcher)
+    {
+        // Closed requires the item-creation thread's dispatcher, even with a free-threaded frame pool.
+        var created = new TaskCompletionSource<GraphicsCaptureItem>();
+        dispatcher = DispatcherQueueController.CreateOnDedicatedThread();
+        try
+        {
+            var queue = dispatcher.DispatcherQueue;
+            try
+            {
+                if (!queue.TryEnqueue(() =>
+                {
+                    try
+                    {
+                        CheckWait(stopwatch, cancellationToken, 0);
+                        created.SetResult(CreateWindowItem(hwnd));
+                    }
+                    catch (Exception ex)
+                    {
+                        created.SetException(ex);
+                    }
+                }))
+                    throw new InvalidOperationException("The capture-item dispatcher refused creation.");
+                CheckWait(stopwatch, cancellationToken, 0);
+                return created.Task.WaitAsync(TimeSpan.FromMilliseconds(Math.Max(0,
+                    AcquisitionDeadlineMilliseconds - stopwatch.ElapsedMilliseconds)), cancellationToken)
+                    .GetAwaiter().GetResult();
+            }
+            finally
+            {
+                ((IWinRTObject)queue).NativeObject.Dispose();
+            }
+        }
+        catch
+        {
+            try
+            {
+                ShutdownDispatcher(dispatcher);
+            }
+            finally
+            {
+                if (created.Task.IsCompletedSuccessfully)
+                    ((IWinRTObject)created.Task.Result).NativeObject.Dispose();
+            }
+            throw;
+        }
+    }
+
+    private static void ShutdownDispatcher(DispatcherQueueController dispatcher)
+    {
+        try
+        {
+            var shutdown = dispatcher.ShutdownQueueAsync();
+            try
+            {
+                shutdown.AsTask().GetAwaiter().GetResult();
+            }
+            finally
+            {
+                shutdown.Close();
+            }
+        }
+        finally
+        {
+            ((IWinRTObject)dispatcher).NativeObject.Dispose();
         }
     }
 

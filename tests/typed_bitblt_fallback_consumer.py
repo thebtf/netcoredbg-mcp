@@ -859,9 +859,12 @@ async def main() -> None:
             }:
                 assert result["trace"] == ["primary", "alternate"], result
             elif expected == "close-at-acceptance":
-                assert result["trace"][:2] == ["primary", "alternate"], result
-                assert "acceptance-close-observed" in result["trace"], result
-                assert "acceptance-close-not-observed" not in result["trace"], result
+                assert result["trace"] == [
+                    "primary",
+                    "alternate",
+                    "acceptance-window-replaced",
+                    "acceptance-close-observed",
+                ], result
             elif expected == "reject":
                 assert result["trace"] == ["primary"], result
             else:

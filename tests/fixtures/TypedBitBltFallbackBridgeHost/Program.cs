@@ -179,6 +179,11 @@ internal static class Program
             if (SendMessageTimeout(hwnd, 0x802B, IntPtr.Zero, IntPtr.Zero, 3, 1_000, out var replacement) == IntPtr.Zero ||
                 replacement == IntPtr.Zero)
                 throw new InvalidOperationException("The owned calibration window could not be replaced within the bounded request.");
+            var actualReplacement = _native.ReadSnapshot(replacement);
+            if ((actualReplacement with { Hwnd = equivalentIdentity.Hwnd }) != equivalentIdentity ||
+                _native.ReadCaptureAffinity(replacement) != affinity)
+                throw new InvalidOperationException("The replacement changed the owned calibration process, geometry or policy.");
+            AppendTrace("acceptance-window-replaced");
             // The window really closes; equal identity/policy model ABA, not a promised numeric HWND reuse.
             _acceptanceSnapshot = equivalentIdentity;
             _acceptanceAffinity = affinity;
