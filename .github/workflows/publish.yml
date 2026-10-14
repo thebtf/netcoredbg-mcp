@@ -48,7 +48,7 @@ jobs:
             throw "Unable to read .NET SDK information."
           }
 
-      - name: Compile bridge and test host, package bridge
+      - name: Compile bridge, test host, and WPF fixture; package bridge
         shell: pwsh
         run: |
           dotnet build bridge/FlaUIBridge.csproj --configuration Release --artifacts-path .artifacts/bridge-verify --disable-build-servers
@@ -58,6 +58,10 @@ jobs:
           dotnet build tests/fixtures/TypedBitBltFallbackBridgeHost/TypedBitBltFallbackBridgeHost.csproj --configuration Debug --artifacts-path .artifacts/bridge-verify --disable-build-servers
           if ($LASTEXITCODE -ne 0) {
             throw "Bridge test host compilation failed."
+          }
+          dotnet build tests/fixtures/WpfSmokeApp/WpfSmokeApp.csproj --configuration Debug --artifacts-path .artifacts/bridge-verify --disable-build-servers
+          if ($LASTEXITCODE -ne 0) {
+            throw "WPF smoke fixture compilation failed."
           }
           dotnet publish bridge/FlaUIBridge.csproj --configuration Release --artifacts-path .artifacts/bridge-verify --disable-build-servers --no-build
           if ($LASTEXITCODE -ne 0) {
