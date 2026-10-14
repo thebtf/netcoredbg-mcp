@@ -3,7 +3,9 @@ using System.Drawing;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using FlaUIBridge;
 using FlaUIBridge.Commands;
@@ -20,9 +22,14 @@ internal static class Program
         if (string.IsNullOrWhiteSpace(traceFile))
             throw new InvalidOperationException($"Missing {TraceFileEnvironmentVariable}.");
         WriteIdentity(traceFile);
+        using var diagnostics = string.Equals(
+            Environment.GetEnvironmentVariable("NETCOREDBG_COMPOSITOR_NATIVE_DIAGNOSTICS"),
+            "1", StringComparison.Ordinal)
+            ? new NativeCaptureDiagnostics(traceFile)
+            : null;
 
         using var scope = ScreenshotCommands.PushCaptureTransportForTesting(
-            new BlackPrimaryCaptureTransport(traceFile));
+            new BlackPrimaryCaptureTransport(traceFile, diagnostics));
         try
         {
             FlaUIBridge.Program.RunStdin();
@@ -69,7 +76,124 @@ internal static class Program
             sha256 = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant(),
         };
     }
-    private sealed class BlackPrimaryCaptureTransport(string traceFile) : IScreenshotCaptureTransport
+    private sealed class NativeCaptureDiagnostics : IDisposable
+    {
+        private const int MaximumRecords = 96;
+        private const int MaximumBytes = 256 * 1024;
+        private const int MaximumExceptionRecords = 16;
+        private const int MaximumExceptionCharacters = 8 * 1024;
+        private readonly string _path;
+        private readonly object _sync = new();
+        private readonly Stopwatch _elapsed = Stopwatch.StartNew();
+        private int _active;
+        private int _attempt;
+        private int _exceptionRecords;
+        private int _records;
+        private long _bytes;
+        private bool _sinkFailed;
+        [ThreadStatic] private static bool _writing;
+
+        public NativeCaptureDiagnostics(string traceFile)
+        {
+            _path = Path.GetFullPath(traceFile) + ".native-diagnostics.jsonl";
+            _bytes = File.Exists(_path) ? new FileInfo(_path).Length : 0;
+            Progress("diagnostic-enabled");
+        }
+
+        public void Begin()
+        {
+            Interlocked.Increment(ref _attempt);
+            Volatile.Write(ref _active, 1);
+            AppDomain.CurrentDomain.FirstChanceException += OnFirstChance;
+            Progress("capture-enter");
+        }
+
+        public void End()
+        {
+            AppDomain.CurrentDomain.FirstChanceException -= OnFirstChance;
+            Volatile.Write(ref _active, 0);
+            Progress("capture-end");
+        }
+
+        public void Dispose()
+        {
+            if (Volatile.Read(ref _active) != 0)
+                End();
+        }
+
+        public void Progress(string phase) => Record(phase, null);
+
+        public void Failure(Exception exception) => Record("capture-threw", exception);
+
+        private void OnFirstChance(object? sender, FirstChanceExceptionEventArgs args)
+        {
+            if (_writing || Volatile.Read(ref _active) == 0)
+                return;
+            var count = Interlocked.Increment(ref _exceptionRecords);
+            if (count <= MaximumExceptionRecords)
+                Record("first-chance", args.Exception);
+            else if (count == MaximumExceptionRecords + 1)
+                Progress("first-chance-limit-reached");
+        }
+
+        private void Record(string phase, Exception? exception)
+        {
+            if (_writing)
+                return;
+            _writing = true;
+            try
+            {
+                lock (_sync)
+                {
+                    if (_sinkFailed || _records >= MaximumRecords || _bytes >= MaximumBytes)
+                        return;
+                    var details = exception?.ToString();
+                    var originalLength = details?.Length ?? 0;
+                    var entry = JsonSerializer.Serialize(new
+                    {
+                        sequence = _records + 1,
+                        attempt = Volatile.Read(ref _attempt),
+                        phase,
+                        utc = DateTimeOffset.UtcNow,
+                        elapsed_ms = _elapsed.ElapsedMilliseconds,
+                        process_id = Environment.ProcessId,
+                        managed_thread_id = Environment.CurrentManagedThreadId,
+                        apartment = Thread.CurrentThread.GetApartmentState().ToString(),
+                        exception_type = exception?.GetType().FullName,
+                        hresult = exception is null ? null : $"0x{exception.HResult:X8}",
+                        exception_details = originalLength > MaximumExceptionCharacters
+                            ? details![..MaximumExceptionCharacters] : details,
+                        exception_details_characters = originalLength,
+                        exception_details_truncated = originalLength > MaximumExceptionCharacters,
+                    }) + Environment.NewLine;
+                    var bytes = Encoding.UTF8.GetByteCount(entry);
+                    if (_records == MaximumRecords - 1 || _bytes + bytes > MaximumBytes - 512)
+                    {
+                        entry = "{\"phase\":\"diagnostic-capacity-reached\"}" + Environment.NewLine;
+                        bytes = Encoding.UTF8.GetByteCount(entry);
+                        if (_bytes + bytes > MaximumBytes)
+                            return;
+                        _sinkFailed = true;
+                    }
+                    File.AppendAllText(_path, entry);
+                    _bytes += bytes;
+                    _records++;
+                }
+            }
+            catch (Exception)
+            {
+                // A diagnostic sink failure must not replace the capture's original exception.
+                lock (_sync)
+                    _sinkFailed = true;
+            }
+            finally
+            {
+                _writing = false;
+            }
+        }
+    }
+
+    private sealed class BlackPrimaryCaptureTransport(string traceFile, NativeCaptureDiagnostics? diagnostics) : IScreenshotCaptureTransport
     {
         private readonly bool _shortPrimary = string.Equals(
             Environment.GetEnvironmentVariable("NETCOREDBG_COMPOSITOR_PRIMARY_SHAPE"),
@@ -146,25 +270,48 @@ internal static class Program
             IntPtr hwnd, CaptureSnapshot expected, CancellationToken cancellationToken)
         {
             AppendTrace("alternate");
-            if (_mode == "timeout")
+            diagnostics?.Begin();
+            try
             {
-                using var cancelled = new CancellationTokenSource();
-                cancelled.Cancel();
-                try
+                if (_mode == "timeout")
                 {
-                    return _native.CaptureCompositorWindow(hwnd, expected, cancelled.Token);
+                    using var cancelled = new CancellationTokenSource();
+                    cancelled.Cancel();
+                    try
+                    {
+                        return _native.CaptureCompositorWindow(hwnd, expected, cancelled.Token);
+                    }
+                    catch (OperationCanceledException ex)
+                    {
+                        throw new TimeoutException("Controlled compositor acquisition timed out.", ex);
+                    }
                 }
-                catch (OperationCanceledException ex)
+                if (_mode == "close-at-acceptance")
                 {
-                    throw new TimeoutException("Controlled compositor acquisition timed out.", ex);
+                    var closedCapture = CompositorWindowCapture.Capture(hwnd, expected, this,
+                        cancellationToken, CloseAtAcceptance, diagnostics is null ? null : diagnostics.Progress);
+                    diagnostics?.Progress("capture-return");
+                    return closedCapture;
                 }
+                var actual = diagnostics is null
+                    ? _native.CaptureCompositorWindow(hwnd, expected, cancellationToken)
+                    : CompositorWindowCapture.Capture(hwnd, expected, _native, cancellationToken,
+                        progressForTesting: diagnostics.Progress);
+                diagnostics?.Progress("capture-return");
+                _alternateCompleted = true;
+                return _mode == "closed" ? actual with { WindowClosed = true } : actual;
             }
-            if (_mode == "close-at-acceptance")
-                return CompositorWindowCapture.Capture(hwnd, expected, this, cancellationToken, CloseAtAcceptance);
-            var actual = _native.CaptureCompositorWindow(hwnd, expected, cancellationToken);
-            _alternateCompleted = true;
-            return _mode == "closed" ? actual with { WindowClosed = true } : actual;
+            catch (Exception exception)
+            {
+                diagnostics?.Failure(exception);
+                throw;
+            }
+            finally
+            {
+                diagnostics?.End();
+            }
         }
+
 
         private void CloseAtAcceptance(IntPtr hwnd, Func<bool> observedClosed)
         {
