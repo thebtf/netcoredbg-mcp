@@ -132,12 +132,15 @@ def _create_authority_repository(
     _git(authority_root, "config", "user.name", "Artifact Tests")
     _git(authority_root, "checkout", "-b", "main")
 
+    policy_payloads: dict[str, bytes] = {}
     for relative_path in _authority_paths():
         source = PROJECT_ROOT / relative_path
         target = authority_root / relative_path
         assert source.is_file(), f"missing authority source: {relative_path}"
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(source.read_bytes())
+        payload = source.read_bytes().replace(b"\r\n", b"\n")
+        target.write_bytes(payload)
+        policy_payloads[relative_path] = payload
 
     _git(authority_root, "add", ".")
     _git(authority_root, "commit", "-m", "snapshot release authorities")
@@ -148,7 +151,7 @@ def _create_authority_repository(
     snapshots = [
         {
             "path": relative_path,
-            "sha256": _sha256_path(authority_root / relative_path),
+            "sha256": _sha256_bytes(policy_payloads[relative_path]),
             "source_commit": source_commit,
         }
         for relative_path in _authority_paths()
@@ -1740,6 +1743,51 @@ def test_stage_evidence_semantics_revalidate_catalog_authority(
 
     with pytest.raises(ValueError):
         artifact_contract.seal_stage_gate_evidence(inputs["stage_record"], **_stage_binding(inputs))
+
+
+def test_stage_evidence_semantics_policy_snapshots_are_raw_blobs_under_git_eol_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.autocrlf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "input")
+    inputs = _simulated_review_inputs(tmp_path)
+    root = inputs["repository_root"]
+    source_commit = inputs["candidate_identity"]["candidate"]["source"]["commit"]
+    raw_snapshots = [
+        {
+            "path": path,
+            "source_commit": source_commit,
+            "sha256": _sha256_bytes(
+                subprocess.run(
+                    ["git", "cat-file", "blob", f"{source_commit}:{path}"],
+                    cwd=root,
+                    capture_output=True,
+                    check=True,
+                ).stdout
+            ),
+        }
+        for path in _authority_paths()
+    ]
+    generated_snapshots = []
+    for autocrlf in ("false", "true"):
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", autocrlf)
+        catalog = resolve_release_gate_catalog(inputs["candidate_identity"], root)
+        generated_snapshots.append(catalog["catalog"]["policy_authority_snapshots"])
+        stage_inputs = _simulated_stage_inputs(deepcopy(inputs), "pre-publication")
+        stage_inputs["catalog"]["catalog"]["policy_authority_snapshots"] = deepcopy(raw_snapshots)
+        raw_catalog = _canonical_json_bytes(stage_inputs["catalog"])
+        catalog_hash = _sha256_bytes(raw_catalog)
+        stage_inputs["release_gate_catalog_bytes"] = raw_catalog
+        stage_inputs["release_gate_catalog_reference"]["sha256"] = catalog_hash
+        stage_inputs["stage_record"]["release_gate_catalog"]["sha256"] = catalog_hash
+
+        sealed = artifact_contract.seal_stage_gate_evidence(
+            stage_inputs["stage_record"], **_stage_binding(stage_inputs)
+        )
+
+        assert sealed["outcome"] == "PASS", autocrlf
+    assert generated_snapshots == [raw_snapshots, raw_snapshots]
 
 
 @pytest.mark.parametrize(

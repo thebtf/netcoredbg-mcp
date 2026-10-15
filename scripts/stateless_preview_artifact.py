@@ -635,7 +635,7 @@ def _read_tracked_authority(repository_root: Path, source_commit: str, relative_
     object_type = _git_text(repository_root, "cat-file", "-t", object_name)
     if object_type != "blob":
         _refuse("policy authority is not a tracked file")
-    return _git_bytes(repository_root, "cat-file", "--filters", object_name)
+    return _git_bytes(repository_root, "cat-file", "blob", object_name)
 
 
 def _fixed_gate_descriptors() -> list[dict[str, Any]]:
