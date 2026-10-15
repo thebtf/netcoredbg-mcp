@@ -468,21 +468,25 @@ def prebuild_diagnostics_session(tmp_path, monkeypatch, mock_netcoredbg_path):
     build_session = manager._build_manager.get_session(str(tmp_path))
     failed_commands: set[str] = set()
     commands: list[str] = []
+    invocations: list[tuple[str, ...]] = []
 
     def command_line(command, project_path, configuration="Debug", extra_args=None):
         commands.append(command.value)
         source = str(invalid_source) if command.value in failed_commands else project_path
-        return [
+        # Windows venv launchers may rewrite argv[0], not the declared invocation.
+        invocation = [
             sys.executable,
             "-c",
             "import json, os, py_compile, sys; "
-            "print(json.dumps({'argv': sys.orig_argv, 'cwd': os.getcwd()}), flush=True); "
+            "print(json.dumps({'args': sys.orig_argv[1:], 'cwd': os.getcwd()}), flush=True); "
             "py_compile.compile(sys.argv[1], doraise=True)",
             source,
         ]
+        invocations.append(tuple(invocation))
+        return invocation
 
     monkeypatch.setattr(build_session._policy, "get_dotnet_command", command_line)
-    return manager, project, failed_commands, commands
+    return manager, project, failed_commands, commands, invocations
 
 
 class TestFailedPreBuildDiagnostics:
@@ -509,7 +513,7 @@ class TestFailedPreBuildDiagnostics:
         command_backend,
         burst_stdout=False,
     ):
-        manager, project, _failed_commands, commands = prebuild_diagnostics_session
+        manager, project, _failed_commands, commands, _ = prebuild_diagnostics_session
         build_session = manager._build_manager.get_session(str(project.parent))
         monkeypatch.setattr(
             "netcoredbg_mcp.build.session._IS_WINDOWS", command_backend == "windows_owner"
@@ -699,7 +703,7 @@ class TestFailedPreBuildDiagnostics:
     async def test_unrelated_exception_omits_retained_failed_result(
         self, prebuild_diagnostics_session, capturing_mcp, monkeypatch
     ):
-        manager, project, failed_commands, commands = prebuild_diagnostics_session
+        manager, project, failed_commands, commands, _ = prebuild_diagnostics_session
         failed_commands.add("build")
         with pytest.raises(BuildError):
             await manager.pre_launch_build(str(project), restore_first=False)
@@ -735,7 +739,7 @@ class TestFailedPreBuildDiagnostics:
     async def test_failed_process_reaches_start_debug_response(
         self, prebuild_diagnostics_session, capturing_mcp, monkeypatch, failed_stage
     ):
-        manager, project, failed_commands, commands = prebuild_diagnostics_session
+        manager, project, failed_commands, commands, invocations = prebuild_diagnostics_session
         failed_commands.add(failed_stage)
         start_debugger = AsyncMock(side_effect=AssertionError("Debugger must not start"))
         monkeypatch.setattr(manager.client, "start", start_debugger)
@@ -764,7 +768,8 @@ class TestFailedPreBuildDiagnostics:
         assert actual.exit_code == 1
         assert actual.diagnostics == []
         process_identity = json.loads(actual.stdout.splitlines()[0])
-        assert actual.command_line == tuple(process_identity["argv"])
+        assert actual.command_line == invocations[-1]
+        assert actual.command_line[1:] == tuple(process_identity["args"])
         assert os.path.samefile(actual.working_directory, process_identity["cwd"])
         assert "SyntaxError" in actual.stderr
         assert commands == (["restore"] if failed_stage == "restore" else ["restore", "build"])
@@ -778,7 +783,7 @@ class TestFailedPreBuildDiagnostics:
     async def test_failed_process_reaches_public_diagnostics(
         self, prebuild_diagnostics_session, capturing_mcp, monkeypatch, failed_stage
     ):
-        manager, project, failed_commands, commands = prebuild_diagnostics_session
+        manager, project, failed_commands, commands, invocations = prebuild_diagnostics_session
         failed_commands.add(failed_stage)
         monkeypatch.setenv("NCD3_TEST_SECRET", "not-for-build-diagnostics")
         register_output_tools(capturing_mcp, manager)
@@ -805,9 +810,10 @@ class TestFailedPreBuildDiagnostics:
         assert data["errorCount"] == 0
         assert data["stdout"] == actual.stdout
         assert data["stderr"] == actual.stderr
-        assert data["commandLine"] == process_identity["argv"]
+        assert data["commandLine"] == list(invocations[-1])
         assert os.path.samefile(data["workingDirectory"], process_identity["cwd"])
-        assert actual.command_line == tuple(process_identity["argv"])
+        assert actual.command_line == invocations[-1]
+        assert actual.command_line[1:] == tuple(process_identity["args"])
         assert actual.working_directory == str(project.parent)
         assert manager.last_build_result is actual
         assert commands == (["restore"] if failed_stage == "restore" else ["restore", "build"])
@@ -818,7 +824,7 @@ class TestFailedPreBuildDiagnostics:
     async def test_failed_rebuild_preserves_executed_command(
         self, prebuild_diagnostics_session, failed_stage
     ):
-        manager, project, failed_commands, commands = prebuild_diagnostics_session
+        manager, project, failed_commands, commands, invocations = prebuild_diagnostics_session
         failed_commands.add(failed_stage)
 
         result = await manager._build_manager.build(
@@ -830,8 +836,9 @@ class TestFailedPreBuildDiagnostics:
         assert result.success is False
         assert result.exit_code == 1
         assert result.command == failed_stage
-        assert result.command_line == tuple(process_identity["argv"])
-        assert data["commandLine"] == process_identity["argv"]
+        assert result.command_line == invocations[-1]
+        assert result.command_line[1:] == tuple(process_identity["args"])
+        assert data["commandLine"] == list(invocations[-1])
         assert os.path.samefile(data["workingDirectory"], process_identity["cwd"])
         assert commands == (["clean"] if failed_stage == "clean" else ["clean", "rebuild"])
 
@@ -840,7 +847,7 @@ class TestFailedPreBuildDiagnostics:
     async def test_rejected_attempt_does_not_publish_previous_result(
         self, prebuild_diagnostics_session, capturing_mcp, monkeypatch, rejected_attempt
     ):
-        manager, project, _failed_commands, _commands = prebuild_diagnostics_session
+        manager, project, _failed_commands, _commands, _ = prebuild_diagnostics_session
         register_output_tools(capturing_mcp, manager)
         previous = await manager.pre_launch_build(str(project), restore_first=False)
         assert manager.last_build_result is previous
@@ -879,7 +886,7 @@ class TestFailedPreBuildDiagnostics:
     async def test_owner_refusal_does_not_publish_previous_result(
         self, prebuild_diagnostics_session, capturing_mcp, monkeypatch, entry_point, refusal
     ):
-        manager, project, _failed_commands, commands = prebuild_diagnostics_session
+        manager, project, _failed_commands, commands, _ = prebuild_diagnostics_session
         register_output_tools(capturing_mcp, manager)
         previous = await manager.pre_launch_build(str(project), restore_first=False)
         assert previous.success is True
@@ -955,7 +962,7 @@ class TestFailedPreBuildDiagnostics:
         access_error,
         clear_result,
     ):
-        manager, project, failed_commands, commands = prebuild_diagnostics_session
+        manager, project, failed_commands, commands, _ = prebuild_diagnostics_session
         if rejection in {"invalid_program", "missing_program"}:
             failed_commands.add("build")
             with pytest.raises(BuildError):
@@ -1031,7 +1038,7 @@ class TestFailedPreBuildDiagnostics:
         capturing_mcp,
         entry_point,
     ):
-        manager, project, _failed_commands, commands = prebuild_diagnostics_session
+        manager, project, _failed_commands, commands, _ = prebuild_diagnostics_session
         previous = await manager.pre_launch_build(str(project), restore_first=False)
         register_output_tools(capturing_mcp, manager)
         with pytest.raises((ValueError, RuntimeError)):
