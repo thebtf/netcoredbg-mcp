@@ -138,10 +138,7 @@ public static class JsonRpcHandler
 
         try
         {
-            Program.TraceConnect("uia-init-begin");
-            var automation = Automation;
-            Program.TraceConnect("uia-init-end");
-            return handler(@params, automation, MainWindow);
+            return handler(@params, Automation, MainWindow);
         }
         catch (Exception ex)
         {

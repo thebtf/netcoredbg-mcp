@@ -21,23 +21,17 @@ public static class ElementCommands
         var creationTicks = process.StartTime.ToUniversalTime().Ticks;
         var sessionId = checked((uint)process.SessionId);
 
-        Program.TraceConnect("get-desktop-begin");
         var desktop = automation.GetDesktop();
-        Program.TraceConnect("get-desktop-end");
-        Program.TraceConnect("find-children-begin");
         var windows = desktop.FindAllChildren(
             new ConditionFactory(automation.PropertyLibrary)
                 .ByProcessId(pid));
-        Program.TraceConnect("find-children-end");
 
         if (windows.Length == 0)
             throw new InvalidOperationException($"No window found for process {pid}");
 
-        Program.TraceConnect("selection-begin");
         var window = SelectPrimaryWindow(windows)
             ?? throw new InvalidOperationException(
                 $"No window found for process {pid}: no usable top-level window yet");
-        Program.TraceConnect("selection-end");
         var hwnd = window.Properties.NativeWindowHandle.ValueOrDefault;
         if (process.HasExited || NativeScreenshotCaptureTransport.ReadWindowProcessId(hwnd) != checked((uint)pid))
             throw new InvalidOperationException("Connect target changed while binding process identity.");

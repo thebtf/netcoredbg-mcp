@@ -13,12 +13,6 @@ public static class Program
     private const int MaximumPipeRequestBytes = 1 * 1024 * 1024;
     private const int MaximumPipeResponseBytes = 96 * 1024 * 1024;
 
-    // TEMPORARY protected62 connect diagnosis; remove all phase tracing before merge.
-    private static readonly bool ConnectPhaseTraceEnabled =
-        Environment.GetEnvironmentVariable("NETCOREDBG_CONNECT_PHASE_TRACE") == "1";
-    [ThreadStatic]
-    private static long? _connectTraceRequestId;
-
     public static async Task Main(string[] args)
     {
         AppDomain.CurrentDomain.ProcessExit += (_, _) => ModifierCommands.ReleaseAllHeldModifiers();
@@ -52,16 +46,12 @@ public static class Program
             if (string.IsNullOrWhiteSpace(line))
                 continue;
 
-            _connectTraceRequestId = null;
             JsonNode? response = ProcessRequest(line);
             if (response is null)
                 continue;
 
-            TraceConnect("response-built");
             Console.Out.WriteLine(response.ToJsonString());
             Console.Out.Flush();
-            TraceConnect("stdout-flushed");
-            _connectTraceRequestId = null;
         }
 
         Log("stdin closed, shutting down.");
@@ -187,13 +177,6 @@ public static class Program
             if (method is null)
                 return CreateErrorResponse(id, -32600, "Invalid request: missing 'method'");
 
-            if (ConnectPhaseTraceEnabled && method == "connect" &&
-                id is JsonValue value && value.TryGetValue<long>(out var requestId))
-            {
-                _connectTraceRequestId = requestId;
-                TraceConnect("request-received");
-            }
-
             Log($"<-- {method} (id={id})");
 
             if (method == "shutdown")
@@ -244,15 +227,6 @@ public static class Program
                 ["message"] = message
             }
         };
-    }
-
-    internal static void TraceConnect(string phase)
-    {
-        if (_connectTraceRequestId is not long requestId)
-            return;
-        Log(
-            $"NCD4_CONNECT_PHASE request_id={requestId} phase={phase} utc={DateTimeOffset.UtcNow:O} " +
-            $"pid={Environment.ProcessId} thread={Environment.CurrentManagedThreadId} apartment={Thread.CurrentThread.GetApartmentState()}");
     }
 
     internal static void Log(string message)
