@@ -10,6 +10,7 @@ import subprocess
 import sys
 import zipfile
 from collections.abc import Mapping
+from copy import deepcopy
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -1078,6 +1079,781 @@ def test_seal_retained_consumer_proof_requires_every_functional_release_gate(
             candidate_identity_reference=identity_reference,
             release_gate_catalog=catalog,
         )
+
+
+_S2_S3_LENSES = (
+    "dependency-cve",
+    "dotnet-unsafe-pattern",
+    "owasp-input-output-path",
+    "attack-surface",
+    "secret-asset-manifest",
+    "path-process-fail-closed",
+    "exploitability",
+)
+_REVIEW_SEALERS = (
+    ("seal_s2_s3_lens_result", "lens"),
+    ("seal_s2_s3_review_aggregate", "aggregate"),
+    ("seal_independent_pr_review", "pr_review"),
+)
+
+
+def _simulated_review_inputs(tmp_path: Path) -> dict[str, Any]:
+    # Simulated validator inputs only; these are never reviewer or acceptance receipts.
+    consumer, identity, identity_bytes, consumer_reference, catalog = (
+        _valid_retained_consumer_proof(tmp_path)
+    )
+    identity_reference = {
+        "repository": consumer_reference["repository"],
+        "run_id": consumer_reference["run_id"],
+        "artifact_id": consumer_reference["artifact"]["id"],
+        "path": consumer_reference["path"],
+        "sha256": consumer_reference["sha256"],
+    }
+    binding = {
+        "candidate_identity_record": identity_reference,
+        "candidate_identity_record_sha256": _sha256_bytes(identity_bytes),
+        "candidate": identity["candidate"],
+    }
+    review = {
+        **binding,
+        "reviewer_provenance": {
+            "reviewer_principal_id": "simulated-reviewer",
+            "reviewer_role": "SECURITY_REVIEWER",
+            "independence_basis": "DISTINCT_REVIEWER_AND_PRODUCER",
+        },
+        "producer_provenance": {
+            "producer_principal_id": "simulated-producer",
+            "operation": "seal_s2_s3_lens_result",
+        },
+        "denominator": {"required_evidence_count": 1, "completed_evidence_count": 1},
+        "findings": {
+            "records": [
+                {
+                    "finding_id": "simulated-evidence-001",
+                    "severity": "INFO",
+                    "disposition": "NOT_APPLICABLE",
+                    "observed_result": "SUCCESS",
+                }
+            ],
+            "unresolved_high_severity_count": 0,
+        },
+        "result": {"expected": "EXPECT_SUCCESS", "observed": "SUCCESS"},
+        "outcome": "PASS",
+        "recorded_at": "2030-01-01T00:00:00Z",
+    }
+    lenses = [
+        {**review, "lens": lens, "lens_order": order}
+        for order, lens in enumerate(_S2_S3_LENSES, start=1)
+    ]
+    aggregate = {
+        "aggregate_schema_version": "1.0",
+        "aggregate_id": "simulated-aggregate-001",
+        "aggregate_producer": {
+            "helper_path": "scripts/stateless_preview_artifact.py",
+            "operation": "seal_s2_s3_review_aggregate",
+        },
+        **binding,
+        "lens_results": lenses,
+        "coverage_summary": {
+            "required_lens_count": 7,
+            "completed_lens_count": 7,
+            "unresolved_high_severity_count": 0,
+        },
+        "outcome": "PASS",
+        "sealed_at": "2030-01-01T00:00:00Z",
+    }
+    pr_review = {
+        **review,
+        "receipt_schema_version": "1.0",
+        "receipt_id": "simulated-pr-review-001",
+        "review_target": {
+            "repository": REPOSITORY,
+            "pull_request_id": "801",
+            "reviewed_commit": identity["candidate"]["source"]["commit"],
+            "base_ref": SOURCE_REF,
+        },
+        "reviewer_provenance": {
+            "reviewer_principal_id": "simulated-pr-reviewer",
+            "reviewed_author_principal_id": "simulated-author",
+            "independence_basis": "DISTINCT_REVIEWER_AND_AUTHOR",
+        },
+        "producer_provenance": {
+            "producer_principal_id": "simulated-producer",
+            "operation": "seal_independent_pr_review",
+        },
+    }
+    inputs = json.loads(
+        json.dumps(
+            {
+                "candidate_identity": identity,
+                "candidate_identity_reference": identity_reference,
+                "consumer_identity_reference": consumer_reference,
+                "consumer": consumer,
+                "catalog": catalog,
+                "lens": lenses[0],
+                "aggregate": aggregate,
+                "pr_review": pr_review,
+            }
+        )
+    )
+    inputs["candidate_identity_bytes"] = identity_bytes
+    inputs["repository_root"] = tmp_path / "authority-root"
+    return inputs
+
+
+@pytest.fixture(scope="module")
+def _semantic_review_seed(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+    return _simulated_review_inputs(tmp_path_factory.mktemp("simulated-review-source"))
+
+
+@pytest.fixture
+def semantic_review_inputs(_semantic_review_seed: dict[str, Any]) -> dict[str, Any]:
+    return deepcopy(_semantic_review_seed)
+
+
+def _review_binding(inputs: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "candidate_identity": inputs["candidate_identity"],
+        "candidate_identity_bytes": inputs["candidate_identity_bytes"],
+        "candidate_identity_reference": inputs["consumer_identity_reference"],
+    }
+
+
+def _validate_review_schema(value: Mapping[str, Any], schema_reference: str) -> None:
+    contracts = RELEASE_GATE_CATALOG_CONTRACT.parent
+    schema_name, _, fragment = schema_reference.partition("#")
+    schema_paths = (
+        *contracts.glob("*.schema.json"),
+        *(PROJECT_ROOT / "specs/005-stateless-preview/contracts").glob("*.schema.json"),
+    )
+    registry = Registry().with_resources(
+        (
+            path.resolve().as_uri(),
+            Resource.from_contents(json.loads(path.read_text(encoding="utf-8"))),
+        )
+        for path in schema_paths
+    )
+    Draft202012Validator(
+        {
+            "$ref": (contracts / schema_name).resolve().as_uri()
+            + (f"#{fragment}" if fragment else "")
+        },
+        registry=registry,
+        format_checker=Draft202012Validator.FORMAT_CHECKER,
+    ).validate(value)
+
+
+@pytest.mark.parametrize(
+    ("operation", "record_key", "schema_reference"),
+    [
+        (*_REVIEW_SEALERS[0], "s2-s3-review.schema.json#/$defs/dependency_cve_lens"),
+        (*_REVIEW_SEALERS[1], "s2-s3-review.schema.json"),
+        (*_REVIEW_SEALERS[2], "independent-pr-review.schema.json"),
+    ],
+)
+def test_review_semantics_seal_exact_candidate_and_closed_schema(
+    semantic_review_inputs: dict[str, Any], operation: str, record_key: str, schema_reference: str
+) -> None:
+    inputs = semantic_review_inputs
+    if record_key == "lens":
+        inputs["lens"]["findings"]["records"].clear()
+    elif record_key == "aggregate":
+        for lens in inputs["aggregate"]["lens_results"]:
+            lens["findings"]["records"].clear()
+    _validate_review_schema(inputs[record_key], schema_reference)
+
+    sealed = getattr(artifact_contract, operation)(inputs[record_key], **_review_binding(inputs))
+
+    _validate_review_schema(sealed, schema_reference)
+    assert sealed["candidate"] == inputs["candidate_identity"]["candidate"]
+    assert sealed["candidate_identity_record"] == inputs["candidate_identity_reference"]
+    assert sealed["candidate_identity_record_sha256"] == _sha256_bytes(
+        inputs["candidate_identity_bytes"]
+    )
+    assert sealed["outcome"] == "PASS"
+    if record_key == "aggregate":
+        assert [row["lens"] for row in sealed["lens_results"]] == list(_S2_S3_LENSES)
+        assert sealed["coverage_summary"] == {
+            "required_lens_count": 7,
+            "completed_lens_count": 7,
+            "unresolved_high_severity_count": 0,
+        }
+
+
+@pytest.mark.parametrize(("operation", "record_key"), _REVIEW_SEALERS)
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "candidate_source",
+        "candidate_artifact",
+        "candidate_manifest",
+        "identity_repository",
+        "identity_run",
+        "identity_artifact",
+        "identity_path",
+        "identity_hash",
+        "candidate_hash",
+        "raw_identity_bytes",
+    ],
+)
+def test_review_semantics_refuse_stale_or_substituted_candidate(
+    semantic_review_inputs: dict[str, Any], operation: str, record_key: str, violation: str
+) -> None:
+    inputs = semantic_review_inputs
+    record = inputs[record_key]
+    if violation == "candidate_source":
+        record["candidate"]["source"]["commit"] = "a" * 40
+    elif violation == "candidate_artifact":
+        record["candidate"]["build"]["artifact"]["id"] = "999"
+    elif violation == "candidate_manifest":
+        record["candidate"]["preview_manifest"]["file"]["sha256"] = "a" * 64
+    elif violation.startswith("identity_"):
+        field, replacement = {
+            "identity_repository": ("repository", "other/repository"),
+            "identity_run": ("run_id", "999"),
+            "identity_artifact": ("artifact_id", "999"),
+            "identity_path": ("path", "other-candidate.json"),
+            "identity_hash": ("sha256", "a" * 64),
+        }[violation]
+        record["candidate_identity_record"][field] = replacement
+    elif violation == "candidate_hash":
+        record["candidate_identity_record_sha256"] = "a" * 64
+    else:
+        inputs["candidate_identity_bytes"] += b" "
+
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(record, **_review_binding(inputs))
+
+
+@pytest.mark.parametrize(("operation", "record_key"), (_REVIEW_SEALERS[0], _REVIEW_SEALERS[2]))
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "zero_denominator",
+        "zero_completed_count",
+        "incomplete_denominator",
+        "overcompleted_denominator",
+        "duplicate_finding",
+        "hidden_high_finding",
+        "hidden_critical_finding",
+        "producer_is_reviewer",
+        "unredacted_field",
+        "absolute_path",
+        "uri",
+        "credential_shaped_id",
+        "control_character",
+        "raw_diagnostic_result",
+        "mismatched_result",
+        "nonpassing_outcome",
+    ],
+)
+def test_review_semantics_refuse_ineligible_rows(
+    semantic_review_inputs: dict[str, Any], operation: str, record_key: str, violation: str
+) -> None:
+    inputs = semantic_review_inputs
+    record = inputs[record_key]
+    if violation == "zero_denominator":
+        record["denominator"] = {"required_evidence_count": 0, "completed_evidence_count": 0}
+    elif violation == "zero_completed_count":
+        record["denominator"]["completed_evidence_count"] = 0
+    elif violation == "incomplete_denominator":
+        record["denominator"]["required_evidence_count"] = 2
+    elif violation == "overcompleted_denominator":
+        record["denominator"]["completed_evidence_count"] = 2
+    elif violation == "duplicate_finding":
+        record["findings"]["records"].append(dict(record["findings"]["records"][0]))
+    elif violation in ("hidden_high_finding", "hidden_critical_finding"):
+        record["findings"]["records"][0].update(
+            {
+                "severity": "HIGH" if violation == "hidden_high_finding" else "CRITICAL",
+                "disposition": "UNRESOLVED",
+                "observed_result": "FAILURE",
+            }
+        )
+    elif violation == "producer_is_reviewer":
+        record["reviewer_provenance"]["reviewer_principal_id"] = record["producer_provenance"][
+            "producer_principal_id"
+        ]
+    elif violation == "unredacted_field":
+        record["findings"]["records"][0]["diagnostic"] = "simulated raw diagnostic"
+    elif violation == "mismatched_result":
+        record["result"]["observed"] = "FAILURE"
+    elif violation == "raw_diagnostic_result":
+        record["result"]["observed"] = "simulated raw diagnostic"
+    elif violation == "nonpassing_outcome":
+        record["outcome"] = "FAIL"
+    else:
+        record["reviewer_provenance"]["reviewer_principal_id"] = {
+            "absolute_path": "C:\\simulated\\private-project",
+            "uri": "https://example.invalid/simulated-review",
+            "credential_shaped_id": "ghp_simulated-not-a-credential",
+            "control_character": "simulated-reviewer\n",
+        }[violation]
+
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(record, **_review_binding(inputs))
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "missing_lens",
+        "extra_lens",
+        "duplicate_lens",
+        "out_of_order",
+        "wrong_lens_order",
+        "stale_nested_candidate",
+        "nested_identity_reference",
+        "nested_candidate_hash",
+        "nested_nonindependent_reviewer",
+        "nested_zero_denominator",
+        "nested_incomplete_denominator",
+        "nested_hidden_high_finding",
+        "nested_unredacted_field",
+        "wrong_required_count",
+        "wrong_completed_count",
+        "wrong_high_count",
+        "wrong_outcome",
+    ],
+)
+def test_review_semantics_aggregate_does_not_trust_claimed_seven_seven_zero(
+    semantic_review_inputs: dict[str, Any], violation: str
+) -> None:
+    inputs = semantic_review_inputs
+    aggregate = inputs["aggregate"]
+    rows = aggregate["lens_results"]
+    if violation == "missing_lens":
+        rows.pop()
+    elif violation == "extra_lens":
+        rows.append(json.loads(json.dumps(rows[0])))
+    elif violation == "duplicate_lens":
+        rows[-1] = json.loads(json.dumps(rows[0]))
+    elif violation == "out_of_order":
+        rows[0], rows[1] = rows[1], rows[0]
+    elif violation == "wrong_lens_order":
+        rows[0]["lens_order"] = 2
+    elif violation == "stale_nested_candidate":
+        rows[0]["candidate"]["build"]["artifact"]["id"] = "999"
+    elif violation == "nested_identity_reference":
+        rows[0]["candidate_identity_record"]["artifact_id"] = "999"
+    elif violation == "nested_candidate_hash":
+        rows[0]["candidate_identity_record_sha256"] = "a" * 64
+    elif violation == "nested_nonindependent_reviewer":
+        rows[0]["reviewer_provenance"]["reviewer_principal_id"] = "simulated-producer"
+    elif violation == "nested_zero_denominator":
+        rows[0]["denominator"] = {"required_evidence_count": 0, "completed_evidence_count": 0}
+    elif violation == "nested_incomplete_denominator":
+        rows[0]["denominator"]["required_evidence_count"] = 2
+    elif violation == "nested_hidden_high_finding":
+        rows[0]["findings"]["records"][0].update(
+            {"severity": "HIGH", "disposition": "UNRESOLVED", "observed_result": "FAILURE"}
+        )
+    elif violation == "wrong_required_count":
+        aggregate["coverage_summary"]["required_lens_count"] = 6
+    elif violation == "wrong_completed_count":
+        aggregate["coverage_summary"]["completed_lens_count"] = 6
+    elif violation == "wrong_high_count":
+        aggregate["coverage_summary"]["unresolved_high_severity_count"] = 1
+    elif violation == "wrong_outcome":
+        aggregate["outcome"] = "FAIL"
+    else:
+        rows[0]["findings"]["records"][0]["diagnostic"] = "simulated raw diagnostic"
+
+    with pytest.raises(ValueError):
+        artifact_contract.seal_s2_s3_review_aggregate(aggregate, **_review_binding(inputs))
+
+
+@pytest.mark.parametrize("violation", ["author_is_reviewer", "wrong_repository", "wrong_commit"])
+def test_review_semantics_pr_review_is_independent_and_targets_candidate(
+    semantic_review_inputs: dict[str, Any], violation: str
+) -> None:
+    inputs = semantic_review_inputs
+    review = inputs["pr_review"]
+    if violation == "author_is_reviewer":
+        review["reviewer_provenance"]["reviewer_principal_id"] = "simulated-author"
+    elif violation == "wrong_repository":
+        review["review_target"]["repository"] = "other/repository"
+    else:
+        review["review_target"]["reviewed_commit"] = "a" * 40
+
+    with pytest.raises(ValueError):
+        artifact_contract.seal_independent_pr_review(review, **_review_binding(inputs))
+
+
+@pytest.mark.parametrize("violation", ["missing_observations", "invented_completed_count"])
+def test_review_semantics_pr_denominator_is_derived_from_scoped_records(
+    semantic_review_inputs: dict[str, Any], violation: str
+) -> None:
+    inputs = semantic_review_inputs
+    review = inputs["pr_review"]
+    if violation == "missing_observations":
+        review["findings"]["records"].clear()
+    else:
+        review["denominator"] = {"required_evidence_count": 2, "completed_evidence_count": 2}
+
+    with pytest.raises(ValueError):
+        artifact_contract.seal_independent_pr_review(review, **_review_binding(inputs))
+
+
+def _simulated_stage_inputs(inputs: dict[str, Any], stage: str) -> dict[str, Any]:
+    remote = json.loads(json.dumps(inputs["consumer"]))
+    manifest = inputs["candidate_identity"]["candidate"]["preview_manifest"]
+    remote.update(
+        {
+            "receipt_id": "simulated-remote-proof-001",
+            "proof_stage": "remote_release",
+            "download_origin": {
+                "repository": REPOSITORY,
+                "release_id": "901",
+                "tag": TAG,
+                "prerelease": True,
+                "archive_asset": {"id": "902", **manifest["contents"]["archive"]},
+                "manifest_asset": {"id": "903", **manifest["file"]},
+            },
+        }
+    )
+    inputs["records"] = {
+        "retained-downloaded-consumer-proof.json": _canonical_json_bytes(inputs["consumer"]),
+        "s2-s3-seven-lens-evidence.json": _canonical_json_bytes(inputs["aggregate"]),
+        "independent-review.json": _canonical_json_bytes(inputs["pr_review"]),
+        "remote-downloaded-consumer-proof.json": _canonical_json_bytes(remote),
+    }
+
+    def reference(path: str, raw: bytes) -> dict[str, Any]:
+        return {
+            "repository": REPOSITORY,
+            "run_id": "801",
+            "artifact_id": "802",
+            "path": path,
+            "sha256": _sha256_bytes(raw),
+        }
+
+    def record_resolver(record_reference: Mapping[str, Any]) -> bytes:
+        if (
+            record_reference["repository"] != REPOSITORY
+            or record_reference["run_id"] != "801"
+            or record_reference["artifact_id"] != "802"
+        ):
+            raise ValueError("simulated artifact is unavailable")
+        try:
+            return inputs["records"][record_reference["path"]]
+        except KeyError as error:
+            raise ValueError("simulated record is unavailable") from error
+
+    catalog_bytes = _canonical_json_bytes(inputs["catalog"])
+    catalog_reference = reference("release-gate-catalog.json", catalog_bytes)
+    inputs["release_gate_catalog_bytes"] = catalog_bytes
+    inputs["release_gate_catalog_reference"] = catalog_reference
+    inputs["record_resolver"] = record_resolver
+    inputs["stage_record"] = {
+        "evidence_schema_version": "1.0",
+        "evidence_set_id": "simulated-stage-evidence-001",
+        "producer": {
+            "helper_path": "scripts/stateless_preview_artifact.py",
+            "operation": "seal_stage_gate_evidence",
+        },
+        "release_gate_catalog": dict(catalog_reference),
+        "candidate_identity_record": dict(inputs["candidate_identity_reference"]),
+        "candidate_identity_record_sha256": _sha256_bytes(inputs["candidate_identity_bytes"]),
+        "candidate": json.loads(json.dumps(inputs["candidate_identity"]["candidate"])),
+        "source_ref": SOURCE_REF,
+        "source_commit": inputs["candidate_identity"]["candidate"]["source"]["commit"],
+        "stage": stage,
+        "gate_evidence": [
+            {
+                **descriptor,
+                "record_reference": reference(
+                    descriptor["gate_id"] + ".json",
+                    inputs["records"][descriptor["gate_id"] + ".json"],
+                ),
+                "candidate_identity_record_sha256": _sha256_bytes(
+                    inputs["candidate_identity_bytes"]
+                ),
+                "source_commit": inputs["candidate_identity"]["candidate"]["source"]["commit"],
+                "outcome": "PASS",
+            }
+            for descriptor in _fixed_gate_descriptors()
+            if descriptor["stage"] == stage
+        ],
+        "outcome": "PASS",
+        "sealed_at": "2030-01-01T00:00:00Z",
+    }
+    inputs["records"] = {
+        entry["record_reference"]["path"]: inputs["records"][entry["record_reference"]["path"]]
+        for entry in inputs["stage_record"]["gate_evidence"]
+    }
+    return inputs
+
+
+def _stage_binding(inputs: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        **_review_binding(inputs),
+        "release_gate_catalog": inputs["catalog"],
+        **{
+            key: inputs[key]
+            for key in (
+                "release_gate_catalog_bytes",
+                "release_gate_catalog_reference",
+                "record_resolver",
+                "repository_root",
+            )
+        },
+    }
+
+
+def _replace_simulated_gate_record(
+    inputs: dict[str, Any], gate_index: int, record: Mapping[str, Any]
+) -> None:
+    reference = inputs["stage_record"]["gate_evidence"][gate_index]["record_reference"]
+    raw = _canonical_json_bytes(record)
+    inputs["records"][reference["path"]] = raw
+    reference["sha256"] = _sha256_bytes(raw)
+
+
+@pytest.mark.parametrize("stage", ["pre-decision", "pre-publication", "post-publication"])
+def test_stage_evidence_semantics_seal_only_ordered_catalog_subset(
+    semantic_review_inputs: dict[str, Any], stage: str
+) -> None:
+    inputs = _simulated_stage_inputs(semantic_review_inputs, stage)
+    _validate_review_schema(inputs["stage_record"], "stage-gate-evidence.schema.json")
+    record_schemas = {
+        "artifact-consumer-proof": "artifact-consumer-proof.schema.json",
+        "s2-s3-seven-lens-aggregate": "s2-s3-review.schema.json",
+        "independent-pr-review": "independent-pr-review.schema.json",
+    }
+    for entry in inputs["stage_record"]["gate_evidence"]:
+        _validate_review_schema(
+            json.loads(inputs["records"][entry["record_reference"]["path"]]),
+            record_schemas[entry["record_type"]],
+        )
+
+    sealed = artifact_contract.seal_stage_gate_evidence(
+        inputs["stage_record"], **_stage_binding(inputs)
+    )
+
+    _validate_review_schema(sealed, "stage-gate-evidence.schema.json")
+    assert [
+        {key: entry[key] for key in descriptor}
+        for entry, descriptor in zip(
+            sealed["gate_evidence"],
+            [row for row in _fixed_gate_descriptors() if row["stage"] == stage],
+            strict=True,
+        )
+    ] == [row for row in _fixed_gate_descriptors() if row["stage"] == stage]
+    assert sealed["candidate_identity_record"] == inputs["candidate_identity_reference"]
+    assert sealed["candidate"] == inputs["candidate_identity"]["candidate"]
+    assert sealed["candidate_identity_record_sha256"] == _sha256_bytes(
+        inputs["candidate_identity_bytes"]
+    )
+    assert sealed["release_gate_catalog"] == inputs["release_gate_catalog_reference"]
+    assert sealed["source_ref"] == SOURCE_REF
+    assert sealed["source_commit"] == inputs["candidate_identity"]["candidate"]["source"]["commit"]
+    assert sealed["outcome"] == "PASS"
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "missing_gate",
+        "duplicate_gate",
+        "out_of_order",
+        "future_stage_gate",
+        "wrong_record_type",
+        "authority_rule_drift",
+        "evidence_requirement_drift",
+        "wrong_gate_candidate_hash",
+        "wrong_gate_source",
+        "wrong_candidate",
+        "wrong_identity_reference",
+        "wrong_identity_hash",
+        "wrong_source_ref",
+        "wrong_source_commit",
+        "wrong_catalog_reference",
+        "wrong_catalog_hash",
+        "raw_catalog_substitution",
+        "unredacted_stage_field",
+    ],
+)
+def test_stage_evidence_semantics_refuse_unclosed_or_mismatched_set(
+    semantic_review_inputs: dict[str, Any], violation: str
+) -> None:
+    inputs = _simulated_stage_inputs(semantic_review_inputs, "pre-decision")
+    record = inputs["stage_record"]
+    entries = record["gate_evidence"]
+    if violation == "missing_gate":
+        entries.pop()
+    elif violation == "duplicate_gate":
+        entries[-1] = json.loads(json.dumps(entries[0]))
+    elif violation == "out_of_order":
+        entries[0], entries[1] = entries[1], entries[0]
+    elif violation == "future_stage_gate":
+        entries[0]["stage"] = "post-publication"
+    elif violation == "wrong_record_type":
+        entries[-1]["record_type"] = "s2-s3-seven-lens-aggregate"
+    elif violation == "authority_rule_drift":
+        entries[0]["authority_rules"] = list(reversed(AUTHORITY_RULES))
+    elif violation == "evidence_requirement_drift":
+        entries[0]["evidence_requirements"] = list(reversed(entries[0]["evidence_requirements"]))
+    elif violation == "wrong_gate_candidate_hash":
+        entries[0]["candidate_identity_record_sha256"] = "a" * 64
+    elif violation == "wrong_gate_source":
+        entries[0]["source_commit"] = "a" * 40
+    elif violation == "wrong_candidate":
+        record["candidate"]["build"]["artifact"]["id"] = "999"
+    elif violation == "wrong_identity_reference":
+        record["candidate_identity_record"]["run_id"] = "999"
+    elif violation == "wrong_identity_hash":
+        record["candidate_identity_record_sha256"] = "a" * 64
+    elif violation == "wrong_source_ref":
+        record["source_ref"] = "refs/heads/other"
+    elif violation == "wrong_source_commit":
+        record["source_commit"] = "a" * 40
+    elif violation == "wrong_catalog_reference":
+        record["release_gate_catalog"]["artifact_id"] = "999"
+    elif violation == "wrong_catalog_hash":
+        record["release_gate_catalog"]["sha256"] = "a" * 64
+    elif violation == "raw_catalog_substitution":
+        inputs["release_gate_catalog_bytes"] += b" "
+    else:
+        record["diagnostic"] = "simulated raw diagnostic"
+
+    with pytest.raises(ValueError):
+        artifact_contract.seal_stage_gate_evidence(record, **_stage_binding(inputs))
+
+
+@pytest.mark.parametrize("violation", ["source_commit", "snapshot_hash", "descriptor"])
+def test_stage_evidence_semantics_revalidate_catalog_authority(
+    semantic_review_inputs: dict[str, Any], violation: str
+) -> None:
+    inputs = _simulated_stage_inputs(semantic_review_inputs, "pre-publication")
+    catalog = inputs["catalog"]["catalog"]
+    if violation == "source_commit":
+        catalog["source_commit"] = "a" * 40
+    elif violation == "snapshot_hash":
+        catalog["policy_authority_snapshots"][0]["sha256"] = "a" * 64
+    else:
+        catalog["gate_descriptors"].pop()
+    raw = _canonical_json_bytes(inputs["catalog"])
+    inputs["release_gate_catalog_bytes"] = raw
+    inputs["release_gate_catalog_reference"]["sha256"] = _sha256_bytes(raw)
+    inputs["stage_record"]["release_gate_catalog"]["sha256"] = _sha256_bytes(raw)
+
+    with pytest.raises(ValueError):
+        artifact_contract.seal_stage_gate_evidence(inputs["stage_record"], **_stage_binding(inputs))
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "missing_raw_record",
+        "raw_byte_substitution",
+        "aggregate_instead_of_pr_review",
+        "stale_pr_review",
+        "nonindependent_pr_review",
+        "unredacted_pr_review",
+        "false_aggregate_coverage",
+        "incomplete_consumer_matrix",
+        "failed_consumer_runtime",
+        "failed_raw_review_with_claimed_passing_gate",
+    ],
+)
+def test_stage_evidence_semantics_recompute_predecision_from_raw_typed_records(
+    semantic_review_inputs: dict[str, Any], violation: str
+) -> None:
+    inputs = _simulated_stage_inputs(semantic_review_inputs, "pre-decision")
+    if violation == "missing_raw_record":
+        del inputs["records"]["independent-review.json"]
+    elif violation == "raw_byte_substitution":
+        inputs["records"]["independent-review.json"] += b" "
+    elif violation == "aggregate_instead_of_pr_review":
+        inputs["stage_record"]["gate_evidence"][2]["record_reference"] = dict(
+            inputs["stage_record"]["gate_evidence"][1]["record_reference"]
+        )
+    elif violation == "false_aggregate_coverage":
+        aggregate = inputs["aggregate"]
+        aggregate["lens_results"][0]["denominator"]["required_evidence_count"] = 2
+        _replace_simulated_gate_record(inputs, 1, aggregate)
+    elif violation in ("incomplete_consumer_matrix", "failed_consumer_runtime"):
+        consumer = inputs["consumer"]
+        if violation == "incomplete_consumer_matrix":
+            consumer["scenario_matrix"]["results"].pop()
+        else:
+            consumer["runtime_results"]["stdout_jsonrpc_only"] = False
+        _replace_simulated_gate_record(inputs, 0, consumer)
+    else:
+        review = inputs["pr_review"]
+        if violation == "stale_pr_review":
+            review["review_target"]["reviewed_commit"] = "a" * 40
+        elif violation == "nonindependent_pr_review":
+            review["reviewer_provenance"]["reviewer_principal_id"] = "simulated-author"
+        elif violation == "unredacted_pr_review":
+            review["findings"]["records"][0]["diagnostic"] = "simulated raw diagnostic"
+        else:
+            review["outcome"] = "FAIL"
+            review["result"]["observed"] = "FAILURE"
+        _replace_simulated_gate_record(inputs, 2, review)
+
+    with pytest.raises(ValueError):
+        artifact_contract.seal_stage_gate_evidence(inputs["stage_record"], **_stage_binding(inputs))
+
+
+@pytest.mark.parametrize("stage", ["pre-publication", "post-publication"])
+def test_stage_evidence_semantics_refuse_extra_entries_even_when_claimed_passing(
+    semantic_review_inputs: dict[str, Any], stage: str
+) -> None:
+    inputs = _simulated_stage_inputs(semantic_review_inputs, stage)
+    inputs["stage_record"]["gate_evidence"].append(
+        {
+            **_fixed_gate_descriptors()[0],
+            "record_reference": inputs["candidate_identity_reference"],
+            "candidate_identity_record_sha256": _sha256_bytes(inputs["candidate_identity_bytes"]),
+            "source_commit": inputs["candidate_identity"]["candidate"]["source"]["commit"],
+            "outcome": "PASS",
+        }
+    )
+
+    with pytest.raises(ValueError):
+        artifact_contract.seal_stage_gate_evidence(inputs["stage_record"], **_stage_binding(inputs))
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "missing_remote_proof",
+        "retained_proof_only",
+        "remote_archive_mismatch",
+        "failed_remote_matrix",
+    ],
+)
+def test_stage_evidence_semantics_postpublication_requires_matching_remote_proof(
+    semantic_review_inputs: dict[str, Any], violation: str
+) -> None:
+    inputs = _simulated_stage_inputs(semantic_review_inputs, "post-publication")
+    if violation == "missing_remote_proof":
+        inputs["stage_record"]["gate_evidence"].clear()
+    elif violation == "retained_proof_only":
+        _replace_simulated_gate_record(inputs, 0, inputs["consumer"])
+    else:
+        remote = json.loads(inputs["records"]["remote-downloaded-consumer-proof.json"])
+        if violation == "remote_archive_mismatch":
+            remote["download_origin"]["archive_asset"]["sha256"] = "a" * 64
+        else:
+            remote["scenario_matrix"]["results"].pop()
+        _replace_simulated_gate_record(inputs, 0, remote)
+
+    with pytest.raises(ValueError):
+        artifact_contract.seal_stage_gate_evidence(inputs["stage_record"], **_stage_binding(inputs))
+
+
+@pytest.mark.parametrize("stage", ["pre-decision", "pre-publication", "post-publication"])
+def test_stage_evidence_semantics_refuse_outcome_inconsistent_with_resolved_subset(
+    semantic_review_inputs: dict[str, Any], stage: str
+) -> None:
+    inputs = _simulated_stage_inputs(semantic_review_inputs, stage)
+    inputs["stage_record"]["outcome"] = "FAIL"
+
+    with pytest.raises(ValueError):
+        artifact_contract.seal_stage_gate_evidence(inputs["stage_record"], **_stage_binding(inputs))
 
 
 def _validator_wire_zip(tmp_path: Path, entries: Mapping[str, bytes]) -> bytes:
