@@ -4591,6 +4591,10 @@ class _EvidenceWorkflowCli:
                 ("201", 2, "in_progress", None, self.clock),
             )
         }
+        # Share defaults so existing negative mutations also reach selected-attempt metadata.
+        self.run_attempts = {
+            (run_id, str(run["run_attempt"])): run for run_id, run in self.runs.items()
+        }
         self.jobs = {
             "101": {
                 "total_count": 1,
@@ -4806,7 +4810,7 @@ class _EvidenceWorkflowCli:
         if len(route) == 2:
             return _canonical_json_bytes(self.runs[route[1]])
         if len(route) == 4 and route[2] == "attempts":
-            return _canonical_json_bytes(self.runs[route[1]])
+            return _canonical_json_bytes(self.run_attempts[(route[1], route[3])])
         assert route[-1] == "jobs"
         if "attempts" in route:
             assert route[3] in ("1", "2")
@@ -5119,6 +5123,36 @@ def test_evidence_cli_requires_successful_exact_owned_source_build(
 
     assert cli.invoke("admit-evidence") == 1
     cli.assert_not_staged()
+
+
+def test_evidence_cli_admits_successful_selected_build_attempt_after_rerun(
+    evidence_workflow_cli: _EvidenceWorkflowCli,
+) -> None:
+    cli = evidence_workflow_cli
+    originals = dict(cli.records)
+    cli.runs["101"] = {
+        **cli.runs["101"],
+        "run_attempt": 2,
+        "status": "in_progress",
+        "conclusion": None,
+    }
+
+    assert cli.invoke("admit-evidence") == 0
+
+    directory = cli.runner.resolve() / "stateless-preview-evidence-201-2"
+    assert cli.outputs() == {
+        "records_directory": str(directory / "records"),
+        "stage_path": str(directory / "pre-decision-stage.json"),
+        "decision_path": str(directory / "promotion-decision.json"),
+        "records_artifact_name": "stateless-preview-evidence-records-201-2",
+        "stage_artifact_name": "stateless-preview-evidence-stage-201-2",
+        "decision_artifact_name": "stateless-preview-evidence-decision-201-2",
+        "retention_days": "7",
+    }
+    assert {path.name: path.read_bytes() for path in (directory / "records").iterdir()} == originals
+    assert not (directory / "pre-decision-stage.json").exists()
+    assert not (directory / "promotion-decision.json").exists()
+    assert set(cli.artifacts) == {"501", "601", "701"}
 
 
 def test_evidence_cli_refuses_last_lens_predating_source_build_before_e0_staging(

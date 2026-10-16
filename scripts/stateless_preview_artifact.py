@@ -3497,7 +3497,8 @@ def _verified_evidence_build(
         _refuse("evidence cannot consume its own unfinished source build")
     run = _load_json_object(
         downloader._run_gh(
-            ["api", f"repos/{repository}/actions/runs/{run_id}"], "source build run"
+            ["api", f"repos/{repository}/actions/runs/{run_id}/attempts/{attempt}"],
+            "source build run",
         ),
         "source build run",
     )
