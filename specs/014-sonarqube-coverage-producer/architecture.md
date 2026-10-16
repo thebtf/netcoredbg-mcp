@@ -8,7 +8,7 @@
 
 Keep `scripts/run_sonarqube_exact_head.py` as the sole scanner, analysis-binding, normalization, and receipt authority. The runner verifies exact Wave-2 closure evidence and the producer toolchain before scanner begin. It derives an exact `CoveragePlan`, passes the two final report paths to scanner begin, claims a fresh run root after begin, invokes a thin producer, validates Python evidence plus five private .NET input reports, normalizes those inputs into one final .NET Cobertura report, and only then calls scanner end.
 
-`build/coverage.sh` receives a fully enumerated plan. It executes no scanner, API, report discovery, normalization, validation, or receipt decision. Python coverage runs through an external isolated locked `uv` environment. The five fixed .NET projects carry direct private `coverlet.msbuild` `10.0.1` references and use VSTest with `Microsoft.NET.Test.Sdk` `17.12.0`. MTP is rejected before scanner begin. `SonarQube.Analysis.xml` and `docs/RELEASE-PROTOCOL.md` remain unchanged.
+`build/coverage.sh` receives a fully enumerated plan. It executes no scanner, API, report discovery, normalization, validation, or receipt decision. Python coverage runs through an external isolated locked `uv` environment. The five fixed .NET projects carry direct private `coverlet.msbuild` `10.1.0` references and use VSTest with `Microsoft.NET.Test.Sdk` `17.12.0`. MTP is rejected before scanner begin. `SonarQube.Analysis.xml` and `docs/RELEASE-PROTOCOL.md` remain unchanged.
 
 ## Authority map
 
@@ -172,7 +172,7 @@ ToolchainPreflight {
   uv: available
   bash: available
   dotnet: available
-  coverlet_msbuild: 10.0.1
+  coverlet_msbuild: 10.1.0
   test_sdk: 17.12.0
   mtp_active: false
 }
@@ -233,7 +233,7 @@ The fixed Preview test project contains a real artifact-consumer journey and int
 The runner checks all of the following before scanner begin:
 
 1. `uv`, `bash`, and `dotnet` resolve to executable commands and return a version response without creating the run root.
-2. Each fixed project evaluates as `net8.0` VSTest with direct `coverlet.msbuild` `10.0.1`, direct `Microsoft.NET.Test.Sdk` `17.12.0`, and `PrivateAssets=all` for Coverlet.
+2. Each fixed project evaluates as `net8.0` VSTest with direct `coverlet.msbuild` `10.1.0`, direct `Microsoft.NET.Test.Sdk` `17.12.0`, and `PrivateAssets=all` for Coverlet.
 3. No evaluated project activates `TestingPlatformDotnetTestSupport`, references Microsoft Testing Platform, or otherwise selects MTP. The runner does not inject a property to change the platform.
 
 A missing executable is `COVERAGE_TOOL_UNAVAILABLE`. An invalid tuple is `COVERAGE_VSTEST_INCOMPATIBLE`. Active MTP is `COVERAGE_MTP_INCOMPATIBLE`. All three fail at `PLANNED` and make `begin` and `claim` unreachable.

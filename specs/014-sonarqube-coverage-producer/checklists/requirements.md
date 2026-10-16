@@ -14,7 +14,7 @@
 ## Plan, preflight, and report layout
 
 - [ ] `CoveragePlan` is pure before scanner begin and root claim.
-- [ ] The preflight checks `uv`, `bash`, `dotnet`, Coverlet `10.0.1`, Test SDK `17.12.0`, VSTest, and MTP refusal before begin and claim.
+- [ ] The preflight checks `uv`, `bash`, `dotnet`, Coverlet `10.1.0`, Test SDK `17.12.0`, VSTest, and MTP refusal before begin and claim.
 - [ ] The matrix proves every entry/preflight failure has zero begin and claim calls.
 - [ ] The marker names exactly two final Cobertura reports and five ordered private .NET producer inputs.
 - [ ] The marker requires the source hash, accepted candidate, actual PR head, artifact commit, merge commit, one integrated tree SHA, observed main, and resolved-copy path. It does not require the artifact commit to be an ancestor of the actual PR head.
@@ -26,7 +26,7 @@
 ## Producer, normalizer, and local evidence
 
 - [ ] The Python route uses isolated locked `uv` and does not make Coverage.py a permanent dependency.
-- [ ] Each .NET producer is one of the fixed five VSTest projects and has direct private Coverlet `10.0.1`.
+- [ ] Each .NET producer is one of the fixed five VSTest projects and has direct private Coverlet `10.1.0`.
 - [ ] The shell restores/tests each project and writes planned private Cobertura inputs without merge switches.
 - [ ] The normalizer consumes the fixed input order, canonicalizes source paths, unions coverage facts, and emits one lexical final .NET report.
 - [ ] Input and final validation require safe tracked production mappings and positive required denominators.

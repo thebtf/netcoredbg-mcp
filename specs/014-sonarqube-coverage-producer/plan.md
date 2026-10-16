@@ -23,7 +23,7 @@ The implementation changes the runner, focused runner tests, `.coveragerc`, `bui
 | Wave-2 entry source | External tracked `pull_request_head` artifact `specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json`, produced by Wave-2 T014 on PR #289 and now available in merged clones. It carries the reviewed source head, which equals the accepted candidate, but not the final PR head or a future main SHA. |
 | Entry validation | Before preflight, the source schema, `release_intent: none`, and canonical Git-blob source and receipt hashes validate. First-party PR evidence binds the actual PR head to the merge commit. The candidate must be ancestor-or-equal to the PR head, their integration trees must match, and the path-history artifact commit and merge commit must relate to observed main. A resolved copy under the claimed root records the source hash, candidate, PR head, artifact commit, merge commit, one integrated tree SHA, and observed main. |
 | .NET producer inventory | Five closed `net8.0` VSTest projects are private inputs in fixed order. They are not Sonar report identities. |
-| Pre-begin gate | `uv`, `bash`, `dotnet`, Coverlet `10.0.1`, Test SDK `17.12.0`, and VSTest must validate before begin and claim. MTP is refused. |
+| Pre-begin gate | `uv`, `bash`, `dotnet`, Coverlet `10.1.0`, Test SDK `17.12.0`, and VSTest must validate before begin and claim. MTP is refused. |
 | Scanner handoff | Runtime begin arguments name the two final Cobertura paths. `SonarQube.Analysis.xml` remains unchanged. |
 | Normalization | The runner owns `cobertura-merge-normalize-v1`; it validates all inputs and emits only the final `.NET` report. |
 | Diagnostic authority | `DIAGNOSTIC_COMPLETE` binds a create-new hash-checked inventory artifact with complete issue/hotspot records. |
@@ -43,7 +43,7 @@ Wave 2, not this packet, placed the tracked `pull_request_head` `wave-closure-v1
 | `tests/test_sonarqube_exact_head_runner.py` | Add the 15 behavior-first rows and fixture builders. |
 | `.coveragerc` | Add Python branch, relative-path, and source configuration. |
 | `build/coverage.sh` and `build/prepare_preview_fixture.py` | Add strict enumerated producer commands for a deterministic non-live Python coverage workload and five private .NET inputs, plus one deterministic run-local Preview archive/manifest required by the fixed Preview consumer test. |
-| Five fixed test `.csproj` files | Add direct private `coverlet.msbuild` `10.0.1` references. |
+| Five fixed test `.csproj` files | Add direct private `coverlet.msbuild` `10.1.0` references. |
 | `host/NetCoreDbg.Mcp.Stateless.Preview.Tests/PreviewArtifactConsumerTests.cs` | Accept only an explicit coverage-owned artifact root override; unchanged default behavior still requires the repository artifact location. |
 | `scripts/stateless_preview_artifact.py` and focused tests | Replace receipt schema v2 admission with unified v3 post-merge receipt validation while preserving artifact sealing behavior. |
 | `.github/workflows/stateless-preview.yml` | Add a hosted-checkout entry verification step before post-merge scan and artifact sealing. It verifies the tracked Wave-2 artifact and provisions no `.agent` state. |

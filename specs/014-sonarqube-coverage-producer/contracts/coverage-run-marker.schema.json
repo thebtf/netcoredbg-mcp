@@ -103,7 +103,7 @@
           "const": "7.15.4"
         },
         "coverlet_msbuild": {
-          "const": "10.0.1"
+          "const": "10.1.0"
         },
         "test_sdk": {
           "const": "17.12.0"
