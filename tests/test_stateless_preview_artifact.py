@@ -24,6 +24,8 @@ import pytest
 from jsonschema import Draft202012Validator, ValidationError
 from referencing import Registry, Resource
 
+from scripts import stateless_preview_artifact as artifact_contract
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT_CONTRACT_PATH = PROJECT_ROOT / "scripts" / "stateless_preview_artifact.py"
 EXACT_HEAD_RUNNER_PATH = PROJECT_ROOT / "scripts" / "run_sonarqube_exact_head.py"
@@ -46,15 +48,6 @@ AUTHORITY_RULES = [
 assert ARTIFACT_CONTRACT_PATH.is_file(), (
     "T005 preview artifact contract is missing: scripts/stateless_preview_artifact.py"
 )
-
-_spec = importlib.util.spec_from_file_location(
-    "stateless_preview_artifact",
-    ARTIFACT_CONTRACT_PATH,
-)
-assert _spec is not None and _spec.loader is not None
-artifact_contract = importlib.util.module_from_spec(_spec)
-sys.modules[_spec.name] = artifact_contract
-_spec.loader.exec_module(artifact_contract)
 
 assemble_candidate_identity = artifact_contract.assemble_candidate_identity
 verify_retained_artifact = artifact_contract.verify_retained_artifact
@@ -2167,7 +2160,7 @@ def _validator_wire_zip(tmp_path: Path, entries: Mapping[str, bytes]) -> bytes:
 
 
 def _validator_artifact_reference(*, artifact_sha256: str, path: str, sha256: str) -> Any:
-    return preview_validator.ArtifactFileReference(
+    return artifact_contract.ArtifactFileReference(
         repository=REPOSITORY,
         run_id="701",
         artifact_id="701",
@@ -2598,10 +2591,10 @@ def test_artifact_downloader_hashes_wire_bytes_before_exclusive_retention(
         path="payload.zip",
         sha256=_sha256_bytes(member),
     )
-    downloader = preview_validator.ArtifactDownloader(root)
+    downloader = artifact_contract.ArtifactDownloader(root)
     archive_path = root / "artifacts" / f"{reference.artifact_id}-{reference.artifact_sha256}.zip"
     events: list[str] = []
-    original_hash = preview_validator._sha256_bytes
+    original_hash = artifact_contract._sha256_bytes
     original_mkdir = Path.mkdir
     original_open = Path.open
 
@@ -2636,7 +2629,7 @@ def test_artifact_downloader_hashes_wire_bytes_before_exclusive_retention(
 
     monkeypatch.setattr(downloader, "_metadata", lambda _: None)
     monkeypatch.setattr(downloader, "_run_gh", fetch_wire)
-    monkeypatch.setattr(preview_validator, "_sha256_bytes", track_hash)
+    monkeypatch.setattr(artifact_contract, "_sha256_bytes", track_hash)
     monkeypatch.setattr(Path, "mkdir", track_mkdir)
     monkeypatch.setattr(Path, "open", track_open)
 
@@ -2662,7 +2655,7 @@ def test_artifact_downloader_refuses_preexisting_destination_without_caching(
     archive_path = root / "artifacts" / f"{reference.artifact_id}-{reference.artifact_sha256}.zip"
     archive_path.parent.mkdir()
     archive_path.write_bytes(b"planted archive")
-    downloader = preview_validator.ArtifactDownloader(root)
+    downloader = artifact_contract.ArtifactDownloader(root)
 
     monkeypatch.setattr(downloader, "_metadata", lambda _: None)
     monkeypatch.setattr(downloader, "_run_gh", lambda *_: wire_bytes)
@@ -2687,7 +2680,7 @@ def test_artifact_downloader_refuses_racing_destination_without_caching(
         sha256=_sha256_bytes(member),
     )
     archive_path = root / "artifacts" / f"{reference.artifact_id}-{reference.artifact_sha256}.zip"
-    downloader = preview_validator.ArtifactDownloader(root)
+    downloader = artifact_contract.ArtifactDownloader(root)
     original_open = Path.open
     race_injected = False
 
@@ -2723,7 +2716,7 @@ def test_artifact_downloader_refuses_mismatched_wire_digest_before_retention(
         path="payload.zip",
         sha256=_sha256_bytes(member),
     )
-    downloader = preview_validator.ArtifactDownloader(root)
+    downloader = artifact_contract.ArtifactDownloader(root)
 
     monkeypatch.setattr(downloader, "_metadata", lambda _: None)
     monkeypatch.setattr(downloader, "_run_gh", lambda *_: wire_bytes)
@@ -2757,7 +2750,7 @@ def test_artifact_downloader_refuses_tampered_cached_wire_before_member_read(
         path="payload.manifest.json",
         sha256=_sha256_bytes(manifest_member),
     )
-    downloader = preview_validator.ArtifactDownloader(root)
+    downloader = artifact_contract.ArtifactDownloader(root)
     requests: list[Any] = []
 
     def fetch_wire(arguments: Any, _: str) -> bytes:
@@ -2805,7 +2798,7 @@ def test_artifact_downloader_retains_payload_after_distinct_digest_checks(
         path="payload.manifest.json",
         sha256=_sha256_bytes(manifest_member),
     )
-    downloader = preview_validator.ArtifactDownloader(root)
+    downloader = artifact_contract.ArtifactDownloader(root)
 
     monkeypatch.setattr(downloader, "_metadata", lambda _: None)
     monkeypatch.setattr(downloader, "_run_gh", lambda *_: wire_bytes)
@@ -2844,7 +2837,7 @@ def test_artifact_downloader_requires_candidate_payload_digest_after_member_hash
         path="payload.manifest.json",
         sha256=_sha256_bytes(manifest_member),
     )
-    downloader = preview_validator.ArtifactDownloader(root)
+    downloader = artifact_contract.ArtifactDownloader(root)
 
     monkeypatch.setattr(downloader, "_metadata", lambda _: None)
     monkeypatch.setattr(downloader, "_run_gh", lambda *_: wire_bytes)
