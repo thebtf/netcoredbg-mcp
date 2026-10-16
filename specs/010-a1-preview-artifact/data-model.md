@@ -233,7 +233,7 @@ The Promotion Decision is the candidate-approval record defined by [promotion-de
 
 ## Promotion Attempt
 
-A Promotion Attempt 2.0 is the fresh execution-admission record defined by [promotion-attempt.schema.json](contracts/promotion-attempt.schema.json). The pure `seal_promotion_attempt` library revalidates one `APPROVE` Decision against independent current facts before any remote mutation. This is source implementation, not live authorization: permission capability remains `UNKNOWN`, and the workflow has no promote route or publisher.
+A Promotion Attempt 2.0 is the fresh execution-admission record defined by [promotion-attempt.schema.json](contracts/promotion-attempt.schema.json). The pure `seal_promotion_attempt` library revalidates one `APPROVE` Decision against independent current facts before any remote mutation. The workflow's complete publisher source now calls that seam through immutable upload/readback boundaries; source implementation is not live authorization. Permission capability remains `UNKNOWN`, and each actual promote still requires its own qualified same-job report.
 
 ### Fields
 
@@ -256,6 +256,9 @@ A Promotion Attempt 2.0 is the fresh execution-admission record defined by [prom
 - The referenced report must have the closed qualified-report shape, native log hash/source, ordered before/log/after HTTP evidence, exact numeric run/attempt/job and source/workflow SHA binding, fixed `Promote canonical-main preview candidate` name, and current initiator logins. Probe reports, missing grants, `INSUFFICIENT`/`UNAVAILABLE`, and declarations are not permission evidence. Preserve the complete explicit grants in the report; the Attempt stores only the verified two-right projection.
 - Chronology is pre-decision seal ≤ Decision ≤ pre-publication seal ≤ permission start ≤ permission finish ≤ observation ≤ classification ≤ Attempt, before candidate retention expiry. Remote records must bind the independently supplied fresh attempt ID/current run; re-derive the whole classification and require `ADMITTED`, never collision. This does not itself establish live readback truth.
 - The same dispatcher may retry only with a new independently captured attempt and fresh records. Fixed `github.token` provenance comes from trusted workflow wiring, not token introspection; App/installation IDs remain unobserved/null. An Attempt cannot start Program B/C or perform an effect.
+- The complete workflow retains Stage/report/O0 together as P0, then C0, then A, using only actual post-upload IDs/digests. Protected actions independently read back A first. A remains immutable with its initial O0/C0; later O_N/C_N records are separate retained evidence for the same attempt.
+- When draft assets are complete, a real `pre-publication-verification-N.json` typed fragment is retained with O_N before publication and rechecked against fresh exact release/asset IDs and bytes. It is an existing Remote Verification fragment, not a new schema or consumer proof. Initial published recovery cannot manufacture it retrospectively.
+- `publisher-handoff.json` carries exact retained references for later remote closure, including a nullable predecessor fragment reference. It is not the Program B Handoff, Remote Verification, post-publication Stage or fresh public consumer proof, and grants no new authority.
 
 ## Remote Observed State
 

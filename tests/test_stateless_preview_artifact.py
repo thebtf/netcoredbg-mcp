@@ -16,9 +16,13 @@ import sys
 import zipfile
 from collections.abc import Mapping
 from copy import deepcopy
+from http.client import HTTPMessage
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlsplit
+from urllib.response import addinfourl
 
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
@@ -6171,3 +6175,1555 @@ def test_evidence_cli_requires_a_real_well_formed_dispatch_event(
 
     assert artifact_contract.main(["admit-build"]) == 1
     cli.assert_not_staged()
+
+
+class _PromotionWorkflowCli(_EvidenceWorkflowCli):
+    """SIMULATED GitHub/Git edges; dispatch, retained bytes and all sealers stay real.
+
+    Workflow outputs use the existing *_path/*_artifact_name convention. P0 is
+    admission, C_N classification, A attempt and O_N observation; uploads supply
+    only the four A1_PROMOTE_*_ARTIFACT_{ID,DIGEST} environment pairs from the design.
+    No test fixture manufactures a Promotion Attempt or a classification.
+    """
+
+    def __init__(
+        self, inputs: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.native_run = subprocess.run
+        super().__init__(inputs, tmp_path, monkeypatch)
+        self.request["decision"] = "APPROVE"
+        self.sync_request()
+        # Produce the predecessor graph through the already implemented evidence CLI.
+        assert super().invoke("admit-evidence") == 0
+        evidence = self.outputs()
+        super().upload("records", evidence, self.records)
+        self.clock = "2029-01-01T00:00:01Z"
+        assert super().invoke("seal-evidence-stage") == 0
+        super().upload(
+            "stage",
+            evidence,
+            {"pre-decision-stage.json": Path(evidence["stage_path"]).read_bytes()},
+        )
+        self.clock = "2029-01-01T00:00:02Z"
+        assert super().invoke("seal-evidence-decision") == 0
+        self.decision_reference = self.compact(
+            super().upload(
+                "decision",
+                evidence,
+                {"promotion-decision.json": Path(evidence["decision_path"]).read_bytes()},
+            )
+        )
+        assert super().invoke("verify-evidence-retention") == 0
+        self.runs["201"].update(status="completed", conclusion="success")
+        self.decision = json.loads(self.artifacts["903"]["members"]["promotion-decision.json"])
+        self.clock = "2029-01-02T00:00:00Z"
+        self.seconds = 0
+        dispatcher = self.request["authorized_dispatcher"]
+        principal = {"id": int(dispatcher["id"]), "login": dispatcher["login"]}
+        self.runs["801"] = {
+            **deepcopy(self.runs["201"]),
+            "id": 801,
+            "status": "in_progress",
+            "conclusion": None,
+            "actor": dict(principal),
+            "triggering_actor": dict(principal),
+            "created_at": self.clock,
+            "updated_at": self.clock,
+        }
+        self.run_attempts[("801", "2")] = self.runs["801"]
+        self.jobs["801"] = {
+            "total_count": 1,
+            "jobs": [
+                {
+                    "id": 901,
+                    "run_id": 801,
+                    "run_attempt": 2,
+                    "head_sha": self.source_commit,
+                    "name": "Promote canonical-main preview candidate",
+                    "status": "in_progress",
+                    "conclusion": None,
+                    "url": f"https://api.github.com/repos/{REPOSITORY}/actions/jobs/901",
+                    "run_url": f"https://api.github.com/repos/{REPOSITORY}/actions/runs/801",
+                    "steps": [
+                        {
+                            "name": "Set up job",
+                            "number": 1,
+                            "status": "completed",
+                            "conclusion": "success",
+                        }
+                    ],
+                }
+            ],
+        }
+        self.permission_report = deepcopy(inputs["permission_report"])
+        self.permission_report["binding"].update(
+            head_sha=self.source_commit, workflow_sha=self.source_commit
+        )
+        self.permission_report["actor_provenance"] = {
+            "GITHUB_ACTOR": dispatcher["login"],
+            "GITHUB_TRIGGERING_ACTOR": dispatcher["login"],
+        }
+        self.inputs.clear()
+        self.inputs.update(mode="promote", preview_tag=TAG, promote_request="")
+        self.event["sender"] = dict(principal)
+        self.sync_promotion_request()
+        for name, value in {
+            "GITHUB_RUN_ID": "801",
+            "GITHUB_ACTOR": dispatcher["login"],
+            "GITHUB_ACTOR_ID": dispatcher["id"],
+            "GITHUB_TRIGGERING_ACTOR": dispatcher["login"],
+            "GITHUB_JOB": "promote",
+        }.items():
+            monkeypatch.setenv(name, value)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        self.requests.clear()
+        self.trace: list[tuple[str, Any]] = []
+        self.mutations: list[dict[str, Any]] = []
+        self.tag: dict[str, Any] | None = None
+        self.tag_objects: dict[str, dict[str, Any]] = {}
+        self.releases: list[dict[str, Any]] = []
+        self.assets: dict[int, list[dict[str, Any]]] = {}
+        self.asset_bytes: dict[int, bytes] = {}
+        self.main_target = self.source_commit
+        self.known_tag_oid: str | None = None
+        self.tag_input: bytes | None = None
+        self.push_race: str | None = None
+        self.unknown_operation: str | None = None
+        self.unknown_after_apply = False
+        self.unreadable_reconciliation = False
+        self.locations: dict[str, str] = {}
+        self.retained: dict[tuple[str, int], dict[str, Any]] = {}
+        self.admission_bytes: dict[str, bytes] = {}
+        self.attempt_bytes: bytes | None = None
+        monkeypatch.setattr(artifact_contract.subprocess, "run", self.process)
+        monkeypatch.setattr(artifact_contract, "urlopen", self.http)
+        monkeypatch.setattr(
+            artifact_contract, "build_opener", lambda *handlers: SimpleNamespace(open=self.http)
+        )
+
+    def sync_promotion_request(self) -> None:
+        self.inputs["promote_request"] = json.dumps(self.decision_reference, separators=(",", ":"))
+
+    def invoke(self, command: str, *, step: int | None = None) -> int:
+        self.seconds += 1
+        self.clock = f"2029-01-02T00:{self.seconds // 60:02d}:{self.seconds % 60:02d}Z"
+        self.event_path.write_text(json.dumps(self.event), encoding="utf-8")
+        self.output_path.write_text("", encoding="utf-8")
+        arguments = [command] if step is None else [command, "--step", str(step)]
+        result = artifact_contract.main(arguments)
+        self.locations.update(self.outputs())
+        return result
+
+    def write_permission_report(self) -> bytes:
+        report = self.permission_report
+        report["started_at"] = report["finished_at"] = self.clock
+        for request in report["requests"]:
+            request["started_at"] = request["finished_at"] = self.clock
+        raw = (json.dumps(report, indent=1) + "\r\n").encode("utf-8")
+        path = Path(self.locations["permission_path"])
+        assert path.resolve().is_relative_to(self.runner.resolve())
+        path.write_bytes(raw)
+        return raw
+
+    def retain(self, kind: str, step: int = 0) -> dict[str, Any]:
+        if kind == "admission":
+            paths = [
+                Path(self.locations[key])
+                for key in ("stage_path", "permission_path", "observation_path")
+            ]
+        elif kind == "observation":
+            paths = [Path(self.locations["observation_path"])]
+        else:
+            paths = [Path(self.locations[f"{kind}_path"])]
+        fragment = self.locations.get("pre_publication_verification_path")
+        if (
+            kind in ("admission", "observation")
+            and fragment
+            and Path(fragment).name == f"pre-publication-verification-{step}.json"
+            and Path(fragment).is_file()
+        ):
+            paths.append(Path(fragment))
+        for path in paths:
+            assert path.resolve().is_relative_to(self.runner.resolve()) and not path.is_symlink()
+        members = {path.name: path.read_bytes() for path in paths}
+        artifact_id = str(1100 + len(self.retained))
+        assert all(
+            self.locations[f"{kind}_artifact_name"] != reference["artifact"]["name"]
+            for reference in self.retained.values()
+        ), "immutable workflow uploads must have distinct artifact names"
+        reference = self.add_artifact(
+            artifact_id, self.locations[f"{kind}_artifact_name"], "801", members
+        )
+        prefix = f"A1_PROMOTE_{kind.upper()}_ARTIFACT"
+        self.environment[f"{prefix}_ID"] = artifact_id
+        self.environment[f"{prefix}_DIGEST"] = reference["artifact"]["sha256"]
+        self.retained[(kind, step)] = reference
+        self.trace.append(("upload", artifact_id))
+        if kind == "admission":
+            self.admission_bytes = members
+        elif kind == "attempt":
+            self.attempt_bytes = members["promotion-attempt.json"]
+        return reference
+
+    def stage_and_observe(self) -> None:
+        assert self.invoke("admit-promote") == 0
+        assert self.locations["retention_days"] == "7"
+        stage = json.loads(Path(self.locations["stage_path"]).read_bytes())
+        _validate_review_schema(stage, "stage-gate-evidence.schema.json")
+        assert stage["stage"] == "pre-publication" and stage["outcome"] == "PASS"
+        assert stage["candidate"] == self.identity["candidate"]
+        permission_raw = self.write_permission_report()
+        assert self.invoke("observe-promote") == 0
+        assert Path(self.locations["permission_path"]).read_bytes() == permission_raw
+        assert self.mutations == []
+
+    def classify_and_retain(self, step: int) -> dict[str, Any]:
+        assert self.invoke("classify-promote", step=step) == 0
+        record = json.loads(Path(self.locations["classification_path"]).read_bytes())
+        _validate_review_schema(record, "remote-classification.schema.json")
+        self.retain("classification", step)
+        return record
+
+    def admit_attempt(self) -> dict[str, Any]:
+        self.stage_and_observe()
+        self.retain("admission")
+        initial = self.classify_and_retain(0)
+        assert self.invoke("seal-promote-attempt") == 0
+        attempt = json.loads(Path(self.locations["attempt_path"]).read_bytes())
+        _validate_review_schema(attempt, "promotion-attempt.schema.json")
+        assert attempt["schema_version"] == "2.0"
+        assert attempt["attempt_id"] == "a1-promote-801-2-901"
+        assert (
+            attempt["authorization"]["current_github_actor"]
+            == self.request["authorized_dispatcher"]
+        )
+        assert attempt["authorization"]["permission_readback"]["execution_token"] == {
+            "source": "github.token",
+            "kind": "GITHUB_APP_INSTALLATION_TOKEN",
+            "identity_observation": "UNOBSERVED",
+            "app_id": None,
+            "installation_id": None,
+        }
+        self.retain("attempt")
+        assert self.mutations == []
+        return initial
+
+    def advance_and_retain(self, step: int) -> dict[str, Any]:
+        assert self.invoke("advance-promote", step=step) == 0
+        observation = json.loads(Path(self.locations["observation_path"]).read_bytes())
+        _validate_review_schema(observation, "remote-observation.schema.json")
+        assert observation["promotion_attempt_id"] == "a1-promote-801-2-901"
+        self.retain("observation", step)
+        return self.classify_and_retain(step)
+
+    def finish(self, step: int) -> dict[str, Any]:
+        assert self.invoke("finish-promote", step=step) == 0
+        path = Path(self.locations["handoff_path"])
+        assert path.resolve().is_relative_to(self.runner.resolve())
+        return json.loads(path.read_bytes())
+
+    def remote_asset(self, kind: str, release_id: int = 1901) -> dict[str, Any]:
+        descriptor = self.identity["candidate"]["preview_manifest"]
+        descriptor = descriptor["contents"]["archive"] if kind == "archive" else descriptor["file"]
+        raw = self.artifacts["501"]["members"][descriptor["name"]]
+        asset_id = 2900 + len(self.asset_bytes) + 1
+        asset = {
+            "id": asset_id,
+            "name": descriptor["name"],
+            "size": len(raw),
+            "state": "uploaded",
+            "digest": f"sha256:{_sha256_bytes(raw)}",
+            "url": f"https://api.github.com/repos/{REPOSITORY}/releases/assets/{asset_id}",
+        }
+        self.assets.setdefault(release_id, []).append(asset)
+        self.asset_bytes[asset_id] = raw
+        return asset
+
+    def seed_remote(self, state: str) -> None:
+        if state == "unstarted":
+            return
+        oid = "d" * 40
+        self.set_tag(oid)
+        if state == "tag_only":
+            return
+        self.releases.append(self.release_metadata(1901, draft=state != "published_complete"))
+        self.assets[1901] = []
+        for kind in ("archive", "manifest"):
+            if state in ("draft_complete", "published_complete", f"draft_{kind}_only"):
+                self.remote_asset(kind)
+
+    def set_tag(self, oid: str, *, target: str | None = None, kind: str = "tag") -> None:
+        self.tag = {"ref": f"refs/tags/{TAG}", "object": {"type": kind, "sha": oid}}
+        self.tag_objects[oid] = {
+            "sha": oid,
+            "tag": TAG,
+            "object": {"type": "commit", "sha": target or self.source_commit},
+        }
+
+    def release_metadata(self, release_id: int, *, draft: bool = True) -> dict[str, Any]:
+        return {
+            "id": release_id,
+            "tag_name": TAG,
+            "target_commitish": self.source_commit,
+            "name": TAG,
+            "body": "",
+            "draft": draft,
+            "prerelease": True,
+            "upload_url": (
+                f"https://uploads.github.com/repos/{REPOSITORY}/releases/"
+                f"{release_id}/assets{{?name,label}}"
+            ),
+            "url": f"https://api.github.com/repos/{REPOSITORY}/releases/{release_id}",
+        }
+
+    def replace_retained(self, artifact_id: str, path: str, raw: bytes) -> None:
+        artifact = self.artifacts[artifact_id]
+        artifact["members"][path] = raw
+        artifact["wire"] = _evidence_bundle_zip(list(artifact["members"].items()))
+        artifact["metadata"]["digest"] = f"sha256:{_sha256_bytes(artifact['wire'])}"
+
+    def rewrite_decision(self, change: Any) -> None:
+        change(self.decision)
+        raw = _canonical_json_bytes(self.decision)
+        self.replace_retained("903", "promotion-decision.json", raw)
+        self.decision_reference["sha256"] = _sha256_bytes(raw)
+        self.sync_promotion_request()
+
+    def mutation(self, operation: str, target: str, raw: bytes) -> bool:
+        self.mutations.append({"operation": operation, "target": target, "body": raw})
+        self.trace.append(("mutation", operation))
+        return operation == self.unknown_operation
+
+    @staticmethod
+    def not_found(endpoint: str) -> HTTPError:
+        return HTTPError(
+            f"https://api.github.com/{endpoint}", 404, "SIMULATED", HTTPMessage(), io.BytesIO(b"{}")
+        )
+
+    def response(self, endpoint: str) -> bytes:
+        if not hasattr(self, "trace") or "/actions/" in endpoint:
+            if hasattr(self, "trace"):
+                self.trace.append(("read", endpoint))
+            try:
+                return super().response(endpoint)
+            except KeyError as error:
+                raise self.not_found(endpoint) from error
+        self.requests.append(endpoint)
+        self.trace.append(("read", endpoint))
+        if self.unreadable_reconciliation and self.mutations:
+            raise URLError("SIMULATED unavailable reconciliation")
+        prefix = f"repos/{REPOSITORY}/"
+        assert endpoint.startswith(prefix), f"unexpected publication target: {endpoint}"
+        route, _, query = endpoint.removeprefix(prefix).partition("?")
+        if route == "git/ref/heads/main":
+            value: Any = {"ref": SOURCE_REF, "object": {"type": "commit", "sha": self.main_target}}
+        elif route == f"git/ref/tags/{TAG}":
+            if self.tag is None:
+                raise self.not_found(endpoint)
+            value = self.tag
+        elif route.startswith("git/tags/"):
+            oid = route.removeprefix("git/tags/")
+            if oid not in self.tag_objects:
+                raise self.not_found(endpoint)
+            value = self.tag_objects[oid]
+        elif route == "releases":
+            page = int(parse_qs(query).get("page", ["1"])[0])
+            value = self.releases[(page - 1) * 100 : page * 100]
+        elif route.startswith("releases/tags/"):
+            # GitHub's tag endpoint can miss a draft; listing must still discover it.
+            raise self.not_found(endpoint)
+        elif re.fullmatch(r"releases/\d+/assets", route):
+            release_id = int(route.split("/")[1])
+            page = int(parse_qs(query).get("page", ["1"])[0])
+            value = self.assets.get(release_id, [])[(page - 1) * 100 : page * 100]
+        elif re.fullmatch(r"releases/assets/\d+", route):
+            asset_id = int(route.rsplit("/", 1)[1])
+            self.trace.append(("download", asset_id))
+            return self.asset_bytes[asset_id]
+        elif re.fullmatch(r"releases/\d+", route):
+            matches = [
+                release for release in self.releases if release["id"] == int(route.split("/")[1])
+            ]
+            if len(matches) != 1:
+                raise self.not_found(endpoint)
+            value = {**matches[0], "assets": self.assets.get(matches[0]["id"], [])[:100]}
+        else:
+            raise AssertionError(f"unexpected publication read: {endpoint}")
+        return _canonical_json_bytes(value)
+
+    def api_write(self, method: str, endpoint: str, raw: bytes) -> bytes:
+        prefix = f"repos/{REPOSITORY}/releases"
+        if endpoint == prefix and method == "POST":
+            body = json.loads(raw)
+            assert body == {
+                "tag_name": TAG,
+                "target_commitish": self.source_commit,
+                "name": TAG,
+                "body": "",
+                "draft": True,
+                "prerelease": True,
+                "generate_release_notes": False,
+                "make_latest": "false",
+            }
+            operation = "create-draft"
+            lost = self.mutation(operation, endpoint, raw)
+            if lost and not self.unknown_after_apply:
+                raise URLError(f"SIMULATED lost {operation} response")
+            release = self.release_metadata(1901)
+            self.releases.append(release)
+            self.assets[1901] = []
+        elif endpoint == f"{prefix}/1901" and method == "PATCH":
+            assert json.loads(raw) == {"draft": False, "prerelease": True, "make_latest": "false"}
+            operation = "publish"
+            lost = self.mutation(operation, endpoint, raw)
+            release = next(value for value in self.releases if value["id"] == 1901)
+            if not lost or self.unknown_after_apply:
+                release["draft"] = False
+        else:
+            self.mutation(f"forbidden-{method}", endpoint, raw)
+            raise AssertionError(f"unexpected publication mutation: {method} {endpoint}")
+        if lost:
+            raise URLError(f"SIMULATED lost {operation} response")
+        return _canonical_json_bytes(release)
+
+    def process(self, command: Any, *args: Any, **kwargs: Any) -> Any:
+        if command[0] == "git":
+            if command[1] == "config":
+                assert command[2:] == ["--null", "--list", "--no-includes"]
+                return self.native_run(command, *args, **kwargs)
+            if command[1] in ("rev-parse", "cat-file", "show", "merge-base"):
+                return self.native_run(command, *args, **kwargs)
+            if command[1] == "mktag":
+                raw = kwargs["input"]
+                raw = raw.encode("utf-8") if isinstance(raw, str) else raw
+                self.tag_input = raw
+                self.known_tag_oid = hashlib.sha1(
+                    b"tag " + str(len(raw)).encode("ascii") + b"\0" + raw
+                ).hexdigest()
+                wire = (self.known_tag_oid + "\n").encode("ascii")
+                return subprocess.CompletedProcess(
+                    command, 0, wire.decode() if kwargs.get("text") else wire, b""
+                )
+            assert command[1] == "push", f"unexpected native Git effect: {command}"
+            lost = self.mutation("create-tag", " ".join(command), b"")
+            assert self.known_tag_oid is not None
+            assert command[2:] == [
+                "--porcelain",
+                "--no-follow-tags",
+                f"--force-with-lease=refs/tags/{TAG}:",
+                f"https://github.com/{REPOSITORY}.git",
+                f"{self.known_tag_oid}:refs/tags/{TAG}",
+            ]
+            child = kwargs.get("env", self.environment)
+            assert child.get("GIT_TERMINAL_PROMPT") == "0"
+            assert int(child.get("GIT_CONFIG_COUNT", "0")) > 0
+            config = [
+                (child[f"GIT_CONFIG_KEY_{index}"], child[f"GIT_CONFIG_VALUE_{index}"])
+                for index in range(int(child["GIT_CONFIG_COUNT"]))
+            ]
+            assert ("credential.helper", "") in config
+            assert any(
+                key.lower().endswith("followredirects") and value.lower() == "false"
+                for key, value in config
+            )
+            assert any(
+                key.lower().endswith("extraheader") and value.lower().startswith("authorization:")
+                for key, value in config
+            )
+            assert self.environment["GITHUB_TOKEN"] not in " ".join(command)
+            if self.push_race is not None:
+                oid = self.known_tag_oid if self.push_race == "same-oid" else "e" * 40
+                self.set_tag(oid)
+                flag = "=" if self.push_race == "same-oid" else "!"
+                wire = f"{flag}\trefs/tags/{TAG}:refs/tags/{TAG}\tSIMULATED race\n"
+                return subprocess.CompletedProcess(
+                    command,
+                    0 if flag == "=" else 1,
+                    wire if kwargs.get("text") else wire.encode(),
+                    "SIMULATED" if kwargs.get("text") else b"SIMULATED",
+                )
+            assert self.tag is None, "publisher attempted to overwrite an existing tag"
+            if not lost or self.unknown_after_apply:
+                self.set_tag(self.known_tag_oid)
+            if lost:
+                raise subprocess.TimeoutExpired(command, 60)
+            wire = f"*\t{self.known_tag_oid}:refs/tags/{TAG}\t[new tag]\n"
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                wire if kwargs.get("text") else wire.encode(),
+                "" if kwargs.get("text") else b"",
+            )
+        assert command[:2] == ["gh", "api"], f"unexpected build/auth/publication process: {command}"
+        child = kwargs.get("env", self.environment)
+        assert child.get("GITHUB_TOKEN") == "test-only-token"
+        assert not child.get("GH_TOKEN"), "GH_TOKEN must not override the workflow token"
+        endpoint = next(value for value in command[2:] if value.startswith("repos/"))
+        method = (
+            command[command.index("--method") + 1]
+            if "--method" in command
+            else (command[command.index("-X") + 1] if "-X" in command else "GET")
+        )
+        include_headers = "--include" in command or "-i" in command
+        try:
+            if method != "GET":
+                assert "--input" in command and not any(value in command for value in ("-f", "-F"))
+                source = command[command.index("--input") + 1]
+                raw = kwargs.get("input", b"") if source == "-" else Path(source).read_bytes()
+                raw = raw.encode("utf-8") if isinstance(raw, str) else raw
+                wire = self.api_write(method, endpoint, raw)
+            elif "--paginate" in command:
+                pages = []
+                page = 1
+                while True:
+                    separator = "&" if "?" in endpoint else "?"
+                    result = self.response(f"{endpoint}{separator}page={page}")
+                    pages.append(json.loads(result))
+                    if len(pages[-1]) < 100:
+                        break
+                    page += 1
+                wire = (
+                    _canonical_json_bytes(pages)
+                    if "--slurp" in command
+                    else b"\n".join(_canonical_json_bytes(value) for value in pages)
+                )
+            else:
+                wire = self.response(endpoint)
+        except (HTTPError, URLError) as error:
+            wire = b""
+            if include_headers and isinstance(error, HTTPError):
+                wire = (
+                    f"HTTP/2.0 {error.code} SIMULATED\r\nContent-Type: application/json\r\n\r\n".encode()
+                    + error.read()
+                )
+            return subprocess.CompletedProcess(command, 1, wire, b"SIMULATED transport failure")
+        if include_headers:
+            status = 201 if method == "POST" else 200
+            wire = (
+                f"HTTP/2.0 {status} SIMULATED\r\nContent-Type: application/json\r\n\r\n".encode()
+                + wire
+            )
+        return subprocess.CompletedProcess(command, 0, wire, b"")
+
+    def http(self, request: Any, *args: Any, **kwargs: Any) -> addinfourl:
+        url = request.full_url
+        assert request.get_header("Authorization", "").endswith(" test-only-token")
+        if url.startswith("https://uploads.github.com/"):
+            assert request.get_method() == "POST"
+            parsed = urlsplit(url)
+            assert parsed.path == f"/repos/{REPOSITORY}/releases/1901/assets"
+            query = parse_qs(parsed.query)
+            assert set(query) == {"name"} and len(query["name"]) == 1
+            name = query["name"][0]
+            kind = "archive" if name.endswith(".zip") else "manifest"
+            expected = self.identity["candidate"]["preview_manifest"]
+            descriptor = expected["contents"]["archive"] if kind == "archive" else expected["file"]
+            assert name == descriptor["name"]
+            raw = request.data
+            lost = self.mutation(f"upload-{kind}", url, raw)
+            assert isinstance(raw, bytes)
+            assert request.get_header("Content-type") == (
+                "application/zip" if kind == "archive" else "application/json"
+            )
+            assert request.get_header("Content-length") == str(len(raw))
+            assert not any(asset["name"] == name for asset in self.assets[1901])
+            if lost and not self.unknown_after_apply:
+                raise URLError(f"SIMULATED lost upload-{kind} response")
+            asset = self.remote_asset(kind)
+            self.asset_bytes[asset["id"]] = raw
+            asset.update(size=len(raw), digest=f"sha256:{_sha256_bytes(raw)}")
+            if lost:
+                raise URLError(f"SIMULATED lost upload-{kind} response")
+            wire = _canonical_json_bytes(asset)
+        else:
+            prefix = "https://api.github.com/"
+            assert url.startswith(prefix), f"unexpected HTTP target: {url}"
+            endpoint = url.removeprefix(prefix)
+            wire = (
+                self.response(endpoint)
+                if request.get_method() == "GET"
+                else self.api_write(request.get_method(), endpoint, request.data)
+            )
+        status = 201 if request.get_method() == "POST" else 200
+        parsed = urlsplit(url)
+        query = parse_qs(parsed.query)
+        page = int(query.get("page", ["1"])[0])
+        listing_count = len(self.releases) if parsed.path == f"/repos/{REPOSITORY}/releases" else 0
+        headers = HTTPMessage()
+        headers["Content-Type"] = (
+            "application/octet-stream" if "/releases/assets/" in parsed.path else "application/json"
+        )
+        if request.get_method() == "GET" and listing_count > page * 100:
+            headers["Link"] = (
+                f"<{parsed.scheme}://{parsed.netloc}{parsed.path}"
+                f'?per_page=100&page={page + 1}>; rel="next"'
+            )
+        return addinfourl(io.BytesIO(wire), headers, url, status)
+
+
+@pytest.fixture
+def promotion_workflow_cli(
+    promotion_attempt_inputs: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> _PromotionWorkflowCli:
+    return _PromotionWorkflowCli(promotion_attempt_inputs, tmp_path, monkeypatch)
+
+
+def test_promotion_cli_unstarted_to_published_complete(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+) -> None:
+    cli = promotion_workflow_cli
+    initial = cli.admit_attempt()
+    assert initial["state"] == "unstarted"
+    initial_attempt = cli.attempt_bytes
+    assert initial_attempt is not None
+    attempt = json.loads(initial_attempt)
+    assert attempt["promotion_decision"] == cli.decision_reference
+    assert attempt["remote_classification"] == cli.compact(cli.retained[("classification", 0)])
+    assert cli.advance_and_retain(1)["state"] == "draft_empty"
+    assert cli.advance_and_retain(2)["state"] == "draft_complete"
+
+    prepublication_artifact = cli.artifacts[cli.retained[("observation", 2)]["artifact"]["id"]]
+    fragment_raw = prepublication_artifact["members"]["pre-publication-verification-2.json"]
+    fragment = json.loads(fragment_raw)
+    _validate_review_schema(
+        fragment, "remote-verification.schema.json#/$defs/pre_publication_verification"
+    )
+    assert fragment["phase"] == "PRE_PUBLICATION" and fragment["outcome"] == "PASS"
+    manifest = cli.identity["candidate"]["preview_manifest"]
+    for kind, expected in (
+        ("archive", manifest["contents"]["archive"]),
+        ("manifest", manifest["file"]),
+    ):
+        asset = fragment["release"][f"{kind}_asset"]
+        assert {key: asset[key] for key in expected} == expected
+        assert _sha256_bytes(cli.asset_bytes[int(asset["id"])]) == expected["sha256"]
+    assert fragment["executable"] == manifest["contents"]["executable"]
+
+    assert cli.advance_and_retain(3)["state"] == "published_complete"
+    before_finish = deepcopy(cli.mutations)
+    cli.requests.clear()
+    handoff = cli.finish(3)
+    assert cli.mutations == before_finish
+    assert handoff["promotion_attempt"] == cli.compact(cli.retained[("attempt", 0)])
+    assert handoff["remote_observation"] == cli.compact(cli.retained[("observation", 3)])
+    assert handoff["remote_classification"] == cli.compact(cli.retained[("classification", 3)])
+    assert handoff["promotion_decision"] == cli.decision_reference
+    assert handoff["candidate_identity_record"] == cli.compact(
+        cli.request["candidate_identity_reference"]
+    )
+    assert handoff["release_gate_catalog"] == cli.compact(
+        cli.request["release_gate_catalog_reference"]
+    )
+    assert (
+        handoff["pre_decision_stage_evidence"]
+        == attempt["pre_decision_stage_evidence"]["record_reference"]
+    )
+    assert (
+        handoff["pre_publication_stage_evidence"]
+        == attempt["pre_publication_stage_evidence"]["record_reference"]
+    )
+    assert (
+        handoff["permission_report"] == attempt["authorization"]["permission_readback"]["reference"]
+    )
+    assert (
+        not {
+            "remote_consumer_proof",
+            "remote_verification",
+            "post_publication_stage_evidence",
+            "program_b_handoff",
+        }
+        & handoff.keys()
+    )
+    assert handoff["pre_publication_verification"]["sha256"] == _sha256_bytes(fragment_raw)
+    assert Path(cli.locations["attempt_path"]).read_bytes() == initial_attempt
+    assert cli.artifacts[cli.retained[("attempt", 0)]["artifact"]["id"]]["members"] == {
+        "promotion-attempt.json": initial_attempt
+    }
+    assert [entry["operation"] for entry in cli.mutations] == [
+        "create-tag",
+        "create-draft",
+        "upload-archive",
+        "upload-manifest",
+        "publish",
+    ]
+    first_write = next(index for index, entry in enumerate(cli.trace) if entry[0] == "mutation")
+    for kind in ("admission", "classification", "attempt"):
+        artifact_id = cli.retained[(kind, 0)]["artifact"]["id"]
+        upload = cli.trace.index(("upload", artifact_id))
+        readback = cli.trace.index(
+            ("read", f"repos/{REPOSITORY}/actions/artifacts/{artifact_id}/zip")
+        )
+        assert upload < readback < first_write
+    for artifact_id in ("501", "601", "701", "901", "902", "903"):
+        assert ("read", f"repos/{REPOSITORY}/actions/artifacts/{artifact_id}/zip") in cli.trace[
+            :first_write
+        ]
+        assert f"repos/{REPOSITORY}/actions/artifacts/{artifact_id}/zip" in cli.requests
+    for step, following_action in ((1, "upload-archive"), (2, "publish")):
+        following_write = cli.trace.index(("mutation", following_action))
+        for kind in ("observation", "classification"):
+            artifact_id = cli.retained[(kind, step)]["artifact"]["id"]
+            uploaded = cli.trace.index(("upload", artifact_id))
+            readback = cli.trace.index(
+                ("read", f"repos/{REPOSITORY}/actions/artifacts/{artifact_id}/zip")
+            )
+            assert uploaded < readback < following_write
+    for kind in ("observation", "classification"):
+        artifact_id = cli.retained[(kind, 3)]["artifact"]["id"]
+        assert f"repos/{REPOSITORY}/actions/artifacts/{artifact_id}/zip" in cli.requests
+
+    tag_write = cli.trace.index(("mutation", "create-tag"))
+    draft_write = cli.trace.index(("mutation", "create-draft"))
+    assert ("read", f"repos/{REPOSITORY}/git/ref/tags/{TAG}") in cli.trace[
+        tag_write + 1 : draft_write
+    ]
+    assert ("read", f"repos/{REPOSITORY}/git/tags/{cli.known_tag_oid}") in cli.trace[
+        tag_write + 1 : draft_write
+    ]
+    tagger_epoch = int(
+        artifact_contract.datetime.fromisoformat(
+            attempt["recorded_at"].replace("Z", "+00:00")
+        ).timestamp()
+    )
+    assert (
+        cli.tag_input
+        == (
+            f"object {cli.source_commit}\ntype commit\ntag {TAG}\n"
+            "tagger github-actions[bot] "
+            f"<41898282+github-actions[bot]@users.noreply.github.com> {tagger_epoch} +0000\n"
+            f"\nA1 opt-in preview\ncandidate-identity-sha256 {_sha256_bytes(cli.identity_bytes)}\n"
+            f"promotion-decision-sha256 {cli.decision_reference['sha256']}\n"
+        ).encode()
+    )
+    assert cli.tag is not None and cli.tag["object"]["sha"] == cli.known_tag_oid
+    assert (
+        cli.admission_bytes["current-job-permissions.json"]
+        == Path(cli.locations["permission_path"]).read_bytes()
+    )
+    for name in (
+        "remote-consumer-proof.json",
+        "remote-verification.json",
+        "post-publication-stage.json",
+    ):
+        assert not list(cli.runner.rglob(name)), "publisher must not invent post-publication proof"
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_initial", "expected_writes", "steps"),
+    [
+        (
+            "tag_only",
+            "tag_only",
+            ["create-draft", "upload-archive", "upload-manifest", "publish"],
+            3,
+        ),
+        ("draft_empty", "draft_empty", ["upload-archive", "upload-manifest", "publish"], 2),
+        ("draft_archive_only", "draft_partial", ["upload-manifest", "publish"], 2),
+        ("draft_manifest_only", "draft_partial", ["upload-archive", "publish"], 2),
+        ("draft_complete", "draft_complete", ["publish"], 1),
+    ],
+    ids=["tag-only", "draft-empty", "archive-only", "manifest-only", "draft-complete"],
+)
+def test_promotion_cli_resumes_only_missing_matching_work(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+    state: str,
+    expected_initial: str,
+    expected_writes: list[str],
+    steps: int,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.seed_remote(state)
+    original_assets = deepcopy(cli.asset_bytes)
+    classification = cli.admit_attempt()
+    assert classification["state"] == expected_initial
+    initial_attempt = cli.attempt_bytes
+    for step in range(1, steps + 1):
+        classification = cli.advance_and_retain(step)
+    assert classification["state"] == "published_complete"
+    cli.finish(steps)
+    assert [entry["operation"] for entry in cli.mutations] == expected_writes
+    assert cli.tag_input is None, "an existing matching annotated tag must not be recreated"
+    assert all(cli.asset_bytes[key] == raw for key, raw in original_assets.items())
+    assert Path(cli.locations["attempt_path"]).read_bytes() == initial_attempt
+
+
+def test_promotion_cli_published_recovery_does_not_fabricate_prepublication_evidence(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.seed_remote("published_complete")
+    assert cli.admit_attempt()["state"] == "published_complete"
+    handoff = cli.finish(0)
+    assert handoff.get("pre_publication_verification") is None
+    assert handoff["remote_classification"] == cli.compact(cli.retained[("classification", 0)])
+    assert not list(cli.runner.rglob("pre-publication-verification-*.json"))
+    assert cli.mutations == []
+
+
+@pytest.mark.parametrize(
+    "boundary", ["admission-upload", "classification-upload", "attempt-upload", "attempt-readback"]
+)
+def test_promotion_cli_requires_retained_admission_chain_before_any_mutation(
+    promotion_workflow_cli: _PromotionWorkflowCli, boundary: str
+) -> None:
+    cli = promotion_workflow_cli
+    cli.stage_and_observe()
+    if boundary == "admission-upload":
+        assert cli.invoke("classify-promote", step=0) == 1
+    else:
+        cli.retain("admission")
+        assert cli.invoke("classify-promote", step=0) == 0
+        if boundary == "classification-upload":
+            assert cli.invoke("seal-promote-attempt") == 1
+        else:
+            cli.retain("classification")
+            assert cli.invoke("seal-promote-attempt") == 0
+            if boundary == "attempt-readback":
+                reference = cli.retain("attempt")
+                cli.artifacts[reference["artifact"]["id"]]["wire"] += b"SIMULATED damaged readback"
+            assert cli.invoke("advance-promote", step=1) == 1
+    assert cli.mutations == []
+
+
+def test_promotion_cli_refuses_in_progress_foreign_evidence_producer(
+    promotion_workflow_cli: _PromotionWorkflowCli, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli = promotion_workflow_cli
+    producer = cli.run_attempts[("201", "2")]
+    assert producer is cli.runs["201"]
+    assert (producer["status"], producer["conclusion"]) == ("completed", "success")
+    assert (cli.runs["801"]["status"], cli.runs["801"]["conclusion"]) == ("in_progress", None)
+    producer.update(status="in_progress", conclusion=None)
+
+    assert cli.invoke("admit-promote") == 1
+    assert "STATELESS_PREVIEW_ARTIFACT_REFUSED" in capsys.readouterr().err
+    assert cli.mutations == []
+    assert not list(cli.runner.rglob("promotion-attempt.json"))
+    assert not list(cli.runner.rglob("pre-publication-stage.json"))
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "decline",
+        "decision-raw",
+        "candidate-raw",
+        "stage-raw",
+        "catalog-raw",
+        "nested-proof-raw",
+        "payload-raw",
+        "artifact-expired",
+        "expiry-time",
+        "artifact-run",
+        "stage-outcome",
+        "stage-gate-omitted",
+    ],
+)
+def test_promotion_cli_revalidates_retained_authority_before_staging(
+    promotion_workflow_cli: _PromotionWorkflowCli, violation: str
+) -> None:
+    cli = promotion_workflow_cli
+    if violation == "decline":
+        cli.rewrite_decision(lambda decision: decision.update(decision="DECLINE"))
+    elif violation in ("stage-outcome", "stage-gate-omitted"):
+        stage = json.loads(cli.artifacts["902"]["members"]["pre-decision-stage.json"])
+        if violation == "stage-outcome":
+            stage["outcome"] = "FAIL"
+        else:
+            stage["gate_evidence"].pop()
+        raw = _canonical_json_bytes(stage)
+        cli.replace_retained("902", "pre-decision-stage.json", raw)
+        cli.rewrite_decision(
+            lambda decision: decision["evidence"]["pre_decision_stage_evidence"][
+                "record_reference"
+            ].update(sha256=_sha256_bytes(raw))
+        )
+    elif violation.endswith("-raw"):
+        artifact_id, path = {
+            "decision-raw": ("903", "promotion-decision.json"),
+            "candidate-raw": ("601", "candidate-identity.json"),
+            "stage-raw": ("902", "pre-decision-stage.json"),
+            "catalog-raw": ("701", "release-gate-catalog.json"),
+            "nested-proof-raw": ("901", "consumer-proof.json"),
+            "payload-raw": (
+                "501",
+                cli.identity["candidate"]["preview_manifest"]["contents"]["archive"]["name"],
+            ),
+        }[violation]
+        cli.replace_retained(artifact_id, path, cli.artifacts[artifact_id]["members"][path] + b" ")
+    elif violation == "artifact-expired":
+        cli.artifacts["903"]["metadata"]["expired"] = True
+    elif violation == "expiry-time":
+        cli.artifacts["501"]["metadata"]["expires_at"] = "2028-12-31T23:59:59Z"
+    else:
+        cli.artifacts["903"]["metadata"]["workflow_run"]["id"] = 999
+
+    assert cli.invoke("admit-promote") == 1
+    assert not list(cli.runner.rglob("promotion-attempt.json"))
+    assert not list(cli.runner.rglob("pre-publication-stage.json"))
+    assert cli.mutations == []
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "source-run",
+        "fork",
+        "live-main",
+        "workflow-sha",
+        "run-attempt",
+        "completed-run",
+        "wrong-job",
+        "ambiguous-job",
+        "actor",
+        "rerun-actor",
+        "event-sender",
+        "probe-job",
+        "missing-token",
+    ],
+)
+def test_promotion_cli_requires_independent_current_promote_context(
+    promotion_workflow_cli: _PromotionWorkflowCli, violation: str
+) -> None:
+    cli = promotion_workflow_cli
+    run = cli.runs["801"]
+    if violation == "source-run":
+        run["head_sha"] = "a" * 40
+    elif violation == "fork":
+        run["head_repository"] = {"id": 4002, "full_name": "other/fork"}
+    elif violation == "live-main":
+        cli.main_target = "a" * 40
+    elif violation == "workflow-sha":
+        cli.environment["GITHUB_WORKFLOW_SHA"] = "a" * 40
+    elif violation == "run-attempt":
+        cli.environment["GITHUB_RUN_ATTEMPT"] = "3"
+    elif violation == "completed-run":
+        run.update(status="completed", conclusion="success")
+    elif violation == "wrong-job":
+        cli.jobs["801"]["jobs"][0]["name"] = "Probe current job permissions"
+    elif violation == "ambiguous-job":
+        cli.jobs["801"]["jobs"].append(deepcopy(cli.jobs["801"]["jobs"][0]))
+        cli.jobs["801"]["total_count"] = 2
+    elif violation == "actor":
+        cli.environment["GITHUB_ACTOR"] = "thebtf"
+    elif violation == "rerun-actor":
+        run["triggering_actor"] = {"id": 7106373, "login": "thebtf"}
+    elif violation == "event-sender":
+        cli.event["sender"]["id"] = 7106373
+    elif violation == "probe-job":
+        cli.environment["GITHUB_JOB"] = "probe_permissions"
+    else:
+        cli.environment.pop("GITHUB_TOKEN")
+    assert cli.invoke("admit-promote") == 1
+    assert cli.mutations == []
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "unavailable",
+        "unqualified",
+        "contents-read",
+        "probe",
+        "other-run",
+        "other-attempt",
+        "other-job",
+        "other-workflow",
+        "other-actor",
+        "missing-native-log",
+        "stale-report",
+    ],
+)
+def test_promotion_cli_refuses_unqualified_or_substituted_same_job_report(
+    promotion_workflow_cli: _PromotionWorkflowCli, violation: str
+) -> None:
+    cli = promotion_workflow_cli
+    assert cli.invoke("admit-promote") == 0
+    report = cli.permission_report
+    if violation == "unavailable":
+        report.update(status="UNAVAILABLE", availability="UNAVAILABLE")
+    elif violation == "unqualified":
+        report["status"] = "UNQUALIFIED"
+    elif violation == "contents-read":
+        report["grants"]["contents"] = "read"
+    elif violation == "probe":
+        report["binding"].update(
+            job_key="probe_permissions", job_name="Probe current job permissions"
+        )
+    elif violation.startswith("other-"):
+        key, value = {
+            "other-run": ("run_id", 999),
+            "other-attempt": ("run_attempt", 1),
+            "other-job": ("job_id", 999),
+            "other-workflow": ("workflow_sha", "a" * 40),
+            "other-actor": ("GITHUB_TRIGGERING_ACTOR", "thebtf"),
+        }[violation]
+        report["actor_provenance" if violation == "other-actor" else "binding"][key] = value
+    elif violation == "missing-native-log":
+        report["log_sha256"] = None
+    cli.write_permission_report()
+    if violation == "stale-report":
+        report["started_at"] = report["finished_at"] = "2029-01-01T00:00:00Z"
+        Path(cli.locations["permission_path"]).write_bytes(_canonical_json_bytes(report))
+    assert cli.invoke("observe-promote") == 1
+    assert not list(cli.runner.rglob("promotion-attempt.json"))
+    assert cli.mutations == []
+
+
+def test_promotion_cli_job_id_is_not_sourced_from_the_permission_report(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+) -> None:
+    cli = promotion_workflow_cli
+    job = cli.jobs["801"]["jobs"][0]
+    job.update(id=902, url=f"https://api.github.com/repos/{REPOSITORY}/actions/jobs/902")
+    assert cli.invoke("admit-promote") == 0
+    cli.write_permission_report()
+    assert cli.invoke("observe-promote") == 1
+    assert any("/actions/runs/801/attempts/2/jobs" in endpoint for endpoint in cli.requests)
+    assert cli.mutations == []
+
+
+@pytest.mark.parametrize(
+    "violation",
+    ["main-moved", "actor-changed", "job-changed", "decision-tamper", "report-tamper", "expired"],
+)
+def test_promotion_cli_rechecks_authority_immediately_before_mutation(
+    promotion_workflow_cli: _PromotionWorkflowCli, violation: str
+) -> None:
+    cli = promotion_workflow_cli
+    cli.admit_attempt()
+    if violation == "main-moved":
+        cli.main_target = "a" * 40
+    elif violation == "actor-changed":
+        cli.runs["801"]["triggering_actor"] = {"id": 999, "login": "other"}
+    elif violation == "job-changed":
+        job = cli.jobs["801"]["jobs"][0]
+        job.update(id=902, url=f"https://api.github.com/repos/{REPOSITORY}/actions/jobs/902")
+    elif violation == "decision-tamper":
+        cli.replace_retained("903", "promotion-decision.json", b"{}\n")
+    else:
+        artifact_id = cli.retained[("admission", 0)]["artifact"]["id"]
+        if violation == "expired":
+            cli.artifacts[artifact_id]["metadata"]["expired"] = True
+        else:
+            cli.replace_retained(artifact_id, "current-job-permissions.json", b"{}\n")
+    assert cli.invoke("advance-promote", step=1) == 1
+    assert cli.mutations == []
+
+
+def test_promotion_cli_discovers_matching_draft_on_later_release_page(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.seed_remote("draft_empty")
+    cli.releases[:0] = [
+        {**cli.release_metadata(4000 + index), "tag_name": f"unrelated-{index}"}
+        for index in range(100)
+    ]
+    assert cli.admit_attempt()["state"] == "draft_empty"
+    assert any("releases?" in endpoint and "page=2" in endpoint for endpoint in cli.requests)
+    assert cli.advance_and_retain(1)["state"] == "draft_complete"
+    assert cli.advance_and_retain(2)["state"] == "published_complete"
+    assert "create-draft" not in [entry["operation"] for entry in cli.mutations]
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "duplicate-draft",
+        "lightweight-tag",
+        "wrong-tag-target",
+        "duplicate-name",
+        "duplicate-id",
+        "extra",
+        "starter",
+        "renamed",
+        "tampered-bytes",
+    ],
+)
+def test_promotion_cli_observes_collisions_without_repairing_remote_objects(
+    promotion_workflow_cli: _PromotionWorkflowCli, violation: str
+) -> None:
+    cli = promotion_workflow_cli
+    cli.seed_remote("draft_complete")
+    if violation == "duplicate-draft":
+        cli.releases.append(cli.release_metadata(1902))
+    elif violation == "lightweight-tag":
+        cli.set_tag(cli.source_commit, kind="commit")
+    elif violation == "wrong-tag-target":
+        cli.set_tag("d" * 40, target="a" * 40)
+    else:
+        archive = cli.assets[1901][0]
+        if violation == "duplicate-name":
+            duplicate = {**archive, "id": 3901}
+            cli.assets[1901].append(duplicate)
+            cli.asset_bytes[3901] = cli.asset_bytes[archive["id"]]
+        elif violation == "duplicate-id":
+            cli.assets[1901][1]["id"] = archive["id"]
+        elif violation == "extra":
+            cli.assets[1901].append({**archive, "id": 3901, "name": "unexpected.zip"})
+            cli.asset_bytes[3901] = b"SIMULATED unexpected asset"
+        elif violation == "starter":
+            archive["state"] = "starter"
+        elif violation == "renamed":
+            archive["name"] = "unapproved-name.zip"
+        else:
+            raw = cli.asset_bytes[archive["id"]]
+            cli.asset_bytes[archive["id"]] = bytes([raw[0] ^ 1]) + raw[1:]
+    cli.stage_and_observe()
+    cli.retain("admission")
+    classification = cli.classify_and_retain(0)
+    assert classification["state"] == "collision"
+    assert classification["admission"] == "REFUSED" and classification["allowed_action"] == "REFUSE"
+    assert cli.invoke("seal-promote-attempt") == 1
+    assert cli.mutations == []
+
+
+@pytest.mark.parametrize("race", ["same-oid", "other-oid-same-commit"])
+def test_promotion_cli_create_only_tag_lease_refuses_racing_or_up_to_date_result(
+    promotion_workflow_cli: _PromotionWorkflowCli, race: str
+) -> None:
+    cli = promotion_workflow_cli
+    cli.admit_attempt()
+    cli.push_race = race
+    assert cli.invoke("advance-promote", step=1) == 1
+    assert [entry["operation"] for entry in cli.mutations] == ["create-tag"]
+    assert cli.releases == []
+    assert cli.tag is not None
+
+
+@pytest.mark.parametrize(
+    ("operation", "state"),
+    [
+        ("create-tag", "unstarted"),
+        ("create-draft", "tag_only"),
+        ("upload-archive", "draft_manifest_only"),
+        ("upload-manifest", "draft_archive_only"),
+        ("publish", "draft_complete"),
+    ],
+)
+@pytest.mark.parametrize("applied", [False, True], ids=["not-applied", "applied-response-lost"])
+def test_promotion_cli_unknown_write_is_reconciled_once_and_never_replayed(
+    promotion_workflow_cli: _PromotionWorkflowCli, operation: str, state: str, applied: bool
+) -> None:
+    cli = promotion_workflow_cli
+    cli.seed_remote(state)
+    cli.admit_attempt()
+    cli.unknown_operation = operation
+    cli.unknown_after_apply = applied
+    result = cli.invoke("advance-promote", step=1)
+    assert result == (0 if applied else 1)
+    assert sum(entry["operation"] == operation for entry in cli.mutations) == 1
+    if applied:
+        cli.retain("observation", 1)
+        classification = cli.classify_and_retain(1)
+        assert (
+            classification["state"]
+            == {
+                "create-tag": "draft_empty",
+                "create-draft": "draft_empty",
+                "upload-archive": "draft_complete",
+                "upload-manifest": "draft_complete",
+                "publish": "published_complete",
+            }[operation]
+        )
+        if operation == "create-tag":
+            assert cli.tag is not None and cli.tag["object"]["sha"] == cli.known_tag_oid
+    else:
+        assert [entry["operation"] for entry in cli.mutations] == [operation]
+    writes = deepcopy(cli.mutations)
+    assert cli.invoke("advance-promote", step=1) == 1
+    assert cli.mutations == writes
+
+
+def test_promotion_cli_unknown_tag_write_with_unreadable_reconciliation_stops(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.admit_attempt()
+    cli.unknown_operation = "create-tag"
+    cli.unknown_after_apply = True
+    cli.unreadable_reconciliation = True
+    assert cli.invoke("advance-promote", step=1) == 1
+    assert [entry["operation"] for entry in cli.mutations] == ["create-tag"]
+    assert cli.releases == []
+    assert cli.invoke("finish-promote", step=0) == 1
+
+
+@pytest.mark.parametrize(
+    "violation", ["missing-fragment", "false-fragment", "asset-id-changed", "bytes-changed"]
+)
+def test_promotion_cli_publish_requires_retained_prepublication_fragment_and_fresh_same_assets(
+    promotion_workflow_cli: _PromotionWorkflowCli, violation: str
+) -> None:
+    cli = promotion_workflow_cli
+    cli.seed_remote("draft_complete")
+    cli.admit_attempt()
+    reference = cli.retained[("admission", 0)]
+    artifact_id = reference["artifact"]["id"]
+    members = cli.artifacts[artifact_id]["members"]
+    fragment_name = "pre-publication-verification-0.json"
+    assert fragment_name in members
+    if violation in ("missing-fragment", "false-fragment"):
+        if violation == "missing-fragment":
+            del members[fragment_name]
+        else:
+            fragment = json.loads(members[fragment_name])
+            fragment["archive_matches_candidate"] = False
+            members[fragment_name] = _canonical_json_bytes(fragment)
+        artifact = cli.artifacts[artifact_id]
+        artifact["wire"] = _evidence_bundle_zip(list(members.items()))
+        digest = _sha256_bytes(artifact["wire"])
+        artifact["metadata"]["digest"] = f"sha256:{digest}"
+        cli.environment["A1_PROMOTE_ADMISSION_ARTIFACT_DIGEST"] = digest
+    else:
+        asset = cli.assets[1901][0]
+        if violation == "asset-id-changed":
+            cli.asset_bytes[3901] = cli.asset_bytes[asset["id"]]
+            asset["id"] = 3901
+            asset["url"] = f"https://api.github.com/repos/{REPOSITORY}/releases/assets/3901"
+        else:
+            raw = cli.asset_bytes[asset["id"]]
+            cli.asset_bytes[asset["id"]] = raw[:-1] + bytes([raw[-1] ^ 1])
+    assert cli.invoke("advance-promote", step=1) == 1
+    assert cli.mutations == []
+    assert cli.releases[0]["draft"] is True
+
+
+def test_promotion_cli_uploads_exact_binary_bytes_and_reads_back_before_next_write(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.seed_remote("draft_empty")
+    cli.admit_attempt()
+    assert cli.advance_and_retain(1)["state"] == "draft_complete"
+    for mutation in cli.mutations:
+        kind = mutation["operation"].removeprefix("upload-")
+        manifest = cli.identity["candidate"]["preview_manifest"]
+        descriptor = manifest["contents"]["archive"] if kind == "archive" else manifest["file"]
+        expected = cli.artifacts["501"]["members"][descriptor["name"]]
+        assert mutation["body"] == expected
+        assert _sha256_bytes(mutation["body"]) == descriptor["sha256"]
+        if kind == "archive":
+            assert b"\0" in expected
+    first_upload = cli.trace.index(("mutation", "upload-archive"))
+    second_upload = cli.trace.index(("mutation", "upload-manifest"))
+    assert any(entry[0] == "download" for entry in cli.trace[first_upload + 1 : second_upload])
+    before_publish = len(cli.trace)
+    assert cli.advance_and_retain(2)["state"] == "published_complete"
+    publication = cli.trace.index(("mutation", "publish"))
+    downloaded = {
+        entry[1] for entry in cli.trace[before_publish:publication] if entry[0] == "download"
+    }
+    assert downloaded == set(cli.asset_bytes)
+
+
+@pytest.mark.parametrize(
+    "boundary", ["skip-action-block", "observation-upload", "classification-upload"]
+)
+def test_promotion_cli_requires_fresh_retained_observation_and_classification_between_actions(
+    promotion_workflow_cli: _PromotionWorkflowCli, boundary: str
+) -> None:
+    cli = promotion_workflow_cli
+    cli.admit_attempt()
+    if boundary == "skip-action-block":
+        assert cli.invoke("advance-promote", step=2) == 1
+    else:
+        assert cli.invoke("advance-promote", step=1) == 0
+        if boundary == "classification-upload":
+            cli.retain("observation", 1)
+            assert cli.invoke("classify-promote", step=1) == 0
+        mutations = deepcopy(cli.mutations)
+        assert cli.invoke("advance-promote", step=2) == 1
+        assert cli.mutations == mutations
+    assert not any(entry["operation"].startswith("upload-") for entry in cli.mutations)
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "unknown-request-field",
+        "actor",
+        "source-sha",
+        "grants",
+        "release-id",
+        "path",
+        "url",
+        "token",
+        "repository",
+        "wrong-tag",
+        "mixed-build",
+        "mixed-evidence",
+        "duplicate-json-key",
+        "escaped-overflow",
+    ],
+)
+def test_promotion_cli_public_request_is_only_a_closed_retained_decision_reference(
+    promotion_workflow_cli: _PromotionWorkflowCli, violation: str
+) -> None:
+    cli = promotion_workflow_cli
+    reference = deepcopy(cli.decision_reference)
+    if violation in (
+        "unknown-request-field",
+        "actor",
+        "source-sha",
+        "grants",
+        "release-id",
+        "url",
+        "token",
+    ):
+        key, value = {
+            "unknown-request-field": ("approved", True),
+            "actor": ("actor", {"id": "17", "login": "release-bot"}),
+            "source-sha": ("source_commit", cli.source_commit),
+            "grants": ("permissions", {"contents": "write"}),
+            "release-id": ("release_id", "1901"),
+            "url": ("url", "https://example.invalid/decision.json"),
+            "token": ("GITHUB_TOKEN", "SIMULATED caller token"),
+        }[violation]
+        reference[key] = value
+    elif violation == "path":
+        reference["path"] = "../promotion-decision.json"
+    elif violation == "repository":
+        reference["repository"] = "other/repository"
+    elif violation == "wrong-tag":
+        cli.inputs["preview_tag"] = "stateless-preview-v9.9.9-preview.9"
+    elif violation == "mixed-build":
+        cli.inputs["preview_version"] = VERSION
+    elif violation == "mixed-evidence":
+        cli.inputs["evidence_request"] = "{}"
+    cli.inputs["promote_request"] = json.dumps(reference)
+    if violation == "duplicate-json-key":
+        cli.inputs["promote_request"] = (
+            cli.inputs["promote_request"][:-1] + ',"path":"promotion-decision.json"}'
+        )
+    elif violation == "escaped-overflow":
+        cli.inputs["promote_request"] += "\t" * 33_000
+        assert json.loads(cli.inputs["promote_request"]) == reference
+        assert len(cli.inputs["promote_request"]) < 65_535
+        assert len(json.dumps(cli.inputs, ensure_ascii=True, separators=(",", ":"))) > 65_535
+    assert cli.invoke("admit-promote") == 1
+    assert cli.mutations == []
+    if violation == "escaped-overflow":
+        assert cli.requests == []
+
+
+@pytest.mark.parametrize(
+    ("command", "arguments"),
+    [
+        ("admit-promote", ["--output", "caller.json"]),
+        ("observe-promote", ["--step", "0"]),
+        ("seal-promote-attempt", ["--step", "0"]),
+        ("classify-promote", ["--step", "4"]),
+        ("advance-promote", ["--step", "0"]),
+        ("advance-promote", ["--step", "4"]),
+        ("finish-promote", ["--step", "-1"]),
+    ],
+)
+def test_promotion_cli_rejects_caller_paths_and_nonfixed_action_steps(
+    promotion_workflow_cli: _PromotionWorkflowCli, command: str, arguments: list[str]
+) -> None:
+    cli = promotion_workflow_cli
+    cli.requests.clear()
+    with pytest.raises(SystemExit) as error:
+        artifact_contract.main([command, *arguments])
+    assert error.value.code == 2
+    assert cli.requests == [] and cli.mutations == []
+    assert not (cli.root / "caller.json").exists()
+
+
+def test_promotion_cli_ignores_foreign_gh_token_without_exposing_workflow_token(
+    promotion_workflow_cli: _PromotionWorkflowCli, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli = promotion_workflow_cli
+    cli.environment["GH_TOKEN"] = "SIMULATED foreign higher-precedence token"
+    assert cli.invoke("admit-promote") == 0
+    output = capsys.readouterr()
+    assert "test-only-token" not in output.out + output.err
+    assert "SIMULATED foreign higher-precedence token" not in output.out + output.err
+    assert cli.environment["GH_TOKEN"] == "SIMULATED foreign higher-precedence token"
+    assert cli.mutations == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "admit-build",
+        "prepare-payload",
+        "seal-build-records",
+        "admit-evidence",
+        "seal-evidence-stage",
+        "seal-evidence-decision",
+    ],
+)
+def test_promotion_cli_cannot_enter_build_or_evidence_effect_routes(
+    promotion_workflow_cli: _PromotionWorkflowCli, command: str
+) -> None:
+    cli = promotion_workflow_cli
+    assert cli.invoke(command) == 1
+    assert cli.mutations == []
+    assert not (cli.root / "artifacts" / "stateless-preview").exists()
+
+
+@pytest.mark.parametrize("state", ["unstarted", "draft_empty"])
+def test_promotion_cli_changed_remote_state_does_not_select_a_different_action(
+    promotion_workflow_cli: _PromotionWorkflowCli, state: str
+) -> None:
+    cli = promotion_workflow_cli
+    cli.seed_remote(state)
+    cli.admit_attempt()
+    if state == "unstarted":
+        cli.set_tag("d" * 40)
+    else:
+        cli.remote_asset("manifest")
+    assert cli.invoke("advance-promote", step=1) == 1
+    assert cli.mutations == []
+
+
+@pytest.mark.parametrize(
+    "upload_url",
+    [
+        "https://example.invalid/repos/thebtf/netcoredbg-mcp/releases/1901/assets{?name,label}",
+        "http://uploads.github.com/repos/thebtf/netcoredbg-mcp/releases/1901/assets{?name,label}",
+        "https://uploads.github.com/repos/other/repository/releases/1901/assets{?name,label}",
+        "https://uploads.github.com/repos/thebtf/netcoredbg-mcp/releases/1902/assets{?name,label}",
+    ],
+    ids=["foreign-host", "http", "foreign-repository", "different-release-id"],
+)
+def test_promotion_cli_never_sends_payload_or_token_to_an_unbound_upload_target(
+    promotion_workflow_cli: _PromotionWorkflowCli, upload_url: str
+) -> None:
+    cli = promotion_workflow_cli
+    cli.seed_remote("draft_empty")
+    cli.admit_attempt()
+    cli.releases[0]["upload_url"] = upload_url
+    assert cli.invoke("advance-promote", step=1) == 1
+    assert cli.mutations == []
+
+
+def test_promotion_cli_strips_child_auth_overrides_and_logging(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cli = promotion_workflow_cli
+    overrides = {
+        "GH_TOKEN": "SIMULATED foreign token",
+        "GH_ENTERPRISE_TOKEN": "SIMULATED foreign enterprise token",
+        "GH_DEBUG": "api",
+        "GH_HOST": "example.invalid",
+        "GH_CONFIG_DIR": "SIMULATED foreign credential cache",
+        "GITHUB_ENTERPRISE_TOKEN": "SIMULATED other token",
+        "GIT_TRACE": "1",
+        "GIT_TRACE_CURL": "1",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.extraHeader",
+        "GIT_CONFIG_VALUE_0": "Authorization: SIMULATED foreign header",
+    }
+    for key, value in overrides.items():
+        monkeypatch.setenv(key, value)
+    children = []
+
+    def process(command: Any, *args: Any, **kwargs: Any) -> Any:
+        if command[0] == "gh" or command[:2] in (
+            ["git", "push"],
+            ["git", "config"],
+            ["git", "mktag"],
+        ):
+            children.append((command, dict(kwargs["env"])))
+        return cli.process(command, *args, **kwargs)
+
+    monkeypatch.setattr(artifact_contract.subprocess, "run", process)
+    cli.admit_attempt()
+    assert cli.advance_and_retain(1)["state"] == "draft_empty"
+    assert children
+    for command, child in children:
+        assert child["GITHUB_TOKEN"] == "test-only-token"
+        assert not set(child) & {
+            "GH_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "GH_DEBUG",
+            "GH_HOST",
+            "GITHUB_ENTERPRISE_TOKEN",
+            "GIT_TRACE",
+            "GIT_TRACE_CURL",
+        }
+        assert child["GH_CONFIG_DIR"] != overrides["GH_CONFIG_DIR"]
+        assert all(
+            value not in " ".join(command) for value in ("test-only-token", overrides["GH_TOKEN"])
+        )
+    assert all(cli.environment[key] == value for key, value in overrides.items())
+    captured = capsys.readouterr()
+    assert "test-only-token" not in captured.out + captured.err
+    assert overrides["GH_TOKEN"] not in captured.out + captured.err
+
+
+def test_promotion_upload_redirect_handler_never_forwards_request_credentials() -> None:
+    request = artifact_contract.Request(
+        "https://uploads.github.com/repos/thebtf/netcoredbg-mcp/releases/1901/assets?name=approved.zip",
+        data=b"SIMULATED approved bytes",
+        method="POST",
+        headers={"Authorization": "Bearer SIMULATED workflow token"},
+    )
+    for status in (301, 302, 303, 307, 308):
+        assert (
+            artifact_contract._PromotionNoRedirect().redirect_request(
+                request,
+                None,
+                status,
+                "SIMULATED redirect",
+                HTTPMessage(),
+                "https://example.invalid/steal",
+            )
+            is None
+        )
+
+
+def test_promotion_cli_diagnostic_observation_cannot_authorize_next_action(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.admit_attempt()
+    cli.set_tag("d" * 40)
+    assert cli.invoke("advance-promote", step=1) == 1
+    cli.retain("observation", 1)
+    assert cli.invoke("classify-promote", step=1) == 1
+    assert cli.mutations == []
+
+
+@pytest.mark.parametrize("newline", [b"\r\n", b"\n"])
+def test_promotion_rest_transport_preserves_binary_header_like_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    newline: bytes,
+) -> None:
+    payload = b"SIMULATED\0archive\r\n\r\nHTTP/2.0 403 not a response\n\nend"
+    environment = {
+        "GITHUB_TOKEN": "test-only-token",
+        "GITHUB_REPOSITORY": REPOSITORY,
+        "GITHUB_RUN_ID": "801",
+        "GITHUB_RUN_ATTEMPT": "2",
+        "RUNNER_TEMP": str(tmp_path),
+    }
+
+    def process(command: Any, *args: Any, **kwargs: Any) -> Any:
+        assert command[:2] == ["gh", "api"]
+        assert kwargs["env"]["GITHUB_TOKEN"] == "test-only-token"
+        header = newline.join(
+            (b"HTTP/2.0 200 OK", b"Content-Type: application/octet-stream", b"", b"")
+        )
+        return subprocess.CompletedProcess(command, 0, header + payload, b"")
+
+    monkeypatch.setattr(artifact_contract.subprocess, "run", process)
+    status, raw = artifact_contract._promotion_gh(
+        tmp_path,
+        environment,
+        [
+            "api",
+            f"repos/{REPOSITORY}/releases/assets/2901",
+            "-H",
+            "Accept: application/octet-stream",
+        ],
+        "SIMULATED binary asset",
+    )
+    assert status == 200 and raw == payload

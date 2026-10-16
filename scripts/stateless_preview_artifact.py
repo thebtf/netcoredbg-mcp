@@ -14,16 +14,18 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import zipfile
 import zlib
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from os import PathLike
 from pathlib import Path
 from typing import Any, NoReturn
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import quote, urlencode, urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener, urlopen
 
 _CANONICAL_SOURCE_REF = "refs/heads/main"
 _TRUSTED_WORKFLOW_PATH = ".github/workflows/stateless-preview.yml"
@@ -1495,12 +1497,18 @@ class ArtifactFileReference:
 
 
 class ArtifactDownloader:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, environment: Mapping[str, str] | None = None):
         self._root = root
+        self._environment = environment
         self._archives: dict[tuple[str, str, str], tuple[Path, str]] = {}
         self._archive_directory: Path | None = None
 
     def _run_gh(self, arguments: Sequence[str], name: str) -> bytes:
+        if self._environment is not None:
+            status, raw = _promotion_gh(self._root, self._environment, arguments, name)
+            if status != 200:
+                _refuse(f"{name}: HTTP {status or 'UNKNOWN'}")
+            return raw
         try:
             result = subprocess.run(
                 ["gh", *arguments],
@@ -1575,6 +1583,15 @@ class ArtifactDownloader:
         try:
             with zipfile.ZipFile(io.BytesIO(wire_bytes)) as archive:
                 entries = [entry for entry in archive.infolist() if entry.filename == path]
+                if self._environment is not None and (
+                    len(archive.infolist()) > 64
+                    or any(
+                        entry.file_size > _PROMOTION_BINARY_LIMIT for entry in archive.infolist()
+                    )
+                    or sum(entry.file_size for entry in archive.infolist())
+                    > _PROMOTION_BINARY_LIMIT
+                ):
+                    _refuse("retained artifact exceeds publisher bounds")
                 if len(entries) != 1 or entries[0].is_dir():
                     _refuse("retained artifact file is absent or ambiguous")
                 contents = archive.read(entries[0])
@@ -3598,6 +3615,7 @@ def _read_cli_dispatch(command: str, environment: Mapping[str, str]) -> Mapping[
         "retention_days",
         "evidence_operation",
         "evidence_request",
+        "promote_request",
     }
     if (
         not isinstance(inputs, Mapping)
@@ -3629,11 +3647,20 @@ def _read_cli_dispatch(command: str, environment: Mapping[str, str]) -> Mapping[
         _refuse("workflow dispatch does not bind the canonical workflow context")
     mode = inputs.get("mode", "build")
     build_commands = ("admit-build", "prepare-payload", "seal-build-records")
+    promote_commands = (
+        "admit-promote",
+        "observe-promote",
+        "classify-promote",
+        "seal-promote-attempt",
+        "advance-promote",
+        "finish-promote",
+    )
     if mode == "build":
         if command not in build_commands or any(
-            inputs.get(key, "") for key in ("evidence_operation", "evidence_request")
+            inputs.get(key, "")
+            for key in ("evidence_operation", "evidence_request", "promote_request")
         ):
-            _refuse("build dispatch cannot execute evidence commands or accept evidence inputs")
+            _refuse("build dispatch cannot execute or accept evidence/promotion inputs")
         for key, variable in (
             ("preview_version", "A1_PREVIEW_VERSION"),
             ("preview_tag", "A1_PREVIEW_TAG"),
@@ -3642,16 +3669,33 @@ def _read_cli_dispatch(command: str, environment: Mapping[str, str]) -> Mapping[
             if not inputs.get(key) or inputs[key] != _environment_value(environment, variable):
                 _refuse("build dispatch inputs differ from the runner inputs")
     elif mode == "evidence":
-        if command in build_commands or any(
-            inputs.get(key, "") for key in ("preview_version", "preview_tag", "retention_days")
+        if command in (*build_commands, *promote_commands) or any(
+            inputs.get(key, "")
+            for key in ("preview_version", "preview_tag", "retention_days", "promote_request")
         ):
-            _refuse("evidence dispatch cannot execute build commands or accept build inputs")
+            _refuse("evidence dispatch cannot execute or accept build/promotion inputs")
         operation = inputs.get("evidence_operation")
         if operation == "permission-probe":
             if command != "admit-evidence" or inputs.get("evidence_request", ""):
                 _refuse("permission probe cannot retain evidence")
         elif operation != "retain" or not inputs.get("evidence_request"):
             _refuse("evidence dispatch operation or request is unavailable")
+    elif mode == "promote":
+        if (
+            command not in promote_commands
+            or any(
+                inputs.get(key, "")
+                for key in (
+                    "preview_version",
+                    "retention_days",
+                    "evidence_operation",
+                    "evidence_request",
+                )
+            )
+            or not inputs.get("promote_request")
+            or not inputs.get("preview_tag")
+        ):
+            _refuse("promotion requires only its closed Decision request and destination tag")
     else:
         _refuse("workflow dispatch mode is unsupported")
     return event
@@ -4342,6 +4386,1733 @@ def _verify_evidence_retention(
         _refuse("GitHub Actions summary file is unavailable")
 
 
+_PROMOTION_BINARY_LIMIT = 256 * 1024 * 1024
+_PROMOTION_JSON_LIMIT = 1024 * 1024
+_PROMOTION_JOB_NAME = "Promote canonical-main preview candidate"
+
+
+def _promotion_environment(environment: Mapping[str, str]) -> dict[str, str]:
+    token = _environment_value(environment, "GITHUB_TOKEN")
+    if any(character.isspace() for character in token):
+        _refuse("workflow token contains unsupported whitespace")
+    child = {
+        key: value
+        for key, value in environment.items()
+        if not key.upper().startswith(("GH_", "GIT_", "GCM_"))
+        and key.upper()
+        not in (
+            "SSH_ASKPASS",
+            "CURL_HOME",
+            "CURL_VERBOSE",
+            "GITHUB_ENTERPRISE_TOKEN",
+            "HTTPS_PROXY",
+            "HTTP_PROXY",
+            "ALL_PROXY",
+        )
+    }
+    temporary = Path(_environment_value(environment, "RUNNER_TEMP")).resolve(strict=True)
+    suffix = "-".join(
+        _expect_environment_identifier(environment, key)
+        for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")
+    )
+    config = temporary / f"stateless-preview-empty-gh-{suffix}"
+    if config.is_symlink() or not _path_within(config, temporary):
+        _refuse("publisher authentication directory is unsafe")
+    config.mkdir(parents=True, exist_ok=True)
+    if any(config.iterdir()):
+        _refuse("publisher authentication directory must not contain cached credentials")
+    child.update(
+        GITHUB_TOKEN=token,
+        GH_CONFIG_DIR=str(config),
+        GH_PROMPT_DISABLED="1",
+        GH_NO_UPDATE_NOTIFIER="1",
+        GH_NO_EXTENSION_UPDATE_NOTIFIER="1",
+        GIT_TERMINAL_PROMPT="0",
+        GIT_CONFIG_NOSYSTEM="1",
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_CONFIG_SYSTEM=os.devnull,
+    )
+    return child
+
+
+def _promotion_process(
+    root: Path,
+    environment: Mapping[str, str],
+    command: Sequence[str],
+    *,
+    data: bytes | None = None,
+    limit: int = _PROMOTION_JSON_LIMIT,
+) -> tuple[int | None, bytes]:
+    # File-backed capture bounds accepted bytes without an unbounded PIPE allocation.
+    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+        try:
+            result = subprocess.run(
+                list(command),
+                cwd=root,
+                env=dict(environment),
+                input=data,
+                stdout=output,
+                stderr=errors,
+                check=False,
+                timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None, b""
+        output.seek(0)
+        raw = result.stdout if isinstance(result.stdout, bytes) else output.read(limit + 1)
+        if len(raw) > limit:
+            _refuse("publisher process response exceeds its byte bound")
+        return result.returncode, raw
+
+
+def _promotion_gh(
+    root: Path,
+    environment: Mapping[str, str],
+    arguments: Sequence[str],
+    name: str,
+    *,
+    data: bytes | None = None,
+) -> tuple[int, bytes]:
+    if not arguments or arguments[0] != "api":
+        _refuse("publisher supports only fixed GitHub REST operations")
+    endpoint = arguments[1]
+    repository = _expect_repository(environment.get("GITHUB_REPOSITORY"), "publisher repository")
+    if not endpoint.startswith(f"repos/{repository}/") or any(
+        character in endpoint for character in ("#", "\r", "\n", "\\")
+    ):
+        _refuse("publisher endpoint is outside the bound repository")
+    limit = (
+        _PROMOTION_BINARY_LIMIT
+        if endpoint.endswith("/zip") or "/releases/assets/" in endpoint
+        else _PROMOTION_JSON_LIMIT
+    )
+    if not any(value.lower().startswith("accept:") for value in arguments):
+        arguments = [*arguments, "-H", "Accept: application/vnd.github+json"]
+    code, raw = _promotion_process(
+        root,
+        _promotion_environment(environment),
+        [
+            "gh",
+            *arguments,
+            "--hostname",
+            "github.com",
+            "--include",
+            "-H",
+            "X-GitHub-Api-Version: 2026-03-10",
+            "-H",
+            "Cache-Control: no-cache",
+        ],
+        data=data,
+        limit=limit + 16 * 1024,
+    )
+    # Only an actual HTTP status can establish absence; stderr is never parsed.
+    separators = [(raw.find(delimiter), delimiter) for delimiter in (b"\r\n\r\n", b"\n\n")]
+    separators = [(position, delimiter) for position, delimiter in separators if position >= 0]
+    if not separators:
+        return 0, b""
+    position, delimiter = min(separators)
+    header, body = raw[:position], raw[position + len(delimiter) :]
+    match = re.match(rb"HTTP/\S+ ([1-5][0-9]{2})(?: |\r?\n|$)", header)
+    if match is None or len(header) > 16 * 1024:
+        return 0, b""
+    status = int(match[1])
+    if len(body) > limit:
+        _refuse(f"{name} exceeds its byte bound")
+    if code != 0 and 200 <= status < 300:
+        return 0, b""
+    return status, body
+
+
+def _promotion_api(
+    inputs: Mapping[str, Any],
+    route: str,
+    *,
+    method: str = "GET",
+    body: Any = None,
+    absent: bool = False,
+    binary: bool = False,
+) -> Any:
+    endpoint = f"repos/{inputs['context']['source']['repository']}/{route}"
+    arguments = [
+        "api",
+        endpoint,
+        "--method",
+        method,
+        "-H",
+        "Accept: application/octet-stream" if binary else "Accept: application/vnd.github+json",
+    ]
+    raw = None
+    if body is not None:
+        raw = _canonical_json_bytes(body, "publisher request")
+        arguments.extend(("--input", "-"))
+    status, response = _promotion_gh(
+        inputs["root"], inputs["environment"], arguments, route, data=raw
+    )
+    inputs["diagnostics"].append(
+        {"operation": method, "endpoint": route, "http_status": status or None}
+    )
+    if absent and status == 404:
+        return None
+    if status not in ((200,) if method == "GET" else (200, 201)):
+        _refuse(f"{method} {route}: HTTP {status or 'UNKNOWN'}")
+    if binary:
+        return response
+    # Lists also use the strict duplicate-key parser by wrapping the original bytes.
+    return _load_json_object(b'{"value":' + response + b"}", route)["value"]
+
+
+def _promotion_listing(inputs: Mapping[str, Any], route: str) -> list[Any]:
+    entries: list[Any] = []
+    for page in range(1, 101):
+        batch = _expect_list(_promotion_api(inputs, f"{route}?per_page=100&page={page}"), route)
+        if len(batch) > 100 or any(not isinstance(value, Mapping) for value in batch):
+            _refuse("publisher listing is malformed")
+        entries.extend(batch)
+        if len(batch) < 100:
+            return entries
+    _refuse("publisher listing exceeds its pagination bound")
+
+
+def _promotion_context(
+    root: Path, environment: Mapping[str, str], event: Mapping[str, Any]
+) -> dict[str, Any]:
+    try:
+        from .stateless_preview_permissions import select_current_job
+    except ImportError:
+        from stateless_preview_permissions import select_current_job
+    _environment_value(environment, "GITHUB_TOKEN")
+    source = _canonical_build_source(root, environment)
+    context = {
+        "source": source,
+        "repository_id": _expect_environment_identifier(environment, "GITHUB_REPOSITORY_ID"),
+        "run_id": _expect_environment_identifier(environment, "GITHUB_RUN_ID"),
+        "attempt": int(_expect_environment_identifier(environment, "GITHUB_RUN_ATTEMPT")),
+    }
+    read_inputs = {"root": root, "environment": environment, "context": context, "diagnostics": []}
+    live = _promotion_api(read_inputs, "git/ref/heads/main")
+    if (
+        not isinstance(live, Mapping)
+        or live.get("ref") != _CANONICAL_SOURCE_REF
+        or live.get("object") != {"type": "commit", "sha": source["commit"]}
+    ):
+        # GitHub may include additional object metadata, but not a different target/type.
+        if (
+            not isinstance(live, Mapping)
+            or live.get("ref") != _CANONICAL_SOURCE_REF
+            or not isinstance(live.get("object"), Mapping)
+            or live["object"].get("type") != "commit"
+            or live["object"].get("sha") != source["commit"]
+        ):
+            _refuse("live canonical main differs from the exact checkout")
+    run = _promotion_api(
+        read_inputs, f"actions/runs/{context['run_id']}/attempts/{context['attempt']}"
+    )
+    _validate_cli_run(run, context, context["run_id"], context["attempt"], successful_build=False)
+    actors = {}
+    for field in ("actor", "triggering_actor"):
+        actor = run.get(field)
+        if not isinstance(actor, Mapping):
+            _refuse("current promote actor is unavailable")
+        actors[field] = {
+            "id": str(_expect_positive_integer(actor.get("id"), field)),
+            "login": actor.get("login"),
+        }
+        _decision_actor(actors[field], field)
+    sender = event.get("sender")
+    if (
+        not isinstance(sender, Mapping)
+        or {
+            "id": str(_expect_positive_integer(sender.get("id"), "event sender ID")),
+            "login": sender.get("login"),
+        }
+        != actors["actor"]
+        or any(
+            (
+                _expect_environment_identifier(environment, "GITHUB_ACTOR_ID")
+                != actors["actor"]["id"],
+                _environment_value(environment, "GITHUB_ACTOR") != actors["actor"]["login"],
+                _environment_value(environment, "GITHUB_TRIGGERING_ACTOR")
+                != actors["triggering_actor"]["login"],
+                _environment_value(environment, "GITHUB_JOB") != "promote",
+            )
+        )
+    ):
+        _refuse("current promote actors or job differ from the event/runner context")
+    jobs = _promotion_api(
+        read_inputs,
+        f"actions/runs/{context['run_id']}/attempts/{context['attempt']}/jobs?per_page=100",
+    )
+    selected = select_current_job(
+        jobs,
+        repository=source["repository"],
+        run_id=int(context["run_id"]),
+        run_attempt=context["attempt"],
+        head_sha=source["commit"],
+        job_name=_PROMOTION_JOB_NAME,
+    )
+    job_id = str(selected["job_id"])
+    context["current"] = {
+        "current_attempt_id": f"a1-promote-{context['run_id']}-{context['attempt']}-{job_id}",
+        "workflow_run": {
+            "repository": source["repository"],
+            "workflow_path": _TRUSTED_WORKFLOW_PATH,
+            "mode": "promote",
+            "event": _TRUSTED_BUILD_EVENT,
+            "run_id": context["run_id"],
+            "run_attempt": context["attempt"],
+            "ref": source["ref"],
+            "commit": source["commit"],
+        },
+        "job_id": job_id,
+        "job_key": "promote",
+        "workflow_sha": environment["GITHUB_WORKFLOW_SHA"],
+        "checkout_head": source["commit"],
+        "origin_main_target": live["object"]["sha"],
+        "current_github_actor": actors["actor"],
+        "current_github_triggering_actor": actors["triggering_actor"],
+    }
+    return context
+
+
+def _promotion_locations(
+    environment: Mapping[str, str], context: Mapping[str, Any], step: int
+) -> dict[str, str]:
+    temporary = Path(_environment_value(environment, "RUNNER_TEMP")).resolve(strict=True)
+    suffix = context["current"]["current_attempt_id"].removeprefix("a1-promote-")
+    directory = temporary / f"stateless-preview-promote-{suffix}"
+    if not temporary.is_dir() or directory.is_symlink() or not _path_within(directory, temporary):
+        _refuse("publisher destination escapes the runner temporary directory")
+    paths = {
+        "stage": "pre-publication-stage.json",
+        "permission": "current-job-permissions.json",
+        "observation": f"remote-observation-{step}.json",
+        "classification": f"remote-classification-{step}.json",
+        "attempt": "promotion-attempt.json",
+        "handoff": "publisher-handoff.json",
+        "pre_publication_verification": f"pre-publication-verification-{step}.json",
+    }
+    return {
+        **{f"{key}_path": str(directory / name) for key, name in paths.items()},
+        **{
+            f"{kind}_artifact_name": f"stateless-preview-promote-{kind}-{suffix}"
+            + (f"-{step}" if kind in ("observation", "classification") else "")
+            for kind in ("admission", "observation", "classification", "attempt")
+        },
+    }
+
+
+def _promotion_artifact(
+    inputs: Mapping[str, Any], reference: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    reference = _review_record_reference(reference, "publisher retained reference")
+    context = inputs["context"]
+    if reference["repository"] != context["source"]["repository"]:
+        _refuse("publisher retained reference belongs to another repository")
+    metadata = _promotion_api(inputs, f"actions/artifacts/{reference['artifact_id']}")
+    name = _expect_string(metadata.get("name"), "retained artifact name")
+    admitted = _validate_uploaded_artifact(
+        metadata,
+        artifact_id=reference["artifact_id"],
+        expected_name=name,
+        current_run_id=reference["run_id"],
+    )
+    workflow = metadata["workflow_run"]
+    if any(
+        (
+            str(workflow.get("repository_id")) != context["repository_id"],
+            str(workflow.get("head_repository_id")) != context["repository_id"],
+            workflow.get("head_branch") != "main",
+            workflow.get("head_sha") != context["source"]["commit"],
+            _review_timestamp(admitted["expires_at"], "retained artifact expiry")
+            <= datetime.now(timezone.utc),
+        )
+    ):
+        _refuse("publisher retained artifact has expired or has different provenance")
+    producer_attempt = re.search(
+        rf"-{reference['run_id']}-([1-9][0-9]*)(?:-[1-9][0-9]*(?:-[0-3])?)?$", name
+    )
+    if producer_attempt is None:
+        _refuse("retained artifact name does not identify its producer attempt")
+    attempt = int(producer_attempt[1])
+    producer_key = (reference["run_id"], attempt)
+    if producer_key not in inputs["producers"]:
+        run = _promotion_api(inputs, f"actions/runs/{reference['run_id']}/attempts/{attempt}")
+        _validate_cli_run(
+            run,
+            context,
+            reference["run_id"],
+            attempt,
+            successful_build=reference["run_id"] != inputs["context"]["run_id"],
+        )
+        inputs["producers"][producer_key] = run
+    digest = metadata.get("digest")
+    if not isinstance(digest, str) or not digest.startswith("sha256:"):
+        _refuse("publisher retained container digest is unavailable")
+    # Compact references do not assert configured_days; recover it only from Candidate later.
+    return {
+        "id": reference["artifact_id"],
+        "name": name,
+        "sha256": _expect_sha256(digest[7:], "container digest"),
+        "retention": {"expires_at": admitted["expires_at"]},
+    }
+
+
+def _promotion_resolve(inputs: Mapping[str, Any], reference: Mapping[str, Any]) -> bytes:
+    key = _evidence_reference_key(reference)
+    if key not in inputs["resolved"]:
+        artifact = _promotion_artifact(inputs, reference)
+        raw = inputs["downloader"]._member_bytes(
+            reference["repository"], reference["run_id"], artifact, reference["path"]
+        )
+        limit = (
+            _PROMOTION_JSON_LIMIT
+            if reference["path"].endswith(".json")
+            else _PROMOTION_BINARY_LIMIT
+        )
+        if len(raw) > limit:
+            _refuse("retained publisher member exceeds its byte bound")
+        if _sha256_bytes(raw) != reference["sha256"]:
+            _refuse("publisher retained raw record hash differs from its reference")
+        inputs["resolved"][key] = raw
+    return inputs["resolved"][key]
+
+
+def _promotion_inputs(
+    root: Path,
+    environment: Mapping[str, str],
+    event: Mapping[str, Any],
+    command: str,
+    step: int = 0,
+) -> dict[str, Any]:
+    request = _review_record_reference(
+        _load_json_object(event["inputs"]["promote_request"].encode("utf-8"), "promotion request"),
+        "promotion request",
+    )
+    if request["path"] != "promotion-decision.json":
+        _refuse("promotion request must name the retained Decision")
+    context = _promotion_context(root, environment, event)
+    locations = _promotion_locations(environment, context, step)
+    directory = Path(locations["stage_path"]).parent / f"{command}-{step}"
+    directory.mkdir(parents=True, exist_ok=False)
+    inputs: dict[str, Any] = {
+        "root": root,
+        "environment": environment,
+        "event": event,
+        "context": context,
+        "locations": locations,
+        "directory": directory,
+        "resolved": {},
+        "producers": {},
+        "diagnostics": [],
+        "downloader": ArtifactDownloader(directory, environment=environment),
+        "decision_reference": request,
+    }
+
+    def resolve(reference: Mapping[str, Any]) -> bytes:
+        return _promotion_resolve(inputs, reference)
+
+    decision = _load_json_object(resolve(request), "retained Decision")
+    identity_compact = _review_record_reference(
+        decision.get("candidate_identity_record"), "Decision Candidate"
+    )
+    if identity_compact["path"] != _CANDIDATE_IDENTITY_FILENAME:
+        _refuse("Decision Candidate has an unexpected path")
+    identity_raw = resolve(identity_compact)
+    identity = _validate_candidate_identity(_load_json_object(identity_raw, "retained Candidate"))
+    candidate = identity["candidate"]
+    retention = candidate["build"]["artifact"]["retention"]["configured_days"]
+    _expect_retention_days({"A1_RETENTION_DAYS": str(retention)})
+    locations["retention_days"] = str(retention)
+    artifact = _promotion_artifact(inputs, identity_compact)
+    artifact = {**artifact, "retention": {**artifact["retention"], "configured_days": retention}}
+    identity_reference = {
+        **{key: identity_compact[key] for key in ("repository", "run_id", "path", "sha256")},
+        "artifact": artifact,
+    }
+    _verified_review_candidate(identity, identity_raw, identity_reference)
+    names = _artifact_names(
+        candidate["preview_manifest"]["contents"]["version"],
+        candidate["build"]["run_id"],
+        candidate["build"]["run_attempt"],
+    )
+    if (
+        any(candidate["source"][key] != value for key, value in context["source"].items())
+        or identity_compact["run_id"] != candidate["build"]["run_id"]
+        or artifact["name"] != names["candidate_identity"]
+        or candidate["build"]["artifact"]["name"] != names["payload"]
+        or event["inputs"]["preview_tag"] != candidate["destination"]["tag"]
+    ):
+        _refuse("promotion candidate/destination differs from the exact canonical source build")
+    completed_at = _verified_evidence_build(inputs["downloader"], context, candidate)
+    stage_reference = (
+        decision.get("evidence", {}).get("pre_decision_stage_evidence", {}).get("record_reference")
+    )
+    stage = _load_json_object(resolve(stage_reference), "pre-decision Stage")
+    catalog_reference = _review_record_reference(stage.get("release_gate_catalog"), "Stage Catalog")
+    if (
+        catalog_reference["path"] != _RELEASE_GATE_CATALOG_FILENAME
+        or catalog_reference["run_id"] != candidate["build"]["run_id"]
+        or catalog_reference["artifact_id"] == identity_compact["artifact_id"]
+        or _promotion_artifact(inputs, catalog_reference)["name"] != names["release_gate_catalog"]
+    ):
+        _refuse("promotion Catalog does not bind the distinct source-build artifact")
+    catalog_raw = resolve(catalog_reference)
+    binding = {
+        "candidate_identity": identity,
+        "candidate_identity_bytes": identity_raw,
+        "candidate_identity_reference": identity_reference,
+        "release_gate_catalog": _load_json_object(catalog_raw, "Catalog"),
+        "release_gate_catalog_bytes": catalog_raw,
+        "release_gate_catalog_reference": catalog_reference,
+        "record_resolver": resolve,
+        "repository_root": root,
+    }
+    decision = seal_promotion_decision(decision, **binding)
+    if decision["decision"] != "APPROVE" or _review_timestamp(
+        decision["decided_at"], "Decision time"
+    ) > datetime.now(timezone.utc):
+        _refuse("promotion requires an existing APPROVE, not future evidence")
+    decision_artifact = _promotion_artifact(inputs, request)
+    evidence_attempt = int(decision_artifact["name"].rsplit("-", 1)[-1])
+    evidence_suffix = f"{request['run_id']}-{evidence_attempt}"
+    if (
+        decision_artifact["name"] != f"stateless-preview-evidence-decision-{evidence_suffix}"
+        or stage_reference["run_id"] != request["run_id"]
+        or _promotion_artifact(inputs, stage_reference)["name"]
+        != f"stateless-preview-evidence-stage-{evidence_suffix}"
+    ):
+        _refuse("Decision/Stage do not belong to the exact retained evidence producer")
+    producer = inputs["producers"][(request["run_id"], evidence_attempt)]
+    author = decision["promotion_attempt"]["decision_author"]
+    for role in ("actor", "triggering_actor"):
+        observed = producer.get(role)
+        if (
+            not isinstance(observed, Mapping)
+            or {"id": str(observed.get("id")), "login": observed.get("login")} != author
+        ):
+            _refuse("retained Decision author differs from its actual producer initiators")
+    for role in ("current_github_actor", "current_github_triggering_actor"):
+        if context["current"][role] != decision["promotion_attempt"]["authorized_dispatcher"]:
+            _refuse("promotion initiators are not the Decision's authorized dispatcher")
+    for entry in stage["gate_evidence"]:
+        reference = _review_record_reference(entry["record_reference"], "pre-decision record")
+        if (
+            reference["run_id"] != request["run_id"]
+            or _promotion_artifact(inputs, reference)["name"]
+            != f"stateless-preview-evidence-records-{evidence_suffix}"
+        ):
+            _refuse("pre-decision proofs do not belong to the retained evidence producer")
+        proof = _load_json_object(resolve(entry["record_reference"]), "pre-decision proof")
+        times = [
+            proof[
+                "sealed_at"
+                if entry["record_type"] == "s2-s3-seven-lens-aggregate"
+                else "recorded_at"
+            ]
+        ]
+        if entry["record_type"] == "s2-s3-seven-lens-aggregate":
+            times.extend(lens["recorded_at"] for lens in proof["lens_results"])
+        if any(
+            not completed_at <= _review_timestamp(value, "proof time") <= datetime.now(timezone.utc)
+            for value in times
+        ):
+            _refuse("promotion proof does not follow the completed source build")
+    payload_artifact = candidate["build"]["artifact"]
+    payload_paths = {}
+    for kind in ("archive", "manifest"):
+        reference = candidate["preview_manifest"][f"{kind}_reference"]
+        metadata = _promotion_artifact(inputs, reference)
+        if (
+            metadata["name"] != payload_artifact["name"]
+            or metadata["retention"]["expires_at"] != payload_artifact["retention"]["expires_at"]
+        ):
+            _refuse("retained payload metadata differs from Candidate")
+        raw = resolve(reference)
+        path = directory / "payload" / reference["path"]
+        _write_bytes_once(path, raw, "retained payload")
+        payload_paths[kind] = path
+    verify_retained_artifact_inputs(identity, payload_paths["archive"], payload_paths["manifest"])
+    archive_raw = _read_regular_bytes(payload_paths["archive"], "retained archive")
+    _promotion_verify_executable(archive_raw, candidate)
+    inputs.update(
+        binding=binding, decision=decision, candidate=candidate, payload_paths=payload_paths
+    )
+    return inputs
+
+
+def _promotion_verify_executable(archive: bytes, candidate: Mapping[str, Any]) -> None:
+    descriptor = candidate["preview_manifest"]["contents"]["executable"]
+    if descriptor["size_bytes"] > _PROMOTION_BINARY_LIMIT:
+        _refuse("approved executable exceeds the publisher byte bound")
+    try:
+        with zipfile.ZipFile(io.BytesIO(archive)) as contents:
+            entries = contents.infolist()
+            if len(entries) != 1 or entries[0].file_size != descriptor["size_bytes"]:
+                _refuse("preview archive member exceeds its exact approved identity")
+    except (OSError, zipfile.BadZipFile):
+        _refuse("preview archive is unreadable")
+    executable = _read_exact_preview_archive_member(archive, _PREVIEW_EXECUTABLE)
+    if (
+        len(executable) != descriptor["size_bytes"]
+        or _sha256_bytes(executable) != descriptor["sha256"]
+    ):
+        _refuse("preview executable differs from the approved manifest")
+
+
+def _promotion_record(inputs: Mapping[str, Any], key: str, record: Mapping[str, Any]) -> None:
+    _write_bytes_once(
+        Path(inputs["locations"][f"{key}_path"]), _canonical_json_bytes(record, key), key
+    )
+
+
+def _promotion_stage(inputs: Mapping[str, Any]) -> Mapping[str, Any]:
+    raw = _read_regular_bytes(Path(inputs["locations"]["stage_path"]), "pre-publication Stage")
+    stage = seal_stage_gate_evidence(
+        _load_json_object(raw, "pre-publication Stage"), **inputs["binding"]
+    )
+    if (
+        stage["stage"] != "pre-publication"
+        or stage["outcome"] != "PASS"
+        or not (
+            _review_timestamp(inputs["decision"]["decided_at"], "Decision time")
+            <= _review_timestamp(stage["sealed_at"], "Stage time")
+            <= datetime.now(timezone.utc)
+        )
+    ):
+        _refuse("publisher Stage is outside current pre-publication admission")
+    return stage
+
+
+def _promotion_report(inputs: Mapping[str, Any]) -> Mapping[str, Any]:
+    stage = _promotion_stage(inputs)
+    report = _load_json_object(
+        _read_regular_bytes(Path(inputs["locations"]["permission_path"]), "current-job report"),
+        "current-job report",
+    )
+    return _validate_promotion_permission_report(
+        report,
+        inputs["context"]["current"],
+        not_before=_review_timestamp(stage["sealed_at"], "Stage time"),
+        recorded_at=datetime.now(timezone.utc),
+    )
+
+
+def _promotion_remote_binding(inputs: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        **{
+            key: inputs["binding"][key]
+            for key in (
+                "candidate_identity",
+                "candidate_identity_bytes",
+                "candidate_identity_reference",
+            )
+        },
+        "current_attempt_id": inputs["context"]["current"]["current_attempt_id"],
+    }
+
+
+def _promotion_remember(
+    inputs: Mapping[str, Any], kind: str, step: int, reference: Mapping[str, Any]
+) -> None:
+    path = Path(inputs["locations"]["stage_path"]).parent / f"{kind}-reference-{step}.json"
+    raw = _canonical_json_bytes(reference, "publisher readback reference")
+    if path.exists():
+        if _read_regular_bytes(path, "publisher readback reference") != raw:
+            _refuse("publisher readback reference cannot change")
+    else:
+        _write_bytes_once(path, raw, "publisher readback reference")
+
+
+def _promotion_uploaded(
+    inputs: Mapping[str, Any],
+    kind: str,
+    step: int,
+    filename: str,
+    *,
+    reference: Mapping[str, Any] | None = None,
+    compare_local: bool = True,
+) -> tuple[dict[str, str], bytes]:
+    environment, context = inputs["environment"], inputs["context"]
+    locations = _promotion_locations(environment, context, step)
+    prefix = f"A1_PROMOTE_{kind.upper()}_ARTIFACT"
+    if reference is None:
+        artifact_id = _expect_environment_identifier(environment, prefix + "_ID")
+        digest = _expect_sha256(
+            _environment_value(environment, prefix + "_DIGEST"), "uploaded container digest"
+        )
+    else:
+        reference = _review_record_reference(reference, "retained publisher predecessor")
+        if (
+            reference["repository"] != context["source"]["repository"]
+            or reference["run_id"] != context["run_id"]
+            or reference["path"] != filename
+        ):
+            _refuse("publisher predecessor has a different path/run/repository")
+        artifact_id, digest = reference["artifact_id"], None
+    artifact = _checked_evidence_artifact(
+        inputs["downloader"],
+        context,
+        artifact_id,
+        context["run_id"],
+        locations[f"{kind}_artifact_name"],
+        int(inputs["locations"]["retention_days"]),
+        digest,
+    )
+    raw = inputs["downloader"]._member_bytes(
+        context["source"]["repository"], context["run_id"], artifact, filename
+    )
+    actual = {
+        "repository": context["source"]["repository"],
+        "run_id": context["run_id"],
+        "artifact_id": artifact_id,
+        "path": filename,
+        "sha256": _sha256_bytes(raw),
+    }
+    if reference is not None and reference != actual:
+        _refuse("retained publisher predecessor raw bytes changed")
+    if compare_local and raw != _read_regular_bytes(
+        Path(locations["stage_path"]).parent / filename, "original publisher record"
+    ):
+        _refuse("publisher upload readback differs from the original bytes")
+    inputs["resolved"][_evidence_reference_key(actual)] = raw
+    return actual, raw
+
+
+def _promotion_completed(
+    inputs: Mapping[str, Any], step: int, observation_reference: Mapping[str, Any]
+) -> None:
+    if step == 0:
+        return
+    path = Path(inputs["locations"]["stage_path"]).parent / f"action-{step}-complete.json"
+    record = _load_json_object(
+        _read_regular_bytes(path, "completed action receipt"), "completed action receipt"
+    )
+    if record != {"step": step, "observation_sha256": observation_reference["sha256"]}:
+        _refuse("diagnostic/unfinished action observations cannot authorize another action")
+
+
+def _promotion_classification(
+    inputs: Mapping[str, Any], step: int
+) -> tuple[Mapping[str, Any], dict[str, str], Mapping[str, Any], dict[str, str]]:
+    classification_reference, raw = _promotion_uploaded(
+        inputs, "classification", step, f"remote-classification-{step}.json"
+    )
+    record = _load_json_object(raw, "retained classification")
+    observation_reference = record.get("remote_observed_state_reference")
+    kind = "admission" if step == 0 else "observation"
+    observation_reference, observation_raw = _promotion_uploaded(
+        inputs, kind, step, f"remote-observation-{step}.json", reference=observation_reference
+    )
+    _promotion_completed(inputs, step, observation_reference)
+    derived = classify_remote_observation(
+        observation_reference,
+        classification_id=record.get("classification_id"),
+        classified_at=record.get("classified_at"),
+        current_workflow_run=inputs["context"]["current"]["workflow_run"],
+        record_resolver=inputs["binding"]["record_resolver"],
+        **_promotion_remote_binding(inputs),
+    )
+    if record != derived or _review_timestamp(
+        record["classified_at"], "classification time"
+    ) > datetime.now(timezone.utc):
+        _refuse("retained classification differs from its actual observation")
+    _promotion_remember(inputs, "classification", step, classification_reference)
+    _promotion_remember(inputs, "observation", step, observation_reference)
+    return (
+        derived,
+        classification_reference,
+        _load_json_object(observation_raw, "observation"),
+        observation_reference,
+    )
+
+
+def _promotion_attempt(inputs: Mapping[str, Any]) -> tuple[Mapping[str, Any], dict[str, str]]:
+    reference, raw = _promotion_uploaded(inputs, "attempt", 0, "promotion-attempt.json")
+    record = _load_json_object(raw, "retained Attempt")
+    if record.get("promotion_decision") != inputs["decision_reference"]:
+        _refuse("retained Attempt is bound to another Decision")
+    # A remains immutable; its admission O0/C0 are not replaced by later records.
+    for field, kind, filename in (
+        ("remote_observation", "admission", "remote-observation-0.json"),
+        ("remote_classification", "classification", "remote-classification-0.json"),
+    ):
+        _promotion_uploaded(inputs, kind, 0, filename, reference=record.get(field))
+    readback = record.get("authorization", {}).get("permission_readback", {})
+    permission_reference, _ = _promotion_uploaded(
+        inputs, "admission", 0, "current-job-permissions.json", reference=readback.get("reference")
+    )
+    stage_reference, _ = _promotion_uploaded(
+        inputs,
+        "admission",
+        0,
+        "pre-publication-stage.json",
+        reference=record.get("pre_publication_stage_evidence", {}).get("record_reference"),
+    )
+    if (
+        len(
+            {
+                permission_reference["artifact_id"],
+                stage_reference["artifact_id"],
+                record["remote_observation"]["artifact_id"],
+            }
+        )
+        != 1
+    ):
+        _refuse("initial Stage/report/observation must share the retained admission artifact")
+    sealed = seal_promotion_attempt(
+        record, **inputs["binding"], current_promotion_context=inputs["context"]["current"]
+    )
+    _promotion_report(inputs)
+    return sealed, reference
+
+
+def _promotion_tag(inputs: Mapping[str, Any]) -> Mapping[str, Any]:
+    tag = inputs["candidate"]["destination"]["tag"]
+    ref = _promotion_api(inputs, f"git/ref/tags/{quote(tag, safe='')}", absent=True)
+    if ref is None:
+        return {"status": "ABSENT"}
+    if (
+        not isinstance(ref, Mapping)
+        or ref.get("ref") != f"refs/tags/{tag}"
+        or not isinstance(ref.get("object"), Mapping)
+    ):
+        _refuse("tag ref readback is incomplete")
+    obj = ref["object"]
+    oid = _expect_commit(obj.get("sha"), "tag object ID")
+    if obj.get("type") == "commit":
+        return {
+            "status": "PRESENT",
+            "tag": tag,
+            "tag_type": "LIGHTWEIGHT",
+            "object_id": oid,
+            "peeled_commit": oid,
+        }
+    if obj.get("type") != "tag":
+        _refuse("tag ref type is unsupported")
+    annotated = _promotion_api(inputs, f"git/tags/{oid}")
+    if (
+        not isinstance(annotated, Mapping)
+        or annotated.get("sha") != oid
+        or annotated.get("tag") != tag
+        or not isinstance(annotated.get("object"), Mapping)
+        or annotated["object"].get("type") != "commit"
+    ):
+        _refuse("annotated tag does not point directly to a commit")
+    return {
+        "status": "PRESENT",
+        "tag": tag,
+        "tag_type": "ANNOTATED",
+        "object_id": oid,
+        "peeled_commit": _expect_commit(annotated["object"].get("sha"), "tag commit"),
+    }
+
+
+def _promotion_fragment(
+    inputs: Mapping[str, Any], observation: Mapping[str, Any]
+) -> dict[str, Any]:
+    assets = observation["asset_observations"]
+    return {
+        "phase": "PRE_PUBLICATION",
+        "expected_result": "EXPECT_SUCCESS",
+        "observed_result": "SUCCESS",
+        "outcome": "PASS",
+        "release": {
+            "repository": inputs["candidate"]["source"]["repository"],
+            "release_id": observation["release_observation"]["release_id"],
+            "tag": inputs["candidate"]["destination"]["tag"],
+            "prerelease": True,
+            **{
+                f"{kind}_asset": {
+                    "id": assets[kind]["metadata"]["id"],
+                    **assets[kind]["downloaded_identity"],
+                }
+                for kind in ("archive", "manifest")
+            },
+        },
+        "executable": inputs["candidate"]["preview_manifest"]["contents"]["executable"],
+        "archive_matches_candidate": True,
+        "manifest_matches_candidate": True,
+        "executable_matches_manifest": True,
+        "inherited_verifier_equations_pass": True,
+    }
+
+
+def _observe_promotion(
+    inputs: MutableMapping[str, Any], *, step: int, label: str
+) -> tuple[Mapping[str, Any], Mapping[str, Any] | None]:
+    candidate = inputs["candidate"]
+    tag: Mapping[str, Any] = {"status": "UNREADABLE", "reason_code": "TAG_READBACK_UNAVAILABLE"}
+    release: Mapping[str, Any] = {
+        "status": "UNREADABLE",
+        "reason_code": "RELEASE_READBACK_UNAVAILABLE",
+    }
+    assets: dict[str, Any] = {
+        "archive": {"status": "ABSENT"},
+        "manifest": {"status": "ABSENT"},
+        "unexpected_asset_ids": [],
+    }
+    failed = False
+    try:
+        tag = _promotion_tag(inputs)
+    except (ValueError, OSError, URLError):
+        failed = True
+    downloads = {}
+    try:
+        matches = [
+            item
+            for item in _promotion_listing(inputs, "releases")
+            if item.get("tag_name") == candidate["destination"]["tag"]
+        ]
+        if len(matches) > 1:
+            _refuse("multiple releases target the approved tag")
+        release = {"status": "ABSENT"}
+        if matches:
+            release_id = str(_expect_positive_integer(matches[0].get("id"), "release ID"))
+            metadata = _promotion_api(inputs, f"releases/{release_id}")
+            if (
+                not isinstance(metadata, Mapping)
+                or str(metadata.get("id")) != release_id
+                or any(
+                    metadata.get(key) != matches[0].get(key)
+                    for key in ("tag_name", "draft", "prerelease")
+                )
+            ):
+                _refuse("release discovery differs from exact-ID readback")
+            release = {
+                "status": "PRESENT",
+                "release_id": release_id,
+                "tag": candidate["destination"]["tag"],
+                "is_draft": _expect_boolean(metadata.get("draft"), "release draft"),
+                "is_prerelease": _expect_boolean(metadata.get("prerelease"), "release prerelease"),
+                "destination_metadata_status": "MATCHING",
+            }
+            entries = _promotion_listing(inputs, f"releases/{release_id}/assets")
+            ids = [str(_expect_positive_integer(item.get("id"), "asset ID")) for item in entries]
+            if len(ids) != len(set(ids)):
+                _refuse("release assets contain duplicate IDs")
+            expected_names = {
+                candidate["preview_manifest"]["contents"]["archive"]["name"],
+                candidate["preview_manifest"]["file"]["name"],
+            }
+            unexpected = [
+                str(item["id"]) for item in entries if item.get("name") not in expected_names
+            ]
+            if len(unexpected) > 64:
+                _refuse("release contains too many unexpected assets")
+            assets["unexpected_asset_ids"] = unexpected
+            for kind, descriptor in (
+                ("archive", candidate["preview_manifest"]["contents"]["archive"]),
+                ("manifest", candidate["preview_manifest"]["file"]),
+            ):
+                present = [item for item in entries if item.get("name") == descriptor["name"]]
+                if len(present) > 1:
+                    _refuse("release contains duplicate expected asset names")
+                if not present:
+                    continue
+                item = present[0]
+                asset_id = str(_expect_positive_integer(item.get("id"), "asset ID"))
+                size = _expect_positive_integer(item.get("size"), "asset size")
+                asset_metadata = {"id": asset_id, "name": descriptor["name"], "size_bytes": size}
+                assets[kind] = {
+                    "status": "PRESENT_UNREADABLE",
+                    "metadata": asset_metadata,
+                    "reason_code": kind.upper() + "_DOWNLOAD_INCOMPLETE",
+                }
+                if item.get("state") != "uploaded" or size > _PROMOTION_BINARY_LIMIT:
+                    failed = True
+                    continue
+                try:
+                    raw = _promotion_api(inputs, f"releases/assets/{asset_id}", binary=True)
+                    identity = {
+                        "name": descriptor["name"],
+                        "size_bytes": len(raw),
+                        "sha256": _sha256_bytes(raw),
+                    }
+                    if not raw:
+                        _refuse("remote asset download is empty")
+                    status = "MATCHES_CANDIDATE"
+                    if size != descriptor["size_bytes"]:
+                        status = "METADATA_SIZE_MISMATCH"
+                    elif len(raw) != descriptor["size_bytes"]:
+                        status = "DOWNLOADED_SIZE_MISMATCH"
+                    elif identity["sha256"] != descriptor["sha256"] or item.get("digest") not in (
+                        None,
+                        f"sha256:{identity['sha256']}",
+                    ):
+                        status = "DOWNLOADED_SHA256_MISMATCH"
+                    assets[kind] = {
+                        "status": "PRESENT",
+                        "metadata": asset_metadata,
+                        "downloaded_identity": identity,
+                        "observed_result": "SUCCESS"
+                        if status == "MATCHES_CANDIDATE"
+                        else "FAILURE",
+                        "identity_status": status,
+                    }
+                    downloads[kind] = raw
+                except (ValueError, OSError, URLError):
+                    assets[kind]["reason_code"] = kind.upper() + "_DOWNLOAD_UNAVAILABLE"
+                    failed = True
+    except (ValueError, OSError, URLError):
+        failed = True
+        if release["status"] != "PRESENT":
+            release = {"status": "UNREADABLE", "reason_code": "RELEASE_READBACK_INCOMPLETE"}
+    observation = seal_remote_observation(
+        {
+            "observation_schema_version": "1.0",
+            "observation_id": f"{inputs['context']['current']['current_attempt_id']}-o{step}-{label}",
+            "promotion_attempt_id": inputs["context"]["current"]["current_attempt_id"],
+            "candidate_identity_record": _compact_evidence_reference(
+                ArtifactFileReference.from_mapping(
+                    inputs["binding"]["candidate_identity_reference"], "Candidate"
+                )
+            ),
+            "candidate": candidate,
+            "retained_artifact_availability": {
+                "status": "AVAILABLE_AND_VERIFIED",
+                "observed_result": "SUCCESS",
+            },
+            "tag_observation": tag,
+            "release_observation": release,
+            "asset_observations": assets,
+            "readback_status": {
+                "expected_result": "EXPECT_SUCCESS",
+                "observed_result": "FAILURE" if failed else "SUCCESS",
+                "reason_code": "READBACK_INCOMPLETE" if failed else "READBACK_COMPLETE",
+            },
+            "observed_at": _utc_timestamp(),
+        },
+        **_promotion_remote_binding(inputs),
+    )
+    fragment = None
+    if (
+        _remote_collision_reason(observation, candidate, datetime.now(timezone.utc)) is None
+        and release["status"] == "PRESENT"
+        and all(assets[kind]["status"] == "PRESENT" for kind in ("archive", "manifest"))
+    ):
+        paths = {}
+        for kind in ("archive", "manifest"):
+            path = (
+                inputs["directory"]
+                / f"remote-{label}"
+                / assets[kind]["downloaded_identity"]["name"]
+            )
+            _write_bytes_once(path, downloads[kind], "remote asset bytes")
+            paths[kind] = path
+        verify_retained_artifact_inputs(
+            inputs["binding"]["candidate_identity"], paths["archive"], paths["manifest"]
+        )
+        _promotion_verify_executable(downloads["archive"], candidate)
+        if release["is_draft"]:
+            fragment = _promotion_fragment(inputs, observation)
+    inputs["last_observation"] = observation
+    inputs["last_fragment"] = fragment
+    return observation, fragment
+
+
+def _promotion_save_observation(
+    inputs: Mapping[str, Any], observation: Mapping[str, Any], fragment: Mapping[str, Any] | None
+) -> None:
+    _promotion_record(inputs, "observation", observation)
+    if fragment is not None:
+        _promotion_record(inputs, "pre_publication_verification", fragment)
+    _write_action_outputs(
+        {
+            **inputs["locations"],
+            "pre_publication_verification_path": inputs["locations"][
+                "pre_publication_verification_path"
+            ]
+            if fragment is not None
+            else "",
+        },
+        inputs["environment"],
+    )
+
+
+def _admit_promote(inputs: Mapping[str, Any]) -> None:
+    binding, candidate = inputs["binding"], inputs["candidate"]
+    compact = _compact_evidence_reference(
+        ArtifactFileReference.from_mapping(binding["candidate_identity_reference"], "Candidate")
+    )
+    stage = seal_stage_gate_evidence(
+        {
+            "evidence_schema_version": "1.0",
+            "evidence_set_id": inputs["context"]["current"]["current_attempt_id"] + "-prepub",
+            "producer": {
+                "helper_path": "scripts/stateless_preview_artifact.py",
+                "operation": "seal_stage_gate_evidence",
+            },
+            "release_gate_catalog": binding["release_gate_catalog_reference"],
+            "candidate_identity_record": compact,
+            "candidate_identity_record_sha256": compact["sha256"],
+            "candidate": candidate,
+            "source_ref": candidate["source"]["ref"],
+            "source_commit": candidate["source"]["commit"],
+            "stage": "pre-publication",
+            "gate_evidence": [],
+            "outcome": "PASS",
+            "sealed_at": _utc_timestamp(),
+        },
+        **binding,
+    )
+    _promotion_record(inputs, "stage", stage)
+    _write_action_outputs(inputs["locations"], inputs["environment"])
+
+
+def _classify_promote(inputs: Mapping[str, Any], step: int) -> None:
+    _promotion_report(inputs)
+    kind = "admission" if step == 0 else "observation"
+    reference, _ = _promotion_uploaded(inputs, kind, step, f"remote-observation-{step}.json")
+    _promotion_completed(inputs, step, reference)
+    if step == 0:
+        for name in ("pre-publication-stage.json", "current-job-permissions.json"):
+            predecessor = {
+                **reference,
+                "path": name,
+                "sha256": _sha256_bytes(
+                    _read_regular_bytes(
+                        Path(inputs["locations"]["stage_path"]).parent / name, "admission record"
+                    )
+                ),
+            }
+            _promotion_uploaded(inputs, "admission", 0, name, reference=predecessor)
+    else:
+        _promotion_attempt(inputs)
+    record = classify_remote_observation(
+        reference,
+        classification_id=f"{inputs['context']['current']['current_attempt_id']}-c{step}",
+        classified_at=_utc_timestamp(),
+        current_workflow_run=inputs["context"]["current"]["workflow_run"],
+        record_resolver=inputs["binding"]["record_resolver"],
+        **_promotion_remote_binding(inputs),
+    )
+    _promotion_remember(inputs, "observation", step, reference)
+    _promotion_record(inputs, "classification", record)
+    _write_action_outputs(
+        {
+            **inputs["locations"],
+            "state": record["state"],
+            "allowed_action": record["allowed_action"],
+        },
+        inputs["environment"],
+    )
+
+
+def _seal_promote_attempt(inputs: Mapping[str, Any]) -> None:
+    _promotion_report(inputs)
+    classification, classification_reference, _, observation_reference = _promotion_classification(
+        inputs, 0
+    )
+    if classification["admission"] != "ADMITTED":
+        _refuse("collision cannot create an admitted Attempt")
+    stage = _promotion_stage(inputs)
+
+    def admission_reference(name: str) -> dict[str, str]:
+        raw = _read_regular_bytes(
+            Path(inputs["locations"]["stage_path"]).parent / name, "admission record"
+        )
+        reference = {**observation_reference, "path": name, "sha256": _sha256_bytes(raw)}
+        return _promotion_uploaded(inputs, "admission", 0, name, reference=reference)[0]
+
+    stage_reference = admission_reference("pre-publication-stage.json")
+    permission_reference = admission_reference("current-job-permissions.json")
+    current = inputs["context"]["current"]
+    compact = _compact_evidence_reference(
+        ArtifactFileReference.from_mapping(
+            inputs["binding"]["candidate_identity_reference"], "Candidate"
+        )
+    )
+    record = {
+        "schema_version": "2.0",
+        "attempt_id": current["current_attempt_id"],
+        "candidate_identity_record": compact,
+        "candidate_identity_record_sha256": compact["sha256"],
+        "candidate": inputs["candidate"],
+        "promotion_decision": inputs["decision_reference"],
+        "promotion_decision_sha256": inputs["decision_reference"]["sha256"],
+        "pre_decision_stage_evidence": inputs["decision"]["evidence"][
+            "pre_decision_stage_evidence"
+        ],
+        "pre_publication_stage_evidence": {
+            "record_reference": stage_reference,
+            **{
+                key: stage[key]
+                for key in (
+                    "candidate_identity_record_sha256",
+                    "source_ref",
+                    "source_commit",
+                    "stage",
+                    "outcome",
+                )
+            },
+        },
+        "authorization": {
+            "decision_authorization": inputs["decision"]["promotion_attempt"],
+            **{
+                role: current[role]
+                for role in ("current_github_actor", "current_github_triggering_actor")
+            },
+            "permission_readback": {
+                "reference": permission_reference,
+                "run_attempt": current["workflow_run"]["run_attempt"],
+                **{key: current[key] for key in ("job_key", "job_id", "workflow_sha")},
+                "execution_token": {
+                    "source": "github.token",
+                    "kind": "GITHUB_APP_INSTALLATION_TOKEN",
+                    "identity_observation": "UNOBSERVED",
+                    "app_id": None,
+                    "installation_id": None,
+                },
+                "permissions": {"actions": "read", "contents": "write"},
+            },
+        },
+        "workflow_run": current["workflow_run"],
+        "remote_observation": observation_reference,
+        "remote_classification": classification_reference,
+        "admission_status": "PASS",
+        "recorded_at": _utc_timestamp(),
+    }
+    sealed = seal_promotion_attempt(record, **inputs["binding"], current_promotion_context=current)
+    _promotion_record(inputs, "attempt", sealed)
+    _write_action_outputs(inputs["locations"], inputs["environment"])
+
+
+class _PromotionNoRedirect(HTTPRedirectHandler):
+    def redirect_request(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> None:
+        return None
+
+
+def _promotion_guard(inputs: Mapping[str, Any], attempt: Mapping[str, Any]) -> None:
+    fresh = _promotion_context(inputs["root"], inputs["environment"], inputs["event"])
+    if fresh != inputs["context"]:
+        _refuse("promotion runtime context changed before the protected write")
+    inputs["resolved"].clear()
+    inputs["producers"].clear()
+    current, _ = _promotion_attempt(inputs)
+    if current != attempt:
+        _refuse("retained Attempt changed before the protected write")
+    for kind in ("archive", "manifest"):
+        reference = inputs["candidate"]["preview_manifest"][f"{kind}_reference"]
+        metadata = _promotion_artifact(inputs, reference)
+        if (
+            metadata["retention"]["expires_at"]
+            != inputs["candidate"]["build"]["artifact"]["retention"]["expires_at"]
+        ):
+            _refuse("payload retention changed before the protected write")
+        if _promotion_resolve(inputs, reference) != _read_regular_bytes(
+            inputs["payload_paths"][kind], "approved payload"
+        ):
+            _refuse("retained payload changed before the protected write")
+
+
+def _promotion_same_remote(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> bool:
+    return all(
+        expected[key] == actual[key]
+        for key in (
+            "tag_observation",
+            "release_observation",
+            "asset_observations",
+            "readback_status",
+            "retained_artifact_availability",
+        )
+    )
+
+
+def _promotion_require_state(
+    inputs: Mapping[str, Any], observation: Mapping[str, Any], states: tuple[str, ...]
+) -> None:
+    if (
+        _remote_collision_reason(observation, inputs["candidate"], datetime.now(timezone.utc))
+        is not None
+    ):
+        _refuse("protected write postcondition is collision/unreadable")
+    tag, release, assets = (
+        observation["tag_observation"],
+        observation["release_observation"],
+        observation["asset_observations"],
+    )
+    if tag["status"] == "ABSENT":
+        state = "unstarted"
+    elif release["status"] == "ABSENT":
+        state = "tag_only"
+    elif not release["is_draft"]:
+        state = "published_complete"
+    else:
+        count = sum(assets[kind]["status"] == "PRESENT" for kind in ("archive", "manifest"))
+        state = ("draft_empty", "draft_partial", "draft_complete")[count]
+    if state not in states:
+        _refuse("protected write postcondition was not established; the write is not replayable")
+
+
+def _promotion_intent(
+    inputs: Mapping[str, Any], step: int, operation: str, details: Mapping[str, Any]
+) -> None:
+    path = Path(inputs["locations"]["stage_path"]).parent / f"write-{step}-{operation}.json"
+    _write_bytes_once(
+        path,
+        _canonical_json_bytes({"operation": operation, **details}, "write intent"),
+        "single-send write intent",
+    )
+
+
+def _promotion_create_tag(inputs: Mapping[str, Any], attempt: Mapping[str, Any], step: int) -> str:
+    candidate, decision_reference = inputs["candidate"], inputs["decision_reference"]
+    epoch = int(_review_timestamp(attempt["recorded_at"], "Attempt time").timestamp())
+    raw = (
+        f"object {candidate['source']['commit']}\ntype commit\ntag {candidate['destination']['tag']}\n"
+        "tagger github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com> "
+        f"{epoch} +0000\n\nA1 opt-in preview\ncandidate-identity-sha256 {attempt['candidate_identity_record_sha256']}\n"
+        f"promotion-decision-sha256 {decision_reference['sha256']}\n"
+    ).encode("utf-8")
+    child = _promotion_environment(inputs["environment"])
+    token = child["GITHUB_TOKEN"]
+    repository = candidate["source"]["repository"]
+    header = "AUTHORIZATION: basic " + base64.b64encode(f"x-access-token:{token}".encode()).decode(
+        "ascii"
+    )
+    code, local_config = _promotion_process(
+        inputs["root"], child, ["git", "config", "--null", "--list", "--no-includes"]
+    )
+    if code != 0:
+        _refuse("native Git configuration cannot be inspected safely")
+    for setting in local_config.split(b"\0"):
+        key = setting.partition(b"\n")[0].decode("utf-8", errors="strict").lower()
+        if (
+            key.startswith(("http.", "credential.", "url.", "include.", "includeif."))
+            or key in ("core.hookspath", "core.sshcommand", "core.gitproxy")
+            or (key.startswith("remote.") and key.endswith((".pushurl", ".proxy", ".mirror")))
+        ):
+            _refuse(
+                "native Git configuration contains an overriding transport/authentication setting"
+            )
+    settings = [
+        ("credential.helper", ""),
+        ("credential.interactive", "false"),
+        ("http.extraHeader", ""),
+        ("http.https://github.com/.extraHeader", ""),
+        (f"http.https://github.com/{repository}.git.extraHeader", header),
+        ("http.followRedirects", "false"),
+        ("http.proxy", ""),
+        ("core.hooksPath", os.devnull),
+        ("push.followTags", "false"),
+        ("push.recurseSubmodules", "no"),
+    ]
+    child["GIT_CONFIG_COUNT"] = str(len(settings))
+    for index, (key, value) in enumerate(settings):
+        child[f"GIT_CONFIG_KEY_{index}"], child[f"GIT_CONFIG_VALUE_{index}"] = key, value
+    code, result = _promotion_process(inputs["root"], child, ["git", "mktag"], data=raw)
+    if code != 0:
+        _refuse("native Git could not construct the exact annotated tag")
+    oid = _expect_commit(result.decode("ascii").strip(), "native annotated tag OID")
+    expected = hashlib.sha1(b"tag " + str(len(raw)).encode("ascii") + b"\0" + raw).hexdigest()
+    if oid != expected:
+        _refuse("native Git tag OID does not identify the exact approved bytes")
+    _promotion_intent(inputs, step, "tag", {"object_id": oid})
+    tag = candidate["destination"]["tag"]
+    code, result = _promotion_process(
+        inputs["root"],
+        child,
+        [
+            "git",
+            "push",
+            "--porcelain",
+            "--no-follow-tags",
+            f"--force-with-lease=refs/tags/{tag}:",
+            f"https://github.com/{repository}.git",
+            f"{oid}:refs/tags/{tag}",
+        ],
+    )
+    lines = [
+        line.split("\t")
+        for line in result.decode("utf-8", errors="replace").splitlines()
+        if "\t" in line
+    ]
+    inputs["diagnostics"].append(
+        {
+            "operation": "GIT_CREATE_TAG",
+            "returncode": code,
+            "porcelain_flags": [line[0] for line in lines],
+            "known_object_id": oid,
+        }
+    )
+    if lines and (
+        len(lines) != 1
+        or lines[0][0] != "*"
+        or lines[0][1] != f"{oid}:refs/tags/{tag}"
+        or code != 0
+    ):
+        _refuse("create-only tag push was rejected or did not create a new ref")
+    if code == 0 and not lines:
+        _refuse("create-only tag push lacks its new-ref result")
+    # A lost response is reconciled by this exact known object, never by peeled commit alone.
+    observed = _promotion_tag(inputs)
+    if observed != {
+        "status": "PRESENT",
+        "tag": tag,
+        "tag_type": "ANNOTATED",
+        "object_id": oid,
+        "peeled_commit": candidate["source"]["commit"],
+    }:
+        _refuse("tag write UNKNOWN: exact known-OID postcondition is unavailable")
+    return oid
+
+
+def _promotion_write_json(
+    inputs: Mapping[str, Any], step: int, operation: str, route: str, method: str, body: Any
+) -> str | None:
+    _promotion_intent(inputs, step, operation, {"endpoint": route})
+    try:
+        response = _promotion_api(inputs, route, method=method, body=body)
+        if not isinstance(response, Mapping):
+            _refuse("publisher mutation response is not a resource")
+        return str(_expect_positive_integer(response.get("id"), "mutation resource ID"))
+    except (ValueError, OSError, URLError):
+        # One read-only postcondition reconciliation belongs to the caller; never resend.
+        return None
+
+
+def _promotion_upload(
+    inputs: Mapping[str, Any], step: int, release_id: str, kind: str
+) -> str | None:
+    release = _promotion_api(inputs, f"releases/{release_id}")
+    if (
+        not isinstance(release, Mapping)
+        or str(release.get("id")) != release_id
+        or release.get("tag_name") != inputs["candidate"]["destination"]["tag"]
+        or release.get("draft") is not True
+        or release.get("prerelease") is not True
+    ):
+        _refuse("asset upload release is not the exact matching draft")
+    descriptor = (
+        inputs["candidate"]["preview_manifest"]["contents"]["archive"]
+        if kind == "archive"
+        else inputs["candidate"]["preview_manifest"]["file"]
+    )
+    entries = _promotion_listing(inputs, f"releases/{release_id}/assets")
+    if any(item.get("name") == descriptor["name"] for item in entries):
+        _refuse("asset upload would overwrite an existing name")
+    expected_url = f"https://uploads.github.com/repos/{inputs['candidate']['source']['repository']}/releases/{release_id}/assets"
+    upload_url = release.get("upload_url")
+    if upload_url not in (expected_url, expected_url + "{?name,label}"):
+        _refuse("asset upload URL does not bind the exact HTTPS repository/release ID")
+    parsed = urlsplit(expected_url)
+    if (
+        parsed.hostname != "uploads.github.com"
+        or parsed.scheme != "https"
+        or parsed.username
+        or parsed.password
+        or parsed.port
+    ):
+        _refuse("asset upload target is not trusted")
+    raw = _read_regular_bytes(inputs["payload_paths"][kind], "approved upload payload")
+    _verify_recorded_file(inputs["payload_paths"][kind], raw, descriptor, "approved upload payload")
+    url = expected_url + "?" + urlencode({"name": descriptor["name"]})
+    request = Request(
+        url,
+        data=raw,
+        method="POST",
+        headers={
+            "Authorization": "Bearer " + _environment_value(inputs["environment"], "GITHUB_TOKEN"),
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2026-03-10",
+            "Content-Type": "application/zip" if kind == "archive" else "application/json",
+            "Content-Length": str(len(raw)),
+        },
+    )
+    _promotion_intent(
+        inputs,
+        step,
+        f"upload-{kind}",
+        {"release_id": release_id, "name": descriptor["name"], "sha256": descriptor["sha256"]},
+    )
+    try:
+        with build_opener(ProxyHandler({}), _PromotionNoRedirect()).open(
+            request, timeout=60
+        ) as response:
+            status = response.status
+            wire = response.read(_PROMOTION_JSON_LIMIT + 1)
+            if len(wire) > _PROMOTION_JSON_LIMIT or response.geturl() != url:
+                _refuse("asset upload response exceeds bounds or changes destination")
+            inputs["diagnostics"].append(
+                {
+                    "operation": "UPLOAD",
+                    "release_id": release_id,
+                    "kind": kind,
+                    "http_status": status,
+                }
+            )
+            if status != 201:
+                _refuse("asset upload did not return its created resource")
+            metadata = _load_json_object(wire, "asset upload response")
+            if (
+                metadata.get("name") != descriptor["name"]
+                or metadata.get("size") != len(raw)
+                or metadata.get("state") != "uploaded"
+            ):
+                _refuse("asset upload response identity is incomplete")
+            return str(_expect_positive_integer(metadata.get("id"), "uploaded asset ID"))
+    except (HTTPError, URLError, OSError, ValueError) as error:
+        inputs["diagnostics"].append(
+            {
+                "operation": "UPLOAD_UNKNOWN",
+                "release_id": release_id,
+                "kind": kind,
+                "http_status": error.code if isinstance(error, HTTPError) else None,
+            }
+        )
+        return None
+
+
+def _promotion_retained_fragment(
+    inputs: Mapping[str, Any],
+    step: int,
+    observation: Mapping[str, Any],
+    observation_reference: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], dict[str, str]]:
+    filename = f"pre-publication-verification-{step}.json"
+    local = Path(inputs["locations"]["stage_path"]).parent / filename
+    reference = {
+        **observation_reference,
+        "path": filename,
+        "sha256": _sha256_bytes(_read_regular_bytes(local, "pre-publication fragment")),
+    }
+    reference, raw = _promotion_uploaded(
+        inputs, "admission" if step == 0 else "observation", step, filename, reference=reference
+    )
+    fragment = _load_json_object(raw, "retained pre-publication fragment")
+    if (
+        fragment != _promotion_fragment(inputs, observation)
+        or observation["release_observation"].get("is_draft") is not True
+    ):
+        _refuse("retained fragment does not prove these exact pre-publication bytes/IDs")
+    return fragment, reference
+
+
+def _advance_promote(inputs: MutableMapping[str, Any], step: int) -> None:
+    attempt, _ = _promotion_attempt(inputs)
+    classification, _, previous, previous_reference = _promotion_classification(inputs, step - 1)
+    if classification["admission"] != "ADMITTED" or classification["state"] in (
+        "collision",
+        "published_complete",
+    ):
+        _refuse("this classification authorizes no publisher action block")
+    _promotion_guard(inputs, attempt)
+    observed, fragment = _observe_promotion(inputs, step=step, label="before")
+    if not _promotion_same_remote(previous, observed):
+        _refuse("remote state changed; a different action cannot be selected implicitly")
+    state = classification["state"]
+    if state in ("unstarted", "tag_only"):
+        known_oid = None
+        if state == "unstarted":
+            known_oid = _promotion_create_tag(inputs, attempt, step)
+            observed, _ = _observe_promotion(inputs, step=step, label="tag")
+            _promotion_require_state(inputs, observed, ("tag_only",))
+            if observed["tag_observation"]["object_id"] != known_oid:
+                _refuse("tag object changed after create-only push")
+        _promotion_guard(inputs, attempt)
+        before_draft, _ = _observe_promotion(inputs, step=step, label="before-draft")
+        if not _promotion_same_remote(observed, before_draft):
+            _refuse("tag/release changed immediately before draft creation")
+        candidate = inputs["candidate"]
+        release_id = _promotion_write_json(
+            inputs,
+            step,
+            "draft",
+            "releases",
+            "POST",
+            {
+                "tag_name": candidate["destination"]["tag"],
+                "target_commitish": candidate["source"]["commit"],
+                "name": candidate["destination"]["tag"],
+                "body": "",
+                "draft": True,
+                "prerelease": True,
+                "generate_release_notes": False,
+                "make_latest": "false",
+            },
+        )
+        observed, fragment = _observe_promotion(inputs, step=step, label="draft")
+        _promotion_require_state(inputs, observed, ("draft_empty",))
+        if observed["tag_observation"] != before_draft["tag_observation"] or (
+            release_id is not None and observed["release_observation"]["release_id"] != release_id
+        ):
+            _refuse("draft write postcondition does not bind its exact resource/tag")
+    elif state in ("draft_empty", "draft_partial"):
+        release_id = observed["release_observation"]["release_id"]
+        for kind in ("archive", "manifest"):
+            if previous["asset_observations"][kind]["status"] != "ABSENT":
+                continue
+            _promotion_guard(inputs, attempt)
+            fresh, _ = _observe_promotion(inputs, step=step, label=f"before-{kind}")
+            if not _promotion_same_remote(observed, fresh):
+                _refuse("draft/assets changed before the exact missing-asset upload")
+            asset_id = _promotion_upload(inputs, step, release_id, kind)
+            after, fragment = _observe_promotion(inputs, step=step, label=f"after-{kind}")
+            _promotion_require_state(inputs, after, ("draft_partial", "draft_complete"))
+            asset = after["asset_observations"][kind]
+            if (
+                after["release_observation"] != observed["release_observation"]
+                or after["tag_observation"] != observed["tag_observation"]
+                or asset["status"] != "PRESENT"
+                or (asset_id is not None and asset["metadata"]["id"] != asset_id)
+            ):
+                _refuse(
+                    "asset write UNKNOWN: exact approved identity/ID postcondition is unavailable"
+                )
+            other = "manifest" if kind == "archive" else "archive"
+            if after["asset_observations"][other] != observed["asset_observations"][other]:
+                _refuse("another asset changed during the upload")
+            observed = after
+        _promotion_require_state(inputs, observed, ("draft_complete",))
+    elif state == "draft_complete":
+        retained, _ = _promotion_retained_fragment(inputs, step - 1, previous, previous_reference)
+        if fragment != retained:
+            _refuse("fresh draft verification differs from retained pre-publication evidence")
+        _promotion_guard(inputs, attempt)
+        fresh, fresh_fragment = _observe_promotion(inputs, step=step, label="publish-check")
+        if not _promotion_same_remote(observed, fresh) or fresh_fragment != retained:
+            _refuse("draft changed immediately before publication")
+        release_id = fresh["release_observation"]["release_id"]
+        response_id = _promotion_write_json(
+            inputs,
+            step,
+            "publish",
+            f"releases/{release_id}",
+            "PATCH",
+            {"draft": False, "prerelease": True, "make_latest": "false"},
+        )
+        observed, fragment = _observe_promotion(inputs, step=step, label="published")
+        _promotion_require_state(inputs, observed, ("published_complete",))
+        expected_release = {**fresh["release_observation"], "is_draft": False}
+        if (
+            (response_id is not None and response_id != release_id)
+            or observed["release_observation"] != expected_release
+            or observed["tag_observation"] != fresh["tag_observation"]
+            or observed["asset_observations"] != fresh["asset_observations"]
+        ):
+            _refuse("publication postcondition changed exact tag/release/assets")
+    else:
+        _refuse("classification has no legal publisher action")
+    _promotion_save_observation(inputs, observed, fragment)
+    path = Path(inputs["locations"]["stage_path"]).parent / f"action-{step}-complete.json"
+    _write_bytes_once(
+        path,
+        _canonical_json_bytes(
+            {
+                "step": step,
+                "observation_sha256": _sha256_bytes(
+                    _read_regular_bytes(
+                        Path(inputs["locations"]["observation_path"]),
+                        "completed action observation",
+                    )
+                ),
+            },
+            "completed action receipt",
+        ),
+        "completed action receipt",
+    )
+
+
+def _finish_promote(inputs: MutableMapping[str, Any], step: int) -> None:
+    attempt, attempt_reference = _promotion_attempt(inputs)
+    classification, classification_reference, observation, observation_reference = (
+        _promotion_classification(inputs, step)
+    )
+    if classification["state"] != "published_complete" or classification["admission"] != "ADMITTED":
+        _refuse("publisher handoff requires retained published_complete")
+    fresh, _ = _observe_promotion(inputs, step=step, label="finish")
+    if not _promotion_same_remote(observation, fresh):
+        _refuse("published resources changed before the publisher handoff")
+    fragment_reference = None
+    for predecessor in range(step - 1, -1, -1):
+        path = (
+            Path(inputs["locations"]["stage_path"]).parent
+            / f"observation-reference-{predecessor}.json"
+        )
+        reference = _load_json_object(
+            _read_regular_bytes(path, "retained predecessor locator"),
+            "retained predecessor locator",
+        )
+        _, raw = _promotion_uploaded(
+            inputs,
+            "admission" if predecessor == 0 else "observation",
+            predecessor,
+            f"remote-observation-{predecessor}.json",
+            reference=reference,
+        )
+        previous = seal_remote_observation(
+            _load_json_object(raw, "retained predecessor observation"),
+            **_promotion_remote_binding(inputs),
+        )
+        if previous["release_observation"].get("is_draft") is True and all(
+            previous["asset_observations"][kind]["status"] == "PRESENT"
+            for kind in ("archive", "manifest")
+        ):
+            _promotion_require_state(inputs, previous, ("draft_complete",))
+            fragment, fragment_reference = _promotion_retained_fragment(
+                inputs, predecessor, previous, reference
+            )
+            if fragment["release"] != _promotion_fragment(inputs, observation)["release"]:
+                _refuse("published identities differ from predecessor pre-publication evidence")
+            break
+    record = {
+        "candidate_identity_record": attempt["candidate_identity_record"],
+        "release_gate_catalog": inputs["binding"]["release_gate_catalog_reference"],
+        "promotion_decision": inputs["decision_reference"],
+        "pre_decision_stage_evidence": attempt["pre_decision_stage_evidence"]["record_reference"],
+        "pre_publication_stage_evidence": attempt["pre_publication_stage_evidence"][
+            "record_reference"
+        ],
+        "permission_report": attempt["authorization"]["permission_readback"]["reference"],
+        "promotion_attempt": attempt_reference,
+        "remote_observation": observation_reference,
+        "remote_classification": classification_reference,
+        "pre_publication_verification": fragment_reference,
+    }
+    _promotion_record(inputs, "handoff", record)
+    _write_action_outputs(
+        {**inputs["locations"], "state": "published_complete"}, inputs["environment"]
+    )
+
+
+def _run_promote(
+    root: Path, environment: Mapping[str, str], event: Mapping[str, Any], command: str, step: int
+) -> None:
+    inputs = _promotion_inputs(root, environment, event, command, step)
+    try:
+        if command == "admit-promote":
+            _admit_promote(inputs)
+        elif command == "observe-promote":
+            _promotion_report(inputs)
+            observation, fragment = _observe_promotion(inputs, step=0, label="initial")
+            _promotion_save_observation(inputs, observation, fragment)
+        elif command == "classify-promote":
+            _classify_promote(inputs, step)
+        elif command == "seal-promote-attempt":
+            _seal_promote_attempt(inputs)
+        elif command == "advance-promote":
+            _advance_promote(inputs, step)
+        elif command == "finish-promote":
+            _finish_promote(inputs, step)
+        else:
+            _refuse("unknown publisher command")
+    finally:
+        if (
+            command == "advance-promote"
+            and "last_observation" in inputs
+            and not Path(inputs["locations"]["observation_path"]).exists()
+        ):
+            _promotion_save_observation(inputs, inputs["last_observation"], inputs["last_fragment"])
+        path = inputs["directory"] / "diagnostics.json"
+        raw = _canonical_json_bytes(inputs["diagnostics"], "publisher HTTP diagnostics")
+        if len(raw) > _PROMOTION_JSON_LIMIT:
+            _refuse("publisher diagnostics exceed their byte bound")
+        _write_bytes_once(path, raw, "publisher diagnostics")
+        _write_action_outputs({"diagnostics_path": str(path)}, environment)
+
+
 def _write_action_outputs(values: Mapping[str, str], environment: Mapping[str, str]) -> None:
     if any("\r" in value or "\n" in value for value in values.values()):
         _refuse("GitHub Actions output contains unsupported characters")
@@ -4380,8 +6151,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "seal-evidence-stage",
         "seal-evidence-decision",
         "verify-evidence-retention",
+        "admit-promote",
+        "observe-promote",
+        "seal-promote-attempt",
     ):
         commands.add_parser(command)
+    for command in ("classify-promote", "advance-promote", "finish-promote"):
+        command_parser = commands.add_parser(command)
+        command_parser.add_argument(
+            "--step",
+            type=int,
+            required=True,
+            choices=range(1, 4) if command == "advance-promote" else range(4),
+        )
     return parser.parse_args(argv)
 
 
@@ -4403,10 +6185,42 @@ def main(argv: Sequence[str] | None = None) -> int:
             _seal_evidence_decision(Path.cwd(), os.environ, event)
         elif arguments.command == "verify-evidence-retention":
             _verify_evidence_retention(Path.cwd(), os.environ, event)
+        elif arguments.command in (
+            "admit-promote",
+            "observe-promote",
+            "classify-promote",
+            "seal-promote-attempt",
+            "advance-promote",
+            "finish-promote",
+        ):
+            _run_promote(
+                Path.cwd(), os.environ, event, arguments.command, getattr(arguments, "step", 0)
+            )
         else:
             raise AssertionError("unreachable")
-    except (ValueError, OSError, UnicodeError, RecursionError):
-        print("STATELESS_PREVIEW_ARTIFACT_REFUSED", file=sys.stderr)
+    except (
+        ValueError,
+        OSError,
+        UnicodeError,
+        RecursionError,
+        KeyError,
+        TypeError,
+        AttributeError,
+    ) as error:
+        message = "STATELESS_PREVIEW_ARTIFACT_REFUSED"
+        if arguments.command.endswith("promote") or arguments.command == "seal-promote-attempt":
+            reason = str(error).replace("\r", " ").replace("\n", " ")
+            for key in (
+                "GITHUB_TOKEN",
+                "GH_TOKEN",
+                "GITHUB_ENTERPRISE_TOKEN",
+                "GH_ENTERPRISE_TOKEN",
+            ):
+                secret = os.environ.get(key)
+                if secret:
+                    reason = reason.replace(secret, "[REDACTED]")
+            message += ": " + reason[:512]
+        print(message, file=sys.stderr)
         return 1
     print("STATELESS_PREVIEW_ARTIFACT_READY")
     return 0
