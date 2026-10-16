@@ -55,6 +55,12 @@ The validator resolves every reference itself with GitHub Actions metadata and
 artifact downloads. A manually downloaded archive, manifest, extracted
 executable, or source-tree executable is not an input and cannot be proof.
 
+The shared production transport is `ArtifactDownloader` with the expanded
+`ArtifactFileReference` in `scripts/stateless_preview_artifact.py`. Candidate
+mode uses that owner for the existing metadata, ZIP, raw-file and payload hash
+checks and exclusive local retention. The CLI and reference bundle stay
+unchanged; this extraction does not implement an evidence workflow or promotion.
+
 Sonar receipts are not inputs to build admission, candidate sealing, or consumer
 proof. Run the separate exact-head audit only after actual publication, as
 described in [SonarQube onboarding](../../docs/SONARQUBE-ONBOARDING.md). Preserve

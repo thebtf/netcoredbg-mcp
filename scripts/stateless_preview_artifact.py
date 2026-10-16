@@ -1,4 +1,4 @@
-"""Fail-closed identity and retained-byte helpers for the A1 preview artifact."""
+"""Fail-closed identity, shared transport, and retained-byte helpers for the A1 preview artifact."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ import sys
 import zipfile
 import zlib
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from os import PathLike
 from pathlib import Path
@@ -1400,6 +1401,228 @@ def validate_artifact_consumer_proof_reference(value: Mapping[str, Any]) -> Mapp
     """Validate a closed GitHub artifact file locator used by consumer proof."""
 
     return _freeze(_thaw(_validate_consumer_proof_reference(value, "consumer proof reference")))
+
+
+def _load_retained_json_object(raw: bytes, name: str) -> dict[str, Any]:
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                _refuse(f"{name} has duplicate keys")
+            result[key] = value
+        return result
+
+    try:
+        result = json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicates)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        _refuse(f"{name} is not valid UTF-8 JSON")
+    if not isinstance(result, dict):
+        _refuse(f"{name} must be an object")
+    return result
+
+
+def _path_within(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(parent.resolve(strict=True))
+    except ValueError:
+        return False
+    return True
+
+
+@dataclass(frozen=True)
+class ArtifactFileReference:
+    repository: str
+    run_id: str
+    artifact_id: str
+    artifact_name: str
+    artifact_sha256: str
+    retention_days: int
+    expires_at: str
+    path: str
+    sha256: str
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any], name: str) -> ArtifactFileReference:
+        validated = validate_artifact_consumer_proof_reference(value)
+        artifact = validated["artifact"]
+        return cls(
+            repository=validated["repository"],
+            run_id=validated["run_id"],
+            artifact_id=artifact["id"],
+            artifact_name=artifact["name"],
+            artifact_sha256=artifact["sha256"],
+            retention_days=artifact["retention"]["configured_days"],
+            expires_at=artifact["retention"]["expires_at"],
+            path=validated["path"],
+            sha256=validated["sha256"],
+        )
+
+    def as_mapping(self) -> dict[str, Any]:
+        return {
+            "repository": self.repository,
+            "run_id": self.run_id,
+            "artifact": {
+                "id": self.artifact_id,
+                "name": self.artifact_name,
+                "sha256": self.artifact_sha256,
+                "retention": {
+                    "configured_days": self.retention_days,
+                    "expires_at": self.expires_at,
+                },
+            },
+            "path": self.path,
+            "sha256": self.sha256,
+        }
+
+    def same_artifact(self, other: ArtifactFileReference) -> bool:
+        return (
+            self.repository,
+            self.run_id,
+            self.artifact_id,
+            self.artifact_name,
+            self.artifact_sha256,
+            self.retention_days,
+            self.expires_at,
+        ) == (
+            other.repository,
+            other.run_id,
+            other.artifact_id,
+            other.artifact_name,
+            other.artifact_sha256,
+            other.retention_days,
+            other.expires_at,
+        )
+
+
+class ArtifactDownloader:
+    def __init__(self, root: Path):
+        self._root = root
+        self._archives: dict[tuple[str, str, str], tuple[Path, str]] = {}
+        self._archive_directory: Path | None = None
+
+    def _run_gh(self, arguments: Sequence[str], name: str) -> bytes:
+        try:
+            result = subprocess.run(
+                ["gh", *arguments],
+                cwd=self._root,
+                capture_output=True,
+                check=False,
+                timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError):
+            _refuse(f"{name} could not be downloaded")
+        if result.returncode != 0:
+            _refuse(f"{name} could not be downloaded")
+        return result.stdout
+
+    def _metadata(self, reference: ArtifactFileReference) -> None:
+        raw = self._run_gh(
+            ["api", f"repos/{reference.repository}/actions/artifacts/{reference.artifact_id}"],
+            "retained artifact metadata",
+        )
+        metadata = _load_retained_json_object(raw, "retained artifact metadata")
+        workflow_run = metadata.get("workflow_run")
+        if (
+            str(metadata.get("id")) != reference.artifact_id
+            or metadata.get("name") != reference.artifact_name
+            or metadata.get("expired") is not False
+            or not isinstance(workflow_run, Mapping)
+            or str(workflow_run.get("id")) != reference.run_id
+            or metadata.get("expires_at") != reference.expires_at
+        ):
+            _refuse("retained artifact metadata does not match its structural reference")
+        digest = metadata.get("digest")
+        if digest is not None and digest != f"sha256:{reference.artifact_sha256}":
+            _refuse("retained artifact metadata digest does not match its structural reference")
+
+    def _archive(self, reference: ArtifactFileReference) -> bytes:
+        key = (reference.repository, reference.artifact_id, reference.artifact_sha256)
+        cached = self._archives.get(key)
+        if cached is not None:
+            cached_path, wire_sha256 = cached
+            wire_bytes = _read_regular_bytes(cached_path, "cached retained artifact")
+            if _sha256_bytes(wire_bytes) != wire_sha256 or wire_sha256 != reference.artifact_sha256:
+                _refuse("cached retained artifact wire bytes do not match the structural reference")
+            return wire_bytes
+        self._metadata(reference)
+        wire_bytes = self._run_gh(
+            [
+                "api",
+                f"repos/{reference.repository}/actions/artifacts/{reference.artifact_id}/zip",
+            ],
+            "retained artifact",
+        )
+        wire_sha256 = _sha256_bytes(wire_bytes)
+        if wire_sha256 != reference.artifact_sha256:
+            _refuse("retained artifact wire bytes do not match the structural reference")
+        destination = (
+            self._root / "artifacts" / f"{reference.artifact_id}-{reference.artifact_sha256}.zip"
+        )
+        try:
+            if self._archive_directory is None:
+                destination.parent.mkdir(parents=True, exist_ok=False)
+                self._archive_directory = destination.parent
+            elif destination.parent != self._archive_directory:
+                _refuse("retained artifact directory is inconsistent")
+            with destination.open("xb") as output:
+                output.write(wire_bytes)
+        except FileExistsError:
+            _refuse("retained artifact destination already exists")
+        except OSError:
+            _refuse("fresh retained artifact directory is unavailable")
+        self._archives[key] = (destination, wire_sha256)
+        return wire_bytes
+
+    def _artifact_member(self, reference: ArtifactFileReference) -> bytes:
+        wire_bytes = self._archive(reference)
+        try:
+            with zipfile.ZipFile(io.BytesIO(wire_bytes)) as archive:
+                entries = [
+                    entry for entry in archive.infolist() if entry.filename == reference.path
+                ]
+                if len(entries) != 1 or entries[0].is_dir():
+                    _refuse("retained artifact file is absent or ambiguous")
+                contents = archive.read(entries[0])
+        except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile):
+            _refuse("retained artifact is unreadable")
+        if _sha256_bytes(contents) != reference.sha256:
+            _refuse("retained artifact file bytes do not match the structural reference")
+        return contents
+
+    def _retain_file(self, reference: ArtifactFileReference, contents: bytes) -> Path:
+        destination = self._root / "downloaded" / Path(*reference.path.split("/"))
+        if not _path_within(destination, self._root):
+            _refuse("retained artifact path escapes the fresh download directory")
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with destination.open("xb") as output:
+                output.write(contents)
+        except OSError:
+            _refuse("retained artifact file cannot be retained locally")
+        return destination
+
+    def download_file(self, reference: ArtifactFileReference) -> Path:
+        return self._retain_file(reference, self._artifact_member(reference))
+
+    def download_payload(
+        self,
+        archive: ArtifactFileReference,
+        manifest: ArtifactFileReference,
+        candidate_artifact_sha256: str,
+    ) -> tuple[Path, Path]:
+        if not archive.same_artifact(manifest):
+            _refuse("payload references do not name one retained artifact")
+        archive_contents = self._artifact_member(archive)
+        manifest_contents = self._artifact_member(manifest)
+        payload_digest = hashlib.sha256()
+        payload_digest.update(archive_contents)
+        payload_digest.update(manifest_contents)
+        if payload_digest.hexdigest() != candidate_artifact_sha256:
+            _refuse("downloaded retained payload does not match the candidate artifact")
+        return (
+            self._retain_file(archive, archive_contents),
+            self._retain_file(manifest, manifest_contents),
+        )
 
 
 def _validate_release_gate_catalog_for_consumer_proof(
@@ -2974,6 +3197,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 __all__ = [
+    "ArtifactDownloader",
+    "ArtifactFileReference",
     "admit_build",
     "assemble_candidate_identity",
     "classify_remote_observation",
