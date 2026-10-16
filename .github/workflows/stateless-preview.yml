@@ -149,10 +149,11 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          dotnet publish host/NetCoreDbg.Mcp.Stateless.Preview/NetCoreDbg.Mcp.Stateless.Preview.csproj --configuration Release --runtime win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishTrimmed=false -p:AssemblyName=netcoredbg-mcp-stateless-preview --output artifacts/stateless-preview/publish
+          dotnet publish host/NetCoreDbg.Mcp.Stateless.Preview/NetCoreDbg.Mcp.Stateless.Preview.csproj --configuration Release --runtime win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishTrimmed=false --output artifacts/stateless-preview/publish
           if ($LASTEXITCODE -ne 0) {
             throw "Preview publish failed."
           }
+          Rename-Item -Path artifacts/stateless-preview/publish/NetCoreDbg.Mcp.Stateless.Preview.exe -NewName netcoredbg-mcp-stateless-preview.exe
 
       - name: Archive and manifest the preview payload
         shell: pwsh
