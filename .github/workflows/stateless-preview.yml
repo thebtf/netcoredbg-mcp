@@ -155,6 +155,14 @@ jobs:
           }
           Rename-Item -Path artifacts/stateless-preview/publish/NetCoreDbg.Mcp.Stateless.Preview.exe -NewName netcoredbg-mcp-stateless-preview.exe
 
+      - name: Verify the published embedded runtime
+        shell: pwsh
+        run: |
+          python scripts/stateless_preview_runtime.py --executable artifacts/stateless-preview/publish/netcoredbg-mcp-stateless-preview.exe --expected-runtime 8.0.32 --diagnostics-directory artifacts/stateless-preview/runtime-evidence
+          if ($LASTEXITCODE -ne 0) {
+            throw "Published preview runtime verification failed."
+          }
+
       - name: Archive and manifest the preview payload
         shell: pwsh
         run: python scripts/stateless_preview_artifact.py prepare-payload
