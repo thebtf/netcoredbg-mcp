@@ -87,6 +87,7 @@ def scenario(tmp_path, monkeypatch):
         http_status=200,
         exit_codes=None,
         collector_error=None,
+        second_checkpoint_delay=0.0,
     ):
         directory = tmp_path / "observation"
         starts, sleeps, requests, originals = [], [], [], []
@@ -132,6 +133,18 @@ def scenario(tmp_path, monkeypatch):
         def metadata(output):
             first = driver._report(output / driver._FIRST)
             return driver._metadata_record(first, IDENTITY)
+
+        real_save = driver._save
+        checkpoint_delayed = False
+
+        def save(output, summary):
+            nonlocal checkpoint_delayed
+            real_save(output, summary)
+            if second_checkpoint_delay and not checkpoint_delayed and current[0] >= 1061.0:
+                current[0] += second_checkpoint_delay
+                checkpoint_delayed = True
+
+        monkeypatch.setattr(driver, "_save", save)
 
         monkeypatch.setattr(driver.permissions, "_get", get)
         code = driver.observe(
@@ -384,6 +397,31 @@ def test_one_second_second_start_lateness_is_allowed_without_moving_deadline(sce
     assert (result.code, result.starts, result.sleeps) == (0, [0.0, 61.0], [57.5])
     assert result.summary["samples"][1]["planned_start_offset_seconds"] == 60.0
     assert result.summary["deadline_offset_seconds"] == 120.0
+
+
+def test_second_actual_start_after_guard_lateness_allowance_refuses_collector(scenario):
+    result = scenario(
+        [report(), report("REQUIRED_RUNNER_GRANTS_REPORTED", status="QUALIFIED")],
+        oversleep=1.0,
+        second_checkpoint_delay=0.5,
+    )
+
+    assert (result.code, result.starts, result.sleeps, len(result.requests)) == (
+        1,
+        [0.0],
+        [57.5],
+        1,
+    )
+    summary = result.summary
+    assert summary["observation"] == "INCOMPLETE"
+    assert summary["reason_code"] == "SECOND_SAMPLE_SCHEDULE_MISSED"
+    assert summary["capability"] == "NOT_ESTABLISHED"
+    assert summary["binding"] == BINDING
+    first = summary["samples"][0]
+    assert first["terminal_metadata"]["binding_confirmed"] is True
+    assert (result.directory / driver._FIRST).read_bytes() == result.originals[0]
+    assert first["report_sha256"] == hashlib.sha256(result.originals[0]).hexdigest()
+    assert not (result.directory / driver._SECOND).exists()
 
 
 @pytest.mark.parametrize("finished_at", [60.0, 60.5, 61.0], ids=["t60", "t60_5", "t61"])

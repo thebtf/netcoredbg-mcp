@@ -235,11 +235,9 @@ def observe(
         if not summary["samples"]:
             origin = clock()
             summary["origin_monotonic_seconds"] = origin
-        if elapsed() >= 120.0:
-            raise _IncompleteError("OBSERVATION_DEADLINE_EXCEEDED")
         item = {
             "planned_start_offset_seconds": planned,
-            "actual_start_offset_seconds": elapsed(),
+            "actual_start_offset_seconds": None,
             "finished_offset_seconds": None,
             "exit_code": None,
             "report_file": filename,
@@ -248,6 +246,16 @@ def observe(
         }
         summary["samples"].append(item)
         checkpoint()
+        actual_start = elapsed()
+        if actual_start >= 120.0:
+            summary["samples"].pop()
+            raise _IncompleteError("OBSERVATION_DEADLINE_EXCEEDED")
+        if planned == 60.0:
+            if not 60.0 <= actual_start <= 61.0:
+                summary["samples"].pop()
+                raise _IncompleteError("SECOND_SAMPLE_SCHEDULE_MISSED")
+            summary["second_sample"] = "EXECUTED"
+        item["actual_start_offset_seconds"] = actual_start
         item["exit_code"] = collect(directory / filename)
         item["finished_offset_seconds"] = elapsed()
         checkpoint()
@@ -302,10 +310,8 @@ def observe(
             actual_time = elapsed()
             if actual_time < 60.0:
                 sleep(60.0 - actual_time)
-            if elapsed() < 60.0 or elapsed() > 61.0:
-                raise _IncompleteError("SECOND_SAMPLE_SCHEDULE_MISSED")
-            summary["second_sample"] = "EXECUTED"
             last, item = sample(_SECOND, 60.0)
+            checkpoint()
             after(item)
             if _binding(last, identity) != summary["binding"]:
                 raise _IncompleteError("CURRENT_JOB_BINDING_CHANGED")
