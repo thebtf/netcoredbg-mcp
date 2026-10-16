@@ -31,8 +31,16 @@
 | SonarQube .NET coverage documentation | C# accepts a Cobertura report path during analysis. | Pass the one final .NET Cobertura path through `sonar.cs.cobertura.reportsPaths`. |
 | SonarQube Python coverage documentation | Python accepts a Cobertura path during analysis. | Pass the one final Python Cobertura path at scanner begin. |
 | Coverage.py XML documentation | Cobertura output can carry line and branch denominators with relative files. | Keep `.coveragerc` as the Python policy owner. |
-| Coverlet MSBuild integration | Direct package references support VSTest MSBuild collection and Cobertura output. | Use direct private `coverlet.msbuild` `10.0.1` for the five inputs. |
+| Coverlet MSBuild integration | Direct package references support VSTest MSBuild collection and Cobertura output. | Use direct private `coverlet.msbuild` `10.1.0` for the five inputs. |
 | Coverlet compatibility documentation | `coverlet.msbuild` is incompatible with MTP v2 because MTP bypasses VSTest MSBuild targets. | Preflight refuses MTP before scanner begin. It does not inject a fallback property. |
+
+## Technical amendment — 2026-10-16
+
+**OBSERVED**: The [upstream changelog at commit `10a8051216eeaebb661624eef348ee768693fed9`](https://github.com/coverlet-coverage/coverlet/blob/10a8051216eeaebb661624eef348ee768693fed9/Documentation/Changelog.md) records `coverlet.msbuild` `10.1.0`, released 2026-09-27, with the fix for the race between a `ProcessExit` hit-file write and an out-of-process coverage read that causes `EndOfStreamException` (#1987/#1988). Canonical run `38947862318` observed the EOF failure after Host `132/132`; that failure remains meaningful RED evidence. The historical hit-file writer/PID and root cause remain **UNKNOWN**. The upstream fix identifies a known hit-file publication hazard; it does not prove what caused that historical failure.
+
+**SELECTED**: Change only the active Coverlet pin from `10.0.1` to `10.1.0`, including COV-004/COV-009 and the marker schema. Exact version matching, direct references, `PrivateAssets=all`, `Microsoft.NET.Test.Sdk` `17.12.0`, and the MSBuild/VSTest route remain unchanged. No collector migration, new filters, retries, integration changes, scanner/credential changes, or product runtime/workflow changes are authorized by this amendment.
+
+**Proof boundary**: Completed T009 remains the historical `10.0.1` implementation/evidence record; all other run receipts and denominators remain unchanged. Neither those records nor this amendment establish a `10.1.0` producer PASS. The mandatory Python plus all five .NET producer chain, private-input validation, normalization, source mappings, positive denominators, restored production DLL/PDB hashes, cleanliness, and exact-head proof remain required without weakening.
 
 ## Selected decisions
 
@@ -50,7 +58,7 @@
 
 ### Gate before scanner begin
 
-**SELECTED**: Wave-2 entry validation and producer preflight precede scanner begin and run-root claim. The preflight requires `uv`, `bash`, `dotnet`, Coverlet `10.0.1`, Test SDK `17.12.0`, and VSTest. It rejects MTP.
+**SELECTED**: Wave-2 entry validation and producer preflight precede scanner begin and run-root claim. The preflight requires `uv`, `bash`, `dotnet`, Coverlet `10.1.0`, Test SDK `17.12.0`, and VSTest. It rejects MTP.
 
 **Reason**: A known unavailable or incompatible producer discovered after begin would violate the transaction boundary and make cleanup carry unnecessary scanner state.
 

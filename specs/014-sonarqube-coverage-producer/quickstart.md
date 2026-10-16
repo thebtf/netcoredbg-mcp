@@ -72,7 +72,7 @@ The five paths under `dotnet/inputs/` are private producer inputs. Sonar receive
 
 ## 4. Understand the private producer and preflight
 
-The runner preflights `uv`, `bash`, and `dotnet`; exact Coverlet `10.0.1`; Test SDK `17.12.0`; and VSTest selection for every fixed project. It refuses MTP rather than modifying project configuration. The shell then receives five `--dotnet-project` groups in the inventory order and produces a private Cobertura input for each group. The runner validates them, normalizes their canonical source union, and writes `dotnet/coverage.xml`.
+The runner preflights `uv`, `bash`, and `dotnet`; exact Coverlet `10.1.0`; Test SDK `17.12.0`; and VSTest selection for every fixed project. It refuses MTP rather than modifying project configuration. The shell then receives five `--dotnet-project` groups in the inventory order and produces a private Cobertura input for each group. The runner validates them, normalizes their canonical source union, and writes `dotnet/coverage.xml`.
 
 A missing executable, invalid package tuple, or MTP activation has zero begin and claim calls. A missing private input, unsafe source mapping, invalid final output, or zero final denominator has zero scanner-end calls.
 
