@@ -1,4 +1,4 @@
-# Quickstart — Validate an A1 retained preview artifact
+# Quickstart вЂ” Validate an A1 retained preview artifact
 
 This is the retained-artifact consumer-proof procedure. It is neither an
 execution receipt nor authority to approve, publish, tag, upload, distribute,
@@ -391,64 +391,52 @@ file identity, not current-attempt permission or publication authority.
 
 ## Probe the same current job's permissions
 
-The diagnostic source and dedicated YAML job are wired. Live setup-log
-availability during that invoking job remains `UNKNOWN`; no live-job,
-retention, final-candidate or publisher PASS is claimed by this source change.
-Do not manufacture Actions environment values as proof.
+The one-time timing experiment is complete with a negative capability result.
+Actual [run `38937481596`, attempt 1](https://github.com/thebtf/netcoredbg-mcp/actions/runs/38937481596/attempts/1)
+used source/workflow SHA `541b57007b0f56c0bfabe9bd1dd94a20daeac6df`
+(merged PR #333) and [job `117096512282`](https://github.com/thebtf/netcoredbg-mcp/actions/runs/38937481596/job/117096512282).
+Both samples started at the observed offsets 0.0 and 60.0 seconds and returned
+`UNAVAILABLE` / `CURRENT_JOB_LOGS_UNAVAILABLE`, exit 1, empty grants and no log
+hash. Bounded metadata reads confirmed the same job was `in_progress` with null
+conclusion after each sample. Observation completed at 62.062 seconds; this is
+a completed negative experiment, not a qualified current-job grant or a PASS
+for promotion, retention, publication or the final consumer journey.
 
-After integration on canonical main, Root's bounded nonmutating live route is:
+Root verified the original report hashes. Preserve artifact ID `12061642440`,
+named `stateless-preview-current-job-permissions-38937481596-1`, and its separate
+`current-job-permissions-t0.json`, `current-job-permissions-t60.json` and
+`timing-summary.json`. Local original bytes remain under
+`.agent/runs/a1-artifact-20261016/permission-timing-live-38937481596/`; Root's
+verdict is `permission-timing-live-root-verdict.json` in the parent directory.
+The earlier negative run `38907673130` and all positive/negative source and
+watchdog receipts, including private failed scratch, remain unchanged. The
+consumed driver, watchdog and their two tracked test files are retired, not
+promoted into a retry feature or reusable wrapper. Their source remains in
+PR #333 / that merge commit; historical receipts remain evidence for their
+recorded source, not proof of later changes.
+
+Re-entry requires a new provider contract/change or a source-backed supported
+same-current-job interface that changes the capability basis. Do not identically
+redispatch, add a third sample, extend the window, or use a PAT/auth-cache or
+declaration-only fallback. The observed result establishes neither global
+impossibility, completion-only semantics nor a log-availability SLA. Qualified
+same-current-promote-job readback remains required before dependent admission
+or remote mutation; independent complete-publisher source work continues.
+
+The canonical manual route remains available for a newly justified probe, not
+as authority to repeat the consumed experiment:
 
 ```powershell
 gh workflow run stateless-preview.yml --repo thebtf/netcoredbg-mcp --ref main -f mode=evidence -f evidence_operation=permission-probe
 ```
 
 Leave `evidence_request` and the three build fields absent/empty. The exact job
-ID is `probe_permissions` and its exact API display name is
-`Probe current job permissions`. It declares `contents: write` and
-`actions: read`, but contains no SDK, build, retain chain, tag, release, asset
-or test-write commands. Exact checkout/live-main fetch, Python setup and
-`admit-evidence` remain unchanged. Root dispatches one new run at attempt 1,
-not a rerun of historical run `38907673130`.
-
-The workflow invokes the one-use
-`scripts/stateless_preview_permission_timing_diagnostic.py` driver through an
-owned-process watchdog, without new dispatch inputs or collector options:
-
-1. At t=0, call the existing collector once and preserve its original report
-   and exit code. Derive the job ID from that report's verified metadata binding,
-   never an input. Make one additional same-job metadata GET, bounded to ten
-   seconds, to confirm the binding, `status: in_progress` and `conclusion: null`.
-2. Only `UNAVAILABLE` / `CURRENT_JOB_LOGS_UNAVAILABLE` with that confirmation
-   permits a second collector call at t=60 seconds from the first start. A
-   qualified first sample, insufficient grants, parser refusal, identity failure
-   or any other refusal stops without a second sample. The fixed scheduler guard
-   permits at most one second of wake-up lateness; a missed schedule is
-   `INCOMPLETE`, not another wait.
-3. After a second sample, perform the same bounded metadata GET for the original
-   job and require both reports to bind that same job. The overall observation
-   deadline is 120 seconds. The one-use
-   `scripts/stateless_preview_permission_watchdog.py` reuses the private Windows
-   owner: create the root suspended, admit it to a non-breakaway, kill-on-close
-   Job, then resume. The retained Job owns descendants even after the root exits;
-   neither root exit nor a PID/name census proves cleanup. At the deadline it
-   terminates that Job. Pre/post-termination bounded Job-member snapshots retain
-   membership-verified process handles and start identities; any uncovered
-   `TotalProcesses` delta refuses cleanup proof. Snapshots, handle acquisition and
-   waits share five additional seconds, not observation time. A terminating Job
-   refuses new assignments. Only zero active Job processes, every captured handle
-   signaled, stable covered membership and a retained-root exit code permit timeout
-   finalization to `INCOMPLETE`, partial-report reads and upload. Unknown/failed
-   cleanup or finalization leaves upload unauthorized; zero accounting or closing
-   the Job alone is not writer-closure proof. There is no overlapping worker, third
-   sample or automatic redispatch.
-
-The fixed 60/120-second bounds are experimental limits, not a log-availability
-SLA or a production retry feature. Root retires the timing driver/wrapper after
-consuming this single experiment.
-
-Separately, the manual single-sample collector CLI remains valid in the trusted
-Actions context below. It does not run the timing sequence or produce its
-three-file diagnostic artifact set:
+ID remains `probe_permissions`, with display name `Probe current job permissions`,
+declared `contents: write` / `actions: read`, exact checkout/live-main fetch,
+Python setup and `admit-evidence`. It contains no SDK, build, retention-chain,
+tag, release, asset or test-write commands. The restored probe invokes exactly
+one bounded collector, also available as the manual single-sample CLI in the
+trusted Actions context:
 
 ```powershell
 python scripts/stateless_preview_permissions.py --output current-job-permissions.json
@@ -460,61 +448,40 @@ There is no `--job-name` override. Trusted context must report
 `GITHUB_WORKFLOW_REF` must equal
 `{GITHUB_REPOSITORY}/.github/workflows/stateless-preview.yml@refs/heads/main`,
 and `GITHUB_WORKFLOW_SHA` must equal `GITHUB_SHA`. `GITHUB_TOKEN` is an
-environment value only. Actor/rerun provenance is not the token principal.
+environment value only, wired from `${{ github.token }}`. Actor/rerun provenance
+is not the token principal. The unchanged collector also recognizes the fixed
+`promote` → `Promote canonical-main preview candidate` mapping; a probe report
+cannot qualify that separate job or an Attempt 2.0.
 
-Each collector makes bounded HTTPS GETs, selects the unique fixed-name current
-job, and checks repository/run/attempt/SHA and `in_progress` status before log
-retrieval and again before qualifying returned log bytes. It requests the
-completed `Set up job` step's log using its zero-based array position and falls
-back to the current-job log endpoint if unavailable. Each owned worker retains
-the 45-second outer deadline and is killed/reaped on timeout; socket operations
-have a ten-second timeout, but collector DNS is not individually bounded to ten
-seconds. Raw logs remain limited to 1 MiB and are not saved. Collector JSON
-records binding, timestamps, HTTP outcomes, log source/hash and only actually
-parsed grants, with no token or signed download URL. Available bytes with parser
-refusal do not qualify permission evidence.
+The unchanged collector makes bounded HTTPS GETs, selects the unique fixed-name
+current job, and checks repository/run/attempt/SHA and `in_progress` status before
+log retrieval and again before qualifying returned log bytes. It requests the
+completed `Set up job` step's log using zero-based array position, then the
+same-job log endpoint if unavailable. The owned worker retains its 45-second
+outer deadline and is killed/reaped on timeout; socket operations have a
+ten-second timeout, but DNS is not individually bounded to ten seconds. Redirect
+safety, the 1 MiB raw-log limit and exclusive output creation remain unchanged.
+Raw logs are not saved. JSON records numeric run/attempt/job IDs, `job_key`,
+`workflow_sha`, binding, timestamps, HTTP outcomes, log source/hash and only
+actually parsed grants, without tokens or signed download URLs. Parser refusal
+does not qualify permission evidence. Only reported `actions: read` plus
+`contents: write` yields `QUALIFIED` / exit zero; `UNAVAILABLE` or `INSUFFICIENT`
+remains nonzero and authorizes no dependent mutation.
 
-For an individual collector, only reported `actions: read` plus `contents: write`
-yields `QUALIFIED` and exit zero. `UNAVAILABLE`/`INSUFFICIENT` yields a nonzero
-exit. The timing driver preserves both actual exit codes and never rewrites a
-negative first report when a later sample qualifies. It returns zero only for a
-complete qualified observation with confirmed terminal metadata; an incomplete
-or unqualified experiment remains nonzero and authorizes no dependent mutation.
+The immutable upload again lists only `current-job-permissions.json` under
+`stateless-preview-current-job-permissions-{run_id}-{run_attempt}`. Its existing
+`always()` condition requires actual probe success or failure, never skipped
+admission/probe. Only the retired watchdog's output gate is removed; this does
+not relax collector limits, qualification or mutation authority. Admitted
+seven-day retention, `overwrite: false` and `if-no-files-found: error` remain,
+without `continue-on-error`. No raw logs, tokens, signed URLs, internal payloads
+or Diag are uploaded.
 
-The existing `always()` upload runs only after the probe step actually succeeds
-or fails **and** its watchdog sets `cleanup_verified=true`. Under artifact name
-`stateless-preview-current-job-permissions-{run_id}-{run_attempt}`, it explicitly
-lists only:
-
-```text
-permission-timing-diagnostic/current-job-permissions-t0.json
-permission-timing-diagnostic/current-job-permissions-t60.json
-permission-timing-diagnostic/timing-summary.json
-```
-
-The first two files are separate, unaltered collector reports. An unexecuted
-second sample has no fabricated report. The summary records planned/actual
-monotonic times, exact repository/run/attempt/job/key/source/workflow SHA,
-terminal metadata facts, observed exit codes and hashes of existing reports;
-an interrupted collector's unobserved exit code remains null. Log-byte
-availability and parsed-grant qualification remain separate facts. The upload
-keeps admitted seven-day retention, `overwrite: false` and
-`if-no-files-found: error`. It does not run after skipped admission/probe, upload
-raw logs, signed URLs, tokens, internal payloads or Diag, or mask failure with
-`continue-on-error`.
-
-The meaning remains `RUNNER_REPORTED_GRANT_NOT_TOKEN_INTROSPECTION`:
-observational evidence, not Promotion Attempt admission, approval, or publication.
-YAML declarations, another job's grants, successful GETs or endpoint headers are
-not substitutes. A failed live probe holds dependent publisher admission only;
-it does not prove global impossibility or authorize a declaration-only fallback.
-
-The diagnostic collector recognizes only the fixed `probe_permissions`/future
-`promote` mapping. The latter is not an existing YAML job. Its `binding` includes
-`job_key` and `workflow_sha`, while run/attempt/job IDs stay numeric. Preserve
-historical diagnostic JSON; reports without the new bindings cannot qualify an
-Attempt 2.0. Actual probe run `38907673130` returned `UNAVAILABLE`; live capability
-remains `UNKNOWN`, and no source-only success establishes live permission.
+The meaning remains `RUNNER_REPORTED_GRANT_NOT_TOKEN_INTROSPECTION`. Current
+qualified grants have not been obtained; live capability remains `UNKNOWN`.
+YAML declarations, another job's grants, successful GETs or endpoint headers
+are not substitutes. Retirement closes this experiment's code lifecycle only;
+it is neither permission proof nor a product-release claim.
 
 ## Root validation and remaining evidence
 

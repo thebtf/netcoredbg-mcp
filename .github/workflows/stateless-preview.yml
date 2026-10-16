@@ -365,17 +365,14 @@ jobs:
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python scripts/stateless_preview_permission_watchdog.py
+        run: python scripts/stateless_preview_permissions.py --output current-job-permissions.json
 
       - name: Retain only the attempted permission diagnostic
-        if: ${{ always() && (steps.probe.outcome == 'success' || steps.probe.outcome == 'failure') && steps.probe.outputs.cleanup_verified == 'true' }}
+        if: ${{ always() && (steps.probe.outcome == 'success' || steps.probe.outcome == 'failure') }}
         uses: actions/upload-artifact@v7
         with:
           name: stateless-preview-current-job-permissions-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            permission-timing-diagnostic/current-job-permissions-t0.json
-            permission-timing-diagnostic/current-job-permissions-t60.json
-            permission-timing-diagnostic/timing-summary.json
+          path: current-job-permissions.json
           if-no-files-found: error
           overwrite: false
           retention-days: ${{ steps.admit.outputs.retention_days }}
