@@ -1692,19 +1692,43 @@ def _validate_review_evidence(record: Mapping[str, Any], *, independent_pr: bool
     ] not in ("SECURITY_REVIEWER", "CODE_WORKFLOW_REVIEWER"):
         _refuse("lens reviewer provenance is invalid")
 
+    checks = _expect_list(record["checks"], "review checks")
+    required = len(checks)
+    if not 1 <= required <= 128:
+        _refuse("review checks must contain between 1 and 128 required records")
+    check_ids: set[str] = set()
+    completed = 0
+    for value in checks:
+        check = _expect_mapping(value, "review check", ("check_id", "result", "status"))
+        identifier = _expect_safe_opaque_id(check["check_id"], "review check ID")
+        if identifier in check_ids:
+            _refuse("review checks contain duplicate check IDs")
+        check_ids.add(identifier)
+        result = _expect_mapping(check["result"], "review check result", ("expected", "observed"))
+        expected = _expect_string(result["expected"], "review check expected result")
+        observed = _expect_string(result["observed"], "review check observed result")
+        status = _expect_string(check["status"], "review check status")
+        if (
+            expected not in _EXPECTED_OBSERVED_OUTCOMES
+            or observed not in _REVIEW_OBSERVED_RESULTS
+            or status not in ("PASS", "FAIL", "REFUSED", "INCOMPLETE")
+        ):
+            _refuse("review check contains an unsupported closed value")
+        completed += status == "PASS" and observed == _EXPECTED_OBSERVED_OUTCOMES[expected]
+
     denominator = _expect_mapping(
         record["denominator"],
         "review denominator",
         ("required_evidence_count", "completed_evidence_count"),
     )
-    required = _expect_positive_integer(
+    supplied_required = _expect_positive_integer(
         denominator["required_evidence_count"], "review required count"
     )
-    completed = _expect_nonnegative_integer(
+    supplied_completed = _expect_nonnegative_integer(
         denominator["completed_evidence_count"], "review completed count"
     )
-    if required > 128 or completed != required:
-        _refuse("review evidence denominator is incomplete or outside its bounds")
+    if supplied_required != required or supplied_completed != completed or completed != required:
+        _refuse("review evidence denominator does not match its complete checks")
     findings = _expect_mapping(
         record["findings"], "review findings", ("records", "unresolved_high_severity_count")
     )
@@ -1735,9 +1759,6 @@ def _validate_review_evidence(record: Mapping[str, Any], *, independent_pr: bool
     )
     if supplied_high != unresolved_high or unresolved_high != 0:
         _refuse("review findings do not prove zero unresolved high-severity findings")
-    # Only the PR receipt defines its completed denominator in terms of scoped records.
-    if independent_pr and completed != len(rows):
-        _refuse("independent PR completed count does not match its scoped records")
     result = _expect_mapping(record["result"], "review result", ("expected", "observed"))
     expected = _expect_string(result["expected"], "review expected result")
     if (
@@ -1766,6 +1787,7 @@ def _validate_s2_s3_lens_result(
             "reviewer_provenance",
             "producer_provenance",
             "denominator",
+            "checks",
             "findings",
             "result",
             "outcome",
@@ -1878,7 +1900,7 @@ def seal_independent_pr_review(
     candidate_identity_bytes: bytes,
     candidate_identity_reference: Mapping[str, Any],
 ) -> Mapping[str, Any]:
-    """Admit the distinct PR review, including its author and scoped-record denominator."""
+    """Admit the distinct PR review with independent provenance and check-derived coverage."""
 
     identity, reference = _verified_review_candidate(
         candidate_identity, candidate_identity_bytes, candidate_identity_reference
@@ -1896,6 +1918,7 @@ def seal_independent_pr_review(
             "reviewer_provenance",
             "producer_provenance",
             "denominator",
+            "checks",
             "findings",
             "result",
             "outcome",

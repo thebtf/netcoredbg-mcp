@@ -1102,6 +1102,17 @@ _REVIEW_SEALERS = (
 )
 
 
+def _simulated_review_checks(count: int) -> list[dict[str, Any]]:
+    return [
+        {
+            "check_id": f"simulated-check-{index:03d}",
+            "result": {"expected": "EXPECT_SUCCESS", "observed": "SUCCESS"},
+            "status": "PASS",
+        }
+        for index in range(1, count + 1)
+    ]
+
+
 def _simulated_review_inputs(tmp_path: Path) -> dict[str, Any]:
     # Simulated validator inputs only; these are never reviewer or acceptance receipts.
     consumer, identity, identity_bytes, consumer_reference, catalog = (
@@ -1131,6 +1142,7 @@ def _simulated_review_inputs(tmp_path: Path) -> dict[str, Any]:
             "operation": "seal_s2_s3_lens_result",
         },
         "denominator": {"required_evidence_count": 1, "completed_evidence_count": 1},
+        "checks": _simulated_review_checks(1),
         "findings": {
             "records": [
                 {
@@ -1260,11 +1272,15 @@ def test_review_semantics_seal_exact_candidate_and_closed_schema(
     semantic_review_inputs: dict[str, Any], operation: str, record_key: str, schema_reference: str
 ) -> None:
     inputs = semantic_review_inputs
-    if record_key == "lens":
-        inputs["lens"]["findings"]["records"].clear()
-    elif record_key == "aggregate":
-        for lens in inputs["aggregate"]["lens_results"]:
-            lens["findings"]["records"].clear()
+    record = inputs[record_key]
+    reviews = record["lens_results"] if record_key == "aggregate" else [record]
+    for review in reviews:
+        review["checks"] = _simulated_review_checks(11)
+        review["checks"][-1]["result"] = {"expected": "EXPECT_REFUSAL", "observed": "REFUSAL"}
+        review["checks"][-2]["result"] = {"expected": "EXPECT_FAILURE", "observed": "FAILURE"}
+        review["denominator"] = {"required_evidence_count": 11, "completed_evidence_count": 11}
+        review["findings"]["records"].clear()
+    original = deepcopy(record)
     _validate_review_schema(inputs[record_key], schema_reference)
 
     sealed = getattr(artifact_contract, operation)(inputs[record_key], **_review_binding(inputs))
@@ -1276,6 +1292,18 @@ def test_review_semantics_seal_exact_candidate_and_closed_schema(
         inputs["candidate_identity_bytes"]
     )
     assert sealed["outcome"] == "PASS"
+    assert sealed == original
+    assert record == original
+    sealed_reviews = sealed["lens_results"] if record_key == "aggregate" else [sealed]
+    for review in sealed_reviews:
+        assert len(review["checks"]) == 11
+        assert review["denominator"] == {
+            "required_evidence_count": 11,
+            "completed_evidence_count": 11,
+        }
+        assert not review["findings"]["records"]
+        with pytest.raises(TypeError):
+            review["checks"][0]["status"] = "INCOMPLETE"
     if record_key == "aggregate":
         assert [row["lens"] for row in sealed["lens_results"]] == list(_S2_S3_LENSES)
         assert sealed["coverage_summary"] == {
@@ -1485,19 +1513,217 @@ def test_review_semantics_pr_review_is_independent_and_targets_candidate(
         artifact_contract.seal_independent_pr_review(review, **_review_binding(inputs))
 
 
-@pytest.mark.parametrize("violation", ["missing_observations", "invented_completed_count"])
-def test_review_semantics_pr_denominator_is_derived_from_scoped_records(
-    semantic_review_inputs: dict[str, Any], violation: str
+@pytest.mark.parametrize(("operation", "record_key"), _REVIEW_SEALERS)
+@pytest.mark.parametrize(
+    ("violation", "schema_refuses"),
+    [
+        ("missing_checks", True),
+        ("zero_checks", True),
+        ("too_many_checks", True),
+        ("checks_not_array", True),
+        ("check_not_object", True),
+        ("missing_check_id", True),
+        ("missing_result", True),
+        ("missing_status", True),
+        ("missing_expected", True),
+        ("missing_observed", True),
+        ("duplicate_check", True),
+        ("duplicate_id_different_result", False),
+        ("failed_check", True),
+        ("refused_check", True),
+        ("incomplete_check", True),
+        ("mismatched_result", False),
+        ("check_lookup_contradiction", False),
+        ("invalid_status", True),
+        ("invalid_expected", True),
+        ("invalid_observed", True),
+        ("extra_check_field", True),
+        ("extra_result_field", True),
+        ("unsafe_check_id", True),
+    ],
+)
+def test_review_semantics_check_records_are_closed_complete_and_unique(
+    semantic_review_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    violation: str,
+    schema_refuses: bool,
 ) -> None:
     inputs = semantic_review_inputs
-    review = inputs["pr_review"]
-    if violation == "missing_observations":
-        review["findings"]["records"].clear()
-    else:
+    record = inputs[record_key]
+    schema_reference = {
+        "lens": "s2-s3-review.schema.json#/$defs/dependency_cve_lens",
+        "aggregate": "s2-s3-review.schema.json",
+        "pr_review": "independent-pr-review.schema.json",
+    }[record_key]
+    _validate_review_schema(record, schema_reference)
+    assert (
+        getattr(artifact_contract, operation)(record, **_review_binding(inputs))["outcome"]
+        == "PASS"
+    )
+    review = record["lens_results"][-1] if record_key == "aggregate" else record
+    check = review["checks"][0]
+    if violation == "missing_checks":
+        del review["checks"]
+    elif violation == "zero_checks":
+        review["checks"].clear()
+    elif violation == "too_many_checks":
+        review["checks"] = _simulated_review_checks(129)
+    elif violation == "checks_not_array":
+        review["checks"] = {}
+    elif violation == "check_not_object":
+        review["checks"][0] = None
+    elif violation in ("missing_check_id", "missing_result", "missing_status"):
+        del check[violation.removeprefix("missing_")]
+    elif violation in ("missing_expected", "missing_observed"):
+        del check["result"][violation.removeprefix("missing_")]
+    elif violation in ("duplicate_check", "duplicate_id_different_result"):
+        duplicate = deepcopy(check)
+        if violation == "duplicate_id_different_result":
+            duplicate["result"] = {"expected": "EXPECT_FAILURE", "observed": "FAILURE"}
+        review["checks"].append(duplicate)
         review["denominator"] = {"required_evidence_count": 2, "completed_evidence_count": 2}
+    elif violation in ("failed_check", "refused_check", "incomplete_check", "invalid_status"):
+        check["status"] = {
+            "failed_check": "FAIL",
+            "refused_check": "REFUSED",
+            "incomplete_check": "INCOMPLETE",
+            "invalid_status": "CLEAN",
+        }[violation]
+    elif violation == "mismatched_result":
+        check["result"]["observed"] = "FAILURE"
+    elif violation == "check_lookup_contradiction":
+        check["result"]["expected"] = "EXPECT_REFUSAL"
+    elif violation in ("invalid_expected", "invalid_observed"):
+        check["result"][violation.removeprefix("invalid_")] = "UNKNOWN"
+    elif violation == "extra_check_field":
+        check["diagnostic"] = "simulated raw diagnostic"
+    elif violation == "extra_result_field":
+        check["result"]["diagnostic"] = "simulated raw diagnostic"
+    else:
+        check["check_id"] = "../simulated-check"
+
+    if schema_refuses:
+        with pytest.raises(ValidationError):
+            _validate_review_schema(record, schema_reference)
+    else:
+        _validate_review_schema(record, schema_reference)
+    original = deepcopy(record)
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(record, **_review_binding(inputs))
+    assert record == original
+
+
+@pytest.mark.parametrize(("operation", "record_key"), _REVIEW_SEALERS)
+@pytest.mark.parametrize(
+    ("required", "completed", "passing_checks"),
+    [
+        pytest.param(12, 12, 11, id="overclaim"),
+        pytest.param(11, 10, 11, id="false-completed"),
+        pytest.param(10, 10, 11, id="underclaim"),
+        pytest.param(11, 11, 10, id="partial-checks"),
+        pytest.param(True, 11, 11, id="boolean-required"),
+        pytest.param(11, True, 11, id="boolean-completed"),
+        pytest.param(11.5, 11, 11, id="fractional-required"),
+        pytest.param(11, 10.5, 11, id="fractional-completed"),
+    ],
+)
+def test_review_semantics_check_denominator_is_derived_from_completed_checks(
+    semantic_review_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    required: int | float,
+    completed: int | float,
+    passing_checks: int,
+) -> None:
+    inputs = semantic_review_inputs
+    record = inputs[record_key]
+    review = record["lens_results"][-1] if record_key == "aggregate" else record
+    review["checks"] = _simulated_review_checks(11)
+    review["denominator"] = {"required_evidence_count": 11, "completed_evidence_count": 11}
+    assert (
+        getattr(artifact_contract, operation)(record, **_review_binding(inputs))["outcome"]
+        == "PASS"
+    )
+
+    review["denominator"] = {
+        "required_evidence_count": required,
+        "completed_evidence_count": completed,
+    }
+    for check in review["checks"][passing_checks:]:
+        check["status"] = "INCOMPLETE"
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(record, **_review_binding(inputs))
+
+
+@pytest.mark.parametrize(("operation", "record_key"), _REVIEW_SEALERS)
+def test_review_semantics_check_coverage_is_independent_of_finding_count(
+    semantic_review_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+) -> None:
+    inputs = semantic_review_inputs
+    record = inputs[record_key]
+    review = record["lens_results"][-1] if record_key == "aggregate" else record
+    review["findings"]["records"] = [
+        {
+            "finding_id": "simulated-resolved-high",
+            "severity": "HIGH",
+            "disposition": "RESOLVED",
+            "observed_result": "SUCCESS",
+        },
+        {
+            "finding_id": "simulated-unresolved-low",
+            "severity": "LOW",
+            "disposition": "UNRESOLVED",
+            "observed_result": "FAILURE",
+        },
+    ]
+    original = deepcopy(record)
+
+    sealed = getattr(artifact_contract, operation)(record, **_review_binding(inputs))
+
+    assert sealed == original
+    assert record == original
+    sealed_review = sealed["lens_results"][-1] if record_key == "aggregate" else sealed
+    assert len(sealed_review["checks"]) == 1
+    assert len(sealed_review["findings"]["records"]) == 2
+    assert sealed_review["denominator"] == {
+        "required_evidence_count": 1,
+        "completed_evidence_count": 1,
+    }
+    assert sealed_review["findings"]["unresolved_high_severity_count"] == 0
+
+
+@pytest.mark.parametrize(("operation", "record_key"), _REVIEW_SEALERS)
+@pytest.mark.parametrize("severity", ["HIGH", "CRITICAL"])
+def test_review_semantics_check_completion_cannot_override_unresolved_high_findings(
+    semantic_review_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    severity: str,
+) -> None:
+    inputs = semantic_review_inputs
+    record = inputs[record_key]
+    assert (
+        getattr(artifact_contract, operation)(record, **_review_binding(inputs))["outcome"]
+        == "PASS"
+    )
+    review = record["lens_results"][-1] if record_key == "aggregate" else record
+    review["findings"]["records"].append(
+        {
+            "finding_id": "simulated-blocking-finding",
+            "severity": severity,
+            "disposition": "UNRESOLVED",
+            "observed_result": "FAILURE",
+        }
+    )
+    review["findings"]["unresolved_high_severity_count"] = 1
+    if record_key == "aggregate":
+        record["coverage_summary"]["unresolved_high_severity_count"] = 1
 
     with pytest.raises(ValueError):
-        artifact_contract.seal_independent_pr_review(review, **_review_binding(inputs))
+        getattr(artifact_contract, operation)(record, **_review_binding(inputs))
 
 
 def _simulated_stage_inputs(inputs: dict[str, Any], stage: str) -> dict[str, Any]:
@@ -1805,12 +2031,21 @@ def test_stage_evidence_semantics_policy_snapshots_are_raw_blobs_under_git_eol_c
         "incomplete_consumer_matrix",
         "failed_consumer_runtime",
         "failed_raw_review_with_claimed_passing_gate",
+        "incomplete_pr_checks",
+        "false_lens_check_count",
     ],
 )
 def test_stage_evidence_semantics_recompute_predecision_from_raw_typed_records(
     semantic_review_inputs: dict[str, Any], violation: str
 ) -> None:
     inputs = _simulated_stage_inputs(semantic_review_inputs, "pre-decision")
+    if violation in ("incomplete_pr_checks", "false_lens_check_count"):
+        assert (
+            artifact_contract.seal_stage_gate_evidence(
+                inputs["stage_record"], **_stage_binding(inputs)
+            )["outcome"]
+            == "PASS"
+        )
     if violation == "missing_raw_record":
         del inputs["records"]["independent-review.json"]
     elif violation == "raw_byte_substitution":
@@ -1822,6 +2057,13 @@ def test_stage_evidence_semantics_recompute_predecision_from_raw_typed_records(
     elif violation == "false_aggregate_coverage":
         aggregate = inputs["aggregate"]
         aggregate["lens_results"][0]["denominator"]["required_evidence_count"] = 2
+        _replace_simulated_gate_record(inputs, 1, aggregate)
+    elif violation == "false_lens_check_count":
+        aggregate = inputs["aggregate"]
+        aggregate["lens_results"][-1]["denominator"] = {
+            "required_evidence_count": 2,
+            "completed_evidence_count": 2,
+        }
         _replace_simulated_gate_record(inputs, 1, aggregate)
     elif violation in ("incomplete_consumer_matrix", "failed_consumer_runtime"):
         consumer = inputs["consumer"]
@@ -1838,10 +2080,17 @@ def test_stage_evidence_semantics_recompute_predecision_from_raw_typed_records(
             review["reviewer_provenance"]["reviewer_principal_id"] = "simulated-author"
         elif violation == "unredacted_pr_review":
             review["findings"]["records"][0]["diagnostic"] = "simulated raw diagnostic"
+        elif violation == "incomplete_pr_checks":
+            review["checks"][0]["status"] = "INCOMPLETE"
         else:
             review["outcome"] = "FAIL"
             review["result"]["observed"] = "FAILURE"
         _replace_simulated_gate_record(inputs, 2, review)
+
+    if violation in ("incomplete_pr_checks", "false_lens_check_count"):
+        for entry in inputs["stage_record"]["gate_evidence"]:
+            reference = entry["record_reference"]
+            assert reference["sha256"] == _sha256_bytes(inputs["records"][reference["path"]])
 
     with pytest.raises(ValueError):
         artifact_contract.seal_stage_gate_evidence(inputs["stage_record"], **_stage_binding(inputs))
@@ -2897,12 +3146,26 @@ def test_promotion_decision_semantics_require_exact_resolved_predecision_stage(
 
 
 @pytest.mark.parametrize(
-    "violation", ["false_seven_lens_coverage", "nonindependent_pr_review", "incomplete_consumer"]
+    "violation",
+    [
+        "false_seven_lens_coverage",
+        "nonindependent_pr_review",
+        "incomplete_consumer",
+        "false_pr_check_count",
+        "incomplete_lens_checks",
+    ],
 )
 def test_promotion_decision_semantics_recompute_nested_raw_evidence(
     promotion_decision_inputs: dict[str, Any], violation: str
 ) -> None:
     inputs = promotion_decision_inputs
+    if violation in ("false_pr_check_count", "incomplete_lens_checks"):
+        assert (
+            artifact_contract.seal_promotion_decision(
+                inputs["decision_record"], **_stage_binding(inputs)
+            )["decision"]
+            == "APPROVE"
+        )
     if violation == "false_seven_lens_coverage":
         aggregate = inputs["aggregate"]
         aggregate["lens_results"].pop()
@@ -2911,11 +3174,29 @@ def test_promotion_decision_semantics_recompute_nested_raw_evidence(
         review = inputs["pr_review"]
         review["reviewer_provenance"]["reviewer_principal_id"] = "simulated-author"
         _replace_simulated_gate_record(inputs, 2, review)
+    elif violation == "false_pr_check_count":
+        review = inputs["pr_review"]
+        review["denominator"] = {"required_evidence_count": 2, "completed_evidence_count": 2}
+        _replace_simulated_gate_record(inputs, 2, review)
+    elif violation == "incomplete_lens_checks":
+        aggregate = inputs["aggregate"]
+        aggregate["lens_results"][-1]["checks"][0]["status"] = "INCOMPLETE"
+        _replace_simulated_gate_record(inputs, 1, aggregate)
     else:
         consumer = inputs["consumer"]
         consumer["scenario_matrix"]["results"].pop()
         _replace_simulated_gate_record(inputs, 0, consumer)
     _replace_simulated_decision_stage(inputs)
+
+    if violation in ("false_pr_check_count", "incomplete_lens_checks"):
+        references = [
+            entry["record_reference"] for entry in inputs["stage_record"]["gate_evidence"]
+        ]
+        references.append(
+            inputs["decision_record"]["evidence"]["pre_decision_stage_evidence"]["record_reference"]
+        )
+        for reference in references:
+            assert reference["sha256"] == _sha256_bytes(inputs["records"][reference["path"]])
 
     with pytest.raises(ValueError):
         artifact_contract.seal_promotion_decision(

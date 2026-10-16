@@ -112,7 +112,7 @@ The S2/S3 Review Aggregate is one immutable closed record for all seven required
 | --- | --- |
 | `receipt_id` and sealed record reference | A bounded opaque review identifier and the enclosing immutable GitHub artifact-file reference. |
 | `candidate_identity_reference` | The closed Candidate Identity Record reference and exact canonical-main binding. |
-| `results` | The seven ordered required S2/S3 lens results, each with a nonzero denominator, closed status/result code, and no raw diagnostic text. |
+| `lens_results` | The seven ordered required S2/S3 lens results, each with nonempty closed `checks`, a check-derived denominator, independent findings, closed status/result codes, and no raw diagnostic text. |
 | `coverage_summary` | Derived `7/7/0` lens completion and unresolved-high result; it is never caller-supplied admission data. |
 | `outcome` and `recorded_at` | Closed pass/fail/incomplete/refused status and record time. |
 | `producer` | The future independent review producer and semantic sealing operation; no raw path, command, secret, or diagnostic enters the durable receipt. |
@@ -120,8 +120,10 @@ The S2/S3 Review Aggregate is one immutable closed record for all seven required
 ### Validation rules
 
 - Required S2/S3 coverage is exactly the D3 program's dependency/CVE, .NET unsafe-pattern, OWASP input/output/path, attack-surface, secret/asset-manifest, path/process fail-closed, and exploitability lenses in closed order.
-- Each lens denominator is nonzero and every result uses the shared bounded ID/status/result-code vocabulary. A missing, zero, stale, candidate-mismatched, path-bearing, or unredacted receipt makes the evidence ineligible for `APPROVE`.
-- An unresolved high-severity finding makes the evidence ineligible for `APPROVE`.
+- Each lens requires 1..128 checks unique by `check_id`. Every check is a closed object with exactly `check_id` (the existing safe opaque ID), `result` (closed `expected`/`observed` codes), and `status` (`PASS`, `FAIL`, `REFUSED`, or `INCOMPLETE`).
+- The required denominator equals `len(checks)`. The completed denominator counts only `PASS` checks with `EXPECT_SUCCESS/SUCCESS`, `EXPECT_FAILURE/FAILURE`, or `EXPECT_REFUSAL/REFUSAL`. Both supplied counts must exactly equal the derived counts, and every required check must complete. A `REFUSED` status is not completed passing evidence.
+- Findings independently contain 0..128 closed records, unique by `finding_id`. Their number does not determine coverage. The unresolved count is recomputed only from HIGH/CRITICAL findings with disposition `UNRESOLVED`; that count must match the supplied value and equal zero. A resolved HIGH finding is not unresolved evidence.
+- A missing, zero, duplicate, incomplete, falsely counted, stale, candidate-mismatched, path-bearing, or unredacted check or receipt makes the evidence ineligible for `APPROVE`. Stage and decision sealing repeat semantic admission from the raw records even when their hashes match.
 - A review receipt can inspect source/workflow only when canonical main commit, trusted build run, artifact, manifest, archive, and executable bindings equal the Candidate Identity Record.
 - The receipt does not grant promotion. A GitHub environment reviewer can guard workflow execution, but it cannot replace the Decision, current Promotion Attempt, or this review record.
 
@@ -134,6 +136,22 @@ planned or reviewing -> sealed_incomplete
 ```
 
 Every sealed review receipt is immutable. A corrected candidate needs fresh review evidence.
+
+## Independent PR Review Receipt
+
+The distinct [Independent PR Review Receipt](contracts/independent-pr-review.schema.json)
+binds one reviewed repository, pull request, canonical base ref, and source commit
+to the exact retained candidate. Its reviewer must differ from both the reviewed
+author and the receipt producer. It cannot substitute for any S2/S3 lens.
+
+It uses the same required `checks`, check-derived `denominator`, and independent
+`findings` rules as each lens. Eleven completed checks and zero findings are
+eligible; synthetic INFO findings are neither required nor coverage evidence.
+An absent `checks` array is refused, not inferred from old counts or findings.
+The `1.0` schemas correct the not-yet-accepted review format without aliases or
+fallbacks. Existing raw evidence is not rewritten: corrected closed receipts
+preserve the real check IDs and keep free-form evidence in the original raw record.
+Sealing validates supplied claims; it does not execute or certify reviewer work.
 
 ## Stage Gate Evidence
 

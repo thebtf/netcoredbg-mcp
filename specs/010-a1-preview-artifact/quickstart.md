@@ -160,10 +160,16 @@ validate supplied evidence; they do not add review or promotion CLI commands:
 - `seal_s2_s3_review_aggregate` revalidates all seven ordered lenses and derives
   `7/7/0` coverage rather than trusting supplied counts.
 - `seal_independent_pr_review` admits the separate PR-review obligation, including
-  the exact repository/commit, reviewer/author/producer separation, and completed
-  denominator derived from typed scoped finding records. A clean lens may have
-  no findings; a positive PR-review denominator cannot be proved by an empty
-  scoped-record set under the current contract.
+  the exact repository/commit and reviewer/author/producer separation. Both PR
+  reviews and lenses require `checks`: 1..128 closed records with unique
+  `check_id`, `result: {expected, observed}`, and `status`. The required count is
+  the number of checks; the completed count includes only `PASS` checks whose
+  expected and observed codes match. Both supplied counts must equal the derived
+  counts, and every required check must complete. `EXPECT_REFUSAL/REFUSAL/PASS`
+  is completed evidence of an expected refusal; `status: REFUSED` is incomplete.
+  Findings are separate: a clean PR review or lens may have no findings, while
+  any unresolved HIGH/CRITICAL finding refuses admission. Eleven completed
+  checks and zero findings therefore prove `11/11/0` without INFO padding.
 - `seal_stage_gate_evidence` re-hashes the five exact-source policy snapshots,
   resolves and hashes each required raw record, validates its type and candidate
   binding, and recomputes each gate and stage outcome.
