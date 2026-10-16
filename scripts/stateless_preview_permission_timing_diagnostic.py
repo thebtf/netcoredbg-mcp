@@ -232,9 +232,6 @@ def observe(
 
     def sample(filename: str, planned: float) -> tuple[dict, dict]:
         nonlocal origin
-        if not summary["samples"]:
-            origin = clock()
-            summary["origin_monotonic_seconds"] = origin
         item = {
             "planned_start_offset_seconds": planned,
             "actual_start_offset_seconds": None,
@@ -246,7 +243,13 @@ def observe(
         }
         summary["samples"].append(item)
         checkpoint()
-        actual_start = elapsed()
+        actual_start = clock()
+        if planned == 0.0:
+            origin = actual_start
+            summary["origin_monotonic_seconds"] = origin
+            actual_start = 0.0
+        else:
+            actual_start -= origin
         if actual_start >= 120.0:
             summary["samples"].pop()
             raise _IncompleteError("OBSERVATION_DEADLINE_EXCEEDED")

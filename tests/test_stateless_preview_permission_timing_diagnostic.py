@@ -87,6 +87,7 @@ def scenario(tmp_path, monkeypatch):
         http_status=200,
         exit_codes=None,
         collector_error=None,
+        first_checkpoint_delay=0.0,
         second_checkpoint_delay=0.0,
     ):
         directory = tmp_path / "observation"
@@ -136,10 +137,20 @@ def scenario(tmp_path, monkeypatch):
 
         real_save = driver._save
         checkpoint_delayed = False
+        first_pending_checkpoint = None
 
         def save(output, summary):
-            nonlocal checkpoint_delayed
+            nonlocal checkpoint_delayed, first_pending_checkpoint
             real_save(output, summary)
+            if (
+                first_checkpoint_delay
+                and first_pending_checkpoint is None
+                and len(summary["samples"]) == 1
+                and summary["samples"][0]["actual_start_offset_seconds"] is None
+            ):
+                first_pending_checkpoint = json.loads((output / driver._SUMMARY).read_bytes())
+                assert not (output / driver._FIRST).exists()
+                current[0] += first_checkpoint_delay
             if second_checkpoint_delay and not checkpoint_delayed and current[0] >= 1061.0:
                 current[0] += second_checkpoint_delay
                 checkpoint_delayed = True
@@ -170,6 +181,7 @@ def scenario(tmp_path, monkeypatch):
             requests=requests,
             originals=originals,
             directory=directory,
+            first_pending_checkpoint=first_pending_checkpoint,
         )
 
     return run
@@ -210,6 +222,38 @@ def test_exact_unavailable_reason_resamples_at_t60_and_can_qualify(scenario):
         assert metadata["binding_confirmed"] is True
         assert metadata["facts"]["status"] == "in_progress"
         assert metadata["facts"]["conclusion_is_null"] is True
+
+
+def test_first_pending_checkpoint_io_delay_keeps_t60_from_first_collector_start(scenario):
+    result = scenario(
+        [report(), report("REQUIRED_RUNNER_GRANTS_REPORTED", status="QUALIFIED")],
+        first_checkpoint_delay=5.0,
+    )
+
+    pending = result.first_pending_checkpoint
+    assert pending is not None
+    assert pending["observation"] == "INCOMPLETE"
+    assert len(pending["samples"]) == 1
+    assert pending["samples"][0]["report_file"] == driver._FIRST
+    for field in (
+        "actual_start_offset_seconds",
+        "finished_offset_seconds",
+        "exit_code",
+        "report_sha256",
+        "terminal_metadata",
+    ):
+        assert pending["samples"][0][field] is None
+    assert result.code == 0
+    assert result.starts == [5.0, 65.0]
+    assert result.starts[1] - result.starts[0] == 60.0
+    assert result.sleeps == [57.5]
+    first, second = result.summary["samples"]
+    assert first["actual_start_offset_seconds"] == 0.0
+    assert second["planned_start_offset_seconds"] == 60.0
+    assert second["actual_start_offset_seconds"] == 60.0
+    assert result.summary["origin_monotonic_seconds"] == 1005.0
+    assert result.summary["deadline_offset_seconds"] == 120.0
+    assert result.summary["latest_second_start_offset_seconds"] == 61.0
 
 
 @pytest.mark.parametrize(
