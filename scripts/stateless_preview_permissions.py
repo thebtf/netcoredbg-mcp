@@ -1,9 +1,10 @@
 """Diagnose runner-reported permissions for the current GitHub Actions job.
 
 The two evidence functions remain pure. The CLI performs bounded HTTPS GETs
-in one disposable worker process. It is restricted to job probe_permissions
-(Probe current job permissions) in the canonical stateless-preview.yml workflow;
-no job-name override exists. Socket operations time out after ten seconds.
+in one disposable worker process. In the canonical stateless-preview.yml workflow,
+GITHUB_JOB selects a fixed pair: probe_permissions (Probe current job permissions)
+or future promote (Promote canonical-main preview candidate). No caller or
+environment job-name override exists. Socket operations time out after ten seconds.
 DNS is bounded by the outer 45-second worker deadline, not separately.
 Reported grants establish neither token identity nor artifact-promotion authority.
 """
@@ -30,8 +31,10 @@ _MAX_LOG_BYTES = 1024 * 1024
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?Z ")
 _GRANT = re.compile(r"([A-Za-z][A-Za-z0-9_-]*): (none|read|write)")
 _PERMISSION_GROUP = "GITHUB_TOKEN Permissions"
-_PROBE_JOB_ID = "probe_permissions"
-_PROBE_JOB_NAME = "Probe current job permissions"
+_JOB_NAMES = {
+    "probe_permissions": "Probe current job permissions",
+    "promote": "Promote canonical-main preview candidate",
+}
 
 
 def select_current_job(
@@ -214,17 +217,19 @@ def _validate_redirect_url(url: str) -> str:
 
 
 def _read_context() -> tuple[dict, dict]:
+    job_key = os.environ.get("GITHUB_JOB", "")
     if (
         os.environ.get("GITHUB_ACTIONS") != "true"
         or os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
         or os.environ.get("GITHUB_REF") != "refs/heads/main"
-        or os.environ.get("GITHUB_JOB") != _PROBE_JOB_ID
+        or job_key not in _JOB_NAMES
     ):
         raise _ProbeError("ACTIONS_CONTEXT_REQUIRED")
     repository = os.environ.get("GITHUB_REPOSITORY", "")
     run_id = os.environ.get("GITHUB_RUN_ID", "")
     run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "")
     head_sha = os.environ.get("GITHUB_SHA", "")
+    workflow_sha = os.environ.get("GITHUB_WORKFLOW_SHA", "")
     if (
         re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is None
         or any(part in {".", ".."} for part in repository.split("/"))
@@ -233,7 +238,7 @@ def _read_context() -> tuple[dict, dict]:
         or re.fullmatch(r"[0-9a-fA-F]{40}", head_sha) is None
         or os.environ.get("GITHUB_WORKFLOW_REF")
         != f"{repository}/.github/workflows/stateless-preview.yml@refs/heads/main"
-        or os.environ.get("GITHUB_WORKFLOW_SHA") != head_sha
+        or workflow_sha != head_sha
     ):
         raise _ProbeError("ACTIONS_IDENTITY_INVALID")
     token = os.environ.get("GITHUB_TOKEN", "")
@@ -244,7 +249,9 @@ def _read_context() -> tuple[dict, dict]:
         "run_id": int(run_id),
         "run_attempt": int(run_attempt),
         "head_sha": head_sha,
-        "job_name": _PROBE_JOB_NAME,
+        "job_key": job_key,
+        "workflow_sha": workflow_sha,
+        "job_name": _JOB_NAMES[job_key],
     }
     actors = {name: os.environ.get(name) for name in ("GITHUB_ACTOR", "GITHUB_TRIGGERING_ACTOR")}
     if any(
@@ -383,7 +390,14 @@ def _run_probe() -> dict:
             deadline=deadline,
         )
         try:
-            selected = select_current_job(jobs, **identity)
+            selected = select_current_job(
+                jobs,
+                repository=identity["repository"],
+                run_id=identity["run_id"],
+                run_attempt=identity["run_attempt"],
+                head_sha=identity["head_sha"],
+                job_name=identity["job_name"],
+            )
         except ValueError:
             raise _ProbeError("CURRENT_JOB_NOT_UNAMBIGUOUS") from None
         record["binding"].update(selected)
@@ -403,7 +417,14 @@ def _run_probe() -> dict:
         record["log_sha256"] = hashlib.sha256(raw).hexdigest()
         after = _get_json(job_url, phase="current_job_after", record=record, deadline=deadline)
         try:
-            after_selected = select_current_job({"total_count": 1, "jobs": [after]}, **identity)
+            after_selected = select_current_job(
+                {"total_count": 1, "jobs": [after]},
+                repository=identity["repository"],
+                run_id=identity["run_id"],
+                run_attempt=identity["run_attempt"],
+                head_sha=identity["head_sha"],
+                job_name=identity["job_name"],
+            )
         except ValueError:
             raise _ProbeError("CURRENT_JOB_BINDING_CHANGED") from None
         if after_selected != selected:

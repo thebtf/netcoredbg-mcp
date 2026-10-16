@@ -4546,6 +4546,605 @@ def test_remote_observation_semantics_outputs_are_detached_and_deeply_immutable(
         classified["reason_codes"].append("TAG_ABSENT")
 
 
+def _replace_simulated_attempt_record(
+    inputs: dict[str, Any], reference: dict[str, Any], record: Mapping[str, Any]
+) -> None:
+    raw = _canonical_json_bytes(record)
+    inputs["records"][reference["path"]] = raw
+    reference["sha256"] = _sha256_bytes(raw)
+
+
+@pytest.fixture
+def promotion_attempt_inputs(
+    promotion_decision_inputs: dict[str, Any], remote_observation_inputs: dict[str, Any]
+) -> dict[str, Any]:
+    """SIMULATED Attempt 2.0 inputs; never live grants, approval, or effect authority."""
+    inputs = promotion_decision_inputs
+    # Keep the reused proof chain before the candidate's fixed 2030 retention expiry.
+    for record, timestamp in (
+        (inputs["consumer"], "recorded_at"),
+        (inputs["aggregate"], "sealed_at"),
+        (inputs["pr_review"], "recorded_at"),
+        (inputs["stage_record"], "sealed_at"),
+    ):
+        record[timestamp] = "2029-12-31T23:59:50Z"
+    for lens in inputs["aggregate"]["lens_results"]:
+        lens["recorded_at"] = "2029-12-31T23:59:50Z"
+    for index, key in enumerate(("consumer", "aggregate", "pr_review")):
+        _replace_simulated_gate_record(inputs, index, inputs[key])
+    _replace_simulated_decision_stage(inputs)
+    inputs["decision_record"]["decided_at"] = "2029-12-31T23:59:51Z"
+    source_commit = inputs["candidate_identity"]["candidate"]["source"]["commit"]
+    pre_decision = inputs["decision_record"]["evidence"]["pre_decision_stage_evidence"]
+
+    def retain(path: str, record: Mapping[str, Any]) -> dict[str, Any]:
+        reference = {**pre_decision["record_reference"], "path": path}
+        _replace_simulated_attempt_record(inputs, reference, record)
+        return reference
+
+    decision = artifact_contract.seal_promotion_decision(
+        inputs["decision_record"], **_stage_binding(inputs)
+    )
+    decision_reference = retain("simulated-promotion-decision.json", decision)
+    pre_publication_inputs = _simulated_stage_inputs(deepcopy(inputs), "pre-publication")
+    pre_publication_inputs["stage_record"]["sealed_at"] = "2029-12-31T23:59:52Z"
+    pre_publication = artifact_contract.seal_stage_gate_evidence(
+        pre_publication_inputs["stage_record"], **_stage_binding(pre_publication_inputs)
+    )
+    inputs["pre_publication_record"] = json.loads(_canonical_json_bytes(pre_publication))
+    pre_publication_receipt = {
+        **deepcopy(pre_decision),
+        "record_reference": retain("simulated-pre-publication-stage.json", pre_publication),
+        "stage": "pre-publication",
+    }
+
+    inputs["current_attempt_id"] = "simulated-attempt-801-2-901"
+    inputs["current_workflow_run"] = deepcopy(remote_observation_inputs["current_workflow_run"])
+    inputs["observation"]["promotion_attempt_id"] = inputs["current_attempt_id"]
+    inputs["observation"]["observed_at"] = "2029-12-31T23:59:54Z"
+    inputs["classified_at"] = "2029-12-31T23:59:55Z"
+    _replace_simulated_remote_observation(inputs)
+    observation_reference = retain("simulated-remote-observation.json", inputs["observation"])
+    inputs["classification"] = json.loads(
+        _canonical_json_bytes(
+            artifact_contract.classify_remote_observation(
+                inputs["observation_reference"], **_remote_classification_binding(inputs)
+            )
+        )
+    )
+    classification_reference = retain(
+        "simulated-remote-classification.json", inputs["classification"]
+    )
+    dispatcher = inputs["decision_record"]["promotion_attempt"]["authorized_dispatcher"]
+    inputs["permission_report"] = {
+        "diagnostic": "current-job-permissions",
+        "meaning": "RUNNER_REPORTED_GRANT_NOT_TOKEN_INTROSPECTION",
+        "status": "QUALIFIED",
+        "availability": "AVAILABLE",
+        "reason_code": "REQUIRED_RUNNER_GRANTS_REPORTED",
+        "started_at": "2029-12-31T23:59:52Z",
+        "finished_at": "2029-12-31T23:59:53Z",
+        "binding": {
+            "repository": REPOSITORY,
+            "run_id": 801,
+            "run_attempt": 2,
+            "head_sha": source_commit,
+            "job_key": "promote",
+            "workflow_sha": source_commit,
+            "job_name": "Promote canonical-main preview candidate",
+            "job_id": 901,
+            "setup_step_position": 0,
+        },
+        "actor_provenance": {
+            "GITHUB_ACTOR": dispatcher["login"],
+            "GITHUB_TRIGGERING_ACTOR": dispatcher["login"],
+        },
+        "grants": {
+            "actions": "read",
+            "contents": "write",
+            "metadata": "read",
+            "pullrequests": "read",
+        },
+        "log_sha256": _sha256_bytes(b"SIMULATED native setup permission log"),
+        "log_source": "setup_step_logs",
+        "requests": [
+            {
+                "phase": phase,
+                "http_status": 200,
+                "reason_code": "HTTP_RESPONSE",
+                "started_at": "2029-12-31T23:59:52Z",
+                "finished_at": "2029-12-31T23:59:53Z",
+            }
+            for phase in ("current_attempt_jobs", "setup_step_logs", "current_job_after")
+        ],
+    }
+    inputs["current_promotion_context"] = {
+        "current_attempt_id": inputs["current_attempt_id"],
+        "workflow_run": deepcopy(inputs["current_workflow_run"]),
+        "job_id": "901",
+        "job_key": "promote",
+        "workflow_sha": source_commit,
+        "checkout_head": source_commit,
+        "origin_main_target": source_commit,
+        "current_github_actor": deepcopy(dispatcher),
+        "current_github_triggering_actor": deepcopy(dispatcher),
+    }
+    inputs["attempt_record"] = {
+        "schema_version": "2.0",
+        "attempt_id": inputs["current_attempt_id"],
+        "candidate_identity_record": deepcopy(inputs["candidate_identity_reference"]),
+        "candidate_identity_record_sha256": _sha256_bytes(inputs["candidate_identity_bytes"]),
+        "candidate": deepcopy(inputs["candidate_identity"]["candidate"]),
+        "promotion_decision": decision_reference,
+        "promotion_decision_sha256": decision_reference["sha256"],
+        "pre_decision_stage_evidence": deepcopy(pre_decision),
+        "pre_publication_stage_evidence": pre_publication_receipt,
+        "authorization": {
+            "decision_authorization": deepcopy(inputs["decision_record"]["promotion_attempt"]),
+            "current_github_actor": deepcopy(dispatcher),
+            "current_github_triggering_actor": deepcopy(dispatcher),
+            "permission_readback": {
+                "reference": retain(
+                    "simulated-current-job-permissions.json", inputs["permission_report"]
+                ),
+                "run_attempt": 2,
+                "job_key": "promote",
+                "job_id": "901",
+                "workflow_sha": source_commit,
+                "execution_token": {
+                    "source": "github.token",
+                    "kind": "GITHUB_APP_INSTALLATION_TOKEN",
+                    "identity_observation": "UNOBSERVED",
+                    "app_id": None,
+                    "installation_id": None,
+                },
+                "permissions": {"actions": "read", "contents": "write"},
+            },
+        },
+        "workflow_run": deepcopy(inputs["current_workflow_run"]),
+        "remote_observation": observation_reference,
+        "remote_classification": classification_reference,
+        "admission_status": "PASS",
+        "recorded_at": "2029-12-31T23:59:56Z",
+    }
+    return inputs
+
+
+def _attempt_binding(inputs: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        **_stage_binding(inputs),
+        "current_promotion_context": inputs["current_promotion_context"],
+    }
+
+
+def test_promotion_attempt_schema_accepts_simulated_2_0_with_eight_field_workflow(
+    promotion_attempt_inputs: dict[str, Any],
+) -> None:
+    inputs = promotion_attempt_inputs
+    _validate_review_schema(inputs["attempt_record"], "promotion-attempt.schema.json")
+    assert set(inputs["current_promotion_context"]["workflow_run"]) == {
+        "repository",
+        "workflow_path",
+        "mode",
+        "event",
+        "run_id",
+        "run_attempt",
+        "ref",
+        "commit",
+    }
+
+
+@pytest.mark.parametrize(
+    "violation",
+    ["legacy", "authenticated_actor", "missing_triggering_actor", "missing_token_id", "extra"],
+)
+def test_promotion_attempt_schema_refuses_legacy_or_open_identity_shape(
+    promotion_attempt_inputs: dict[str, Any], violation: str
+) -> None:
+    record = promotion_attempt_inputs["attempt_record"]
+    authorization = record["authorization"]
+    if violation == "legacy":
+        record["schema_version"] = "1.0"
+    elif violation == "authenticated_actor":
+        authorization["permission_readback"]["authenticated_actor"] = deepcopy(
+            authorization["current_github_actor"]
+        )
+    elif violation == "missing_triggering_actor":
+        del authorization["current_github_triggering_actor"]
+    elif violation == "missing_token_id":
+        del authorization["permission_readback"]["execution_token"]["installation_id"]
+    else:
+        authorization["permission_readback"]["execution_token"]["owner"] = "simulated-dispatcher"
+    with pytest.raises(ValidationError):
+        _validate_review_schema(record, "promotion-attempt.schema.json")
+
+
+def test_promotion_attempt_semantics_seal_simulated_approval_for_distinct_dispatcher(
+    promotion_attempt_inputs: dict[str, Any],
+) -> None:
+    inputs = promotion_attempt_inputs
+    original = deepcopy(inputs["attempt_record"])
+    context = deepcopy(inputs["current_promotion_context"])
+
+    sealed = artifact_contract.seal_promotion_attempt(original, **_attempt_binding(inputs))
+
+    _validate_review_schema(sealed, "promotion-attempt.schema.json")
+    assert sealed == inputs["attempt_record"] == original
+    assert inputs["current_promotion_context"] == context
+
+
+def test_promotion_attempt_semantics_output_is_detached_and_deeply_immutable(
+    promotion_attempt_inputs: dict[str, Any],
+) -> None:
+    inputs = promotion_attempt_inputs
+    original = deepcopy(inputs["attempt_record"])
+    sealed = artifact_contract.seal_promotion_attempt(
+        inputs["attempt_record"], **_attempt_binding(inputs)
+    )
+    inputs["attempt_record"]["authorization"]["current_github_actor"]["id"] = "999"
+    inputs["current_promotion_context"]["workflow_run"]["commit"] = "a" * 40
+    assert sealed == original
+    for branch, field, value in (
+        (sealed["workflow_run"], "commit", "a" * 40),
+        (sealed["authorization"]["current_github_triggering_actor"], "id", "999"),
+        (sealed["authorization"]["permission_readback"]["execution_token"], "app_id", "999"),
+    ):
+        with pytest.raises(TypeError):
+            branch[field] = value
+
+
+@pytest.mark.parametrize("log_source", ["setup_step_logs", "job_logs"])
+def test_promotion_attempt_semantics_accept_rehashed_equivalent_permission_bytes(
+    promotion_attempt_inputs: dict[str, Any],
+    log_source: str,
+) -> None:
+    inputs = promotion_attempt_inputs
+    report = inputs["permission_report"]
+    report["log_source"] = log_source
+    if log_source == "job_logs":
+        report["requests"][1]["http_status"] = 404
+        report["requests"].insert(2, {**report["requests"][2], "phase": "job_logs"})
+    reference = inputs["attempt_record"]["authorization"]["permission_readback"]["reference"]
+    raw = json.dumps(inputs["permission_report"], indent=4, sort_keys=False).encode("utf-8")
+    inputs["records"][reference["path"]] = raw
+    reference["sha256"] = _sha256_bytes(raw)
+
+    sealed = artifact_contract.seal_promotion_attempt(
+        inputs["attempt_record"], **_attempt_binding(inputs)
+    )
+
+    assert sealed["authorization"]["permission_readback"]["reference"] == reference
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "candidate",
+        "catalog",
+        "decision",
+        "pre-decision",
+        "pre-publication",
+        "permissions",
+        "observation",
+        "classification",
+    ],
+)
+def test_promotion_attempt_semantics_reject_changed_raw_bytes(
+    promotion_attempt_inputs: dict[str, Any], document: str
+) -> None:
+    inputs = promotion_attempt_inputs
+    record = inputs["attempt_record"]
+    if document in ("candidate", "catalog"):
+        field = (
+            "candidate_identity_bytes" if document == "candidate" else "release_gate_catalog_bytes"
+        )
+        inputs[field] += b" "
+    else:
+        reference = {
+            "decision": record["promotion_decision"],
+            "pre-decision": record["pre_decision_stage_evidence"]["record_reference"],
+            "pre-publication": record["pre_publication_stage_evidence"]["record_reference"],
+            "permissions": record["authorization"]["permission_readback"]["reference"],
+            "observation": record["remote_observation"],
+            "classification": record["remote_classification"],
+        }[document]
+        inputs["records"][reference["path"]] += b" "
+
+    with pytest.raises(ValueError):
+        artifact_contract.seal_promotion_attempt(record, **_attempt_binding(inputs))
+
+
+@pytest.mark.parametrize(
+    ("branch", "field", "value"),
+    [
+        (None, "current_attempt_id", "simulated-previous-attempt"),
+        (None, "job_id", "999"),
+        (None, "job_key", "probe_permissions"),
+        (None, "workflow_sha", "a" * 40),
+        (None, "checkout_head", "a" * 40),
+        (None, "origin_main_target", "a" * 40),
+        ("workflow_run", "run_id", "999"),
+        ("workflow_run", "run_attempt", 1),
+        ("workflow_run", "commit", "a" * 40),
+        ("workflow_run", "workflow_sha", "a" * 40),
+        ("current_github_actor", "id", "999"),
+        ("current_github_actor", "login", "simulated-other-dispatcher"),
+        ("current_github_triggering_actor", "id", "999"),
+        ("current_github_triggering_actor", "login", "simulated-other-rerunner"),
+        ("current_github_triggering_actor", "id", 102),
+    ],
+)
+def test_promotion_attempt_semantics_require_independent_current_identity(
+    promotion_attempt_inputs: dict[str, Any], branch: str | None, field: str, value: Any
+) -> None:
+    inputs = promotion_attempt_inputs
+    context = inputs["current_promotion_context"]
+    target = context if branch is None else context[branch]
+    target[field] = value
+
+    with pytest.raises(ValueError):
+        artifact_contract.seal_promotion_attempt(
+            inputs["attempt_record"], **_attempt_binding(inputs)
+        )
+
+
+def test_promotion_attempt_semantics_require_explicit_current_context(
+    promotion_attempt_inputs: dict[str, Any],
+) -> None:
+    inputs = promotion_attempt_inputs
+    with pytest.raises(TypeError):
+        artifact_contract.seal_promotion_attempt(inputs["attempt_record"], **_stage_binding(inputs))
+
+
+@pytest.mark.parametrize("violation", ["absent", "extra", "missing_triggering_actor"])
+def test_promotion_attempt_semantics_require_closed_current_context(
+    promotion_attempt_inputs: dict[str, Any], violation: str
+) -> None:
+    inputs = promotion_attempt_inputs
+    if violation == "absent":
+        inputs["current_promotion_context"] = None
+    elif violation == "extra":
+        inputs["current_promotion_context"]["approved"] = True
+    else:
+        del inputs["current_promotion_context"]["current_github_triggering_actor"]
+    with pytest.raises(ValueError):
+        artifact_contract.seal_promotion_attempt(
+            inputs["attempt_record"], **_attempt_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize(
+    ("branch", "field", "value"),
+    [
+        ("binding", "repository", "other/repository"),
+        ("binding", "run_id", 999),
+        ("binding", "run_attempt", 1),
+        ("binding", "job_id", 999),
+        ("binding", "job_id", "901"),
+        ("binding", "head_sha", "a" * 40),
+        ("binding", "workflow_sha", "a" * 40),
+        ("binding", "setup_step_position", -1),
+        ("grants", "contents", "read"),
+        ("grants", "actions", "none"),
+        ("actor_provenance", "GITHUB_TRIGGERING_ACTOR", "simulated-other-rerunner"),
+        (None, "status", "INSUFFICIENT"),
+        (None, "availability", "UNAVAILABLE"),
+        (None, "meaning", "WORKFLOW_DECLARED_PERMISSIONS"),
+        (None, "reason_code", "REQUIRED_RUNNER_GRANTS_NOT_REPORTED"),
+        (None, "log_source", "workflow_yaml"),
+        (None, "log_sha256", None),
+        (None, "log_sha256", "not-a-hash"),
+        (None, "started_at", "not-a-timestamp"),
+        (None, "finished_at", "2029-12-31T23:59:51Z"),
+        (None, "finished_at", "2029-12-31T23:59:57Z"),
+        (None, "declared_permissions", {"actions": "read", "contents": "write"}),
+    ],
+)
+def test_promotion_attempt_semantics_reject_unqualified_permission_report(
+    promotion_attempt_inputs: dict[str, Any], branch: str | None, field: str, value: Any
+) -> None:
+    inputs = promotion_attempt_inputs
+    report = inputs["permission_report"]
+    target = report if branch is None else report[branch]
+    target[field] = value
+    reference = inputs["attempt_record"]["authorization"]["permission_readback"]["reference"]
+    _replace_simulated_attempt_record(inputs, reference, report)
+
+    with pytest.raises(ValueError):
+        artifact_contract.seal_promotion_attempt(
+            inputs["attempt_record"], **_attempt_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize(
+    "violation",
+    ["probe_report", "unavailable", "missing_log_hash", "missing_binding", "missing_timestamp"],
+)
+def test_promotion_attempt_semantics_do_not_substitute_probe_or_unavailable_readback(
+    promotion_attempt_inputs: dict[str, Any], violation: str
+) -> None:
+    inputs = promotion_attempt_inputs
+    report = inputs["permission_report"]
+    if violation == "probe_report":
+        report["binding"].update(
+            job_key="probe_permissions", job_name="Probe current job permissions"
+        )
+    elif violation == "unavailable":
+        report.update(
+            status="UNAVAILABLE",
+            availability="UNAVAILABLE",
+            reason_code="CURRENT_JOB_LOGS_UNAVAILABLE",
+            grants={},
+            log_sha256=None,
+        )
+    elif violation == "missing_log_hash":
+        del report["log_sha256"]
+    elif violation == "missing_binding":
+        del report["binding"]["workflow_sha"]
+    else:
+        del report["finished_at"]
+    reference = inputs["attempt_record"]["authorization"]["permission_readback"]["reference"]
+    _replace_simulated_attempt_record(inputs, reference, report)
+    with pytest.raises(ValueError):
+        artifact_contract.seal_promotion_attempt(
+            inputs["attempt_record"], **_attempt_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize(
+    ("branch", "field", "value"),
+    [
+        (None, "run_attempt", 1),
+        (None, "job_key", "probe_permissions"),
+        (None, "job_id", "999"),
+        (None, "workflow_sha", "a" * 40),
+        ("permissions", "contents", "read"),
+        ("execution_token", "source", "PAT"),
+        ("execution_token", "kind", "PERSONAL_ACCESS_TOKEN"),
+        ("execution_token", "identity_observation", "OBSERVED"),
+        ("execution_token", "app_id", "999"),
+        ("execution_token", "installation_id", "999"),
+        (None, "authenticated_actor", {"id": "102", "login": "simulated-dispatcher"}),
+    ],
+)
+def test_promotion_attempt_semantics_bind_permission_projection_and_token_provenance(
+    promotion_attempt_inputs: dict[str, Any], branch: str | None, field: str, value: Any
+) -> None:
+    inputs = promotion_attempt_inputs
+    readback = inputs["attempt_record"]["authorization"]["permission_readback"]
+    target = readback if branch is None else readback[branch]
+    target[field] = value
+    with pytest.raises(ValueError):
+        artifact_contract.seal_promotion_attempt(
+            inputs["attempt_record"], **_attempt_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "legacy_1_0",
+        "candidate_hash",
+        "candidate_source",
+        "decision_hash",
+        "decline",
+        "decision_candidate",
+        "decision_authorization",
+        "recorded_actor",
+        "recorded_triggering_actor",
+        "recorded_workflow",
+        "predecision_other_record",
+        "nested_review_incomplete",
+        "prepublication_source",
+        "prepublication_catalog",
+        "missing_prepublication",
+        "stale_observation",
+        "stale_classification",
+        "collision",
+        "forged_classification",
+        "post_publication_proof",
+        "invalid_recorded_at",
+        "attempt_before_classification",
+    ],
+)
+def test_promotion_attempt_semantics_revalidate_decision_stages_and_remote_admission(
+    promotion_attempt_inputs: dict[str, Any], violation: str
+) -> None:
+    inputs = promotion_attempt_inputs
+    record = inputs["attempt_record"]
+    if violation == "legacy_1_0":
+        record["schema_version"] = "1.0"
+    elif violation == "candidate_hash":
+        record["candidate_identity_record_sha256"] = "a" * 64
+    elif violation == "candidate_source":
+        record["candidate"]["source"]["commit"] = "a" * 40
+    elif violation == "decision_hash":
+        record["promotion_decision_sha256"] = "a" * 64
+    elif violation in ("decline", "decision_candidate", "nested_review_incomplete"):
+        if violation == "decline":
+            inputs["decision_record"]["decision"] = "DECLINE"
+        elif violation == "decision_candidate":
+            inputs["decision_record"]["candidate"]["build"]["artifact"]["id"] = "999"
+        else:
+            inputs["aggregate"]["lens_results"].pop()
+            _replace_simulated_gate_record(inputs, 1, inputs["aggregate"])
+            _replace_simulated_decision_stage(inputs)
+            record["pre_decision_stage_evidence"] = deepcopy(
+                inputs["decision_record"]["evidence"]["pre_decision_stage_evidence"]
+            )
+        _replace_simulated_attempt_record(
+            inputs, record["promotion_decision"], inputs["decision_record"]
+        )
+        record["promotion_decision_sha256"] = record["promotion_decision"]["sha256"]
+    elif violation == "decision_authorization":
+        record["authorization"]["decision_authorization"]["authorized_dispatcher"]["id"] = "999"
+    elif violation in ("recorded_actor", "recorded_triggering_actor"):
+        role = (
+            "current_github_actor"
+            if violation == "recorded_actor"
+            else "current_github_triggering_actor"
+        )
+        record["authorization"][role]["id"] = "999"
+    elif violation == "recorded_workflow":
+        record["workflow_run"]["run_attempt"] = 1
+    elif violation == "predecision_other_record":
+        reference = record["pre_decision_stage_evidence"]["record_reference"]
+        reference["path"] = "simulated-other-pre-decision-stage.json"
+        _replace_simulated_attempt_record(inputs, reference, inputs["stage_record"])
+    elif violation in ("prepublication_source", "prepublication_catalog"):
+        stage = inputs["pre_publication_record"]
+        if violation == "prepublication_source":
+            stage["source_commit"] = "a" * 40
+            record["pre_publication_stage_evidence"]["source_commit"] = "a" * 40
+        else:
+            stage["release_gate_catalog"]["sha256"] = "a" * 64
+        _replace_simulated_attempt_record(
+            inputs, record["pre_publication_stage_evidence"]["record_reference"], stage
+        )
+    elif violation == "missing_prepublication":
+        del inputs["records"][record["pre_publication_stage_evidence"]["record_reference"]["path"]]
+    elif violation == "stale_observation":
+        inputs["observation"]["promotion_attempt_id"] = "simulated-previous-attempt"
+        _replace_simulated_attempt_record(
+            inputs, record["remote_observation"], inputs["observation"]
+        )
+        inputs["classification"]["remote_observed_state_reference"] = deepcopy(
+            record["remote_observation"]
+        )
+        _replace_simulated_attempt_record(
+            inputs, record["remote_classification"], inputs["classification"]
+        )
+    elif violation in ("stale_classification", "forged_classification"):
+        if violation == "stale_classification":
+            inputs["classification"]["promotion_attempt_id"] = "simulated-previous-attempt"
+        else:
+            inputs["classification"]["allowed_action"] = "CREATE_DRAFT_PRERELEASE"
+        _replace_simulated_attempt_record(
+            inputs, record["remote_classification"], inputs["classification"]
+        )
+    elif violation == "collision":
+        inputs["observation"]["asset_observations"]["unexpected_asset_ids"] = ["999"]
+        _replace_simulated_remote_observation(inputs)
+        _replace_simulated_attempt_record(
+            inputs, record["remote_observation"], inputs["observation"]
+        )
+        classification = artifact_contract.classify_remote_observation(
+            inputs["observation_reference"], **_remote_classification_binding(inputs)
+        )
+        _replace_simulated_attempt_record(inputs, record["remote_classification"], classification)
+    elif violation == "post_publication_proof":
+        record["post_publication_stage_evidence"] = deepcopy(
+            record["pre_publication_stage_evidence"]
+        )
+    elif violation == "invalid_recorded_at":
+        record["recorded_at"] = "not-a-timestamp"
+    else:
+        record["recorded_at"] = "2029-12-31T23:59:54Z"
+
+    with pytest.raises(ValueError):
+        artifact_contract.seal_promotion_attempt(record, **_attempt_binding(inputs))
+
+
 class _EvidenceWorkflowCli:
     """Real CLI/files/sealers with only the GitHub process/HTTP edge simulated."""
 

@@ -10,7 +10,7 @@ The handoff binds all of these records to the same canonical `refs/heads/main` c
 
 - Candidate Identity Record
 - approved Promotion Decision
-- fresh Promotion Attempt
+- fresh Promotion Attempt 2.0
 - Remote Observation
 - Remote Classification
 - Remote Verification
@@ -18,7 +18,7 @@ The handoff binds all of these records to the same canonical `refs/heads/main` c
 - Release Gate Catalog
 - three Stage Gate Evidence records
 
-The validator requires exact equality of candidate binding, source ref, source commit, origin-main target, trusted build run, Decision hash, authorized dispatcher, current attempt ID, current workflow run/attempt, and permission readback.
+The validator requires exact equality of candidate binding, source ref/commit, origin-main target, trusted build run, Decision hash/authorization, current attempt ID, workflow run/attempt/job and workflow SHA. Both current initiator ID/login maps must equal the Decision's authorized dispatcher. Resolve the Attempt 2.0 qualified same-promote-job report, not a probe report or declaration; its exact rights projection and fixed unobserved/null installation-token provenance must validate. Do not equate a human dispatcher with the execution-token principal or accept legacy Attempt 1.0. These are future closeout obligations, not an implemented handoff sealer or live permission proof.
 
 ## Require every stage
 

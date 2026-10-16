@@ -3194,6 +3194,395 @@ def classify_remote_observation(
     )
 
 
+def _validate_promotion_permission_report(
+    value: Any,
+    context: Mapping[str, Any],
+    *,
+    not_before: datetime,
+    recorded_at: datetime,
+) -> Mapping[str, Any]:
+    report = _expect_mapping(
+        value,
+        "promotion permission report",
+        (
+            "diagnostic",
+            "meaning",
+            "status",
+            "availability",
+            "reason_code",
+            "started_at",
+            "finished_at",
+            "binding",
+            "actor_provenance",
+            "grants",
+            "log_sha256",
+            "log_source",
+            "requests",
+        ),
+    )
+    expected = {
+        "diagnostic": "current-job-permissions",
+        "meaning": "RUNNER_REPORTED_GRANT_NOT_TOKEN_INTROSPECTION",
+        "status": "QUALIFIED",
+        "availability": "AVAILABLE",
+        "reason_code": "REQUIRED_RUNNER_GRANTS_REPORTED",
+    }
+    if any(report[field] != value for field, value in expected.items()):
+        _refuse("promotion requires qualified actual current-job grants")
+    workflow = context["workflow_run"]
+    binding = _expect_mapping(
+        report["binding"],
+        "promotion permission report binding",
+        (
+            "repository",
+            "run_id",
+            "run_attempt",
+            "head_sha",
+            "job_key",
+            "workflow_sha",
+            "job_name",
+            "job_id",
+            "setup_step_position",
+        ),
+    )
+    for field in ("run_id", "run_attempt", "job_id"):
+        _expect_positive_integer(binding[field], f"permission report {field}")
+    _expect_nonnegative_integer(binding["setup_step_position"], "setup step position")
+    if binding != {
+        "repository": workflow["repository"],
+        "run_id": int(workflow["run_id"]),
+        "run_attempt": workflow["run_attempt"],
+        "head_sha": workflow["commit"],
+        "job_key": "promote",
+        "workflow_sha": context["workflow_sha"],
+        "job_name": "Promote canonical-main preview candidate",
+        "job_id": int(context["job_id"]),
+        "setup_step_position": 0,
+    }:
+        _refuse("permission report does not bind the exact current promote job")
+    actors = _expect_mapping(
+        report["actor_provenance"],
+        "permission actor provenance",
+        ("GITHUB_ACTOR", "GITHUB_TRIGGERING_ACTOR"),
+    )
+    if actors != {
+        "GITHUB_ACTOR": context["current_github_actor"]["login"],
+        "GITHUB_TRIGGERING_ACTOR": context["current_github_triggering_actor"]["login"],
+    }:
+        _refuse("permission report actor provenance differs from the current initiators")
+    grants = report["grants"]
+    if not isinstance(grants, Mapping) or not grants:
+        _refuse("permission report requires the complete explicit grant map")
+    for name, access in grants.items():
+        if (
+            not isinstance(name, str)
+            or re.fullmatch(r"[a-z][a-z0-9_-]*", name) is None
+            or access not in ("none", "read", "write")
+        ):
+            _refuse("permission report contains an invalid explicit grant")
+    if grants.get("actions") != "read" or grants.get("contents") != "write":
+        _refuse("permission report lacks the exact required grants")
+    _expect_sha256(report["log_sha256"], "permission log SHA-256")
+    if report["log_source"] not in ("setup_step_logs", "job_logs"):
+        _refuse("permission report requires a native same-job setup log source")
+    started = _review_timestamp(report["started_at"], "permission report started_at")
+    finished = _review_timestamp(report["finished_at"], "permission report finished_at")
+    if not not_before <= started <= finished <= recorded_at:
+        _refuse("permission report is outside the current admission chronology")
+    requests = _expect_list(report["requests"], "permission report requests")
+    if not 3 <= len(requests) <= 6:
+        _refuse("permission report request sequence is incomplete")
+    for request in requests:
+        request = _expect_mapping(
+            request,
+            "permission request",
+            ("phase", "http_status", "reason_code", "started_at", "finished_at"),
+        )
+        status = _expect_positive_integer(request["http_status"], "permission HTTP status")
+        if status > 599 or status < 100 or request["reason_code"] != "HTTP_RESPONSE":
+            _refuse("permission request is not a completed HTTP response")
+        request_start = _review_timestamp(request["started_at"], "permission request started_at")
+        request_end = _review_timestamp(request["finished_at"], "permission request finished_at")
+        if not started <= request_start <= request_end <= finished:
+            _refuse("permission request is outside its report chronology")
+    if any(
+        request["phase"] != phase or request["http_status"] != 200
+        for request, phase in (
+            (requests[0], "current_attempt_jobs"),
+            (requests[-1], "current_job_after"),
+        )
+    ):
+        _refuse("permission report lacks before/after current-job readback")
+    log_requests = requests[1:-1]
+    position = 0
+    for phase in ("setup_step_logs", "job_logs"):
+        if position >= len(log_requests) or log_requests[position]["phase"] != phase:
+            _refuse("permission report log request order is invalid")
+        response = log_requests[position]
+        position += 1
+        if response["http_status"] == 302:
+            if (
+                position >= len(log_requests)
+                or log_requests[position]["phase"] != phase + "_redirect"
+            ):
+                _refuse("permission log redirect response is missing")
+            response = log_requests[position]
+            position += 1
+        if phase == report["log_source"]:
+            if response["http_status"] != 200 or position != len(log_requests):
+                _refuse("permission report does not contain its successful log response")
+            break
+    return report
+
+
+def seal_promotion_attempt(
+    attempt: Mapping[str, Any],
+    *,
+    candidate_identity: Mapping[str, Any],
+    candidate_identity_bytes: bytes,
+    candidate_identity_reference: Mapping[str, Any],
+    release_gate_catalog: Mapping[str, Any],
+    release_gate_catalog_bytes: bytes,
+    release_gate_catalog_reference: Mapping[str, Any],
+    record_resolver: Callable[[Mapping[str, Any]], bytes],
+    repository_root: str | PathLike[str],
+    current_promotion_context: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Revalidate one immutable Attempt 2.0 against independently captured current facts."""
+    identity, identity_reference = _verified_raw_candidate(
+        candidate_identity, candidate_identity_bytes, candidate_identity_reference
+    )
+    candidate = identity["candidate"]
+    context = _expect_mapping(
+        current_promotion_context,
+        "current promotion context",
+        (
+            "current_attempt_id",
+            "workflow_run",
+            "job_id",
+            "job_key",
+            "workflow_sha",
+            "checkout_head",
+            "origin_main_target",
+            "current_github_actor",
+            "current_github_triggering_actor",
+        ),
+    )
+    current_attempt_id = _expect_safe_opaque_id(context["current_attempt_id"], "current attempt ID")
+    _expect_identifier(context["job_id"], "current promote job ID")
+    for field in ("workflow_sha", "checkout_head", "origin_main_target"):
+        if _expect_commit(context[field], f"current {field}") != candidate["source"]["commit"]:
+            _refuse("current source/workflow does not equal the approved canonical candidate")
+    if context["job_key"] != "promote":
+        _refuse("promotion requires the current promote job")
+    workflow = _expect_mapping(
+        context["workflow_run"],
+        "current promote workflow run",
+        ("repository", "workflow_path", "mode", "event", "run_id", "run_attempt", "ref", "commit"),
+    )
+    _expect_identifier(workflow["run_id"], "current workflow run ID")
+    _expect_positive_integer(workflow["run_attempt"], "current workflow run attempt")
+    record = _expect_mapping(
+        _thaw(attempt),
+        "promotion attempt",
+        (
+            "schema_version",
+            "attempt_id",
+            "candidate_identity_record",
+            "candidate_identity_record_sha256",
+            "candidate",
+            "promotion_decision",
+            "promotion_decision_sha256",
+            "pre_decision_stage_evidence",
+            "pre_publication_stage_evidence",
+            "authorization",
+            "workflow_run",
+            "remote_observation",
+            "remote_classification",
+            "admission_status",
+            "recorded_at",
+        ),
+    )
+    if (
+        record["schema_version"] != "2.0"
+        or record["admission_status"] != "PASS"
+        or _expect_safe_opaque_id(record["attempt_id"], "promotion attempt ID")
+        != current_attempt_id
+        or record["workflow_run"] != workflow
+    ):
+        _refuse("promotion attempt version or independent current identity does not match")
+    recorded_workflow = _expect_mapping(
+        record["workflow_run"], "recorded promote workflow run", tuple(workflow)
+    )
+    _expect_positive_integer(recorded_workflow["run_attempt"], "recorded workflow run attempt")
+    _validate_candidate_identity({"schema_version": "1.0", "candidate": record["candidate"]})
+    _validate_review_candidate_binding(record, candidate, identity_reference)
+    recorded_at = _review_timestamp(record["recorded_at"], "promotion attempt recorded_at")
+    for artifact in (candidate_identity_reference["artifact"], candidate["build"]["artifact"]):
+        if recorded_at >= _review_timestamp(artifact["retention"]["expires_at"], "artifact expiry"):
+            _refuse("promotion attempt candidate retention has expired")
+    if not callable(record_resolver):
+        _refuse("promotion attempt raw record resolver is unavailable")
+    stage_binding = {
+        "candidate_identity": identity,
+        "candidate_identity_bytes": candidate_identity_bytes,
+        "candidate_identity_reference": candidate_identity_reference,
+        "release_gate_catalog": release_gate_catalog,
+        "release_gate_catalog_bytes": release_gate_catalog_bytes,
+        "release_gate_catalog_reference": release_gate_catalog_reference,
+        "record_resolver": record_resolver,
+        "repository_root": repository_root,
+    }
+    decision_reference = _review_record_reference(record["promotion_decision"], "attempt Decision")
+    if decision_reference["repository"] != candidate["source"]["repository"]:
+        _refuse("promotion Decision reference belongs to another repository")
+    if (
+        _expect_sha256(record["promotion_decision_sha256"], "attempt Decision hash")
+        != decision_reference["sha256"]
+    ):
+        _refuse("promotion attempt Decision hash differs from its raw reference")
+    decision = seal_promotion_decision(
+        _resolve_stage_record(decision_reference, record_resolver), **stage_binding
+    )
+    if (
+        decision["decision"] != "APPROVE"
+        or record["pre_decision_stage_evidence"]
+        != decision["evidence"]["pre_decision_stage_evidence"]
+    ):
+        _refuse("promotion attempt requires the approved Decision's exact pre-decision receipt")
+    authorization = _expect_mapping(
+        record["authorization"],
+        "attempt authorization",
+        (
+            "decision_authorization",
+            "current_github_actor",
+            "current_github_triggering_actor",
+            "permission_readback",
+        ),
+    )
+    if authorization["decision_authorization"] != decision["promotion_attempt"]:
+        _refuse("promotion attempt authorization differs from its resolved Decision")
+    for role in ("current_github_actor", "current_github_triggering_actor"):
+        if (
+            _decision_actor(context[role], f"independent {role}")
+            != decision["promotion_attempt"]["authorized_dispatcher"]
+            or _decision_actor(authorization[role], role) != context[role]
+        ):
+            _refuse("current actor and rerun initiator must equal the authorized dispatcher")
+    summary_fields = (
+        "candidate_identity_record_sha256",
+        "source_ref",
+        "source_commit",
+        "stage",
+        "outcome",
+    )
+    pre_publication = _expect_mapping(
+        record["pre_publication_stage_evidence"],
+        "attempt pre-publication receipt",
+        ("record_reference", *summary_fields),
+    )
+    stage = seal_stage_gate_evidence(
+        _resolve_stage_record(pre_publication["record_reference"], record_resolver), **stage_binding
+    )
+    if (
+        stage["stage"] != "pre-publication"
+        or stage["outcome"] != "PASS"
+        or any(pre_publication[field] != stage[field] for field in summary_fields)
+    ):
+        _refuse("promotion attempt requires its exact passing pre-publication Stage")
+    decision_time = _review_timestamp(decision["decided_at"], "Decision decided_at")
+    stage_time = _review_timestamp(stage["sealed_at"], "pre-publication sealed_at")
+    if not decision_time <= stage_time <= recorded_at:
+        _refuse("promotion attempt stages are outside Decision/admission chronology")
+    readback = _expect_mapping(
+        authorization["permission_readback"],
+        "promotion permission readback",
+        (
+            "reference",
+            "run_attempt",
+            "job_key",
+            "job_id",
+            "workflow_sha",
+            "execution_token",
+            "permissions",
+        ),
+    )
+    _expect_positive_integer(readback["run_attempt"], "permission run attempt")
+    _expect_identifier(readback["job_id"], "permission job ID")
+    if readback["run_attempt"] != workflow["run_attempt"] or any(
+        readback[field] != context[field] for field in ("job_key", "job_id", "workflow_sha")
+    ):
+        _refuse("permission readback belongs to another current run/attempt/job/source")
+    token = _expect_mapping(
+        readback["execution_token"],
+        "execution token provenance",
+        ("source", "kind", "identity_observation", "app_id", "installation_id"),
+    )
+    if token != {
+        "source": "github.token",
+        "kind": "GITHUB_APP_INSTALLATION_TOKEN",
+        "identity_observation": "UNOBSERVED",
+        "app_id": None,
+        "installation_id": None,
+    }:
+        _refuse("execution token provenance cannot assert unobserved installation identity")
+    permissions = _expect_mapping(
+        readback["permissions"], "permission projection", ("actions", "contents")
+    )
+    permission_reference = _review_record_reference(readback["reference"], "permission reference")
+    for reference in (
+        permission_reference,
+        record["remote_observation"],
+        record["remote_classification"],
+    ):
+        reference = _review_record_reference(reference, "current attempt record reference")
+        if (
+            reference["repository"] != workflow["repository"]
+            or reference["run_id"] != workflow["run_id"]
+        ):
+            _refuse("current attempt record reference belongs to another run")
+    report = _validate_promotion_permission_report(
+        _resolve_stage_record(permission_reference, record_resolver),
+        context,
+        not_before=stage_time,
+        recorded_at=recorded_at,
+    )
+    if permissions != {field: report["grants"][field] for field in ("actions", "contents")}:
+        _refuse("permission projection differs from the actual complete grant map")
+    remote_binding = {
+        "candidate_identity": identity,
+        "candidate_identity_bytes": candidate_identity_bytes,
+        "candidate_identity_reference": candidate_identity_reference,
+        "current_attempt_id": current_attempt_id,
+    }
+    observation = seal_remote_observation(
+        _resolve_stage_record(record["remote_observation"], record_resolver), **remote_binding
+    )
+    classification = _resolve_stage_record(record["remote_classification"], record_resolver)
+    _validate_candidate_identity(
+        {"schema_version": "1.0", "candidate": classification.get("candidate")}
+    )
+    # Re-derive the complete closed record; a self-asserted ADMITTED is not authority.
+    derived = classify_remote_observation(
+        record["remote_observation"],
+        classification_id=classification.get("classification_id"),
+        classified_at=classification.get("classified_at"),
+        current_workflow_run=workflow,
+        record_resolver=record_resolver,
+        **remote_binding,
+    )
+    if classification != derived or derived["admission"] != "ADMITTED":
+        _refuse("promotion attempt remote classification is forged, stale, or collision")
+    if not (
+        _review_timestamp(report["finished_at"], "permission finished_at")
+        <= _review_timestamp(observation["observed_at"], "remote observed_at")
+        <= _review_timestamp(derived["classified_at"], "remote classified_at")
+        <= recorded_at
+    ):
+        _refuse("promotion attempt remote facts are outside current admission chronology")
+    return _freeze(record)
+
+
 def _read_cli_dispatch(command: str, environment: Mapping[str, str]) -> Mapping[str, Any]:
     event = _load_json_object(
         _read_regular_bytes(
@@ -4038,6 +4427,7 @@ __all__ = [
     "seal_artifact_consumer_proof",
     "seal_build_records",
     "seal_independent_pr_review",
+    "seal_promotion_attempt",
     "seal_promotion_decision",
     "seal_remote_observation",
     "seal_s2_s3_lens_result",
