@@ -4742,7 +4742,7 @@ def _promotion_artifact(
             context,
             reference["run_id"],
             attempt,
-            successful_build=run.get("status") == "completed",
+            successful_build=reference["run_id"] != inputs["context"]["run_id"],
         )
         inputs["producers"][producer_key] = run
     digest = metadata.get("digest")

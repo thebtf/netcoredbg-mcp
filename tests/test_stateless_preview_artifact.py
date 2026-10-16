@@ -6213,6 +6213,8 @@ class _PromotionWorkflowCli(_EvidenceWorkflowCli):
                 {"promotion-decision.json": Path(evidence["decision_path"]).read_bytes()},
             )
         )
+        assert super().invoke("verify-evidence-retention") == 0
+        self.runs["201"].update(status="completed", conclusion="success")
         self.decision = json.loads(self.artifacts["903"]["members"]["promotion-decision.json"])
         self.clock = "2029-01-02T00:00:00Z"
         self.seconds = 0
@@ -6221,6 +6223,8 @@ class _PromotionWorkflowCli(_EvidenceWorkflowCli):
         self.runs["801"] = {
             **deepcopy(self.runs["201"]),
             "id": 801,
+            "status": "in_progress",
+            "conclusion": None,
             "actor": dict(principal),
             "triggering_actor": dict(principal),
             "created_at": self.clock,
@@ -6979,6 +6983,23 @@ def test_promotion_cli_requires_retained_admission_chain_before_any_mutation(
                 cli.artifacts[reference["artifact"]["id"]]["wire"] += b"SIMULATED damaged readback"
             assert cli.invoke("advance-promote", step=1) == 1
     assert cli.mutations == []
+
+
+def test_promotion_cli_refuses_in_progress_foreign_evidence_producer(
+    promotion_workflow_cli: _PromotionWorkflowCli, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli = promotion_workflow_cli
+    producer = cli.run_attempts[("201", "2")]
+    assert producer is cli.runs["201"]
+    assert (producer["status"], producer["conclusion"]) == ("completed", "success")
+    assert (cli.runs["801"]["status"], cli.runs["801"]["conclusion"]) == ("in_progress", None)
+    producer.update(status="in_progress", conclusion=None)
+
+    assert cli.invoke("admit-promote") == 1
+    assert "STATELESS_PREVIEW_ARTIFACT_REFUSED" in capsys.readouterr().err
+    assert cli.mutations == []
+    assert not list(cli.runner.rglob("promotion-attempt.json"))
+    assert not list(cli.runner.rglob("pre-publication-stage.json"))
 
 
 @pytest.mark.parametrize(
