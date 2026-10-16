@@ -1609,7 +1609,7 @@ def _review_record_reference(value: Any, name: str) -> Mapping[str, Any]:
     return reference
 
 
-def _verified_review_candidate(
+def _verified_raw_candidate(
     candidate_identity: Mapping[str, Any],
     candidate_identity_bytes: bytes,
     candidate_identity_reference: Mapping[str, Any],
@@ -1638,8 +1638,24 @@ def _verified_review_candidate(
         "sha256": reference["sha256"],
     }
     _review_record_reference(compact_reference, "review candidate identity reference")
-    now = datetime.now(timezone.utc)
     for artifact in (reference["artifact"], candidate["build"]["artifact"]):
+        _review_timestamp(artifact["retention"]["expires_at"], "artifact expiry")
+    return identity, compact_reference
+
+
+def _verified_review_candidate(
+    candidate_identity: Mapping[str, Any],
+    candidate_identity_bytes: bytes,
+    candidate_identity_reference: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    identity, compact_reference = _verified_raw_candidate(
+        candidate_identity, candidate_identity_bytes, candidate_identity_reference
+    )
+    now = datetime.now(timezone.utc)
+    for artifact in (
+        candidate_identity_reference["artifact"],
+        identity["candidate"]["build"]["artifact"],
+    ):
         if _review_timestamp(artifact["retention"]["expires_at"], "artifact expiry") <= now:
             _refuse("review candidate artifact retention has expired")
     return identity, compact_reference
@@ -2283,6 +2299,456 @@ def seal_promotion_decision(
     return _freeze(record)
 
 
+def _expect_remote_tag(value: Any, name: str) -> str:
+    tag = _expect_string(value, name)
+    prefix = "stateless-preview-v"
+    if not tag.startswith(prefix):
+        _refuse(f"{name} is not a preview tag")
+    _expect_pattern(tag[len(prefix) :], name, _PREVIEW_VERSION_PATTERN)
+    return tag
+
+
+def _expect_remote_asset_name(value: Any, kind: str) -> str:
+    name = _expect_string(value, f"remote {kind} name")
+    prefix = "netcoredbg-mcp-stateless-preview-win-x64-"
+    suffix = ".zip" if kind == "archive" else ".manifest.json"
+    if not name.startswith(prefix) or not name.endswith(suffix):
+        _refuse(f"remote {kind} name is not a preview asset")
+    _expect_pattern(
+        name[len(prefix) : -len(suffix)], f"remote {kind} version", _PREVIEW_VERSION_PATTERN
+    )
+    return name
+
+
+def _validate_remote_tag(value: Any) -> None:
+    if not isinstance(value, Mapping):
+        _refuse("remote tag observation must be an object")
+    status = value.get("status")
+    if status == "ABSENT":
+        _expect_mapping(value, "absent remote tag", ("status",))
+    elif status == "PRESENT":
+        tag = _expect_mapping(
+            value, "present remote tag", ("status", "tag", "tag_type", "object_id", "peeled_commit")
+        )
+        _expect_remote_tag(tag["tag"], "remote tag")
+        if tag["tag_type"] not in ("ANNOTATED", "LIGHTWEIGHT"):
+            _refuse("remote tag type is unsupported")
+        _expect_commit(tag["object_id"], "remote tag object ID")
+        _expect_commit(tag["peeled_commit"], "remote tag peeled commit")
+    elif status == "UNREADABLE":
+        tag = _expect_mapping(value, "unreadable remote tag", ("status", "reason_code"))
+        if tag["reason_code"] not in (
+            "TAG_READBACK_UNAVAILABLE",
+            "TAG_READBACK_UNAUTHORIZED",
+            "TAG_READBACK_INCOMPLETE",
+        ):
+            _refuse("remote tag readback reason is unsupported")
+    else:
+        _refuse("remote tag observation status is unsupported")
+
+
+def _validate_remote_release(value: Any) -> None:
+    if not isinstance(value, Mapping):
+        _refuse("remote release observation must be an object")
+    status = value.get("status")
+    if status == "ABSENT":
+        _expect_mapping(value, "absent remote release", ("status",))
+    elif status == "PRESENT":
+        release = _expect_mapping(
+            value,
+            "present remote release",
+            (
+                "status",
+                "release_id",
+                "tag",
+                "is_draft",
+                "is_prerelease",
+                "destination_metadata_status",
+            ),
+        )
+        _expect_identifier(release["release_id"], "remote release ID")
+        _expect_remote_tag(release["tag"], "remote release tag")
+        _expect_boolean(release["is_draft"], "remote release is_draft")
+        _expect_boolean(release["is_prerelease"], "remote release is_prerelease")
+        if release["destination_metadata_status"] not in ("MATCHING", "MISMATCHED"):
+            _refuse("remote release metadata status is unsupported")
+    elif status == "UNREADABLE":
+        release = _expect_mapping(value, "unreadable remote release", ("status", "reason_code"))
+        if release["reason_code"] not in (
+            "RELEASE_READBACK_UNAVAILABLE",
+            "RELEASE_READBACK_UNAUTHORIZED",
+            "RELEASE_READBACK_INCOMPLETE",
+        ):
+            _refuse("remote release readback reason is unsupported")
+    else:
+        _refuse("remote release observation status is unsupported")
+
+
+def _validate_remote_asset(value: Any, kind: str) -> None:
+    if not isinstance(value, Mapping):
+        _refuse(f"remote {kind} observation must be an object")
+    status = value.get("status")
+    if status == "ABSENT":
+        _expect_mapping(value, f"absent remote {kind}", ("status",))
+        return
+    if status == "PRESENT":
+        asset = _expect_mapping(
+            value,
+            f"present remote {kind}",
+            ("status", "metadata", "downloaded_identity", "observed_result", "identity_status"),
+        )
+        descriptor = _validate_file_descriptor(
+            asset["downloaded_identity"], f"remote {kind} downloaded identity"
+        )
+        _expect_remote_asset_name(descriptor["name"], kind)
+        if asset["observed_result"] not in _REVIEW_OBSERVED_RESULTS or asset[
+            "identity_status"
+        ] not in (
+            "MATCHES_CANDIDATE",
+            "METADATA_SIZE_MISMATCH",
+            "DOWNLOADED_SIZE_MISMATCH",
+            "DOWNLOADED_SHA256_MISMATCH",
+        ):
+            _refuse(f"remote {kind} identity result is unsupported")
+    elif status in ("PRESENT_UNREADABLE", "UNREADABLE"):
+        keys = (
+            ("status", "metadata", "reason_code")
+            if status == "PRESENT_UNREADABLE"
+            else ("status", "reason_code")
+        )
+        asset = _expect_mapping(value, f"unreadable remote {kind}", keys)
+        reason_prefix = kind.upper() + (
+            "_DOWNLOAD_" if status == "PRESENT_UNREADABLE" else "_READBACK_"
+        )
+        if asset["reason_code"] not in tuple(
+            reason_prefix + code for code in ("UNAVAILABLE", "UNAUTHORIZED", "INCOMPLETE")
+        ):
+            _refuse(f"remote {kind} readback reason is unsupported")
+        if status == "UNREADABLE":
+            return
+    else:
+        _refuse(f"remote {kind} observation status is unsupported")
+    metadata = _expect_mapping(
+        asset["metadata"], f"remote {kind} metadata", ("id", "name", "size_bytes")
+    )
+    _expect_identifier(metadata["id"], f"remote {kind} asset ID")
+    _expect_remote_asset_name(metadata["name"], kind)
+    _expect_positive_integer(metadata["size_bytes"], f"remote {kind} metadata size")
+
+
+def _validate_remote_observation(
+    value: Any, candidate: Mapping[str, Any], reference: Mapping[str, Any], current_attempt_id: str
+) -> Mapping[str, Any]:
+    record = _expect_mapping(
+        value,
+        "remote observation",
+        (
+            "observation_schema_version",
+            "observation_id",
+            "promotion_attempt_id",
+            "candidate_identity_record",
+            "candidate",
+            "retained_artifact_availability",
+            "tag_observation",
+            "release_observation",
+            "asset_observations",
+            "readback_status",
+            "observed_at",
+        ),
+    )
+    if record["observation_schema_version"] != "1.0":
+        _refuse("remote observation schema version is unsupported")
+    _expect_safe_opaque_id(record["observation_id"], "remote observation ID")
+    attempt_id = _expect_safe_opaque_id(current_attempt_id, "current promotion attempt ID")
+    if (
+        _expect_safe_opaque_id(record["promotion_attempt_id"], "observation promotion attempt ID")
+        != attempt_id
+    ):
+        _refuse("remote observation belongs to another promotion attempt")
+    observed_candidate = _validate_candidate_identity(
+        {"schema_version": "1.0", "candidate": record["candidate"]}
+    )["candidate"]
+    if (
+        _review_record_reference(
+            record["candidate_identity_record"], "remote candidate identity reference"
+        )
+        != reference
+        or observed_candidate != candidate
+    ):
+        _refuse("remote observation does not bind the exact downloaded candidate")
+    _review_timestamp(record["observed_at"], "remote observed_at")
+    retained = _expect_mapping(
+        record["retained_artifact_availability"],
+        "retained artifact availability",
+        ("status", "observed_result"),
+    )
+    if (
+        retained["status"]
+        not in (
+            "AVAILABLE_AND_VERIFIED",
+            "UNAVAILABLE",
+            "EXPIRED",
+            "IDENTITY_MISMATCH",
+            "UNREADABLE",
+        )
+        or retained["observed_result"] not in _REVIEW_OBSERVED_RESULTS
+    ):
+        _refuse("retained artifact availability contains an unsupported value")
+    _validate_remote_tag(record["tag_observation"])
+    _validate_remote_release(record["release_observation"])
+    assets = _expect_mapping(
+        record["asset_observations"],
+        "remote asset observations",
+        ("archive", "manifest", "unexpected_asset_ids"),
+    )
+    for kind in ("archive", "manifest"):
+        _validate_remote_asset(assets[kind], kind)
+    unexpected = _expect_list(assets["unexpected_asset_ids"], "unexpected asset IDs")
+    if len(unexpected) > 64:
+        _refuse("unexpected asset IDs exceed their bound")
+    identifiers: set[str] = set()
+    for value in unexpected:
+        identifier = _expect_safe_opaque_id(value, "unexpected asset ID")
+        if identifier in identifiers:
+            _refuse("unexpected asset IDs contain duplicates")
+        identifiers.add(identifier)
+    readback = _expect_mapping(
+        record["readback_status"],
+        "remote readback status",
+        ("expected_result", "observed_result", "reason_code"),
+    )
+    if (
+        readback["expected_result"] != "EXPECT_SUCCESS"
+        or readback["observed_result"] not in _REVIEW_OBSERVED_RESULTS
+        or readback["reason_code"]
+        not in (
+            "READBACK_COMPLETE",
+            "READBACK_UNAVAILABLE",
+            "READBACK_UNAUTHORIZED",
+            "READBACK_INCOMPLETE",
+            "READBACK_EVIDENCE_REJECTED",
+        )
+    ):
+        _refuse("remote readback status contains an unsupported value")
+    return record
+
+
+def seal_remote_observation(
+    observation: Mapping[str, Any],
+    *,
+    candidate_identity: Mapping[str, Any],
+    candidate_identity_bytes: bytes,
+    candidate_identity_reference: Mapping[str, Any],
+    current_attempt_id: str,
+) -> Mapping[str, Any]:
+    """Seal candidate-bound recorded facts, preserving negative observations without remote I/O."""
+    identity, reference = _verified_raw_candidate(
+        candidate_identity, candidate_identity_bytes, candidate_identity_reference
+    )
+    record = _validate_remote_observation(
+        _thaw(observation), identity["candidate"], reference, current_attempt_id
+    )
+    return _freeze(record)
+
+
+def _remote_collision_reason(
+    record: Mapping[str, Any], candidate: Mapping[str, Any], classified_at: datetime
+) -> str | None:
+    retained = record["retained_artifact_availability"]
+    expiry = _review_timestamp(
+        candidate["build"]["artifact"]["retention"]["expires_at"], "retained payload expiry"
+    )
+    if (
+        retained["status"] == "EXPIRED"
+        or expiry <= _review_timestamp(record["observed_at"], "remote observed_at")
+        or expiry <= classified_at
+    ):
+        return "RETAINED_ARTIFACT_EXPIRED"
+    if retained["status"] == "UNAVAILABLE":
+        return "RETAINED_ARTIFACT_UNAVAILABLE"
+    if retained["status"] == "IDENTITY_MISMATCH":
+        return "RETAINED_ARTIFACT_IDENTITY_MISMATCH"
+    tag = record["tag_observation"]
+    release = record["release_observation"]
+    assets = record["asset_observations"]
+    readback = record["readback_status"]
+    if (
+        retained["status"] == "UNREADABLE"
+        or readback["reason_code"] in ("READBACK_UNAVAILABLE", "READBACK_UNAUTHORIZED")
+        or tag["status"] == "UNREADABLE"
+        or release["status"] == "UNREADABLE"
+        or any(
+            assets[kind]["status"] in ("UNREADABLE", "PRESENT_UNREADABLE")
+            for kind in ("archive", "manifest")
+        )
+    ):
+        return "REMOTE_READBACK_UNREADABLE"
+    present = [
+        assets[kind] for kind in ("archive", "manifest") if assets[kind]["status"] == "PRESENT"
+    ]
+    if (
+        retained["observed_result"] != "SUCCESS"
+        or readback["observed_result"] != "SUCCESS"
+        or readback["reason_code"] != "READBACK_COMPLETE"
+        or (release["status"] == "ABSENT" and (present or assets["unexpected_asset_ids"]))
+        or (len(present) == 2 and present[0]["metadata"]["id"] == present[1]["metadata"]["id"])
+    ):
+        return "REMOTE_READBACK_INCOMPLETE"
+    if tag["status"] == "PRESENT":
+        if tag["tag_type"] != "ANNOTATED":
+            return "TAG_NON_ANNOTATED"
+        if (
+            tag["tag"] != candidate["destination"]["tag"]
+            or tag["peeled_commit"] != candidate["source"]["commit"]
+        ):
+            return "TAG_TARGET_MISMATCH"
+    if release["status"] == "PRESENT":
+        if (
+            release["tag"] != candidate["destination"]["tag"]
+            or release["destination_metadata_status"] != "MATCHING"
+        ):
+            return "RELEASE_METADATA_MISMATCH"
+        if (
+            tag["status"] != "PRESENT"
+            or not release["is_prerelease"]
+            or (not release["is_draft"] and len(present) != 2)
+        ):
+            return "RELEASE_STATE_MISMATCH"
+    if assets["unexpected_asset_ids"]:
+        return "UNEXPECTED_ASSET_PRESENT"
+    for kind, expected in (
+        ("archive", candidate["preview_manifest"]["contents"]["archive"]),
+        ("manifest", candidate["preview_manifest"]["file"]),
+    ):
+        asset = assets[kind]
+        if asset["status"] == "PRESENT" and (
+            asset["metadata"]["name"] != expected["name"]
+            or asset["metadata"]["size_bytes"] != expected["size_bytes"]
+            or asset["downloaded_identity"] != expected
+            or asset["observed_result"] != "SUCCESS"
+            or asset["identity_status"] != "MATCHES_CANDIDATE"
+        ):
+            return "ASSET_IDENTITY_MISMATCH"
+    return None
+
+
+def classify_remote_observation(
+    remote_observed_state_reference: Mapping[str, Any],
+    *,
+    classification_id: str,
+    classified_at: str,
+    candidate_identity: Mapping[str, Any],
+    candidate_identity_bytes: bytes,
+    candidate_identity_reference: Mapping[str, Any],
+    current_attempt_id: str,
+    current_workflow_run: Mapping[str, Any],
+    record_resolver: Callable[[Mapping[str, Any]], bytes],
+) -> Mapping[str, Any]:
+    """Derive one immutable recovery action from verified recorded facts, not effect authority."""
+    identity, candidate_reference = _verified_raw_candidate(
+        candidate_identity, candidate_identity_bytes, candidate_identity_reference
+    )
+    candidate = identity["candidate"]
+    _expect_safe_opaque_id(classification_id, "remote classification ID")
+    classification_time = _review_timestamp(classified_at, "remote classified_at")
+    workflow = _expect_mapping(
+        current_workflow_run,
+        "current promote workflow run",
+        ("repository", "workflow_path", "mode", "event", "run_id", "run_attempt", "ref", "commit"),
+    )
+    _expect_repository(workflow["repository"], "current workflow repository")
+    _expect_identifier(workflow["run_id"], "current workflow run ID")
+    _expect_positive_integer(workflow["run_attempt"], "current workflow run attempt")
+    _expect_commit(workflow["commit"], "current workflow commit")
+    if (
+        workflow["repository"] != candidate["source"]["repository"]
+        or workflow["commit"] != candidate["source"]["commit"]
+        or workflow["workflow_path"] != ".github/workflows/stateless-preview.yml"
+        or workflow["mode"] != "promote"
+        or workflow["event"] != "workflow_dispatch"
+        or workflow["ref"] != _CANONICAL_SOURCE_REF
+    ):
+        _refuse("remote classification requires the current canonical candidate promote run")
+    reference = _review_record_reference(
+        _thaw(remote_observed_state_reference), "remote observation reference"
+    )
+    if (
+        reference["repository"] != workflow["repository"]
+        or reference["run_id"] != workflow["run_id"]
+    ):
+        _refuse("remote observation reference belongs to another workflow run")
+    if not callable(record_resolver):
+        _refuse("remote observation resolver is unavailable")
+    record = _validate_remote_observation(
+        _resolve_stage_record(reference, record_resolver),
+        candidate,
+        candidate_reference,
+        current_attempt_id,
+    )
+    if classification_time < _review_timestamp(record["observed_at"], "remote observed_at"):
+        _refuse("remote classification predates its observation")
+    reason = _remote_collision_reason(record, candidate, classification_time)
+    if reason is not None:
+        state, admission, action = "collision", "REFUSED", "REFUSE"
+        result = {"expected": "EXPECT_SUCCESS", "observed": "REFUSAL", "status": "REFUSED"}
+    else:
+        admission = "ADMITTED"
+        result = {"expected": "EXPECT_SUCCESS", "observed": "SUCCESS", "status": "PASS"}
+        if record["tag_observation"]["status"] == "ABSENT":
+            state, action, reason = (
+                "unstarted",
+                "CREATE_ANNOTATED_TAG_AND_DRAFT_RELEASE",
+                "TAG_ABSENT",
+            )
+        elif record["release_observation"]["status"] == "ABSENT":
+            state, action, reason = "tag_only", "CREATE_DRAFT_PRERELEASE", "TAG_MATCHING_ANNOTATED"
+        elif not record["release_observation"]["is_draft"]:
+            state, action, reason = (
+                "published_complete",
+                "RUN_REMOTE_CONSUMER_PROOF",
+                "RELEASE_MATCHING_PRERELEASE",
+            )
+        else:
+            count = sum(
+                record["asset_observations"][kind]["status"] == "PRESENT"
+                for kind in ("archive", "manifest")
+            )
+            if count == 2:
+                state, action, reason = (
+                    "draft_complete",
+                    "VERIFY_REMOTE_ASSETS_AND_PUBLISH_PRERELEASE",
+                    "EXPECTED_ASSETS_COMPLETE_MATCH",
+                )
+            elif count == 1:
+                state, action, reason = (
+                    "draft_partial",
+                    "UPLOAD_MISSING_APPROVED_ASSETS",
+                    "EXPECTED_ASSETS_PARTIAL_MATCH",
+                )
+            else:
+                state, action, reason = (
+                    "draft_empty",
+                    "UPLOAD_MISSING_APPROVED_ASSETS",
+                    "EXPECTED_ASSETS_ABSENT",
+                )
+    return _freeze(
+        {
+            "classification_schema_version": "1.0",
+            "classification_id": classification_id,
+            "promotion_attempt_id": current_attempt_id,
+            "candidate_identity_record": candidate_reference,
+            "candidate": candidate,
+            "remote_observed_state_reference": reference,
+            "state": state,
+            "admission": admission,
+            "allowed_action": action,
+            "reason_codes": [reason],
+            "classification_result": result,
+            "classified_at": classified_at,
+        }
+    )
+
+
 def _write_admission_outputs(admission: Mapping[str, Any], environment: Mapping[str, str]) -> None:
     output_path = _environment_value(environment, "GITHUB_OUTPUT")
     preview = admission["preview"]
@@ -2336,6 +2802,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 __all__ = [
     "admit_build",
     "assemble_candidate_identity",
+    "classify_remote_observation",
     "consumer_proof_scenario_catalog",
     "main",
     "parse_args",
@@ -2345,6 +2812,7 @@ __all__ = [
     "seal_build_records",
     "seal_independent_pr_review",
     "seal_promotion_decision",
+    "seal_remote_observation",
     "seal_s2_s3_lens_result",
     "seal_s2_s3_review_aggregate",
     "seal_stage_gate_evidence",
