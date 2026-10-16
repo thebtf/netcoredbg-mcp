@@ -85,15 +85,20 @@ class _DiagnosticApi(_Kernel32):
         return int(info.TotalProcesses)
 
     def _snapshot(self, job: int) -> tuple[int, tuple[int, ...]]:
-        self._check_deadline()
-        info = self._process_id_list()
-        if not self._query_information(
-            job, 3, self._ctypes.byref(info), self._ctypes.sizeof(info), None
-        ):
-            raise self._error(AdmissionStage.DRAIN)
-        if info.assigned != info.returned or info.returned > 64:
-            raise _Win32CallError(AdmissionStage.DRAIN, None)
-        return self._total_processes(job), tuple(info.pids[: info.returned])
+        while True:
+            self._check_deadline()
+            total_before = self._total_processes(job)
+            info = self._process_id_list()
+            if not self._query_information(
+                job, 3, self._ctypes.byref(info), self._ctypes.sizeof(info), None
+            ):
+                raise self._error(AdmissionStage.DRAIN)
+            if info.assigned != info.returned or info.returned > 64:
+                raise _Win32CallError(AdmissionStage.DRAIN, None)
+            pids = tuple(info.pids[: info.returned])
+            total_after = self._total_processes(job)
+            if total_before == total_after:
+                return total_after, pids
 
     def _capture(self, job: int, pids: tuple[int, ...]) -> set[tuple[int, int]]:
         captured = set()

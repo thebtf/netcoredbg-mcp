@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -282,6 +283,90 @@ def terminating_api():
     api._total_processes = lambda _job: state["total"]
     api.wait_for_process = lambda _handle, _timeout: state["signaled"]
     return SimpleNamespace(api=api, state=state, events=events)
+
+
+@pytest.fixture
+def snapshot_api(monkeypatch):
+    class ProcessIdList(ctypes.Structure):
+        _fields_ = [
+            ("assigned", ctypes.c_uint32),
+            ("returned", ctypes.c_uint32),
+            ("pids", ctypes.c_size_t * 64),
+        ]
+
+    class Accounting(ctypes.Structure):
+        _fields_ = [("TotalProcesses", ctypes.c_uint32)]
+
+    api: Any = object.__new__(watchdog._DiagnosticApi)
+    api._ctypes = ctypes
+    api._process_id_list = ProcessIdList
+    api._basic_accounting_information = Accounting
+    api._error = lambda stage: _Win32CallError(stage, None)
+    api.cleanup_deadline = 1005.0
+    state = {"now": 1000.0, "pids": (7,), "total": 1, "growth": "once", "invalid": None}
+    monkeypatch.setattr(watchdog.time, "monotonic", lambda: state["now"])
+
+    def query(job, kind, pointer, size, returned):
+        assert job == 11
+        state["now"] += 0.25
+        info = pointer._obj
+        if kind == 1:
+            info.TotalProcesses = state["total"]
+        else:
+            assert kind == 3
+            pids = state["pids"]
+            info.assigned = info.returned = len(pids)
+            info.pids[: len(pids)] = pids
+            if state["invalid"] == "incomplete":
+                info.assigned += 1
+            elif state["invalid"] == "overflow":
+                info.assigned = info.returned = 65
+            elif state["invalid"] == "query_failure":
+                return False
+            if state["growth"]:
+                state["pids"] = (*pids, pids[-1] + 1)
+                state["total"] += 1
+                if state["growth"] == "once":
+                    state["growth"] = None
+        return True
+
+    api._query_information = query
+    return SimpleNamespace(api=api, state=state)
+
+
+def test_snapshot_retries_admission_until_returned_members_cover_stable_total(snapshot_api):
+    total, pids = snapshot_api.api._snapshot(11)
+
+    assert (total, pids) == (2, (7, 8))
+    assert total == snapshot_api.state["total"] == len(pids)
+    assert pids == snapshot_api.state["pids"]
+    assert snapshot_api.state["now"] < snapshot_api.api.cleanup_deadline
+    assert snapshot_api.api.cleanup_deadline == 1005.0
+
+
+def test_snapshot_continual_admission_exhausts_existing_cleanup_deadline(snapshot_api):
+    snapshot_api.state["growth"] = "always"
+
+    with pytest.raises(_Win32CallError):
+        snapshot_api.api._snapshot(11)
+
+    assert snapshot_api.state["now"] >= 1005.0
+    assert snapshot_api.api.cleanup_deadline == 1005.0
+
+
+@pytest.mark.parametrize("invalid", ["incomplete", "overflow", "query_failure"])
+def test_snapshot_refuses_incomplete_or_unbounded_membership(snapshot_api, invalid):
+    snapshot_api.state.update(growth=None, invalid=invalid)
+
+    with pytest.raises(_Win32CallError):
+        snapshot_api.api._snapshot(11)
+
+
+def test_snapshot_accepts_existing_64_member_bound(snapshot_api):
+    pids = tuple(range(7, 71))
+    snapshot_api.state.update(growth=None, pids=pids, total=64)
+
+    assert snapshot_api.api._snapshot(11) == (64, pids)
 
 
 def test_current_member_handles_are_captured_before_job_termination(terminating_api):
