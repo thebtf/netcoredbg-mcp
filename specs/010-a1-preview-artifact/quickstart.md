@@ -59,8 +59,9 @@ The shared production transport is `ArtifactDownloader` with the expanded
 `ArtifactFileReference` in `scripts/stateless_preview_artifact.py`. Candidate
 mode uses that owner for metadata, ZIP, raw-file and payload hash checks and
 exclusive local retention. Its consumer CLI/reference bundle is unchanged.
-The same workflow now wires separate evidence-retention adapters and a permission
-diagnostic; neither is a publisher or proof of a successful live run.
+The same workflow wires separate evidence retention, a permission diagnostic,
+and a complete three-block promote source path. Source implementation is not
+proof of successful live retention, qualified permission, promotion or publication.
 
 Sonar receipts are not inputs to build admission, candidate sealing, or consumer
 proof. Run the separate exact-head audit only after actual publication, as
@@ -208,9 +209,9 @@ candidate-bound asset identities and complete consumer/denial/EOF/Python-rollbac
 matrix; the sealer does not itself download or execute those assets.
 
 Decision sealing and its nonpublishing retention adapter are source implementation,
-not a completed live S4 decision. `seal_promotion_attempt` adds pure immutable
-Attempt 2.0 revalidation, not a live promote caller or publisher. A sealed
-Decision or SIMULATED Attempt is not authority for live publication.
+not a completed live S4 decision. The complete promote CLI/workflow now calls
+pure immutable Attempt 2.0 revalidation through real upload/readback boundaries.
+A sealed Decision or SIMULATED Attempt is not live publication authority.
 
 ### Revalidate one source-only Attempt 2.0
 
@@ -243,7 +244,7 @@ and `contents: write` projection. Probe/foreign/insufficient/unavailable grants
 never qualify. The report and remote chronology must follow the Stages/Decision
 and precede Attempt sealing and retention expiry.
 
-Trusted future workflow wiring must use `GITHUB_TOKEN: ${{ github.token }}`.
+The promote job supplies `GITHUB_TOKEN: ${{ github.token }}` to every command.
 Execution provenance is fixed to `github.token`, `GITHUB_APP_INSTALLATION_TOKEN`,
 `UNOBSERVED`, and null `app_id`/`installation_id`; initiators are not token owners.
 Legacy Attempt 1.0/`authenticated_actor`, extra fields, stale/colliding remote
@@ -272,8 +273,8 @@ candidate_identity_reference, current_attempt_id, current_workflow_run,
 record_resolver)` resolves the exact raw observation, checks its hash and closed
 form again, and derives one immutable `remote-classification.schema.json` record.
 The resolver takes a compact artifact-file reference and returns previously
-obtained bytes; no downloader, credential, CLI promotion path, or network
-producer is added. `current_workflow_run` has exactly the existing
+obtained bytes; this pure function adds no downloader, credential or network
+producer. The separate publisher CLI owns those effects. `current_workflow_run` has exactly the existing
 `promotion-attempt.schema.json#/$defs/current_promote_workflow_run` shape and
 must come from the invoking runtime, not the observation under validation.
 
@@ -289,19 +290,19 @@ expiry is evaluated at `observed_at` and `classified_at`; classification cannot
 precede observation. These times and the truth of the recorded readback remain
 runtime/observer inputs. The stored observation has no workflow `run_attempt`,
 so matching run ID and attempt ID cannot prove freshness across a rerun of that
-run. The future collector must create a new attempt ID and observation for each
-run attempt, and full Promotion Attempt admission must enforce that capture
-before any effect. An `ADMITTED` classification alone is not effect authority.
+run. The publisher derives a new attempt ID and creates observations for each
+run attempt; full Promotion Attempt admission and retained readback precede
+protected effects. An `ADMITTED` classification alone is not effect authority.
 
 ## Retain exact evidence through the existing workflow
 
-The workflow source now accepts `mode=build` (the default) or `mode=evidence`.
-Build still requires `preview_version`, `preview_tag`, and `retention_days`;
-these are optional empty strings in YAML so that evidence requests need not
-supply fake build inputs. A legacy request with no `mode` uses build admission;
-an explicitly empty/unknown mode, unknown operation, mixed fields, or unsupported
-input refuses rather than succeeding with every job skipped. There is no
-`promote` mode or placeholder in the current workflow.
+The workflow source accepts `mode=build` (the default), `mode=evidence`, or
+`mode=promote`. Build still requires `preview_version`, `preview_tag`, and
+`retention_days`; these are optional empty strings in YAML so evidence requests
+need not supply fake build inputs. A legacy request without `mode` uses build
+admission; an explicitly empty/unknown mode, unknown operation, mixed fields, or
+unsupported input refuses instead of succeeding with every job skipped. Promote
+is the complete publisher described below, not an admission-only route.
 
 For retention, the original candidate build must be complete and successful at
 its exact run attempt, workflow/ref/SHA and named build job. Obtain the real
@@ -388,6 +389,130 @@ the original records while the evidence run remains `in_progress`; the source
 build alone must already be `completed/success`. There is no fourth upload or
 future-ID cycle. The final summary's compact Decision reference is a retained
 file identity, not current-attempt permission or publication authority.
+
+## Dispatch the complete publisher after explicit retained approval
+
+This is an operator procedure for an authorized later execution, not an executed
+command or new publication grant. Root first integrates and verifies all pipeline
+source on canonical main, then builds the final candidate and obtains its fresh
+consumer proof, seven lenses, distinct PR review, passing Stage and explicit
+retained `APPROVE`. An older candidate cannot use a newer workflow: source/main,
+checkout, build and workflow SHA must agree. Live same-promote-job permission
+capability remains `UNKNOWN`; source work can proceed, but no actual mutation
+may use declarations, another job's report, a PAT or cached login as a substitute.
+
+Save the actual compact reference obtained from the retained Decision/readback
+as `C:\preview-validation\promotion-decision-reference.json`. It has exactly:
+
+```text
+repository: the retained Decision's repository
+run_id: its positive decimal-string producer run ID
+artifact_id: its real positive decimal-string uploaded artifact ID
+path: promotion-decision.json
+sha256: the lowercase SHA-256 of that original raw file
+```
+
+Do not supply the Decision body, an arbitrary request path/URL, actor, grants,
+source SHA, release/job/attempt ID, or extra Candidate/Stage references. The
+helper resolves the existing Decision chain itself. `preview_tag` is checked
+against that chain's candidate destination; a local candidate copy supplies only
+this concurrency tag and creates no authority. The request stays data on stdin:
+
+```powershell
+$candidate = Get-Content -Raw C:\preview-validation\candidate-identity.json | ConvertFrom-Json
+$decisionReference = Get-Content -Raw C:\preview-validation\promotion-decision-reference.json
+@{
+  mode = 'promote'
+  preview_tag = $candidate.candidate.destination.tag
+  promote_request = $decisionReference
+} | ConvertTo-Json -Compress | gh workflow run stateless-preview.yml --repo thebtf/netcoredbg-mcp --ref main --json
+```
+
+Leave `preview_version`, `retention_days`, `evidence_operation`, and
+`evidence_request` absent or empty. The actual escaped input object must still
+fit 65,535 characters. Do not interpolate the request into shell code. No dispatch
+shown here was performed by this source change.
+
+The exact job is `promote` / `Promote canonical-main preview candidate`, with
+`actions: read` and `contents: write`, exact checkout and no persisted credentials,
+live main fetch, existing Python setup and job-scoped
+`GITHUB_TOKEN: ${{ github.token }}`. It installs no SDK, builds nothing, and uses
+only approved retained payload bytes. The house helper scrubs overriding
+`GH_TOKEN`/enterprise/debug/Git environment and disallows auth-cache fallback.
+It independently derives the current source/run/attempt/job and both initiators;
+the Decision's named dispatcher must match them, not a request-supplied identity.
+
+The actual CLI/retention sequence is:
+
+```text
+admit-promote                         -> real pre-publication Stage and owned paths
+collector --output <permission_path>  -> original same-job report; QUALIFIED required
+observe-promote                      -> O0 and genuine draft-byte fragment if present
+P0 upload                            -> Stage + report + O0 + optional actual fragment
+classify-promote --step 0             -> independent P0 readback, C0
+C0 upload
+seal-promote-attempt                  -> independent C0/P0 readback, immutable A
+A upload
+advance-promote --step 1              -> A/C0 readback, one legal action, O1/optional fragment
+O1 upload; classify-promote --step 1; C1 upload
+advance-promote --step 2              -> A/C1 readback, one legal action, O2/optional fragment
+O2 upload; classify-promote --step 2; C2 upload
+advance-promote --step 3              -> A/C2 readback, one legal action, O3/optional fragment
+O3 upload; classify-promote --step 3; C3 upload
+finish-promote --step N               -> A/final C_N readback, exact published references
+```
+
+Publisher commands above use `python scripts/stateless_preview_artifact.py`;
+`collector` is `python scripts/stateless_preview_permissions.py`. `admit-promote`,
+`observe-promote` and `seal-promote-attempt` accept no extra arguments.
+Classification/finish require `--step` 0–3; advance requires 1–3. Numbers identify
+fixed blocks, not retry counts or caller-selected operations. Once classification
+is `published_complete`, remaining action blocks skip and finish uses that actual
+step, including step 0 for initial published recovery. A remains unchanged.
+
+The classifier alone chooses the legal action: `unstarted` creates/readbacks
+the exact annotated tag and draft; `tag_only` creates only a draft;
+`draft_empty`/`draft_partial` upload only missing approved assets;
+`draft_complete` requires retained genuine pre-publication byte verification,
+then fresh exact draft/asset readback before publishing. Collision, unreadable
+or mismatched resources refuse. Each protected write repeats current-context,
+retained-chain and remote checks. No rebuild, clobber, delete, tag move, release
+replacement, automatic `APPROVE`, or Python/PyPI publication is permitted.
+
+Every upload enumerates only actual helper-owned file paths, uses
+`overwrite: false`, `if-no-files-found: error`, and Candidate's validated 1–90-day
+retention. P0/C/A/O references come only from real upload output IDs/digests;
+there is no future-ID cycle. YAML removes only the exact leading `sha256:` from
+v7 container digests before helpers validate 64 lowercase hex digits. Container,
+raw-file and payload hashes remain different domains. A failed collector's raw
+report may be retained separately with `always()`, but cannot create O0/C0/A or
+authorize release writes. Actions upload success is neither a protected release
+write nor evidence of a `contents: write` grant.
+
+An error/lost response triggers only bounded read-only postcondition reconciliation,
+never a second send: known tag OID, exact matching draft ID/listing, downloaded
+asset IDs/bytes or exact published release/assets. Only a fully proven postcondition
+permits the next block. UNKNOWN, partial/changed state, or a failed/unfinished
+action stops the attempt; a retained diagnostic O_N cannot authorize C_N or another
+action. A retry is a new run/run_attempt with new identity and fresh Stage/report/
+O/C/A, not replay of an old write. Non-cancelling per-tag workflow concurrency is
+not a transaction against other authorized GitHub writers.
+
+On success download the immutable `<attempt_artifact_name>-handoff` Actions
+artifact from this actual run and preserve its `publisher-handoff.json`. It names
+exact Candidate/Catalog/Decision/Stage/report/A/final O/C references and any real
+predecessor pre-publication fragment. It is not Remote Verification, Consumer Proof,
+post-publication Stage or the Program B Handoff. Initial `published_complete`
+recovery makes no mutations; without an actual earlier fragment it returns
+`pre_publication_verification: null`, never a fabricated pre-publication PASS.
+Root must resolve real predecessor evidence or leave that closeout incomplete.
+
+T027–T029/T034–T035 still require fresh public archive/manifest downloads into
+a new directory and the full identity/consumer/denial/EOF/unchanged-Python-rollback
+journey, then Remote Verification, post-publication Stage and non-authorizing
+Program B Handoff. Publisher cache bytes cannot replace this proof. The separate
+probe section below preserves its earlier diagnostic description; its historical
+"future promote" wording predates the complete source job described here.
 
 ## Probe the same current job's permissions
 
@@ -492,13 +617,14 @@ existing project test environment, not a child agent's midflight check:
 python -m pytest tests/test_stateless_preview_artifact.py tests/test_stateless_preview_permissions.py -q
 ```
 
-Root must also check workflow parsing/routing, unchanged build gates, exact
-upload file sets and permissions. The pre-implementation unknown-mode/unknown-
-input refusal assertions were real RED in
+Root must also check actionlint/YAML parsing and token routing, unchanged build
+gates, exact upload file sets, digest normalization and permissions; then run the
+actual CLI owner, retained-gate/API-edge smoke and current publisher diff review.
+The pre-implementation unknown-mode/unknown-input assertions were real RED in
 `.agent/runs/a1-artifact-20261016/evidence-cli-dispatch-red.xml`; this procedure
-does not invent a later PASS. Source/fixture evidence remains separate from the
-live same-current-job diagnostic and E0/E1/E2 retention/readback. A final
-canonical candidate, fresh consumer/review/Decision evidence, live Attempt
-admission, publisher and remote/public consumer proof remain pending. The Python
-default/rollback and Program B/C are unchanged.
+does not invent a later PASS. T023/T026 remain unclosed until integrated proof.
+Source/fixture evidence is separate from live same-current-job permission,
+retention/readback, approval, mutation and fresh public consumer proof. Final
+canonical candidate/review/Decision and remote closure still need their own real
+receipts. Python default/rollback and Program B/C remain unchanged.
 
