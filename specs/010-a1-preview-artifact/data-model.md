@@ -233,7 +233,7 @@ The Promotion Decision is the candidate-approval record defined by [promotion-de
 
 ## Promotion Attempt
 
-A Promotion Attempt is the fresh execution-authorization record defined by [promotion-attempt.schema.json](contracts/promotion-attempt.schema.json). It binds one `APPROVE` Decision to the current `workflow_dispatch` invocation before remote mutation.
+A Promotion Attempt 2.0 is the fresh execution-admission record defined by [promotion-attempt.schema.json](contracts/promotion-attempt.schema.json). The pure `seal_promotion_attempt` library revalidates one `APPROVE` Decision against independent current facts before any remote mutation. This is source implementation, not live authorization: permission capability remains `UNKNOWN`, and the workflow has no promote route or publisher.
 
 ### Fields
 
@@ -241,16 +241,22 @@ A Promotion Attempt is the fresh execution-authorization record defined by [prom
 | --- | --- |
 | `attempt_id` and `recorded_at` | A bounded opaque attempt ID and audit time. |
 | `candidate_identity_record` and `promotion_decision` | Closed record references whose raw bytes/hash and embedded candidate equality must match. |
-| `dispatcher` and `workflow_run` | The current authenticated `github.actor` and the current canonical promote run ID, attempt, ref, SHA, and dispatch event. |
-| `permission_readback` | The current run's sealed readback proving required permissions. |
+| `authorization.decision_authorization` | The exact resolved Decision's `decision_author` and `authorized_dispatcher` template. |
+| `authorization.current_github_actor` and `authorization.current_github_triggering_actor` | Separate current actor/rerun initiator ID/login maps; both must equal the Decision's dispatcher, who may differ from its author. |
+| `workflow_run` | The unchanged eight-field canonical promote run context: repository, workflow path, mode, event, run ID/attempt, ref, and commit. |
+| `authorization.permission_readback` | Raw report reference, run attempt, positive decimal-string job ID, fixed `job_key: promote`, workflow SHA, exact `actions: read`/`contents: write` projection, and execution-token provenance. |
+| `authorization.permission_readback.execution_token` | `source: github.token`, `kind: GITHUB_APP_INSTALLATION_TOKEN`, `identity_observation: UNOBSERVED`, and required `app_id: null`/`installation_id: null`. Neither initiator is the token principal. |
 | `pre_decision_stage_evidence` and `pre_publication_stage_evidence` | The approved pre-decision set and the newly validated pre-publication set. |
 | `remote_observation` and `remote_classification` | Fresh current-attempt records used to select the only legal remote action. |
 
 ### Validation rules
 
-- The current actor, run ID, run attempt, ref/SHA, Decision hash, authorized dispatcher, and permission readback must agree exactly. A different dispatcher or old attempt is refused.
-- The attempt revalidates the Decision's pre-decision set and requires a passing pre-publication set before it creates a tag, release, or asset. It must not require post-publication proof.
-- The same authorized dispatcher may retry only through a new attempt and fresh matching classification. An attempt cannot start Program B/C.
+- The closed independent current context supplies `current_attempt_id`, `workflow_run`, `job_id`, `job_key`, `workflow_sha`, `checkout_head`, `origin_main_target`, and both actor maps. It must come from trusted runtime admission, not the Attempt or dispatch request. Candidate source/build commit, main target, checkout HEAD, workflow commit, and workflow SHA must agree.
+- Resolve and hash raw Candidate/Catalog/Decision/Stages/report/remote records. Reuse the existing Decision and Stage sealers; require `APPROVE`, exact Decision authorization and pre-decision receipt, plus a PASS pre-publication record even for the empty subset. Attempt 1.0, `authenticated_actor`, extra fields, and post-publication proof refuse without a shim.
+- The referenced report must have the closed qualified-report shape, native log hash/source, ordered before/log/after HTTP evidence, exact numeric run/attempt/job and source/workflow SHA binding, fixed `Promote canonical-main preview candidate` name, and current initiator logins. Probe reports, missing grants, `INSUFFICIENT`/`UNAVAILABLE`, and declarations are not permission evidence. Preserve the complete explicit grants in the report; the Attempt stores only the verified two-right projection.
+- Chronology is pre-decision seal ≤ Decision ≤ pre-publication seal ≤ permission start ≤ permission finish ≤ observation ≤ classification ≤ Attempt, before candidate retention expiry. Remote records must bind the independently supplied fresh attempt ID/current run; re-derive the whole classification and require `ADMITTED`, never collision. This does not itself establish live readback truth.
+- The same dispatcher may retry only with a new independently captured attempt and fresh records. Fixed `github.token` provenance comes from trusted workflow wiring, not token introspection; App/installation IDs remain unobserved/null. An Attempt cannot start Program B/C or perform an effect.
+
 ## Remote Observed State
 
 Remote Observed State is a sealed point-in-time observation of the prerelease destination that validates against [remote-observation.schema.json](contracts/remote-observation.schema.json). The [Promotion recovery contract](contracts/promotion-recovery.md) and [remote-classification schema](contracts/remote-classification.schema.json) derive the only allowed action from it. It records closed live-readback facts, never arbitrary diagnostics.
@@ -361,7 +367,7 @@ The Program B Handoff is the durable A1 closeout record defined by the [Program 
 ### Validation rules
 
 - A handoff validates only through the Program B Handoff semantic validator: it resolves and hashes every structured record, validates its typed shape, and requires canonical candidate/source equality across the Candidate Identity, Decision, Attempt, stage evidence, remote evidence, proof, and catalog.
-- The Decision must be `APPROVE`; its named dispatcher must match the fresh Attempt actor/run/permission readback. The Attempt must carry passing pre-decision and pre-publication evidence before remote mutation.
+- The Decision must be `APPROVE`; the resolved Attempt must be 2.0, with the exact Decision authorization, both current initiators equal to its named dispatcher, and matching run/attempt/job/workflow SHA plus qualified same-promote-job permission evidence. The execution token remains a distinct GitHub App installation token with unobserved/null IDs. Both pre-mutation Stages must pass.
 - The remote classification must be `published_complete`; remote archive, manifest, and executable bytes must equal the Candidate Identity Record; and the remote Consumer Proof Receipt must pass the complete matrix, clean EOF, and unchanged Python rollback.
 - The static catalog must bind the same exact head and five authority snapshots. The handoff requires a passing stage record for each of the three stages, so the post-publication remote proof is required only after publication.
 - Literal `program_b_authorization_required: true` and `program_c_authorization_required: true` prove the handoff is evidence only. The record cannot start Program B/C, change Python/default selection, or contain extracted executable, local project path, process ID, debug session, subscription, artifact handle, or preview runtime state.

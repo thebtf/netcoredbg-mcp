@@ -6,10 +6,13 @@ No network, token introspection, workflow dispatch, or promotion is exercised.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from copy import deepcopy
 from unittest import TestCase
 from unittest.mock import patch
 
+from scripts import stateless_preview_permissions as permission_collector
 from scripts.stateless_preview_permissions import (
     _ProbeError,
     _read_context,
@@ -451,19 +454,29 @@ class TestPermissionProbeContext(TestCase):
             "GITHUB_TOKEN": "synthetic-unit-test-token-not-a-credential",
         }
 
-    def test_expected_job_context_returns_the_fixed_api_display_name(self):
-        with patch.dict("os.environ", self.environment(), clear=True):
-            identity, _ = _read_context()
-        self.assertEqual(
-            identity,
-            {
-                "repository": REPOSITORY,
-                "run_id": RUN_ID,
-                "run_attempt": RUN_ATTEMPT,
-                "head_sha": HEAD_SHA,
-                "job_name": "Probe current job permissions",
-            },
-        )
+    def test_expected_job_context_returns_only_the_fixed_mapping_and_source_binding(self):
+        for job_key, job_name in (
+            ("probe_permissions", "Probe current job permissions"),
+            ("promote", "Promote canonical-main preview candidate"),
+        ):
+            with self.subTest(job_key=job_key):
+                environment = self.environment()
+                environment["GITHUB_JOB"] = job_key
+                environment["GITHUB_JOB_NAME"] = "SIMULATED untrusted name override"
+                with patch.dict("os.environ", environment, clear=True):
+                    identity, _ = _read_context()
+                self.assertEqual(
+                    identity,
+                    {
+                        "repository": REPOSITORY,
+                        "run_id": RUN_ID,
+                        "run_attempt": RUN_ATTEMPT,
+                        "head_sha": HEAD_SHA,
+                        "job_key": job_key,
+                        "workflow_sha": HEAD_SHA,
+                        "job_name": job_name,
+                    },
+                )
 
     def test_peer_job_id_is_refused_even_with_the_expected_display_name(self):
         for job_id in ("build_preview", "probe_permissions_peer", "Probe current job permissions"):
@@ -517,3 +530,130 @@ class TestPermissionProbeContext(TestCase):
                 "GITHUB_TRIGGERING_ACTOR": "workflow-rerun-user",
             },
         )
+
+
+class TestPermissionProbeReport(TestCase):
+    """SIMULATED HTTP-edge responses, not live setup-log capability evidence."""
+
+    def run_simulated_probe(
+        self,
+        job_key,
+        *,
+        after_change=None,
+        peer_job=False,
+        step_status=200,
+        job_log_status=200,
+        log=SETUP_PERMISSIONS,
+    ):
+        environment = TestPermissionProbeContext.environment()
+        environment["GITHUB_JOB"] = job_key
+        jobs = current_jobs()
+        job_name = {
+            "probe_permissions": "Probe current job permissions",
+            "promote": "Promote canonical-main preview candidate",
+        }[job_key]
+        jobs["jobs"][0]["name"] = "Probe current job permissions" if peer_job else job_name
+        after = deepcopy(jobs["jobs"][0])
+        if after_change:
+            after.update(after_change)
+        base = f"https://api.github.com/repos/{REPOSITORY}/actions"
+        job_url = f"{base}/jobs/{JOB_ID}"
+        calls = []
+
+        def get(url, *, authenticated, phase, record, deadline):
+            calls.append((url, authenticated))
+            if phase == "current_attempt_jobs":
+                self.assertEqual(
+                    url,
+                    f"{base}/runs/{RUN_ID}/attempts/{RUN_ATTEMPT}/jobs?per_page=100",
+                )
+                status, body = 200, json.dumps(jobs).encode("utf-8")
+            elif phase == "current_job_after":
+                self.assertEqual(url, job_url)
+                status, body = 200, json.dumps(after).encode("utf-8")
+            elif phase == "setup_step_logs":
+                self.assertEqual(url, f"{job_url}/steps/0/logs")
+                status, body = step_status, log if step_status == 200 else b""
+            elif phase == "job_logs":
+                self.assertEqual(url, job_url + "/logs")
+                status, body = job_log_status, log if job_log_status == 200 else b""
+            else:
+                raise AssertionError(f"unexpected SIMULATED GET phase: {phase}")
+            record["requests"].append(
+                {
+                    "phase": phase,
+                    "http_status": status,
+                    "reason_code": "HTTP_RESPONSE",
+                    "started_at": "2026-10-16T01:00:00Z",
+                    "finished_at": "2026-10-16T01:00:01Z",
+                }
+            )
+            return {"status": status, "body": body, "location": None}
+
+        with (
+            patch.dict("os.environ", environment, clear=True),
+            patch.object(permission_collector, "_get", side_effect=get),
+        ):
+            record = permission_collector._run_probe()
+        return record, calls
+
+    def test_fixed_jobs_report_exact_job_key_workflow_sha_and_full_actual_grants(self):
+        log = SETUP_PERMISSIONS.replace(b"Contents: read", b"Contents: write")
+        for job_key, job_name in (
+            ("probe_permissions", "Probe current job permissions"),
+            ("promote", "Promote canonical-main preview candidate"),
+        ):
+            with self.subTest(job_key=job_key):
+                report, calls = self.run_simulated_probe(job_key, log=log)
+                self.assertEqual(report["status"], "QUALIFIED")
+                self.assertEqual(report["availability"], "AVAILABLE")
+                self.assertEqual(
+                    report["binding"],
+                    {
+                        "repository": REPOSITORY,
+                        "run_id": RUN_ID,
+                        "run_attempt": RUN_ATTEMPT,
+                        "head_sha": HEAD_SHA,
+                        "job_key": job_key,
+                        "workflow_sha": HEAD_SHA,
+                        "job_name": job_name,
+                        "job_id": JOB_ID,
+                        "setup_step_position": 0,
+                    },
+                )
+                self.assertEqual(report["grants"], {**EXPECTED_PERMISSIONS, "contents": "write"})
+                self.assertEqual(report["log_sha256"], hashlib.sha256(log).hexdigest())
+                self.assertEqual(report["log_source"], "setup_step_logs")
+                self.assertEqual(len(calls), 3)
+                self.assertTrue(all(authenticated for _, authenticated in calls))
+                serialized = json.dumps(report)
+                self.assertNotIn("synthetic-unit-test-token-not-a-credential", serialized)
+                self.assertNotIn("##[group]", serialized)
+
+    def test_promote_never_uses_the_peer_probe_jobs_setup_log(self):
+        report, calls = self.run_simulated_probe("promote", peer_job=True)
+        self.assertEqual(report["reason_code"], "CURRENT_JOB_NOT_UNAMBIGUOUS")
+        self.assertEqual(report["status"], "UNAVAILABLE")
+        self.assertEqual(len(calls), 1)
+
+    def test_current_job_must_remain_the_same_running_job_after_log_readback(self):
+        for change in ({"id": JOB_ID + 1}, {"status": "completed", "conclusion": "success"}):
+            with self.subTest(change=change):
+                report, _ = self.run_simulated_probe("promote", after_change=change)
+                self.assertEqual(report["reason_code"], "CURRENT_JOB_BINDING_CHANGED")
+                self.assertEqual(report["status"], "UNAVAILABLE")
+                self.assertEqual(report["grants"], {})
+
+    def test_setup_step_unavailable_falls_back_only_to_the_same_job_log(self):
+        report, calls = self.run_simulated_probe("promote", step_status=404)
+        self.assertEqual(report["log_source"], "job_logs")
+        self.assertEqual(report["log_sha256"], hashlib.sha256(SETUP_PERMISSIONS).hexdigest())
+        self.assertEqual(report["status"], "INSUFFICIENT")
+        self.assertEqual(len(calls), 4)
+
+    def test_unavailable_logs_cannot_become_declared_grants(self):
+        report, _ = self.run_simulated_probe("promote", step_status=404, job_log_status=404)
+        self.assertEqual(report["reason_code"], "CURRENT_JOB_LOGS_UNAVAILABLE")
+        self.assertEqual(report["status"], "UNAVAILABLE")
+        self.assertEqual(report["grants"], {})
+        self.assertIsNone(report["log_sha256"])

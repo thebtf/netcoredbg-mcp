@@ -208,9 +208,48 @@ candidate-bound asset identities and complete consumer/denial/EOF/Python-rollbac
 matrix; the sealer does not itself download or execute those assets.
 
 Decision sealing and its nonpublishing retention adapter are source implementation,
-not a completed live S4 decision. Fresh Promotion Attempt admission remains
-unimplemented. The pure remote-record API below does not replace it. A sealed
-Decision, including `APPROVE`, is not authority for a live attempt or publication.
+not a completed live S4 decision. `seal_promotion_attempt` adds pure immutable
+Attempt 2.0 revalidation, not a live promote caller or publisher. A sealed
+Decision or SIMULATED Attempt is not authority for live publication.
+
+### Revalidate one source-only Attempt 2.0
+
+Call `seal_promotion_attempt(attempt, **stage_binding,
+current_promotion_context=current_context)`, where `stage_binding` contains the
+same candidate object/raw bytes/expanded reference, catalog object/raw bytes/
+reference, raw-record resolver and repository root required by
+`seal_stage_gate_evidence`. The required independent `current_context` has exactly:
+
+```text
+current_attempt_id, workflow_run, job_id, job_key, workflow_sha,
+checkout_head, origin_main_target, current_github_actor,
+current_github_triggering_actor
+```
+
+`workflow_run` retains the classifier's eight fields. `job_id` is a positive
+decimal string; `job_key` is `promote`. Current source/build/main/checkout/workflow
+SHA agree. Both current actor maps contain numeric-string `id` and `login` and
+must match the resolved Decision's dispatcher, not necessarily its author.
+Supply current facts from trusted admission, never the checked Attempt/request.
+
+The API resolves/hashes the `APPROVE` Decision, exact pre-decision receipt,
+PASS pre-publication Stage even for the empty subset, qualified permission report
+and remote records, reusing existing sealers and the classifier. The report must
+bind the same numeric run/attempt/job, `job_key: promote`, fixed
+`Promote canonical-main preview candidate` name and source/workflow SHA, with
+native log hash/source, timestamps and before/after HTTP evidence. Full explicit
+grants stay in the report; Attempt contains exactly their checked `actions: read`
+and `contents: write` projection. Probe/foreign/insufficient/unavailable grants
+never qualify. The report and remote chronology must follow the Stages/Decision
+and precede Attempt sealing and retention expiry.
+
+Trusted future workflow wiring must use `GITHUB_TOKEN: ${{ github.token }}`.
+Execution provenance is fixed to `github.token`, `GITHUB_APP_INSTALLATION_TOKEN`,
+`UNOBSERVED`, and null `app_id`/`installation_id`; initiators are not token owners.
+Legacy Attempt 1.0/`authenticated_actor`, extra fields, stale/colliding remote
+records and post-publication proof refuse. There is no dual reader or shim.
+The API returns a detached deeply immutable record or raises `ValueError`;
+it does not collect live facts, create a receipt or perform remote effects.
 
 Schema-valid simulated test vectors are not actual reviewer or acceptance
 receipts. Library tests do not complete the live retained-candidate journey,
@@ -406,6 +445,13 @@ YAML declarations, another job's grants, successful GETs or endpoint headers are
 not substitutes. A failed live probe holds dependent publisher admission only;
 it does not prove global impossibility or authorize a declaration-only fallback.
 
+The diagnostic collector recognizes only the fixed `probe_permissions`/future
+`promote` mapping. The latter is not an existing YAML job. Its `binding` includes
+`job_key` and `workflow_sha`, while run/attempt/job IDs stay numeric. Preserve
+historical diagnostic JSON; reports without the new bindings cannot qualify an
+Attempt 2.0. Actual probe run `38907673130` returned `UNAVAILABLE`; live capability
+remains `UNKNOWN`, and no source-only success establishes live permission.
+
 ## Root validation and remaining evidence
 
 After all source owners finish, Root runs the focused integrated owners in the
@@ -421,7 +467,7 @@ input refusal assertions were real RED in
 `.agent/runs/a1-artifact-20261016/evidence-cli-dispatch-red.xml`; this procedure
 does not invent a later PASS. Source/fixture evidence remains separate from the
 live same-current-job diagnostic and E0/E1/E2 retention/readback. A final
-canonical candidate, fresh consumer/review/Decision evidence, Promotion Attempt
+canonical candidate, fresh consumer/review/Decision evidence, live Attempt
 admission, publisher and remote/public consumer proof remain pending. The Python
 default/rollback and Program B/C are unchanged.
 

@@ -2,8 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "promotion-attempt.schema.json",
   "title": "A1 preview Promotion Attempt",
-  "description": "Immutable admission record for one current promotion run. Before its first remote mutation it revalidates the Decision's passing pre-decision evidence and binds a passing pre-publication evidence set, then records the current dispatcher, run, permission readback, observation, and classification. It neither requires nor accepts post-publication proof.",
-  "$comment": "Semantic admission resolves candidate, decision, and both stage evidence records by their structural references and raw-byte SHA-256. ATTEMPT_CANDIDATE_DECISION_EQUALITY requires all candidate bindings and decision hashes to agree. ATTEMPT_PRE_MUTATION_STAGE_ADMISSION requires pre_decision_stage_evidence to be the exact same resolved record named by the approved Decision, revalidates its stage=pre-decision PASS result and the seven-lens aggregate, and requires pre_publication_stage_evidence to resolve to a PASS pre-publication set for the same candidate, source commit, and catalog before any Remote Observation, Remote Classification, tag, release, or asset mutation. POST_PUBLICATION_PROOF_ABSENCE is deliberate: this closed record has no post-publication field and cannot require remote proof before publication. ATTEMPT_DECISION_AUTHORIZATION, ATTEMPT_WORKFLOW_CONTEXT_EQUALITY, and ATTEMPT_PERMISSION_READBACK_EQUALITY retain current dispatcher, current workflow run/attempt, and current permission binding requirements.",
+  "description": "Immutable Attempt 2.0 admission for one independently captured current promotion run/job. Revalidates the approved Decision and both pre-mutation Stages, current initiators, actual same-promote-job grants, and remote records. No post-publication proof or remote effect is accepted here.",
+  "$comment": "ATTEMPT_CANDIDATE_DECISION_EQUALITY resolves raw candidate/catalog/Decision/Stage/report/remote bytes and verifies structural references, SHA-256, candidate/source/catalog equality, APPROVE, and the exact Decision authorization. ATTEMPT_PRE_MUTATION_STAGE_ADMISSION reuses Decision and Stage semantic sealers, including nested seven-lens and independent review; the pre-decision receipt must equal the Decision receipt and a PASS pre-publication Stage remains mandatory for the empty subset. ATTEMPT_CURRENT_CONTEXT requires independently captured current_attempt_id, the unchanged eight-field workflow_run, positive decimal-string job_id, job_key=promote, workflow_sha, checkout_head, origin_main_target, and both ID/login actor maps; source/build/checkout/main/workflow SHA must agree. Both initiators equal the Decision authorized_dispatcher, not necessarily its author. ATTEMPT_PERMISSION_READBACK_EQUALITY resolves qualified_permission_report, binds numeric report run/attempt/job IDs, fixed promote name/key, head/workflow SHA and actor provenance, requires native log hash/source and before/after HTTP evidence, and projects only actions:read/contents:write without discarding other report grants. EXECUTION_TOKEN_PROVENANCE is trusted workflow wiring GITHUB_TOKEN=${{ github.token }}, not token introspection or human identity; unobserved App/installation IDs remain null. Chronology requires pre-decision <= Decision <= pre-publication <= report start <= report finish <= observation <= classification <= recorded_at, all before candidate retention expiry. Re-derive the complete remote classification for the same fresh attempt/current run and require ADMITTED, never collision. POST_PUBLICATION_PROOF_ABSENCE: this closed record has no post-publication field. Legacy 1.0/authenticated_actor, extra fields, stale identity and declaration-only permission fallback refuse; no dual reader or migration shim.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -25,7 +25,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "1.0"
+      "const": "2.0"
     },
     "attempt_id": {
       "$ref": "artifact-consumer-proof.schema.json#/$defs/safe_opaque_id"
@@ -190,7 +190,10 @@
       "required": [
         "reference",
         "run_attempt",
-        "authenticated_actor",
+        "job_key",
+        "job_id",
+        "workflow_sha",
+        "execution_token",
         "permissions"
       ],
       "properties": {
@@ -201,8 +204,17 @@
           "type": "integer",
           "minimum": 1
         },
-        "authenticated_actor": {
-          "$ref": "#/$defs/github_actor_identity"
+        "job_key": {
+          "const": "promote"
+        },
+        "job_id": {
+          "$ref": "#/$defs/github_identifier"
+        },
+        "workflow_sha": {
+          "$ref": "#/$defs/source_commit"
+        },
+        "execution_token": {
+          "$ref": "#/$defs/execution_token_provenance"
         },
         "permissions": {
           "type": "object",
@@ -228,6 +240,7 @@
       "required": [
         "decision_authorization",
         "current_github_actor",
+        "current_github_triggering_actor",
         "permission_readback"
       ],
       "properties": {
@@ -235,6 +248,9 @@
           "$ref": "#/$defs/decision_authorization"
         },
         "current_github_actor": {
+          "$ref": "#/$defs/github_actor_identity"
+        },
+        "current_github_triggering_actor": {
           "$ref": "#/$defs/github_actor_identity"
         },
         "permission_readback": {
@@ -281,6 +297,100 @@
         "commit": {
           "$ref": "#/$defs/source_commit"
         }
+      }
+    },
+    "execution_token_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "kind", "identity_observation", "app_id", "installation_id"],
+      "properties": {
+        "source": {"const": "github.token"},
+        "kind": {"const": "GITHUB_APP_INSTALLATION_TOKEN"},
+        "identity_observation": {"const": "UNOBSERVED"},
+        "app_id": {"const": null},
+        "installation_id": {"const": null}
+      }
+    },
+    "qualified_permission_report": {
+      "description": "Resolved raw current-job diagnostic admitted only for this exact promote job; historical probe and other diagnostic outcomes remain unchanged but cannot satisfy this definition.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "diagnostic", "meaning", "status", "availability", "reason_code",
+        "started_at", "finished_at", "binding", "actor_provenance", "grants",
+        "log_sha256", "log_source", "requests"
+      ],
+      "properties": {
+        "diagnostic": {"const": "current-job-permissions"},
+        "meaning": {"const": "RUNNER_REPORTED_GRANT_NOT_TOKEN_INTROSPECTION"},
+        "status": {"const": "QUALIFIED"},
+        "availability": {"const": "AVAILABLE"},
+        "reason_code": {"const": "REQUIRED_RUNNER_GRANTS_REPORTED"},
+        "started_at": {"type": "string", "format": "date-time"},
+        "finished_at": {"type": "string", "format": "date-time"},
+        "binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repository", "run_id", "run_attempt", "head_sha", "job_key",
+            "workflow_sha", "job_name", "job_id", "setup_step_position"
+          ],
+          "properties": {
+            "repository": {"$ref": "#/$defs/github_repository"},
+            "run_id": {"type": "integer", "minimum": 1},
+            "run_attempt": {"type": "integer", "minimum": 1},
+            "head_sha": {"$ref": "#/$defs/source_commit"},
+            "job_key": {"const": "promote"},
+            "workflow_sha": {"$ref": "#/$defs/source_commit"},
+            "job_name": {"const": "Promote canonical-main preview candidate"},
+            "job_id": {"type": "integer", "minimum": 1},
+            "setup_step_position": {"type": "integer", "const": 0}
+          }
+        },
+        "actor_provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["GITHUB_ACTOR", "GITHUB_TRIGGERING_ACTOR"],
+          "properties": {
+            "GITHUB_ACTOR": {"$ref": "#/$defs/github_actor_identity/properties/login"},
+            "GITHUB_TRIGGERING_ACTOR": {"$ref": "#/$defs/github_actor_identity/properties/login"}
+          }
+        },
+        "grants": {
+          "type": "object",
+          "required": ["actions", "contents"],
+          "propertyNames": {"pattern": "^[a-z][a-z0-9_-]*$"},
+          "additionalProperties": {"enum": ["none", "read", "write"]},
+          "properties": {
+            "actions": {"const": "read"},
+            "contents": {"const": "write"}
+          }
+        },
+        "log_sha256": {"$ref": "#/$defs/sha256"},
+        "log_source": {"enum": ["setup_step_logs", "job_logs"]},
+        "requests": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 6,
+          "items": {"$ref": "#/$defs/permission_http_response"}
+        }
+      }
+    },
+    "permission_http_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "http_status", "reason_code", "started_at", "finished_at"],
+      "properties": {
+        "phase": {
+          "enum": [
+            "current_attempt_jobs", "setup_step_logs", "setup_step_logs_redirect",
+            "job_logs", "job_logs_redirect", "current_job_after"
+          ]
+        },
+        "http_status": {"type": "integer", "minimum": 100, "maximum": 599},
+        "reason_code": {"const": "HTTP_RESPONSE"},
+        "started_at": {"type": "string", "format": "date-time"},
+        "finished_at": {"type": "string", "format": "date-time"}
       }
     },
     "promotion_attempt_reference": {

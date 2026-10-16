@@ -8,11 +8,17 @@ The [Candidate Identity Record](candidate-identity.schema.json), [Promotion Deci
 
 A Promotion Decision is candidate approval. It requires only one passing `pre-decision` Stage Gate Evidence record. That record contains the retained downloaded consumer proof, seven-lens aggregate, and distinct independent PR review.
 
-A Decision does not bind a historical workflow run. It names a decision author and one authorized GitHub dispatcher. The dispatcher creates a fresh Promotion Attempt in the consuming `workflow_dispatch` run. The attempt must bind the current actor, run ID, run attempt, permission readback, canonical main source, Decision, and fresh remote observation.
+A Decision does not bind a historical workflow run. It names a decision author and one authorized GitHub dispatcher; they need not be the same identity. Attempt 2.0 requires both the current actor and rerun initiator ID/login maps to equal that dispatcher. Its separate closed current context supplies fresh attempt ID, the unchanged eight-field workflow run, positive decimal-string job ID, fixed `job_key: promote`, workflow SHA, checkout HEAD, and origin-main target. These facts come from trusted runtime admission, not the Attempt or dispatch request. Source/build/main/checkout/workflow SHA must all equal the approved candidate.
 
 Before the first remote mutation, the attempt revalidates the passing pre-decision record and requires a passing `pre-publication` Stage Gate Evidence record. Its current catalog descriptor subset is empty; the record still binds the same canonical candidate and catalog. Source, provenance, current permission, and remote-state checks remain required. No Sonar receipt or audit outcome is an admission or seal dependency.
 
 The attempt must not require the `post-publication` record. That record cannot exist until the prerelease is public.
+
+`seal_promotion_attempt` resolves raw Candidate/Catalog/Decision/Stage/report/remote bytes and hashes, reuses the existing semantic sealers, requires `APPROVE` and its exact authorization/pre-decision receipt, and re-derives the complete current-attempt classification. The native permission report must be closed, `AVAILABLE`/`QUALIFIED`, bind the same numeric run/attempt/job and source/workflow SHA, use the fixed promote job name, and retain the native log hash/source, timestamps, before/after HTTP evidence, and full explicit grants. The Attempt's rights are exactly the checked `actions: read`/`contents: write` projection. A probe report never substitutes for the consuming promote job.
+
+Keep execution-token provenance separate: trusted workflow wiring must use `GITHUB_TOKEN: ${{ github.token }}`. Attempt records `github.token`, `GITHUB_APP_INSTALLATION_TOKEN`, `UNOBSERVED`, and null App/installation IDs; no human principal, PAT, auth-cache fallback, or token introspection is introduced. Legacy Attempt 1.0/`authenticated_actor`, stale/colliding records, extras, missing report evidence and premature post-publication proof refuse.
+
+The deterministic order is pre-decision ≤ Decision ≤ pre-publication ≤ report start ≤ report finish ≤ observation ≤ classification ≤ Attempt, before candidate retention expiry. A new retry needs a new independently captured attempt ID and fresh same-job facts, not a renamed old record. The pure source seam does not collect live facts, add a promote YAML/CLI route, or mutate remote state. Actual permission capability remains `UNKNOWN`; probe run `38907673130` was `UNAVAILABLE` and supplies no live grant or approval.
 
 ## Classify remote state before mutation
 
