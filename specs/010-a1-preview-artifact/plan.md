@@ -55,13 +55,15 @@ No `.specify/memory/constitution.md` exists in the current checkout; the install
 | Shape | Decision | Rationale |
 |---|---|---|
 | Extend the existing Python `publish.yml` tag/PyPI workflow | Rejected | Its `v*` trigger, Python `dist/` artifact, independent non-draft release job, and PyPI environments belong to the default Python channel. They cannot establish proof before S4 or preserve a separate preview namespace. |
-| Two independent build and promotion workflows | Deferred | It can preserve a cross-run handoff but creates another workflow identity and additional drift. The accepted parent A1 plan already selects one explicit manual workflow with two modes. |
-| One manual preview workflow with `build` and `promote` modes | Selected | It preserves build-once/promote-same identity, makes the approval handoff explicit, keeps the preview namespace isolated, and can serialize mutations per preview tag. |
+| Two independent build and promotion workflows | Deferred | A cross-run handoff is necessary, but another workflow identity adds drift without a needed producer capability. |
+| One manual preview workflow with `build`, `evidence`, and `promote` modes | Selected technical correction | A separate evidence-only dispatch retains real proof/review records after the build succeeds, then uploads Stage and Decision in dependency order. It preserves build-once/promote-same identity without another workflow, controller, or local artifact uploader. |
 | Preview PyPI package or default-selector change | Rejected | That changes the Python consumer route and belongs to Program C, not this opt-in artifact runway. |
 
 ### Selected architecture
 
-The existing [ADR-004](../../docs/adr/ADR-004-stateless-preview.md) remains the architecture decision for the separate one-tool executable and its strict root authority. This plan extends its release mechanics without changing its runtime route: a manual `stateless-preview.yml` build emits a retained candidate archive and manifest for one exact source commit; downloaded candidate proof and S2/S3 evidence create immutable records; an explicit S4 Decision authorizes exactly one `promote` attempt; live remote classification then creates or resumes only the matching prerelease state. The existing Python workflow and public selector remain a parallel, unchanged route.
+The existing [ADR-004](../../docs/adr/ADR-004-stateless-preview.md) remains the architecture decision for the separate one-tool executable and its strict root authority. The accepted target is one manual `stateless-preview.yml` with three modes: `build` emits a retained archive, manifest, Candidate Identity, and Catalog; after that run succeeds, independent consumer proof and review produce real records; `evidence` retains those original records, then seals/uploads pre-decision Stage, then seals/uploads an explicit Decision; a later `promote` run consumes the already retained Decision and admits only matching remote state. Each reference uses an existing post-upload artifact ID and the referenced file's raw SHA-256, never a future ID or self-hash. The Python workflow and public selector remain unchanged. The current YAML and helper CLI implement build only; the Stage/Decision library sealers do not yet provide this transport or a publishing path.
+
+Complete and fixture-check all required pipeline code, including promotion admission and `github.workflow_sha` binding, before forming the final canonical-main candidate. The candidate commit, workflow SHA, checkout, and required canonical-main binding must agree; checking out an old payload source from a newer workflow does not restore that equality. Any pipeline/payload correction requires a new candidate and fresh candidate-bound consumer proof, seven-lens review, distinct PR review, Stage, and Decision. Neither a successful byte decoder nor this documentation establishes live transport, review closure, or approval.
 
 ### Planning versus release execution
 
@@ -98,11 +100,11 @@ The feature exposes release-operator and consumer-validation interfaces, not a n
 - [Artifact Consumer Proof schema](contracts/artifact-consumer-proof.schema.json) binds retained/remote origin, identity verification, redaction-safe matrix closure, EOF, and unchanged Python rollback.
 - [S2/S3 Review schema](contracts/s2-s3-review.schema.json) binds the closed seven-lens review record that security and code/workflow reviewers seal for one candidate.
 - [Promotion Decision schema](contracts/promotion-decision.schema.json) binds an `APPROVE` or `DECLINE` to the exact candidate, closed evidence, explicit decision author, and named authorized dispatcher.
-- [Promotion Attempt schema](contracts/promotion-attempt.schema.json) binds a future consuming promotion run/attempt, authenticated dispatcher, permission readback, exact Decision, and live state classification before any remote mutation.
+- [Promotion Attempt schema](contracts/promotion-attempt.schema.json) describes the future consuming run/attempt, dispatcher, actual current-job permission readback, exact Decision, and live state classification before mutation. Its human-shaped `authenticated_actor` model still needs implementation-stage correction: the dispatcher is not the `GITHUB_TOKEN` installation principal, and an unavailable principal ID must not be invented.
 - [Release Gate Catalog](contracts/release-gate-catalog.schema.json) snapshots tracked exact-head policy authorities and requires an independent resolver to derive the closed pre-decision, pre-publication, and post-publication gate set.
 - [Remote evidence schemas](contracts/remote-observation.schema.json), [classification](contracts/remote-classification.schema.json), and [verification](contracts/remote-verification.schema.json) close the records used for live matching-state and remote-byte admission.
 - [Promotion recovery contract](contracts/promotion-recovery.md) defines `tag_only` recovery, collision refusal, semantic evidence admission, and remote-byte verification.
-- [Workflow contract](contracts/stateless-preview-workflow.md) fixes canonical-main dispatch, least-privilege permissions, non-cancelling tag concurrency, attempt authorization, and build/promote admission order.
+- [Workflow contract](contracts/stateless-preview-workflow.md) distinguishes the current build-only YAML from the accepted build/evidence/promote target, fixes bounded record ingress and post-upload ordering, and preserves canonical-main dispatch, least privilege, non-cancelling tag concurrency, and current-attempt admission.
 - [Program B Handoff contract](contracts/program-b-handoff.md) defines a machine-checkable A1 closeout record that requires separate Program B/C authorization.
 - [Data model](data-model.md) defines durable evidence relationships and keeps extracted bytes/runtime state non-authoritative.
 - [Quickstart](quickstart.md) is the post-implementation consumer validation guide; it is not publication authorization or an evidence receipt.
@@ -145,7 +147,7 @@ specs/010-a1-preview-artifact/
 
 ```text
 .github/workflows/
-└── stateless-preview.yml                  # new: manual build|promote pipeline
+└── stateless-preview.yml                  # current: build; target: build|evidence|promote
 
 scripts/
 └── stateless_preview_artifact.py          # new: manifest/identity/proof helpers
@@ -178,9 +180,9 @@ docs/
 | AR-02 | Test | Implement and run downloaded-retained artifact consumer proof with redaction-safe receipt sealing. Depends on AR-01; blocks AR-04. | RED-to-GREEN proof covers discovery/list/call, full inherited denial matrix, stdout/EOF, and unchanged Python rollback from retained—not local—bytes. |
 | AR-03 | Code | Implement one typed seven-lens review aggregate and stage-gate evidence resolver for the pre-decision subset. Depends on AR-01; blocks AR-04 and AR-05. | Schema/semantic tests reject any missing, duplicate, stale, zero-denominator, unredacted, candidate-mismatched, or non-independent lens; exactly `7/7/0` and the pre-decision gate subset are derived. |
 | AR-04 | Review | Run the seven independent S2/S3 lenses and the distinct typed independent PR review over the retained candidate. Depends on AR-02 and AR-03; blocks AR-05. | All aggregate and distinct PR-review evidence is sealed against the same candidate; no unresolved high-severity finding remains. |
-| AR-05 | Input | Record `APPROVE` or `DECLINE` after AR-04, naming the decision author and authorized dispatcher. `DECLINE` ends safely. | Decision binds exactly the candidate and passing pre-decision stage evidence; it grants no historical run and no other dispatcher. |
-| AR-06 | Code | Implement fresh current-attempt authorization plus pre-publication stage-gate admission before the first remote mutation. Depends on AR-01 and AR-05; blocks AR-07. | A current dispatcher/run/attempt/permission record matches the Decision and canonical-main source; pre-decision and pre-publication subsets pass while post-publication proof is not yet required. |
-| AR-07 | Code | Implement matching-only remote recovery, draft-asset byte verification, publish transition, and typed remote observation/classification/verification records. Depends on AR-06; blocks AR-08. | `unstarted`, `tag_only`, draft states, `published_complete`, and collision admit only their legal action; no rebuild/overwrite/delete/replay path exists. |
+| AR-05 | Input | After AR-04, retain original proof/review bytes through bounded evidence-only dispatch, upload their pre-decision Stage, then record/upload an explicit `APPROVE` or `DECLINE` naming the decision author and authorized dispatcher. `DECLINE` ends safely. | Independently downloaded records preserve raw hashes and resolve evidence → Stage → Decision through real post-upload IDs; a passing seal never automatically creates `APPROVE`. |
+| AR-06 | Code | Implement and fixture-check fresh current-attempt authorization, actual current-job permission readback, and pre-publication admission before the final canonical build. Code depends on AR-01/AR-03 and remote classification semantics; live admission depends on AR-05. Blocks AR-07 execution. | Current dispatcher/rerun identity, run/attempt/job, actual grant, Decision, and canonical source/workflow SHA agree before mutation; a missing or ambiguous readback refuses. Pre-decision/pre-publication pass; post-publication proof is not yet required. |
+| AR-07 | Code | Implement matching-only remote recovery, draft-asset byte verification, publish transition, and typed remote observation/classification/verification records. Pure classification semantics/fixtures can precede AR-06; mutation execution depends on AR-06. Blocks AR-08. | `unstarted`, `tag_only`, draft states, `published_complete`, and collision admit only their legal action; no rebuild/overwrite/delete/replay path exists. |
 | AR-08 | Test | At the later approved release boundary, run post-publication remote proof, satisfy the post-publication gate subset, and seal the Program B Handoff. Depends on AR-07. | Fresh remote archive/manifest/executable proof, full consumer/denial/EOF/Python rollback, all three stage sets, and a non-authorizing machine-valid handoff pass together. |
 
 ### Granularity quiz
@@ -197,6 +199,8 @@ docs/
 | AR-08 | The public bytes and handoff proof satisfy the complete A1 boundary. | Yes — release-stage remote proof. |
 
 Each ticket is one vertical outcome rather than a layer-only chore. A changed candidate after any failure re-enters AR-01; it never inherits later proof, review, decision, or stage evidence.
+
+The nonpublishing evidence transport and one bounded same-job permission-capability probe belong within existing T021–T026 work, not a second roadmap. Availability of the current in-progress job's runner-reported `Set up job` grant remains UNKNOWN; the probe must precede final pipeline freeze and cannot substitute declarations, defaults, endpoint-required headers, or another job's permissions. This uncertainty holds dependent promotion admission/effects, not independent evidence retention or classifier work. `data-model.md`, `quickstart.md`, the recovery contract, and Attempt schema/code must be aligned during implementation; they are outside this three-file correction, not evidence of a completed end-to-end attempt.
 
 ## Milestone Map
 

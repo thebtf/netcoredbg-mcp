@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import io
 import json
+import math
 import os
 import re
+import stat
+import struct
 import subprocess
 import sys
 import zipfile
+import zlib
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from os import PathLike
@@ -952,6 +957,125 @@ def _load_json_object(raw: bytes, name: str) -> dict[str, Any]:
     if not isinstance(result, dict):
         _refuse(f"{name} must contain an object")
     return result
+
+
+_EVIDENCE_BUNDLE_MEMBERS = (
+    "consumer-proof.json",
+    "s2-s3-review.json",
+    "independent-pr-review.json",
+)
+_EVIDENCE_BUNDLE_MAX_ENCODED_CHARACTERS = 60_000
+_EVIDENCE_BUNDLE_MAX_ZIP_BYTES = 45_000
+_EVIDENCE_BUNDLE_MAX_RECORD_BYTES = 128 * 1024
+_EVIDENCE_BUNDLE_MAX_TOTAL_BYTES = 256 * 1024
+
+
+def decode_evidence_bundle(encoded: str, expected_sha256: Mapping[str, str]) -> Mapping[str, bytes]:
+    """Decode original evidence bytes; semantic admission remains with the sealers."""
+    encoded = _expect_string(encoded, "evidence bundle")
+    if len(encoded) > _EVIDENCE_BUNDLE_MAX_ENCODED_CHARACTERS:
+        _refuse("evidence bundle exceeds the encoded size limit")
+    expected = _expect_mapping(expected_sha256, "evidence bundle hashes", _EVIDENCE_BUNDLE_MEMBERS)
+    hashes = {
+        name: _expect_sha256(expected[name], "evidence bundle record hash")
+        for name in _EVIDENCE_BUNDLE_MEMBERS
+    }
+    try:
+        raw_zip = base64.b64decode(encoded, validate=True)
+    except ValueError:
+        _refuse("evidence bundle must contain strict base64")
+    if base64.b64encode(raw_zip).decode("ascii") != encoded:
+        _refuse("evidence bundle must contain canonical base64")
+    if len(raw_zip) > _EVIDENCE_BUNDLE_MAX_ZIP_BYTES:
+        _refuse("evidence bundle exceeds the ZIP size limit")
+
+    records: dict[str, bytes] = {}
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw_zip)) as archive:
+            members = archive.infolist()
+            if len(members) != 3 or {entry.filename for entry in members} != set(
+                _EVIDENCE_BUNDLE_MEMBERS
+            ):
+                _refuse("evidence bundle must contain exactly the three fixed records")
+            declared_total = 0
+            for entry in members:
+                if not 0 <= entry.header_offset <= len(raw_zip) - 30:
+                    _refuse("evidence bundle local ZIP header is outside the archive")
+                header = struct.unpack_from("<4s5H3I2H", raw_zip, entry.header_offset)
+                if (
+                    header[0] != b"PK\x03\x04"
+                    or header[2] != entry.flag_bits
+                    or header[3] != entry.compress_type
+                ):
+                    _refuse("evidence bundle local ZIP header disagrees with its directory")
+                if header[7] == 0xFFFFFFFF or header[8] == 0xFFFFFFFF:
+                    _refuse("evidence bundle does not support ZIP64 local sizes")
+                descriptor = bool(header[2] & 0x08)
+                for local, central in (
+                    (header[6], entry.CRC),
+                    (header[7], entry.compress_size),
+                    (header[8], entry.file_size),
+                ):
+                    if local != central and not (descriptor and local == 0):
+                        _refuse(
+                            "evidence bundle local ZIP sizes or CRC disagree with its directory"
+                        )
+                mode = stat.S_IFMT(entry.external_attr >> 16)
+                if (
+                    entry.orig_filename != entry.filename
+                    or entry.is_dir()
+                    or entry.flag_bits & (0x01 | 0x40)
+                    or entry.external_attr & (0x10 | 0x400)
+                    or mode not in (0, stat.S_IFREG)
+                    # Other ZIP codecs may inflate an unbounded internal chunk in read(n).
+                    or entry.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
+                ):
+                    _refuse("evidence bundle contains an unsafe ZIP entry")
+                if not 0 <= entry.file_size <= _EVIDENCE_BUNDLE_MAX_RECORD_BYTES:
+                    _refuse("evidence bundle record exceeds the size limit")
+                declared_total += entry.file_size
+            if declared_total > _EVIDENCE_BUNDLE_MAX_TOTAL_BYTES:
+                _refuse("evidence bundle records exceed the total size limit")
+
+            actual_total = 0
+            for entry in members:
+                with archive.open(entry) as member:
+                    raw = member.read(_EVIDENCE_BUNDLE_MAX_RECORD_BYTES + 1)
+                actual_total += len(raw)
+                if (
+                    len(raw) != entry.file_size
+                    or len(raw) > _EVIDENCE_BUNDLE_MAX_RECORD_BYTES
+                    or actual_total > _EVIDENCE_BUNDLE_MAX_TOTAL_BYTES
+                ):
+                    _refuse("evidence bundle decompressed bytes exceed their bounds")
+                records[entry.filename] = raw
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        EOFError,
+        zipfile.BadZipFile,
+        zlib.error,
+    ):
+        _refuse("evidence bundle ZIP is unsafe or unreadable")
+
+    for name, raw in records.items():
+        if _sha256_bytes(raw) != hashes[name]:
+            _refuse("evidence bundle record bytes do not match their expected hash")
+        try:
+            record = _load_json_object(raw, "evidence bundle record")
+        except RecursionError:
+            _refuse("evidence bundle record JSON is nested too deeply")
+        pending: list[Any] = [record]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, dict):
+                pending.extend(value.values())
+            elif isinstance(value, list):
+                pending.extend(value)
+            elif isinstance(value, float) and not math.isfinite(value):
+                _refuse("evidence bundle record contains a non-finite JSON number")
+    return _freeze(records)
 
 
 def _read_github_artifact(repository: str, artifact_id: str, token: str) -> Mapping[str, Any]:
@@ -2337,6 +2461,7 @@ __all__ = [
     "admit_build",
     "assemble_candidate_identity",
     "consumer_proof_scenario_catalog",
+    "decode_evidence_bundle",
     "main",
     "parse_args",
     "prepare_preview_payload",

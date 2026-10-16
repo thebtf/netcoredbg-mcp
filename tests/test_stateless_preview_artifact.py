@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import zipfile
@@ -3243,3 +3246,432 @@ def test_promotion_decision_semantics_refuse_unclosed_or_invalid_authorization(
 
     with pytest.raises(ValueError):
         artifact_contract.seal_promotion_decision(record, **_stage_binding(inputs))
+
+
+_EVIDENCE_BUNDLE_MEMBERS = (
+    "consumer-proof.json",
+    "s2-s3-review.json",
+    "independent-pr-review.json",
+)
+
+
+@pytest.fixture
+def evidence_bundle_records() -> dict[str, bytes]:
+    # Transport-only objects, not semantically admitted review or approval receipts.
+    return {
+        "consumer-proof.json": (
+            b'{\r\n  "proof_stage": "retained_artifact", "outcome": "FAIL"\r\n}\r\n'
+        ),
+        "s2-s3-review.json": (
+            b'{"coverage_summary":{"completed_lens_count":0},"outcome":"INCOMPLETE"}\n'
+        ),
+        "independent-pr-review.json": (
+            '{ "findings": {"records": [], "unresolved_high_severity_count": 0}, '
+            '"label": "тест" }\n'
+        ).encode("utf-8"),
+    }
+
+
+def _evidence_bundle_zip(
+    members: list[tuple[str | zipfile.ZipInfo, bytes]],
+    *,
+    compression: int = zipfile.ZIP_DEFLATED,
+    comment: bytes = b"",
+) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=compression) as archive:
+        for name, raw in members:
+            archive.writestr(name, raw)
+        archive.comment = comment
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize("compression", [zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED])
+def test_decode_evidence_bundle_returns_only_original_named_bytes(
+    evidence_bundle_records: dict[str, bytes], compression: int
+) -> None:
+    records = evidence_bundle_records
+    expected_sha256 = {name: _sha256_bytes(raw) for name, raw in records.items()}
+    encoded = base64.b64encode(
+        _evidence_bundle_zip(list(reversed(list(records.items()))), compression=compression)
+    ).decode("ascii")
+
+    decoded = artifact_contract.decode_evidence_bundle(encoded, MappingProxyType(expected_sha256))
+
+    expected_sha256.clear()
+    assert isinstance(decoded, Mapping)
+    assert decoded == records
+    assert set(decoded) == set(_EVIDENCE_BUNDLE_MEMBERS)
+    assert all(type(raw) is bytes for raw in decoded.values())
+    with pytest.raises(TypeError):
+        decoded["consumer-proof.json"] = b"{}"
+
+
+def test_decode_evidence_bundle_keeps_distinct_names_with_equal_raw_hashes() -> None:
+    raw = b'{"findings":{"records":[]}}\n'
+    records = dict.fromkeys(_EVIDENCE_BUNDLE_MEMBERS, raw)
+    encoded = base64.b64encode(_evidence_bundle_zip(list(records.items()))).decode("ascii")
+
+    decoded = artifact_contract.decode_evidence_bundle(
+        encoded, dict.fromkeys(_EVIDENCE_BUNDLE_MEMBERS, _sha256_bytes(raw))
+    )
+
+    assert decoded == records
+    assert len(decoded) == 3
+
+
+@pytest.mark.parametrize(
+    "violation",
+    ["empty", "nonalphabet", "whitespace", "padding", "truncated", "not_zip", "truncated_zip"],
+)
+def test_decode_evidence_bundle_refuses_invalid_base64_or_zip(
+    evidence_bundle_records: dict[str, bytes], violation: str
+) -> None:
+    records = evidence_bundle_records
+    raw_zip = _evidence_bundle_zip(list(records.items()))
+    encoded = base64.b64encode(raw_zip).decode("ascii")
+    if violation == "empty":
+        encoded = ""
+    elif violation == "nonalphabet":
+        encoded = "!" + encoded[1:]
+    elif violation == "whitespace":
+        encoded += "\n"
+    elif violation == "padding":
+        encoded += "===="
+    elif violation == "truncated":
+        encoded = encoded[:-1]
+    elif violation == "not_zip":
+        encoded = base64.b64encode(b"not a ZIP archive").decode("ascii")
+    else:
+        encoded = base64.b64encode(raw_zip[:-22]).decode("ascii")
+
+    with pytest.raises(ValueError):
+        artifact_contract.decode_evidence_bundle(
+            encoded, {name: _sha256_bytes(raw) for name, raw in records.items()}
+        )
+
+
+@pytest.mark.parametrize("zip_size", [45_000, 45_001])
+def test_decode_evidence_bundle_bounds_encoded_and_decoded_wire_bytes(
+    evidence_bundle_records: dict[str, bytes], zip_size: int
+) -> None:
+    records = evidence_bundle_records
+    members = list(records.items())
+    raw_zip = _evidence_bundle_zip(members)
+    raw_zip = _evidence_bundle_zip(members, comment=b"x" * (zip_size - len(raw_zip)))
+    encoded = base64.b64encode(raw_zip).decode("ascii")
+    expected_sha256 = {name: _sha256_bytes(raw) for name, raw in records.items()}
+    assert len(raw_zip) == zip_size
+
+    if zip_size == 45_000:
+        assert len(encoded) == 60_000
+        assert artifact_contract.decode_evidence_bundle(encoded, expected_sha256) == records
+    else:
+        assert len(encoded) > 60_000
+        with pytest.raises(ValueError):
+            artifact_contract.decode_evidence_bundle(encoded, expected_sha256)
+
+
+@pytest.mark.parametrize(
+    ("sizes", "accepted"),
+    [
+        ((128 * 1024, 128 * 1024 - 2, 2), True),
+        ((128 * 1024 + 1, 2, 2), False),
+        ((128 * 1024, 128 * 1024 - 1, 2), False),
+    ],
+    ids=["exact-member-and-total-limits", "member-limit-exceeded", "total-limit-exceeded"],
+)
+def test_decode_evidence_bundle_bounds_actual_decompressed_records(
+    sizes: tuple[int, int, int], accepted: bool
+) -> None:
+    records = {
+        name: b"{}" + b" " * (size - 2) for name, size in zip(_EVIDENCE_BUNDLE_MEMBERS, sizes)
+    }
+    raw_zip = _evidence_bundle_zip(list(records.items()))
+    encoded = base64.b64encode(raw_zip).decode("ascii")
+    expected_sha256 = {name: _sha256_bytes(raw) for name, raw in records.items()}
+    assert len(raw_zip) <= 45_000 and len(encoded) <= 60_000
+
+    if accepted:
+        assert artifact_contract.decode_evidence_bundle(encoded, expected_sha256) == records
+    else:
+        with pytest.raises(ValueError):
+            artifact_contract.decode_evidence_bundle(encoded, expected_sha256)
+
+
+@pytest.mark.parametrize(
+    "unexpected_name",
+    [
+        "../consumer-proof.json",
+        "/consumer-proof.json",
+        "folder/consumer-proof.json",
+        "folder/../consumer-proof.json",
+        "..\\consumer-proof.json",
+        "C:\\consumer-proof.json",
+        "consumer-proof.json/",
+        "CONSUMER-PROOF.JSON",
+        "manifest.json",
+    ],
+)
+def test_decode_evidence_bundle_refuses_nonfixed_or_unsafe_member_names(
+    evidence_bundle_records: dict[str, bytes], unexpected_name: str
+) -> None:
+    records = evidence_bundle_records
+    members = list(records.items())
+    members[0] = (unexpected_name, members[0][1])
+    encoded = base64.b64encode(_evidence_bundle_zip(members)).decode("ascii")
+
+    with pytest.raises(ValueError):
+        artifact_contract.decode_evidence_bundle(
+            encoded, {name: _sha256_bytes(raw) for name, raw in records.items()}
+        )
+
+
+@pytest.mark.parametrize("violation", ["missing", "extra", "duplicate", "casefold_collision"])
+def test_decode_evidence_bundle_requires_exactly_three_unique_members(
+    evidence_bundle_records: dict[str, bytes], violation: str
+) -> None:
+    records = evidence_bundle_records
+    members = list(records.items())
+    if violation == "missing":
+        members.pop()
+    elif violation == "extra":
+        members.append(("manifest.json", b"{}"))
+    elif violation == "duplicate":
+        members.append(members[0])
+    else:
+        members.append((members[0][0].upper(), members[0][1]))
+    if violation == "duplicate":
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            raw_zip = _evidence_bundle_zip(members)
+    else:
+        raw_zip = _evidence_bundle_zip(members)
+
+    with pytest.raises(ValueError):
+        artifact_contract.decode_evidence_bundle(
+            base64.b64encode(raw_zip).decode("ascii"),
+            {name: _sha256_bytes(raw) for name, raw in records.items()},
+        )
+
+
+@pytest.mark.parametrize("kind", ["symlink", "directory", "reparse"])
+def test_decode_evidence_bundle_refuses_unsafe_zip_entry_metadata(
+    evidence_bundle_records: dict[str, bytes], kind: str
+) -> None:
+    records = evidence_bundle_records
+    member = zipfile.ZipInfo(_EVIDENCE_BUNDLE_MEMBERS[0])
+    member.create_system = 3
+    if kind == "symlink":
+        member.external_attr = (stat.S_IFLNK | 0o777) << 16
+    elif kind == "directory":
+        member.external_attr = ((stat.S_IFDIR | 0o755) << 16) | 0x10
+    else:
+        member.create_system = 0
+        member.external_attr = 0x400 | 0x20
+    members = list(records.items())
+    members[0] = (member, members[0][1])
+
+    with pytest.raises(ValueError):
+        artifact_contract.decode_evidence_bundle(
+            base64.b64encode(_evidence_bundle_zip(members)).decode("ascii"),
+            {name: _sha256_bytes(raw) for name, raw in records.items()},
+        )
+
+
+def test_decode_evidence_bundle_refuses_encrypted_zip_entries(
+    evidence_bundle_records: dict[str, bytes],
+) -> None:
+    records = evidence_bundle_records
+    raw_zip = bytearray(_evidence_bundle_zip(list(records.items())))
+    for offset in (6, raw_zip.index(b"PK\x01\x02") + 8):
+        flags = int.from_bytes(raw_zip[offset : offset + 2], "little") | 1
+        raw_zip[offset : offset + 2] = flags.to_bytes(2, "little")
+
+    with pytest.raises(ValueError):
+        artifact_contract.decode_evidence_bundle(
+            base64.b64encode(raw_zip).decode("ascii"),
+            {name: _sha256_bytes(raw) for name, raw in records.items()},
+        )
+
+
+def test_decode_evidence_bundle_refuses_corrupt_crc_even_with_matching_raw_hash(
+    evidence_bundle_records: dict[str, bytes],
+) -> None:
+    records = evidence_bundle_records
+    name = _EVIDENCE_BUNDLE_MEMBERS[0]
+    original = records[name]
+    raw_zip = bytearray(_evidence_bundle_zip(list(records.items()), compression=zipfile.ZIP_STORED))
+    offset = raw_zip.index(original) + len(original) - 1
+    raw_zip[offset] = ord(" ")
+    records[name] = original[:-1] + b" "
+
+    with pytest.raises(ValueError):
+        artifact_contract.decode_evidence_bundle(
+            base64.b64encode(raw_zip).decode("ascii"),
+            {name: _sha256_bytes(raw) for name, raw in records.items()},
+        )
+
+
+@pytest.mark.parametrize(
+    "violation", ["missing", "extra", "empty", "not_hex", "uppercase", "aliased_hash"]
+)
+def test_decode_evidence_bundle_refuses_unclosed_or_invalid_expected_hash_mapping(
+    evidence_bundle_records: dict[str, bytes], violation: str
+) -> None:
+    records = evidence_bundle_records
+    expected_sha256 = {name: _sha256_bytes(raw) for name, raw in records.items()}
+    name = _EVIDENCE_BUNDLE_MEMBERS[0]
+    if violation == "missing":
+        expected_sha256.pop(name)
+    elif violation == "extra":
+        expected_sha256["manifest.json"] = _sha256_bytes(b"{}")
+    elif violation == "empty":
+        expected_sha256[name] = ""
+    elif violation == "not_hex":
+        expected_sha256[name] = "g" * 64
+    elif violation == "uppercase":
+        expected_sha256[name] = expected_sha256[name].upper()
+    else:
+        expected_sha256 = dict.fromkeys(_EVIDENCE_BUNDLE_MEMBERS, expected_sha256[name])
+
+    with pytest.raises(ValueError):
+        artifact_contract.decode_evidence_bundle(
+            base64.b64encode(_evidence_bundle_zip(list(records.items()))).decode("ascii"),
+            expected_sha256,
+        )
+
+
+@pytest.mark.parametrize("changed_member", _EVIDENCE_BUNDLE_MEMBERS)
+def test_decode_evidence_bundle_checks_each_original_raw_hash(
+    evidence_bundle_records: dict[str, bytes], changed_member: str
+) -> None:
+    records = evidence_bundle_records
+    expected_sha256 = {name: _sha256_bytes(raw) for name, raw in records.items()}
+    records[changed_member] += b" "
+
+    with pytest.raises(ValueError):
+        artifact_contract.decode_evidence_bundle(
+            base64.b64encode(_evidence_bundle_zip(list(records.items()))).decode("ascii"),
+            expected_sha256,
+        )
+
+
+@pytest.mark.parametrize(
+    "raw_record",
+    [
+        b"",
+        b'{"label":"\xff"}',
+        b"\xef\xbb\xbf{}",
+        "{}".encode("utf-16"),
+        b'{"value":}',
+        b"{} {}",
+        b"[]",
+        b"null",
+        b'"record"',
+        b'{"value":NaN}',
+        b'{"value":Infinity}',
+        b'{"value":-Infinity}',
+        b'{"value":1e999}',
+        b'{"value":-1e999}',
+        b'{"outcome":"FAIL","outcome":"PASS"}',
+        b'{"nested":{"value":1,"value":2}}',
+        b'{"a":1,"\\u0061":2}',
+    ],
+    ids=[
+        "empty",
+        "invalid-utf8",
+        "utf8-bom",
+        "utf16",
+        "malformed",
+        "trailing-record",
+        "array",
+        "null",
+        "string",
+        "nan",
+        "infinity",
+        "negative-infinity",
+        "overflow",
+        "negative-overflow",
+        "duplicate-key",
+        "nested-duplicate",
+        "escaped-duplicate",
+    ],
+)
+def test_decode_evidence_bundle_refuses_nonobject_or_nonstrict_json_despite_matching_hash(
+    evidence_bundle_records: dict[str, bytes], raw_record: bytes
+) -> None:
+    records = evidence_bundle_records
+    records[_EVIDENCE_BUNDLE_MEMBERS[-1]] = raw_record
+
+    with pytest.raises(ValueError):
+        artifact_contract.decode_evidence_bundle(
+            base64.b64encode(_evidence_bundle_zip(list(records.items()))).decode("ascii"),
+            {name: _sha256_bytes(raw) for name, raw in records.items()},
+        )
+
+
+@pytest.mark.parametrize("compression", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA])
+def test_decode_evidence_bundle_refuses_other_zip_codecs(
+    evidence_bundle_records: dict[str, bytes], compression: int
+) -> None:
+    records = evidence_bundle_records
+    raw_zip = _evidence_bundle_zip(list(records.items()), compression=compression)
+
+    with pytest.raises(ValueError):
+        artifact_contract.decode_evidence_bundle(
+            base64.b64encode(raw_zip).decode("ascii"),
+            {name: _sha256_bytes(raw) for name, raw in records.items()},
+        )
+
+
+@pytest.mark.parametrize("field", ["compression", "encryption", "crc"])
+def test_decode_evidence_bundle_refuses_local_header_disagreement(
+    evidence_bundle_records: dict[str, bytes], field: str
+) -> None:
+    records = evidence_bundle_records
+    raw_zip = bytearray(_evidence_bundle_zip(list(records.items())))
+    with zipfile.ZipFile(io.BytesIO(raw_zip)) as archive:
+        entry = archive.getinfo(_EVIDENCE_BUNDLE_MEMBERS[0])
+    assert not entry.flag_bits & 0x08
+    field_offset, width = {
+        "compression": (8, 2),
+        "encryption": (6, 2),
+        "crc": (14, 4),
+    }[field]
+    offset = entry.header_offset + field_offset
+    value = int.from_bytes(raw_zip[offset : offset + width], "little")
+    value ^= zipfile.ZIP_DEFLATED if field == "compression" else 1
+    raw_zip[offset : offset + width] = value.to_bytes(width, "little")
+
+    with pytest.raises(ValueError):
+        artifact_contract.decode_evidence_bundle(
+            base64.b64encode(raw_zip).decode("ascii"),
+            {name: _sha256_bytes(raw) for name, raw in records.items()},
+        )
+
+
+def test_decode_evidence_bundle_accepts_zero_local_sizes_with_data_descriptors(
+    evidence_bundle_records: dict[str, bytes],
+) -> None:
+    class NonSeekableBuffer(io.BytesIO):
+        def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+            raise io.UnsupportedOperation("non-seekable ZIP output")
+
+    records = evidence_bundle_records
+    buffer = NonSeekableBuffer()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, raw in records.items():
+            archive.writestr(name, raw)
+    raw_zip = buffer.getvalue()
+    with zipfile.ZipFile(io.BytesIO(raw_zip)) as archive:
+        for entry in archive.infolist():
+            assert entry.flag_bits & 0x08
+            assert raw_zip[entry.header_offset + 14 : entry.header_offset + 26] == b"\0" * 12
+
+    assert (
+        artifact_contract.decode_evidence_bundle(
+            base64.b64encode(raw_zip).decode("ascii"),
+            {name: _sha256_bytes(raw) for name, raw in records.items()},
+        )
+        == records
+    )
