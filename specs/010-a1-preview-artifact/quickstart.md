@@ -245,3 +245,42 @@ so matching run ID and attempt ID cannot prove freshness across a rerun of that
 run. The future collector must create a new attempt ID and observation for each
 run attempt, and full Promotion Attempt admission must enforce that capture
 before any effect. An `ADMITTED` classification alone is not effect authority.
+
+## Source-only current-job permission diagnostic
+
+The diagnostic source is complete and locally checked, but the dedicated YAML
+job is not wired. Setup-log availability during the invoking job remains
+`UNKNOWN`; no live-job or consumer PASS is claimed. Do not dispatch the current
+workflow expecting this probe or manufacture Actions environment values as proof.
+
+The future job must have ID `probe_permissions` and the exact API display name
+`Probe current job permissions`. Only inside that job, from the repository root,
+run the source CLI with a new, nonexistent output path:
+
+```powershell
+python scripts/stateless_preview_permissions.py --output current-job-permissions.json
+```
+
+There is no `--job-name` override. The trusted Actions context must report
+`GITHUB_ACTIONS=true`, `GITHUB_EVENT_NAME=workflow_dispatch`,
+`GITHUB_REF=refs/heads/main`, and `GITHUB_JOB=probe_permissions`.
+`GITHUB_WORKFLOW_REF` must equal
+`{GITHUB_REPOSITORY}/.github/workflows/stateless-preview.yml@refs/heads/main`,
+and `GITHUB_WORKFLOW_SHA` must equal `GITHUB_SHA`. The token is read only from
+`GITHUB_TOKEN`, never from an argument. Actor and triggering-actor fields are
+separate provenance, not the token principal.
+
+The probe makes bounded HTTPS GETs, selects the unique fixed-name job, and checks
+its repository/run/attempt/SHA and `in_progress` status before and after reading
+logs. One owned worker process has a 45-second outer deadline and is killed and
+reaped on timeout. Socket operations have a ten-second timeout; DNS is not
+individually bounded to ten seconds. Raw logs are limited to 1 MiB and are not
+saved; JSON records binding, timestamps, HTTP outcomes, the log hash, and the full
+explicit grant map without tokens or signed URLs.
+
+Only reported `actions: read` plus `contents: write` yields `QUALIFIED` and exit
+zero. Missing or insufficient evidence yields `UNAVAILABLE` or `INSUFFICIENT`
+and a nonzero exit. The meaning is
+`RUNNER_REPORTED_GRANT_NOT_TOKEN_INTROSPECTION`: this is observational evidence,
+not Promotion Attempt admission, approval, or publication authority. Neither the
+workflow YAML nor the Promotion Attempt schema is changed by this source slice.
