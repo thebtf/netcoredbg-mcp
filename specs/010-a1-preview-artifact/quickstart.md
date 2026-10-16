@@ -136,3 +136,42 @@ Do not substitute a local candidate build, a source-bin executable, or a later
 artifact for this process. Do not treat a sealed retained-artifact receipt as
 publication authority: T014 remains the separate live retained-candidate
 execution and receipt-sealing task.
+
+## Internal review and stage sealing
+
+The library functions in [the artifact helper](../../scripts/stateless_preview_artifact.py)
+validate supplied evidence; they do not add review or promotion CLI commands:
+
+- `seal_s2_s3_lens_result` admits one ordered, independent, exact-candidate lens.
+- `seal_s2_s3_review_aggregate` revalidates all seven ordered lenses and derives
+  `7/7/0` coverage rather than trusting supplied counts.
+- `seal_independent_pr_review` admits the separate PR-review obligation, including
+  the exact repository/commit, reviewer/author/producer separation, and completed
+  denominator derived from typed scoped finding records. A clean lens may have
+  no findings; a positive PR-review denominator cannot be proved by an empty
+  scoped-record set under the current contract.
+- `seal_stage_gate_evidence` re-hashes the five exact-source policy snapshots,
+  resolves and hashes each required raw record, validates its type and candidate
+  binding, and recomputes each gate and stage outcome.
+
+Review calls require the Candidate Identity Record object, its raw bytes, and
+its expanded retained-artifact reference. Compact review references must equal
+the verified projection of that reference. Stage sealing additionally requires
+the catalog object/raw bytes/reference, a raw-record resolver, and the Git
+repository containing the candidate's policy snapshots. The functions reject
+missing, duplicate, out-of-order, mismatched, unredacted, non-independent,
+incomplete, or falsely passing evidence. They return immutable passing records
+or raise `ValueError`; they do not write receipts or repair claims into `PASS`.
+
+The closed stage subsets are three pre-decision records (retained consumer
+proof, the seven-lens aggregate, and independent PR review), no pre-publication
+records, and one post-publication remote consumer proof. A passing empty
+pre-publication subset proves only that subset, not review completion or
+publication authorization. Post-publication admission checks the remote receipt's
+candidate-bound asset identities and complete consumer/denial/EOF/Python-rollback
+matrix; the sealer does not itself download or execute those assets.
+
+Schema-valid simulated test vectors are not actual reviewer or acceptance
+receipts. Library tests do not complete the live retained-candidate journey,
+independent reviews, live stage sealing, promotion decision, or external
+publication. Those remain separate tasks; the Python default remains unchanged.

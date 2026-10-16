@@ -635,7 +635,7 @@ def _read_tracked_authority(repository_root: Path, source_commit: str, relative_
     object_type = _git_text(repository_root, "cat-file", "-t", object_name)
     if object_type != "blob":
         _refuse("policy authority is not a tracked file")
-    return _git_bytes(repository_root, "cat-file", "--filters", object_name)
+    return _git_bytes(repository_root, "cat-file", "blob", object_name)
 
 
 def _fixed_gate_descriptors() -> list[dict[str, Any]]:
@@ -1574,6 +1574,603 @@ def seal_artifact_consumer_proof(
     return _freeze(value)
 
 
+_S2_S3_REVIEW_LENSES = (
+    "dependency-cve",
+    "dotnet-unsafe-pattern",
+    "owasp-input-output-path",
+    "attack-surface",
+    "secret-asset-manifest",
+    "path-process-fail-closed",
+    "exploitability",
+)
+_REVIEW_OBSERVED_RESULTS = ("SUCCESS", "FAILURE", "REFUSAL", "HARNESS_FAILURE", "EVIDENCE_REJECTED")
+
+
+def _review_timestamp(value: Any, name: str) -> datetime:
+    text = _expect_string(value, name)
+    _expect_datetime(text[:-1] + "Z" if text.endswith("z") else text, name)
+    if (
+        re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}"
+            r"(?:\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})",
+            text,
+        )
+        is None
+    ):
+        _refuse(f"{name} must be a closed date-time value")
+    return datetime.fromisoformat(text[:-1] + "+00:00" if text[-1:] in ("Z", "z") else text)
+
+
+def _review_record_reference(value: Any, name: str) -> Mapping[str, Any]:
+    reference = _validate_artifact_file_reference(value, name)
+    if len(reference["repository"]) > 200 or len(reference["path"]) > 1024:
+        _refuse(f"{name} exceeds the record locator bounds")
+    return reference
+
+
+def _verified_review_candidate(
+    candidate_identity: Mapping[str, Any],
+    candidate_identity_bytes: bytes,
+    candidate_identity_reference: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    reference = _validate_consumer_proof_reference(
+        candidate_identity_reference, "review candidate identity reference"
+    )
+    if (
+        not isinstance(candidate_identity_bytes, bytes)
+        or _sha256_bytes(candidate_identity_bytes) != reference["sha256"]
+    ):
+        _refuse("review candidate identity bytes do not match the downloaded reference")
+    identity = _validate_candidate_identity(
+        _load_json_object(candidate_identity_bytes, "review candidate identity")
+    )
+    if identity != _validate_candidate_identity(candidate_identity):
+        _refuse("review candidate identity bytes do not match the supplied candidate")
+    candidate = identity["candidate"]
+    if reference["repository"] != candidate["source"]["repository"]:
+        _refuse("review candidate identity reference has a different repository")
+    compact_reference = {
+        "repository": reference["repository"],
+        "run_id": reference["run_id"],
+        "artifact_id": reference["artifact"]["id"],
+        "path": reference["path"],
+        "sha256": reference["sha256"],
+    }
+    _review_record_reference(compact_reference, "review candidate identity reference")
+    now = datetime.now(timezone.utc)
+    for artifact in (reference["artifact"], candidate["build"]["artifact"]):
+        if _review_timestamp(artifact["retention"]["expires_at"], "artifact expiry") <= now:
+            _refuse("review candidate artifact retention has expired")
+    return identity, compact_reference
+
+
+def _validate_review_candidate_binding(
+    record: Mapping[str, Any], candidate: Mapping[str, Any], reference: Mapping[str, Any]
+) -> None:
+    observed_reference = _review_record_reference(
+        record["candidate_identity_record"], "review candidate identity record"
+    )
+    if (
+        observed_reference != reference
+        or _expect_sha256(record["candidate_identity_record_sha256"], "review candidate hash")
+        != reference["sha256"]
+        or record["candidate"] != candidate
+    ):
+        _refuse("review evidence does not bind the exact downloaded candidate")
+
+
+def _validate_review_evidence(record: Mapping[str, Any], *, independent_pr: bool) -> int:
+    reviewer = _expect_mapping(
+        record["reviewer_provenance"],
+        "reviewer provenance",
+        (
+            "reviewer_principal_id",
+            "reviewed_author_principal_id" if independent_pr else "reviewer_role",
+            "independence_basis",
+        ),
+    )
+    reviewer_id = _expect_safe_opaque_id(reviewer["reviewer_principal_id"], "reviewer principal")
+    producer = _expect_mapping(
+        record["producer_provenance"], "review producer", ("producer_principal_id", "operation")
+    )
+    producer_id = _expect_safe_opaque_id(producer["producer_principal_id"], "producer principal")
+    operation = "seal_independent_pr_review" if independent_pr else "seal_s2_s3_lens_result"
+    if producer["operation"] != operation or reviewer_id == producer_id:
+        _refuse("reviewer and producer must have distinct, typed provenance")
+    if independent_pr:
+        author_id = _expect_safe_opaque_id(
+            reviewer["reviewed_author_principal_id"], "reviewed author principal"
+        )
+        if (
+            reviewer["independence_basis"] != "DISTINCT_REVIEWER_AND_AUTHOR"
+            or reviewer_id == author_id
+        ):
+            _refuse("independent PR reviewer must differ from the reviewed author")
+    elif reviewer["independence_basis"] != "DISTINCT_REVIEWER_AND_PRODUCER" or reviewer[
+        "reviewer_role"
+    ] not in ("SECURITY_REVIEWER", "CODE_WORKFLOW_REVIEWER"):
+        _refuse("lens reviewer provenance is invalid")
+
+    denominator = _expect_mapping(
+        record["denominator"],
+        "review denominator",
+        ("required_evidence_count", "completed_evidence_count"),
+    )
+    required = _expect_positive_integer(
+        denominator["required_evidence_count"], "review required count"
+    )
+    completed = _expect_nonnegative_integer(
+        denominator["completed_evidence_count"], "review completed count"
+    )
+    if required > 128 or completed != required:
+        _refuse("review evidence denominator is incomplete or outside its bounds")
+    findings = _expect_mapping(
+        record["findings"], "review findings", ("records", "unresolved_high_severity_count")
+    )
+    rows = _expect_list(findings["records"], "review finding records")
+    if len(rows) > 128:
+        _refuse("review finding records exceed their bounds")
+    identifiers: set[str] = set()
+    unresolved_high = 0
+    for value in rows:
+        finding = _expect_mapping(
+            value, "review finding", ("finding_id", "severity", "disposition", "observed_result")
+        )
+        identifier = _expect_safe_opaque_id(finding["finding_id"], "review finding ID")
+        if identifier in identifiers:
+            _refuse("review finding records contain duplicate evidence")
+        identifiers.add(identifier)
+        if (
+            finding["severity"] not in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
+            or finding["disposition"] not in ("UNRESOLVED", "RESOLVED", "NOT_APPLICABLE")
+            or finding["observed_result"] not in _REVIEW_OBSERVED_RESULTS
+        ):
+            _refuse("review finding contains an unsupported closed value")
+        unresolved_high += (
+            finding["severity"] in ("CRITICAL", "HIGH") and finding["disposition"] == "UNRESOLVED"
+        )
+    supplied_high = _expect_nonnegative_integer(
+        findings["unresolved_high_severity_count"], "review unresolved high count"
+    )
+    if supplied_high != unresolved_high or unresolved_high != 0:
+        _refuse("review findings do not prove zero unresolved high-severity findings")
+    # Only the PR receipt defines its completed denominator in terms of scoped records.
+    if independent_pr and completed != len(rows):
+        _refuse("independent PR completed count does not match its scoped records")
+    result = _expect_mapping(record["result"], "review result", ("expected", "observed"))
+    expected = _expect_string(result["expected"], "review expected result")
+    if (
+        expected not in _EXPECTED_OBSERVED_OUTCOMES
+        or result["observed"] != _EXPECTED_OBSERVED_OUTCOMES[expected]
+        or result["observed"] != "SUCCESS"
+        or record["outcome"] != "PASS"
+    ):
+        _refuse("review outcome does not match its passing result")
+    _review_timestamp(record["recorded_at"], "review recorded_at")
+    return unresolved_high
+
+
+def _validate_s2_s3_lens_result(
+    value: Any, candidate: Mapping[str, Any], reference: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    record = _expect_mapping(
+        value,
+        "S2/S3 lens result",
+        (
+            "lens",
+            "lens_order",
+            "candidate_identity_record",
+            "candidate_identity_record_sha256",
+            "candidate",
+            "reviewer_provenance",
+            "producer_provenance",
+            "denominator",
+            "findings",
+            "result",
+            "outcome",
+            "recorded_at",
+        ),
+    )
+    order = _expect_positive_integer(record["lens_order"], "review lens order")
+    if order > len(_S2_S3_REVIEW_LENSES) or record["lens"] != _S2_S3_REVIEW_LENSES[order - 1]:
+        _refuse("review lens does not match its fixed order")
+    _validate_review_candidate_binding(record, candidate, reference)
+    _validate_review_evidence(record, independent_pr=False)
+    return record
+
+
+def seal_s2_s3_lens_result(
+    lens_result: Mapping[str, Any],
+    *,
+    candidate_identity: Mapping[str, Any],
+    candidate_identity_bytes: bytes,
+    candidate_identity_reference: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Admit one independent, exact-candidate S2/S3 lens without changing its claims."""
+
+    identity, reference = _verified_review_candidate(
+        candidate_identity, candidate_identity_bytes, candidate_identity_reference
+    )
+    record = _validate_s2_s3_lens_result(_thaw(lens_result), identity["candidate"], reference)
+    return _freeze(record)
+
+
+def seal_s2_s3_review_aggregate(
+    aggregate: Mapping[str, Any],
+    *,
+    candidate_identity: Mapping[str, Any],
+    candidate_identity_bytes: bytes,
+    candidate_identity_reference: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Recompute the fixed seven-lens aggregate from independently admitted lens results."""
+
+    identity, reference = _verified_review_candidate(
+        candidate_identity, candidate_identity_bytes, candidate_identity_reference
+    )
+    record = _expect_mapping(
+        _thaw(aggregate),
+        "S2/S3 review aggregate",
+        (
+            "aggregate_schema_version",
+            "aggregate_id",
+            "aggregate_producer",
+            "candidate_identity_record",
+            "candidate_identity_record_sha256",
+            "candidate",
+            "lens_results",
+            "coverage_summary",
+            "outcome",
+            "sealed_at",
+        ),
+    )
+    if record["aggregate_schema_version"] != "1.0":
+        _refuse("S2/S3 aggregate schema version is unsupported")
+    _expect_safe_opaque_id(record["aggregate_id"], "S2/S3 aggregate ID")
+    producer = _expect_mapping(
+        record["aggregate_producer"], "S2/S3 aggregate producer", ("helper_path", "operation")
+    )
+    if producer != {
+        "helper_path": "scripts/stateless_preview_artifact.py",
+        "operation": "seal_s2_s3_review_aggregate",
+    }:
+        _refuse("S2/S3 aggregate producer is invalid")
+    _validate_review_candidate_binding(record, identity["candidate"], reference)
+    sealed_at = _review_timestamp(record["sealed_at"], "S2/S3 aggregate sealed_at")
+    lenses = _expect_list(record["lens_results"], "S2/S3 lens results")
+    if len(lenses) != len(_S2_S3_REVIEW_LENSES):
+        _refuse("S2/S3 aggregate does not contain exactly seven required lenses")
+    completed = 0
+    unresolved_high = 0
+    for order, (lens_id, value) in enumerate(zip(_S2_S3_REVIEW_LENSES, lenses), start=1):
+        lens = _validate_s2_s3_lens_result(value, identity["candidate"], reference)
+        if lens["lens"] != lens_id or lens["lens_order"] != order:
+            _refuse("S2/S3 aggregate lens results are missing, duplicate, or out of order")
+        if _review_timestamp(lens["recorded_at"], "lens recorded_at") > sealed_at:
+            _refuse("S2/S3 aggregate was sealed before its lens evidence")
+        completed += 1
+        unresolved_high += sum(
+            finding["severity"] in ("CRITICAL", "HIGH") and finding["disposition"] == "UNRESOLVED"
+            for finding in lens["findings"]["records"]
+        )
+    coverage = _expect_mapping(
+        record["coverage_summary"],
+        "S2/S3 coverage summary",
+        ("required_lens_count", "completed_lens_count", "unresolved_high_severity_count"),
+    )
+    derived_coverage = {
+        "required_lens_count": len(_S2_S3_REVIEW_LENSES),
+        "completed_lens_count": completed,
+        "unresolved_high_severity_count": unresolved_high,
+    }
+    for field, expected in derived_coverage.items():
+        if _expect_nonnegative_integer(coverage[field], f"S2/S3 {field}") != expected:
+            _refuse("S2/S3 aggregate coverage does not match its sealed lens results")
+    if record["outcome"] != "PASS":
+        _refuse("S2/S3 aggregate outcome does not match its passing lens results")
+    return _freeze(record)
+
+
+def seal_independent_pr_review(
+    receipt: Mapping[str, Any],
+    *,
+    candidate_identity: Mapping[str, Any],
+    candidate_identity_bytes: bytes,
+    candidate_identity_reference: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Admit the distinct PR review, including its author and scoped-record denominator."""
+
+    identity, reference = _verified_review_candidate(
+        candidate_identity, candidate_identity_bytes, candidate_identity_reference
+    )
+    record = _expect_mapping(
+        _thaw(receipt),
+        "independent PR review",
+        (
+            "receipt_schema_version",
+            "receipt_id",
+            "candidate_identity_record",
+            "candidate_identity_record_sha256",
+            "candidate",
+            "review_target",
+            "reviewer_provenance",
+            "producer_provenance",
+            "denominator",
+            "findings",
+            "result",
+            "outcome",
+            "recorded_at",
+        ),
+    )
+    if record["receipt_schema_version"] != "1.0":
+        _refuse("independent PR review schema version is unsupported")
+    _expect_safe_opaque_id(record["receipt_id"], "independent PR review ID")
+    _validate_review_candidate_binding(record, identity["candidate"], reference)
+    target = _expect_mapping(
+        record["review_target"],
+        "PR review target",
+        ("repository", "pull_request_id", "reviewed_commit", "base_ref"),
+    )
+    _expect_identifier(target["pull_request_id"], "reviewed pull request ID")
+    if (
+        target["repository"] != identity["candidate"]["source"]["repository"]
+        or target["reviewed_commit"] != identity["candidate"]["source"]["commit"]
+        or target["base_ref"] != _CANONICAL_SOURCE_REF
+    ):
+        _refuse("independent PR review target does not match the canonical candidate")
+    _validate_review_evidence(record, independent_pr=True)
+    return _freeze(record)
+
+
+def _validate_stage_consumer_proof(
+    proof: Mapping[str, Any],
+    *,
+    remote: bool,
+    candidate_identity: Mapping[str, Any],
+    candidate_identity_bytes: bytes,
+    candidate_identity_reference: Mapping[str, Any],
+    release_gate_catalog: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    if not remote:
+        return seal_artifact_consumer_proof(
+            proof,
+            candidate_identity=candidate_identity,
+            candidate_identity_bytes=candidate_identity_bytes,
+            candidate_identity_reference=candidate_identity_reference,
+            release_gate_catalog=release_gate_catalog,
+        )
+    record = _expect_mapping(
+        proof,
+        "remote consumer proof",
+        (
+            "receipt_schema_version",
+            "receipt_id",
+            "candidate_identity_record",
+            "candidate",
+            "proof_stage",
+            "download_origin",
+            "input_identity_results",
+            "fixture_identity",
+            "scenario_matrix",
+            "runtime_results",
+            "python_rollback_result",
+            "outcome",
+            "recorded_at",
+        ),
+    )
+    _expect_safe_opaque_id(record["receipt_id"], "remote consumer proof ID")
+    _review_timestamp(record["recorded_at"], "remote consumer proof recorded_at")
+    identity_reference = _validate_consumer_proof_reference(
+        record["candidate_identity_record"], "remote consumer proof identity reference"
+    )
+    candidate = candidate_identity["candidate"]
+    if (
+        record["receipt_schema_version"] != _CONSUMER_PROOF_SCHEMA_VERSION
+        or record["proof_stage"] != "remote_release"
+        or record["outcome"] != "PASS"
+        or identity_reference != candidate_identity_reference
+        or record["candidate"] != candidate
+    ):
+        _refuse("remote consumer proof does not bind the exact passing candidate")
+    origin = _expect_mapping(
+        record["download_origin"],
+        "remote consumer proof origin",
+        ("repository", "release_id", "tag", "prerelease", "archive_asset", "manifest_asset"),
+    )
+    _expect_identifier(origin["release_id"], "remote consumer proof release ID")
+    if (
+        origin["repository"] != candidate["source"]["repository"]
+        or origin["tag"] != candidate["destination"]["tag"]
+        or origin["prerelease"] is not True
+    ):
+        _refuse("remote consumer proof origin does not match the prerelease candidate")
+    manifest = candidate["preview_manifest"]
+    for field, expected in (
+        ("archive_asset", manifest["contents"]["archive"]),
+        ("manifest_asset", manifest["file"]),
+    ):
+        asset = _expect_mapping(
+            origin[field], "remote consumer proof asset", ("id", "name", "size_bytes", "sha256")
+        )
+        _expect_identifier(asset["id"], "remote consumer proof asset ID")
+        descriptor = {key: asset[key] for key in ("name", "size_bytes", "sha256")}
+        _validate_file_descriptor(descriptor, "remote consumer proof asset")
+        if descriptor != expected:
+            _refuse("remote consumer proof asset bytes do not match the candidate")
+    if origin["archive_asset"]["id"] == origin["manifest_asset"]["id"]:
+        _refuse("remote consumer proof asset identities are not distinct")
+    _validate_input_identity_results(record["input_identity_results"], candidate)
+    _validate_fixture_identity(record["fixture_identity"])
+    _validate_scenario_matrix(record["scenario_matrix"])
+    _validate_runtime_results(record["runtime_results"])
+    _validate_python_rollback(record["python_rollback_result"])
+    return record
+
+
+def _resolve_stage_record(
+    reference: Mapping[str, Any],
+    record_resolver: Callable[[Mapping[str, Any]], bytes],
+) -> dict[str, Any]:
+    validated_reference = _review_record_reference(reference, "stage evidence record reference")
+    try:
+        raw = record_resolver(_freeze(_thaw(validated_reference)))
+    except (OSError, ValueError, KeyError):
+        _refuse("stage evidence record is unavailable")
+    if not isinstance(raw, bytes) or _sha256_bytes(raw) != validated_reference["sha256"]:
+        _refuse("stage evidence record raw bytes do not match their reference")
+    return _load_json_object(raw, "stage evidence record")
+
+
+def seal_stage_gate_evidence(
+    evidence: Mapping[str, Any],
+    *,
+    candidate_identity: Mapping[str, Any],
+    candidate_identity_bytes: bytes,
+    candidate_identity_reference: Mapping[str, Any],
+    release_gate_catalog: Mapping[str, Any],
+    release_gate_catalog_bytes: bytes,
+    release_gate_catalog_reference: Mapping[str, Any],
+    record_resolver: Callable[[Mapping[str, Any]], bytes],
+    repository_root: str | PathLike[str],
+) -> Mapping[str, Any]:
+    """Seal only the requested catalog stage after revalidating its exact raw evidence."""
+
+    identity, identity_reference = _verified_review_candidate(
+        candidate_identity, candidate_identity_bytes, candidate_identity_reference
+    )
+    candidate = identity["candidate"]
+    catalog_reference = _review_record_reference(
+        release_gate_catalog_reference, "stage release gate catalog reference"
+    )
+    if (
+        catalog_reference["repository"] != candidate["source"]["repository"]
+        or not isinstance(release_gate_catalog_bytes, bytes)
+        or _sha256_bytes(release_gate_catalog_bytes) != catalog_reference["sha256"]
+    ):
+        _refuse("stage release gate catalog bytes do not match their reference")
+    catalog_document = _load_json_object(release_gate_catalog_bytes, "stage release gate catalog")
+    if catalog_document != _thaw(release_gate_catalog):
+        _refuse("stage release gate catalog bytes do not match the supplied catalog")
+    _validate_release_gate_catalog_for_consumer_proof(catalog_document, candidate)
+    root = _resolve_repository_root(repository_root)
+    for snapshot in catalog_document["catalog"]["policy_authority_snapshots"]:
+        actual_hash = _sha256_bytes(
+            _read_tracked_authority(root, candidate["source"]["commit"], snapshot["path"])
+        )
+        if snapshot["sha256"] != actual_hash:
+            _refuse("stage release gate catalog policy snapshot differs from exact source bytes")
+
+    record = _expect_mapping(
+        _thaw(evidence),
+        "stage gate evidence",
+        (
+            "evidence_schema_version",
+            "evidence_set_id",
+            "producer",
+            "release_gate_catalog",
+            "candidate_identity_record",
+            "candidate_identity_record_sha256",
+            "candidate",
+            "source_ref",
+            "source_commit",
+            "stage",
+            "gate_evidence",
+            "outcome",
+            "sealed_at",
+        ),
+    )
+    if record["evidence_schema_version"] != "1.0":
+        _refuse("stage evidence schema version is unsupported")
+    _expect_safe_opaque_id(record["evidence_set_id"], "stage evidence set ID")
+    producer = _expect_mapping(
+        record["producer"], "stage evidence producer", ("helper_path", "operation")
+    )
+    if producer != {
+        "helper_path": "scripts/stateless_preview_artifact.py",
+        "operation": "seal_stage_gate_evidence",
+    }:
+        _refuse("stage evidence producer is invalid")
+    _validate_review_candidate_binding(record, candidate, identity_reference)
+    if (
+        _review_record_reference(record["release_gate_catalog"], "stage catalog reference")
+        != catalog_reference
+        or record["source_ref"] != _CANONICAL_SOURCE_REF
+        or record["source_commit"] != candidate["source"]["commit"]
+    ):
+        _refuse("stage evidence catalog or canonical source does not match the candidate")
+    stage = _expect_string(record["stage"], "stage evidence stage")
+    if stage not in ("pre-decision", "pre-publication", "post-publication"):
+        _refuse("stage evidence stage is unsupported")
+    sealed_at = _review_timestamp(record["sealed_at"], "stage evidence sealed_at")
+    if (
+        _review_timestamp(catalog_document["catalog"]["resolved_at"], "catalog resolved_at")
+        > sealed_at
+    ):
+        _refuse("stage evidence was sealed before its catalog")
+    expected_descriptors = [
+        descriptor for descriptor in _fixed_gate_descriptors() if descriptor["stage"] == stage
+    ]
+    entries = _expect_list(record["gate_evidence"], "stage gate evidence entries")
+    if len(entries) != len(expected_descriptors):
+        _refuse("stage evidence does not contain its exact catalog subset")
+    if not callable(record_resolver):
+        _refuse("stage evidence record resolver is unavailable")
+    outcomes: list[str] = []
+    review_binding = {
+        "candidate_identity": identity,
+        "candidate_identity_bytes": candidate_identity_bytes,
+        "candidate_identity_reference": candidate_identity_reference,
+    }
+    for descriptor, value in zip(expected_descriptors, entries):
+        entry = _expect_mapping(
+            value,
+            "stage gate evidence entry",
+            (
+                "stage",
+                "gate_id",
+                "record_type",
+                "authority_rules",
+                "evidence_requirements",
+                "record_reference",
+                "candidate_identity_record_sha256",
+                "source_commit",
+                "outcome",
+            ),
+        )
+        if any(entry[field] != expected for field, expected in descriptor.items()):
+            _refuse("stage evidence descriptor subset is changed, duplicate, or out of order")
+        if (
+            _expect_sha256(entry["candidate_identity_record_sha256"], "stage gate candidate hash")
+            != identity_reference["sha256"]
+            or entry["source_commit"] != candidate["source"]["commit"]
+        ):
+            _refuse("stage gate evidence entry does not bind the exact candidate source")
+        raw_record = _resolve_stage_record(entry["record_reference"], record_resolver)
+        if descriptor["record_type"] == "s2-s3-seven-lens-aggregate":
+            admitted = seal_s2_s3_review_aggregate(raw_record, **review_binding)
+            record_time = admitted["sealed_at"]
+        elif descriptor["record_type"] == "independent-pr-review":
+            admitted = seal_independent_pr_review(raw_record, **review_binding)
+            record_time = admitted["recorded_at"]
+        else:
+            admitted = _validate_stage_consumer_proof(
+                raw_record,
+                remote=stage == "post-publication",
+                release_gate_catalog=catalog_document,
+                **review_binding,
+            )
+            record_time = admitted["recorded_at"]
+        if _review_timestamp(record_time, "stage evidence record time") > sealed_at:
+            _refuse("stage evidence was sealed before its required proof")
+        if entry["outcome"] != admitted["outcome"]:
+            _refuse("stage gate outcome does not match its resolved typed record")
+        outcomes.append(admitted["outcome"])
+    # The empty pre-publication subset is not review or publication authorization.
+    derived_outcome = "PASS" if all(outcome == "PASS" for outcome in outcomes) else "FAIL"
+    if record["outcome"] != derived_outcome:
+        _refuse("stage outcome does not match its exact resolved catalog subset")
+    return _freeze(record)
+
+
 def _write_admission_outputs(admission: Mapping[str, Any], environment: Mapping[str, str]) -> None:
     output_path = _environment_value(environment, "GITHUB_OUTPUT")
     preview = admission["preview"]
@@ -1634,6 +2231,10 @@ __all__ = [
     "resolve_release_gate_catalog",
     "seal_artifact_consumer_proof",
     "seal_build_records",
+    "seal_independent_pr_review",
+    "seal_s2_s3_lens_result",
+    "seal_s2_s3_review_aggregate",
+    "seal_stage_gate_evidence",
     "validate_artifact_consumer_proof_reference",
     "verify_and_extract_retained_artifact",
     "verify_retained_artifact",

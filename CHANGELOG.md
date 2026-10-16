@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added internal preview-library validators for exact-candidate seven-lens S2/S3 review, distinct independent PR review, and ordered stage evidence. These source-only validators reject inconsistent evidence claims; they do not perform reviews, publish artifacts, constitute a consumer release, or change the Python default.
+
 ## [0.23.14] - 2026-10-11
 
 ### Fixed
