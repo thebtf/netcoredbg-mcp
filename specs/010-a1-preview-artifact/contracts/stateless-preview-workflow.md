@@ -111,7 +111,59 @@ Separately, the complete dispatch must fit the [65,535-character total input lim
 
 The build/evidence routing, four-command retention adapter, and diagnostic job are source implementation, not a final candidate or live execution receipt. Root must run the focused integrated fixtures and the bounded live probe/retention routes. Complete all required future publisher/admission code before freezing a final canonical candidate. Bind candidate commit, workflow SHA, exact checkout, and canonical-main provenance; a newer workflow checking out old source does not satisfy this. Subsequent source changes require fresh candidate-bound consumer proof, all seven lenses, distinct PR review, and an explicit retained Decision. Source fixtures, classifier evidence, and historical consumer proof do not approve a held or final candidate.
 
-Actual current-job permission capability remains `UNKNOWN`: probe run `38907673130` returned `UNAVAILABLE`, not a qualified grant. The existing nonmutating route is this workflow at `main`, `mode=evidence`, `evidence_operation=permission-probe`, with empty request/build fields. It admits source/actors, declares `actions: read`/`contents: write`, and invokes the bounded diagnostic without SDK/build/retention-chain/publication commands. The collector uses only the fixed mapping `probe_permissions` → `Probe current job permissions` or future `promote` → `Promote canonical-main preview candidate`, selected by `GITHUB_JOB`; no job-name override exists. Only the first job exists in YAML. Reports retain numeric run/attempt/job IDs and add `job_key`/`workflow_sha`; raw historical diagnostic JSON is not rewritten. The native step-log → same-job-log fallback, zero-based setup position, before/after running-job check, deadlines, log bound and diagnostic-only upload are unchanged. The admitted seven-day upload runs only after probe success/failure, uses `always()` without `continue-on-error`, and excludes raw logs, tokens and signed URLs.
+Actual current-job permission capability remains `UNKNOWN`: probe run
+`38907673130` returned `UNAVAILABLE`, not a qualified grant. Preserve that report
+unchanged. The existing nonmutating route remains this workflow at `main`,
+`mode=evidence`, `evidence_operation=permission-probe`, with empty request/build
+fields. Source/actor admission, exact checkout/canonical workflow/main binding,
+declared `actions: read`/`contents: write`, fixed
+`GITHUB_TOKEN: ${{ github.token }}` wiring and admitted seven-day retention do not
+change. No SDK/build/retention-chain/publication commands are connected.
+
+For one new run at attempt 1, the probe step uses
+`scripts/stateless_preview_permission_timing_diagnostic.py` under an owned-process
+watchdog. At t=0 it calls the existing collector once, preserves its original
+report/exit code and derives the job ID from its verified metadata binding.
+One additional same-job metadata GET, bounded to ten seconds, must confirm that
+binding, `status: in_progress` and `conclusion: null`. Only `UNAVAILABLE` /
+`CURRENT_JOB_LOGS_UNAVAILABLE` with that confirmation permits a second collector
+at t=60 seconds from the first start. Other statuses, parser/identity failures
+and other refusals stop without a second sample. The second sample is followed
+by the same bounded metadata GET for the original job, and both reports must
+bind that job. Scheduler lateness beyond one second, unfinished metadata or the
+overall 120-second observation deadline produces `INCOMPLETE`; no wait extends
+the window. The watchdog kills only its owned process tree and preserves partial
+reports. There is no overlapping worker, third sample or automatic redispatch.
+The fixed 60/120-second experiment is not a timing SLA or production retry
+mechanism; Root retires the driver/wrapper after consuming its one run.
+
+The collector itself is unchanged: fixed `GITHUB_JOB` mapping
+`probe_permissions` → `Probe current job permissions` or future `promote` →
+`Promote canonical-main preview candidate`, no job-name override, native
+step-log → same-job-log fallback, zero-based setup position, running-job guards,
+45-second worker deadline, ten-second socket timeout, 1 MiB log bound and redirect
+safety. Only the first job exists in YAML. Collector reports retain numeric
+run/attempt/job IDs plus `job_key`/`workflow_sha`. The manual single-sample CLI
+with `--output current-job-permissions.json` remains valid separately; it is not
+the timed workflow sequence.
+
+The existing immutable upload explicitly lists
+`permission-timing-diagnostic/current-job-permissions-t0.json`,
+`permission-timing-diagnostic/current-job-permissions-t60.json` and
+`permission-timing-diagnostic/timing-summary.json` under artifact name
+`stateless-preview-current-job-permissions-{run_id}-{run_attempt}`. Collector
+reports remain distinct and unaltered; an unexecuted second sample creates no
+report. The summary records planned/actual monotonic times, exact
+repository/run/attempt/job/key/source/workflow SHA, terminal metadata facts,
+observed collector exit codes and existing-report hashes. Unobserved exit codes
+remain null. Available log bytes and actually parsed grants remain separate:
+HTTP 200 with parser refusal is not permission qualification. A later qualified
+sample never overwrites the first negative or generates promotion approval.
+The admitted seven-day upload still runs only after probe success/failure,
+uses `always()`, `overwrite: false` and `if-no-files-found: error` without
+`continue-on-error`, and excludes raw logs, tokens, signed URLs, internal payloads
+and Diag. A complete unqualified or incomplete experiment remains nonzero and
+leaves dependent admission/mutation unauthorized.
 
 A successful probe shows only observed availability of that job's runner-reported grant, not universal API availability or token introspection. Every real attempt still needs its own actual readback. Missing, ambiguous, wrong-job/attempt, or insufficient grants refuse before mutation. YAML, repository defaults, endpoint-required permission headers, successful GETs, and another job's grant are not substitutes. A failed bounded probe does not prove global impossibility or authorize falling back to declarations.
 

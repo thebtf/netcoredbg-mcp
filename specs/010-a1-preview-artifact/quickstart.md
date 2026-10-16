@@ -406,8 +406,38 @@ Leave `evidence_request` and the three build fields absent/empty. The exact job
 ID is `probe_permissions` and its exact API display name is
 `Probe current job permissions`. It declares `contents: write` and
 `actions: read`, but contains no SDK, build, retain chain, tag, release, asset
-or test-write commands. After exact checkout/live-main fetch, Python setup and
-`admit-evidence`, it runs only the existing diagnostic CLI:
+or test-write commands. Exact checkout/live-main fetch, Python setup and
+`admit-evidence` remain unchanged. Root dispatches one new run at attempt 1,
+not a rerun of historical run `38907673130`.
+
+The workflow invokes the one-use
+`scripts/stateless_preview_permission_timing_diagnostic.py` driver through an
+owned-process watchdog, without new dispatch inputs or collector options:
+
+1. At t=0, call the existing collector once and preserve its original report
+   and exit code. Derive the job ID from that report's verified metadata binding,
+   never an input. Make one additional same-job metadata GET, bounded to ten
+   seconds, to confirm the binding, `status: in_progress` and `conclusion: null`.
+2. Only `UNAVAILABLE` / `CURRENT_JOB_LOGS_UNAVAILABLE` with that confirmation
+   permits a second collector call at t=60 seconds from the first start. A
+   qualified first sample, insufficient grants, parser refusal, identity failure
+   or any other refusal stops without a second sample. The fixed scheduler guard
+   permits at most one second of wake-up lateness; a missed schedule is
+   `INCOMPLETE`, not another wait.
+3. After a second sample, perform the same bounded metadata GET for the original
+   job and require both reports to bind that same job. The overall observation
+   deadline is 120 seconds; the workflow kills its owned process tree on timeout
+   and preserves partial reports with an `INCOMPLETE` summary. Cleanup does not
+   extend observation. There is no overlapping worker, third sample or automatic
+   redispatch.
+
+The fixed 60/120-second bounds are experimental limits, not a log-availability
+SLA or a production retry feature. Root retires the timing driver/wrapper after
+consuming this single experiment.
+
+Separately, the manual single-sample collector CLI remains valid in the trusted
+Actions context below. It does not run the timing sequence or produce its
+three-file diagnostic artifact set:
 
 ```powershell
 python scripts/stateless_preview_permissions.py --output current-job-permissions.json
@@ -421,23 +451,46 @@ There is no `--job-name` override. Trusted context must report
 and `GITHUB_WORKFLOW_SHA` must equal `GITHUB_SHA`. `GITHUB_TOKEN` is an
 environment value only. Actor/rerun provenance is not the token principal.
 
-The probe makes bounded HTTPS GETs, selects the unique fixed-name current job,
-and checks repository/run/attempt/SHA and `in_progress` status before and after
-log reads. It requests the completed `Set up job` step's log using its zero-based
-array position and falls back to the current-job log endpoint if unavailable.
-One owned worker has a 45-second outer deadline and is killed/reaped on timeout;
-socket operations have a ten-second timeout, but DNS is not individually bounded
-to ten seconds. Raw logs are limited to 1 MiB and are not saved. Diagnostic JSON
-records binding, timestamps, HTTP outcomes, the log hash and the complete explicit
-grant map, with no token or signed download URL.
+Each collector makes bounded HTTPS GETs, selects the unique fixed-name current
+job, and checks repository/run/attempt/SHA and `in_progress` status before log
+retrieval and again before qualifying returned log bytes. It requests the
+completed `Set up job` step's log using its zero-based array position and falls
+back to the current-job log endpoint if unavailable. Each owned worker retains
+the 45-second outer deadline and is killed/reaped on timeout; socket operations
+have a ten-second timeout, but collector DNS is not individually bounded to ten
+seconds. Raw logs remain limited to 1 MiB and are not saved. Collector JSON
+records binding, timestamps, HTTP outcomes, log source/hash and only actually
+parsed grants, with no token or signed download URL. Available bytes with parser
+refusal do not qualify permission evidence.
 
-Only reported `actions: read` plus `contents: write` yields `QUALIFIED` and exit
-zero. Missing or insufficient evidence yields `UNAVAILABLE`/`INSUFFICIENT` and a
-nonzero exit; the job remains failed. An `always()` upload runs only after the
-probe step actually succeeds or fails and retains just
-`current-job-permissions.json` with admitted seven-day retention,
-`overwrite: false`, and `if-no-files-found: error`. It does not run after skipped
-admission/probe, upload raw logs, or mask failure with `continue-on-error`.
+For an individual collector, only reported `actions: read` plus `contents: write`
+yields `QUALIFIED` and exit zero. `UNAVAILABLE`/`INSUFFICIENT` yields a nonzero
+exit. The timing driver preserves both actual exit codes and never rewrites a
+negative first report when a later sample qualifies. It returns zero only for a
+complete qualified observation with confirmed terminal metadata; an incomplete
+or unqualified experiment remains nonzero and authorizes no dependent mutation.
+
+The existing `always()` upload runs only after the probe step actually succeeds
+or fails. Under artifact name
+`stateless-preview-current-job-permissions-{run_id}-{run_attempt}`, it explicitly
+lists only:
+
+```text
+permission-timing-diagnostic/current-job-permissions-t0.json
+permission-timing-diagnostic/current-job-permissions-t60.json
+permission-timing-diagnostic/timing-summary.json
+```
+
+The first two files are separate, unaltered collector reports. An unexecuted
+second sample has no fabricated report. The summary records planned/actual
+monotonic times, exact repository/run/attempt/job/key/source/workflow SHA,
+terminal metadata facts, observed exit codes and hashes of existing reports;
+an interrupted collector's unobserved exit code remains null. Log-byte
+availability and parsed-grant qualification remain separate facts. The upload
+keeps admitted seven-day retention, `overwrite: false` and
+`if-no-files-found: error`. It does not run after skipped admission/probe, upload
+raw logs, signed URLs, tokens, internal payloads or Diag, or mask failure with
+`continue-on-error`.
 
 The meaning remains `RUNNER_REPORTED_GRANT_NOT_TOKEN_INTROSPECTION`:
 observational evidence, not Promotion Attempt admission, approval, or publication.
