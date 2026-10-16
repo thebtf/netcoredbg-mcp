@@ -1,6 +1,6 @@
 # Stateless preview workflow contract
 
-The current `.github/workflows/stateless-preview.yml` is one executable manual `build` surface for the A1 preview artifact. It runs only through `workflow_dispatch`, never from `push`, tag push, `workflow_run`, a schedule, or a Python release event. It creates no tag, release, asset outside retained Actions artifacts, Python change, or Program B/C change. The accepted target adds `evidence` and `promote` modes to this same workflow, not another workflow/controller. Neither mode is implemented in the current YAML; it has no promotion input, job, placeholder, or remote-mutation path.
+The current `.github/workflows/stateless-preview.yml` implements manual `build` and `evidence` dispatch for the A1 preview artifact. Evidence dispatch selects either nonpublishing retention or a same-current-job permission probe. It runs only through `workflow_dispatch`, never from `push`, tag push, `workflow_run`, a schedule, or a Python release event. It creates no tag, release, or release asset, and changes neither Python nor Program B/C. There is no `promote` input, job, placeholder, or remote-mutation path; future publication remains separate implementation work.
 
 ## Own one preview channel
 
@@ -10,22 +10,34 @@ All durable records use closed fields only: structural GitHub references, bounde
 
 ## Dispatch and permissions
 
-The current build-only workflow accepts exactly three caller inputs, all as strings. It validates every input before using it in a path, API call, artifact name, or record. It derives source, repository, workflow identity, run identity, and every receipt location from trusted Actions and Git facts. The following table describes only that executable surface, not the future multi-mode dispatch interface.
+`mode` is a choice with `build` and `evidence`, defaulting to `build`. The other five inputs are strings with `required: false` and `default: ""`: `preview_version`, `preview_tag`, `retention_days`, `evidence_operation`, and `evidence_request`. Conditional requirements belong to the helper's real `GITHUB_EVENT_PATH` admission, not YAML's unconditional input requirement. The closed input combinations are:
 
-| Executable mode | Inputs |
-| --- | --- |
-| `build` | `preview_version`, `preview_tag`, and `retention_days`. The workflow derives the source from the current canonical `refs/heads/main` ref. It has no source-commit, receipt, artifact-ID, or promotion input. |
+| Admitted mode / operation | Required nonempty inputs | Other inputs |
+| --- | --- | --- |
+| `build` | `preview_version`, `preview_tag`, `retention_days` | Evidence fields absent or empty. A missing `mode` preserves the legacy three-field build request; an explicitly empty or unknown mode refuses. |
+| `evidence` / `retain` | `evidence_request` | Build fields absent or empty; retention belongs inside the request. |
+| `evidence` / `permission-probe` | None | Request and build fields absent or empty; the helper admits a fixed seven-day diagnostic retention. |
 
-Set top-level `permissions: {}`. The current build job declares `contents: read`, `actions: read`, and `pull-requests: read`; it gets no Python publication, package registry, cross-repository, or write permission. The future evidence job requires `contents: read` and `actions: read`; grant `pull-requests: read` only for actual PR API reads. Artifact upload uses the live job's runtime credentials through the upload action, not a local PAT or `contents: write`.
+Each helper invocation closes the actual event inputs and checks command/mode compatibility. It derives source, repository, workflow/run identity, and receipt locations from trusted Actions, API, and Git facts. Unknown fields, unsupported operations, mixed build/evidence fields, or missing required values refuse before upload or probe. No request JSON is interpolated into a shell command or supplied as a path, URL, or script.
 
-The workflow has one concurrency group per preview tag and `cancel-in-progress: false`. GitHub Actions supplies no `queue: max` workflow key, so the executable workflow does not claim one; each admitted run still recomputes every source and artifact fact before sealing its candidate.
+The job routes deliberately include invalid-value fallbacks rather than allowing a successful all-skipped run:
+
+| Job ID / exact display name | `if` expression | Permissions |
+| --- | --- | --- |
+| `build` / `Build canonical-main preview candidate` | `inputs.mode != 'evidence'` | `contents: read`, `actions: read`, `pull-requests: read` |
+| `retain_evidence` / `Retain canonical-main preview evidence` | `inputs.mode == 'evidence' && inputs.evidence_operation != 'permission-probe'` | `contents: read`, `actions: read` |
+| `probe_permissions` / `Probe current job permissions` | `inputs.mode == 'evidence' && inputs.evidence_operation == 'permission-probe'` | `contents: write`, `actions: read` |
+
+Set top-level `permissions: {}`. The probe's declared write grant exists only to observe its own runner-reported permission map; no remote write or test mutation is connected. Retention uses the live job's artifact runtime credentials through `actions/upload-artifact@v7`, not a PAT or `contents: write`. Helper and diagnostic tokens are available only as `GITHUB_TOKEN` environment values, never arguments or record contents.
+
+Concurrency uses `stateless-preview-${{ inputs.preview_tag || format('run-{0}-{1}', github.run_id, github.run_attempt) }}` and `cancel-in-progress: false`. Build requests with a tag share its lock; evidence without a tag has a run/attempt-specific group, not an artificial shared empty-tag lock. GitHub supplies no `queue: max` workflow key. Each admitted run recomputes its source and artifact facts.
 
 ## Build from canonical main
 
 The build job must do the following in order:
 
-1. Fetch live `origin/main`. Require `github.ref`, the workflow ref, `github.sha`, checkout `HEAD`, and the resolved `origin/main` target to bind one canonical `refs/heads/main` commit.
-2. In a clean detached functional worktree at that commit, use the existing Sonar-free `build/coverage.sh` producer through its supported `run_coverage_producer` owner. Require the solution and standalone builds, Python functional suite, and all five .NET producer suites to pass; validate the reports and restored stateless binary hashes. Preserve exact-head, tracked Wave2 entry, source-cleanliness, and cleanup guards. Do not start a scanner, load Sonar credentials, or produce a Sonar receipt in this build-only workflow.
+1. Check out `github.sha` exactly and fetch live `origin/main`. Require `github.ref`, the canonical-main workflow ref, `github.workflow_sha`, `github.sha`, checkout `HEAD`, and the resolved `origin/main` target to bind one canonical `refs/heads/main` commit.
+2. In a clean detached functional worktree at that commit, use the existing Sonar-free `build/coverage.sh` producer through its supported `run_coverage_producer` owner. Require the solution and standalone builds, Python functional suite, and all five .NET producer suites to pass; validate the reports and restored stateless binary hashes. Preserve exact-head, tracked Wave2 entry, source-cleanliness, and cleanup guards. Do not start a scanner, load Sonar credentials, or produce a Sonar receipt in this build job.
 3. Publish only `NetCoreDbg.Mcp.Stateless.Preview` as a self-contained, single-file Windows x64 executable.
 4. Create the archive and inherited manifest. Validate its equations and hash archive, manifest, and extracted executable.
 5. Upload the payload as a new Actions artifact with `if-no-files-found: error`, bounded retention, and `overwrite: false`.
@@ -34,6 +46,8 @@ The build job must do the following in order:
 
 The build job must not build a Python wheel, call `publish.yml`, use PyPI tooling, change the default selector, accept an arbitrary source or receipt, or create a promotion input.
 
+The build job sets `DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: 'false'` before SDK setup or any SDK use. Its existing SDK setup, permissions, build/functional producers, runtime check, and three build-artifact uploads remain in place.
+
 This workflow is not publication. Do not rename a pre-publication scan to
 "postrelease" or run it asynchronously from this build. The existing standalone
 `scripts/run_sonarqube_exact_head.py --role post-merge` route is a strict audit
@@ -41,39 +55,67 @@ only after actual publication, as described in
 [`docs/SONARQUBE-ONBOARDING.md`](../../../docs/SONARQUBE-ONBOARDING.md). Preserve
 its real red or blocked outcome; it does not authorize or block promotion.
 
-## Accepted evidence mode (not implemented)
+## Evidence retention source
 
-The accepted target keeps three operations in this workflow: `build` produces the candidate, `evidence` retains proof/review and its explicit Decision, and `promote` consumes that retained Decision. Evidence mode does not build a payload or mutate tags, releases, or assets. The ordinary GitHub Artifacts REST API is not a local-file upload route; use the existing `actions/upload-artifact@v7` inside a live job.
+The `retain_evidence` job checks out the exact dispatched SHA, fetches live main, selects the existing Python 3.12 setup action, and runs the stdlib-only helper. It neither builds a payload nor mutates tags, releases, or release assets. The ordinary GitHub Artifacts REST API is not a local-file upload route; retention uses `actions/upload-artifact@v7` inside this live job. The source is wired; successful source fixtures and live retention still require Root's separate evidence.
 
 1. Require the original build run to have concluded successfully before independent consumer proof or review. Do not wait for these records in that original build: the Candidate Identity requires a completed successful run first.
-2. Accept exact Candidate Identity/Catalog artifact-file references, the original three records and raw hashes, an explicit candidate-bound `APPROVE` or `DECLINE` intent naming that evidence and destination, one authorized dispatcher, and bounded retention. The intent is conditional on successful validation; it is not the completed S4 Decision and must not contain a future Stage reference or future decision time. Only after the actual Stage exists may step 6 seal the explicit Decision with its actual Stage/review references, decision time, and destination. Derive `decision_author` from actual authenticated run/event actor metadata and applicable authority for this candidate, not a caller-supplied identity or GitHub write access alone. Bind the existing operator principal `thebtf`/`7106373` from actual run metadata and check both numeric ID and login for the actor and rerun initiator; this binding grants no new scope. Preserve the real producers, checks, findings, and timestamps; transport is not a rerun of their work.
+2. Require `evidence_request` to be a JSON object with exactly seven fields: `candidate_identity_reference`, `release_gate_catalog_reference`, `bundle_base64`, `record_sha256`, `decision`, `authorized_dispatcher`, and `retention_days`. The two references identify retained Candidate Identity/Catalog files; `record_sha256` binds each of the three fixed original files. `decision` is an explicit candidate-bound `APPROVE` or `DECLINE` intent, `authorized_dispatcher` is the separate closed `{id, login}` identity, and retention is 1 through 90 days. Candidate identity already binds the destination. The intent is conditional on successful validation, not a completed S4 Decision; no caller author, future Stage reference, or future decision time is accepted. Derive `decision_author` from authenticated run/event metadata. Both actor and rerun principals must match numeric ID `7106373` and login `thebtf`; this binding grants no new scope. Preserve original producers, checks, findings, and timestamps; retention does not rerun their work.
 3. Transfer the three original byte sequences as one bounded base64 ZIP in string dispatch inputs. Enforce the ingress limits below and validate candidate/provenance/author/review semantics before retention/sealing; successful byte decoding alone does not establish those semantics.
 4. Upload those three original files together as one immutable artifact with `overwrite: false`, `if-no-files-found: error`, and bounded retention. Only after upload, resolve the real artifact ID, repository/run ownership, and expiry, independently download the saved files, verify their raw hashes, and form `repository, run_id, artifact_id, path, sha256` references. Keep original evidence outside tracked source; artifact names/job outputs are not sealed references.
 5. Revalidate the actual consumer proof, complete seven-lens aggregate, distinct independent PR review, and Catalog through the existing Stage sealer. Upload the passing pre-decision Stage as a separate immutable artifact; obtain its real reference/raw hash after upload.
 6. Seal the author's explicit Decision against that existing Stage, preserve decision/stage time order, and upload the Decision as a third immutable artifact. `PASS` alone must never generate `APPROVE`; missing lenses or unresolved blocking findings cannot be synthesized away. Decision names the authorized dispatcher but no future promote run, current-job permission readback, or remote state.
-7. After the evidence run completes, a separate promote run may consume the already retained Decision reference. No record requires its own or another not-yet-uploaded object's ID/hash.
+7. Independently read back the third artifact and its nested Stage/original evidence references with `verify-evidence-retention`. Revalidate raw hashes, exact request decision/dispatcher, real author, provenance, and expiry while the current evidence run is still `in_progress`. The source build must instead be `completed/success` at its exact candidate attempt, workflow/ref/SHA, with the successful `Build canonical-main preview candidate` job. A future promotion run may consume the completed evidence run's retained Decision. No record requires its own or another not-yet-uploaded object's ID/hash, and there is no fourth evidence upload.
 
-The [S4 author boundary](../../../docs/RELEASE-PROTOCOL.md#a1-preview-channel-promotion-s4-only) requires a separate after-evidence decision, not a human-only gate. Under the accepted autonomous A1 mandate, Root may decide as a delegated executor; its workflow call is not evidence of the operator's personal review or click. The mandate, allowlist, actor identity, and passing checks do not automatically create `APPROVE` or pre-approve unknown future bytes. A distinct explicit `authorized_dispatcher` remains possible only within the existing closed Decision contract. Actual numeric actor admission and evidence/promote execution are still pending; this interpretation creates no current S4 record, promotion authority for another run/scope, or Program B/C scope. Required review closure, including FR-006, remains unchanged.
+The [S4 author boundary](../../../docs/RELEASE-PROTOCOL.md#a1-preview-channel-promotion-s4-only) requires a separate after-evidence decision, not a human-only gate. Root may decide as a delegated executor within the accepted autonomous A1 mandate; its workflow call is not the operator's personal review or click. Neither the mandate, passing checks, identity allowlist, nor GitHub access generates `APPROVE`. `DECLINE` also requires a valid passing pre-decision Stage under the existing Decision contract. The explicit `authorized_dispatcher` may differ from the derived author only as that closed contract permits. This implementation creates no actual S4 record or publication authority by itself; missing lenses and unresolved blocking findings remain refusals.
 
-The first ingress slice is byte ingress only: `decode_evidence_bundle` is implemented, not an executable evidence workflow, artifact resolver, or live retention proof. It accepts exactly `consumer-proof.json`, `s2-s3-review.json`, and `independent-pr-review.json`; it preserves original bytes/raw hashes and requires strict finite JSON. Base64 is at most 60,000 characters; decoded ZIP is at most 45,000 bytes; each member is at most 128 KiB and their total at most 256 KiB.
+### Fixed CLI / upload interface
+
+All four commands take zero additional arguments:
+
+```text
+python scripts/stateless_preview_artifact.py admit-evidence
+E0: upload exactly consumer-proof.json, s2-s3-review.json, independent-pr-review.json
+python scripts/stateless_preview_artifact.py seal-evidence-stage
+E1: upload exactly pre-decision-stage.json
+python scripts/stateless_preview_artifact.py seal-evidence-decision
+E2: upload exactly promotion-decision.json
+python scripts/stateless_preview_artifact.py verify-evidence-retention
+```
+
+Admission emits exactly `records_directory`, `stage_path`, `decision_path`, `records_artifact_name`, `stage_artifact_name`, `decision_artifact_name`, and `retention_days` for retain. Every output path is helper-owned below `RUNNER_TEMP` in the current run/attempt namespace. E0 enumerates the three filenames explicitly; E1/E2 use the exact admitted file paths. No upload includes the whole scratch/download directory or tracked source.
+
+Each of the three immutable uploads sets `overwrite: false`, `if-no-files-found: error`, and the admitted bounded retention. Upload output IDs and container digests reach later helpers only through the fixed environment keys below; there are no caller artifact IDs/URLs in shell commands:
+
+| Uploaded object | Environment prefix (suffixes `_ID` and `_DIGEST`) |
+| --- | --- |
+| E0 originals | `A1_EVIDENCE_RECORDS_ARTIFACT` |
+| E1 Stage | `A1_EVIDENCE_STAGE_ARTIFACT` |
+| E2 Decision | `A1_EVIDENCE_DECISION_ARTIFACT` |
+
+Stage reads back E0. Decision reads back E1 and resolves its E0 records. Final verification reads back E2 and all nested references independently. Names, ownership, expiry, container digest, raw file hashes, and candidate/source provenance are revalidated; outputs alone are not sealed references. Existing library sealers remain pure and do not acquire Actions/network behavior.
+
+### Bounded original-byte ingress
+
+`decode_evidence_bundle` remains the byte-ingress owner, not evidence of a live upload. It accepts exactly `consumer-proof.json`, `s2-s3-review.json`, and `independent-pr-review.json`; it preserves original bytes/raw hashes and requires strict finite JSON. Base64 is at most 60,000 characters; decoded ZIP is at most 45,000 bytes; each member is at most 128 KiB and their total at most 256 KiB.
 
 The protected boundary is the actual three returned records, not universal ZIP-format conformance. Refuse directory-parsing failures, duplicate/unexpected members, unsafe file metadata or paths, unsupported codecs/flags, inconsistent supported local-header/descriptor metadata, and violated actual byte/CRC/hash/JSON bounds. Allow only `ZIP_STORED` or `ZIP_DEFLATED`; the supported general flags are UTF-8, data descriptors, and DEFLATE-only compression options. Require complete DEFLATE EOF and matching actual sizes/CRC; cross-check supported local/central fields and signed or unsigned 32-bit descriptors. Local ZIP64 size markers are unsupported. Read fixed members without arbitrary extraction or shell-code interpolation. Unused legacy EOCD disk/count declarations are not independently conformance-checked: the library's actual enumerated member set must still be exactly the three fixed names, and every returned member must pass all content bounds and identities. This input ZIP is not executed or redistributed.
 
 The historical standalone owner before classifier integration passed `409/409` in `.agent/runs/a1-artifact-20261016/evidence-ingress-header-fixed.xml`; the subsequent integrated owner passed `533/533` in `classifier-ingress-integrated.xml`. The supported-flags correction has its own complete `544/544`, zero-error/failure/skip receipt in `evidence-ingress-supported-flags-fixed.xml`. Historical receipts do not prove later source changes. The actual API smoke in `evidence-ingress-supported-flags-api-smoke.json` exercises supported byte preservation and unsupported-flag refusal; earlier smoke separately covers immutable mapping and raw-hash tamper refusal. Synthetic `FAIL`/`INCOMPLETE` records are transported unchanged, not approved. These checks neither close independent review findings by themselves nor expand schemas or replace candidate/review admission.
 
-Separately, the complete dispatch must fit the [65,535-character total input limit](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch), including every reference, hash, decision/dispatcher field, retention value, and mode input. The decoder's 60,000-character bound does not prove that whole budget. Oversize input refuses explicitly; do not truncate checks, rewrite evidence, or substitute an inaccessible local path. Transport/live retention acceptance remains pending until independent download resolves all three uploads and reproduces original raw hashes.
+Separately, the complete dispatch must fit the [65,535-character total input limit](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch). Admission conservatively measures the full escaped ASCII JSON serialization of actual `inputs`, including nested request escaping and every reference, hash, decision/dispatcher, retention, and mode field. The decoder's 60,000-character bound alone does not prove that whole budget. Oversize input refuses explicitly; do not truncate checks, rewrite evidence, or substitute a local path. Live retention remains pending until independent download resolves all three real uploads and reproduces the original raw hashes.
 
 `reference.sha256` hashes the referenced raw file, not GitHub's `artifact-digest` container. The current helper's `candidate.build.artifact.sha256` is `SHA256(archive_bytes + manifest_bytes)`, another distinct quantity; do not compare it with a container digest or change its schema for this ingress.
 
 ## Source freeze and permission capability (pending)
 
-Complete and fixture-check all required pipeline code, including promote admission and explicit `github.workflow_sha` checks, before a new final canonical candidate. Bind candidate commit, workflow SHA, checkout, and required canonical-main provenance; a newer workflow checking out an old source does not satisfy this. Changes require fresh candidate-bound consumer proof, all seven lenses, distinct PR review, and an explicit retained Decision. Source fixtures, classifier evidence, and retained-candidate consumer proof each keep their own scope; none closes the whole attempt or approves a held candidate.
+The build/evidence routing, four-command retention adapter, and diagnostic job are source implementation, not a final candidate or live execution receipt. Root must run the focused integrated fixtures and the bounded live probe/retention routes. Complete all required future publisher/admission code before freezing a final canonical candidate. Bind candidate commit, workflow SHA, exact checkout, and canonical-main provenance; a newer workflow checking out old source does not satisfy this. Subsequent source changes require fresh candidate-bound consumer proof, all seven lenses, distinct PR review, and an explicit retained Decision. Source fixtures, classifier evidence, and historical consumer proof do not approve a held or final candidate.
 
-Actual current-job permission-readback availability before mutation is UNKNOWN. The accepted next step is one bounded nonmutating probe in a separate trusted manual non-fork job of this same workflow, before final freeze. Declare `actions: read` and `contents: write` for that probe, but connect no tag/release/asset commands and perform no test write. Resolve the exact current run/attempt/job and completed `Set up job` step; while that same job is `in_progress`, request `GET /repos/{owner}/{repo}/actions/jobs/{job_id}/steps/{step_number}/logs` with the documented zero-based step position, then `GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs` if step logs are unavailable. Retain result/time, run/attempt/job/SHA binding, and the extracted runner permission map, never tokens or signed download URLs.
+Actual current-job permission-readback availability remains `UNKNOWN` until the live `probe_permissions` job executes. Dispatch this same workflow at `main` with `mode=evidence`, `evidence_operation=permission-probe`, and empty request/build fields. The job uses the same exact checkout/main fetch and `admit-evidence` source/actor admission before `python scripts/stateless_preview_permissions.py --output current-job-permissions.json`. It declares `actions: read` and `contents: write` but runs no SDK, build, retain chain, tag, release, or asset command. The diagnostic resolves the exact current run/attempt/job and completed `Set up job` step; while that job is `in_progress`, it requests the step-log route using the zero-based position, then the job-log route if needed. Only its diagnostic JSON is uploaded, with admitted seven-day retention, after the probe step actually succeeds or fails. `always()` makes that upload failure-safe; no `continue-on-error` hides a diagnostic nonzero exit. Raw logs, tokens, and signed URLs are not uploaded.
 
 A successful probe shows only observed availability of that job's runner-reported grant, not universal API availability or token introspection. Every real attempt still needs its own actual readback. Missing, ambiguous, wrong-job/attempt, or insufficient grants refuse before mutation. YAML, repository defaults, endpoint-required permission headers, successful GETs, and another job's grant are not substitutes. A failed bounded probe does not prove global impossibility or authorize falling back to declarations.
 
-Keep dispatcher identity separate from the `GITHUB_TOKEN` GitHub App installation token. Validate both numeric ID and login from actual run/event metadata for `github.actor` and the rerun initiator `github.triggering_actor` against the authorized dispatcher; do not admit another person's rerun using only the original actor. The current Attempt schema's human-shaped `authenticated_actor` needs implementation-stage schema/code correction and exact job/run/attempt binding; do not fill it with a human as the token principal or invent unavailable App/installation IDs. That correction, `data-model.md`, `quickstart.md`, and recovery-contract alignment remain outside this documentation slice. Unknown permission capability holds dependent admission/mutation only, not evidence retention or independent classifier work.
+Keep dispatcher identity separate from the `GITHUB_TOKEN` GitHub App installation token. Actual actor and rerun admission checks both numeric ID and login; another person's rerun cannot borrow the original actor. The future Promotion Attempt schema's human-shaped `authenticated_actor` still needs its separately owned correction and exact job/run/attempt binding; never fill it with a human as token principal or invent App/installation IDs. Attempt/data-model/recovery changes remain outside this nonpublishing slice. Unknown live permission capability holds dependent admission/mutation only, not evidence retention or independent classifier work.
 
 ## Future promotion boundary (not implemented)
 
@@ -87,15 +129,15 @@ the fresh source, provenance, permission, and remote-state checks remain require
 
 The future attempt must not require `post-publication` evidence. That evidence can exist only after a prerelease is public.
 
-## Recover matching remote state
+## Future publisher recovery (not implemented)
 
-The fresh attempt creates a Remote Observation and a Remote Classification. The classifier admits only `unstarted`, `tag_only`, `draft_empty`, `draft_partial`, `draft_complete`, `published_complete`, or `collision`.
+The future fresh attempt must create a Remote Observation and a Remote Classification. The existing pure classifier admits only `unstarted`, `tag_only`, `draft_empty`, `draft_partial`, `draft_complete`, `published_complete`, or `collision`; it does not collect remote state or perform these effects.
 
-The workflow creates an annotated tag only for `unstarted`. It creates only the draft prerelease for `tag_only`. It uploads only missing matching assets for `draft_empty` or `draft_partial`. It verifies draft assets before it publishes the prerelease. A retry uses a new attempt and fresh matching classification.
+The future publisher may create an annotated tag only for `unstarted`, and only the draft prerelease for `tag_only`. It may upload only missing matching assets for `draft_empty` or `draft_partial`, and must verify draft assets before publication. A retry needs a new attempt and fresh matching classification. None of these mutation commands is wired in the current YAML.
 
-The workflow never rebuilds a candidate, uses `--clobber`, overwrites or deletes an asset, moves/deletes/reuses a tag, deletes/replaces a release, invokes Python packaging, or publishes to PyPI.
+Neither the current workflow nor the future publisher may rebuild a retained candidate, use `--clobber`, overwrite/delete an asset, move/delete/reuse a tag, delete/replace a release, invoke Python packaging, or publish to PyPI.
 
-## Close after publication
+## Future post-publication closure (not implemented)
 
 After the prerelease is public, download the public archive and manifest into a new directory. Create the Remote Verification and remote-release Artifact Consumer Proof records. Then seal a passing `post-publication` Stage Gate Evidence record.
 
@@ -105,4 +147,4 @@ A Program B Handoff requires passing evidence for all three stages, `published_c
 
 `tests/test_stateless_preview_artifact.py` must reject arbitrary/unmerged source admission, origin-main mismatch, catalog policy drift, an omitted functional or review gate, missing or duplicate stage evidence, an aggregate with fewer than seven lenses, a duplicate lens, a stale review, a different dispatcher, a reused attempt, missing pre-publication evidence, premature post-publication evidence, nonmatching remote state, a rebuild, a clobber/delete operation, Python-channel use, secret/path leakage, and a false handoff seal. Sonar audit absence or a real red outcome must not reject an otherwise valid functional candidate.
 
-Within the same owner, add evidence-ingress/retention cases for all byte and whole-dispatch limits, unsafe/duplicate/encrypted ZIP members, original-byte preservation, real post-upload references, expiry/provenance mismatches, explicit-author Decision ordering, and refusal of automatic `APPROVE`. Add missing/wrong-attempt/job/grant and dispatcher/rerun cases for the future admission correction. Fixture success does not complete the same-job capability probe or live artifact-retention proof.
+The supplied `test_evidence_cli_*` fixtures exercise the four-command boundary, original-byte retention, full escaped-input budget, actor/rerun and source-build provenance, ordered E0/E1/E2 readback, request substitution, and no automatic `APPROVE`. Root's pre-implementation dispatch run failed the unknown-mode/unknown-input refusal assertions because the old helper returned `READY`/zero, as recorded in `.agent/runs/a1-artifact-20261016/evidence-cli-dispatch-red.xml`. This is the intended source RED, not an integrated PASS. Root must run the focused owner after implementation lands. Fixture success does not complete the same-job capability probe, live retention, final candidate, or publisher.

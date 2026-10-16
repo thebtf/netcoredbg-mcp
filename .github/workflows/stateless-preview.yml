@@ -3,27 +3,49 @@ name: Stateless Preview Build
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: Build a candidate or retain evidence / probe permissions
+        required: true
+        default: build
+        type: choice
+        options:
+          - build
+          - evidence
       preview_version:
         description: Preview version in x.y.z-preview.n form
-        required: true
+        required: false
+        default: ""
         type: string
       preview_tag:
         description: Preview tag matching stateless-preview-v<preview_version>
-        required: true
+        required: false
+        default: ""
         type: string
       retention_days:
         description: Retention period from 1 through 90 days
-        required: true
+        required: false
+        default: ""
+        type: string
+      evidence_operation:
+        description: Evidence operation (retain or permission-probe)
+        required: false
+        default: ""
+        type: string
+      evidence_request:
+        description: Closed evidence-retention request JSON (retain only)
+        required: false
+        default: ""
         type: string
 
 permissions: {}
 
 concurrency:
-  group: stateless-preview-build-${{ inputs.preview_tag }}
+  group: stateless-preview-${{ inputs.preview_tag || format('run-{0}-{1}', github.run_id, github.run_attempt) }}
   cancel-in-progress: false
 
 jobs:
   build:
+    if: ${{ inputs.mode != 'evidence' }}
     name: Build canonical-main preview candidate
     runs-on: windows-latest
     permissions:
@@ -31,6 +53,7 @@ jobs:
       contents: read
       pull-requests: read
     env:
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: 'false'
       A1_PREVIEW_VERSION: ${{ inputs.preview_version }}
       A1_PREVIEW_TAG: ${{ inputs.preview_tag }}
       A1_RETENTION_DAYS: ${{ inputs.retention_days }}
@@ -198,6 +221,158 @@ jobs:
         with:
           name: ${{ steps.admit.outputs.release_gate_catalog_artifact_name }}
           path: artifacts/stateless-preview/records/release-gate-catalog.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+  retain_evidence:
+    name: Retain canonical-main preview evidence
+    if: ${{ inputs.mode == 'evidence' && inputs.evidence_operation != 'permission-probe' }}
+    runs-on: windows-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out the dispatched revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch live canonical main
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to fetch canonical main."
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Admit the exact evidence source and request
+        id: admit
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/stateless_preview_artifact.py admit-evidence
+
+      - name: Retain the three original evidence records (E0)
+        id: upload_records
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.admit.outputs.records_artifact_name }}
+          path: |
+            ${{ steps.admit.outputs.records_directory }}/consumer-proof.json
+            ${{ steps.admit.outputs.records_directory }}/s2-s3-review.json
+            ${{ steps.admit.outputs.records_directory }}/independent-pr-review.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+      - name: Read back E0 and seal the pre-decision Stage
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          A1_EVIDENCE_RECORDS_ARTIFACT_ID: ${{ steps.upload_records.outputs.artifact-id }}
+          A1_EVIDENCE_RECORDS_ARTIFACT_DIGEST: ${{ steps.upload_records.outputs.artifact-digest }}
+        run: python scripts/stateless_preview_artifact.py seal-evidence-stage
+
+      - name: Retain the pre-decision Stage (E1)
+        id: upload_stage
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.admit.outputs.stage_artifact_name }}
+          path: ${{ steps.admit.outputs.stage_path }}
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+      - name: Read back E1 and seal the explicit Decision
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          A1_EVIDENCE_RECORDS_ARTIFACT_ID: ${{ steps.upload_records.outputs.artifact-id }}
+          A1_EVIDENCE_RECORDS_ARTIFACT_DIGEST: ${{ steps.upload_records.outputs.artifact-digest }}
+          A1_EVIDENCE_STAGE_ARTIFACT_ID: ${{ steps.upload_stage.outputs.artifact-id }}
+          A1_EVIDENCE_STAGE_ARTIFACT_DIGEST: ${{ steps.upload_stage.outputs.artifact-digest }}
+        run: python scripts/stateless_preview_artifact.py seal-evidence-decision
+
+      - name: Retain the explicit Promotion Decision (E2)
+        id: upload_decision
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.admit.outputs.decision_artifact_name }}
+          path: ${{ steps.admit.outputs.decision_path }}
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+      - name: Independently verify all retained evidence
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          A1_EVIDENCE_RECORDS_ARTIFACT_ID: ${{ steps.upload_records.outputs.artifact-id }}
+          A1_EVIDENCE_RECORDS_ARTIFACT_DIGEST: ${{ steps.upload_records.outputs.artifact-digest }}
+          A1_EVIDENCE_STAGE_ARTIFACT_ID: ${{ steps.upload_stage.outputs.artifact-id }}
+          A1_EVIDENCE_STAGE_ARTIFACT_DIGEST: ${{ steps.upload_stage.outputs.artifact-digest }}
+          A1_EVIDENCE_DECISION_ARTIFACT_ID: ${{ steps.upload_decision.outputs.artifact-id }}
+          A1_EVIDENCE_DECISION_ARTIFACT_DIGEST: ${{ steps.upload_decision.outputs.artifact-digest }}
+        run: python scripts/stateless_preview_artifact.py verify-evidence-retention
+
+  probe_permissions:
+    name: Probe current job permissions
+    if: ${{ inputs.mode == 'evidence' && inputs.evidence_operation == 'permission-probe' }}
+    runs-on: windows-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Check out the dispatched revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch live canonical main
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to fetch canonical main."
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Admit the exact nonmutating permission probe
+        id: admit
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/stateless_preview_artifact.py admit-evidence
+
+      - name: Read the invoking job's runner-reported permissions
+        id: probe
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/stateless_preview_permissions.py --output current-job-permissions.json
+
+      - name: Retain only the attempted permission diagnostic
+        if: ${{ always() && (steps.probe.outcome == 'success' || steps.probe.outcome == 'failure') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: stateless-preview-current-job-permissions-${{ github.run_id }}-${{ github.run_attempt }}
+          path: current-job-permissions.json
           if-no-files-found: error
           overwrite: false
           retention-days: ${{ steps.admit.outputs.retention_days }}

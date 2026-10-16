@@ -57,9 +57,10 @@ executable, or source-tree executable is not an input and cannot be proof.
 
 The shared production transport is `ArtifactDownloader` with the expanded
 `ArtifactFileReference` in `scripts/stateless_preview_artifact.py`. Candidate
-mode uses that owner for the existing metadata, ZIP, raw-file and payload hash
-checks and exclusive local retention. The CLI and reference bundle stay
-unchanged; this extraction does not implement an evidence workflow or promotion.
+mode uses that owner for metadata, ZIP, raw-file and payload hash checks and
+exclusive local retention. Its consumer CLI/reference bundle is unchanged.
+The same workflow now wires separate evidence-retention adapters and a permission
+diagnostic; neither is a publisher or proof of a successful live run.
 
 Sonar receipts are not inputs to build admission, candidate sealing, or consumer
 proof. Run the separate exact-head audit only after actual publication, as
@@ -159,8 +160,10 @@ execution and receipt-sealing task.
 
 ## Internal review and stage sealing
 
-The library functions in [the artifact helper](../../scripts/stateless_preview_artifact.py)
-validate supplied evidence; they do not add review or promotion CLI commands:
+The pure library functions in [the artifact helper](../../scripts/stateless_preview_artifact.py)
+validate supplied evidence. They do not generate reviews, perform Actions
+admission, retain artifacts, or publish; the separate workflow adapters below
+own event/API/retention effects:
 
 - `seal_s2_s3_lens_result` admits one ordered, independent, exact-candidate lens.
 - `seal_s2_s3_review_aggregate` revalidates all seven ordered lenses and derives
@@ -204,11 +207,10 @@ publication authorization. Post-publication admission checks the remote receipt'
 candidate-bound asset identities and complete consumer/denial/EOF/Python-rollback
 matrix; the sealer does not itself download or execute those assets.
 
-Only the decision subpart of T021/T022 is implemented here. Fresh Promotion Attempt
-admission remains unimplemented. T024/T025 now have the pure remote-record API
-described below, pending root verification; it does not substitute for current
-attempt admission. A sealed Decision, including `APPROVE`, is not authority for a
-live attempt or publication.
+Decision sealing and its nonpublishing retention adapter are source implementation,
+not a completed live S4 decision. Fresh Promotion Attempt admission remains
+unimplemented. The pure remote-record API below does not replace it. A sealed
+Decision, including `APPROVE`, is not authority for a live attempt or publication.
 
 Schema-valid simulated test vectors are not actual reviewer or acceptance
 receipts. Library tests do not complete the live retained-candidate journey,
@@ -252,41 +254,174 @@ run. The future collector must create a new attempt ID and observation for each
 run attempt, and full Promotion Attempt admission must enforce that capture
 before any effect. An `ADMITTED` classification alone is not effect authority.
 
-## Source-only current-job permission diagnostic
+## Retain exact evidence through the existing workflow
 
-The diagnostic source is complete and locally checked, but the dedicated YAML
-job is not wired. Setup-log availability during the invoking job remains
-`UNKNOWN`; no live-job or consumer PASS is claimed. Do not dispatch the current
-workflow expecting this probe or manufacture Actions environment values as proof.
+The workflow source now accepts `mode=build` (the default) or `mode=evidence`.
+Build still requires `preview_version`, `preview_tag`, and `retention_days`;
+these are optional empty strings in YAML so that evidence requests need not
+supply fake build inputs. A legacy request with no `mode` uses build admission;
+an explicitly empty/unknown mode, unknown operation, mixed fields, or unsupported
+input refuses rather than succeeding with every job skipped. There is no
+`promote` mode or placeholder in the current workflow.
 
-The future job must have ID `probe_permissions` and the exact API display name
-`Probe current job permissions`. Only inside that job, from the repository root,
-run the source CLI with a new, nonexistent output path:
+For retention, the original candidate build must be complete and successful at
+its exact run attempt, workflow/ref/SHA and named build job. Obtain the real
+candidate-bound consumer proof, seven-lens aggregate, and distinct independent
+PR review before dispatch. Keep those three original byte sequences outside
+tracked source. A passing source fixture or transported `FAIL`/`INCOMPLETE`
+document is not that evidence, and transport must not rewrite it into `PASS`.
+
+Prepare an `evidence_request` JSON object with exactly these fields:
+
+| Field | Required source/value |
+| --- | --- |
+| `candidate_identity_reference` | Exact retained Candidate Identity file reference, not local candidate bytes. |
+| `release_gate_catalog_reference` | Exact retained Catalog file reference from the successful source build. |
+| `bundle_base64` | Base64 ZIP containing only `consumer-proof.json`, `s2-s3-review.json`, and `independent-pr-review.json`, preserving their original bytes. |
+| `record_sha256` | Object with those three exact filenames mapped to their original raw-file SHA-256 values. |
+| `decision` | Root's explicit candidate-bound `APPROVE` or `DECLINE` intent, not an outcome derived from passing checks. |
+| `authorized_dispatcher` | Explicit closed `{id, login}` identity, separate from the actual decision author. |
+| `retention_days` | String integer from `1` through `90`. |
+
+The destination is already bound by the candidate. Do not add `decision_author`,
+a future Stage/reference/time, a workflow/job name override, paths, URLs, scripts,
+or publication parameters. Admission derives the real actor and rerun principals
+from Actions/API facts and requires both `7106373` and `thebtf`; this identity
+binding is not approval or the operator's personal click. A distinct dispatcher
+is admitted only as the existing Decision contract permits. Even `DECLINE`
+requires the existing passing pre-decision Stage contract.
+
+The base64 string is at most 60,000 characters and its decoded ZIP at most
+45,000 bytes; fixed-member, CRC/hash, strict JSON and decompression bounds still
+apply. The whole actual `inputs` object, conservatively serialized as escaped
+ASCII JSON including the nested request string, must fit 65,535 characters.
+Oversize or semantically invalid evidence refuses; do not truncate or substitute
+local paths. Raw file hashes, GitHub artifact-container digests, and
+`SHA256(archive_bytes + manifest_bytes)` are three separate hash domains.
+
+Once this source is integrated on canonical main, Root may send the request as
+data on standard input using the [GitHub CLI JSON route](https://cli.github.com/manual/gh_workflow_run):
+
+```powershell
+$request = Get-Content -Raw C:\preview-validation\evidence-request.json
+@{
+  mode = 'evidence'
+  evidence_operation = 'retain'
+  evidence_request = $request
+} | ConvertTo-Json -Compress | gh workflow run stateless-preview.yml --repo thebtf/netcoredbg-mcp --ref main --json
+```
+
+This command is a live dispatch, not a validation command. Root owns its timing
+and the explicit decision; the procedure grants no new publication authority.
+The runner reads the actual event file rather than interpolating request JSON
+into a shell command. Build-only input fields must remain absent or empty.
+
+The `retain_evidence` job has exact display name
+`Retain canonical-main preview evidence` and only `contents: read`/`actions: read`.
+It checks out the dispatched SHA, fetches live main, and admits the exact source,
+workflow SHA and actor before any upload. It uses the house Python 3.12 action
+and the existing stdlib helper, with no SDK, payload build or publisher:
+
+```text
+python scripts/stateless_preview_artifact.py admit-evidence
+E0 upload: consumer-proof.json + s2-s3-review.json + independent-pr-review.json
+python scripts/stateless_preview_artifact.py seal-evidence-stage
+E1 upload: pre-decision-stage.json
+python scripts/stateless_preview_artifact.py seal-evidence-decision
+E2 upload: promotion-decision.json
+python scripts/stateless_preview_artifact.py verify-evidence-retention
+```
+
+The four commands have no extra arguments. Admission alone supplies
+`records_directory`, `stage_path`, `decision_path`, `records_artifact_name`,
+`stage_artifact_name`, `decision_artifact_name`, and `retention_days`.
+Paths stay below `RUNNER_TEMP` in the current run/attempt namespace. The job
+enumerates exactly the three E0 filenames and the separate E1/E2 files; it never
+uploads the whole scratch directory. All three uploads use `overwrite: false`,
+`if-no-files-found: error`, and admitted retention. Upload IDs/digests reach
+helpers only as `A1_EVIDENCE_{RECORDS,STAGE,DECISION}_ARTIFACT_{ID,DIGEST}`.
+Tokens reach helpers only through `GITHUB_TOKEN`, never CLI arguments.
+
+Each sealing command independently downloads the previous real upload and
+revalidates metadata, ownership, expiry, container/raw hashes, provenance and
+record semantics. Final verification independently resolves Decision, Stage and
+the original records while the evidence run remains `in_progress`; the source
+build alone must already be `completed/success`. There is no fourth upload or
+future-ID cycle. The final summary's compact Decision reference is a retained
+file identity, not current-attempt permission or publication authority.
+
+## Probe the same current job's permissions
+
+The diagnostic source and dedicated YAML job are wired. Live setup-log
+availability during that invoking job remains `UNKNOWN`; no live-job,
+retention, final-candidate or publisher PASS is claimed by this source change.
+Do not manufacture Actions environment values as proof.
+
+After integration on canonical main, Root's bounded nonmutating live route is:
+
+```powershell
+gh workflow run stateless-preview.yml --repo thebtf/netcoredbg-mcp --ref main -f mode=evidence -f evidence_operation=permission-probe
+```
+
+Leave `evidence_request` and the three build fields absent/empty. The exact job
+ID is `probe_permissions` and its exact API display name is
+`Probe current job permissions`. It declares `contents: write` and
+`actions: read`, but contains no SDK, build, retain chain, tag, release, asset
+or test-write commands. After exact checkout/live-main fetch, Python setup and
+`admit-evidence`, it runs only the existing diagnostic CLI:
 
 ```powershell
 python scripts/stateless_preview_permissions.py --output current-job-permissions.json
 ```
 
-There is no `--job-name` override. The trusted Actions context must report
+There is no `--job-name` override. Trusted context must report
 `GITHUB_ACTIONS=true`, `GITHUB_EVENT_NAME=workflow_dispatch`,
 `GITHUB_REF=refs/heads/main`, and `GITHUB_JOB=probe_permissions`.
 `GITHUB_WORKFLOW_REF` must equal
 `{GITHUB_REPOSITORY}/.github/workflows/stateless-preview.yml@refs/heads/main`,
-and `GITHUB_WORKFLOW_SHA` must equal `GITHUB_SHA`. The token is read only from
-`GITHUB_TOKEN`, never from an argument. Actor and triggering-actor fields are
-separate provenance, not the token principal.
+and `GITHUB_WORKFLOW_SHA` must equal `GITHUB_SHA`. `GITHUB_TOKEN` is an
+environment value only. Actor/rerun provenance is not the token principal.
 
-The probe makes bounded HTTPS GETs, selects the unique fixed-name job, and checks
-its repository/run/attempt/SHA and `in_progress` status before and after reading
-logs. One owned worker process has a 45-second outer deadline and is killed and
-reaped on timeout. Socket operations have a ten-second timeout; DNS is not
-individually bounded to ten seconds. Raw logs are limited to 1 MiB and are not
-saved; JSON records binding, timestamps, HTTP outcomes, the log hash, and the full
-explicit grant map without tokens or signed URLs.
+The probe makes bounded HTTPS GETs, selects the unique fixed-name current job,
+and checks repository/run/attempt/SHA and `in_progress` status before and after
+log reads. It requests the completed `Set up job` step's log using its zero-based
+array position and falls back to the current-job log endpoint if unavailable.
+One owned worker has a 45-second outer deadline and is killed/reaped on timeout;
+socket operations have a ten-second timeout, but DNS is not individually bounded
+to ten seconds. Raw logs are limited to 1 MiB and are not saved. Diagnostic JSON
+records binding, timestamps, HTTP outcomes, the log hash and the complete explicit
+grant map, with no token or signed download URL.
 
 Only reported `actions: read` plus `contents: write` yields `QUALIFIED` and exit
-zero. Missing or insufficient evidence yields `UNAVAILABLE` or `INSUFFICIENT`
-and a nonzero exit. The meaning is
-`RUNNER_REPORTED_GRANT_NOT_TOKEN_INTROSPECTION`: this is observational evidence,
-not Promotion Attempt admission, approval, or publication authority. Neither the
-workflow YAML nor the Promotion Attempt schema is changed by this source slice.
+zero. Missing or insufficient evidence yields `UNAVAILABLE`/`INSUFFICIENT` and a
+nonzero exit; the job remains failed. An `always()` upload runs only after the
+probe step actually succeeds or fails and retains just
+`current-job-permissions.json` with admitted seven-day retention,
+`overwrite: false`, and `if-no-files-found: error`. It does not run after skipped
+admission/probe, upload raw logs, or mask failure with `continue-on-error`.
+
+The meaning remains `RUNNER_REPORTED_GRANT_NOT_TOKEN_INTROSPECTION`:
+observational evidence, not Promotion Attempt admission, approval, or publication.
+YAML declarations, another job's grants, successful GETs or endpoint headers are
+not substitutes. A failed live probe holds dependent publisher admission only;
+it does not prove global impossibility or authorize a declaration-only fallback.
+
+## Root validation and remaining evidence
+
+After all source owners finish, Root runs the focused integrated owners in the
+existing project test environment, not a child agent's midflight check:
+
+```powershell
+python -m pytest tests/test_stateless_preview_artifact.py tests/test_stateless_preview_permissions.py -q
+```
+
+Root must also check workflow parsing/routing, unchanged build gates, exact
+upload file sets and permissions. The pre-implementation unknown-mode/unknown-
+input refusal assertions were real RED in
+`.agent/runs/a1-artifact-20261016/evidence-cli-dispatch-red.xml`; this procedure
+does not invent a later PASS. Source/fixture evidence remains separate from the
+live same-current-job diagnostic and E0/E1/E2 retention/readback. A final
+canonical candidate, fresh consumer/review/Decision evidence, Promotion Attempt
+admission, publisher and remote/public consumer proof remain pending. The Python
+default/rollback and Program B/C are unchanged.
+
