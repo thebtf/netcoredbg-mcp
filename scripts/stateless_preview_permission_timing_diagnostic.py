@@ -295,11 +295,13 @@ def observe(
             first["status"] == "UNAVAILABLE"
             and first["reason_code"] == "CURRENT_JOB_LOGS_UNAVAILABLE"
         ):
-            if elapsed() >= 60.0:
+            if elapsed() > 61.0:
                 raise _IncompleteError("SECOND_SAMPLE_SCHEDULE_MISSED")
             summary["second_sample"] = "WAITING_FOR_T60"
             checkpoint()
-            sleep(max(0.0, 60.0 - elapsed()))
+            actual_time = elapsed()
+            if actual_time < 60.0:
+                sleep(60.0 - actual_time)
             if elapsed() < 60.0 or elapsed() > 61.0:
                 raise _IncompleteError("SECOND_SAMPLE_SCHEDULE_MISSED")
             summary["second_sample"] = "EXECUTED"

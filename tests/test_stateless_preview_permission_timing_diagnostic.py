@@ -356,8 +356,8 @@ def test_exit_report_mismatch_keeps_original_exit_and_raw_negative(scenario, exi
 
 @pytest.mark.parametrize(
     ("duration", "oversleep", "expected_sleeps"),
-    [(59.5, 0.0, []), (2.0, 2.0, [57.5]), (2.0, -0.5, [57.5])],
-    ids=["already-t60", "late-wakeup", "early-wakeup"],
+    [(2.0, 2.0, [57.5]), (2.0, -0.5, [57.5])],
+    ids=["late-wakeup", "early-wakeup"],
 )
 def test_missed_second_start_never_extends_observation_window(
     scenario, duration, oversleep, expected_sleeps
@@ -384,6 +384,61 @@ def test_one_second_second_start_lateness_is_allowed_without_moving_deadline(sce
     assert (result.code, result.starts, result.sleeps) == (0, [0.0, 61.0], [57.5])
     assert result.summary["samples"][1]["planned_start_offset_seconds"] == 60.0
     assert result.summary["deadline_offset_seconds"] == 120.0
+
+
+@pytest.mark.parametrize("finished_at", [60.0, 60.5, 61.0], ids=["t60", "t60_5", "t61"])
+def test_first_confirmed_metadata_within_lateness_allowance_resamples_immediately(
+    scenario, finished_at
+):
+    result = scenario(
+        [report(), report("REQUIRED_RUNNER_GRANTS_REPORTED", status="QUALIFIED")],
+        durations=[finished_at - 0.5, 3.0],
+    )
+
+    assert (result.code, result.starts, result.sleeps, len(result.requests)) == (
+        0,
+        [0.0, finished_at],
+        [],
+        2,
+    )
+    summary = result.summary
+    assert (summary["observation"], summary["capability"], summary["second_sample"]) == (
+        "COMPLETE",
+        "OBSERVED_QUALIFIED",
+        "EXECUTED",
+    )
+    assert summary["binding"] == BINDING
+    assert summary["deadline_offset_seconds"] == 120.0
+    assert summary["latest_second_start_offset_seconds"] == 61.0
+    first, second = summary["samples"]
+    assert first["terminal_metadata"]["finished_offset_seconds"] == finished_at
+    assert second["planned_start_offset_seconds"] == 60.0
+    for sample, raw in zip((first, second), result.originals, strict=True):
+        assert sample["terminal_metadata"]["binding_confirmed"] is True
+        assert json.loads(raw)["binding"] == BINDING
+        assert (result.directory / sample["report_file"]).read_bytes() == raw
+        assert sample["report_sha256"] == hashlib.sha256(raw).hexdigest()
+
+
+def test_first_confirmed_metadata_after_lateness_allowance_refuses_second_sample(scenario):
+    result = scenario([report()], durations=[61.0])
+
+    assert (result.code, result.starts, result.sleeps, len(result.requests)) == (
+        1,
+        [0.0],
+        [],
+        1,
+    )
+    summary = result.summary
+    assert summary["observation"] == "INCOMPLETE"
+    assert summary["reason_code"] == "SECOND_SAMPLE_SCHEDULE_MISSED"
+    assert summary["capability"] == "NOT_ESTABLISHED"
+    assert summary["binding"] == BINDING
+    assert summary["deadline_offset_seconds"] == 120.0
+    assert summary["latest_second_start_offset_seconds"] == 61.0
+    metadata = summary["samples"][0]["terminal_metadata"]
+    assert metadata["binding_confirmed"] is True
+    assert metadata["finished_offset_seconds"] == 61.5
 
 
 @pytest.mark.parametrize(
