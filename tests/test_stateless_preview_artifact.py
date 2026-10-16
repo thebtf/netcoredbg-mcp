@@ -4179,9 +4179,10 @@ def test_decode_evidence_bundle_refuses_local_header_disagreement(
         )
 
 
-def test_decode_evidence_bundle_accepts_zero_local_sizes_with_data_descriptors(
+@pytest.fixture
+def evidence_bundle_data_descriptor_zip(
     evidence_bundle_records: dict[str, bytes],
-) -> None:
+) -> bytes:
     class NonSeekableBuffer(io.BytesIO):
         def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
             raise io.UnsupportedOperation("non-seekable ZIP output")
@@ -4191,7 +4192,15 @@ def test_decode_evidence_bundle_accepts_zero_local_sizes_with_data_descriptors(
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name, raw in records.items():
             archive.writestr(name, raw)
-    raw_zip = buffer.getvalue()
+    return buffer.getvalue()
+
+
+def test_decode_evidence_bundle_accepts_zero_local_sizes_with_data_descriptors(
+    evidence_bundle_records: dict[str, bytes],
+    evidence_bundle_data_descriptor_zip: bytes,
+) -> None:
+    records = evidence_bundle_records
+    raw_zip = evidence_bundle_data_descriptor_zip
     with zipfile.ZipFile(io.BytesIO(raw_zip)) as archive:
         for entry in archive.infolist():
             assert entry.flag_bits & 0x08
@@ -4204,6 +4213,51 @@ def test_decode_evidence_bundle_accepts_zero_local_sizes_with_data_descriptors(
         )
         == records
     )
+
+
+@pytest.mark.parametrize(
+    "violation", ["crc", "compressed_size", "raw_size", "truncated", "missing", "unsigned"]
+)
+def test_decode_evidence_bundle_checks_data_descriptor_metadata(
+    evidence_bundle_records: dict[str, bytes],
+    evidence_bundle_data_descriptor_zip: bytes,
+    violation: str,
+) -> None:
+    records = evidence_bundle_records
+    raw_zip = bytearray(evidence_bundle_data_descriptor_zip)
+    with zipfile.ZipFile(io.BytesIO(raw_zip)) as archive:
+        entry = archive.getinfo(_EVIDENCE_BUNDLE_MEMBERS[-1])
+    filename_length = int.from_bytes(
+        raw_zip[entry.header_offset + 26 : entry.header_offset + 28], "little"
+    )
+    extra_length = int.from_bytes(
+        raw_zip[entry.header_offset + 28 : entry.header_offset + 30], "little"
+    )
+    descriptor_offset = (
+        entry.header_offset + 30 + filename_length + extra_length + entry.compress_size
+    )
+    assert raw_zip[descriptor_offset : descriptor_offset + 4] == b"PK\x07\x08"
+    assert raw_zip[-22:-18] == b"PK\x05\x06"
+    central_offset = int.from_bytes(raw_zip[-6:-2], "little")
+    assert descriptor_offset + 16 == central_offset
+
+    if violation in ("crc", "compressed_size", "raw_size"):
+        offset = descriptor_offset + {"crc": 4, "compressed_size": 8, "raw_size": 12}[violation]
+        value = int.from_bytes(raw_zip[offset : offset + 4], "little") ^ 1
+        raw_zip[offset : offset + 4] = value.to_bytes(4, "little")
+    else:
+        removed = 16 if violation == "missing" else 4
+        offset = descriptor_offset + (12 if violation == "truncated" else 0)
+        del raw_zip[offset : offset + removed]
+        raw_zip[-6:-2] = (central_offset - removed).to_bytes(4, "little")
+
+    encoded = base64.b64encode(raw_zip).decode("ascii")
+    expected_sha256 = {name: _sha256_bytes(raw) for name, raw in records.items()}
+    if violation == "unsigned":
+        assert artifact_contract.decode_evidence_bundle(encoded, expected_sha256) == records
+    else:
+        with pytest.raises(ValueError):
+            artifact_contract.decode_evidence_bundle(encoded, expected_sha256)
 
 
 @pytest.mark.parametrize(

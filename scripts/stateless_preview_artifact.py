@@ -1038,6 +1038,30 @@ def decode_evidence_bundle(encoded: str, expected_sha256: Mapping[str, str]) -> 
                 payload_end = payload_start + entry.compress_size
                 if not 0 <= payload_start <= payload_end <= len(raw_zip):
                     _refuse("evidence bundle compressed payload is outside the archive")
+                if descriptor:
+                    next_boundary = min(
+                        [archive.start_dir]
+                        + [
+                            other.header_offset
+                            for other in members
+                            if other.header_offset > entry.header_offset
+                        ]
+                    )
+                    if not payload_end <= next_boundary <= len(raw_zip):
+                        _refuse("evidence bundle data descriptor is outside its member boundary")
+                    expected_descriptor = (entry.CRC, entry.compress_size, entry.file_size)
+                    unsigned = (
+                        payload_end + 12 == next_boundary
+                        and struct.unpack_from("<3I", raw_zip, payload_end) == expected_descriptor
+                    )
+                    signed = (
+                        payload_end + 16 == next_boundary
+                        and raw_zip[payload_end : payload_end + 4] == b"PK\x07\x08"
+                        and struct.unpack_from("<3I", raw_zip, payload_end + 4)
+                        == expected_descriptor
+                    )
+                    if not (unsigned or signed):
+                        _refuse("evidence bundle data descriptor is missing or inconsistent")
                 payload_ranges[entry.filename] = (payload_start, payload_end)
                 declared_total += entry.file_size
             if declared_total > _EVIDENCE_BUNDLE_MAX_TOTAL_BYTES:
