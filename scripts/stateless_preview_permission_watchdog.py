@@ -260,6 +260,7 @@ async def _run(repository: Path, *, observation_seconds: float = 120.0) -> int:
             # Request Job-wide termination at the cutoff, without a second observation wait.
             force_timeout=0.0,
         )
+        observation_deadline_reached = time.monotonic() >= deadline
     finally:
         try:
             # Snapshots, handle acquisition and handle waits share the cutoff + five seconds.
@@ -281,7 +282,7 @@ async def _run(repository: Path, *, observation_seconds: float = 120.0) -> int:
     if (
         observation.forced
         or observation.status is not DrainStatus.DRAINED
-        or time.monotonic() >= deadline
+        or observation_deadline_reached
     ):
         code = _finalize_timeout(repository, code)
     _allow_artifacts()

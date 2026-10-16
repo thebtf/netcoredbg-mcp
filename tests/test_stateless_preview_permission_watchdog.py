@@ -162,6 +162,25 @@ def test_timeout_finalization_failure_never_authorizes_artifact_reads(owned_run,
     assert [event[0] for event in owned_run.events] == ["launch", "observe", "close"]
 
 
+def test_predeadline_drain_preserves_qualification_when_cleanup_crosses_deadline(owned_run):
+    observe = owned_run.owner.drain_after_grace
+    close = owned_run.owner.aclose
+
+    async def observe_before_deadline(**kwargs):
+        owned_run.now[0] = 1119.9
+        return await observe(**kwargs)
+
+    async def close_after_deadline():
+        owned_run.now[0] = 1120.2
+        return await close()
+
+    owned_run.owner.drain_after_grace = observe_before_deadline
+    owned_run.owner.aclose = close_after_deadline
+
+    assert owned_run.run() == 0
+    assert [event[0] for event in owned_run.events] == ["launch", "observe", "close", "allow"]
+
+
 def test_exit_observed_at_deadline_cannot_preserve_qualification(owned_run):
     async def observe(**kwargs):
         owned_run.now[0] = 1120.0
