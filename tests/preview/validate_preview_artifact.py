@@ -18,6 +18,7 @@ import io
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -851,12 +852,21 @@ _PYTHON_ROLLBACK_PRODUCT_WORKS_MARKER = {
 
 def _run_python_rollback(command: str, arguments: Sequence[str]) -> dict[str, Any]:
     try:
+        resolved_command = shutil.which(command)
+        if resolved_command is None:
+            _refuse("unchanged Python rollback oracle could not run")
+        resolved_command = str(Path(resolved_command).absolute())
+        environment = os.environ.copy()
+        environment["PATH"] = (
+            str(Path(resolved_command).parent) + os.pathsep + environment.get("PATH", "")
+        )
         result = subprocess.run(
-            [command, *arguments],
+            [resolved_command, *arguments],
             cwd=_PROJECT_ROOT,
+            env=environment,
             capture_output=True,
             check=False,
-            timeout=30,
+            timeout=120,
         )
     except (OSError, subprocess.SubprocessError):
         _refuse("unchanged Python rollback oracle could not run")

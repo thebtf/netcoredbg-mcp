@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Preview artifact publishing preserves distinct preview/core assembly names during restore and publish, then renames only the published apphost to `netcoredbg-mcp-stateless-preview.exe`. The self-contained, single-file Windows x64 artifact contract and Python default remain unchanged.
+- The retained-preview validator resolves the selected rollback executable and prepends its directory only to the child PATH, preserving inherited entries and the parent environment. Its separate total-journey budget is 120 seconds to admit an observed 74.9-second retained-Python replay; per-call deadlines, the driver, package, and Python default remain unchanged. This controller correction is not a startup-performance fix or evidence that T014 passed.
 
 ## [0.23.14] - 2026-10-11
 

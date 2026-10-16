@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -2605,6 +2607,65 @@ def test_artifact_downloader_requires_candidate_payload_digest_after_member_hash
     assert not (root / "downloaded").exists()
 
 
+def test_python_rollback_controlled_child_prefers_selected_environment_helper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Controller-boundary proof only; this is not live Python PRODUCT_WORKS."""
+    # The existing interpreter doubles as the helper, avoiding a new environment.
+    command = Path(sys.executable).absolute()
+    ambient = tmp_path / "ambient"
+    ambient.mkdir()
+    ambient_helper = ambient / command.name
+    ambient_helper.write_bytes(b"ambient helper must not be selected\n")
+    ambient_helper.chmod(0o700)
+    inherited_helper = ambient / (
+        "a1-inherited-helper.exe" if os.name == "nt" else "a1-inherited-helper"
+    )
+    inherited_helper.write_bytes(b"inherited helper remains discoverable\n")
+    inherited_helper.chmod(0o700)
+    monkeypatch.setenv("PATH", str(ambient) + os.pathsep + os.environ.get("PATH", ""))
+    assert Path(shutil.which(command.name)).resolve() == ambient_helper.resolve()
+    parent_environment = dict(os.environ)
+    child = """
+import json
+import shutil
+import sys
+from pathlib import Path
+
+selected = shutil.which(sys.argv[1])
+assert selected is not None, "selected environment helper is unavailable"
+assert Path(selected).resolve() == Path(sys.argv[2]).resolve(), selected
+inherited = shutil.which(sys.argv[3])
+assert inherited is not None, "inherited PATH entries were discarded"
+assert Path(inherited).resolve() == Path(sys.argv[4]).resolve(), inherited
+print(json.dumps({
+    "product_works": True,
+    "denominator": "5/5",
+    "tool_count": 135,
+    "stopped_at_entry": True,
+}))
+"""
+
+    try:
+        result = preview_validator._run_python_rollback(
+            str(command),
+            [
+                "-I",
+                "-S",
+                "-c",
+                child,
+                command.name,
+                str(command),
+                inherited_helper.name,
+                str(inherited_helper),
+            ],
+        )
+    finally:
+        assert dict(os.environ) == parent_environment
+
+    assert result["legacy_journey_outcome"] == "PRODUCT_WORKS"
+
+
 def test_python_rollback_refuses_zero_exit_without_product_works_marker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2614,7 +2675,7 @@ def test_python_rollback_refuses_zero_exit_without_product_works_marker(
         preview_validator.subprocess,
         "run",
         lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            args=["consumer-python"],
+            args=[sys.executable],
             returncode=0,
             stdout=raw_output,
             stderr=b"",
@@ -2622,7 +2683,7 @@ def test_python_rollback_refuses_zero_exit_without_product_works_marker(
     )
 
     with pytest.raises(ValueError, match="did not emit PRODUCT_WORKS") as error:
-        preview_validator._run_python_rollback("consumer-python", ["consumer.py"])
+        preview_validator._run_python_rollback(sys.executable, ["consumer.py"])
 
     assert raw_output.decode("utf-8") not in str(error.value)
 
@@ -2641,14 +2702,14 @@ def test_python_rollback_records_product_works_after_observable_marker(
         preview_validator.subprocess,
         "run",
         lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            args=["consumer-python"],
+            args=[sys.executable],
             returncode=0,
             stdout=json.dumps(marker, sort_keys=True).encode("utf-8") + b"\n",
             stderr=b"",
         ),
     )
 
-    assert preview_validator._run_python_rollback("consumer-python", ["consumer.py"]) == {
+    assert preview_validator._run_python_rollback(sys.executable, ["consumer.py"]) == {
         "only_preview_selection_removed": True,
         "python_package_reinstalled": False,
         "python_package_replaced": False,

@@ -132,6 +132,20 @@ established `PRODUCT_WORKS` journey. The resulting receipt records that only
 preview selection was removed and that the Python package, console entry point,
 and default selector were unchanged.
 
+The controller resolves the supplied command with the supported executable lookup
+and prepends its directory to PATH only in the rollback child process. This makes
+the unchanged driver's parent-side console lookup select the retained environment
+before the MCP SDK applies its server environment. All inherited PATH entries and
+the controller's own environment remain unchanged; no wrapper or driver change is
+required.
+
+The full rollback journey has a separate 120-second process budget, including
+startup, the installed consumer journey, and shutdown. A correctly selected
+retained-environment replay completed in 74.9 seconds; the former 30-second total
+budget could not admit that valid journey. DAP/MCP per-call deadlines are unchanged.
+This budget change does not improve or diagnose startup performance, and does not
+itself prove T014: rerun the full retained-candidate matrix and unchanged oracle.
+
 Do not substitute a local candidate build, a source-bin executable, or a later
 artifact for this process. Do not treat a sealed retained-artifact receipt as
 publication authority: T014 remains the separate live retained-candidate
