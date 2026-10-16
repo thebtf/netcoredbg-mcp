@@ -2579,65 +2579,21 @@ def test_unified_v3_pass_refuses_blocking_findings_or_hotspots(
         validator(receipt)
 
 
-def test_artifact_downloader_hashes_wire_bytes_before_exclusive_retention(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "fresh-download"
-    root.mkdir()
-    member = b"retained payload member"
-    wire_bytes = _validator_wire_zip(tmp_path, {"payload.zip": member})
-    reference = _validator_artifact_reference(
-        artifact_sha256=_sha256_bytes(wire_bytes),
-        path="payload.zip",
-        sha256=_sha256_bytes(member),
-    )
-    downloader = artifact_contract.ArtifactDownloader(root)
-    archive_path = root / "artifacts" / f"{reference.artifact_id}-{reference.artifact_sha256}.zip"
-    events: list[str] = []
-    original_hash = artifact_contract._sha256_bytes
-    original_mkdir = Path.mkdir
-    original_open = Path.open
-
-    def track_hash(value: bytes) -> str:
-        if value == wire_bytes:
-            events.append("wire-hash")
-        return original_hash(value)
-
-    def track_mkdir(
-        path: Path,
-        mode: int = 0o777,
-        parents: bool = False,
-        exist_ok: bool = False,
-    ) -> None:
-        if path == archive_path.parent:
-            events.append("archive-directory")
-        original_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
-
-    def track_open(path: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
-        if path == archive_path and mode == "xb":
-            events.append("exclusive-write")
-        return original_open(path, mode, *args, **kwargs)
-
-    def fetch_wire(arguments: Any, name: str) -> bytes:
-        assert name == "retained artifact"
-        assert arguments == [
-            "api",
-            f"repos/{reference.repository}/actions/artifacts/{reference.artifact_id}/zip",
-        ]
-        assert not archive_path.parent.exists()
-        return wire_bytes
-
-    monkeypatch.setattr(downloader, "_metadata", lambda _: None)
-    monkeypatch.setattr(downloader, "_run_gh", fetch_wire)
-    monkeypatch.setattr(artifact_contract, "_sha256_bytes", track_hash)
-    monkeypatch.setattr(Path, "mkdir", track_mkdir)
-    monkeypatch.setattr(Path, "open", track_open)
-
-    retained_path = downloader.download_file(reference)
-
-    assert events == ["wire-hash", "archive-directory", "exclusive-write"]
-    assert archive_path.read_bytes() == wire_bytes
-    assert retained_path.read_bytes() == member
+def _artifact_transport_responses(reference: Any, wire_bytes: bytes) -> dict[str, bytes]:
+    endpoint = f"repos/{reference.repository}/actions/artifacts/{reference.artifact_id}"
+    return {
+        endpoint: _canonical_json_bytes(
+            {
+                "id": int(reference.artifact_id),
+                "name": reference.artifact_name,
+                "expired": False,
+                "digest": f"sha256:{reference.artifact_sha256}",
+                "expires_at": reference.expires_at,
+                "workflow_run": {"id": int(reference.run_id)},
+            }
+        ),
+        f"{endpoint}/zip": wire_bytes,
+    }
 
 
 def test_artifact_downloader_refuses_preexisting_destination_without_caching(
@@ -2657,14 +2613,15 @@ def test_artifact_downloader_refuses_preexisting_destination_without_caching(
     archive_path.write_bytes(b"planted archive")
     downloader = artifact_contract.ArtifactDownloader(root)
 
-    monkeypatch.setattr(downloader, "_metadata", lambda _: None)
-    monkeypatch.setattr(downloader, "_run_gh", lambda *_: wire_bytes)
+    responses = _artifact_transport_responses(reference, wire_bytes)
+    monkeypatch.setattr(downloader, "_run_gh", lambda arguments, _: responses[arguments[1]])
 
-    with pytest.raises(ValueError, match="destination already exists"):
-        downloader.download_file(reference)
+    for _ in range(2):
+        with pytest.raises(ValueError, match="destination already exists"):
+            downloader.download_file(reference)
 
     assert archive_path.read_bytes() == b"planted archive"
-    assert downloader._archives == {}
+    assert not (root / "downloaded").exists()
 
 
 def test_artifact_downloader_refuses_racing_destination_without_caching(
@@ -2692,16 +2649,17 @@ def test_artifact_downloader_refuses_racing_destination_without_caching(
                 planted.write(b"raced archive")
         return original_open(path, mode, *args, **kwargs)
 
-    monkeypatch.setattr(downloader, "_metadata", lambda _: None)
-    monkeypatch.setattr(downloader, "_run_gh", lambda *_: wire_bytes)
+    responses = _artifact_transport_responses(reference, wire_bytes)
+    monkeypatch.setattr(downloader, "_run_gh", lambda arguments, _: responses[arguments[1]])
     monkeypatch.setattr(Path, "open", race_open)
 
-    with pytest.raises(ValueError, match="destination already exists"):
-        downloader.download_file(reference)
+    for _ in range(2):
+        with pytest.raises(ValueError, match="destination already exists"):
+            downloader.download_file(reference)
 
     assert race_injected
     assert archive_path.read_bytes() == b"raced archive"
-    assert downloader._archives == {}
+    assert not (root / "downloaded").exists()
 
 
 def test_artifact_downloader_refuses_mismatched_wire_digest_before_retention(
@@ -2718,14 +2676,14 @@ def test_artifact_downloader_refuses_mismatched_wire_digest_before_retention(
     )
     downloader = artifact_contract.ArtifactDownloader(root)
 
-    monkeypatch.setattr(downloader, "_metadata", lambda _: None)
-    monkeypatch.setattr(downloader, "_run_gh", lambda *_: wire_bytes)
+    responses = _artifact_transport_responses(reference, wire_bytes)
+    monkeypatch.setattr(downloader, "_run_gh", lambda arguments, _: responses[arguments[1]])
 
     with pytest.raises(ValueError, match="wire bytes"):
         downloader.download_file(reference)
 
     assert not (root / "artifacts").exists()
-    assert downloader._archives == {}
+    assert not (root / "downloaded").exists()
 
 
 def test_artifact_downloader_refuses_tampered_cached_wire_before_member_read(
@@ -2751,16 +2709,10 @@ def test_artifact_downloader_refuses_tampered_cached_wire_before_member_read(
         sha256=_sha256_bytes(manifest_member),
     )
     downloader = artifact_contract.ArtifactDownloader(root)
-    requests: list[Any] = []
+    responses = _artifact_transport_responses(archive_reference, wire_bytes)
+    monkeypatch.setattr(downloader, "_run_gh", lambda arguments, _: responses[arguments[1]])
 
-    def fetch_wire(arguments: Any, _: str) -> bytes:
-        requests.append(arguments)
-        return wire_bytes
-
-    monkeypatch.setattr(downloader, "_metadata", lambda _: None)
-    monkeypatch.setattr(downloader, "_run_gh", fetch_wire)
-
-    downloader.download_file(archive_reference)
+    assert downloader.download_file(archive_reference).read_bytes() == archive_member
     cached_path = root / "artifacts" / f"{archive_reference.artifact_id}-{wire_sha256}.zip"
     cached_path.write_bytes(
         _validator_wire_zip(
@@ -2772,7 +2724,7 @@ def test_artifact_downloader_refuses_tampered_cached_wire_before_member_read(
     with pytest.raises(ValueError, match="cached retained artifact"):
         downloader.download_file(manifest_reference)
 
-    assert len(requests) == 1
+    assert not (root / "downloaded" / "payload.manifest.json").exists()
 
 
 def test_artifact_downloader_retains_payload_after_distinct_digest_checks(
@@ -2800,8 +2752,8 @@ def test_artifact_downloader_retains_payload_after_distinct_digest_checks(
     )
     downloader = artifact_contract.ArtifactDownloader(root)
 
-    monkeypatch.setattr(downloader, "_metadata", lambda _: None)
-    monkeypatch.setattr(downloader, "_run_gh", lambda *_: wire_bytes)
+    responses = _artifact_transport_responses(archive_reference, wire_bytes)
+    monkeypatch.setattr(downloader, "_run_gh", lambda arguments, _: responses[arguments[1]])
 
     archive_path, manifest_path = downloader.download_payload(
         archive_reference,
@@ -2812,6 +2764,8 @@ def test_artifact_downloader_retains_payload_after_distinct_digest_checks(
     assert wire_sha256 != candidate_payload_digest
     assert archive_path.read_bytes() == archive_member
     assert manifest_path.read_bytes() == manifest_member
+    retained_wire = root / "artifacts" / f"{archive_reference.artifact_id}-{wire_sha256}.zip"
+    assert retained_wire.read_bytes() == wire_bytes
 
 
 def test_artifact_downloader_requires_candidate_payload_digest_after_member_hashes(
@@ -2839,8 +2793,8 @@ def test_artifact_downloader_requires_candidate_payload_digest_after_member_hash
     )
     downloader = artifact_contract.ArtifactDownloader(root)
 
-    monkeypatch.setattr(downloader, "_metadata", lambda _: None)
-    monkeypatch.setattr(downloader, "_run_gh", lambda *_: wire_bytes)
+    responses = _artifact_transport_responses(archive_reference, wire_bytes)
+    monkeypatch.setattr(downloader, "_run_gh", lambda arguments, _: responses[arguments[1]])
 
     with pytest.raises(ValueError, match="candidate artifact"):
         downloader.download_payload(
@@ -4590,3 +4544,997 @@ def test_remote_observation_semantics_outputs_are_detached_and_deeply_immutable(
         sealed["asset_observations"]["archive"]["metadata"]["size_bytes"] = 1
     with pytest.raises(TypeError):
         classified["reason_codes"].append("TAG_ABSENT")
+
+
+class _EvidenceWorkflowCli:
+    """Real CLI/files/sealers with only the GitHub process/HTTP edge simulated."""
+
+    def __init__(
+        self, inputs: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.root = tmp_path / "checkout"
+        shutil.copytree(inputs["repository_root"], self.root)
+        self.runner = tmp_path / "runner"
+        self.runner.mkdir()
+        self.event_path = tmp_path / "event.json"
+        self.output_path = tmp_path / "github-output"
+        self.summary_path = tmp_path / "github-summary"
+        self.artifacts: dict[str, dict[str, Any]] = {}
+        self.requests: list[str] = []
+        self.clock = "2029-01-01T00:00:00Z"
+        self.identity = deepcopy(inputs["candidate_identity"])
+        candidate = self.identity["candidate"]
+        candidate["build"]["artifact"]["name"] = f"stateless-preview-payload-{VERSION}-101-1"
+        self.identity_bytes = _canonical_json_bytes(self.identity)
+        self.source_commit = candidate["source"]["commit"]
+        principal = {"id": 7106373, "login": "thebtf"}
+        repository = {"id": 4001, "full_name": REPOSITORY}
+        self.runs = {
+            run_id: {
+                "id": int(run_id),
+                "run_attempt": attempt,
+                "event": "workflow_dispatch",
+                "path": ".github/workflows/stateless-preview.yml",
+                "head_branch": "main",
+                "head_sha": self.source_commit,
+                "status": status,
+                "conclusion": conclusion,
+                "actor": dict(principal),
+                "triggering_actor": dict(principal),
+                "repository": dict(repository),
+                "head_repository": dict(repository),
+                "created_at": created_at,
+                "updated_at": created_at,
+            }
+            for run_id, attempt, status, conclusion, created_at in (
+                ("101", 1, "completed", "success", "2028-01-01T00:00:00Z"),
+                ("201", 2, "in_progress", None, self.clock),
+            )
+        }
+        self.jobs = {
+            "101": {
+                "total_count": 1,
+                "jobs": [
+                    {
+                        "id": 1001,
+                        "run_id": 101,
+                        "run_attempt": 1,
+                        "head_sha": self.source_commit,
+                        "name": "Build canonical-main preview candidate",
+                        "status": "completed",
+                        "conclusion": "success",
+                        "completed_at": "2028-01-01T00:01:00Z",
+                    }
+                ],
+            }
+        }
+        retained = inputs["repository_root"].parent / "retained"
+        manifest = candidate["preview_manifest"]
+        self.add_artifact(
+            "501",
+            candidate["build"]["artifact"]["name"],
+            "101",
+            {
+                manifest["archive_reference"]["path"]: (
+                    retained / manifest["archive_reference"]["path"]
+                ).read_bytes(),
+                manifest["manifest_reference"]["path"]: (
+                    retained / manifest["manifest_reference"]["path"]
+                ).read_bytes(),
+            },
+        )
+        identity_reference = self.add_artifact(
+            "601",
+            f"stateless-preview-candidate-identity-{VERSION}-101-1",
+            "101",
+            {"candidate-identity.json": self.identity_bytes},
+        )
+        self.catalog = deepcopy(inputs["catalog"])
+        self.catalog["catalog"]["resolved_at"] = "2028-01-01T00:02:00Z"
+        catalog_reference = self.add_artifact(
+            "701",
+            f"stateless-preview-release-gate-catalog-{VERSION}-101-1",
+            "101",
+            {"release-gate-catalog.json": _canonical_json_bytes(self.catalog)},
+        )
+        compact_identity = self.compact(identity_reference)
+        binding = {
+            "candidate_identity_record": compact_identity,
+            "candidate_identity_record_sha256": identity_reference["sha256"],
+            "candidate": candidate,
+        }
+        consumer = deepcopy(inputs["consumer"])
+        consumer.update(
+            {
+                "candidate_identity_record": deepcopy(identity_reference),
+                "candidate": deepcopy(candidate),
+                "recorded_at": "2028-01-02T00:00:00Z",
+            }
+        )
+        consumer["download_origin"]["artifact"] = deepcopy(candidate["build"]["artifact"])
+        aggregate = deepcopy(inputs["aggregate"])
+        aggregate.update(deepcopy(binding))
+        aggregate["sealed_at"] = "2028-01-03T00:00:00Z"
+        for lens in aggregate["lens_results"]:
+            lens.update(deepcopy(binding))
+            lens["recorded_at"] = "2028-01-02T00:01:00Z"
+        review = deepcopy(inputs["pr_review"])
+        review.update(deepcopy(binding))
+        review["recorded_at"] = "2028-01-04T00:00:00Z"
+        self.records = {
+            name: (json.dumps(record, ensure_ascii=False, indent=1) + "\r\n").encode("utf-8")
+            for name, record in (
+                ("consumer-proof.json", consumer),
+                ("s2-s3-review.json", aggregate),
+                ("independent-pr-review.json", review),
+            )
+        }
+        self.request = {
+            "candidate_identity_reference": identity_reference,
+            "release_gate_catalog_reference": catalog_reference,
+            "bundle_base64": "",
+            "record_sha256": {},
+            "decision": "DECLINE",
+            "authorized_dispatcher": {"id": "17", "login": "release-bot"},
+            "retention_days": "7",
+        }
+        self.inputs: dict[str, Any] = {
+            "mode": "evidence",
+            "evidence_operation": "retain",
+            "evidence_request": "",
+        }
+        self.sync_request()
+        self.event = {
+            "inputs": self.inputs,
+            "ref": "main",
+            "repository": dict(repository),
+            "sender": dict(principal),
+        }
+        environment = {
+            **_build_environment(self.source_commit),
+            "GITHUB_WORKFLOW_SHA": self.source_commit,
+            "GITHUB_RUN_ID": "201",
+            "GITHUB_RUN_ATTEMPT": "2",
+            "GITHUB_REPOSITORY_ID": "4001",
+            "GITHUB_ACTOR": "thebtf",
+            "GITHUB_ACTOR_ID": "7106373",
+            "GITHUB_TRIGGERING_ACTOR": "thebtf",
+            "GITHUB_JOB": "retain_evidence",
+            "GITHUB_TOKEN": "test-only-token",
+            "GITHUB_EVENT_PATH": str(self.event_path),
+            "GITHUB_OUTPUT": str(self.output_path),
+            "GITHUB_STEP_SUMMARY": str(self.summary_path),
+            "RUNNER_TEMP": str(self.runner),
+        }
+        for name in tuple(os.environ):
+            if name.startswith(("A1_", "GITHUB_")):
+                monkeypatch.delenv(name)
+        for name, value in environment.items():
+            monkeypatch.setenv(name, value)
+        self.environment = os.environ
+        monkeypatch.chdir(self.root)
+        original_run = subprocess.run
+
+        def process(command: Any, *args: Any, **kwargs: Any) -> Any:
+            if command[0] == "git":
+                assert command[1] in ("rev-parse", "cat-file", "show", "merge-base")
+                return original_run(command, *args, **kwargs)
+            assert command[0] == "gh", f"unexpected build/publish process: {command}"
+            assert command[1] == "api", f"unexpected GitHub mutation: {command}"
+            assert not any(
+                value in command for value in ("POST", "PUT", "PATCH", "DELETE", "-f", "-F")
+            )
+            endpoint = next(value for value in command[2:] if value.startswith("repos/"))
+            return subprocess.CompletedProcess(command, 0, self.response(endpoint), b"")
+
+        def http(request: Any, *args: Any, **kwargs: Any) -> io.BytesIO:
+            assert request.get_method() == "GET"
+            prefix = "https://api.github.com/"
+            assert request.full_url.startswith(prefix)
+            return io.BytesIO(self.response(request.full_url.removeprefix(prefix)))
+
+        real_datetime = artifact_contract.datetime
+        workflow = self
+
+        class WorkflowClock(real_datetime):
+            @classmethod
+            def now(cls, tz: Any = None) -> Any:
+                instant = real_datetime.fromisoformat(workflow.clock.replace("Z", "+00:00"))
+                return instant.astimezone(tz) if tz is not None else instant.replace(tzinfo=None)
+
+        monkeypatch.setattr(artifact_contract.subprocess, "run", process)
+        monkeypatch.setattr(artifact_contract, "urlopen", http)
+        monkeypatch.setattr(artifact_contract, "datetime", WorkflowClock)
+
+    @staticmethod
+    def compact(reference: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            **{key: reference[key] for key in ("repository", "run_id", "path", "sha256")},
+            "artifact_id": reference["artifact"]["id"],
+        }
+
+    def add_artifact(
+        self, artifact_id: str, name: str, run_id: str, members: Mapping[str, bytes]
+    ) -> dict[str, Any]:
+        wire = _evidence_bundle_zip(list(members.items()))
+        run = self.runs[run_id]
+        self.artifacts[artifact_id] = {
+            "wire": wire,
+            "members": dict(members),
+            "metadata": {
+                "id": int(artifact_id),
+                "name": name,
+                "expired": False,
+                "digest": f"sha256:{_sha256_bytes(wire)}",
+                "expires_at": "2030-01-01T00:00:00Z",
+                "created_at": run["created_at"],
+                "workflow_run": {
+                    "id": int(run_id),
+                    "repository_id": 4001,
+                    "head_repository_id": 4001,
+                    "head_branch": "main",
+                    "head_sha": self.source_commit,
+                },
+            },
+        }
+        path, raw = next(iter(members.items()))
+        return {
+            "repository": REPOSITORY,
+            "run_id": run_id,
+            "artifact": {
+                "id": artifact_id,
+                "name": name,
+                "sha256": _sha256_bytes(wire),
+                "retention": {"configured_days": 7, "expires_at": "2030-01-01T00:00:00Z"},
+            },
+            "path": path,
+            "sha256": _sha256_bytes(raw),
+        }
+
+    def response(self, endpoint: str) -> bytes:
+        self.requests.append(endpoint)
+        prefix = f"repos/{REPOSITORY}/actions/"
+        assert endpoint.startswith(prefix), f"unexpected GitHub target: {endpoint}"
+        route = endpoint.removeprefix(prefix).partition("?")[0].split("/")
+        if route[0] == "artifacts":
+            artifact = self.artifacts[route[1]]
+            if route[2:] == ["zip"]:
+                return artifact["wire"]
+            assert len(route) == 2
+            return _canonical_json_bytes(artifact["metadata"])
+        assert route[0] == "runs", f"unexpected GitHub effect: {endpoint}"
+        if len(route) == 2:
+            return _canonical_json_bytes(self.runs[route[1]])
+        if len(route) == 4 and route[2] == "attempts":
+            return _canonical_json_bytes(self.runs[route[1]])
+        assert route[-1] == "jobs"
+        if "attempts" in route:
+            assert route[3] in ("1", "2")
+        return _canonical_json_bytes(self.jobs[route[1]])
+
+    def sync_request(self) -> None:
+        self.request["bundle_base64"] = base64.b64encode(
+            _evidence_bundle_zip(list(self.records.items()))
+        ).decode("ascii")
+        self.request["record_sha256"] = {
+            name: _sha256_bytes(raw) for name, raw in self.records.items()
+        }
+        self.inputs["evidence_request"] = json.dumps(self.request, ensure_ascii=False)
+
+    def replace_catalog(self) -> None:
+        reference = self.request["release_gate_catalog_reference"]
+        self.request["release_gate_catalog_reference"] = self.add_artifact(
+            reference["artifact"]["id"],
+            reference["artifact"]["name"],
+            "101",
+            {"release-gate-catalog.json": _canonical_json_bytes(self.catalog)},
+        )
+        self.sync_request()
+
+    def invoke(self, command: str) -> int:
+        self.event_path.write_text(json.dumps(self.event), encoding="utf-8")
+        self.output_path.write_text("", encoding="utf-8")
+        self.summary_path.touch(exist_ok=True)
+        return artifact_contract.main([command])
+
+    def outputs(self) -> dict[str, str]:
+        return dict(
+            line.split("=", 1) for line in self.output_path.read_text(encoding="utf-8").splitlines()
+        )
+
+    def upload(
+        self, kind: str, admission: Mapping[str, str], members: Mapping[str, bytes]
+    ) -> dict[str, Any]:
+        artifact_id = {"records": "901", "stage": "902", "decision": "903"}[kind]
+        reference = self.add_artifact(
+            artifact_id, admission[f"{kind}_artifact_name"], "201", members
+        )
+        prefix = f"A1_EVIDENCE_{kind.upper()}_ARTIFACT"
+        self.environment[f"{prefix}_ID"] = artifact_id
+        self.environment[f"{prefix}_DIGEST"] = reference["artifact"]["sha256"]
+        return reference
+
+    def assert_not_staged(self) -> None:
+        assert self.output_path.read_bytes() == b""
+        for name in (*self.records, "pre-decision-stage.json", "promotion-decision.json"):
+            assert not list(self.runner.rglob(name)), f"refused evidence was staged: {name}"
+        assert not (self.root / "artifacts" / "stateless-preview").exists()
+
+
+@pytest.fixture
+def evidence_workflow_cli(
+    semantic_review_inputs: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> _EvidenceWorkflowCli:
+    return _EvidenceWorkflowCli(semantic_review_inputs, tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize("mode", [None, "build"], ids=["legacy-three-inputs", "explicit-build"])
+def test_evidence_cli_preserves_legacy_build_dispatch(
+    evidence_workflow_cli: _EvidenceWorkflowCli, mode: str | None
+) -> None:
+    cli = evidence_workflow_cli
+    cli.inputs.clear()
+    cli.inputs.update(preview_version=VERSION, preview_tag=TAG, retention_days="7")
+    if mode is not None:
+        cli.inputs.update(mode=mode, evidence_operation="", evidence_request="")
+
+    assert cli.invoke("admit-build") == 0
+
+    assert cli.outputs() == {
+        "preview_version": VERSION,
+        "preview_tag": TAG,
+        "retention_days": "7",
+        "payload_artifact_name": f"stateless-preview-payload-{VERSION}-201-2",
+        "candidate_identity_artifact_name": f"stateless-preview-candidate-identity-{VERSION}-201-2",
+        "release_gate_catalog_artifact_name": f"stateless-preview-release-gate-catalog-{VERSION}-201-2",
+    }
+    assert not list(cli.runner.iterdir())
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "unknown-mode",
+        "empty-mode",
+        "build-with-evidence",
+        "unknown-input",
+        "env-event-drift",
+        "unknown-operation",
+        "missing-operation",
+        "retain-with-build",
+        "retain-without-request",
+        "probe-with-request",
+        "probe-with-build",
+        "build-command-for-evidence",
+        "evidence-command-for-build",
+    ],
+)
+def test_evidence_cli_refuses_unclosed_or_cross_mode_dispatch(
+    evidence_workflow_cli: _EvidenceWorkflowCli, violation: str
+) -> None:
+    cli = evidence_workflow_cli
+    build = {"preview_version": VERSION, "preview_tag": TAG, "retention_days": "7"}
+    command = "admit-evidence"
+    if violation in {
+        "unknown-mode",
+        "empty-mode",
+        "build-with-evidence",
+        "unknown-input",
+        "env-event-drift",
+    }:
+        cli.inputs.clear()
+        cli.inputs.update(build)
+        command = "admit-build"
+    if violation == "unknown-mode":
+        cli.inputs["mode"] = "promote"
+    elif violation == "empty-mode":
+        cli.inputs["mode"] = ""
+    elif violation == "build-with-evidence":
+        cli.inputs["evidence_operation"] = "retain"
+    elif violation == "unknown-input":
+        cli.inputs["source_commit"] = cli.source_commit
+    elif violation == "env-event-drift":
+        cli.inputs["preview_version"] = "9.9.9-preview.1"
+    elif violation == "unknown-operation":
+        cli.inputs["evidence_operation"] = "publish"
+    elif violation == "missing-operation":
+        del cli.inputs["evidence_operation"]
+    elif violation == "retain-with-build":
+        cli.inputs.update(build)
+    elif violation == "retain-without-request":
+        del cli.inputs["evidence_request"]
+    elif violation == "probe-with-request":
+        cli.inputs["evidence_operation"] = "permission-probe"
+    elif violation == "probe-with-build":
+        cli.inputs.clear()
+        cli.inputs.update(mode="evidence", evidence_operation="permission-probe", **build)
+    elif violation == "build-command-for-evidence":
+        command = "admit-build"
+    elif violation == "evidence-command-for-build":
+        cli.inputs.clear()
+        cli.inputs.update(build)
+
+    assert cli.invoke(command) == 1
+    cli.assert_not_staged()
+
+
+def test_evidence_cli_refuses_unknown_command_without_effects(
+    evidence_workflow_cli: _EvidenceWorkflowCli,
+) -> None:
+    cli = evidence_workflow_cli
+    with pytest.raises(SystemExit) as error:
+        cli.invoke("promote")
+    assert error.value.code == 2
+    cli.assert_not_staged()
+    assert cli.requests == []
+
+
+@pytest.mark.parametrize("escaped_size", [65400, 65536], ids=["within-budget", "escaped-overflow"])
+def test_evidence_cli_bounds_the_entire_escaped_inputs_payload(
+    evidence_workflow_cli: _EvidenceWorkflowCli, escaped_size: int
+) -> None:
+    cli = evidence_workflow_cli
+    initial = len(json.dumps(cli.inputs, ensure_ascii=True, separators=(",", ":")).encode("ascii"))
+    padding = escaped_size - initial
+    assert padding > 0
+    cli.inputs["evidence_request"] = (
+        "\t" * (padding // 2) + " " * (padding % 2) + cli.inputs["evidence_request"]
+    )
+    assert (
+        len(json.dumps(cli.inputs, ensure_ascii=True, separators=(",", ":")).encode("ascii"))
+        == escaped_size
+    )
+    assert len(cli.inputs["evidence_request"]) < 65535
+
+    assert cli.invoke("admit-evidence") == (0 if escaped_size <= 65535 else 1)
+    if escaped_size > 65535:
+        cli.assert_not_staged()
+    else:
+        assert set(cli.outputs()) == {
+            "records_directory",
+            "stage_path",
+            "decision_path",
+            "records_artifact_name",
+            "stage_artifact_name",
+            "decision_artifact_name",
+            "retention_days",
+        }
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "missing-decision",
+        "empty-decision",
+        "unknown-request-field",
+        "caller-author",
+        "unbounded-retention",
+    ],
+)
+def test_evidence_cli_requires_closed_explicit_decision_request(
+    evidence_workflow_cli: _EvidenceWorkflowCli, violation: str
+) -> None:
+    cli = evidence_workflow_cli
+    if violation == "missing-decision":
+        del cli.request["decision"]
+    elif violation == "empty-decision":
+        cli.request["decision"] = ""
+    elif violation == "unknown-request-field":
+        cli.request["download_url"] = "https://untrusted.example/evidence.zip"
+    elif violation == "caller-author":
+        cli.request["decision_author"] = {"id": "7106373", "login": "thebtf"}
+    else:
+        cli.request["retention_days"] = "91"
+    cli.sync_request()
+
+    assert cli.invoke("admit-evidence") == 1
+    cli.assert_not_staged()
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "actor-id",
+        "actor-login",
+        "actor-id-type",
+        "event-sender",
+        "runner-actor-id",
+        "rerun-id",
+        "rerun-login",
+        "current-attempt",
+        "workflow-source",
+    ],
+)
+def test_evidence_cli_binds_authenticated_actor_and_rerun_context(
+    evidence_workflow_cli: _EvidenceWorkflowCli, violation: str
+) -> None:
+    cli = evidence_workflow_cli
+    run = cli.runs["201"]
+    if violation == "actor-id":
+        run["actor"]["id"] = 17
+    elif violation == "actor-login":
+        run["actor"]["login"] = "impostor"
+    elif violation == "actor-id-type":
+        run["actor"]["id"] = True
+    elif violation == "event-sender":
+        cli.event["sender"]["id"] = 17
+    elif violation == "runner-actor-id":
+        cli.environment["GITHUB_ACTOR_ID"] = "17"
+    elif violation == "rerun-id":
+        run["triggering_actor"]["id"] = 17
+    elif violation == "rerun-login":
+        run["triggering_actor"]["login"] = "impostor"
+        cli.environment["GITHUB_TRIGGERING_ACTOR"] = "impostor"
+    elif violation == "current-attempt":
+        run["run_attempt"] = 1
+    else:
+        cli.environment["GITHUB_WORKFLOW_SHA"] = "a" * 40
+
+    assert cli.invoke("admit-evidence") == 1
+    cli.assert_not_staged()
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "incomplete",
+        "failed",
+        "repository",
+        "fork",
+        "attempt",
+        "sha",
+        "workflow",
+        "build-job-failed",
+        "build-job-attempt",
+        "candidate-artifact-owner",
+        "catalog-artifact-owner",
+    ],
+)
+def test_evidence_cli_requires_successful_exact_owned_source_build(
+    evidence_workflow_cli: _EvidenceWorkflowCli, violation: str
+) -> None:
+    cli = evidence_workflow_cli
+    run = cli.runs["101"]
+    if violation == "incomplete":
+        run.update(status="in_progress", conclusion=None)
+    elif violation == "failed":
+        run["conclusion"] = "failure"
+    elif violation == "repository":
+        run["repository"]["full_name"] = "other/netcoredbg-mcp"
+    elif violation == "fork":
+        run["head_repository"] = {"id": 4002, "full_name": "fork/netcoredbg-mcp"}
+    elif violation == "attempt":
+        run["run_attempt"] = 2
+    elif violation == "sha":
+        run["head_sha"] = "a" * 40
+    elif violation == "workflow":
+        run["path"] = ".github/workflows/other.yml"
+    elif violation == "build-job-failed":
+        cli.jobs["101"]["jobs"][0]["conclusion"] = "failure"
+    elif violation == "build-job-attempt":
+        cli.jobs["101"]["jobs"][0]["run_attempt"] = 2
+    else:
+        artifact_id = "601" if violation == "candidate-artifact-owner" else "701"
+        cli.artifacts[artifact_id]["metadata"]["workflow_run"]["id"] = 999
+
+    assert cli.invoke("admit-evidence") == 1
+    cli.assert_not_staged()
+
+
+def test_evidence_cli_refuses_last_lens_predating_source_build_before_e0_staging(
+    evidence_workflow_cli: _EvidenceWorkflowCli,
+) -> None:
+    cli = evidence_workflow_cli
+    name = "s2-s3-review.json"
+    aggregate = json.loads(cli.records[name])
+    assert len(aggregate["lens_results"]) == 7
+    aggregate["lens_results"][-1]["recorded_at"] = "2028-01-01T00:00:59Z"
+    assert (
+        aggregate["lens_results"][-1]["recorded_at"]
+        < cli.jobs["101"]["jobs"][0]["completed_at"]
+        < aggregate["sealed_at"]
+    )
+    cli.records[name] = _canonical_json_bytes(aggregate)
+    cli.sync_request()
+
+    assert cli.invoke("admit-evidence") == 1
+    cli.assert_not_staged()
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "catalog-snapshot",
+        "catalog-closure",
+        "consumer-matrix",
+        "missing-lens",
+        "self-review",
+        "false-review-denominator",
+    ],
+)
+def test_evidence_cli_refuses_false_semantics_before_e0_staging(
+    evidence_workflow_cli: _EvidenceWorkflowCli, violation: str
+) -> None:
+    cli = evidence_workflow_cli
+    if violation.startswith("catalog-"):
+        if violation == "catalog-snapshot":
+            cli.catalog["catalog"]["policy_authority_snapshots"][0]["sha256"] = "0" * 64
+        else:
+            cli.catalog["catalog"]["gate_descriptors"].pop()
+        cli.replace_catalog()
+    else:
+        name = {
+            "consumer-matrix": "consumer-proof.json",
+            "missing-lens": "s2-s3-review.json",
+            "self-review": "independent-pr-review.json",
+            "false-review-denominator": "independent-pr-review.json",
+        }[violation]
+        record = json.loads(cli.records[name])
+        if violation == "consumer-matrix":
+            record["scenario_matrix"]["results"].pop()
+        elif violation == "missing-lens":
+            record["lens_results"].pop()
+        elif violation == "self-review":
+            record["reviewer_provenance"]["reviewer_principal_id"] = record["reviewer_provenance"][
+                "reviewed_author_principal_id"
+            ]
+        else:
+            record["checks"] = []
+        cli.records[name] = _canonical_json_bytes(record)
+        cli.sync_request()
+
+    assert cli.invoke("admit-evidence") == 1
+    cli.assert_not_staged()
+
+
+@pytest.mark.parametrize(
+    "command", ["seal-evidence-stage", "seal-evidence-decision", "verify-evidence-retention"]
+)
+def test_evidence_cli_requires_real_predecessor_upload(
+    evidence_workflow_cli: _EvidenceWorkflowCli, command: str
+) -> None:
+    cli = evidence_workflow_cli
+    assert cli.invoke("admit-evidence") == 0
+    admission = cli.outputs()
+
+    assert cli.invoke(command) == 1
+    assert not Path(admission["stage_path"]).exists()
+    assert not Path(admission["decision_path"]).exists()
+    assert set(cli.artifacts) == {"501", "601", "701"}
+
+
+def test_evidence_cli_retains_decline_through_independent_three_artifact_readback(
+    evidence_workflow_cli: _EvidenceWorkflowCli,
+) -> None:
+    cli = evidence_workflow_cli
+    originals = dict(cli.records)
+    assert cli.invoke("admit-evidence") == 0
+    admission = cli.outputs()
+    assert set(admission) == {
+        "records_directory",
+        "stage_path",
+        "decision_path",
+        "records_artifact_name",
+        "stage_artifact_name",
+        "decision_artifact_name",
+        "retention_days",
+    }
+    assert admission["retention_days"] == "7"
+    assert (
+        len({admission[f"{kind}_artifact_name"] for kind in ("records", "stage", "decision")}) == 3
+    )
+    records_directory = Path(admission["records_directory"])
+    stage_path = Path(admission["stage_path"])
+    decision_path = Path(admission["decision_path"])
+    assert stage_path.name == "pre-decision-stage.json"
+    assert decision_path.name == "promotion-decision.json"
+    for path in (records_directory, stage_path, decision_path):
+        assert path.resolve().is_relative_to(cli.runner.resolve())
+    assert {path.name: path.read_bytes() for path in records_directory.iterdir()} == originals
+    assert not stage_path.exists() and not decision_path.exists()
+    records_reference = cli.upload("records", admission, originals)
+    for path in records_directory.iterdir():
+        path.write_bytes(b"local bytes are not retained evidence\n")
+
+    cli.clock = "2029-01-01T00:00:01Z"
+    assert cli.invoke("seal-evidence-stage") == 0
+    stage_bytes = stage_path.read_bytes()
+    stage = json.loads(stage_bytes)
+    descriptors = [
+        value
+        for value in cli.catalog["catalog"]["gate_descriptors"]
+        if value["stage"] == "pre-decision"
+    ]
+    expected_names = ["consumer-proof.json", "s2-s3-review.json", "independent-pr-review.json"]
+    payload_hash = cli.identity["candidate"]["build"]["artifact"]["sha256"]
+    payload_members = cli.artifacts["501"]["members"]
+    manifest = cli.identity["candidate"]["preview_manifest"]
+    assert payload_hash == _sha256_bytes(
+        payload_members[manifest["archive_reference"]["path"]]
+        + payload_members[manifest["manifest_reference"]["path"]]
+    )
+    assert payload_hash != _sha256_bytes(cli.artifacts["501"]["wire"])
+    assert stage["stage"] == "pre-decision" and stage["outcome"] == "PASS"
+    assert len(stage["gate_evidence"]) == len(descriptors) == 3
+    for entry, descriptor, name in zip(stage["gate_evidence"], descriptors, expected_names):
+        assert {key: entry[key] for key in descriptor} == descriptor
+        assert entry["record_reference"] == {
+            "repository": REPOSITORY,
+            "run_id": "201",
+            "artifact_id": "901",
+            "path": name,
+            "sha256": _sha256_bytes(originals[name]),
+        }
+        assert (
+            len(
+                {
+                    entry["record_reference"]["sha256"],
+                    records_reference["artifact"]["sha256"],
+                    payload_hash,
+                }
+            )
+            == 3
+        )
+    stage_reference = cli.upload("stage", admission, {"pre-decision-stage.json": stage_bytes})
+    stage_path.write_bytes(b"{}\n")
+
+    cli.clock = "2029-01-01T00:00:02Z"
+    assert cli.invoke("seal-evidence-decision") == 0
+    decision_bytes = decision_path.read_bytes()
+    decision = json.loads(decision_bytes)
+    assert decision["decision"] == "DECLINE"
+    assert decision["candidate"] == cli.identity["candidate"]
+    assert decision["promotion_attempt"] == {
+        "decision_author": {"id": "7106373", "login": "thebtf"},
+        "authorized_dispatcher": cli.request["authorized_dispatcher"],
+    }
+    assert decision["evidence"]["pre_decision_stage_evidence"]["record_reference"] == cli.compact(
+        stage_reference
+    )
+    assert stage["sealed_at"] <= decision["decided_at"]
+    decision_reference = cli.upload(
+        "decision", admission, {"promotion-decision.json": decision_bytes}
+    )
+    decision_path.write_bytes(b"{}\n")
+    shutil.rmtree(cli.runner)
+    cli.runner.mkdir()
+    cli.requests.clear()
+    cli.summary_path.write_text("", encoding="utf-8")
+
+    assert cli.invoke("verify-evidence-retention") == 0
+
+    for artifact_id in ("901", "902", "903"):
+        assert f"repos/{REPOSITORY}/actions/artifacts/{artifact_id}/zip" in cli.requests
+    summary = cli.summary_path.read_text(encoding="utf-8")
+    for value in cli.compact(decision_reference).values():
+        assert value in summary
+    assert "APPROVE" not in summary
+    assert cli.runs["201"]["status"] == "in_progress"
+    assert cli.artifacts["901"]["members"] == originals
+    assert set(cli.artifacts) == {"501", "601", "701", "901", "902", "903"}
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "expired",
+        "expiry-timestamp",
+        "wire-tamper",
+        "member-tamper",
+        "wrong-run",
+        "wrong-sha",
+        "wrong-name",
+        "wrong-upload-digest",
+    ],
+)
+def test_evidence_cli_refuses_untrusted_uploaded_records(
+    evidence_workflow_cli: _EvidenceWorkflowCli, violation: str
+) -> None:
+    cli = evidence_workflow_cli
+    assert cli.invoke("admit-evidence") == 0
+    admission = cli.outputs()
+    cli.upload("records", admission, cli.records)
+    artifact = cli.artifacts["901"]
+    if violation == "expired":
+        artifact["metadata"]["expired"] = True
+    elif violation == "expiry-timestamp":
+        artifact["metadata"]["expires_at"] = "2028-12-31T23:59:59Z"
+    elif violation == "wire-tamper":
+        artifact["wire"] += b"tamper"
+    elif violation == "member-tamper":
+        members = {**cli.records, "consumer-proof.json": b"{}\n"}
+        artifact["wire"] = _evidence_bundle_zip(list(members.items()))
+        digest = _sha256_bytes(artifact["wire"])
+        artifact["metadata"]["digest"] = f"sha256:{digest}"
+        cli.environment["A1_EVIDENCE_RECORDS_ARTIFACT_DIGEST"] = digest
+    elif violation == "wrong-run":
+        artifact["metadata"]["workflow_run"]["id"] = 999
+    elif violation == "wrong-sha":
+        artifact["metadata"]["workflow_run"]["head_sha"] = "a" * 40
+    elif violation == "wrong-name":
+        artifact["metadata"]["name"] = "foreign-records-201-1"
+    else:
+        cli.environment["A1_EVIDENCE_RECORDS_ARTIFACT_DIGEST"] = "0" * 64
+
+    assert cli.invoke("seal-evidence-stage") == 1
+    assert not Path(admission["stage_path"]).exists()
+    assert not Path(admission["decision_path"]).exists()
+    assert set(cli.artifacts) == {"501", "601", "701", "901"}
+
+
+@pytest.mark.parametrize("changed_field", ["decision", "authorized_dispatcher"])
+def test_evidence_cli_readback_refuses_decision_request_substitution(
+    evidence_workflow_cli: _EvidenceWorkflowCli, changed_field: str
+) -> None:
+    cli = evidence_workflow_cli
+    assert cli.invoke("admit-evidence") == 0
+    admission = cli.outputs()
+    cli.upload("records", admission, cli.records)
+    assert cli.invoke("seal-evidence-stage") == 0
+    cli.upload(
+        "stage", admission, {"pre-decision-stage.json": Path(admission["stage_path"]).read_bytes()}
+    )
+    assert cli.invoke("seal-evidence-decision") == 0
+    cli.upload(
+        "decision",
+        admission,
+        {"promotion-decision.json": Path(admission["decision_path"]).read_bytes()},
+    )
+    cli.request[changed_field] = (
+        "APPROVE" if changed_field == "decision" else {"id": "18", "login": "other-bot"}
+    )
+    cli.sync_request()
+    shutil.rmtree(cli.runner)
+    cli.runner.mkdir()
+
+    assert cli.invoke("verify-evidence-retention") == 1
+    assert set(cli.artifacts) == {"501", "601", "701", "901", "902", "903"}
+
+
+def test_evidence_cli_permission_probe_admission_has_no_retain_build_or_publish_effects(
+    evidence_workflow_cli: _EvidenceWorkflowCli,
+) -> None:
+    cli = evidence_workflow_cli
+    cli.inputs.clear()
+    cli.inputs.update(mode="evidence", evidence_operation="permission-probe")
+    cli.environment["GITHUB_JOB"] = "probe_permissions"
+    for name in ("A1_PREVIEW_VERSION", "A1_PREVIEW_TAG", "A1_RETENTION_DAYS"):
+        del cli.environment[name]
+
+    assert cli.invoke("admit-evidence") == 0
+
+    assert not list(cli.runner.iterdir())
+    assert not (cli.root / "artifacts").exists()
+    assert set(cli.outputs()).isdisjoint(
+        {
+            "records_directory",
+            "stage_path",
+            "decision_path",
+            "records_artifact_name",
+            "stage_artifact_name",
+            "decision_artifact_name",
+            "payload_artifact_name",
+            "candidate_identity_artifact_name",
+            "release_gate_catalog_artifact_name",
+        }
+    )
+    assert not any("/artifacts/" in endpoint for endpoint in cli.requests)
+    assert set(cli.artifacts) == {"501", "601", "701"}
+
+
+@pytest.mark.parametrize("command", ["prepare-payload", "seal-build-records"])
+def test_evidence_cli_build_effect_commands_refuse_evidence_dispatch(
+    evidence_workflow_cli: _EvidenceWorkflowCli, command: str
+) -> None:
+    cli = evidence_workflow_cli
+    _create_publish_output(cli.root)
+    if command == "seal-build-records":
+        prepare_preview_payload(cli.root, cli.environment)
+        cli.environment["A1_PAYLOAD_ARTIFACT_ID"] = "501"
+        cli.add_artifact(
+            "501",
+            f"stateless-preview-payload-{VERSION}-201-2",
+            "201",
+            cli.artifacts["501"]["members"],
+        )
+    before = {
+        path.relative_to(cli.root): path.read_bytes()
+        for path in (cli.root / "artifacts").rglob("*")
+        if path.is_file()
+    }
+
+    assert cli.invoke(command) == 1
+
+    assert {
+        path.relative_to(cli.root): path.read_bytes()
+        for path in (cli.root / "artifacts").rglob("*")
+        if path.is_file()
+    } == before
+    assert cli.requests == []
+
+
+@pytest.mark.parametrize(
+    "violation", ["records-wire", "stage-expired", "decision-owner", "stage-member"]
+)
+def test_evidence_cli_final_readback_rechecks_every_retained_artifact(
+    evidence_workflow_cli: _EvidenceWorkflowCli, violation: str
+) -> None:
+    cli = evidence_workflow_cli
+    assert cli.invoke("admit-evidence") == 0
+    admission = cli.outputs()
+    cli.upload("records", admission, cli.records)
+    assert cli.invoke("seal-evidence-stage") == 0
+    cli.upload(
+        "stage", admission, {"pre-decision-stage.json": Path(admission["stage_path"]).read_bytes()}
+    )
+    assert cli.invoke("seal-evidence-decision") == 0
+    cli.upload(
+        "decision",
+        admission,
+        {"promotion-decision.json": Path(admission["decision_path"]).read_bytes()},
+    )
+    if violation == "records-wire":
+        cli.artifacts["901"]["wire"] += b"tampered after sealing"
+    elif violation == "stage-expired":
+        cli.artifacts["902"]["metadata"]["expired"] = True
+    elif violation == "decision-owner":
+        cli.artifacts["903"]["metadata"]["workflow_run"]["id"] = 999
+    else:
+        artifact = cli.artifacts["902"]
+        artifact["wire"] = _evidence_bundle_zip([("pre-decision-stage.json", b"{}\n")])
+        digest = _sha256_bytes(artifact["wire"])
+        artifact["metadata"]["digest"] = f"sha256:{digest}"
+        cli.environment["A1_EVIDENCE_STAGE_ARTIFACT_DIGEST"] = digest
+    shutil.rmtree(cli.runner)
+    cli.runner.mkdir()
+
+    assert cli.invoke("verify-evidence-retention") == 1
+    assert set(cli.artifacts) == {"501", "601", "701", "901", "902", "903"}
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "admit-evidence",
+        "seal-evidence-stage",
+        "seal-evidence-decision",
+        "verify-evidence-retention",
+    ],
+)
+def test_evidence_cli_rejects_caller_output_path_options(
+    evidence_workflow_cli: _EvidenceWorkflowCli, command: str
+) -> None:
+    cli = evidence_workflow_cli
+    cli.event_path.write_text(json.dumps(cli.event), encoding="utf-8")
+    destination = cli.runner / "caller-selected.json"
+
+    with pytest.raises(SystemExit) as error:
+        artifact_contract.main([command, "--output", str(destination)])
+
+    assert error.value.code == 2
+    assert not destination.exists()
+    assert not list(cli.runner.iterdir())
+    assert cli.requests == []
+
+
+@pytest.mark.parametrize(
+    "violation",
+    ["missing-event-file", "invalid-event-json", "inputs-not-object", "non-string-input"],
+)
+def test_evidence_cli_requires_a_real_well_formed_dispatch_event(
+    evidence_workflow_cli: _EvidenceWorkflowCli, violation: str
+) -> None:
+    cli = evidence_workflow_cli
+    cli.inputs.clear()
+    cli.inputs.update(preview_version=VERSION, preview_tag=TAG, retention_days="7")
+    cli.output_path.write_text("", encoding="utf-8")
+    if violation == "inputs-not-object":
+        cli.event["inputs"] = []
+    elif violation == "non-string-input":
+        cli.inputs["retention_days"] = 7
+    if violation != "missing-event-file":
+        raw = "{" if violation == "invalid-event-json" else json.dumps(cli.event)
+        cli.event_path.write_text(raw, encoding="utf-8")
+
+    assert artifact_contract.main(["admit-build"]) == 1
+    cli.assert_not_staged()

@@ -1515,49 +1515,44 @@ class ArtifactDownloader:
             _refuse(f"{name} could not be downloaded")
         return result.stdout
 
-    def _metadata(self, reference: ArtifactFileReference) -> None:
+    def _metadata(self, repository: str, run_id: str, artifact: Mapping[str, Any]) -> None:
         raw = self._run_gh(
-            ["api", f"repos/{reference.repository}/actions/artifacts/{reference.artifact_id}"],
+            ["api", f"repos/{repository}/actions/artifacts/{artifact['id']}"],
             "retained artifact metadata",
         )
         metadata = _load_retained_json_object(raw, "retained artifact metadata")
         workflow_run = metadata.get("workflow_run")
         if (
-            str(metadata.get("id")) != reference.artifact_id
-            or metadata.get("name") != reference.artifact_name
+            str(metadata.get("id")) != artifact["id"]
+            or metadata.get("name") != artifact["name"]
             or metadata.get("expired") is not False
             or not isinstance(workflow_run, Mapping)
-            or str(workflow_run.get("id")) != reference.run_id
-            or metadata.get("expires_at") != reference.expires_at
+            or str(workflow_run.get("id")) != run_id
+            or metadata.get("expires_at") != artifact["retention"]["expires_at"]
         ):
             _refuse("retained artifact metadata does not match its structural reference")
         digest = metadata.get("digest")
-        if digest is not None and digest != f"sha256:{reference.artifact_sha256}":
+        if digest is not None and digest != f"sha256:{artifact['sha256']}":
             _refuse("retained artifact metadata digest does not match its structural reference")
 
-    def _archive(self, reference: ArtifactFileReference) -> bytes:
-        key = (reference.repository, reference.artifact_id, reference.artifact_sha256)
+    def _archive(self, repository: str, run_id: str, artifact: Mapping[str, Any]) -> bytes:
+        key = (repository, artifact["id"], artifact["sha256"])
         cached = self._archives.get(key)
         if cached is not None:
             cached_path, wire_sha256 = cached
             wire_bytes = _read_regular_bytes(cached_path, "cached retained artifact")
-            if _sha256_bytes(wire_bytes) != wire_sha256 or wire_sha256 != reference.artifact_sha256:
+            if _sha256_bytes(wire_bytes) != wire_sha256 or wire_sha256 != artifact["sha256"]:
                 _refuse("cached retained artifact wire bytes do not match the structural reference")
             return wire_bytes
-        self._metadata(reference)
+        self._metadata(repository, run_id, artifact)
         wire_bytes = self._run_gh(
-            [
-                "api",
-                f"repos/{reference.repository}/actions/artifacts/{reference.artifact_id}/zip",
-            ],
+            ["api", f"repos/{repository}/actions/artifacts/{artifact['id']}/zip"],
             "retained artifact",
         )
         wire_sha256 = _sha256_bytes(wire_bytes)
-        if wire_sha256 != reference.artifact_sha256:
+        if wire_sha256 != artifact["sha256"]:
             _refuse("retained artifact wire bytes do not match the structural reference")
-        destination = (
-            self._root / "artifacts" / f"{reference.artifact_id}-{reference.artifact_sha256}.zip"
-        )
+        destination = self._root / "artifacts" / f"{artifact['id']}-{artifact['sha256']}.zip"
         try:
             if self._archive_directory is None:
                 destination.parent.mkdir(parents=True, exist_ok=False)
@@ -1573,21 +1568,51 @@ class ArtifactDownloader:
         self._archives[key] = (destination, wire_sha256)
         return wire_bytes
 
-    def _artifact_member(self, reference: ArtifactFileReference) -> bytes:
-        wire_bytes = self._archive(reference)
+    def _member_bytes(
+        self, repository: str, run_id: str, artifact: Mapping[str, Any], path: str
+    ) -> bytes:
+        wire_bytes = self._archive(repository, run_id, artifact)
         try:
             with zipfile.ZipFile(io.BytesIO(wire_bytes)) as archive:
-                entries = [
-                    entry for entry in archive.infolist() if entry.filename == reference.path
-                ]
+                entries = [entry for entry in archive.infolist() if entry.filename == path]
                 if len(entries) != 1 or entries[0].is_dir():
                     _refuse("retained artifact file is absent or ambiguous")
                 contents = archive.read(entries[0])
         except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile):
             _refuse("retained artifact is unreadable")
+        return contents
+
+    def _artifact_member(self, reference: ArtifactFileReference) -> bytes:
+        contents = self._member_bytes(
+            reference.repository,
+            reference.run_id,
+            reference.as_mapping()["artifact"],
+            reference.path,
+        )
         if _sha256_bytes(contents) != reference.sha256:
             _refuse("retained artifact file bytes do not match the structural reference")
         return contents
+
+    def _download_record(
+        self, repository: str, run_id: str, artifact: Mapping[str, Any], path: str
+    ) -> tuple[ArtifactFileReference, bytes]:
+        _expect_repository(repository, "retained record repository")
+        _expect_identifier(run_id, "retained record run ID")
+        _validate_actions_artifact(artifact)
+        _expect_safe_relative_path(path, "retained record path")
+        contents = self._member_bytes(repository, run_id, artifact, path)
+        reference = ArtifactFileReference.from_mapping(
+            {
+                "repository": repository,
+                "run_id": run_id,
+                "artifact": artifact,
+                "path": path,
+                "sha256": _sha256_bytes(contents),
+            },
+            "retained record reference",
+        )
+        self._retain_file(reference, contents)
+        return reference, contents
 
     def _retain_file(self, reference: ArtifactFileReference, contents: bytes) -> Path:
         destination = self._root / "downloaded" / Path(*reference.path.split("/"))
@@ -2457,6 +2482,34 @@ def _resolve_stage_record(
     return _load_json_object(raw, "stage evidence record")
 
 
+def _verified_release_gate_catalog(
+    catalog: Mapping[str, Any],
+    catalog_bytes: bytes,
+    catalog_reference: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    repository_root: str | PathLike[str],
+) -> Mapping[str, Any]:
+    reference = _review_record_reference(catalog_reference, "stage release gate catalog reference")
+    if (
+        reference["repository"] != candidate["source"]["repository"]
+        or not isinstance(catalog_bytes, bytes)
+        or _sha256_bytes(catalog_bytes) != reference["sha256"]
+    ):
+        _refuse("stage release gate catalog bytes do not match their reference")
+    document = _load_json_object(catalog_bytes, "stage release gate catalog")
+    if document != _thaw(catalog):
+        _refuse("stage release gate catalog bytes do not match the supplied catalog")
+    _validate_release_gate_catalog_for_consumer_proof(document, candidate)
+    root = _resolve_repository_root(repository_root)
+    for snapshot in document["catalog"]["policy_authority_snapshots"]:
+        actual_hash = _sha256_bytes(
+            _read_tracked_authority(root, candidate["source"]["commit"], snapshot["path"])
+        )
+        if snapshot["sha256"] != actual_hash:
+            _refuse("stage release gate catalog policy snapshot differs from exact source bytes")
+    return document
+
+
 def seal_stage_gate_evidence(
     evidence: Mapping[str, Any],
     *,
@@ -2478,23 +2531,13 @@ def seal_stage_gate_evidence(
     catalog_reference = _review_record_reference(
         release_gate_catalog_reference, "stage release gate catalog reference"
     )
-    if (
-        catalog_reference["repository"] != candidate["source"]["repository"]
-        or not isinstance(release_gate_catalog_bytes, bytes)
-        or _sha256_bytes(release_gate_catalog_bytes) != catalog_reference["sha256"]
-    ):
-        _refuse("stage release gate catalog bytes do not match their reference")
-    catalog_document = _load_json_object(release_gate_catalog_bytes, "stage release gate catalog")
-    if catalog_document != _thaw(release_gate_catalog):
-        _refuse("stage release gate catalog bytes do not match the supplied catalog")
-    _validate_release_gate_catalog_for_consumer_proof(catalog_document, candidate)
-    root = _resolve_repository_root(repository_root)
-    for snapshot in catalog_document["catalog"]["policy_authority_snapshots"]:
-        actual_hash = _sha256_bytes(
-            _read_tracked_authority(root, candidate["source"]["commit"], snapshot["path"])
-        )
-        if snapshot["sha256"] != actual_hash:
-            _refuse("stage release gate catalog policy snapshot differs from exact source bytes")
+    catalog_document = _verified_release_gate_catalog(
+        release_gate_catalog,
+        release_gate_catalog_bytes,
+        catalog_reference,
+        candidate,
+        repository_root,
+    )
 
     record = _expect_mapping(
         _thaw(evidence),
@@ -2608,6 +2651,15 @@ def seal_stage_gate_evidence(
     return _freeze(record)
 
 
+def _decision_actor(value: Any, role: str) -> Mapping[str, Any]:
+    actor = _expect_mapping(value, role, ("id", "login"))
+    _expect_identifier(actor["id"], f"{role} ID")
+    login = _expect_pattern(actor["login"], f"{role} login", _GITHUB_ACTOR_LOGIN_PATTERN)
+    if len(login) > 255:
+        _refuse(f"{role} login exceeds its bound")
+    return actor
+
+
 def seal_promotion_decision(
     decision: Mapping[str, Any],
     *,
@@ -2650,11 +2702,7 @@ def seal_promotion_decision(
         ("decision_author", "authorized_dispatcher"),
     )
     for role in ("decision_author", "authorized_dispatcher"):
-        actor = _expect_mapping(authorization[role], role, ("id", "login"))
-        _expect_identifier(actor["id"], f"{role} ID")
-        login = _expect_pattern(actor["login"], f"{role} login", _GITHUB_ACTOR_LOGIN_PATTERN)
-        if len(login) > 255:
-            _refuse(f"{role} login exceeds its bound")
+        _decision_actor(authorization[role], role)
     evidence = _expect_mapping(
         record["evidence"], "decision evidence", ("pre_decision_stage_evidence",)
     )
@@ -3146,8 +3194,778 @@ def classify_remote_observation(
     )
 
 
+def _read_cli_dispatch(command: str, environment: Mapping[str, str]) -> Mapping[str, Any]:
+    event = _load_json_object(
+        _read_regular_bytes(
+            Path(_environment_value(environment, "GITHUB_EVENT_PATH")), "workflow dispatch event"
+        ),
+        "workflow dispatch event",
+    )
+    inputs = event.get("inputs")
+    allowed = {
+        "mode",
+        "preview_version",
+        "preview_tag",
+        "retention_days",
+        "evidence_operation",
+        "evidence_request",
+    }
+    if (
+        not isinstance(inputs, Mapping)
+        or set(inputs) - allowed
+        or any(not isinstance(value, str) for value in inputs.values())
+    ):
+        _refuse("workflow dispatch inputs are not closed strings")
+    if len(json.dumps(inputs, ensure_ascii=True, separators=(",", ":"))) > 65_535:
+        _refuse("workflow dispatch inputs exceed the total escaped input limit")
+    repository = _expect_repository(
+        _environment_value(environment, "GITHUB_REPOSITORY"), "workflow repository"
+    )
+    repository_id = _expect_environment_identifier(environment, "GITHUB_REPOSITORY_ID")
+    event_repository = event.get("repository")
+    if not isinstance(event_repository, Mapping):
+        _refuse("workflow dispatch repository is unavailable")
+    if (
+        str(_expect_positive_integer(event_repository.get("id"), "event repository ID"))
+        != repository_id
+        or event_repository.get("full_name") != repository
+        or event.get("ref") not in ("main", _CANONICAL_SOURCE_REF)
+        or _environment_value(environment, "GITHUB_EVENT_NAME") != _TRUSTED_BUILD_EVENT
+        or _environment_value(environment, "GITHUB_REF") != _CANONICAL_SOURCE_REF
+        or _environment_value(environment, "GITHUB_WORKFLOW_REF")
+        != f"{repository}/{_TRUSTED_WORKFLOW_PATH}@{_CANONICAL_SOURCE_REF}"
+        or _expect_commit(_environment_value(environment, "GITHUB_WORKFLOW_SHA"), "workflow SHA")
+        != _expect_commit(_environment_value(environment, "GITHUB_SHA"), "source SHA")
+    ):
+        _refuse("workflow dispatch does not bind the canonical workflow context")
+    mode = inputs.get("mode", "build")
+    build_commands = ("admit-build", "prepare-payload", "seal-build-records")
+    if mode == "build":
+        if command not in build_commands or any(
+            inputs.get(key, "") for key in ("evidence_operation", "evidence_request")
+        ):
+            _refuse("build dispatch cannot execute evidence commands or accept evidence inputs")
+        for key, variable in (
+            ("preview_version", "A1_PREVIEW_VERSION"),
+            ("preview_tag", "A1_PREVIEW_TAG"),
+            ("retention_days", "A1_RETENTION_DAYS"),
+        ):
+            if not inputs.get(key) or inputs[key] != _environment_value(environment, variable):
+                _refuse("build dispatch inputs differ from the runner inputs")
+    elif mode == "evidence":
+        if command in build_commands or any(
+            inputs.get(key, "") for key in ("preview_version", "preview_tag", "retention_days")
+        ):
+            _refuse("evidence dispatch cannot execute build commands or accept build inputs")
+        operation = inputs.get("evidence_operation")
+        if operation == "permission-probe":
+            if command != "admit-evidence" or inputs.get("evidence_request", ""):
+                _refuse("permission probe cannot retain evidence")
+        elif operation != "retain" or not inputs.get("evidence_request"):
+            _refuse("evidence dispatch operation or request is unavailable")
+    else:
+        _refuse("workflow dispatch mode is unsupported")
+    return event
+
+
+def _validate_cli_run(
+    run: Mapping[str, Any],
+    context: Mapping[str, Any],
+    run_id: str,
+    attempt: int,
+    *,
+    successful_build: bool,
+) -> None:
+    source = context["source"]
+    if (
+        str(_expect_positive_integer(run.get("id"), "workflow run ID")) != run_id
+        or _expect_positive_integer(run.get("run_attempt"), "workflow run attempt") != attempt
+        or run.get("event") != _TRUSTED_BUILD_EVENT
+        or run.get("path") != _TRUSTED_WORKFLOW_PATH
+        or run.get("head_branch") != "main"
+        or run.get("head_sha") != source["commit"]
+    ):
+        _refuse("workflow run does not bind the exact canonical source and attempt")
+    for field in ("repository", "head_repository"):
+        repository = run.get(field)
+        if not isinstance(repository, Mapping):
+            _refuse("workflow run repository is unavailable")
+        if (
+            str(_expect_positive_integer(repository.get("id"), "workflow repository ID"))
+            != context["repository_id"]
+            or repository.get("full_name") != source["repository"]
+        ):
+            _refuse("workflow run belongs to a different repository or fork")
+    if successful_build:
+        if run.get("status") != "completed" or run.get("conclusion") != "success":
+            _refuse("source build has not completed successfully")
+    elif run.get("status") != "in_progress" or run.get("conclusion") is not None:
+        _refuse("evidence run is not the current unfinished run")
+
+
+def _evidence_context(
+    root: Path, environment: Mapping[str, str], event: Mapping[str, Any]
+) -> dict[str, Any]:
+    context = {
+        "source": _canonical_build_source(root, environment),
+        "repository_id": _expect_environment_identifier(environment, "GITHUB_REPOSITORY_ID"),
+        "run_id": _expect_environment_identifier(environment, "GITHUB_RUN_ID"),
+        "attempt": int(_expect_environment_identifier(environment, "GITHUB_RUN_ATTEMPT")),
+    }
+    repository = context["source"]["repository"]
+    run = _load_json_object(
+        ArtifactDownloader(root)._run_gh(
+            ["api", f"repos/{repository}/actions/runs/{context['run_id']}"],
+            "current evidence workflow run",
+        ),
+        "current evidence workflow run",
+    )
+    _validate_cli_run(run, context, context["run_id"], context["attempt"], successful_build=False)
+    principal = {"id": "7106373", "login": "thebtf"}
+    for field in ("actor", "triggering_actor"):
+        actor = run.get(field)
+        if not isinstance(actor, Mapping):
+            _refuse("evidence run actor is unavailable")
+        observed = {
+            "id": str(_expect_positive_integer(actor.get("id"), "authenticated actor ID")),
+            "login": actor.get("login"),
+        }
+        _decision_actor(observed, field)
+        if observed != principal:
+            _refuse("evidence author or rerun initiator is not authorized")
+    sender = event.get("sender")
+    if not isinstance(sender, Mapping):
+        _refuse("evidence event sender is unavailable")
+    if (
+        str(_expect_positive_integer(sender.get("id"), "event sender ID")) != principal["id"]
+        or sender.get("login") != principal["login"]
+        or _expect_environment_identifier(environment, "GITHUB_ACTOR_ID") != principal["id"]
+        or _environment_value(environment, "GITHUB_ACTOR") != principal["login"]
+        or _environment_value(environment, "GITHUB_TRIGGERING_ACTOR") != principal["login"]
+    ):
+        _refuse("evidence actor differs from the actual event or runner context")
+    expected_job = (
+        "probe_permissions"
+        if event["inputs"]["evidence_operation"] == "permission-probe"
+        else "retain_evidence"
+    )
+    if _environment_value(environment, "GITHUB_JOB") != expected_job:
+        _refuse("evidence command is running in a different job")
+    context["actor"] = principal
+    return context
+
+
+def _evidence_request(event: Mapping[str, Any]) -> Mapping[str, Any]:
+    request = _expect_mapping(
+        _load_json_object(event["inputs"]["evidence_request"].encode("utf-8"), "evidence request"),
+        "evidence request",
+        (
+            "candidate_identity_reference",
+            "release_gate_catalog_reference",
+            "bundle_base64",
+            "record_sha256",
+            "decision",
+            "authorized_dispatcher",
+            "retention_days",
+        ),
+    )
+    for field, path in (
+        ("candidate_identity_reference", _CANDIDATE_IDENTITY_FILENAME),
+        ("release_gate_catalog_reference", _RELEASE_GATE_CATALOG_FILENAME),
+    ):
+        reference = ArtifactFileReference.from_mapping(request[field], field)
+        if reference.path != path or reference.retention_days > _MAX_ACTIONS_RETENTION_DAYS:
+            _refuse("evidence source reference has an unexpected path or retention")
+    _expect_string(request["bundle_base64"], "evidence bundle")
+    _expect_retention_days({"A1_RETENTION_DAYS": request["retention_days"]})
+    if request["decision"] not in ("APPROVE", "DECLINE"):
+        _refuse("evidence request requires an explicit decision")
+    _decision_actor(request["authorized_dispatcher"], "authorized_dispatcher")
+    return request
+
+
+def _evidence_locations(
+    environment: Mapping[str, str], context: Mapping[str, Any]
+) -> dict[str, str]:
+    try:
+        temporary = Path(_environment_value(environment, "RUNNER_TEMP")).resolve(strict=True)
+        if not temporary.is_dir():
+            _refuse("runner temporary directory is unavailable")
+        suffix = f"{context['run_id']}-{context['attempt']}"
+        directory = temporary / f"stateless-preview-evidence-{suffix}"
+        paths = {
+            "records_directory": directory / "records",
+            "stage_path": directory / "pre-decision-stage.json",
+            "decision_path": directory / "promotion-decision.json",
+        }
+        if directory.is_symlink() or any(
+            path.is_symlink() or not _path_within(path, temporary) for path in paths.values()
+        ):
+            _refuse("evidence destination escapes the runner temporary directory")
+    except (OSError, RuntimeError):
+        _refuse("runner temporary directory is unavailable")
+    return {
+        **{key: str(path) for key, path in paths.items()},
+        "records_artifact_name": f"stateless-preview-evidence-records-{suffix}",
+        "stage_artifact_name": f"stateless-preview-evidence-stage-{suffix}",
+        "decision_artifact_name": f"stateless-preview-evidence-decision-{suffix}",
+    }
+
+
+def _compact_evidence_reference(reference: ArtifactFileReference) -> dict[str, str]:
+    return {
+        "repository": reference.repository,
+        "run_id": reference.run_id,
+        "artifact_id": reference.artifact_id,
+        "path": reference.path,
+        "sha256": reference.sha256,
+    }
+
+
+def _evidence_reference_key(reference: Mapping[str, Any]) -> tuple[str, ...]:
+    value = _review_record_reference(reference, "retained evidence reference")
+    return tuple(value[key] for key in ("repository", "run_id", "artifact_id", "path", "sha256"))
+
+
+def _checked_evidence_artifact(
+    downloader: ArtifactDownloader,
+    context: Mapping[str, Any],
+    artifact_id: str,
+    run_id: str,
+    expected_name: str,
+    retention_days: int,
+    expected_digest: str | None,
+) -> Mapping[str, Any]:
+    _expect_identifier(artifact_id, "evidence artifact ID")
+    _expect_identifier(run_id, "evidence artifact run ID")
+    source = context["source"]
+    metadata = _load_json_object(
+        downloader._run_gh(
+            ["api", f"repos/{source['repository']}/actions/artifacts/{artifact_id}"],
+            "evidence artifact metadata",
+        ),
+        "evidence artifact metadata",
+    )
+    admitted = _validate_uploaded_artifact(
+        metadata, artifact_id=artifact_id, expected_name=expected_name, current_run_id=run_id
+    )
+    workflow_run = metadata["workflow_run"]
+    if (
+        str(_expect_positive_integer(metadata.get("id"), "uploaded artifact ID")) != artifact_id
+        or str(_expect_positive_integer(workflow_run.get("id"), "artifact workflow run ID"))
+        != run_id
+        or str(
+            _expect_positive_integer(workflow_run.get("repository_id"), "artifact repository ID")
+        )
+        != context["repository_id"]
+        or str(
+            _expect_positive_integer(
+                workflow_run.get("head_repository_id"), "artifact head repository ID"
+            )
+        )
+        != context["repository_id"]
+        or workflow_run.get("head_branch") != "main"
+        or workflow_run.get("head_sha") != source["commit"]
+        or _review_timestamp(admitted["expires_at"], "artifact expiry")
+        <= datetime.now(timezone.utc)
+    ):
+        _refuse("evidence artifact has expired or has different source provenance")
+    digest = metadata.get("digest")
+    if expected_digest is not None:
+        expected_digest = _expect_sha256(expected_digest, "uploaded artifact container digest")
+        if digest is not None and digest != f"sha256:{expected_digest}":
+            _refuse("uploaded artifact container digest differs from metadata")
+    else:
+        if not isinstance(digest, str) or not digest.startswith("sha256:"):
+            _refuse("ancestor artifact container digest is unavailable")
+        expected_digest = _expect_sha256(digest[7:], "ancestor artifact container digest")
+    return {
+        "id": artifact_id,
+        "name": expected_name,
+        "sha256": expected_digest,
+        "retention": {"configured_days": retention_days, "expires_at": admitted["expires_at"]},
+    }
+
+
+def _verified_evidence_build(
+    downloader: ArtifactDownloader, context: Mapping[str, Any], candidate: Mapping[str, Any]
+) -> datetime:
+    build = candidate["build"]
+    repository = context["source"]["repository"]
+    run_id, attempt = build["run_id"], build["run_attempt"]
+    if run_id == context["run_id"]:
+        _refuse("evidence cannot consume its own unfinished source build")
+    run = _load_json_object(
+        downloader._run_gh(
+            ["api", f"repos/{repository}/actions/runs/{run_id}"], "source build run"
+        ),
+        "source build run",
+    )
+    _validate_cli_run(run, context, run_id, attempt, successful_build=True)
+    jobs = _load_json_object(
+        downloader._run_gh(
+            [
+                "api",
+                f"repos/{repository}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100",
+            ],
+            "source build jobs",
+        ),
+        "source build jobs",
+    )
+    entries = _expect_list(jobs.get("jobs"), "source build jobs")
+    if _expect_nonnegative_integer(jobs.get("total_count"), "source build job count") != len(
+        entries
+    ):
+        _refuse("source build job readback is incomplete")
+    if any(not isinstance(job, Mapping) for job in entries):
+        _refuse("source build job is invalid")
+    matches = [
+        job for job in entries if job.get("name") == "Build canonical-main preview candidate"
+    ]
+    if len(matches) != 1:
+        _refuse("source build job is absent or ambiguous")
+    job = matches[0]
+    _expect_positive_integer(job.get("id"), "source build job ID")
+    if (
+        str(_expect_positive_integer(job.get("run_id"), "source build job run ID")) != run_id
+        or _expect_positive_integer(job.get("run_attempt"), "source build job attempt") != attempt
+        or job.get("head_sha") != context["source"]["commit"]
+        or job.get("status") != "completed"
+        or job.get("conclusion") != "success"
+    ):
+        _refuse("source build job does not prove the successful exact build attempt")
+    return _review_timestamp(job.get("completed_at"), "source build completed_at")
+
+
+def _evidence_inputs(
+    root: Path, environment: Mapping[str, str], event: Mapping[str, Any], command: str
+) -> dict[str, Any]:
+    context = _evidence_context(root, environment, event)
+    request = _evidence_request(event)
+    records = decode_evidence_bundle(request["bundle_base64"], request["record_sha256"])
+    locations = _evidence_locations(environment, context)
+    locations["retention_days"] = request["retention_days"]
+    download_directory = Path(locations["stage_path"]).parent / command
+    try:
+        if download_directory.is_symlink():
+            _refuse("evidence download directory is not fresh")
+        download_directory.mkdir(parents=True, exist_ok=False)
+    except OSError:
+        _refuse("evidence download directory is unavailable")
+    downloader = ArtifactDownloader(download_directory)
+    identity_reference = ArtifactFileReference.from_mapping(
+        request["candidate_identity_reference"], "candidate identity reference"
+    )
+    catalog_reference = ArtifactFileReference.from_mapping(
+        request["release_gate_catalog_reference"], "release gate catalog reference"
+    )
+    if (
+        identity_reference.repository != context["source"]["repository"]
+        or catalog_reference.repository != identity_reference.repository
+        or catalog_reference.run_id != identity_reference.run_id
+        or catalog_reference.artifact_id == identity_reference.artifact_id
+    ):
+        _refuse("evidence source references do not bind distinct artifacts of one build")
+    artifact = _checked_evidence_artifact(
+        downloader,
+        context,
+        identity_reference.artifact_id,
+        identity_reference.run_id,
+        identity_reference.artifact_name,
+        identity_reference.retention_days,
+        identity_reference.artifact_sha256,
+    )
+    if artifact != identity_reference.as_mapping()["artifact"]:
+        _refuse("candidate identity artifact metadata differs from the request")
+    identity_bytes = _read_regular_bytes(
+        downloader.download_file(identity_reference), "downloaded candidate identity"
+    )
+    identity, _ = _verified_review_candidate(
+        _load_json_object(identity_bytes, "candidate identity"),
+        identity_bytes,
+        identity_reference.as_mapping(),
+    )
+    candidate = identity["candidate"]
+    if (
+        any(candidate["source"][key] != value for key, value in context["source"].items())
+        or candidate["build"]["run_id"] != identity_reference.run_id
+    ):
+        _refuse("evidence candidate differs from the exact canonical source build")
+    names = _artifact_names(
+        candidate["preview_manifest"]["contents"]["version"],
+        candidate["build"]["run_id"],
+        candidate["build"]["run_attempt"],
+    )
+    if (
+        identity_reference.artifact_name != names["candidate_identity"]
+        or catalog_reference.artifact_name != names["release_gate_catalog"]
+        or candidate["build"]["artifact"]["name"] != names["payload"]
+    ):
+        _refuse("evidence source artifact names do not bind the build attempt")
+    completed_at = _verified_evidence_build(downloader, context, candidate)
+    artifact = _checked_evidence_artifact(
+        downloader,
+        context,
+        catalog_reference.artifact_id,
+        catalog_reference.run_id,
+        names["release_gate_catalog"],
+        catalog_reference.retention_days,
+        catalog_reference.artifact_sha256,
+    )
+    if artifact != catalog_reference.as_mapping()["artifact"]:
+        _refuse("release gate catalog artifact metadata differs from the request")
+    catalog_bytes = _read_regular_bytes(
+        downloader.download_file(catalog_reference), "downloaded release gate catalog"
+    )
+    catalog = _verified_release_gate_catalog(
+        _load_json_object(catalog_bytes, "release gate catalog"),
+        catalog_bytes,
+        _compact_evidence_reference(catalog_reference),
+        candidate,
+        root,
+    )
+    review_binding = {
+        "candidate_identity": identity,
+        "candidate_identity_bytes": identity_bytes,
+        "candidate_identity_reference": identity_reference.as_mapping(),
+    }
+    admitted = {
+        "consumer-proof.json": seal_artifact_consumer_proof(
+            _load_json_object(records["consumer-proof.json"], "consumer proof"),
+            release_gate_catalog=catalog,
+            **review_binding,
+        ),
+        "s2-s3-review.json": seal_s2_s3_review_aggregate(
+            _load_json_object(records["s2-s3-review.json"], "S2/S3 review"),
+            **review_binding,
+        ),
+        "independent-pr-review.json": seal_independent_pr_review(
+            _load_json_object(records["independent-pr-review.json"], "independent PR review"),
+            **review_binding,
+        ),
+    }
+    for name, record in admitted.items():
+        timestamps = [record["sealed_at" if name == "s2-s3-review.json" else "recorded_at"]]
+        if name == "s2-s3-review.json":
+            timestamps.extend(lens["recorded_at"] for lens in record["lens_results"])
+        for timestamp in timestamps:
+            if (
+                not completed_at
+                <= _review_timestamp(timestamp, "evidence record time")
+                <= datetime.now(timezone.utc)
+            ):
+                _refuse("evidence record does not follow the completed source build")
+    resolved: dict[tuple[str, ...], bytes] = {}
+    return {
+        "context": context,
+        "request": request,
+        "locations": locations,
+        "downloader": downloader,
+        "records": records,
+        "admitted": admitted,
+        "resolved": resolved,
+        "binding": {
+            **review_binding,
+            "release_gate_catalog": catalog,
+            "release_gate_catalog_bytes": catalog_bytes,
+            "release_gate_catalog_reference": _compact_evidence_reference(catalog_reference),
+            "record_resolver": lambda reference: resolved[_evidence_reference_key(reference)],
+            "repository_root": root,
+        },
+    }
+
+
+def _evidence_upload_metadata(
+    inputs: Mapping[str, Any], environment: Mapping[str, str], kind: str, artifact_id: str
+) -> Mapping[str, Any]:
+    prefix = f"A1_EVIDENCE_{kind.upper()}_ARTIFACT"
+    uploaded_id = environment.get(f"{prefix}_ID")
+    if uploaded_id is not None and uploaded_id != artifact_id:
+        _refuse("retained ancestor artifact differs from the upload output")
+    context = inputs["context"]
+    return _checked_evidence_artifact(
+        inputs["downloader"],
+        context,
+        artifact_id,
+        context["run_id"],
+        inputs["locations"][f"{kind}_artifact_name"],
+        int(inputs["request"]["retention_days"]),
+        environment.get(f"{prefix}_DIGEST"),
+    )
+
+
+def _read_evidence_records(
+    inputs: Mapping[str, Any],
+    environment: Mapping[str, str],
+    references: Sequence[Mapping[str, Any]] | None = None,
+) -> list[dict[str, str]]:
+    context = inputs["context"]
+    if references is None:
+        artifact_id = _expect_environment_identifier(environment, "A1_EVIDENCE_RECORDS_ARTIFACT_ID")
+    else:
+        if len(references) != len(_EVIDENCE_BUNDLE_MEMBERS):
+            _refuse("retained evidence predecessor set is incomplete")
+        artifact_id = _review_record_reference(references[0], "retained evidence predecessor")[
+            "artifact_id"
+        ]
+    expected = [
+        {
+            "repository": context["source"]["repository"],
+            "run_id": context["run_id"],
+            "artifact_id": artifact_id,
+            "path": name,
+            "sha256": inputs["request"]["record_sha256"][name],
+        }
+        for name in _EVIDENCE_BUNDLE_MEMBERS
+    ]
+    if (
+        references is not None
+        and [
+            _review_record_reference(reference, "retained evidence predecessor")
+            for reference in references
+        ]
+        != expected
+    ):
+        _refuse("retained evidence references differ from the exact requested original records")
+    artifact = _evidence_upload_metadata(inputs, environment, "records", artifact_id)
+    for reference in expected:
+        expanded = ArtifactFileReference.from_mapping(
+            {
+                **{key: reference[key] for key in ("repository", "run_id", "path", "sha256")},
+                "artifact": artifact,
+            },
+            "retained evidence record",
+        )
+        raw = _read_regular_bytes(
+            inputs["downloader"].download_file(expanded), "retained evidence record"
+        )
+        if raw != inputs["records"][reference["path"]]:
+            _refuse("retained evidence differs from the original byte sequence")
+        inputs["resolved"][_evidence_reference_key(reference)] = raw
+    return expected
+
+
+def _read_evidence_stage(
+    inputs: Mapping[str, Any],
+    environment: Mapping[str, str],
+    reference: Mapping[str, Any] | None = None,
+) -> tuple[Mapping[str, Any], dict[str, str]]:
+    context = inputs["context"]
+    if reference is None:
+        artifact_id = _expect_environment_identifier(environment, "A1_EVIDENCE_STAGE_ARTIFACT_ID")
+    else:
+        reference = _review_record_reference(reference, "retained stage predecessor")
+        if (
+            reference["repository"] != context["source"]["repository"]
+            or reference["run_id"] != context["run_id"]
+            or reference["path"] != "pre-decision-stage.json"
+        ):
+            _refuse("retained stage predecessor has different provenance or path")
+        artifact_id = reference["artifact_id"]
+    artifact = _evidence_upload_metadata(inputs, environment, "stage", artifact_id)
+    actual, raw = inputs["downloader"]._download_record(
+        context["source"]["repository"], context["run_id"], artifact, "pre-decision-stage.json"
+    )
+    compact = _compact_evidence_reference(actual)
+    if reference is not None and reference != compact:
+        _refuse("retained stage predecessor bytes differ from the sealed reference")
+    stage = _load_json_object(raw, "retained pre-decision stage")
+    entries = _expect_list(stage.get("gate_evidence"), "retained pre-decision gate entries")
+    if any(not isinstance(entry, Mapping) for entry in entries):
+        _refuse("retained pre-decision gate entry is invalid")
+    _read_evidence_records(
+        inputs, environment, [entry.get("record_reference") for entry in entries]
+    )
+    sealed = seal_stage_gate_evidence(stage, **inputs["binding"])
+    if sealed["stage"] != "pre-decision" or sealed["outcome"] != "PASS":
+        _refuse("retained stage is not passing pre-decision evidence")
+    inputs["resolved"][_evidence_reference_key(compact)] = raw
+    return sealed, compact
+
+
+def _admit_evidence(root: Path, environment: Mapping[str, str], event: Mapping[str, Any]) -> None:
+    if event["inputs"]["evidence_operation"] == "permission-probe":
+        _evidence_context(root, environment, event)
+        _write_action_outputs({"retention_days": "7"}, environment)
+        return
+    inputs = _evidence_inputs(root, environment, event, "admit-evidence")
+    directory = Path(inputs["locations"]["records_directory"])
+    try:
+        directory.mkdir(exist_ok=False)
+    except OSError:
+        _refuse("original evidence destination is unavailable")
+    for name, raw in inputs["records"].items():
+        _write_bytes_once(directory / name, raw, "original evidence record")
+    _write_action_outputs(inputs["locations"], environment)
+
+
+def _seal_evidence_stage(
+    root: Path, environment: Mapping[str, str], event: Mapping[str, Any]
+) -> None:
+    inputs = _evidence_inputs(root, environment, event, "seal-evidence-stage")
+    references = _read_evidence_records(inputs, environment)
+    binding = inputs["binding"]
+    candidate = binding["candidate_identity"]["candidate"]
+    identity_reference = binding["candidate_identity_reference"]
+    identity_hash = identity_reference["sha256"]
+    descriptors = [
+        descriptor
+        for descriptor in binding["release_gate_catalog"]["catalog"]["gate_descriptors"]
+        if descriptor["stage"] == "pre-decision"
+    ]
+    entries = [
+        {
+            **descriptor,
+            "record_reference": reference,
+            "candidate_identity_record_sha256": identity_hash,
+            "source_commit": candidate["source"]["commit"],
+            "outcome": inputs["admitted"][reference["path"]]["outcome"],
+        }
+        for descriptor, reference in zip(descriptors, references)
+    ]
+    context = inputs["context"]
+    stage = seal_stage_gate_evidence(
+        {
+            "evidence_schema_version": "1.0",
+            "evidence_set_id": f"a1-pre-decision-{context['run_id']}-{context['attempt']}",
+            "producer": {
+                "helper_path": "scripts/stateless_preview_artifact.py",
+                "operation": "seal_stage_gate_evidence",
+            },
+            "release_gate_catalog": binding["release_gate_catalog_reference"],
+            "candidate_identity_record": {
+                "repository": identity_reference["repository"],
+                "run_id": identity_reference["run_id"],
+                "artifact_id": identity_reference["artifact"]["id"],
+                "path": identity_reference["path"],
+                "sha256": identity_hash,
+            },
+            "candidate_identity_record_sha256": identity_hash,
+            "candidate": candidate,
+            "source_ref": candidate["source"]["ref"],
+            "source_commit": candidate["source"]["commit"],
+            "stage": "pre-decision",
+            "gate_evidence": entries,
+            "outcome": "PASS" if all(entry["outcome"] == "PASS" for entry in entries) else "FAIL",
+            "sealed_at": _utc_timestamp(),
+        },
+        **binding,
+    )
+    _write_bytes_once(
+        Path(inputs["locations"]["stage_path"]),
+        _canonical_json_bytes(stage, "stage evidence"),
+        "stage evidence",
+    )
+
+
+def _seal_evidence_decision(
+    root: Path, environment: Mapping[str, str], event: Mapping[str, Any]
+) -> None:
+    inputs = _evidence_inputs(root, environment, event, "seal-evidence-decision")
+    stage, stage_reference = _read_evidence_stage(inputs, environment)
+    binding = inputs["binding"]
+    identity_reference = ArtifactFileReference.from_mapping(
+        binding["candidate_identity_reference"], "candidate identity reference"
+    )
+    decision = seal_promotion_decision(
+        {
+            "schema_version": "1.0",
+            "candidate_identity_record": _compact_evidence_reference(identity_reference),
+            "candidate": binding["candidate_identity"]["candidate"],
+            "evidence": {
+                "pre_decision_stage_evidence": {
+                    "record_reference": stage_reference,
+                    **{
+                        key: stage[key]
+                        for key in (
+                            "candidate_identity_record_sha256",
+                            "source_ref",
+                            "source_commit",
+                            "stage",
+                            "outcome",
+                        )
+                    },
+                },
+            },
+            "decision": inputs["request"]["decision"],
+            "promotion_attempt": {
+                "decision_author": inputs["context"]["actor"],
+                "authorized_dispatcher": inputs["request"]["authorized_dispatcher"],
+            },
+            "decided_at": _utc_timestamp(),
+        },
+        **binding,
+    )
+    _write_bytes_once(
+        Path(inputs["locations"]["decision_path"]),
+        _canonical_json_bytes(decision, "decision"),
+        "promotion decision",
+    )
+
+
+def _verify_evidence_retention(
+    root: Path, environment: Mapping[str, str], event: Mapping[str, Any]
+) -> None:
+    inputs = _evidence_inputs(root, environment, event, "verify-evidence-retention")
+    artifact_id = _expect_environment_identifier(environment, "A1_EVIDENCE_DECISION_ARTIFACT_ID")
+    artifact = _evidence_upload_metadata(inputs, environment, "decision", artifact_id)
+    context = inputs["context"]
+    actual, raw = inputs["downloader"]._download_record(
+        context["source"]["repository"], context["run_id"], artifact, "promotion-decision.json"
+    )
+    decision = _load_json_object(raw, "retained promotion decision")
+    if decision.get("decision") != inputs["request"]["decision"] or decision.get(
+        "promotion_attempt"
+    ) != {
+        "decision_author": context["actor"],
+        "authorized_dispatcher": inputs["request"]["authorized_dispatcher"],
+    }:
+        _refuse("retained decision differs from the explicit request or authenticated author")
+    evidence = _expect_mapping(
+        decision.get("evidence"), "retained decision evidence", ("pre_decision_stage_evidence",)
+    )
+    summary = _expect_mapping(
+        evidence["pre_decision_stage_evidence"],
+        "retained decision stage summary",
+        (
+            "record_reference",
+            "candidate_identity_record_sha256",
+            "source_ref",
+            "source_commit",
+            "stage",
+            "outcome",
+        ),
+    )
+    _read_evidence_stage(inputs, environment, summary["record_reference"])
+    seal_promotion_decision(decision, **inputs["binding"])
+    compact = _compact_evidence_reference(actual)
+    try:
+        with Path(_environment_value(environment, "GITHUB_STEP_SUMMARY")).open(
+            "a", encoding="utf-8", newline="\n"
+        ) as output:
+            output.write("Retained A1 promotion decision (not publication):\n\n```json\n")
+            output.write(
+                _canonical_json_bytes(compact, "retained decision reference").decode("utf-8")
+            )
+            output.write("```\n")
+    except OSError:
+        _refuse("GitHub Actions summary file is unavailable")
+
+
+def _write_action_outputs(values: Mapping[str, str], environment: Mapping[str, str]) -> None:
+    if any("\r" in value or "\n" in value for value in values.values()):
+        _refuse("GitHub Actions output contains unsupported characters")
+    try:
+        with Path(_environment_value(environment, "GITHUB_OUTPUT")).open(
+            "a", encoding="utf-8", newline="\n"
+        ) as output:
+            for name, value in values.items():
+                output.write(f"{name}={value}\n")
+    except OSError:
+        _refuse("GitHub Actions output file is unavailable")
+
+
 def _write_admission_outputs(admission: Mapping[str, Any], environment: Mapping[str, str]) -> None:
-    output_path = _environment_value(environment, "GITHUB_OUTPUT")
     preview = admission["preview"]
     artifacts = admission["artifacts"]
     values = {
@@ -3158,12 +3976,7 @@ def _write_admission_outputs(admission: Mapping[str, Any], environment: Mapping[
         "candidate_identity_artifact_name": artifacts["candidate_identity"],
         "release_gate_catalog_artifact_name": artifacts["release_gate_catalog"],
     }
-    try:
-        with Path(output_path).open("a", encoding="utf-8", newline="\n") as output:
-            for name, value in values.items():
-                output.write(f"{name}={value}\n")
-    except OSError:
-        _refuse("GitHub Actions output file is unavailable")
+    _write_action_outputs(values, environment)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -3173,6 +3986,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "admit-build",
         "prepare-payload",
         "seal-build-records",
+        "admit-evidence",
+        "seal-evidence-stage",
+        "seal-evidence-decision",
+        "verify-evidence-retention",
     ):
         commands.add_parser(command)
     return parser.parse_args(argv)
@@ -3181,15 +3998,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = parse_args(argv)
     try:
+        event = _read_cli_dispatch(arguments.command, os.environ)
         if arguments.command == "admit-build":
             _write_admission_outputs(admit_build(Path.cwd(), os.environ), os.environ)
         elif arguments.command == "prepare-payload":
             prepare_preview_payload(Path.cwd(), os.environ)
         elif arguments.command == "seal-build-records":
             seal_build_records(Path.cwd(), os.environ)
+        elif arguments.command == "admit-evidence":
+            _admit_evidence(Path.cwd(), os.environ, event)
+        elif arguments.command == "seal-evidence-stage":
+            _seal_evidence_stage(Path.cwd(), os.environ, event)
+        elif arguments.command == "seal-evidence-decision":
+            _seal_evidence_decision(Path.cwd(), os.environ, event)
+        elif arguments.command == "verify-evidence-retention":
+            _verify_evidence_retention(Path.cwd(), os.environ, event)
         else:
             raise AssertionError("unreachable")
-    except ValueError:
+    except (ValueError, OSError, UnicodeError, RecursionError):
         print("STATELESS_PREVIEW_ARTIFACT_REFUSED", file=sys.stderr)
         return 1
     print("STATELESS_PREVIEW_ARTIFACT_READY")
