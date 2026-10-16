@@ -134,6 +134,10 @@ dotnet publish "$preview_project" \
   -p:PublishSingleFile=true \
   -p:PublishTrimmed=false \
   --output "$preview_publish_directory"
+python "$shell_repo_root/scripts/stateless_preview_runtime.py" \
+  --executable "$preview_publish_directory/NetCoreDbg.Mcp.Stateless.Preview.exe" \
+  --expected-runtime 8.0.32 \
+  --diagnostics-directory "$coverage_root/preview/runtime-evidence"
 cp "$preview_publish_directory/NetCoreDbg.Mcp.Stateless.Preview.exe" \
   "$preview_publish_directory/netcoredbg-mcp-stateless-preview.exe"
 python "$shell_repo_root/build/prepare_preview_fixture.py" \
