@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Added internal preview-library validators for exact-candidate seven-lens S2/S3 review, distinct independent PR review, and ordered stage evidence. These source-only validators reject inconsistent evidence claims; they do not perform reviews, publish artifacts, constitute a consumer release, or change the Python default.
+- Added the decision-only T021/T022 library boundary: `seal_promotion_decision` returns an immutable exact-candidate `APPROVE` or `DECLINE` record only after revalidating its raw pre-decision stage and nested evidence, closed author/dispatcher identities, and decision/stage time order. Fresh attempt admission, remote classification, and publication remain unimplemented; this does not change the Python default or grant live promotion authority.
 
 ### Fixed
 - Preview artifact publishing preserves distinct preview/core assembly names during restore and publish, then renames only the published apphost to `netcoredbg-mcp-stateless-preview.exe`. The self-contained, single-file Windows x64 artifact contract and Python default remain unchanged.

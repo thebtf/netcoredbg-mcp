@@ -43,6 +43,7 @@ _COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _GITHUB_IDENTIFIER_PATTERN = re.compile(r"^[1-9][0-9]*$")
 _GITHUB_REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_GITHUB_ACTOR_LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?$")
 _SAFE_RELATIVE_PATH_PATTERN = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
 )
@@ -2171,6 +2172,94 @@ def seal_stage_gate_evidence(
     return _freeze(record)
 
 
+def seal_promotion_decision(
+    decision: Mapping[str, Any],
+    *,
+    candidate_identity: Mapping[str, Any],
+    candidate_identity_bytes: bytes,
+    candidate_identity_reference: Mapping[str, Any],
+    release_gate_catalog: Mapping[str, Any],
+    release_gate_catalog_bytes: bytes,
+    release_gate_catalog_reference: Mapping[str, Any],
+    record_resolver: Callable[[Mapping[str, Any]], bytes],
+    repository_root: str | PathLike[str],
+) -> Mapping[str, Any]:
+    """Seal an exact-candidate decision record, never a live promotion authorization."""
+    identity, identity_reference = _verified_review_candidate(
+        candidate_identity, candidate_identity_bytes, candidate_identity_reference
+    )
+    record = _expect_mapping(
+        _thaw(decision),
+        "promotion decision",
+        (
+            "schema_version",
+            "candidate_identity_record",
+            "candidate",
+            "evidence",
+            "decision",
+            "promotion_attempt",
+            "decided_at",
+        ),
+    )
+    if record["schema_version"] != "1.0" or record["decision"] not in ("APPROVE", "DECLINE"):
+        _refuse("promotion decision schema version or decision is unsupported")
+    _validate_review_candidate_binding(
+        {**record, "candidate_identity_record_sha256": identity_reference["sha256"]},
+        identity["candidate"],
+        identity_reference,
+    )
+    authorization = _expect_mapping(
+        record["promotion_attempt"],
+        "decision authorization template",
+        ("decision_author", "authorized_dispatcher"),
+    )
+    for role in ("decision_author", "authorized_dispatcher"):
+        actor = _expect_mapping(authorization[role], role, ("id", "login"))
+        _expect_identifier(actor["id"], f"{role} ID")
+        login = _expect_pattern(actor["login"], f"{role} login", _GITHUB_ACTOR_LOGIN_PATTERN)
+        if len(login) > 255:
+            _refuse(f"{role} login exceeds its bound")
+    evidence = _expect_mapping(
+        record["evidence"], "decision evidence", ("pre_decision_stage_evidence",)
+    )
+    summary_fields = (
+        "candidate_identity_record_sha256",
+        "source_ref",
+        "source_commit",
+        "stage",
+        "outcome",
+    )
+    summary = _expect_mapping(
+        evidence["pre_decision_stage_evidence"],
+        "decision pre-decision stage evidence",
+        ("record_reference", *summary_fields),
+    )
+    if not callable(record_resolver):
+        _refuse("decision stage record resolver is unavailable")
+    stage = seal_stage_gate_evidence(
+        _resolve_stage_record(summary["record_reference"], record_resolver),
+        candidate_identity=identity,
+        candidate_identity_bytes=candidate_identity_bytes,
+        candidate_identity_reference=candidate_identity_reference,
+        release_gate_catalog=release_gate_catalog,
+        release_gate_catalog_bytes=release_gate_catalog_bytes,
+        release_gate_catalog_reference=release_gate_catalog_reference,
+        record_resolver=record_resolver,
+        repository_root=repository_root,
+    )
+    if (
+        stage["stage"] != "pre-decision"
+        or stage["outcome"] != "PASS"
+        or any(summary[field] != stage[field] for field in summary_fields)
+    ):
+        _refuse("promotion decision does not bind its exact passing pre-decision stage")
+    if _review_timestamp(record["decided_at"], "decision decided_at") < _review_timestamp(
+        stage["sealed_at"], "pre-decision stage sealed_at"
+    ):
+        _refuse("promotion decision predates its sealed pre-decision evidence")
+    return _freeze(record)
+
+
 def _write_admission_outputs(admission: Mapping[str, Any], environment: Mapping[str, str]) -> None:
     output_path = _environment_value(environment, "GITHUB_OUTPUT")
     preview = admission["preview"]
@@ -2232,6 +2321,7 @@ __all__ = [
     "seal_artifact_consumer_proof",
     "seal_build_records",
     "seal_independent_pr_review",
+    "seal_promotion_decision",
     "seal_s2_s3_lens_result",
     "seal_s2_s3_review_aggregate",
     "seal_stage_gate_evidence",

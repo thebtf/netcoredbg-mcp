@@ -2717,3 +2717,248 @@ def test_python_rollback_records_product_works_after_observable_marker(
         "default_selector_changed": False,
         "legacy_journey_outcome": "PRODUCT_WORKS",
     }
+
+
+@pytest.fixture
+def promotion_decision_inputs(semantic_review_inputs: dict[str, Any]) -> dict[str, Any]:
+    """Simulated semantic inputs, never live approval or promotion authority."""
+    inputs = _simulated_stage_inputs(semantic_review_inputs, "pre-decision")
+    stage = artifact_contract.seal_stage_gate_evidence(
+        inputs["stage_record"], **_stage_binding(inputs)
+    )
+    stage_bytes = _canonical_json_bytes(stage)
+    stage_reference = {
+        **inputs["stage_record"]["gate_evidence"][0]["record_reference"],
+        "path": "simulated-pre-decision-stage.json",
+        "sha256": _sha256_bytes(stage_bytes),
+    }
+    inputs["records"][stage_reference["path"]] = stage_bytes
+    inputs["decision_record"] = {
+        "schema_version": "1.0",
+        "candidate_identity_record": deepcopy(inputs["candidate_identity_reference"]),
+        "candidate": deepcopy(inputs["candidate_identity"]["candidate"]),
+        "evidence": {
+            "pre_decision_stage_evidence": {
+                "record_reference": stage_reference,
+                **{
+                    key: stage[key]
+                    for key in (
+                        "candidate_identity_record_sha256",
+                        "source_ref",
+                        "source_commit",
+                        "stage",
+                        "outcome",
+                    )
+                },
+            }
+        },
+        "decision": "APPROVE",
+        "promotion_attempt": {
+            "decision_author": {"id": "101", "login": "simulated-author"},
+            "authorized_dispatcher": {"id": "102", "login": "simulated-dispatcher"},
+        },
+        "decided_at": "2030-01-01T00:00:01Z",
+    }
+    return inputs
+
+
+def _replace_simulated_decision_stage(inputs: dict[str, Any]) -> None:
+    reference = inputs["decision_record"]["evidence"]["pre_decision_stage_evidence"][
+        "record_reference"
+    ]
+    raw = _canonical_json_bytes(inputs["stage_record"])
+    inputs["records"][reference["path"]] = raw
+    reference["sha256"] = _sha256_bytes(raw)
+
+
+@pytest.mark.parametrize("decision", ["APPROVE", "DECLINE"])
+def test_promotion_decision_semantics_seal_without_attempt_or_remote_proof(
+    promotion_decision_inputs: dict[str, Any], decision: str
+) -> None:
+    inputs = promotion_decision_inputs
+    record = inputs["decision_record"]
+    record["decision"] = decision
+    original = deepcopy(record)
+    _validate_review_schema(record, "promotion-decision.schema.json")
+
+    sealed = artifact_contract.seal_promotion_decision(record, **_stage_binding(inputs))
+
+    _validate_review_schema(sealed, "promotion-decision.schema.json")
+    assert sealed == original
+    assert record == original
+    with pytest.raises(TypeError):
+        sealed["decision"] = "DECLINE" if decision == "APPROVE" else "APPROVE"
+    with pytest.raises(TypeError):
+        sealed["promotion_attempt"]["authorized_dispatcher"]["id"] = "999"
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "candidate_source",
+        "candidate_payload",
+        "identity_repository",
+        "identity_run",
+        "identity_artifact",
+        "identity_path",
+        "identity_hash",
+        "raw_identity_bytes",
+        "supplied_identity_object",
+    ],
+)
+def test_promotion_decision_semantics_refuse_substituted_candidate(
+    promotion_decision_inputs: dict[str, Any], violation: str
+) -> None:
+    inputs = promotion_decision_inputs
+    record = inputs["decision_record"]
+    if violation == "candidate_source":
+        record["candidate"]["source"]["commit"] = "a" * 40
+    elif violation == "candidate_payload":
+        record["candidate"]["build"]["artifact"]["id"] = "999"
+    elif violation.startswith("identity_"):
+        field, value = {
+            "identity_repository": ("repository", "other/repository"),
+            "identity_run": ("run_id", "999"),
+            "identity_artifact": ("artifact_id", "999"),
+            "identity_path": ("path", "other-candidate.json"),
+            "identity_hash": ("sha256", "a" * 64),
+        }[violation]
+        record["candidate_identity_record"][field] = value
+    elif violation == "raw_identity_bytes":
+        inputs["candidate_identity_bytes"] += b" "
+    else:
+        inputs["candidate_identity"]["candidate"]["source"]["commit"] = "a" * 40
+
+    with pytest.raises(ValueError):
+        artifact_contract.seal_promotion_decision(record, **_stage_binding(inputs))
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "missing_raw_stage",
+        "raw_stage_substitution",
+        "stage_reference_origin",
+        "stage_summary_hash",
+        "stage_summary_source",
+        "stage_summary_outcome",
+        "pre_publication_stage",
+        "post_publication_stage",
+        "raw_stage_candidate",
+        "raw_stage_identity",
+        "raw_stage_catalog",
+        "raw_stage_source",
+        "raw_stage_outcome",
+        "missing_stage_descriptor",
+    ],
+)
+def test_promotion_decision_semantics_require_exact_resolved_predecision_stage(
+    promotion_decision_inputs: dict[str, Any], violation: str
+) -> None:
+    inputs = promotion_decision_inputs
+    record = inputs["decision_record"]
+    summary = record["evidence"]["pre_decision_stage_evidence"]
+    reference = summary["record_reference"]
+    stage = inputs["stage_record"]
+    if violation == "missing_raw_stage":
+        del inputs["records"][reference["path"]]
+    elif violation == "raw_stage_substitution":
+        inputs["records"][reference["path"]] += b" "
+    elif violation == "stage_reference_origin":
+        reference["run_id"] = "999"
+    elif violation == "stage_summary_hash":
+        summary["candidate_identity_record_sha256"] = "a" * 64
+    elif violation == "stage_summary_source":
+        summary["source_commit"] = "a" * 40
+    elif violation == "stage_summary_outcome":
+        summary["outcome"] = "FAIL"
+    else:
+        if violation in ("pre_publication_stage", "post_publication_stage"):
+            stage["stage"] = (
+                "pre-publication" if violation == "pre_publication_stage" else "post-publication"
+            )
+            stage["gate_evidence"].clear()
+        elif violation == "raw_stage_candidate":
+            stage["candidate"]["build"]["artifact"]["id"] = "999"
+        elif violation == "raw_stage_identity":
+            stage["candidate_identity_record"]["artifact_id"] = "999"
+        elif violation == "raw_stage_catalog":
+            stage["release_gate_catalog"]["sha256"] = "a" * 64
+        elif violation == "raw_stage_source":
+            stage["source_commit"] = "a" * 40
+        elif violation == "raw_stage_outcome":
+            stage["outcome"] = "FAIL"
+        else:
+            stage["gate_evidence"].pop()
+        _replace_simulated_decision_stage(inputs)
+
+    with pytest.raises(ValueError):
+        artifact_contract.seal_promotion_decision(record, **_stage_binding(inputs))
+
+
+@pytest.mark.parametrize(
+    "violation", ["false_seven_lens_coverage", "nonindependent_pr_review", "incomplete_consumer"]
+)
+def test_promotion_decision_semantics_recompute_nested_raw_evidence(
+    promotion_decision_inputs: dict[str, Any], violation: str
+) -> None:
+    inputs = promotion_decision_inputs
+    if violation == "false_seven_lens_coverage":
+        aggregate = inputs["aggregate"]
+        aggregate["lens_results"].pop()
+        _replace_simulated_gate_record(inputs, 1, aggregate)
+    elif violation == "nonindependent_pr_review":
+        review = inputs["pr_review"]
+        review["reviewer_provenance"]["reviewer_principal_id"] = "simulated-author"
+        _replace_simulated_gate_record(inputs, 2, review)
+    else:
+        consumer = inputs["consumer"]
+        consumer["scenario_matrix"]["results"].pop()
+        _replace_simulated_gate_record(inputs, 0, consumer)
+    _replace_simulated_decision_stage(inputs)
+
+    with pytest.raises(ValueError):
+        artifact_contract.seal_promotion_decision(
+            inputs["decision_record"], **_stage_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "unknown_decision",
+        "historical_run",
+        "post_publication_proof",
+        "attempt_in_template",
+        "invalid_author",
+        "invalid_dispatcher",
+        "invalid_decision_time",
+        "decision_before_stage",
+    ],
+)
+def test_promotion_decision_semantics_refuse_unclosed_or_invalid_authorization(
+    promotion_decision_inputs: dict[str, Any], violation: str
+) -> None:
+    inputs = promotion_decision_inputs
+    record = inputs["decision_record"]
+    if violation == "unknown_decision":
+        record["decision"] = "DEFER"
+    elif violation == "historical_run":
+        record["workflow_run"] = {"run_id": "999", "run_attempt": 1}
+    elif violation == "post_publication_proof":
+        record["evidence"]["post_publication_stage_evidence"] = deepcopy(
+            record["evidence"]["pre_decision_stage_evidence"]
+        )
+    elif violation == "attempt_in_template":
+        record["promotion_attempt"]["run_attempt"] = 1
+    elif violation == "invalid_author":
+        record["promotion_attempt"]["decision_author"]["id"] = 101
+    elif violation == "invalid_dispatcher":
+        record["promotion_attempt"]["authorized_dispatcher"]["login"] = "not a login"
+    elif violation == "decision_before_stage":
+        record["decided_at"] = "2029-12-31T23:59:59Z"
+    else:
+        record["decided_at"] = "not a timestamp"
+
+    with pytest.raises(ValueError):
+        artifact_contract.seal_promotion_decision(record, **_stage_binding(inputs))

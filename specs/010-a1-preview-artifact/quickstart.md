@@ -167,6 +167,13 @@ validate supplied evidence; they do not add review or promotion CLI commands:
 - `seal_stage_gate_evidence` re-hashes the five exact-source policy snapshots,
   resolves and hashes each required raw record, validates its type and candidate
   binding, and recomputes each gate and stage outcome.
+- `seal_promotion_decision` revalidates the exact raw candidate and passing
+  pre-decision stage, including its catalog/source and nested proof/review records.
+  It accepts `APPROVE` or `DECLINE` as an immutable record with a closed decision
+  author/dispatcher template; the decision time cannot precede the stage seal.
+  It takes the same candidate, catalog, resolver, and repository inputs as stage
+  sealing. It does not create an attempt, read current permissions or remote state,
+  write a receipt, or perform publication.
 
 Review calls require the Candidate Identity Record object, its raw bytes, and
 its expanded retained-artifact reference. Compact review references must equal
@@ -174,7 +181,7 @@ the verified projection of that reference. Stage sealing additionally requires
 the catalog object/raw bytes/reference, a raw-record resolver, and the Git
 repository containing the candidate's policy snapshots. The functions reject
 missing, duplicate, out-of-order, mismatched, unredacted, non-independent,
-incomplete, or falsely passing evidence. They return immutable passing records
+incomplete, or falsely passing evidence. They return immutable validated records
 or raise `ValueError`; they do not write receipts or repair claims into `PASS`.
 
 The closed stage subsets are three pre-decision records (retained consumer
@@ -184,6 +191,12 @@ pre-publication subset proves only that subset, not review completion or
 publication authorization. Post-publication admission checks the remote receipt's
 candidate-bound asset identities and complete consumer/denial/EOF/Python-rollback
 matrix; the sealer does not itself download or execute those assets.
+
+Only the decision subpart of T021/T022 is implemented here. Fresh Promotion Attempt
+admission remains unimplemented and depends on T024/T025 deriving a matching
+current-attempt Remote Observation and Remote Classification; no stub or preflight
+alias substitutes for those records. A sealed Decision, including `APPROVE`, is not
+authority for a live attempt or publication.
 
 Schema-valid simulated test vectors are not actual reviewer or acceptance
 receipts. Library tests do not complete the live retained-candidate journey,
