@@ -741,7 +741,13 @@ public sealed class ProgressLoggingRelayTests
         var upstreamChannel = new DuplexChannel();
         var downstreamChannel = new DuplexChannel();
         var gatedOutput = new GatedWriteStream(downstreamChannel.ServerOutputStream);
-        var fakePython = StartProbeFakePython(upstreamChannel, steps: 80);
+        var releaseProducer = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var fakePython = StartProbeFakePython(
+            upstreamChannel,
+            steps: 80,
+            afterStep: (step, cancellationToken) => step == 1
+                ? releaseProducer.Task.WaitAsync(cancellationToken)
+                : Task.CompletedTask);
         var (session, host) = ProgressLoggingComposition.Build(
             upstreamChannel.CreateClientTransport,
             builder => builder.WithStreamServerTransport(
@@ -751,30 +757,38 @@ public sealed class ProgressLoggingRelayTests
         await using var downstreamClient = await McpClient.CreateAsync(
             downstreamChannel.CreateClientTransport());
         var sessionEnded = session.RunUntilSessionEndedAsync(CancellationToken.None);
-        gatedOutput.Block();
-        _ = downstreamClient.CallToolAsync(ProbeCall("token-saturation"));
-
-        await gatedOutput.WaitUntilBlockedAsync(TimeSpan.FromSeconds(10));
-        var completed = await Task.WhenAny(sessionEnded, Task.Delay(TimeSpan.FromSeconds(1)));
+        Task completed;
         Exception? terminalFailure = null;
-        if (completed == sessionEnded)
+        try
         {
-            try
+            gatedOutput.Block();
+            _ = downstreamClient.CallToolAsync(ProbeCall("token-saturation"));
+
+            await gatedOutput.WaitUntilBlockedAsync(TimeSpan.FromSeconds(10));
+            releaseProducer.TrySetResult();
+            completed = await Task.WhenAny(sessionEnded, Task.Delay(TimeSpan.FromSeconds(1)));
+            if (completed == sessionEnded)
             {
-                await sessionEnded;
-            }
-            catch (Exception ex)
-            {
-                terminalFailure = ex;
+                try
+                {
+                    await sessionEnded;
+                }
+                catch (Exception ex)
+                {
+                    terminalFailure = ex;
+                }
             }
         }
-
-        gatedOutput.Release();
-        await downstreamClient.DisposeAsync();
-        await session.DisposeAsync();
-        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
-        host.Dispose();
-        await fakePython.DisposeAsync();
+        finally
+        {
+            releaseProducer.TrySetResult();
+            gatedOutput.Release();
+            await downstreamClient.DisposeAsync();
+            await session.DisposeAsync();
+            await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            host.Dispose();
+            await fakePython.DisposeAsync();
+        }
 
         Assert.Same(sessionEnded, completed);
         Assert.NotNull(terminalFailure);
