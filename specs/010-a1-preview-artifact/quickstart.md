@@ -199,12 +199,49 @@ candidate-bound asset identities and complete consumer/denial/EOF/Python-rollbac
 matrix; the sealer does not itself download or execute those assets.
 
 Only the decision subpart of T021/T022 is implemented here. Fresh Promotion Attempt
-admission remains unimplemented and depends on T024/T025 deriving a matching
-current-attempt Remote Observation and Remote Classification; no stub or preflight
-alias substitutes for those records. A sealed Decision, including `APPROVE`, is not
-authority for a live attempt or publication.
+admission remains unimplemented. T024/T025 now have the pure remote-record API
+described below, pending root verification; it does not substitute for current
+attempt admission. A sealed Decision, including `APPROVE`, is not authority for a
+live attempt or publication.
 
 Schema-valid simulated test vectors are not actual reviewer or acceptance
 receipts. Library tests do not complete the live retained-candidate journey,
 independent reviews, live stage sealing, promotion decision, or external
 publication. Those remain separate tasks; the Python default remains unchanged.
+
+## Pure remote observation and classification API
+
+`seal_remote_observation(observation, *, candidate_identity,
+candidate_identity_bytes, candidate_identity_reference, current_attempt_id)`
+validates and freezes the closed `remote-observation.schema.json` record.
+It checks exact raw candidate/reference binding and the independent current
+attempt ID. Structurally valid negative facts, including unavailable or expired
+payloads and unreadable remote objects, remain observations rather than errors
+or inferred absence. It does not fetch or verify remote bytes itself.
+
+`classify_remote_observation(remote_observed_state_reference, *,
+classification_id, classified_at, candidate_identity, candidate_identity_bytes,
+candidate_identity_reference, current_attempt_id, current_workflow_run,
+record_resolver)` resolves the exact raw observation, checks its hash and closed
+form again, and derives one immutable `remote-classification.schema.json` record.
+The resolver takes a compact artifact-file reference and returns previously
+obtained bytes; no downloader, credential, CLI promotion path, or network
+producer is added. `current_workflow_run` has exactly the existing
+`promotion-attempt.schema.json#/$defs/current_promote_workflow_run` shape and
+must come from the invoking runtime, not the observation under validation.
+
+The classifier derives state/action/reason from constituent tag, release, asset,
+and retained-availability facts, never caller-supplied state or approval. Invalid
+documents, raw hash/context substitutions, and reversed chronology raise
+`ValueError`. Valid negative facts produce `collision/REFUSED/REFUSE`, preserving
+the first applicable refusal reason. A matching published prerelease permits
+only `RUN_REMOTE_CONSUMER_PROOF`, never a mutation.
+
+Neither function consults the wall clock or adds an observation TTL. Payload
+expiry is evaluated at `observed_at` and `classified_at`; classification cannot
+precede observation. These times and the truth of the recorded readback remain
+runtime/observer inputs. The stored observation has no workflow `run_attempt`,
+so matching run ID and attempt ID cannot prove freshness across a rerun of that
+run. The future collector must create a new attempt ID and observation for each
+run attempt, and full Promotion Attempt admission must enforce that capture
+before any effect. An `ADMITTED` classification alone is not effect authority.

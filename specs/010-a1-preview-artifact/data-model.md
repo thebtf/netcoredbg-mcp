@@ -260,7 +260,7 @@ Remote Observed State is a sealed point-in-time observation of the prerelease de
 | Field | Content |
 | --- | --- |
 | `observation_id` and `observed_at` | A bounded opaque snapshot identity and observation time. |
-| `candidate_identity_record` and `promotion_attempt` | Closed references to the same canonical candidate and fresh consuming attempt. |
+| `candidate_identity_record`, `candidate`, and `promotion_attempt_id` | The closed reference and complete binding to the same canonical candidate, plus the bounded opaque ID of the consuming attempt. |
 | `retained_artifact_availability` | A closed availability/status code for the recorded Actions payload. |
 | `tag_observation` and `release_observation` | Closed absence/presence/type/state facts, tag name, peeled target commit, and expected prerelease metadata. |
 | `asset_observations` | Bounded expected asset identities, metadata size, downloaded-byte size, and SHA-256 comparison results. |
@@ -274,6 +274,7 @@ Remote Observed State is a sealed point-in-time observation of the prerelease de
 - Asset metadata alone does not prove identity. The observer downloads remote assets and compares their bytes, sizes, and SHA-256 values to the Candidate Identity Record and inherited manifest.
 - An unreadable API response, incomplete asset readback, unavailable retained artifact, or mismatched byte result remains an observation. It is never treated as an absent tag or release.
 - The snapshot is immutable. A later retry creates a new Remote Observed State.
+- The pure `seal_remote_observation` API validates supplied recorded facts and freezes them without reading the network, consulting the wall clock, or creating a Promotion Attempt. It admits negative observations as evidence, not as permission to act. Root verification of the source implementation remains pending.
 
 ### State transitions
 
@@ -291,17 +292,39 @@ Recovery Classification derives the only permitted promotion action from one Can
 
 | Field | Content |
 | --- | --- |
-| `classification_id`, `classification_sha256`, and `classified_at` | The immutable classification identity and time. |
-| `candidate_identity_reference` | The candidate used for all comparisons. |
-| `remote_observed_state_reference` | The sealed observation that was classified. |
+| `classification_id` and `classified_at` | The immutable classification identity and timezone-aware classification time. |
+| `candidate_identity_record`, `candidate`, and `promotion_attempt_id` | The exact raw-verified candidate reference/binding and consuming attempt ID. |
+| `remote_observed_state_reference` | The complete structural reference and raw-byte SHA-256 of the resolved observation. |
 | `state` | One of `unstarted`, `tag_only`, `draft_empty`, `draft_partial`, `draft_complete`, `published_complete`, or `collision`. |
-| `admission` | Whether promotion may perform the stated action. |
-| `allowed_action` | The sole remote action permitted for the observed state, or `refuse`. |
+| `admission` | Conditional eligibility of the recorded facts, not authorization for a remote effect. |
+| `allowed_action` | The sole derived action code, or `REFUSE`; a separate complete Promotion Attempt must authorize any effect. |
 | `reason_codes` | The identity mismatch, unreadability, expiry, or matching facts that produced the classification. |
 
 ### Validation rules and transitions
 
 The [Promotion recovery contract](contracts/promotion-recovery.md) owns the serialized classifier. The following model rules are mandatory.
+
+`classify_remote_observation` revalidates the raw candidate and observation,
+requires their exact candidate/attempt equality, and independently validates the
+current canonical promote workflow context. The observation reference must belong
+to that context's repository/run. The classifier produces state, action, result,
+and reason codes; it never accepts them as trusted caller claims. Structurally
+invalid or substituted records raise `ValueError`; valid negative facts yield
+immutable `collision/REFUSED/REFUSE`. The first refusal follows the accepted
+order: retained expiry, unavailability, retained identity mismatch, unreadability,
+incomplete/contradictory readback, non-annotated tag, tag target mismatch, release
+metadata mismatch, release state mismatch, unexpected assets, asset identity
+mismatch.
+
+Payload expiry is compared with both observation and classification instants,
+and classification cannot precede observation. No wall-clock read or new TTL is
+part of either pure API. The observer owns live readback, complete asset listing,
+and download hashing. Neither stored run ID nor opaque attempt ID proves
+freshness for a repeated workflow `run_attempt`: the observation has no such
+field. A future collector/admission must bind a newly captured observation and
+new attempt ID to each current invocation before remote mutation. Classification
+does not validate dispatcher permission, Decision/stage admission, consumer
+proof, or publication authority.
 
 | Observed state | Required facts | Allowed action | Resulting state or result |
 | --- | --- | --- | --- |

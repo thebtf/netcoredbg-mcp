@@ -3320,6 +3320,447 @@ def test_decode_evidence_bundle_keeps_distinct_names_with_equal_raw_hashes() -> 
     assert len(decoded) == 3
 
 
+@pytest.fixture
+def remote_observation_inputs(semantic_review_inputs: dict[str, Any]) -> dict[str, Any]:
+    """Simulated recorded facts and independent runtime context, never live readback."""
+    inputs = semantic_review_inputs
+    candidate = inputs["candidate_identity"]["candidate"]
+    inputs["current_attempt_id"] = "simulated-attempt-001"
+    inputs["current_workflow_run"] = {
+        "repository": REPOSITORY,
+        "workflow_path": ".github/workflows/stateless-preview.yml",
+        "mode": "promote",
+        "event": "workflow_dispatch",
+        "run_id": "801",
+        "run_attempt": 2,
+        "ref": SOURCE_REF,
+        "commit": candidate["source"]["commit"],
+    }
+    assets = {}
+    for kind, descriptor, asset_id in (
+        ("archive", candidate["preview_manifest"]["contents"]["archive"], "902"),
+        ("manifest", candidate["preview_manifest"]["file"], "903"),
+    ):
+        assets[kind] = {
+            "status": "PRESENT",
+            "metadata": {
+                "id": asset_id,
+                "name": descriptor["name"],
+                "size_bytes": descriptor["size_bytes"],
+            },
+            "downloaded_identity": deepcopy(descriptor),
+            "observed_result": "SUCCESS",
+            "identity_status": "MATCHES_CANDIDATE",
+        }
+    inputs["observation"] = {
+        "observation_schema_version": "1.0",
+        "observation_id": "simulated-observation-001",
+        "promotion_attempt_id": inputs["current_attempt_id"],
+        "candidate_identity_record": deepcopy(inputs["candidate_identity_reference"]),
+        "candidate": deepcopy(candidate),
+        "retained_artifact_availability": {
+            "status": "AVAILABLE_AND_VERIFIED",
+            "observed_result": "SUCCESS",
+        },
+        "tag_observation": {
+            "status": "PRESENT",
+            "tag": candidate["destination"]["tag"],
+            "tag_type": "ANNOTATED",
+            "object_id": "d" * 40,
+            "peeled_commit": candidate["source"]["commit"],
+        },
+        "release_observation": {
+            "status": "PRESENT",
+            "release_id": "901",
+            "tag": candidate["destination"]["tag"],
+            "is_draft": True,
+            "is_prerelease": True,
+            "destination_metadata_status": "MATCHING",
+        },
+        "asset_observations": {**assets, "unexpected_asset_ids": []},
+        "readback_status": {
+            "expected_result": "EXPECT_SUCCESS",
+            "observed_result": "SUCCESS",
+            "reason_code": "READBACK_COMPLETE",
+        },
+        "observed_at": "2029-12-31T23:59:58Z",
+    }
+    inputs["classified_at"] = "2029-12-31T23:59:59Z"
+    inputs["observation_reference"] = {
+        "repository": REPOSITORY,
+        "run_id": "801",
+        "artifact_id": "802",
+        "path": "simulated-remote-observation.json",
+        "sha256": "0" * 64,
+    }
+    inputs["remote_records"] = {}
+
+    def record_resolver(reference: Mapping[str, Any]) -> bytes:
+        expected = inputs["observation_reference"]
+        if any(
+            reference[key] != expected[key]
+            for key in ("repository", "run_id", "artifact_id", "path")
+        ):
+            raise ValueError("simulated observation locator is unavailable")
+        return inputs["remote_records"][reference["path"]]
+
+    inputs["remote_record_resolver"] = record_resolver
+    _replace_simulated_remote_observation(inputs)
+    return inputs
+
+
+def _replace_simulated_remote_observation(inputs: dict[str, Any], raw: bytes | None = None) -> None:
+    raw = _canonical_json_bytes(inputs["observation"]) if raw is None else raw
+    reference = inputs["observation_reference"]
+    inputs["remote_records"][reference["path"]] = raw
+    reference["sha256"] = _sha256_bytes(raw)
+
+
+def _remote_observation_binding(inputs: Mapping[str, Any]) -> dict[str, Any]:
+    return {**_review_binding(inputs), "current_attempt_id": inputs["current_attempt_id"]}
+
+
+def _remote_classification_binding(inputs: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        **_remote_observation_binding(inputs),
+        "classification_id": "simulated-classification-001",
+        "classified_at": inputs["classified_at"],
+        "current_workflow_run": inputs["current_workflow_run"],
+        "record_resolver": inputs["remote_record_resolver"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("tag_present", "draft", "present_assets", "state", "action", "reason"),
+    [
+        (False, None, (), "unstarted", "CREATE_ANNOTATED_TAG_AND_DRAFT_RELEASE", "TAG_ABSENT"),
+        (True, None, (), "tag_only", "CREATE_DRAFT_PRERELEASE", "TAG_MATCHING_ANNOTATED"),
+        (True, True, (), "draft_empty", "UPLOAD_MISSING_APPROVED_ASSETS", "EXPECTED_ASSETS_ABSENT"),
+        (
+            True,
+            True,
+            ("archive",),
+            "draft_partial",
+            "UPLOAD_MISSING_APPROVED_ASSETS",
+            "EXPECTED_ASSETS_PARTIAL_MATCH",
+        ),
+        (
+            True,
+            True,
+            ("manifest",),
+            "draft_partial",
+            "UPLOAD_MISSING_APPROVED_ASSETS",
+            "EXPECTED_ASSETS_PARTIAL_MATCH",
+        ),
+        (
+            True,
+            True,
+            ("archive", "manifest"),
+            "draft_complete",
+            "VERIFY_REMOTE_ASSETS_AND_PUBLISH_PRERELEASE",
+            "EXPECTED_ASSETS_COMPLETE_MATCH",
+        ),
+        (
+            True,
+            False,
+            ("archive", "manifest"),
+            "published_complete",
+            "RUN_REMOTE_CONSUMER_PROOF",
+            "RELEASE_MATCHING_PRERELEASE",
+        ),
+    ],
+    ids=[
+        "unstarted",
+        "tag-only",
+        "draft-empty",
+        "draft-archive-only",
+        "draft-manifest-only",
+        "draft-complete",
+        "published-complete",
+    ],
+)
+def test_remote_classification_semantics_derive_states_from_facts(
+    remote_observation_inputs: dict[str, Any],
+    tag_present: bool,
+    draft: bool | None,
+    present_assets: tuple[str, ...],
+    state: str,
+    action: str,
+    reason: str,
+) -> None:
+    inputs = remote_observation_inputs
+    observation = inputs["observation"]
+    if not tag_present:
+        observation["tag_observation"] = {"status": "ABSENT"}
+    if draft is None:
+        observation["release_observation"] = {"status": "ABSENT"}
+    else:
+        observation["release_observation"]["is_draft"] = draft
+    for kind in ("archive", "manifest"):
+        if kind not in present_assets:
+            observation["asset_observations"][kind] = {"status": "ABSENT"}
+    _replace_simulated_remote_observation(inputs)
+    original = deepcopy(observation)
+    _validate_review_schema(observation, "remote-observation.schema.json")
+
+    sealed = artifact_contract.seal_remote_observation(
+        observation, **_remote_observation_binding(inputs)
+    )
+    classified = artifact_contract.classify_remote_observation(
+        inputs["observation_reference"], **_remote_classification_binding(inputs)
+    )
+
+    _validate_review_schema(sealed, "remote-observation.schema.json")
+    _validate_review_schema(classified, "remote-classification.schema.json")
+    assert sealed == original == observation
+    assert classified["state"] == state
+    assert classified["allowed_action"] == action
+    assert classified["reason_codes"] == [reason]
+    assert classified["admission"] == "ADMITTED"
+    assert classified["classification_result"] == {
+        "expected": "EXPECT_SUCCESS",
+        "observed": "SUCCESS",
+        "status": "PASS",
+    }
+    assert classified["promotion_attempt_id"] == inputs["current_attempt_id"]
+    assert classified["candidate"] == inputs["candidate_identity"]["candidate"]
+    assert classified["candidate_identity_record"] == observation["candidate_identity_record"]
+    assert classified["remote_observed_state_reference"] == inputs["observation_reference"]
+    assert classified["classification_id"] == "simulated-classification-001"
+    assert classified["classified_at"] == inputs["classified_at"]
+
+
+@pytest.mark.parametrize(
+    ("violation", "reason"),
+    [
+        ("retained_expired", "RETAINED_ARTIFACT_EXPIRED"),
+        ("retained_unavailable", "RETAINED_ARTIFACT_UNAVAILABLE"),
+        ("retained_mismatch", "RETAINED_ARTIFACT_IDENTITY_MISMATCH"),
+        ("retained_unreadable", "REMOTE_READBACK_UNREADABLE"),
+        ("retained_false_success", "REMOTE_READBACK_INCOMPLETE"),
+        ("readback_unavailable", "REMOTE_READBACK_UNREADABLE"),
+        ("readback_unauthorized", "REMOTE_READBACK_UNREADABLE"),
+        ("readback_incomplete", "REMOTE_READBACK_INCOMPLETE"),
+        ("readback_rejected", "REMOTE_READBACK_INCOMPLETE"),
+        ("readback_failed_complete", "REMOTE_READBACK_INCOMPLETE"),
+        ("tag_unreadable", "REMOTE_READBACK_UNREADABLE"),
+        ("release_unreadable", "REMOTE_READBACK_UNREADABLE"),
+        ("archive_unreadable", "REMOTE_READBACK_UNREADABLE"),
+        ("manifest_unreadable", "REMOTE_READBACK_UNREADABLE"),
+        ("archive_present_unreadable", "REMOTE_READBACK_UNREADABLE"),
+        ("manifest_present_unreadable", "REMOTE_READBACK_UNREADABLE"),
+        ("lightweight_tag", "TAG_NON_ANNOTATED"),
+        ("tag_name", "TAG_TARGET_MISMATCH"),
+        ("tag_target", "TAG_TARGET_MISMATCH"),
+        ("release_tag", "RELEASE_METADATA_MISMATCH"),
+        ("release_metadata", "RELEASE_METADATA_MISMATCH"),
+        ("not_prerelease", "RELEASE_STATE_MISMATCH"),
+        ("release_without_tag", "RELEASE_STATE_MISMATCH"),
+        ("assets_without_release", "REMOTE_READBACK_INCOMPLETE"),
+        ("published_empty", "RELEASE_STATE_MISMATCH"),
+        ("published_partial", "RELEASE_STATE_MISMATCH"),
+        ("unexpected_asset", "UNEXPECTED_ASSET_PRESENT"),
+        ("duplicate_asset_id", "REMOTE_READBACK_INCOMPLETE"),
+        ("archive_negative_identity", "ASSET_IDENTITY_MISMATCH"),
+        ("manifest_negative_identity", "ASSET_IDENTITY_MISMATCH"),
+        ("archive_failed_download", "ASSET_IDENTITY_MISMATCH"),
+        ("manifest_failed_download", "ASSET_IDENTITY_MISMATCH"),
+    ],
+)
+def test_remote_classification_semantics_preserve_negative_facts_as_collision(
+    remote_observation_inputs: dict[str, Any],
+    violation: str,
+    reason: str,
+) -> None:
+    inputs = remote_observation_inputs
+    observation = inputs["observation"]
+    assets = observation["asset_observations"]
+    if violation.startswith("retained_"):
+        retained = observation["retained_artifact_availability"]
+        if violation == "retained_false_success":
+            retained["observed_result"] = "FAILURE"
+        else:
+            retained["status"] = {
+                "retained_expired": "EXPIRED",
+                "retained_unavailable": "UNAVAILABLE",
+                "retained_mismatch": "IDENTITY_MISMATCH",
+                "retained_unreadable": "UNREADABLE",
+            }[violation]
+            retained["observed_result"] = "REFUSAL"
+    elif violation.startswith("readback_"):
+        observation["readback_status"].update(
+            {
+                "observed_result": "FAILURE",
+                "reason_code": {
+                    "readback_unavailable": "READBACK_UNAVAILABLE",
+                    "readback_unauthorized": "READBACK_UNAUTHORIZED",
+                    "readback_incomplete": "READBACK_INCOMPLETE",
+                    "readback_rejected": "READBACK_EVIDENCE_REJECTED",
+                    "readback_failed_complete": "READBACK_COMPLETE",
+                }[violation],
+            }
+        )
+    elif violation in ("tag_unreadable", "release_unreadable"):
+        kind = violation.split("_")[0]
+        observation[kind + "_observation"] = {
+            "status": "UNREADABLE",
+            "reason_code": kind.upper() + "_READBACK_UNAVAILABLE",
+        }
+    elif violation.endswith("unreadable"):
+        kind = violation.split("_")[0]
+        asset = assets[kind]
+        assets[kind] = (
+            {
+                "status": "PRESENT_UNREADABLE",
+                "metadata": asset["metadata"],
+                "reason_code": kind.upper() + "_DOWNLOAD_UNAVAILABLE",
+            }
+            if "present" in violation
+            else {"status": "UNREADABLE", "reason_code": kind.upper() + "_READBACK_UNAVAILABLE"}
+        )
+    elif violation == "lightweight_tag":
+        observation["tag_observation"]["tag_type"] = "LIGHTWEIGHT"
+    elif violation in ("tag_name", "tag_target"):
+        observation["tag_observation"]["tag" if violation == "tag_name" else "peeled_commit"] = (
+            "stateless-preview-v9.9.9-preview.9" if violation == "tag_name" else "a" * 40
+        )
+    elif violation == "release_tag":
+        observation["release_observation"]["tag"] = "stateless-preview-v9.9.9-preview.9"
+    elif violation == "release_metadata":
+        observation["release_observation"]["destination_metadata_status"] = "MISMATCHED"
+    elif violation == "not_prerelease":
+        observation["release_observation"]["is_prerelease"] = False
+    elif violation == "release_without_tag":
+        observation["tag_observation"] = {"status": "ABSENT"}
+    elif violation == "assets_without_release":
+        observation["release_observation"] = {"status": "ABSENT"}
+    elif violation.startswith("published_"):
+        observation["release_observation"]["is_draft"] = False
+        assets["archive"] = {"status": "ABSENT"}
+        if violation == "published_empty":
+            assets["manifest"] = {"status": "ABSENT"}
+    elif violation == "unexpected_asset":
+        assets["unexpected_asset_ids"] = ["simulated-unexpected-asset"]
+    elif violation == "duplicate_asset_id":
+        assets["manifest"]["metadata"]["id"] = assets["archive"]["metadata"]["id"]
+    else:
+        kind = violation.split("_")[0]
+        if violation.endswith("negative_identity"):
+            assets[kind]["identity_status"] = "DOWNLOADED_SHA256_MISMATCH"
+        else:
+            assets[kind]["observed_result"] = "FAILURE"
+    _replace_simulated_remote_observation(inputs)
+    original = deepcopy(observation)
+    _validate_review_schema(observation, "remote-observation.schema.json")
+
+    sealed = artifact_contract.seal_remote_observation(
+        observation, **_remote_observation_binding(inputs)
+    )
+    classified = artifact_contract.classify_remote_observation(
+        inputs["observation_reference"], **_remote_classification_binding(inputs)
+    )
+
+    assert sealed == original == observation
+    _validate_review_schema(classified, "remote-classification.schema.json")
+    assert classified["state"] == "collision"
+    assert classified["admission"] == "REFUSED"
+    assert classified["allowed_action"] == "REFUSE"
+    assert classified["reason_codes"] == [reason]
+    assert classified["classification_result"] == {
+        "expected": "EXPECT_SUCCESS",
+        "observed": "REFUSAL",
+        "status": "REFUSED",
+    }
+
+
+@pytest.mark.parametrize("kind", ["archive", "manifest"])
+@pytest.mark.parametrize(
+    "field",
+    ["metadata_name", "metadata_size", "downloaded_name", "downloaded_size", "downloaded_sha256"],
+)
+def test_remote_classification_semantics_recompute_each_asset_identity(
+    remote_observation_inputs: dict[str, Any],
+    kind: str,
+    field: str,
+) -> None:
+    inputs = remote_observation_inputs
+    asset = inputs["observation"]["asset_observations"][kind]
+    container = asset["metadata" if field.startswith("metadata_") else "downloaded_identity"]
+    if field.endswith("name"):
+        container["name"] = container["name"].replace(VERSION, "9.9.9-preview.9")
+    elif field.endswith("size"):
+        container["size_bytes"] += 1
+    else:
+        container["sha256"] = "a" * 64
+    _replace_simulated_remote_observation(inputs)
+    _validate_review_schema(inputs["observation"], "remote-observation.schema.json")
+
+    classified = artifact_contract.classify_remote_observation(
+        inputs["observation_reference"], **_remote_classification_binding(inputs)
+    )
+
+    assert asset["identity_status"] == "MATCHES_CANDIDATE"
+    assert classified["state"] == "collision"
+    assert classified["allowed_action"] == "REFUSE"
+    assert classified["reason_codes"] == ["ASSET_IDENTITY_MISMATCH"]
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "reason"),
+    [
+        ("expired", "unreadable", "RETAINED_ARTIFACT_EXPIRED"),
+        ("unavailable", "unreadable", "RETAINED_ARTIFACT_UNAVAILABLE"),
+        ("identity_mismatch", "unreadable", "RETAINED_ARTIFACT_IDENTITY_MISMATCH"),
+        ("unreadable", "lightweight", "REMOTE_READBACK_UNREADABLE"),
+        ("incomplete", "lightweight", "REMOTE_READBACK_INCOMPLETE"),
+        ("lightweight", "asset", "TAG_NON_ANNOTATED"),
+        ("tag", "release", "TAG_TARGET_MISMATCH"),
+        ("release", "unexpected", "RELEASE_METADATA_MISMATCH"),
+        ("release_state", "unexpected", "RELEASE_STATE_MISMATCH"),
+        ("unexpected", "asset", "UNEXPECTED_ASSET_PRESENT"),
+    ],
+)
+def test_remote_classification_semantics_use_first_applicable_refusal(
+    remote_observation_inputs: dict[str, Any],
+    first: str,
+    second: str,
+    reason: str,
+) -> None:
+    inputs = remote_observation_inputs
+    observation = inputs["observation"]
+    for fault in (first, second):
+        if fault in ("expired", "unavailable", "identity_mismatch"):
+            observation["retained_artifact_availability"]["status"] = fault.upper()
+        elif fault == "unreadable":
+            observation["asset_observations"]["manifest"] = {
+                "status": "UNREADABLE",
+                "reason_code": "MANIFEST_READBACK_UNAUTHORIZED",
+            }
+        elif fault == "incomplete":
+            observation["readback_status"]["reason_code"] = "READBACK_INCOMPLETE"
+        elif fault == "lightweight":
+            observation["tag_observation"]["tag_type"] = "LIGHTWEIGHT"
+        elif fault == "tag":
+            observation["tag_observation"]["peeled_commit"] = "a" * 40
+        elif fault == "release":
+            observation["release_observation"]["destination_metadata_status"] = "MISMATCHED"
+        elif fault == "release_state":
+            observation["release_observation"]["is_prerelease"] = False
+        elif fault == "unexpected":
+            observation["asset_observations"]["unexpected_asset_ids"] = ["simulated-extra"]
+        else:
+            observation["asset_observations"]["archive"]["downloaded_identity"]["sha256"] = "a" * 64
+    _replace_simulated_remote_observation(inputs)
+    _validate_review_schema(observation, "remote-observation.schema.json")
+
+    classified = artifact_contract.classify_remote_observation(
+        inputs["observation_reference"], **_remote_classification_binding(inputs)
+    )
+
+    assert classified["state"] == "collision"
+    assert classified["reason_codes"] == [reason]
+
+
 @pytest.mark.parametrize(
     "violation",
     ["empty", "nonalphabet", "whitespace", "padding", "truncated", "not_zip", "truncated_zip"],
@@ -3513,6 +3954,94 @@ def test_decode_evidence_bundle_refuses_corrupt_crc_even_with_matching_raw_hash(
 
 
 @pytest.mark.parametrize(
+    "violation",
+    [
+        "state",
+        "allowed_action",
+        "admission",
+        "approved",
+        "version",
+        "unsafe_id",
+        "missing_attempt",
+        "invalid_status",
+        "invalid_retained_status",
+        "invalid_readback_reason",
+        "invalid_expected_result",
+        "invalid_observed_result",
+        "invalid_identity_status",
+        "bool_size",
+        "zero_size",
+        "bool_draft",
+        "invalid_object_id",
+        "extra_nested_field",
+        "missing_download_identity",
+        "duplicate_unexpected_ids",
+        "too_many_unexpected_ids",
+    ],
+)
+def test_remote_observation_semantics_refuse_unclosed_or_invalid_records(
+    remote_observation_inputs: dict[str, Any],
+    violation: str,
+) -> None:
+    inputs = remote_observation_inputs
+    observation = inputs["observation"]
+    if violation in ("state", "allowed_action", "admission", "approved"):
+        observation[violation] = {
+            "state": "draft_complete",
+            "allowed_action": "RUN_REMOTE_CONSUMER_PROOF",
+            "admission": "ADMITTED",
+            "approved": True,
+        }[violation]
+    elif violation == "version":
+        observation["observation_schema_version"] = "2.0"
+    elif violation == "unsafe_id":
+        observation["observation_id"] = "../simulated-observation"
+    elif violation == "missing_attempt":
+        del observation["promotion_attempt_id"]
+    elif violation == "invalid_status":
+        observation["tag_observation"]["status"] = "MISSING"
+    elif violation == "invalid_retained_status":
+        observation["retained_artifact_availability"]["status"] = "AVAILABLE"
+    elif violation == "invalid_readback_reason":
+        observation["readback_status"]["reason_code"] = "CLEAN"
+    elif violation == "invalid_expected_result":
+        observation["readback_status"]["expected_result"] = "EXPECT_FAILURE"
+    elif violation == "invalid_observed_result":
+        observation["readback_status"]["observed_result"] = "CLEAN"
+    elif violation == "invalid_identity_status":
+        observation["asset_observations"]["archive"]["identity_status"] = "VERIFIED"
+    elif violation in ("bool_size", "zero_size"):
+        observation["asset_observations"]["archive"]["metadata"]["size_bytes"] = (
+            True if violation == "bool_size" else 0
+        )
+    elif violation == "bool_draft":
+        observation["release_observation"]["is_draft"] = 1
+    elif violation == "invalid_object_id":
+        observation["tag_observation"]["object_id"] = "not-a-commit"
+    elif violation == "extra_nested_field":
+        observation["tag_observation"]["diagnostic"] = "simulated raw diagnostic"
+    elif violation == "missing_download_identity":
+        del observation["asset_observations"]["manifest"]["downloaded_identity"]
+    elif violation in ("duplicate_unexpected_ids", "too_many_unexpected_ids"):
+        observation["asset_observations"]["unexpected_asset_ids"] = (
+            ["simulated-extra", "simulated-extra"]
+            if violation == "duplicate_unexpected_ids"
+            else [f"simulated-extra-{index}" for index in range(65)]
+        )
+    _replace_simulated_remote_observation(inputs)
+    with pytest.raises(ValidationError):
+        _validate_review_schema(observation, "remote-observation.schema.json")
+    with pytest.raises(ValueError):
+        artifact_contract.seal_remote_observation(
+            observation, **_remote_observation_binding(inputs)
+        )
+    with pytest.raises(ValueError):
+        artifact_contract.classify_remote_observation(
+            inputs["observation_reference"], **_remote_classification_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize(
     "violation", ["missing", "extra", "empty", "not_hex", "uppercase", "aliased_hash"]
 )
 def test_decode_evidence_bundle_refuses_unclosed_or_invalid_expected_hash_mapping(
@@ -3675,3 +4204,295 @@ def test_decode_evidence_bundle_accepts_zero_local_sizes_with_data_descriptors(
         )
         == records
     )
+
+
+@pytest.mark.parametrize(
+    "observed_at",
+    ["2029-12-31T23:59:58", "2029-02-30T23:59:58Z"],
+    ids=["naive_time", "invalid_time"],
+)
+def test_remote_observation_semantics_refuse_invalid_observation_timestamps(
+    remote_observation_inputs: dict[str, Any],
+    observed_at: str,
+) -> None:
+    inputs = remote_observation_inputs
+    inputs["observation"]["observed_at"] = observed_at
+    _replace_simulated_remote_observation(inputs)
+    with pytest.raises(ValueError):
+        artifact_contract.seal_remote_observation(
+            inputs["observation"], **_remote_observation_binding(inputs)
+        )
+    with pytest.raises(ValueError):
+        artifact_contract.classify_remote_observation(
+            inputs["observation_reference"], **_remote_classification_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize("field", ["repository", "run_id", "artifact_id", "path", "sha256"])
+def test_remote_observation_semantics_bind_every_candidate_reference_field(
+    remote_observation_inputs: dict[str, Any],
+    field: str,
+) -> None:
+    inputs = remote_observation_inputs
+    inputs["observation"]["candidate_identity_record"][field] = {
+        "repository": "other/repository",
+        "run_id": "999",
+        "artifact_id": "999",
+        "path": "other-candidate.json",
+        "sha256": "a" * 64,
+    }[field]
+    _replace_simulated_remote_observation(inputs)
+    with pytest.raises(ValueError):
+        artifact_contract.seal_remote_observation(
+            inputs["observation"], **_remote_observation_binding(inputs)
+        )
+    with pytest.raises(ValueError):
+        artifact_contract.classify_remote_observation(
+            inputs["observation_reference"], **_remote_classification_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "observation_candidate",
+        "candidate_mapping",
+        "candidate_raw_hash",
+        "duplicate_candidate_key",
+        "other_attempt",
+    ],
+)
+def test_remote_observation_semantics_revalidate_raw_candidate_and_attempt(
+    remote_observation_inputs: dict[str, Any],
+    violation: str,
+) -> None:
+    inputs = remote_observation_inputs
+    if violation == "observation_candidate":
+        inputs["observation"]["candidate"]["preview_manifest"]["file"]["sha256"] = "a" * 64
+    elif violation == "candidate_mapping":
+        inputs["candidate_identity"]["candidate"]["preview_manifest"]["file"]["sha256"] = "a" * 64
+    elif violation == "candidate_raw_hash":
+        inputs["candidate_identity_bytes"] += b" "
+    elif violation == "duplicate_candidate_key":
+        raw = b'{"schema_version":"1.0",' + inputs["candidate_identity_bytes"][1:]
+        inputs["candidate_identity_bytes"] = raw
+        inputs["consumer_identity_reference"]["sha256"] = _sha256_bytes(raw)
+        inputs["observation"]["candidate_identity_record"]["sha256"] = _sha256_bytes(raw)
+    else:
+        inputs["current_attempt_id"] = "simulated-other-attempt"
+    _replace_simulated_remote_observation(inputs)
+    with pytest.raises(ValueError):
+        artifact_contract.seal_remote_observation(
+            inputs["observation"], **_remote_observation_binding(inputs)
+        )
+    with pytest.raises(ValueError):
+        artifact_contract.classify_remote_observation(
+            inputs["observation_reference"], **_remote_classification_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize("field", ["repository", "run_id", "artifact_id", "path", "sha256"])
+def test_remote_classification_semantics_resolve_all_observation_reference_fields(
+    remote_observation_inputs: dict[str, Any],
+    field: str,
+) -> None:
+    inputs = remote_observation_inputs
+    reference = deepcopy(inputs["observation_reference"])
+    reference[field] = {
+        "repository": "other/repository",
+        "run_id": "999",
+        "artifact_id": "999",
+        "path": "other-observation.json",
+        "sha256": "a" * 64,
+    }[field]
+    with pytest.raises(ValueError):
+        artifact_contract.classify_remote_observation(
+            reference, **_remote_classification_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize(
+    "violation",
+    ["unavailable", "nonbytes", "raw_hash", "duplicate_key", "nonfinite_number", "array_document"],
+)
+def test_remote_classification_semantics_refuse_untrusted_resolved_bytes(
+    remote_observation_inputs: dict[str, Any],
+    violation: str,
+) -> None:
+    inputs = remote_observation_inputs
+    path = inputs["observation_reference"]["path"]
+    if violation == "unavailable":
+        del inputs["remote_records"][path]
+    elif violation == "nonbytes":
+        inputs["remote_records"][path] = inputs["remote_records"][path].decode("utf-8")
+    elif violation == "raw_hash":
+        inputs["remote_records"][path] += b" "
+    elif violation == "duplicate_key":
+        _replace_simulated_remote_observation(
+            inputs, b'{"observation_schema_version":"1.0",' + inputs["remote_records"][path][1:]
+        )
+    elif violation == "nonfinite_number":
+        observation = inputs["observation"]
+        observation["asset_observations"]["archive"]["metadata"]["size_bytes"] = float("nan")
+        _replace_simulated_remote_observation(
+            inputs, json.dumps(observation, allow_nan=True).encode("utf-8")
+        )
+    else:
+        _replace_simulated_remote_observation(inputs, b"[]")
+    with pytest.raises(ValueError):
+        artifact_contract.classify_remote_observation(
+            inputs["observation_reference"], **_remote_classification_binding(inputs)
+        )
+
+
+def test_remote_classification_semantics_accept_rehashed_equivalent_raw_json(
+    remote_observation_inputs: dict[str, Any],
+) -> None:
+    inputs = remote_observation_inputs
+    raw = json.dumps(inputs["observation"], indent=2).encode("utf-8")
+    assert _sha256_bytes(raw) != inputs["observation_reference"]["sha256"]
+    _replace_simulated_remote_observation(inputs, raw)
+    classified = artifact_contract.classify_remote_observation(
+        inputs["observation_reference"], **_remote_classification_binding(inputs)
+    )
+    assert classified["state"] == "draft_complete"
+    assert classified["remote_observed_state_reference"]["sha256"] == _sha256_bytes(raw)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("repository", "other/repository"),
+        ("workflow_path", ".github/workflows/publish.yml"),
+        ("mode", "build"),
+        ("event", "push"),
+        ("run_id", "999"),
+        ("run_attempt", True),
+        ("run_attempt", 0),
+        ("ref", "refs/heads/other"),
+        ("commit", "a" * 40),
+        ("approved", True),
+    ],
+)
+def test_remote_classification_semantics_require_independent_current_workflow_context(
+    remote_observation_inputs: dict[str, Any],
+    field: str,
+    value: Any,
+) -> None:
+    inputs = remote_observation_inputs
+    inputs["current_workflow_run"][field] = value
+    with pytest.raises(ValueError):
+        artifact_contract.classify_remote_observation(
+            inputs["observation_reference"], **_remote_classification_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize(
+    "expires_at", ["2029-12-31T23:59:58Z", "2029-12-31T23:59:58.5Z", "2029-12-31T23:59:59Z"]
+)
+def test_remote_classification_semantics_apply_payload_expiry_at_both_observed_instants(
+    remote_observation_inputs: dict[str, Any],
+    expires_at: str,
+) -> None:
+    inputs = remote_observation_inputs
+    candidate = inputs["candidate_identity"]["candidate"]
+    candidate["build"]["artifact"]["retention"]["expires_at"] = expires_at
+    inputs["candidate_identity_bytes"] = _canonical_json_bytes(inputs["candidate_identity"])
+    digest = _sha256_bytes(inputs["candidate_identity_bytes"])
+    inputs["consumer_identity_reference"]["sha256"] = digest
+    inputs["observation"]["candidate_identity_record"]["sha256"] = digest
+    inputs["observation"]["candidate"] = deepcopy(candidate)
+    _replace_simulated_remote_observation(inputs)
+
+    sealed = artifact_contract.seal_remote_observation(
+        inputs["observation"], **_remote_observation_binding(inputs)
+    )
+    classified = artifact_contract.classify_remote_observation(
+        inputs["observation_reference"], **_remote_classification_binding(inputs)
+    )
+
+    assert sealed == inputs["observation"]
+    assert sealed["retained_artifact_availability"]["status"] == "AVAILABLE_AND_VERIFIED"
+    assert classified["state"] == "collision"
+    assert classified["reason_codes"] == ["RETAINED_ARTIFACT_EXPIRED"]
+
+
+@pytest.mark.parametrize(
+    "classified_at", ["2029-12-31T23:59:57Z", "2029-12-31T23:59:59", "2029-02-30T23:59:59Z"]
+)
+def test_remote_classification_semantics_refuse_invalid_or_reversed_chronology(
+    remote_observation_inputs: dict[str, Any],
+    classified_at: str,
+) -> None:
+    inputs = remote_observation_inputs
+    inputs["classified_at"] = classified_at
+    with pytest.raises(ValueError):
+        artifact_contract.classify_remote_observation(
+            inputs["observation_reference"], **_remote_classification_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize("classified_at", ["2029-12-31T23:59:58Z", "2030-01-01T00:59:58+01:00"])
+def test_remote_classification_semantics_compare_instants_not_timestamp_strings(
+    remote_observation_inputs: dict[str, Any],
+    classified_at: str,
+) -> None:
+    inputs = remote_observation_inputs
+    inputs["classified_at"] = classified_at
+    classified = artifact_contract.classify_remote_observation(
+        inputs["observation_reference"], **_remote_classification_binding(inputs)
+    )
+    assert classified["state"] == "draft_complete"
+
+
+def test_remote_classification_semantics_do_not_consult_wall_clock(
+    remote_observation_inputs: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = remote_observation_inputs
+
+    class NoWallClock(artifact_contract.datetime):
+        @classmethod
+        def now(cls, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("pure remote admission must not consult the wall clock")
+
+    monkeypatch.setattr(artifact_contract, "datetime", NoWallClock)
+    sealed = artifact_contract.seal_remote_observation(
+        inputs["observation"], **_remote_observation_binding(inputs)
+    )
+    classified = artifact_contract.classify_remote_observation(
+        inputs["observation_reference"], **_remote_classification_binding(inputs)
+    )
+    assert sealed == inputs["observation"]
+    assert classified["state"] == "draft_complete"
+
+
+def test_remote_observation_semantics_outputs_are_detached_and_deeply_immutable(
+    remote_observation_inputs: dict[str, Any],
+) -> None:
+    inputs = remote_observation_inputs
+    original = deepcopy(inputs["observation"])
+    reference = deepcopy(inputs["observation_reference"])
+    workflow = deepcopy(inputs["current_workflow_run"])
+    sealed = artifact_contract.seal_remote_observation(
+        inputs["observation"], **_remote_observation_binding(inputs)
+    )
+    classified = artifact_contract.classify_remote_observation(
+        inputs["observation_reference"], **_remote_classification_binding(inputs)
+    )
+    assert inputs["observation"] == original
+    assert inputs["observation_reference"] == reference
+    assert inputs["current_workflow_run"] == workflow
+    inputs["observation"]["asset_observations"]["archive"]["metadata"]["size_bytes"] += 1
+    inputs["observation_reference"]["sha256"] = "a" * 64
+    inputs["candidate_identity"]["candidate"]["source"]["commit"] = "a" * 40
+    assert sealed == original
+    assert classified["remote_observed_state_reference"] == reference
+    assert classified["candidate"] == original["candidate"]
+    for record in (sealed, classified):
+        with pytest.raises(TypeError):
+            record["candidate"]["source"]["commit"] = "b" * 40
+    with pytest.raises(TypeError):
+        sealed["asset_observations"]["archive"]["metadata"]["size_bytes"] = 1
+    with pytest.raises(TypeError):
+        classified["reason_codes"].append("TAG_ABSENT")
