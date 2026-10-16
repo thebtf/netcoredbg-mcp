@@ -1,4 +1,4 @@
-# Quickstart вЂ” Validate an A1 retained preview artifact
+# Quickstart — Validate an A1 retained preview artifact
 
 This is the retained-artifact consumer-proof procedure. It is neither an
 execution receipt nor authority to approve, publish, tag, upload, distribute,
