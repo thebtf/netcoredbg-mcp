@@ -44,6 +44,10 @@ channel after explicit S4 approval. It does not modify the existing Python
 package, PyPI, `vX.Y.Z` tag, or default-selector rules above, and grants no
 authority to Program B or Program C.
 
+S4 is a separate explicit external decision after the exact candidate's consumer proof, required independent reviews, and passing pre-decision Stage evidence exist; it is not a human-only gate. Within the accepted autonomous A1 mandate, Root may make that decision as a delegated executor without a new personal operator `go ahead`. The mandate permits the decision process, not its outcome: neither the mandate, `PASS`, an identity allowlist, nor GitHub access constitutes `APPROVE`. Record an explicit candidate-bound `APPROVE` or `DECLINE`, decision time, intended destination, and exact Stage/review evidence. Do not pre-approve unknown future bytes, extend the mandate to a new run or scope, or bypass FR-006 for unresolved blocking findings or missing required lenses.
+
+The existing operator principal is `thebtf`, numeric GitHub ID `7106373`, as observed in `.agent/runs/a1-artifact-20261016/run-metadata.json`; this is an identity binding, not a new authority grant. Derive `decision_author` from actual authenticated run/event actor metadata, never a caller assertion, and verify both numeric ID and login for the actor and any rerun initiator. An authenticated workflow call made by delegated Root must not be described as the operator's personal review or click. Keep the explicit `authorized_dispatcher` separate; a distinct closed identity is permitted only where the existing Decision contract allows it, not through a new team, service, nonce, or PAT authority. Numeric actor admission and evidence/promote execution remain implementation work; this interpretation records no current S4 Decision, approval, or promotion and adds no Program B/C authority.
+
 The approved preview candidate identity is the one exact tuple of build run ID,
 source commit, preview tag, archive SHA-256, manifest SHA-256, executable
 SHA-256, and prerelease destination. The build workflow source SHA, manifest
