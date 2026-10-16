@@ -132,10 +132,23 @@ and other refusals stop without a second sample. The second sample is followed
 by the same bounded metadata GET for the original job, and both reports must
 bind that job. Scheduler lateness beyond one second, unfinished metadata or the
 overall 120-second observation deadline produces `INCOMPLETE`; no wait extends
-the window. The watchdog kills only its owned process tree and preserves partial
-reports. There is no overlapping worker, third sample or automatic redispatch.
-The fixed 60/120-second experiment is not a timing SLA or production retry
-mechanism; Root retires the driver/wrapper after consuming its one run.
+the window. The one-use `scripts/stateless_preview_permission_watchdog.py`
+reuses the private Windows owner to create a suspended root, verify its private
+non-breakaway, kill-on-close Job admission, and only then resume. That retained
+Job contains descendants across root exit and concurrent spawning, without a
+PID/name census. The deadline terminates the Job. Bounded pre/post-termination
+Job-member snapshots retain membership-verified handles and start identities;
+the `TotalProcesses` delta must be covered by newly captured identities, with
+no subsequent growth. The terminating Job refuses new assignments. Snapshot,
+handle acquisition and waits share one five-second cleanup deadline. Only zero
+active Job processes, every captured handle signaled and the retained root's
+exit code allow timeout finalization, partial-report reads and
+`cleanup_verified=true` for upload. Unknown/failed cleanup permits neither reads
+nor finalization; failed finalization never authorizes upload. Root exit, zero
+Job accounting or Job-handle close alone is not writer-closure proof.
+There is no overlapping worker, third sample or automatic redispatch. The fixed
+60/120-second experiment is not a timing SLA or production retry mechanism;
+Root retires the driver/wrapper after consuming its one run.
 
 The collector itself is unchanged: fixed `GITHUB_JOB` mapping
 `probe_permissions` → `Probe current job permissions` or future `promote` →
@@ -159,8 +172,9 @@ observed collector exit codes and existing-report hashes. Unobserved exit codes
 remain null. Available log bytes and actually parsed grants remain separate:
 HTTP 200 with parser refusal is not permission qualification. A later qualified
 sample never overwrites the first negative or generates promotion approval.
-The admitted seven-day upload still runs only after probe success/failure,
-uses `always()`, `overwrite: false` and `if-no-files-found: error` without
+The admitted seven-day upload still runs only after probe success/failure and
+`cleanup_verified=true`, uses `always()`, `overwrite: false` and
+`if-no-files-found: error` without
 `continue-on-error`, and excludes raw logs, tokens, signed URLs, internal payloads
 and Diag. A complete unqualified or incomplete experiment remains nonzero and
 leaves dependent admission/mutation unauthorized.

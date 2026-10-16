@@ -365,38 +365,10 @@ jobs:
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $driver = Join-Path $env:GITHUB_WORKSPACE "scripts/stateless_preview_permission_timing_diagnostic.py"
-          $process = [System.Diagnostics.Process]::new()
-          $process.StartInfo.FileName = (Get-Command python).Source
-          $process.StartInfo.UseShellExecute = $false
-          $process.StartInfo.WorkingDirectory = $env:GITHUB_WORKSPACE
-          $process.StartInfo.ArgumentList.Add($driver)
-          $deadline = [System.Diagnostics.Stopwatch]::StartNew()
-          $started = $false
-          try {
-            $started = $process.Start()
-            if (-not $started) { throw "Unable to start the owned diagnostic process." }
-            $remaining = [Math]::Max(0, 120000 - $deadline.ElapsedMilliseconds)
-            if (-not $process.WaitForExit([int]$remaining)) {
-              $process.Kill($true)
-              # Observation has stopped; the following bounded wait is cleanup only.
-              if (-not $process.WaitForExit(5000)) {
-                throw "Owned diagnostic process cleanup did not complete."
-              }
-              python $driver --_timeout $process.ExitCode
-              exit 1
-            }
-            exit $process.ExitCode
-          }
-          finally {
-            if ($started -and -not $process.HasExited) { $process.Kill($true) }
-            $process.Dispose()
-          }
+        run: python scripts/stateless_preview_permission_watchdog.py
 
       - name: Retain only the attempted permission diagnostic
-        if: ${{ always() && (steps.probe.outcome == 'success' || steps.probe.outcome == 'failure') }}
+        if: ${{ always() && (steps.probe.outcome == 'success' || steps.probe.outcome == 'failure') && steps.probe.outputs.cleanup_verified == 'true' }}
         uses: actions/upload-artifact@v7
         with:
           name: stateless-preview-current-job-permissions-${{ github.run_id }}-${{ github.run_attempt }}

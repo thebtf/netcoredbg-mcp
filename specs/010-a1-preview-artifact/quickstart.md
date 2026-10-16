@@ -426,10 +426,21 @@ owned-process watchdog, without new dispatch inputs or collector options:
    `INCOMPLETE`, not another wait.
 3. After a second sample, perform the same bounded metadata GET for the original
    job and require both reports to bind that same job. The overall observation
-   deadline is 120 seconds; the workflow kills its owned process tree on timeout
-   and preserves partial reports with an `INCOMPLETE` summary. Cleanup does not
-   extend observation. There is no overlapping worker, third sample or automatic
-   redispatch.
+   deadline is 120 seconds. The one-use
+   `scripts/stateless_preview_permission_watchdog.py` reuses the private Windows
+   owner: create the root suspended, admit it to a non-breakaway, kill-on-close
+   Job, then resume. The retained Job owns descendants even after the root exits;
+   neither root exit nor a PID/name census proves cleanup. At the deadline it
+   terminates that Job. Pre/post-termination bounded Job-member snapshots retain
+   membership-verified process handles and start identities; any uncovered
+   `TotalProcesses` delta refuses cleanup proof. Snapshots, handle acquisition and
+   waits share five additional seconds, not observation time. A terminating Job
+   refuses new assignments. Only zero active Job processes, every captured handle
+   signaled, stable covered membership and a retained-root exit code permit timeout
+   finalization to `INCOMPLETE`, partial-report reads and upload. Unknown/failed
+   cleanup or finalization leaves upload unauthorized; zero accounting or closing
+   the Job alone is not writer-closure proof. There is no overlapping worker, third
+   sample or automatic redispatch.
 
 The fixed 60/120-second bounds are experimental limits, not a log-availability
 SLA or a production retry feature. Root retires the timing driver/wrapper after
@@ -471,7 +482,7 @@ complete qualified observation with confirmed terminal metadata; an incomplete
 or unqualified experiment remains nonzero and authorizes no dependent mutation.
 
 The existing `always()` upload runs only after the probe step actually succeeds
-or fails. Under artifact name
+or fails **and** its watchdog sets `cleanup_verified=true`. Under artifact name
 `stateless-preview-current-job-permissions-{run_id}-{run_attempt}`, it explicitly
 lists only:
 
