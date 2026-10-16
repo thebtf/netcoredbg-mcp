@@ -4261,6 +4261,53 @@ def test_decode_evidence_bundle_checks_data_descriptor_metadata(
 
 
 @pytest.mark.parametrize(
+    ("compression", "added_flags", "accepted"),
+    [
+        (zipfile.ZIP_DEFLATED, 0x2000, False),
+        (zipfile.ZIP_DEFLATED, 0x4000, False),
+        (zipfile.ZIP_DEFLATED, 0x0800, True),
+        (zipfile.ZIP_DEFLATED, 0x0006, True),
+        (zipfile.ZIP_STORED, 0x0006, False),
+    ],
+    ids=[
+        "masked-header-encryption",
+        "reserved-flag",
+        "utf8-with-descriptor",
+        "deflate-options-with-descriptor",
+        "stored-rejects-deflate-options",
+    ],
+)
+def test_decode_evidence_bundle_accepts_only_supported_general_flags(
+    evidence_bundle_records: dict[str, bytes],
+    evidence_bundle_data_descriptor_zip: bytes,
+    compression: int,
+    added_flags: int,
+    accepted: bool,
+) -> None:
+    records = evidence_bundle_records
+    raw_zip = bytearray(
+        evidence_bundle_data_descriptor_zip
+        if compression == zipfile.ZIP_DEFLATED
+        else _evidence_bundle_zip(list(records.items()), compression=compression)
+    )
+    with zipfile.ZipFile(io.BytesIO(raw_zip)) as archive:
+        entry = archive.infolist()[0]
+        central_offset = archive.start_dir
+    assert raw_zip[central_offset : central_offset + 4] == b"PK\x01\x02"
+    for offset in (entry.header_offset + 6, central_offset + 8):
+        flags = int.from_bytes(raw_zip[offset : offset + 2], "little") | added_flags
+        raw_zip[offset : offset + 2] = flags.to_bytes(2, "little")
+
+    encoded = base64.b64encode(raw_zip).decode("ascii")
+    expected_sha256 = {name: _sha256_bytes(raw) for name, raw in records.items()}
+    if accepted:
+        assert artifact_contract.decode_evidence_bundle(encoded, expected_sha256) == records
+    else:
+        with pytest.raises(ValueError):
+            artifact_contract.decode_evidence_bundle(encoded, expected_sha256)
+
+
+@pytest.mark.parametrize(
     "observed_at",
     ["2029-12-31T23:59:58", "2029-02-30T23:59:58Z"],
     ids=["naive_time", "invalid_time"],

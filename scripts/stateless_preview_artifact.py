@@ -1022,10 +1022,13 @@ def decode_evidence_bundle(encoded: str, expected_sha256: Mapping[str, str]) -> 
                             "evidence bundle local ZIP sizes or CRC disagree with its directory"
                         )
                 mode = stat.S_IFMT(entry.external_attr >> 16)
+                allowed_flags = 0x0808 | (
+                    0x0006 if entry.compress_type == zipfile.ZIP_DEFLATED else 0
+                )
                 if (
                     entry.orig_filename != entry.filename
                     or entry.is_dir()
-                    or entry.flag_bits & (0x01 | 0x40)
+                    or entry.flag_bits & ~allowed_flags
                     or entry.external_attr & (0x10 | 0x400)
                     or mode not in (0, stat.S_IFREG)
                     # Other ZIP codecs may inflate an unbounded internal chunk in read(n).
