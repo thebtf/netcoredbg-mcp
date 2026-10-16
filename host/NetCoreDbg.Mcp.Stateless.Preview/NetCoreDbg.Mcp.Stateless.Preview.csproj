@@ -9,6 +9,7 @@
   <PropertyGroup Condition="'$(_IsPublishing)' == 'true'">
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PublishSelfContained>true</PublishSelfContained>
+    <RuntimeFrameworkVersion>8.0.32</RuntimeFrameworkVersion>
     <PublishSingleFile>true</PublishSingleFile>
     <PublishTrimmed>false</PublishTrimmed>
   </PropertyGroup>
