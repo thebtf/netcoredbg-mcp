@@ -998,6 +998,7 @@ def decode_evidence_bundle(encoded: str, expected_sha256: Mapping[str, str]) -> 
             ):
                 _refuse("evidence bundle must contain exactly the three fixed records")
             declared_total = 0
+            payload_ranges: dict[str, tuple[int, int]] = {}
             for entry in members:
                 if not 0 <= entry.header_offset <= len(raw_zip) - 30:
                     _refuse("evidence bundle local ZIP header is outside the archive")
@@ -1033,14 +1034,34 @@ def decode_evidence_bundle(encoded: str, expected_sha256: Mapping[str, str]) -> 
                     _refuse("evidence bundle contains an unsafe ZIP entry")
                 if not 0 <= entry.file_size <= _EVIDENCE_BUNDLE_MAX_RECORD_BYTES:
                     _refuse("evidence bundle record exceeds the size limit")
+                payload_start = entry.header_offset + 30 + header[9] + header[10]
+                payload_end = payload_start + entry.compress_size
+                if not 0 <= payload_start <= payload_end <= len(raw_zip):
+                    _refuse("evidence bundle compressed payload is outside the archive")
+                payload_ranges[entry.filename] = (payload_start, payload_end)
                 declared_total += entry.file_size
             if declared_total > _EVIDENCE_BUNDLE_MAX_TOTAL_BYTES:
                 _refuse("evidence bundle records exceed the total size limit")
 
             actual_total = 0
             for entry in members:
-                with archive.open(entry) as member:
-                    raw = member.read(_EVIDENCE_BUNDLE_MAX_RECORD_BYTES + 1)
+                payload_start, payload_end = payload_ranges[entry.filename]
+                # Retain zipfile's name and overlap checks, not its declared-size read cutoff.
+                with archive.open(entry):
+                    payload = raw_zip[payload_start:payload_end]
+                if entry.compress_type == zipfile.ZIP_STORED:
+                    if entry.compress_size != entry.file_size:
+                        _refuse("evidence bundle stored member sizes disagree")
+                    raw = payload
+                else:
+                    decompressor = zlib.decompressobj(wbits=-15)
+                    raw = decompressor.decompress(payload, _EVIDENCE_BUNDLE_MAX_RECORD_BYTES + 1)
+                    if (
+                        not decompressor.eof
+                        or decompressor.unconsumed_tail
+                        or decompressor.unused_data
+                    ):
+                        _refuse("evidence bundle DEFLATE stream is incomplete or has trailing data")
                 actual_total += len(raw)
                 if (
                     len(raw) != entry.file_size
@@ -1048,6 +1069,8 @@ def decode_evidence_bundle(encoded: str, expected_sha256: Mapping[str, str]) -> 
                     or actual_total > _EVIDENCE_BUNDLE_MAX_TOTAL_BYTES
                 ):
                     _refuse("evidence bundle decompressed bytes exceed their bounds")
+                if zlib.crc32(raw) != entry.CRC:
+                    _refuse("evidence bundle actual member CRC does not match its directory")
                 records[entry.filename] = raw
     except (
         OSError,
