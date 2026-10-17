@@ -1,9 +1,10 @@
-# Quickstart — Validate an A1 retained preview artifact
+# Quickstart — Validate retained and public-remote A1 preview artifacts
 
-This is the retained-artifact consumer-proof procedure. It is neither an
-execution receipt nor authority to approve, publish, tag, upload, distribute,
-or select the preview as a public default. Its only candidate authority is the
-downloaded GitHub Actions evidence named by a structural reference bundle.
+This is the retained-artifact and public-remote consumer-proof procedure. It is
+neither an execution receipt nor authority to approve, publish, tag, upload,
+distribute, or select the preview as a public default. Both modes bind to the
+same sealed candidate from GitHub Actions evidence; remote mode additionally
+requires fresh anonymous bytes from that candidate's published GitHub prerelease.
 
 The receipt shape is defined by the [Artifact Consumer Proof schema](contracts/artifact-consumer-proof.schema.json). The candidate and its retained files remain bound by the [Candidate Identity Record schema](contracts/candidate-identity.schema.json) and the [workflow contract](contracts/stateless-preview-workflow.md).
 
@@ -14,8 +15,8 @@ local, ordinary (non-reparse) fixture directory containing the contained C#
 marker `PreviewMarker`. Create an empty ordinary download root, for example
 `C:\preview-validation\downloads`.
 
-Obtain the four structural references from the sealed candidate evidence; do
-not construct them from local files, source output, a rebuilt archive, or a
+Obtain the four expanded metadata references from the sealed candidate evidence;
+do not construct them from local files, source output, a rebuilt archive, or a
 later Actions run. Save them as `C:\preview-validation\candidate-references.json`:
 
 ```json
@@ -51,17 +52,30 @@ name the same retained payload artifact. The candidate identity, archive,
 manifest, and catalog references must retain their exact repository, run,
 artifact, retention, path, and SHA-256 values.
 
-The validator resolves every reference itself with GitHub Actions metadata and
-artifact downloads. A manually downloaded archive, manifest, extracted
-executable, or source-tree executable is not an input and cannot be proof.
+Both modes resolve candidate identity and catalog through GitHub Actions metadata
+and artifact downloads. Candidate mode also downloads the retained archive and
+manifest; remote mode downloads that pair only from the public GitHub prerelease.
+A manually downloaded pair, cached publisher payload, extracted executable, or
+source-tree executable is not a substitute input.
 
-The shared production transport is `ArtifactDownloader` with the expanded
-`ArtifactFileReference` in `scripts/stateless_preview_artifact.py`. Candidate
-mode uses that owner for metadata, ZIP, raw-file and payload hash checks and
-exclusive local retention. Its consumer CLI/reference bundle is unchanged.
-The same workflow wires separate evidence retention, a permission diagnostic,
-and a complete three-block promote source path. Source implementation is not
-proof of successful live retention, qualified permission, promotion or publication.
+The shared retained transport is `ArtifactDownloader` with the expanded
+`ArtifactFileReference` in `scripts/stateless_preview_artifact.py`. These CLI
+references include artifact metadata (`id`, `name`, container `sha256`, retention).
+Structural references inside review/Stage/Decision/Attempt/Verification/Handoff
+records are compact: `repository`, `run_id`, `artifact_id`, `path`, `sha256`.
+They are not interchangeable. Resolve compact locators to real metadata in the
+effect-owning adapter; do not invent names, retention, digests or artifact IDs.
+
+Keep three hash domains separate: a file reference's `sha256` hashes its original
+raw bytes, expanded `artifact.sha256` hashes the downloaded Actions ZIP container,
+and Candidate `build.artifact.sha256` hashes `archive_bytes || manifest_bytes`, in
+that order. The archive, manifest and extracted executable also have independent
+raw-file descriptors. Re-serializing JSON or substituting a container digest for
+the payload-pair digest breaks the binding.
+
+The workflow has separate evidence retention, permission diagnostic and promote
+source paths. Their availability is not proof of live retention, qualified
+same-current-promote-job grants, successful promotion or public publication.
 
 Sonar receipts are not inputs to build admission, candidate sealing, or consumer
 proof. Run the separate exact-head audit only after actual publication, as
@@ -113,10 +127,68 @@ and creates the schema-valid receipt at `--receipt-output`. On any rejected
 input, download, hash, matrix, or rollback result it prints
 `PREVIEW_ARTIFACT_CONSUMER_PROOF_REFUSED` to stderr and creates no receipt.
 
-## What candidate mode proves
+## Run public-remote proof
+
+Use the same four-reference bundle and unchanged rollback oracle. Supply the
+actual positive numeric release ID from the matching published prerelease, not
+an Actions run ID or a tag string. Create a separate empty ordinary download root
+`C:\preview-validation\remote-downloads`; the receipt path must be new. From the
+repository root, replace the receipt ID and timestamp as in candidate mode:
+
+```powershell
+python tests/preview/validate_preview_artifact.py remote `
+  --references C:\preview-validation\candidate-references.json `
+  --release-id <positive-github-release-id> `
+  --download-root C:\preview-validation\remote-downloads `
+  --fixture-root tests\fixtures\PreviewSearchApp `
+  --receipt-output C:\preview-validation\remote-release-proof.json `
+  --receipt-id remote-proof-<opaque-id> `
+  --recorded-at <utc-rfc3339-timestamp-ending-z> `
+  --python-rollback-command $consumerPython `
+  --python-rollback-argument .agent/tmp/t001-retained-python-consumer.py
+```
+
+Both modes use the same validator and complete matrix.
+`--python-rollback-argument` is repeatable. Neither mode accepts a user URL,
+token, mirror, local payload override or a reduced matrix.
+
+Remote mode uses
+`download_public_release(candidate, release_id, destination)` from
+`scripts/stateless_preview_public_release.py`, returning archive path, manifest
+path and immutable remote origin. Its private stdlib HTTPS opener sends no
+Authorization, inherited GitHub credentials, cookies or environment proxies.
+This anonymous rule applies to public release downloads; the identity/catalog
+Actions transport still uses GitHub CLI access to retained evidence.
+
+The public downloader constructs endpoints from the validated repository and IDs.
+It checks a public repository, nondraft prerelease, exact tag and target commit,
+then dereferences the annotated Git tag object to that same candidate commit.
+A lightweight tag or symbolic `target_commitish` alone is insufficient. Exactly
+two uploaded assets must have distinct IDs and the candidate's names and sizes.
+Each asset accepts HTTP 200 or validated HTTPS 302 delivery only through
+`api.github.com`, `github.com` or `release-assets.githubusercontent.com`; downgrade,
+unexpected host, redirect loop and unavailable anonymous access refuse.
+
+Before extraction, bounded fresh archive/manifest reads must match their raw
+SHA-256 descriptors and the ordered payload-pair hash; the extracted executable
+must match the manifest. A nullable provider `digest` never replaces these byte
+checks. Release/tag/asset identity is read again after download; identity changes
+refuse, while unrelated provider counters such as `download_count` may change.
+Only this verified extracted executable runs the full matrix below, with the
+fixture's absolute path passed as `--project <absolute-fixture-root>`.
+
+Success uses the same `PREVIEW_ARTIFACT_CONSUMER_PROOF_SEALED` terminal marker and
+write-once receipt, with `proof_stage: "remote_release"` and exact remote asset
+IDs. Refusal emits `PREVIEW_ARTIFACT_CONSUMER_PROOF_REFUSED`, exits nonzero and
+writes no receipt. An argument-parser usage error exits before proof execution.
+Temporary downloads are disposable; the sealed receipt is the retained output.
+
+## What both modes must prove
 
 The validator launches only the verified extracted executable with the explicit
-fixture root. It performs the positive JSON-RPC journey itself:
+absolute fixture root, not CWD or an environment-selected project. This A1
+read-only preview is not the compatibility proxy or a desktop debugger. It
+performs the positive JSON-RPC journey itself:
 
 1. `server/discover` exposes only the `tools` capability.
 2. `tools/list` exposes exactly `find_code_symbol`.
@@ -132,13 +204,32 @@ catalog methods; EOF and cancellation; and the unchanged Python rollback. Each
 scenario must have one passing result with no partial output and no unintended
 side effect. A missing, changed, or failed scenario rejects the proof.
 
+The matrix has ten required scenario groups, in catalog order. Each must run;
+required symlink/reparse or Windows file-lock setup failures refuse the proof.
+
+| Scenario group | Required observation |
+| --- | --- |
+| `launch-cli-invalid-root` | Missing, relative, nonexistent, non-directory, UNC/device, reparse or duplicate project selection exits 64 with empty stdout and `PREVIEW_ROOT_INVALID` on stderr. |
+| `launch-configuration-hostile-roots` | Hostile CWD, `NETCOREDBG_MCP_PROJECT` and `PREVIEW_PROJECT` do not override explicit project authority. |
+| `contained-fixture-escape` | Reparse escape refuses without returning partial in-root matches. |
+| `tool-input-invalid` | Missing/null/non-string/blank/oversized names, extra fields and invalid kinds return the closed `INVALID_TOOL_ARGUMENTS` result. |
+| `file-system-unreadable` | Locked C# source returns `PREVIEW_SEARCH_UNREADABLE`, not partial matches. |
+| `resources-ceilings` | File size, result count, aggregate bytes and entry-count ceilings each return `PREVIEW_SEARCH_BUDGET_EXCEEDED` without partial results. |
+| `protocol-catalog-exclusions` | `initialize`, `resources/list` and `roots/list` return method-not-found; `start_debug` is an unknown tool, never a hidden runtime route. |
+| `transport-eof-cancellation` | Empty EOF and cancellation followed by EOF exit cleanly without a cancellation result or retained state. |
+| `valid-discovery-list-call` | Tools-only discovery, sole `find_code_symbol`, successful `PreviewMarker` class result, JSON-RPC-only stdout and clean EOF. |
+| `rollback-python-default` | The unchanged installed-Python oracle reports its exact `PRODUCT_WORKS` result. |
+
 ## Python rollback outcome
 
-Candidate mode invokes the supplied rollback command only after the matrix. The
-retained Python consumer driver must exit successfully and therefore report the
+Both modes invoke the supplied rollback command as part of the full matrix. The
+retained Python consumer driver must exit successfully and report the exact
 established `PRODUCT_WORKS` journey. The resulting receipt records that only
 preview selection was removed and that the Python package, console entry point,
-and default selector were unchanged.
+and default selector were unchanged. The driver must emit exactly
+`{"product_works":true,"denominator":"5/5","tool_count":135,"stopped_at_entry":true}`
+as a JSON object; a zero exit alone is not sufficient. The controller does not
+uninstall the preview or alter client configuration on the operator's behalf.
 
 The controller resolves the supplied command with the supported executable lookup
 and prepends its directory to PATH only in the rollback child process. This makes
@@ -507,12 +598,20 @@ recovery makes no mutations; without an actual earlier fragment it returns
 `pre_publication_verification: null`, never a fabricated pre-publication PASS.
 Root must resolve real predecessor evidence or leave that closeout incomplete.
 
-T027–T029/T034–T035 still require fresh public archive/manifest downloads into
-a new directory and the full identity/consumer/denial/EOF/unchanged-Python-rollback
-journey, then Remote Verification, post-publication Stage and non-authorizing
-Program B Handoff. Publisher cache bytes cannot replace this proof. The separate
-probe section below preserves its earlier diagnostic description; its historical
-"future promote" wording predates the complete source job described here.
+Source tasks T027–T030 do not complete the published-candidate closeout in
+T034–T035. After actual publication, require fresh public bytes and the full
+consumer matrix, Remote Verification, the post-publication Stage and the
+non-authorizing Program B Handoff. Use `seal_remote_verification` and
+`seal_program_b_handoff` with the exact keyword inputs in the
+[handoff contract](contracts/program-b-handoff.md#source-only-sealing-apis).
+These APIs validate supplied original records, not live facts. They neither
+create authority nor collect or reconstruct missing genuine pre-publication
+fragments; absent fragments refuse even when classification is
+`published_complete`. Publisher cache bytes cannot replace public consumer proof.
+
+Controlled-loopback HTTP/MCP/EOF/tamper checks and SIMULATED record tests are
+supporting source evidence, not public GitHub release receipts. Record source,
+runtime and publication results separately; none substitutes for the others.
 
 ## Probe the same current job's permissions
 

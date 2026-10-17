@@ -3600,6 +3600,313 @@ def seal_promotion_attempt(
     return _freeze(record)
 
 
+def seal_remote_verification(
+    verification: Mapping[str, Any],
+    *,
+    candidate_identity: Mapping[str, Any],
+    candidate_identity_bytes: bytes,
+    candidate_identity_reference: Mapping[str, Any],
+    release_gate_catalog: Mapping[str, Any],
+    release_gate_catalog_bytes: bytes,
+    release_gate_catalog_reference: Mapping[str, Any],
+    record_resolver: Callable[[Mapping[str, Any]], bytes],
+    repository_root: str | PathLike[str],
+    current_promotion_context: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Admit recorded pre/post byte proof and its exact published Attempt 2.0 lineage."""
+    record = _expect_mapping(
+        _thaw(verification),
+        "remote verification",
+        (
+            "verification_schema_version",
+            "verification_id",
+            "promotion_attempt_id",
+            "candidate_identity_record",
+            "candidate",
+            "promotion_decision",
+            "promotion_attempt",
+            "remote_observation",
+            "remote_classification",
+            "pre_publication_verification",
+            "post_publication_verification",
+            "remote_consumer_proof",
+            "outcome",
+            "verified_at",
+        ),
+    )
+    if record["verification_schema_version"] != "1.0" or record["outcome"] != "PASS":
+        _refuse("remote verification requires a passing supported receipt")
+    _expect_safe_opaque_id(record["verification_id"], "remote verification ID")
+    _expect_safe_opaque_id(record["promotion_attempt_id"], "remote verification attempt ID")
+    verified_at = _review_timestamp(record["verified_at"], "remote verification verified_at")
+    identity, identity_reference = _verified_raw_candidate(
+        candidate_identity, candidate_identity_bytes, candidate_identity_reference
+    )
+    candidate = identity["candidate"]
+    _validate_candidate_identity({"schema_version": "1.0", "candidate": record["candidate"]})
+    if (
+        _review_record_reference(record["candidate_identity_record"], "verification candidate")
+        != identity_reference
+        or record["candidate"] != candidate
+    ):
+        _refuse("remote verification does not bind the exact candidate")
+    if not callable(record_resolver):
+        _refuse("remote verification raw record resolver is unavailable")
+    if _resolve_stage_record(
+        identity_reference, record_resolver
+    ) != identity or _resolve_stage_record(
+        release_gate_catalog_reference, record_resolver
+    ) != _thaw(release_gate_catalog):
+        _refuse("remote verification candidate or catalog differs from its resolved raw record")
+    stage_binding = {
+        "candidate_identity": identity,
+        "candidate_identity_bytes": candidate_identity_bytes,
+        "candidate_identity_reference": candidate_identity_reference,
+        "release_gate_catalog": release_gate_catalog,
+        "release_gate_catalog_bytes": release_gate_catalog_bytes,
+        "release_gate_catalog_reference": release_gate_catalog_reference,
+        "record_resolver": record_resolver,
+        "repository_root": repository_root,
+    }
+    attempt = seal_promotion_attempt(
+        _resolve_stage_record(record["promotion_attempt"], record_resolver),
+        current_promotion_context=_thaw(current_promotion_context),
+        **stage_binding,
+    )
+    if (
+        record["promotion_attempt_id"] != attempt["attempt_id"]
+        or record["promotion_decision"] != attempt["promotion_decision"]
+    ):
+        _refuse("remote verification Decision or attempt differs from the admitted lineage")
+    for field in (
+        "promotion_decision",
+        "promotion_attempt",
+        "remote_observation",
+        "remote_classification",
+        "remote_consumer_proof",
+    ):
+        reference = _review_record_reference(record[field], f"verification {field}")
+        if reference["repository"] != candidate["source"]["repository"] or (
+            field in ("promotion_attempt", "remote_observation", "remote_classification")
+            and reference["run_id"] != attempt["workflow_run"]["run_id"]
+        ):
+            _refuse("remote verification reference belongs to another repository or attempt run")
+    remote_binding = {
+        "candidate_identity": identity,
+        "candidate_identity_bytes": candidate_identity_bytes,
+        "candidate_identity_reference": candidate_identity_reference,
+        "current_attempt_id": attempt["attempt_id"],
+    }
+    observation = seal_remote_observation(
+        _resolve_stage_record(record["remote_observation"], record_resolver), **remote_binding
+    )
+    classification = _resolve_stage_record(record["remote_classification"], record_resolver)
+    _validate_candidate_identity(
+        {"schema_version": "1.0", "candidate": classification.get("candidate")}
+    )
+    derived = classify_remote_observation(
+        record["remote_observation"],
+        classification_id=classification.get("classification_id"),
+        classified_at=classification.get("classified_at"),
+        current_workflow_run=attempt["workflow_run"],
+        record_resolver=record_resolver,
+        **remote_binding,
+    )
+    if (
+        classification != derived
+        or derived["admission"] != "ADMITTED"
+        or derived["state"] != "published_complete"
+    ):
+        _refuse("remote verification requires honestly derived published_complete")
+    consumer = _validate_stage_consumer_proof(
+        _resolve_stage_record(record["remote_consumer_proof"], record_resolver),
+        remote=True,
+        candidate_identity=identity,
+        candidate_identity_bytes=candidate_identity_bytes,
+        candidate_identity_reference=candidate_identity_reference,
+        release_gate_catalog=release_gate_catalog,
+    )
+    _validate_candidate_identity({"schema_version": "1.0", "candidate": consumer["candidate"]})
+    # Expected identities are comparisons only; both actual fragments must already be present.
+    expected = _promotion_fragment({"candidate": candidate}, observation)
+    if consumer["download_origin"] != expected["release"]:
+        _refuse("remote consumer release or asset IDs differ from the published observation")
+    equations = (
+        "archive_matches_candidate",
+        "manifest_matches_candidate",
+        "executable_matches_manifest",
+        "inherited_verifier_equations_pass",
+    )
+    for field, phase in (
+        ("pre_publication_verification", "PRE_PUBLICATION"),
+        ("post_publication_verification", "POST_PUBLICATION"),
+    ):
+        fragment = _expect_mapping(record[field], f"remote verification {phase}", tuple(expected))
+        release = _expect_mapping(
+            fragment["release"], "verification release", tuple(expected["release"])
+        )
+        for kind in ("archive", "manifest"):
+            asset = _expect_mapping(
+                release[f"{kind}_asset"],
+                "verification asset",
+                ("id", "name", "size_bytes", "sha256"),
+            )
+            _expect_identifier(asset["id"], "verification asset ID")
+            _validate_file_descriptor(
+                {key: asset[key] for key in ("name", "size_bytes", "sha256")},
+                "verification asset bytes",
+            )
+        _validate_file_descriptor(fragment["executable"], "verification executable")
+        if (
+            release["prerelease"] is not True
+            or any(fragment[equation] is not True for equation in equations)
+            or fragment != {**expected, "phase": phase}
+        ):
+            _refuse(
+                "remote verification phase does not prove the exact passing published bytes/IDs"
+            )
+    observed_at = _review_timestamp(observation["observed_at"], "published observation observed_at")
+    if not (
+        _review_timestamp(attempt["recorded_at"], "attempt recorded_at")
+        <= observed_at
+        <= _review_timestamp(derived["classified_at"], "published classification classified_at")
+        <= verified_at
+        and observed_at
+        <= _review_timestamp(consumer["recorded_at"], "remote consumer recorded_at")
+        <= verified_at
+    ):
+        _refuse("remote verification proof is outside its attempt/publication chronology")
+    return _freeze(record)
+
+
+def seal_program_b_handoff(
+    handoff: Mapping[str, Any],
+    *,
+    candidate_identity: Mapping[str, Any],
+    candidate_identity_bytes: bytes,
+    candidate_identity_reference: Mapping[str, Any],
+    release_gate_catalog: Mapping[str, Any],
+    release_gate_catalog_bytes: bytes,
+    release_gate_catalog_reference: Mapping[str, Any],
+    record_resolver: Callable[[Mapping[str, Any]], bytes],
+    repository_root: str | PathLike[str],
+    current_promotion_context: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Seal A1 completion from the complete proof graph, never Program B/C authorization."""
+    record = _expect_mapping(
+        _thaw(handoff),
+        "Program B handoff",
+        (
+            "handoff_schema_version",
+            "handoff_id",
+            "producer",
+            "candidate_identity_record",
+            "candidate",
+            "source_ref",
+            "source_commit",
+            "approved_promotion_decision",
+            "promotion_attempt",
+            "promotion_attempt_id",
+            "published_remote_observation",
+            "published_remote_classification",
+            "remote_verification_receipt",
+            "remote_consumer_proof",
+            "release_gate_catalog",
+            "pre_decision_stage_evidence",
+            "pre_publication_stage_evidence",
+            "post_publication_stage_evidence",
+            "completion_scope",
+            "program_b_authorization_required",
+            "program_c_authorization_required",
+            "recorded_at",
+        ),
+    )
+    _expect_safe_opaque_id(record["handoff_id"], "Program B handoff ID")
+    recorded_at = _review_timestamp(record["recorded_at"], "Program B handoff recorded_at")
+    producer = _expect_mapping(record["producer"], "handoff producer", ("helper_path", "operation"))
+    if (
+        record["handoff_schema_version"] != "1.0"
+        or producer
+        != {
+            "helper_path": "scripts/stateless_preview_artifact.py",
+            "operation": "seal_program_b_handoff",
+        }
+        or record["completion_scope"] != "A1_OPT_IN_PREVIEW_COMPLETE"
+        or record["program_b_authorization_required"] is not True
+        or record["program_c_authorization_required"] is not True
+    ):
+        _refuse("handoff must preserve the A1-only producer and separate Program B/C authorization")
+    if not callable(record_resolver):
+        _refuse("handoff raw record resolver is unavailable")
+    stage_binding = {
+        "candidate_identity": candidate_identity,
+        "candidate_identity_bytes": candidate_identity_bytes,
+        "candidate_identity_reference": candidate_identity_reference,
+        "release_gate_catalog": release_gate_catalog,
+        "release_gate_catalog_bytes": release_gate_catalog_bytes,
+        "release_gate_catalog_reference": release_gate_catalog_reference,
+        "record_resolver": record_resolver,
+        "repository_root": repository_root,
+    }
+    verification = seal_remote_verification(
+        _resolve_stage_record(record["remote_verification_receipt"], record_resolver),
+        current_promotion_context=current_promotion_context,
+        **stage_binding,
+    )
+    candidate = verification["candidate"]
+    _validate_candidate_identity({"schema_version": "1.0", "candidate": record["candidate"]})
+    for handoff_field, verification_field in (
+        ("candidate_identity_record", "candidate_identity_record"),
+        ("approved_promotion_decision", "promotion_decision"),
+        ("promotion_attempt", "promotion_attempt"),
+        ("published_remote_observation", "remote_observation"),
+        ("published_remote_classification", "remote_classification"),
+        ("remote_consumer_proof", "remote_consumer_proof"),
+    ):
+        if (
+            _review_record_reference(record[handoff_field], f"handoff {handoff_field}")
+            != verification[verification_field]
+        ):
+            _refuse("handoff predecessor differs from the verified publication lineage")
+    if (
+        record["candidate"] != candidate
+        or record["source_ref"] != _CANONICAL_SOURCE_REF
+        or record["source_commit"] != candidate["source"]["commit"]
+        or record["promotion_attempt_id"] != verification["promotion_attempt_id"]
+        or _review_record_reference(record["release_gate_catalog"], "handoff catalog")
+        != release_gate_catalog_reference
+        or record["remote_verification_receipt"]["repository"] != candidate["source"]["repository"]
+        or _review_timestamp(verification["verified_at"], "remote verification verified_at")
+        > recorded_at
+    ):
+        _refuse("handoff candidate, source, attempt, catalog, or chronology is inconsistent")
+    attempt = _resolve_stage_record(record["promotion_attempt"], record_resolver)
+    for name, stage_name in (
+        ("pre_decision", "pre-decision"),
+        ("pre_publication", "pre-publication"),
+        ("post_publication", "post-publication"),
+    ):
+        reference = record[f"{name}_stage_evidence"]
+        stage = seal_stage_gate_evidence(
+            _resolve_stage_record(reference, record_resolver), **stage_binding
+        )
+        if (
+            stage["stage"] != stage_name
+            or stage["outcome"] != "PASS"
+            or _review_timestamp(stage["sealed_at"], "handoff Stage sealed_at") > recorded_at
+        ):
+            _refuse("handoff requires all three exact passing catalog stages before closeout")
+        if name != "post_publication":
+            if reference != attempt[f"{name}_stage_evidence"]["record_reference"]:
+                _refuse("handoff pre-publication lineage differs from the admitted Attempt stages")
+        elif any(
+            entry["record_reference"] != record["remote_consumer_proof"]
+            for entry in stage["gate_evidence"]
+        ):
+            _refuse("handoff post-publication Stage does not bind its exact remote consumer proof")
+    return _freeze(record)
+
+
 def _read_cli_dispatch(command: str, environment: Mapping[str, str]) -> Mapping[str, Any]:
     event = _load_json_object(
         _read_regular_bytes(
@@ -6243,7 +6550,9 @@ __all__ = [
     "seal_independent_pr_review",
     "seal_promotion_attempt",
     "seal_promotion_decision",
+    "seal_program_b_handoff",
     "seal_remote_observation",
+    "seal_remote_verification",
     "seal_s2_s3_lens_result",
     "seal_s2_s3_review_aggregate",
     "seal_stage_gate_evidence",

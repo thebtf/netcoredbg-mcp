@@ -5149,6 +5149,781 @@ def test_promotion_attempt_semantics_revalidate_decision_stages_and_remote_admis
         artifact_contract.seal_promotion_attempt(record, **_attempt_binding(inputs))
 
 
+_CLOSEOUT_SEALERS = (
+    ("seal_remote_verification", "verification", "remote-verification.schema.json"),
+    ("seal_program_b_handoff", "handoff", "program-b-handoff.schema.json"),
+)
+
+
+def _retain_simulated_closeout_records(inputs: dict[str, Any]) -> None:
+    """Rehash dependencies in order so tampering tests reach semantics, not stale digests."""
+    documents = inputs["closeout_documents"]
+    references = inputs["closeout_references"]
+    for name, reference in references.items():
+        previous_hash = reference["sha256"]
+        _replace_simulated_attempt_record(inputs, reference, documents[name])
+        if (
+            name == "decision"
+            and documents["attempt"]["promotion_decision_sha256"] == previous_hash
+        ):
+            documents["attempt"]["promotion_decision_sha256"] = reference["sha256"]
+
+
+@pytest.fixture
+def remote_closeout_inputs(promotion_attempt_inputs: dict[str, Any]) -> dict[str, Any]:
+    """SIMULATED complete graph; neither publication proof nor Program B/C authority."""
+    inputs = promotion_attempt_inputs
+    attempt = inputs["attempt_record"]
+    candidate = inputs["candidate_identity"]["candidate"]
+    references = {
+        "pre_decision_stage": attempt["pre_decision_stage_evidence"]["record_reference"],
+        "pre_publication_stage": attempt["pre_publication_stage_evidence"]["record_reference"],
+        "decision": attempt["promotion_decision"],
+        "permission_report": attempt["authorization"]["permission_readback"]["reference"],
+        "admission_observation": attempt["remote_observation"],
+        "admission_classification": attempt["remote_classification"],
+    }
+    documents = {
+        "pre_decision_stage": inputs["stage_record"],
+        "pre_publication_stage": inputs["pre_publication_record"],
+        "decision": inputs["decision_record"],
+        "permission_report": inputs["permission_report"],
+        "admission_observation": inputs["observation"],
+        "admission_classification": inputs["classification"],
+        "attempt": attempt,
+    }
+    documents["decision"]["evidence"]["pre_decision_stage_evidence"]["record_reference"] = (
+        references["pre_decision_stage"]
+    )
+    documents["admission_classification"]["remote_observed_state_reference"] = references[
+        "admission_observation"
+    ]
+    for name in (
+        "attempt",
+        "published_observation",
+        "published_classification",
+        "remote_consumer",
+        "post_publication_stage",
+        "verification",
+    ):
+        references[name] = {
+            **references["decision"],
+            "path": f"simulated-closeout-{name}.json",
+            "sha256": "0" * 64,
+        }
+
+    # The pre-phase is based on the independent draft observation, not a published result.
+    draft = documents["admission_observation"]
+    pre_phase = {
+        "phase": "PRE_PUBLICATION",
+        "expected_result": "EXPECT_SUCCESS",
+        "observed_result": "SUCCESS",
+        "outcome": "PASS",
+        "release": {
+            "repository": candidate["source"]["repository"],
+            "release_id": draft["release_observation"]["release_id"],
+            "tag": draft["release_observation"]["tag"],
+            "prerelease": draft["release_observation"]["is_prerelease"],
+            **{
+                f"{kind}_asset": {
+                    "id": draft["asset_observations"][kind]["metadata"]["id"],
+                    **draft["asset_observations"][kind]["downloaded_identity"],
+                }
+                for kind in ("archive", "manifest")
+            },
+        },
+        "executable": deepcopy(candidate["preview_manifest"]["contents"]["executable"]),
+        "archive_matches_candidate": True,
+        "manifest_matches_candidate": True,
+        "executable_matches_manifest": True,
+        "inherited_verifier_equations_pass": True,
+    }
+    published = deepcopy(draft)
+    published.update(
+        observation_id="simulated-closeout-published-observation",
+        observed_at="2029-12-31T23:59:57Z",
+    )
+    published["release_observation"]["is_draft"] = False
+    documents["published_observation"] = published
+    _replace_simulated_attempt_record(inputs, references["published_observation"], published)
+    documents["published_classification"] = json.loads(
+        _canonical_json_bytes(
+            artifact_contract.classify_remote_observation(
+                references["published_observation"],
+                **{
+                    **_remote_classification_binding(inputs),
+                    "classification_id": "simulated-closeout-published-classification",
+                    "classified_at": "2029-12-31T23:59:58Z",
+                    "record_resolver": inputs["record_resolver"],
+                },
+            )
+        )
+    )
+    documents["published_classification"]["remote_observed_state_reference"] = references[
+        "published_observation"
+    ]
+    post_inputs = _simulated_stage_inputs(deepcopy(inputs), "post-publication")
+    documents["remote_consumer"] = json.loads(
+        post_inputs["records"]["remote-downloaded-consumer-proof.json"]
+    )
+    documents["remote_consumer"]["recorded_at"] = "2029-12-31T23:59:58Z"
+    documents["post_publication_stage"] = post_inputs["stage_record"]
+    documents["post_publication_stage"]["sealed_at"] = "2029-12-31T23:59:59Z"
+    documents["post_publication_stage"]["gate_evidence"][0]["record_reference"] = references[
+        "remote_consumer"
+    ]
+    for name in ("pre_decision_stage", "pre_publication_stage", "post_publication_stage"):
+        documents[name]["release_gate_catalog"] = inputs["release_gate_catalog_reference"]
+    post_phase = deepcopy(pre_phase)
+    post_phase["phase"] = "POST_PUBLICATION"
+    documents["verification"] = {
+        "verification_schema_version": "1.0",
+        "verification_id": "simulated-closeout-verification",
+        "promotion_attempt_id": attempt["attempt_id"],
+        "candidate_identity_record": deepcopy(inputs["candidate_identity_reference"]),
+        "candidate": deepcopy(candidate),
+        "promotion_decision": references["decision"],
+        "promotion_attempt": references["attempt"],
+        "remote_observation": references["published_observation"],
+        "remote_classification": references["published_classification"],
+        "pre_publication_verification": pre_phase,
+        "post_publication_verification": post_phase,
+        "remote_consumer_proof": references["remote_consumer"],
+        "outcome": "PASS",
+        "verified_at": "2029-12-31T23:59:59Z",
+    }
+    documents["handoff"] = {
+        "handoff_schema_version": "1.0",
+        "handoff_id": "simulated-closeout-program-b-handoff",
+        "producer": {
+            "helper_path": "scripts/stateless_preview_artifact.py",
+            "operation": "seal_program_b_handoff",
+        },
+        "candidate_identity_record": deepcopy(inputs["candidate_identity_reference"]),
+        "candidate": deepcopy(candidate),
+        "source_ref": SOURCE_REF,
+        "source_commit": candidate["source"]["commit"],
+        "approved_promotion_decision": references["decision"],
+        "promotion_attempt": references["attempt"],
+        "promotion_attempt_id": attempt["attempt_id"],
+        "published_remote_observation": references["published_observation"],
+        "published_remote_classification": references["published_classification"],
+        "remote_verification_receipt": references["verification"],
+        "remote_consumer_proof": references["remote_consumer"],
+        "release_gate_catalog": inputs["release_gate_catalog_reference"],
+        "pre_decision_stage_evidence": references["pre_decision_stage"],
+        "pre_publication_stage_evidence": references["pre_publication_stage"],
+        "post_publication_stage_evidence": references["post_publication_stage"],
+        "completion_scope": "A1_OPT_IN_PREVIEW_COMPLETE",
+        "program_b_authorization_required": True,
+        "program_c_authorization_required": True,
+        "recorded_at": "2029-12-31T23:59:59Z",
+    }
+    inputs["closeout_documents"] = documents
+    inputs["closeout_references"] = references
+    _retain_simulated_closeout_records(inputs)
+    identity_reference = inputs["candidate_identity_reference"]
+    inputs["records"][identity_reference["path"]] = inputs["candidate_identity_bytes"]
+    inputs["records"][inputs["release_gate_catalog_reference"]["path"]] = inputs[
+        "release_gate_catalog_bytes"
+    ]
+    stage_resolver = inputs["record_resolver"]
+
+    def record_resolver(reference: Mapping[str, Any]) -> bytes:
+        if all(
+            reference[key] == identity_reference[key]
+            for key in ("repository", "run_id", "artifact_id", "path")
+        ):
+            return inputs["records"][identity_reference["path"]]
+        return stage_resolver(reference)
+
+    inputs["record_resolver"] = record_resolver
+    return inputs
+
+
+@pytest.mark.parametrize(("operation", "record_key", "schema"), _CLOSEOUT_SEALERS)
+def test_remote_closeout_seals_complete_graph_without_mutating_inputs(
+    remote_closeout_inputs: dict[str, Any], operation: str, record_key: str, schema: str
+) -> None:
+    inputs = remote_closeout_inputs
+    record = inputs["closeout_documents"][record_key]
+    original = deepcopy(record)
+    snapshot = deepcopy(
+        {
+            key: inputs[key]
+            for key in (
+                "closeout_documents",
+                "records",
+                "candidate_identity",
+                "candidate_identity_bytes",
+                "catalog",
+                "release_gate_catalog_bytes",
+                "current_promotion_context",
+            )
+        }
+    )
+    _validate_review_schema(record, schema)
+
+    sealed = getattr(artifact_contract, operation)(record, **_attempt_binding(inputs))
+
+    _validate_review_schema(sealed, schema)
+    assert sealed == original
+    assert {key: inputs[key] for key in snapshot} == snapshot
+    assert sealed["candidate"] == inputs["candidate_identity"]["candidate"]
+    assert (
+        sealed["promotion_attempt_id"] == inputs["current_promotion_context"]["current_attempt_id"]
+    )
+    assert sealed["promotion_attempt"] == inputs["closeout_references"]["attempt"]
+    if record_key == "verification":
+        for phase in ("pre_publication_verification", "post_publication_verification"):
+            assert (
+                sealed[phase]["release"]
+                == inputs["closeout_documents"]["remote_consumer"]["download_origin"]
+            )
+            assert (
+                sealed[phase]["executable"]
+                == sealed["candidate"]["preview_manifest"]["contents"]["executable"]
+            )
+    else:
+        assert (
+            sealed["remote_verification_receipt"] == inputs["closeout_references"]["verification"]
+        )
+        assert [
+            sealed[f"{stage}_stage_evidence"]
+            for stage in ("pre_decision", "pre_publication", "post_publication")
+        ] == [
+            inputs["closeout_references"][f"{stage}_stage"]
+            for stage in ("pre_decision", "pre_publication", "post_publication")
+        ]
+        assert sealed["program_b_authorization_required"] is True
+        assert sealed["program_c_authorization_required"] is True
+    for branch, field in (
+        (sealed, "promotion_attempt_id"),
+        (sealed["candidate"]["source"], "commit"),
+        (sealed["promotion_attempt"], "sha256"),
+        (sealed["candidate"]["build"]["artifact"]["retention"], "configured_days"),
+    ):
+        with pytest.raises(TypeError):
+            branch[field] = "SIMULATED_MUTATION"
+    record["candidate"]["source"]["commit"] = "a" * 40
+    inputs["current_promotion_context"]["workflow_run"]["commit"] = "a" * 40
+    inputs["records"][inputs["closeout_references"]["published_observation"]["path"]] += b" "
+    assert sealed == original
+
+
+@pytest.mark.parametrize(("operation", "record_key", "_schema"), _CLOSEOUT_SEALERS)
+@pytest.mark.parametrize(
+    "document",
+    [
+        "candidate",
+        "catalog",
+        "pre_decision_stage",
+        "pre_publication_stage",
+        "decision",
+        "permission_report",
+        "admission_observation",
+        "admission_classification",
+        "attempt",
+        "published_observation",
+        "published_classification",
+        "remote_consumer",
+    ],
+)
+def test_remote_closeout_refuses_raw_hash_substitution(
+    remote_closeout_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    _schema: str,
+    document: str,
+) -> None:
+    inputs = remote_closeout_inputs
+    if document in ("candidate", "catalog"):
+        key = (
+            "candidate_identity_bytes" if document == "candidate" else "release_gate_catalog_bytes"
+        )
+        inputs[key] += b" "
+    else:
+        reference = inputs["closeout_references"][document]
+        inputs["records"][reference["path"]] += b" "
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(
+            inputs["closeout_documents"][record_key], **_attempt_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize(("operation", "record_key", "_schema"), _CLOSEOUT_SEALERS)
+@pytest.mark.parametrize(
+    ("document", "path", "value"),
+    [
+        ("decision", ("decision",), "DECLINE"),
+        ("decision", ("candidate", "build", "artifact", "id"), "999"),
+        ("attempt", ("schema_version",), "1.0"),
+        ("attempt", ("attempt_id",), "simulated-previous-attempt"),
+        ("attempt", ("candidate_identity_record_sha256",), "a" * 64),
+        ("attempt", ("promotion_decision_sha256",), "a" * 64),
+        ("attempt", ("workflow_run", "run_attempt"), 1),
+        (
+            "attempt",
+            ("authorization", "decision_authorization", "authorized_dispatcher", "id"),
+            "999",
+        ),
+        ("attempt", ("authorization", "current_github_actor", "id"), "999"),
+        (
+            "attempt",
+            ("authorization", "current_github_triggering_actor", "login"),
+            "simulated-other",
+        ),
+        ("attempt", ("authorization", "permission_readback", "execution_token", "app_id"), "999"),
+        (
+            "attempt",
+            ("authorization", "permission_readback", "execution_token", "installation_id"),
+            "999",
+        ),
+        ("attempt", ("authorization", "permission_readback", "execution_token", "source"), "PAT"),
+        ("permission_report", ("binding", "job_id"), 999),
+        ("permission_report", ("binding", "run_id"), 999),
+        ("permission_report", ("binding", "head_sha"), "a" * 40),
+        ("permission_report", ("actor_provenance", "GITHUB_TRIGGERING_ACTOR"), "simulated-other"),
+        ("permission_report", ("binding", "run_attempt"), 1),
+        ("permission_report", ("binding", "workflow_sha"), "a" * 40),
+        ("permission_report", ("binding", "job_key"), "probe_permissions"),
+        ("permission_report", ("grants", "contents"), "read"),
+        ("permission_report", ("status",), "UNAVAILABLE"),
+        ("published_observation", ("candidate", "source", "commit"), "a" * 40),
+        ("published_observation", ("promotion_attempt_id",), "simulated-previous-attempt"),
+        ("published_observation", ("release_observation", "is_draft"), True),
+        ("published_classification", ("promotion_attempt_id",), "simulated-previous-attempt"),
+        ("published_classification", ("candidate", "source", "origin_main_target"), "a" * 40),
+    ],
+)
+def test_remote_closeout_refuses_rehashed_lineage_substitution(
+    remote_closeout_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    _schema: str,
+    document: str,
+    path: tuple[str, ...],
+    value: Any,
+) -> None:
+    inputs = remote_closeout_inputs
+    target = inputs["closeout_documents"][document]
+    for field in path[:-1]:
+        target = target[field]
+    target[path[-1]] = value
+    _retain_simulated_closeout_records(inputs)
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(
+            inputs["closeout_documents"][record_key], **_attempt_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize(("operation", "record_key", "_schema"), _CLOSEOUT_SEALERS)
+@pytest.mark.parametrize(
+    ("branch", "field", "value"),
+    [
+        (None, "current_attempt_id", "simulated-previous-attempt"),
+        (None, "checkout_head", "a" * 40),
+        (None, "origin_main_target", "a" * 40),
+        (None, "job_id", "999"),
+        ("workflow_run", "run_attempt", 1),
+        ("current_github_actor", "id", "999"),
+        ("current_github_triggering_actor", "login", "simulated-other"),
+    ],
+)
+def test_remote_closeout_requires_independent_current_context(
+    remote_closeout_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    _schema: str,
+    branch: str | None,
+    field: str,
+    value: Any,
+) -> None:
+    inputs = remote_closeout_inputs
+    context = inputs["current_promotion_context"]
+    (context if branch is None else context[branch])[field] = value
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(
+            inputs["closeout_documents"][record_key], **_attempt_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize(("operation", "record_key", "_schema"), _CLOSEOUT_SEALERS)
+@pytest.mark.parametrize("phase", ["pre_publication_verification", "post_publication_verification"])
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "missing",
+        "null",
+        "wrong_phase",
+        "release_id",
+        "archive_id",
+        "manifest_id",
+        "archive_hash",
+        "manifest_hash",
+        "asset_size",
+        "prerelease",
+        "executable",
+        "false_equation",
+        "integer_equation",
+    ],
+)
+def test_remote_closeout_requires_both_exact_publication_phases(
+    remote_closeout_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    _schema: str,
+    phase: str,
+    violation: str,
+) -> None:
+    inputs = remote_closeout_inputs
+    verification = inputs["closeout_documents"]["verification"]
+    if violation == "missing":
+        del verification[phase]
+    elif violation == "null":
+        verification[phase] = None
+    elif violation == "wrong_phase":
+        verification[phase]["phase"] = (
+            "POST_PUBLICATION" if phase.startswith("pre_") else "PRE_PUBLICATION"
+        )
+    elif violation == "release_id":
+        verification[phase]["release"]["release_id"] = "999"
+    elif violation in ("archive_id", "manifest_id"):
+        verification[phase]["release"][violation.replace("_id", "_asset")]["id"] = "999"
+    elif violation in ("archive_hash", "manifest_hash"):
+        kind = violation.replace("_hash", "_asset")
+        verification[phase]["release"][kind]["sha256"] = "a" * 64
+    elif violation == "asset_size":
+        verification[phase]["release"]["archive_asset"]["size_bytes"] += 1
+    elif violation == "prerelease":
+        verification[phase]["release"]["prerelease"] = False
+    elif violation == "executable":
+        verification[phase]["executable"]["sha256"] = "a" * 64
+    elif violation == "integer_equation":
+        verification[phase]["inherited_verifier_equations_pass"] = 1
+    else:
+        verification[phase]["inherited_verifier_equations_pass"] = False
+    _retain_simulated_closeout_records(inputs)
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(
+            inputs["closeout_documents"][record_key], **_attempt_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize(("operation", "record_key", "_schema"), _CLOSEOUT_SEALERS)
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "retained",
+        "partial_matrix",
+        "wrong_repository",
+        "wrong_release",
+        "wrong_asset",
+        "unclean_eof",
+        "changed_python",
+    ],
+)
+def test_remote_closeout_requires_complete_matching_remote_consumer(
+    remote_closeout_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    _schema: str,
+    violation: str,
+) -> None:
+    inputs = remote_closeout_inputs
+    remote = inputs["closeout_documents"]["remote_consumer"]
+    if violation == "retained":
+        inputs["closeout_documents"]["remote_consumer"] = deepcopy(inputs["consumer"])
+    elif violation == "partial_matrix":
+        remote["scenario_matrix"]["results"].pop()
+    elif violation == "wrong_repository":
+        remote["download_origin"]["repository"] = "other/repository"
+    elif violation == "wrong_release":
+        remote["download_origin"]["release_id"] = "999"
+    elif violation == "wrong_asset":
+        remote["download_origin"]["archive_asset"]["id"] = "999"
+    elif violation == "unclean_eof":
+        remote["runtime_results"]["clean_eof"]["exited_cleanly"] = False
+    else:
+        remote["python_rollback_result"]["console_entrypoint_changed"] = True
+    _retain_simulated_closeout_records(inputs)
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(
+            inputs["closeout_documents"][record_key], **_attempt_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize("stage", ["pre_decision", "pre_publication", "post_publication"])
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "missing_reference",
+        "missing_record",
+        "duplicate_reference",
+        "wrong_stage",
+        "wrong_source",
+        "wrong_catalog",
+        "failed",
+    ],
+)
+def test_remote_closeout_handoff_requires_all_three_exact_stages(
+    remote_closeout_inputs: dict[str, Any],
+    stage: str,
+    violation: str,
+) -> None:
+    inputs = remote_closeout_inputs
+    handoff = inputs["closeout_documents"]["handoff"]
+    record = inputs["closeout_documents"][f"{stage}_stage"]
+    field = f"{stage}_stage_evidence"
+    if violation == "missing_reference":
+        del handoff[field]
+    elif violation == "duplicate_reference":
+        other = "post_publication" if stage == "pre_decision" else "pre_decision"
+        handoff[field] = inputs["closeout_references"][f"{other}_stage"]
+    elif violation == "wrong_stage":
+        record["stage"] = "post-publication" if stage == "pre_decision" else "pre-decision"
+    elif violation == "wrong_source":
+        record["source_commit"] = "a" * 40
+    elif violation == "wrong_catalog":
+        record["release_gate_catalog"] = {**record["release_gate_catalog"], "sha256": "a" * 64}
+    elif violation == "failed":
+        record["outcome"] = "FAIL"
+    _retain_simulated_closeout_records(inputs)
+    if violation == "missing_record":
+        del inputs["records"][inputs["closeout_references"][f"{stage}_stage"]["path"]]
+    with pytest.raises(ValueError):
+        artifact_contract.seal_program_b_handoff(handoff, **_attempt_binding(inputs))
+
+
+@pytest.mark.parametrize(
+    ("stage", "violation"),
+    [
+        ("pre_decision", "missing"),
+        ("pre_decision", "duplicate"),
+        ("pre_decision", "reordered"),
+        ("pre_decision", "wrong_type"),
+        ("pre_publication", "extra"),
+        ("post_publication", "missing"),
+        ("post_publication", "duplicate"),
+        ("post_publication", "wrong_type"),
+    ],
+)
+def test_remote_closeout_handoff_rederives_ordered_stage_subsets(
+    remote_closeout_inputs: dict[str, Any],
+    stage: str,
+    violation: str,
+) -> None:
+    inputs = remote_closeout_inputs
+    rows = inputs["closeout_documents"][f"{stage}_stage"]["gate_evidence"]
+    if violation == "missing":
+        rows.pop()
+    elif violation == "duplicate":
+        rows.append(deepcopy(rows[0]))
+    elif violation == "reordered":
+        rows.reverse()
+    elif violation == "wrong_type":
+        rows[0]["record_type"] = "independent-pr-review"
+    else:
+        rows.append(
+            deepcopy(inputs["closeout_documents"]["pre_decision_stage"]["gate_evidence"][0])
+        )
+    _retain_simulated_closeout_records(inputs)
+    with pytest.raises(ValueError):
+        artifact_contract.seal_program_b_handoff(
+            inputs["closeout_documents"]["handoff"], **_attempt_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize("violation", ["policy_snapshot", "descriptor"])
+def test_remote_closeout_handoff_refuses_rehashed_catalog_policy_drift(
+    remote_closeout_inputs: dict[str, Any],
+    violation: str,
+) -> None:
+    inputs = remote_closeout_inputs
+    catalog = inputs["catalog"]["catalog"]
+    if violation == "policy_snapshot":
+        catalog["policy_authority_snapshots"][0]["sha256"] = "a" * 64
+    else:
+        catalog["gate_descriptors"][0]["stage"] = "post-publication"
+    raw = _canonical_json_bytes(inputs["catalog"])
+    inputs["release_gate_catalog_bytes"] = raw
+    reference = inputs["release_gate_catalog_reference"]
+    reference["sha256"] = _sha256_bytes(raw)
+    inputs["records"][reference["path"]] = raw
+    _retain_simulated_closeout_records(inputs)
+    with pytest.raises(ValueError):
+        artifact_contract.seal_program_b_handoff(
+            inputs["closeout_documents"]["handoff"], **_attempt_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize(
+    "field", ["program_b_authorization_required", "program_c_authorization_required"]
+)
+@pytest.mark.parametrize("value", [False, 1, None])
+def test_remote_closeout_handoff_never_grants_program_b_or_c(
+    remote_closeout_inputs: dict[str, Any],
+    field: str,
+    value: Any,
+) -> None:
+    inputs = remote_closeout_inputs
+    handoff = inputs["closeout_documents"]["handoff"]
+    handoff[field] = value
+    with pytest.raises(ValueError):
+        artifact_contract.seal_program_b_handoff(handoff, **_attempt_binding(inputs))
+
+
+@pytest.mark.parametrize(("operation", "record_key", "_schema"), _CLOSEOUT_SEALERS)
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("raw_diagnostics", "SIMULATED raw stdout"),
+        ("local_path", "C:\\SIMULATED\\private"),
+        ("token", "SIMULATED_NOT_A_TOKEN"),
+        ("program_b_authorized", True),
+        ("program_c_authorized", True),
+        ("unexpected", {}),
+    ],
+)
+def test_remote_closeout_refuses_leaked_or_authorizing_fields(
+    remote_closeout_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    _schema: str,
+    field: str,
+    value: Any,
+) -> None:
+    inputs = remote_closeout_inputs
+    record = inputs["closeout_documents"][record_key]
+    record[field] = value
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(record, **_attempt_binding(inputs))
+
+
+@pytest.mark.parametrize(("operation", "record_key", "_schema"), _CLOSEOUT_SEALERS)
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("candidate_identity_record", "sha256"), "a" * 64),
+        (("candidate", "source", "ref"), "refs/heads/other"),
+        (("candidate", "source", "commit"), "a" * 40),
+        (("candidate", "source", "origin_main_target"), "a" * 40),
+        (("candidate", "build", "run_id"), "999"),
+        (("promotion_attempt_id",), "simulated-previous-attempt"),
+        (("promotion_attempt",), None),
+        (("source_ref",), "refs/heads/other"),
+        (("source_commit",), "a" * 40),
+    ],
+)
+def test_remote_closeout_refuses_substituted_root_binding(
+    remote_closeout_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    _schema: str,
+    path: tuple[str, ...],
+    value: Any,
+) -> None:
+    inputs = remote_closeout_inputs
+    record = inputs["closeout_documents"][record_key]
+    target = record
+    for field in path[:-1]:
+        target = target[field]
+    target[path[-1]] = value
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(record, **_attempt_binding(inputs))
+
+
+@pytest.mark.parametrize(("operation", "record_key", "_schema"), _CLOSEOUT_SEALERS)
+def test_remote_closeout_refuses_honestly_derived_nonpublished_classification(
+    remote_closeout_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    _schema: str,
+) -> None:
+    inputs = remote_closeout_inputs
+    documents = inputs["closeout_documents"]
+    documents["published_observation"]["release_observation"]["is_draft"] = True
+    _retain_simulated_closeout_records(inputs)
+    classification = artifact_contract.classify_remote_observation(
+        inputs["closeout_references"]["published_observation"],
+        **{
+            **_remote_classification_binding(inputs),
+            "classification_id": "simulated-closeout-published-classification",
+            "classified_at": "2029-12-31T23:59:58Z",
+            "record_resolver": inputs["record_resolver"],
+        },
+    )
+    assert classification["state"] == "draft_complete"
+    documents["published_classification"] = json.loads(_canonical_json_bytes(classification))
+    _retain_simulated_closeout_records(inputs)
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(documents[record_key], **_attempt_binding(inputs))
+
+
+@pytest.mark.parametrize(("operation", "record_key", "_schema"), _CLOSEOUT_SEALERS)
+@pytest.mark.parametrize("identity", ["release_id", "archive_asset", "manifest_asset"])
+def test_remote_closeout_does_not_trust_self_consistent_but_wrong_phase_origins(
+    remote_closeout_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    _schema: str,
+    identity: str,
+) -> None:
+    inputs = remote_closeout_inputs
+    documents = inputs["closeout_documents"]
+    verification = documents["verification"]
+    for origin in (
+        verification["pre_publication_verification"]["release"],
+        verification["post_publication_verification"]["release"],
+        documents["remote_consumer"]["download_origin"],
+    ):
+        if identity == "release_id":
+            origin[identity] = "999"
+        else:
+            origin[identity]["id"] = "999"
+    _retain_simulated_closeout_records(inputs)
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(documents[record_key], **_attempt_binding(inputs))
+
+
+@pytest.mark.parametrize("document", ["post_publication_stage", "verification"])
+def test_remote_closeout_handoff_hashes_its_additional_predecessors(
+    remote_closeout_inputs: dict[str, Any],
+    document: str,
+) -> None:
+    inputs = remote_closeout_inputs
+    inputs["records"][inputs["closeout_references"][document]["path"]] += b" "
+    with pytest.raises(ValueError):
+        artifact_contract.seal_program_b_handoff(
+            inputs["closeout_documents"]["handoff"], **_attempt_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize(("operation", "record_key", "_schema"), _CLOSEOUT_SEALERS)
+@pytest.mark.parametrize("location", ["reference", "phase", "origin", "execution_token"])
+def test_remote_closeout_refuses_nested_raw_or_unexpected_fields(
+    remote_closeout_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    _schema: str,
+    location: str,
+) -> None:
+    inputs = remote_closeout_inputs
+    documents = inputs["closeout_documents"]
+    if location == "reference":
+        target = documents[record_key]["candidate_identity_record"]
+    elif location == "phase":
+        target = documents["verification"]["pre_publication_verification"]
+    elif location == "origin":
+        target = documents["remote_consumer"]["download_origin"]
+    else:
+        target = documents["attempt"]["authorization"]["permission_readback"]["execution_token"]
+    target["raw_diagnostics"] = "SIMULATED raw response"
+    _retain_simulated_closeout_records(inputs)
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(documents[record_key], **_attempt_binding(inputs))
+
+
 class _EvidenceWorkflowCli:
     """Real CLI/files/sealers with only the GitHub process/HTTP edge simulated."""
 
