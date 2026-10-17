@@ -2609,6 +2609,99 @@ def _artifact_transport_responses(reference: Any, wire_bytes: bytes) -> dict[str
     }
 
 
+@pytest.mark.parametrize(
+    ("scenario", "metadata_seconds", "archive_seconds", "refusal"),
+    [
+        ("slow-valid", 60, 599, None),
+        ("metadata-timeout", 61, 1, "metadata could not be downloaded"),
+        ("zip-timeout", 1, 601, "retained artifact could not be downloaded"),
+        ("wire-digest", 1, 1, "wire bytes"),
+        ("archive-member-digest", 1, 1, "file bytes"),
+        ("manifest-member-digest", 1, 1, "file bytes"),
+        ("payload-digest", 1, 1, "candidate artifact"),
+        ("existing-destination", 1, 1, "destination already exists"),
+    ],
+)
+def test_artifact_downloader_transfer_budget_preserves_payload_safety(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+    metadata_seconds: int,
+    archive_seconds: int,
+    refusal: str | None,
+) -> None:
+    candidate_input, source_archive, source_manifest, _ = _create_candidate_input(
+        tmp_path, "a" * 40
+    )
+    archive_member = source_archive.read_bytes()
+    manifest_member = source_manifest.read_bytes()
+    wire_bytes = _validator_wire_zip(
+        tmp_path,
+        {source_archive.name: archive_member, source_manifest.name: manifest_member},
+    )
+    wire_sha256 = "0" * 64 if scenario == "wire-digest" else _sha256_bytes(wire_bytes)
+    archive_reference = _validator_artifact_reference(
+        artifact_sha256=wire_sha256,
+        path=source_archive.name,
+        sha256="0" * 64 if scenario == "archive-member-digest" else _sha256_bytes(archive_member),
+    )
+    manifest_reference = _validator_artifact_reference(
+        artifact_sha256=wire_sha256,
+        path=source_manifest.name,
+        sha256="0" * 64 if scenario == "manifest-member-digest" else _sha256_bytes(manifest_member),
+    )
+    candidate_digest = candidate_input["candidate"]["build"]["artifact"]["sha256"]
+    if scenario == "payload-digest":
+        candidate_digest = "0" * 64
+    responses = _artifact_transport_responses(archive_reference, wire_bytes)
+    metadata_endpoint = (
+        f"repos/{archive_reference.repository}/actions/artifacts/{archive_reference.artifact_id}"
+    )
+    requests: list[str] = []
+
+    def run(command: list[str], **options: Any) -> subprocess.CompletedProcess[bytes]:
+        assert command[:2] == ["gh", "api"]
+        endpoint = command[2]
+        requests.append(endpoint)
+        completion_seconds = metadata_seconds if endpoint == metadata_endpoint else archive_seconds
+        timeout = options.get("timeout")
+        # Model the subprocess deadline without sleeping or invoking GitHub.
+        if timeout is not None and completion_seconds > timeout:
+            raise subprocess.TimeoutExpired(command, timeout)
+        return subprocess.CompletedProcess(command, 0, responses[endpoint], b"")
+
+    monkeypatch.setattr(artifact_contract.subprocess, "run", run)
+    root = tmp_path / "fresh-download"
+    root.mkdir()
+    wire_path = root / "artifacts" / f"{archive_reference.artifact_id}-{wire_sha256}.zip"
+    if scenario == "existing-destination":
+        wire_path.parent.mkdir()
+        wire_path.write_bytes(b"planted archive")
+    downloader = artifact_contract.ArtifactDownloader(root)
+
+    if refusal is None:
+        archive_path, manifest_path = downloader.download_payload(
+            archive_reference, manifest_reference, candidate_digest
+        )
+        assert archive_path.read_bytes() == archive_member
+        assert manifest_path.read_bytes() == manifest_member
+        assert wire_path.read_bytes() == wire_bytes
+    else:
+        with pytest.raises(ValueError, match=refusal):
+            downloader.download_payload(archive_reference, manifest_reference, candidate_digest)
+        assert not (root / "downloaded").exists()
+        if scenario == "existing-destination":
+            assert wire_path.read_bytes() == b"planted archive"
+        elif scenario in ("metadata-timeout", "zip-timeout", "wire-digest"):
+            assert not (root / "artifacts").exists()
+
+    assert requests == (
+        [metadata_endpoint]
+        if scenario == "metadata-timeout"
+        else [metadata_endpoint, f"{metadata_endpoint}/zip"]
+    )
+
+
 def test_artifact_downloader_refuses_preexisting_destination_without_caching(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2627,7 +2720,9 @@ def test_artifact_downloader_refuses_preexisting_destination_without_caching(
     downloader = artifact_contract.ArtifactDownloader(root)
 
     responses = _artifact_transport_responses(reference, wire_bytes)
-    monkeypatch.setattr(downloader, "_run_gh", lambda arguments, _: responses[arguments[1]])
+    monkeypatch.setattr(
+        downloader, "_run_gh", lambda arguments, _, *, timeout=60: responses[arguments[1]]
+    )
 
     for _ in range(2):
         with pytest.raises(ValueError, match="destination already exists"):
@@ -2663,7 +2758,9 @@ def test_artifact_downloader_refuses_racing_destination_without_caching(
         return original_open(path, mode, *args, **kwargs)
 
     responses = _artifact_transport_responses(reference, wire_bytes)
-    monkeypatch.setattr(downloader, "_run_gh", lambda arguments, _: responses[arguments[1]])
+    monkeypatch.setattr(
+        downloader, "_run_gh", lambda arguments, _, *, timeout=60: responses[arguments[1]]
+    )
     monkeypatch.setattr(Path, "open", race_open)
 
     for _ in range(2):
@@ -2690,7 +2787,9 @@ def test_artifact_downloader_refuses_mismatched_wire_digest_before_retention(
     downloader = artifact_contract.ArtifactDownloader(root)
 
     responses = _artifact_transport_responses(reference, wire_bytes)
-    monkeypatch.setattr(downloader, "_run_gh", lambda arguments, _: responses[arguments[1]])
+    monkeypatch.setattr(
+        downloader, "_run_gh", lambda arguments, _, *, timeout=60: responses[arguments[1]]
+    )
 
     with pytest.raises(ValueError, match="wire bytes"):
         downloader.download_file(reference)
@@ -2723,7 +2822,9 @@ def test_artifact_downloader_refuses_tampered_cached_wire_before_member_read(
     )
     downloader = artifact_contract.ArtifactDownloader(root)
     responses = _artifact_transport_responses(archive_reference, wire_bytes)
-    monkeypatch.setattr(downloader, "_run_gh", lambda arguments, _: responses[arguments[1]])
+    monkeypatch.setattr(
+        downloader, "_run_gh", lambda arguments, _, *, timeout=60: responses[arguments[1]]
+    )
 
     assert downloader.download_file(archive_reference).read_bytes() == archive_member
     cached_path = root / "artifacts" / f"{archive_reference.artifact_id}-{wire_sha256}.zip"
@@ -2766,7 +2867,9 @@ def test_artifact_downloader_retains_payload_after_distinct_digest_checks(
     downloader = artifact_contract.ArtifactDownloader(root)
 
     responses = _artifact_transport_responses(archive_reference, wire_bytes)
-    monkeypatch.setattr(downloader, "_run_gh", lambda arguments, _: responses[arguments[1]])
+    monkeypatch.setattr(
+        downloader, "_run_gh", lambda arguments, _, *, timeout=60: responses[arguments[1]]
+    )
 
     archive_path, manifest_path = downloader.download_payload(
         archive_reference,
@@ -2807,7 +2910,9 @@ def test_artifact_downloader_requires_candidate_payload_digest_after_member_hash
     downloader = artifact_contract.ArtifactDownloader(root)
 
     responses = _artifact_transport_responses(archive_reference, wire_bytes)
-    monkeypatch.setattr(downloader, "_run_gh", lambda arguments, _: responses[arguments[1]])
+    monkeypatch.setattr(
+        downloader, "_run_gh", lambda arguments, _, *, timeout=60: responses[arguments[1]]
+    )
 
     with pytest.raises(ValueError, match="candidate artifact"):
         downloader.download_payload(

@@ -1503,7 +1503,7 @@ class ArtifactDownloader:
         self._archives: dict[tuple[str, str, str], tuple[Path, str]] = {}
         self._archive_directory: Path | None = None
 
-    def _run_gh(self, arguments: Sequence[str], name: str) -> bytes:
+    def _run_gh(self, arguments: Sequence[str], name: str, *, timeout: int = 60) -> bytes:
         if self._environment is not None:
             status, raw = _promotion_gh(self._root, self._environment, arguments, name)
             if status != 200:
@@ -1515,7 +1515,7 @@ class ArtifactDownloader:
                 cwd=self._root,
                 capture_output=True,
                 check=False,
-                timeout=60,
+                timeout=timeout,
             )
         except (OSError, subprocess.SubprocessError):
             _refuse(f"{name} could not be downloaded")
@@ -1556,6 +1556,7 @@ class ArtifactDownloader:
         wire_bytes = self._run_gh(
             ["api", f"repos/{repository}/actions/artifacts/{artifact['id']}/zip"],
             "retained artifact",
+            timeout=600,
         )
         wire_sha256 = _sha256_bytes(wire_bytes)
         if wire_sha256 != artifact["sha256"]:
