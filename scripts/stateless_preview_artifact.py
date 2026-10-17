@@ -5481,18 +5481,23 @@ def _promotion_discover_predecessor(
             steps = job.get("steps")
             if not isinstance(steps, list) or any(not isinstance(step, Mapping) for step in steps):
                 _refuse("predecessor step evidence is incomplete")
-            advancement = []
-            for name in _PROMOTION_ADVANCEMENT_STEPS:
-                selected = [step for step in steps if step.get("name") == name]
-                if len(selected) != 1:
-                    _refuse("predecessor advancement evidence is incomplete or ambiguous")
-                advancement.append(selected[0])
             suffix = f"{run_id}-{number}-{job_id}"
             records = [
                 item
                 for item in artifacts
                 if item.get("name") == f"stateless-preview-promote-attempt-{suffix}"
             ]
+            if job.get("conclusion") == "skipped":
+                if records:
+                    _refuse("skipped predecessor promote job has a retained Attempt")
+                if not steps:
+                    continue
+            advancement = []
+            for name in _PROMOTION_ADVANCEMENT_STEPS:
+                selected = [step for step in steps if step.get("name") == name]
+                if len(selected) != 1:
+                    _refuse("predecessor advancement evidence is incomplete or ambiguous")
+                advancement.append(selected[0])
             if not records:
                 upload = [
                     step for step in steps if step.get("name") == "Retain the immutable Attempt (A)"

@@ -9050,6 +9050,109 @@ def test_current_promote_job_selector_requires_exact_successful_setup(
         _select_promote_job(current_promote_jobs)
 
 
+def test_promotion_cli_skipped_empty_step_predecessors_allow_new_admission(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.attempt_jobs[("201", "1")] = {"total_count": 0, "jobs": []}
+    for run_id in ("101", "201"):
+        run = cli.runs[run_id]
+        job_id = int(run_id) + 1000
+        job = {
+            **cli.jobs["801"]["jobs"][0],
+            "id": job_id,
+            "run_id": int(run_id),
+            "run_attempt": run["run_attempt"],
+            "status": "completed",
+            "conclusion": "skipped",
+            "url": f"https://api.github.com/repos/{REPOSITORY}/actions/jobs/{job_id}",
+            "run_url": f"https://api.github.com/repos/{REPOSITORY}/actions/runs/{run_id}",
+            "steps": [],
+        }
+        cli.jobs[run_id]["jobs"].append(job)
+        cli.jobs[run_id]["total_count"] += 1
+        cli.attempt_jobs[(run_id, str(run["run_attempt"]))] = cli.jobs[run_id]
+    assert all(
+        "promotion-attempt.json" not in artifact["members"] for artifact in cli.artifacts.values()
+    )
+    retained_before = {key: artifact["wire"] for key, artifact in cli.artifacts.items()}
+
+    assert cli.admit_attempt()["state"] == "unstarted"
+    attempt = json.loads(cli.attempt_bytes)
+    assert attempt["candidate"] == cli.identity["candidate"]
+    assert attempt["promotion_decision"] == cli.decision_reference
+    assert attempt["predecessor_attempt"] is None
+    assert json.loads(cli.admission_bytes["remote-observation-0.json"])["operation_results"] == []
+    assert {key: cli.artifacts[key]["wire"] for key in retained_before} == retained_before
+    assert not list(cli.runner.rglob("write-*.json"))
+    assert cli.mutations == []
+
+
+def test_promotion_cli_skipped_empty_step_predecessor_with_retained_attempt_refuses(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cli = promotion_workflow_cli
+    cli.admit_attempt()
+    original_attempt = cli.attempt_bytes
+    original_reference = cli.compact(cli.retained[("attempt", 0)])
+    existing_records = {
+        path: path.read_bytes()
+        for path in cli.runner.rglob("*.json")
+        if path.name in ("pre-publication-stage.json", "promotion-attempt.json")
+    }
+    cli.fresh_attempt()
+    cli.attempt_jobs[("801", "2")]["jobs"][0].update(
+        status="completed", conclusion="skipped", steps=[]
+    )
+
+    assert cli.invoke("admit-promote") == 1
+    error = capsys.readouterr().err
+    assert "STATELESS_PREVIEW_ARTIFACT_REFUSED" in error and "predecessor" in error
+    assert {
+        path: path.read_bytes()
+        for path in cli.runner.rglob("*.json")
+        if path.name in ("pre-publication-stage.json", "promotion-attempt.json")
+    } == existing_records
+    assert (
+        cli.artifacts[original_reference["artifact_id"]]["members"]["promotion-attempt.json"]
+        == original_attempt
+    )
+    assert not list(cli.runner.rglob("write-*.json"))
+    assert cli.mutations == []
+
+
+@pytest.mark.parametrize(
+    "status,conclusion",
+    [
+        pytest.param("completed", "failure", id="failed"),
+        pytest.param("completed", "success", id="successful"),
+        pytest.param("completed", "cancelled", id="cancelled"),
+        pytest.param("completed", None, id="missing-conclusion"),
+        pytest.param("in_progress", None, id="in-progress"),
+        pytest.param("queued", None, id="queued"),
+        pytest.param("in_progress", "skipped", id="unfinished-skipped"),
+    ],
+)
+def test_promotion_cli_non_skipped_or_unfinished_empty_step_predecessor_refuses(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+    capsys: pytest.CaptureFixture[str],
+    status: str,
+    conclusion: str | None,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.fresh_attempt()
+    cli.attempt_jobs[("801", "2")]["jobs"][0].update(status=status, conclusion=conclusion, steps=[])
+
+    assert cli.invoke("admit-promote") == 1
+    error = capsys.readouterr().err
+    assert "STATELESS_PREVIEW_ARTIFACT_REFUSED" in error and "predecessor" in error
+    assert not list(cli.runner.rglob("promotion-attempt.json"))
+    assert not list(cli.runner.rglob("pre-publication-stage.json"))
+    assert not list(cli.runner.rglob("write-*.json"))
+    assert cli.mutations == []
+
+
 @pytest.mark.parametrize("rerun", [False, True], ids=["new-run", "new-attempt"])
 def test_promotion_cli_predecessor_unknown_absence_never_permits_resend(
     promotion_workflow_cli: _PromotionWorkflowCli,
