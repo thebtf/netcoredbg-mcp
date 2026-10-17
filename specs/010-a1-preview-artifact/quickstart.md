@@ -419,7 +419,7 @@ admission; an explicitly empty/unknown mode, unknown operation, mixed fields, or
 unsupported input refuses instead of succeeding with every job skipped. Promote
 is the complete publisher described below, not an admission-only route.
 
-For retention, the original candidate build must be complete and successful at
+For `evidence_operation=retain`, the original candidate build must be complete and successful at
 its exact run attempt, workflow/ref/SHA and named build job. Obtain the real
 candidate-bound consumer proof, seven-lens aggregate, and distinct independent
 PR review before dispatch. Keep those three original byte sequences outside
@@ -565,6 +565,13 @@ only approved retained payload bytes. The house helper scrubs overriding
 It independently derives the current source/run/attempt/job and both initiators;
 the Decision's named dispatcher must match them, not a request-supplied identity.
 
+Native tag construction and push run in a private temporary bare Git repository,
+not the checkout's transport configuration. The helper independently validates
+the canonical object store, uses it only as a read-only alternate, disables
+templates/hooks/proxies/redirects and supplies only the bound job token to the
+explicit GitHub URL. The absent-tag lease, exact tag OID and durable intent remain
+mandatory; checkout config is unchanged and uncertain writes are never resent.
+
 The actual CLI/retention sequence is:
 
 ```text
@@ -652,6 +659,113 @@ fragments; absent fragments refuse even when classification is
 Controlled-loopback HTTP/MCP/EOF/tamper checks and SIMULATED record tests are
 supporting source evidence, not public GitHub release receipts. Record source,
 runtime and publication results separately; none substitutes for the others.
+
+## Retain the published-candidate closeout
+
+This is a later authorized procedure, not an execution receipt, new S4 approval
+or Program B/C grant. Integrate the closeout adapter and publisher repair into
+new canonical SHA S before its first successful publication; obtain new
+S-bound Candidate/Catalog, consumer/review evidence and Root S4. Source
+`526df406fb3225a4d23686ac4de920b8067698d2` and its earlier approval remain
+historical-only. Do not redispatch an older candidate to borrow its approval.
+
+1. After actual publisher P completes successfully, obtain the real compact
+   `publisher-handoff.json` reference from its immutable Actions upload and
+   verify the original bytes. It has exactly `repository`, `run_id`,
+   `artifact_id`, `path`, `sha256`; `path` is `publisher-handoff.json`. A local
+   handoff file, artifact name or invented ID is not that reference. Missing or
+   null genuine pre-publication evidence refuses closeout, even when the remote
+   state is already `published_complete`; do not republish to manufacture it.
+2. Run [public-remote proof](#run-public-remote-proof) on Windows x64 against the
+   actual public release, using the unchanged installed-Python oracle. Preserve
+   the complete original PASS receipt bytes from that external execution. Its
+   `remote_release` proof must cover the full consumer/denial matrix, clean EOF
+   and unchanged Python rollback after the final published Observation.
+3. Prepare `C:\preview-validation\closeout-request.json` as a JSON object with
+   exactly the fields below. Put the original receipt into the ZIP under the
+   fixed member name `remote-consumer-proof.json`; changing that member name
+   from the local receipt filename must not reserialize or change its bytes.
+
+| Field | Required source/value |
+| --- | --- |
+| `publisher_handoff_reference` | The real five-field retained reference from P, not a local path or the handoff body. |
+| `bundle_base64` | Canonical base64 ZIP containing only the original `remote-consumer-proof.json` bytes. |
+| `record_sha256` | Object with only `remote-consumer-proof.json` mapped to its original raw-file lowercase SHA-256. |
+
+The existing bounds remain: full escaped dispatch input at most 65,535
+characters, base64 at most 60,000 characters, ZIP at most 45,000 bytes and original
+record at most 128 KiB. Strict JSON/base64, fixed-member, path, duplicate,
+metadata, CRC, EOF and raw-hash checks still apply. Do not supply retention,
+candidate/context objects, actors, timestamps, URLs, execution paths, future
+artifact IDs or ready-made Verification/Stage/Handoff records.
+
+4. While canonical main still equals S, dispatch a separate closeout run Q
+   through the existing data-on-stdin route:
+
+```powershell
+$request = Get-Content -Raw C:\preview-validation\closeout-request.json
+@{
+  mode = 'evidence'
+  evidence_operation = 'closeout'
+  evidence_request = $request
+} | ConvertTo-Json -Compress | gh workflow run stateless-preview.yml --repo thebtf/netcoredbg-mcp --ref main --json
+```
+
+Leave `preview_version`, `preview_tag`, `retention_days` and `promote_request`
+absent or empty. The local request file only transports JSON; it never replaces
+a durable Actions reference. This is a live dispatch owned by Root, not a check
+executed by this source change. Both Q initiators must match the approved
+dispatcher. Q is independently admitted from its current Actions/API/Git facts;
+P is independently reconstructed from the completed exact publisher attempt,
+tracked workflow S, original artifacts and predecessor history before P.
+Attempt/Observation/Classification retain P; new retained closeout references
+name Q. The pure sealers receive P through `current_promotion_context`, never Q
+masquerading as P or context copied from a record. P/Q workflow, source/build,
+checkout and fetched/live main all remain S.
+
+The read-only `retain_closeout` / `Retain canonical-main preview closeout` job
+uses exact checkout without persisted credentials, live main fetch, Python 3.12
+and job-scoped `github.token`. It neither builds nor installs the product, runs
+Python rollback, creates a Decision, mutates a release or starts Program B/C.
+It preserves the external receipt and separately downloads fresh anonymous
+public archive/manifest bytes to create the genuine post-publication byte
+fragment. Publisher caches and retained payloads cannot replace that download.
+
+```text
+admit-closeout                 -> R0 upload: original remote-consumer-proof.json
+                                           + post-publication-verification.json
+seal-closeout-verification     -> R0 readback; R1 upload: remote-verification.json
+seal-closeout-stage            -> R1/dependency readback; R2 upload: post-publication-stage.json
+seal-closeout-handoff          -> R2/R1/lineage readback; R3 upload: program-b-handoff.json
+verify-closeout-retention      -> new-directory R3 and recursive dependency readback
+```
+
+Each command uses `python scripts/stateless_preview_artifact.py` with no extra
+arguments. All four uploads use `actions/upload-artifact@v7`, `archive: true`,
+`overwrite: false`, `if-no-files-found: error` and Candidate-derived 1–90-day
+retention. Only the listed helper-owned files are uploaded. Real upload outputs
+flow through `A1_CLOSEOUT_{RECORDS,VERIFICATION,STAGE,HANDOFF}_ARTIFACT_{ID,DIGEST}`;
+only leading `sha256:` is removed before strict lowercase digest validation.
+The existing `seal_remote_verification`, `seal_stage_gate_evidence` and
+`seal_program_b_handoff` remain pure and keep their schemas/signatures.
+R2 references the R0 Catalog-required remote proof, not a new Verification
+field; R1 is its adapter-order dependency. See the
+[exact output interface](contracts/stateless-preview-workflow.md#fixed-cli-four-upload-barriers-and-final-readback).
+
+Only after successful independent R3/graph readback and fresh Q/live-main
+revalidation does the final step emit `program_b_handoff_reference` in action
+output and `GITHUB_STEP_SUMMARY`. This is the real compact reference to R3, not
+a local receipt or promised future upload. It keeps
+`completion_scope: A1_OPT_IN_PREVIEW_COMPLETE` and both Program B/C
+authorization-required flags true. Source fixtures or a green run alone cannot
+close A1; Root must retain the actual publication, original public consumer/
+Python-rollback proof and all four real artifact references with readback.
+
+On failure, preserve public state and any uploaded artifacts. Do not move tags,
+replace assets, republish or automatically retry. A later separately admitted Q
+still needs the same canonical S. New retention does not renew older artifacts;
+the dependency chain is usable only until its earliest expiry. The Python
+default, package and console entry point remain unchanged.
 
 ## Historical permission experiment — no active probe
 
