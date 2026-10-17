@@ -88,6 +88,23 @@ public sealed class SymbolSearchEngineTests
         Assert.Equal([".git/keep.cs"], symbols.Select(static match => match.File));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void BothPoliciesPreserveExplicitDescendantNegationWithoutReturningIgnoredSibling(bool preview)
+    {
+        using var root = TestRoot.Create();
+        root.Write(".gitignore", "private/\n!private/Allowed.cs\n");
+        root.Write("private/Allowed.cs", "public sealed class NegationMarker { }\n");
+        root.Write("private/Secret.cs", "public sealed class NegationMarker { }\n");
+        SearchPolicy policy = preview ? PreviewSearchPolicy.Instance : LegacySearchPolicy.Instance;
+        var engine = new SymbolSearchEngine(root.Path, policy);
+
+        var symbols = engine.FindCodeSymbol("NegationMarker", "class");
+
+        Assert.Equal(["private/Allowed.cs"], symbols.Select(static match => match.File));
+    }
+
     [Fact]
     public void PreviewPolicyPrunesCaseVariantVcsMetadata()
     {

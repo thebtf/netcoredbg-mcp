@@ -939,7 +939,12 @@ public sealed class SymbolSearchEngine
         try
         {
             var rules = new List<GitIgnoreRule>();
-            foreach (var line in ReadLines(gitIgnore, operation))
+            var lines = ReadLines(gitIgnore, operation);
+            if (lines.Length > 0 && lines[0].StartsWith('\uFEFF'))
+            {
+                lines[0] = lines[0][1..];
+            }
+            foreach (var line in lines)
             {
                 operation.Check();
                 var rule = GitIgnoreRule.Parse(line);
@@ -1204,6 +1209,11 @@ public sealed class SymbolSearchEngine
                 return false;
             }
 
+            if (operation is not null && !isDirectory)
+            {
+                return MatchesStrictFile(path.AsSpan(), operation);
+            }
+
             if (DirectoryOnly && !isDirectory)
             {
                 if (Anchored || HasSlash)
@@ -1225,6 +1235,42 @@ public sealed class SymbolSearchEngine
             }
 
             return GlobMatches(Path.GetFileName(path), Pattern, operation);
+        }
+
+        private bool MatchesStrictFile(ReadOnlySpan<char> path, SearchOperation operation)
+        {
+            var regex = CreateGlobRegex(Pattern, operation);
+            var isDirectory = false;
+            try
+            {
+                while (!path.IsEmpty)
+                {
+                    operation.Check();
+                    var separator = path.LastIndexOf('/');
+                    if ((!DirectoryOnly || isDirectory)
+                        && regex.IsMatch(Anchored || HasSlash ? path : path[(separator + 1)..]))
+                    {
+                        operation.Check();
+                        return true;
+                    }
+
+                    if (separator < 0)
+                    {
+                        break;
+                    }
+
+                    path = path[..separator];
+                    isDirectory = true;
+                }
+
+                operation.Check();
+                return false;
+            }
+            catch (RegexMatchTimeoutException)
+            {
+                ThrowFailure(SearchFailure.PreviewSearchBudgetExceeded(operation.Tool));
+                throw;
+            }
         }
     }
 
