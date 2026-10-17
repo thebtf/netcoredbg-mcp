@@ -858,10 +858,13 @@ binding, complete scenario denominator and exact remote asset identities.
 Remote Verification and Program B Handoff are separate pure
 [source-only APIs](../specs/010-a1-preview-artifact/contracts/program-b-handoff.md#source-only-sealing-apis),
 not evidence collectors or authority. They require real original predecessor
-records, qualified exact same-current-promote-job grants, genuine pre/post byte
-fragments and all three catalog Stage subsets. Missing pre-publication fragments
-refuse even after `published_complete`; published recovery cannot invent them.
-Neither API authorizes Program B/C, defaults or package cutover.
+records, Attempt 3.0 exact-source execution policy, admitted predecessor and
+Observation 2.0 operation history, genuine pre/post byte fragments and all three
+catalog Stage subsets. Source/blob equality is not observed grants or token
+introspection; DENIED and unresolved UNKNOWN cannot be erased by matching state.
+Missing pre-publication fragments refuse even after `published_complete`;
+published recovery cannot invent them. Neither API authorizes Program B/C,
+defaults or package cutover.
 
 Controlled-loopback HTTP/MCP/EOF/tamper checks and simulated unit records are
 supporting source proof, not public GitHub release receipts. Record actual source,

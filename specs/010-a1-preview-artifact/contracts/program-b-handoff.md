@@ -17,8 +17,8 @@ The handoff binds all of these records to the same canonical `refs/heads/main` c
 
 - Candidate Identity Record
 - approved Promotion Decision
-- fresh Promotion Attempt 2.0
-- Remote Observation
+- fresh Promotion Attempt 3.0
+- Remote Observation 2.0
 - Remote Classification
 - Remote Verification
 - remote-release Artifact Consumer Proof
@@ -28,13 +28,17 @@ The handoff binds all of these records to the same canonical `refs/heads/main` c
 The validator requires exact equality of candidate binding, source ref/commit,
 origin-main target, trusted build run, Decision hash/authorization, current
 attempt ID, workflow run/attempt/job and workflow SHA. Both current initiator
-ID/login maps must equal the Decision's authorized dispatcher. Resolve the
-Attempt 2.0 qualified same-promote-job report, not a probe report or declaration;
-its exact rights projection and fixed `github.token` installation-token
-provenance with unobserved/null app and installation IDs must validate. Do not
-equate a human dispatcher with the execution-token principal or accept legacy
-Attempt 1.0. Source-only sealers implement these checks; their availability does
-not establish live permission or successful published proof.
+ID/login maps must equal the Decision's authorized dispatcher. The resolved
+Attempt 3.0 exact tracked-workflow `execution_policy` and independently resolved
+predecessor history must validate, with fixed `github.token` installation-token
+provenance and unobserved/null App/installation IDs. Observation 2.0 operation
+outcomes must permit closure; a known denial is not erased by matching later
+state and unresolved UNKNOWN cannot be resent. Source/blob equality describes
+reviewed configuration, not observed grants, token introspection or live success.
+Do not equate the dispatcher with a token principal or accept Attempt 1.0/2.0,
+removed permission fields or a compatibility shim. Outer Remote Verification and
+Handoff versions stay unchanged; their nested Attempt/Observation admission moves
+to 3.0/2.0. Source-only sealers do not establish actual published consumer proof.
 
 ## Require every stage
 
@@ -43,7 +47,7 @@ The handoff contains three sealed Stage Gate Evidence references. Each stage rec
 | Stage | Required outcome |
 | --- | --- |
 | `pre-decision` | The retained proof, seven-lens aggregate, and distinct PR review all pass. |
-| `pre-publication` | The candidate-bound stage record passes for the current empty catalog subset; fresh source, provenance, permission, and remote-state guards still apply. |
+| `pre-publication` | The candidate-bound stage record passes for the current empty catalog subset; fresh source, provenance, execution-policy, predecessor and remote-state guards still apply. |
 | `post-publication` | Fresh remote consumer and byte proof passes after the prerelease is public. |
 
 The validator derives the descriptor subset for each stage from the static catalog. It requires exact descriptor/evidence equality. It rejects a missing, extra, duplicate, wrong-stage, wrong-type, stale, failed, incomplete, candidate-mismatched, source-mismatched, or policy-drifted entry.
@@ -138,19 +142,23 @@ Prepare every input before calling it:
   are **compact** five-field structural locators. The CLI's expanded catalog
   reference must be projected from verified metadata, not passed unchanged.
 - `record_resolver(reference) -> bytes` resolves every compact locator to its
-  exact original bytes, including all nested Decision/Attempt/permission/Stage/
-  observation/classification/consumer-proof records and the verification for
-  handoff. Missing or wrong bytes refuse. The sealer adds no transport.
+  exact original bytes, including nested Decision/Attempt/Stage/observation/
+  classification/consumer-proof and predecessor records, plus verification for
+  handoff. No permission-report locator remains. Missing/wrong bytes refuse.
 - `repository_root` identifies the Git repository with the candidate commit's
   exact tracked policy snapshots; current checkout files are not substitutes.
 - `current_promotion_context` is independently obtained trusted runtime context
   with exactly `current_attempt_id`, `workflow_run`, `job_id`, `job_key`,
-  `workflow_sha`, `checkout_head`, `origin_main_target`, `current_github_actor`
-  and `current_github_triggering_actor`. Use the
-  [Attempt 2.0 context contract](../quickstart.md#revalidate-one-source-only-attempt-20),
+  `workflow_sha`, `checkout_head`, `origin_main_target`, `current_github_actor`,
+  `current_github_triggering_actor`, `predecessor_attempt` and
+  `predecessor_operation_results`. The predecessor fields come from complete
+  bounded canonical workflow run/attempt/artifact/job discovery; only
+  `predecessor_attempt` persists in A, with operation results in Observation 2.0.
+  No new CLI/env inputs are introduced. Use the
+  [Attempt 3.0 context contract](../quickstart.md#revalidate-one-source-only-attempt-30),
   not values copied from the record being admitted. An old completed/foreign job,
-  identical permission probe, PAT/auth cache or YAML declaration cannot supply
-  the missing qualified same-current-promote-job grant.
+  PAT/auth cache or a caller workflow hash is no substitute. Tracked-byte policy
+  resolution is not token introspection or an observed-grant report.
 
 Raw-record SHA-256, Actions ZIP-container SHA-256 and Candidate's ordered
 `SHA256(archive_bytes || manifest_bytes)` payload hash are distinct. Neither
@@ -159,7 +167,7 @@ record or public asset bytes.
 
 Both APIs return a detached deeply immutable mapping or raise `ValueError`.
 They reuse semantic validators, derive `published_complete`, require `APPROVE`,
-revalidate Attempt 2.0, and bind the same candidate, Decision, Attempt, Catalog,
+revalidate Attempt 3.0 and Observation 2.0, and bind the same candidate, Decision, Attempt, Catalog,
 remote asset IDs and consumer proof. `seal_program_b_handoff` additionally
 requires all three exact passing catalog Stage subsets. They collect no live
 evidence, write no receipt, publish nothing and grant no authority. Their caller

@@ -2898,8 +2898,237 @@ def _validate_remote_asset(value: Any, kind: str) -> None:
     _expect_positive_integer(metadata["size_bytes"], f"remote {kind} metadata size")
 
 
+def _operation_outcome(response: Mapping[str, Any], postcondition: str) -> str:
+    if response["kind"] == "DENIED":
+        return "DENIED"
+    if response["kind"] == "CONFLICT":
+        return "COLLISION"
+    if postcondition == "MATCH":
+        return "CONFIRMED" if response["kind"] == "ACKNOWLEDGED" else "RECONCILED"
+    return "COLLISION" if postcondition == "MISMATCH" else "UNKNOWN"
+
+
+def _operation_postcondition(
+    result: Mapping[str, Any],
+    observation: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    record_resolver: Callable[[Mapping[str, Any]], bytes] | None = None,
+) -> str:
+    if (
+        _remote_collision_reason(
+            observation,
+            candidate,
+            _review_timestamp(observation["observed_at"], "operation observation time"),
+        )
+        is not None
+    ):
+        unreadable = (
+            observation["readback_status"]["observed_result"] != "SUCCESS"
+            or observation["tag_observation"]["status"] == "UNREADABLE"
+            or observation["release_observation"]["status"] == "UNREADABLE"
+            or any(
+                observation["asset_observations"][k]["status"]
+                in ("UNREADABLE", "PRESENT_UNREADABLE")
+                for k in ("archive", "manifest")
+            )
+        )
+        return "UNREADABLE" if unreadable else "MISMATCH"
+    operation, target, response = result["operation"], result["target"], result["response"]
+    tag, release, assets = (
+        observation["tag_observation"],
+        observation["release_observation"],
+        observation["asset_observations"],
+    )
+    if operation == "CREATE_TAG":
+        if tag["status"] == "ABSENT":
+            return "ABSENT"
+        return "MATCH" if tag["object_id"] == target["object_id"] else "MISMATCH"
+    if release["status"] == "ABSENT":
+        return "ABSENT"
+    if operation != "CREATE_DRAFT" and release["release_id"] != target["release_id"]:
+        return "MISMATCH"
+    if operation.startswith("UPLOAD_"):
+        asset = assets["archive" if operation == "UPLOAD_ARCHIVE" else "manifest"]
+        if asset["status"] == "ABSENT":
+            return "ABSENT"
+        identity = asset["metadata"]["id"]
+        if asset["downloaded_identity"] != target["descriptor"]:
+            return "MISMATCH"
+    else:
+        identity = release["release_id"]
+    if response["resource_id"] is not None and response["resource_id"] != identity:
+        return "MISMATCH"
+    if operation == "PUBLISH_RELEASE":
+        if release["is_draft"]:
+            return "ABSENT"
+        if record_resolver is not None:
+            try:
+                fragment = _resolve_stage_record(
+                    target["pre_publication_verification"], record_resolver
+                )
+            except (ValueError, OSError, URLError):
+                return "UNREADABLE"
+            if fragment != _promotion_fragment({"candidate": candidate}, observation):
+                return "MISMATCH"
+    return "MATCH"
+
+
+def _validate_operation_results(
+    record: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    reference: Mapping[str, Any],
+    record_resolver: Callable[[Mapping[str, Any]], bytes] | None = None,
+) -> None:
+    results = _expect_list(record["operation_results"], "operation results")
+    if len(results) > 2:
+        _refuse("operation results exceed one advancement block")
+    operations = []
+    origins = set()
+    for result in results:
+        _expect_mapping(
+            result,
+            "operation result",
+            (
+                "origin_attempt_id",
+                "operation",
+                "intent_sha256",
+                "target",
+                "sent_at",
+                "response",
+                "postcondition",
+                "outcome",
+            ),
+        )
+        origin = _expect_safe_opaque_id(result["origin_attempt_id"], "operation origin")
+        origins.add(origin)
+        operation = result["operation"]
+        fields = {
+            "CREATE_TAG": ("tag", "object_id"),
+            "CREATE_DRAFT": ("tag", "source_commit"),
+            "UPLOAD_ARCHIVE": ("release_id", "descriptor"),
+            "UPLOAD_MANIFEST": ("release_id", "descriptor"),
+            "PUBLISH_RELEASE": ("release_id", "pre_publication_verification"),
+        }.get(operation)
+        if fields is None or operation in operations:
+            _refuse("operation result is unsupported or duplicated")
+        operations.append(operation)
+        target = _expect_mapping(
+            result["target"],
+            "operation target",
+            (
+                "repository",
+                "candidate_identity_record",
+                *fields,
+            ),
+        )
+        if (
+            _expect_repository(target["repository"], "operation repository")
+            != candidate["source"]["repository"]
+            or _review_record_reference(target["candidate_identity_record"], "operation Candidate")
+            != reference
+        ):
+            _refuse("operation target does not bind the exact Candidate/repository")
+        if "tag" in fields and target["tag"] != candidate["destination"]["tag"]:
+            _refuse("operation targets a different tag")
+        if operation == "CREATE_TAG":
+            _expect_commit(target["object_id"], "operation tag OID")
+        if operation == "CREATE_DRAFT" and target["source_commit"] != candidate["source"]["commit"]:
+            _refuse("draft intent targets a different source")
+        if "release_id" in fields:
+            _expect_identifier(target["release_id"], "operation release ID")
+        if "descriptor" in fields:
+            expected = (
+                candidate["preview_manifest"]["contents"]["archive"]
+                if operation == "UPLOAD_ARCHIVE"
+                else candidate["preview_manifest"]["file"]
+            )
+            if _validate_file_descriptor(target["descriptor"], "operation descriptor") != expected:
+                _refuse("upload intent differs from the approved descriptor")
+        if operation == "PUBLISH_RELEASE":
+            _review_record_reference(target["pre_publication_verification"], "publication fragment")
+        intent = {key: result[key] for key in ("origin_attempt_id", "operation", "target")}
+        if _expect_sha256(result["intent_sha256"], "intent hash") != _sha256_bytes(
+            _canonical_json_bytes(intent, "write intent")
+        ):
+            _refuse("operation result differs from its canonical original intent")
+        sent = result["sent_at"]
+        if sent is None:
+            if origin == record["promotion_attempt_id"]:
+                _refuse("a current send must record transmission time")
+        elif _review_timestamp(sent, "operation sent_at") > _review_timestamp(
+            record["observed_at"], "operation readback"
+        ):
+            _refuse("operation readback predates transmission")
+        response = _expect_mapping(
+            result["response"],
+            "operation response",
+            (
+                "kind",
+                "http_status",
+                "git_returncode",
+                "resource_id",
+            ),
+        )
+        status, code, resource = (
+            response["http_status"],
+            response["git_returncode"],
+            response["resource_id"],
+        )
+        if status is not None and (type(status) is not int or not 100 <= status <= 599):
+            _refuse("operation HTTP status is invalid")
+        if code is not None and type(code) is not int:
+            _refuse("operation Git return code is invalid")
+        if resource is not None:
+            _expect_identifier(resource, "operation resource ID")
+        kind = response["kind"]
+        if (
+            status is not None
+            and 400 <= status < 500
+            and kind != ("CONFLICT" if status in (409, 422) else "DENIED")
+        ):
+            _refuse("definite server refusal cannot be relabeled UNKNOWN or success")
+        if kind not in ("ACKNOWLEDGED", "DENIED", "CONFLICT", "UNKNOWN"):
+            _refuse("operation response kind is unsupported")
+        if operation == "CREATE_TAG":
+            if status is not None or resource is not None or (kind == "ACKNOWLEDGED" and code != 0):
+                _refuse("tag response does not bind native Git")
+            if kind in ("DENIED", "CONFLICT") and code is None:
+                _refuse("tag refusal lacks a completed native result")
+        elif (
+            code is not None
+            or (
+                kind == "ACKNOWLEDGED"
+                and (status != (200 if operation == "PUBLISH_RELEASE" else 201) or resource is None)
+            )
+            or (
+                kind == "DENIED"
+                and (status is None or not 400 <= status < 500 or status in (409, 422))
+            )
+            or (kind == "CONFLICT" and status not in (409, 422))
+        ):
+            _refuse("operation response does not establish its claimed acknowledgement/refusal")
+        postcondition = _operation_postcondition(result, record, candidate, record_resolver)
+        if result["postcondition"] != postcondition or result["outcome"] != _operation_outcome(
+            response, postcondition
+        ):
+            _refuse("operation result is not derived from its response and exact readback")
+    if len(origins) > 1 or (
+        len(operations) == 2
+        and operations
+        not in (
+            ["CREATE_TAG", "CREATE_DRAFT"],
+            ["UPLOAD_ARCHIVE", "UPLOAD_MANIFEST"],
+        )
+    ):
+        _refuse("operation results mix origins or advancement blocks")
+
+
 def _validate_remote_observation(
-    value: Any, candidate: Mapping[str, Any], reference: Mapping[str, Any], current_attempt_id: str
+    value: Any,
+    candidate: Mapping[str, Any],
+    reference: Mapping[str, Any],
+    current_attempt_id: str,
+    record_resolver: Callable[[Mapping[str, Any]], bytes] | None = None,
 ) -> Mapping[str, Any]:
     record = _expect_mapping(
         value,
@@ -2915,10 +3144,11 @@ def _validate_remote_observation(
             "release_observation",
             "asset_observations",
             "readback_status",
+            "operation_results",
             "observed_at",
         ),
     )
-    if record["observation_schema_version"] != "1.0":
+    if record["observation_schema_version"] != "2.0":
         _refuse("remote observation schema version is unsupported")
     _expect_safe_opaque_id(record["observation_id"], "remote observation ID")
     attempt_id = _expect_safe_opaque_id(current_attempt_id, "current promotion attempt ID")
@@ -2992,6 +3222,7 @@ def _validate_remote_observation(
         )
     ):
         _refuse("remote readback status contains an unsupported value")
+    _validate_operation_results(record, candidate, reference, record_resolver)
     return record
 
 
@@ -3002,13 +3233,14 @@ def seal_remote_observation(
     candidate_identity_bytes: bytes,
     candidate_identity_reference: Mapping[str, Any],
     current_attempt_id: str,
+    record_resolver: Callable[[Mapping[str, Any]], bytes] | None = None,
 ) -> Mapping[str, Any]:
     """Seal candidate-bound recorded facts, preserving negative observations without remote I/O."""
     identity, reference = _verified_raw_candidate(
         candidate_identity, candidate_identity_bytes, candidate_identity_reference
     )
     record = _validate_remote_observation(
-        _thaw(observation), identity["candidate"], reference, current_attempt_id
+        _thaw(observation), identity["candidate"], reference, current_attempt_id, record_resolver
     )
     return _freeze(record)
 
@@ -3146,10 +3378,23 @@ def classify_remote_observation(
         candidate,
         candidate_reference,
         current_attempt_id,
+        record_resolver,
     )
     if classification_time < _review_timestamp(record["observed_at"], "remote observed_at"):
         _refuse("remote classification predates its observation")
+    _validate_operation_results(record, candidate, candidate_reference, record_resolver)
     reason = _remote_collision_reason(record, candidate, classification_time)
+    for operation in record["operation_results"]:
+        outcome = operation["outcome"]
+        if outcome in ("COLLISION", "UNKNOWN") or (
+            outcome == "DENIED" and operation["origin_attempt_id"] == current_attempt_id
+        ):
+            reason = {
+                "DENIED": "OPERATION_DENIED",
+                "COLLISION": "OPERATION_COLLISION",
+                "UNKNOWN": "OPERATION_UNKNOWN",
+            }[outcome]
+            break
     if reason is not None:
         state, admission, action = "collision", "REFUSED", "REFUSE"
         result = {"expected": "EXPECT_SUCCESS", "observed": "REFUSAL", "status": "REFUSED"}
@@ -3211,147 +3456,6 @@ def classify_remote_observation(
     )
 
 
-def _validate_promotion_permission_report(
-    value: Any,
-    context: Mapping[str, Any],
-    *,
-    not_before: datetime,
-    recorded_at: datetime,
-) -> Mapping[str, Any]:
-    report = _expect_mapping(
-        value,
-        "promotion permission report",
-        (
-            "diagnostic",
-            "meaning",
-            "status",
-            "availability",
-            "reason_code",
-            "started_at",
-            "finished_at",
-            "binding",
-            "actor_provenance",
-            "grants",
-            "log_sha256",
-            "log_source",
-            "requests",
-        ),
-    )
-    expected = {
-        "diagnostic": "current-job-permissions",
-        "meaning": "RUNNER_REPORTED_GRANT_NOT_TOKEN_INTROSPECTION",
-        "status": "QUALIFIED",
-        "availability": "AVAILABLE",
-        "reason_code": "REQUIRED_RUNNER_GRANTS_REPORTED",
-    }
-    if any(report[field] != value for field, value in expected.items()):
-        _refuse("promotion requires qualified actual current-job grants")
-    workflow = context["workflow_run"]
-    binding = _expect_mapping(
-        report["binding"],
-        "promotion permission report binding",
-        (
-            "repository",
-            "run_id",
-            "run_attempt",
-            "head_sha",
-            "job_key",
-            "workflow_sha",
-            "job_name",
-            "job_id",
-            "setup_step_position",
-        ),
-    )
-    for field in ("run_id", "run_attempt", "job_id"):
-        _expect_positive_integer(binding[field], f"permission report {field}")
-    _expect_nonnegative_integer(binding["setup_step_position"], "setup step position")
-    if binding != {
-        "repository": workflow["repository"],
-        "run_id": int(workflow["run_id"]),
-        "run_attempt": workflow["run_attempt"],
-        "head_sha": workflow["commit"],
-        "job_key": "promote",
-        "workflow_sha": context["workflow_sha"],
-        "job_name": "Promote canonical-main preview candidate",
-        "job_id": int(context["job_id"]),
-        "setup_step_position": 0,
-    }:
-        _refuse("permission report does not bind the exact current promote job")
-    actors = _expect_mapping(
-        report["actor_provenance"],
-        "permission actor provenance",
-        ("GITHUB_ACTOR", "GITHUB_TRIGGERING_ACTOR"),
-    )
-    if actors != {
-        "GITHUB_ACTOR": context["current_github_actor"]["login"],
-        "GITHUB_TRIGGERING_ACTOR": context["current_github_triggering_actor"]["login"],
-    }:
-        _refuse("permission report actor provenance differs from the current initiators")
-    grants = report["grants"]
-    if not isinstance(grants, Mapping) or not grants:
-        _refuse("permission report requires the complete explicit grant map")
-    for name, access in grants.items():
-        if (
-            not isinstance(name, str)
-            or re.fullmatch(r"[a-z][a-z0-9_-]*", name) is None
-            or access not in ("none", "read", "write")
-        ):
-            _refuse("permission report contains an invalid explicit grant")
-    if grants.get("actions") != "read" or grants.get("contents") != "write":
-        _refuse("permission report lacks the exact required grants")
-    _expect_sha256(report["log_sha256"], "permission log SHA-256")
-    if report["log_source"] not in ("setup_step_logs", "job_logs"):
-        _refuse("permission report requires a native same-job setup log source")
-    started = _review_timestamp(report["started_at"], "permission report started_at")
-    finished = _review_timestamp(report["finished_at"], "permission report finished_at")
-    if not not_before <= started <= finished <= recorded_at:
-        _refuse("permission report is outside the current admission chronology")
-    requests = _expect_list(report["requests"], "permission report requests")
-    if not 3 <= len(requests) <= 6:
-        _refuse("permission report request sequence is incomplete")
-    for request in requests:
-        request = _expect_mapping(
-            request,
-            "permission request",
-            ("phase", "http_status", "reason_code", "started_at", "finished_at"),
-        )
-        status = _expect_positive_integer(request["http_status"], "permission HTTP status")
-        if status > 599 or status < 100 or request["reason_code"] != "HTTP_RESPONSE":
-            _refuse("permission request is not a completed HTTP response")
-        request_start = _review_timestamp(request["started_at"], "permission request started_at")
-        request_end = _review_timestamp(request["finished_at"], "permission request finished_at")
-        if not started <= request_start <= request_end <= finished:
-            _refuse("permission request is outside its report chronology")
-    if any(
-        request["phase"] != phase or request["http_status"] != 200
-        for request, phase in (
-            (requests[0], "current_attempt_jobs"),
-            (requests[-1], "current_job_after"),
-        )
-    ):
-        _refuse("permission report lacks before/after current-job readback")
-    log_requests = requests[1:-1]
-    position = 0
-    for phase in ("setup_step_logs", "job_logs"):
-        if position >= len(log_requests) or log_requests[position]["phase"] != phase:
-            _refuse("permission report log request order is invalid")
-        response = log_requests[position]
-        position += 1
-        if response["http_status"] == 302:
-            if (
-                position >= len(log_requests)
-                or log_requests[position]["phase"] != phase + "_redirect"
-            ):
-                _refuse("permission log redirect response is missing")
-            response = log_requests[position]
-            position += 1
-        if phase == report["log_source"]:
-            if response["http_status"] != 200 or position != len(log_requests):
-                _refuse("permission report does not contain its successful log response")
-            break
-    return report
-
-
 def seal_promotion_attempt(
     attempt: Mapping[str, Any],
     *,
@@ -3365,7 +3469,7 @@ def seal_promotion_attempt(
     repository_root: str | PathLike[str],
     current_promotion_context: Mapping[str, Any],
 ) -> Mapping[str, Any]:
-    """Revalidate one immutable Attempt 2.0 against independently captured current facts."""
+    """Revalidate immutable Attempt 3.0 against independently captured current facts."""
     identity, identity_reference = _verified_raw_candidate(
         candidate_identity, candidate_identity_bytes, candidate_identity_reference
     )
@@ -3383,6 +3487,8 @@ def seal_promotion_attempt(
             "origin_main_target",
             "current_github_actor",
             "current_github_triggering_actor",
+            "predecessor_attempt",
+            "predecessor_operation_results",
         ),
     )
     current_attempt_id = _expect_safe_opaque_id(context["current_attempt_id"], "current attempt ID")
@@ -3416,12 +3522,13 @@ def seal_promotion_attempt(
             "workflow_run",
             "remote_observation",
             "remote_classification",
+            "predecessor_attempt",
             "admission_status",
             "recorded_at",
         ),
     )
     if (
-        record["schema_version"] != "2.0"
+        record["schema_version"] != "3.0"
         or record["admission_status"] != "PASS"
         or _expect_safe_opaque_id(record["attempt_id"], "promotion attempt ID")
         != current_attempt_id
@@ -3474,7 +3581,7 @@ def seal_promotion_attempt(
             "decision_authorization",
             "current_github_actor",
             "current_github_triggering_actor",
-            "permission_readback",
+            "execution_policy",
         ),
     )
     if authorization["decision_authorization"] != decision["promotion_attempt"]:
@@ -3511,61 +3618,50 @@ def seal_promotion_attempt(
     stage_time = _review_timestamp(stage["sealed_at"], "pre-publication sealed_at")
     if not decision_time <= stage_time <= recorded_at:
         _refuse("promotion attempt stages are outside Decision/admission chronology")
-    readback = _expect_mapping(
-        authorization["permission_readback"],
-        "promotion permission readback",
+    policy = _expect_mapping(
+        authorization["execution_policy"],
+        "promotion execution policy",
         (
-            "reference",
+            "model",
             "run_attempt",
             "job_key",
             "job_id",
             "workflow_sha",
+            "workflow_blob_sha256",
             "execution_token",
-            "permissions",
         ),
     )
-    _expect_positive_integer(readback["run_attempt"], "permission run attempt")
-    _expect_identifier(readback["job_id"], "permission job ID")
-    if readback["run_attempt"] != workflow["run_attempt"] or any(
-        readback[field] != context[field] for field in ("job_key", "job_id", "workflow_sha")
-    ):
-        _refuse("permission readback belongs to another current run/attempt/job/source")
-    token = _expect_mapping(
-        readback["execution_token"],
+    _expect_positive_integer(policy["run_attempt"], "execution run attempt")
+    _expect_identifier(policy["job_id"], "execution job ID")
+    _expect_sha256(policy["workflow_blob_sha256"], "workflow blob SHA-256")
+    _expect_mapping(
+        policy["execution_token"],
         "execution token provenance",
         ("source", "kind", "identity_observation", "app_id", "installation_id"),
     )
-    if token != {
-        "source": "github.token",
-        "kind": "GITHUB_APP_INSTALLATION_TOKEN",
-        "identity_observation": "UNOBSERVED",
-        "app_id": None,
-        "installation_id": None,
-    }:
-        _refuse("execution token provenance cannot assert unobserved installation identity")
-    permissions = _expect_mapping(
-        readback["permissions"], "permission projection", ("actions", "contents")
-    )
-    permission_reference = _review_record_reference(readback["reference"], "permission reference")
-    for reference in (
-        permission_reference,
-        record["remote_observation"],
-        record["remote_classification"],
-    ):
+    if policy != _promotion_execution_policy(Path(repository_root), context):
+        _refuse("execution policy differs from exact tracked workflow/current job/token provenance")
+    predecessor = record["predecessor_attempt"]
+    if predecessor is not None:
+        predecessor = _review_record_reference(predecessor, "predecessor Attempt")
+        prior = _resolve_stage_record(predecessor, record_resolver)
+        if (
+            prior.get("schema_version") != "3.0"
+            or prior.get("admission_status") != "PASS"
+            or prior.get("candidate") != candidate
+            or prior.get("attempt_id") == current_attempt_id
+            or _review_timestamp(prior.get("recorded_at"), "predecessor time") >= recorded_at
+        ):
+            _refuse("predecessor Attempt does not bind earlier exact candidate admission")
+    if predecessor != context["predecessor_attempt"]:
+        _refuse("predecessor differs from independent complete discovery")
+    for reference in (record["remote_observation"], record["remote_classification"]):
         reference = _review_record_reference(reference, "current attempt record reference")
         if (
             reference["repository"] != workflow["repository"]
             or reference["run_id"] != workflow["run_id"]
         ):
             _refuse("current attempt record reference belongs to another run")
-    report = _validate_promotion_permission_report(
-        _resolve_stage_record(permission_reference, record_resolver),
-        context,
-        not_before=stage_time,
-        recorded_at=recorded_at,
-    )
-    if permissions != {field: report["grants"][field] for field in ("actions", "contents")}:
-        _refuse("permission projection differs from the actual complete grant map")
     remote_binding = {
         "candidate_identity": identity,
         "candidate_identity_bytes": candidate_identity_bytes,
@@ -3573,8 +3669,23 @@ def seal_promotion_attempt(
         "current_attempt_id": current_attempt_id,
     }
     observation = seal_remote_observation(
-        _resolve_stage_record(record["remote_observation"], record_resolver), **remote_binding
+        _resolve_stage_record(record["remote_observation"], record_resolver),
+        record_resolver=record_resolver,
+        **remote_binding,
     )
+    expected_results = _thaw(context["predecessor_operation_results"])
+    if predecessor is None and expected_results:
+        _refuse("initial admission cannot invent predecessor operations")
+    if predecessor is not None and any(
+        result.get("origin_attempt_id") != prior["attempt_id"] for result in expected_results
+    ):
+        _refuse("predecessor recovery must preserve the independently resolved original attempt")
+    for result in expected_results:
+        post = _operation_postcondition(result, observation, candidate, record_resolver)
+        result["postcondition"] = post
+        result["outcome"] = _operation_outcome(result["response"], post)
+    if observation["operation_results"] != expected_results:
+        _refuse("admission observation changed independent predecessor outcome history")
     classification = _resolve_stage_record(record["remote_classification"], record_resolver)
     _validate_candidate_identity(
         {"schema_version": "1.0", "candidate": classification.get("candidate")}
@@ -3591,7 +3702,7 @@ def seal_promotion_attempt(
     if classification != derived or derived["admission"] != "ADMITTED":
         _refuse("promotion attempt remote classification is forged, stale, or collision")
     if not (
-        _review_timestamp(report["finished_at"], "permission finished_at")
+        stage_time
         <= _review_timestamp(observation["observed_at"], "remote observed_at")
         <= _review_timestamp(derived["classified_at"], "remote classified_at")
         <= recorded_at
@@ -3613,7 +3724,7 @@ def seal_remote_verification(
     repository_root: str | PathLike[str],
     current_promotion_context: Mapping[str, Any],
 ) -> Mapping[str, Any]:
-    """Admit recorded pre/post byte proof and its exact published Attempt 2.0 lineage."""
+    """Admit recorded pre/post byte proof and exact Attempt 3.0/Observation 2.0 lineage."""
     record = _expect_mapping(
         _thaw(verification),
         "remote verification",
@@ -3698,7 +3809,9 @@ def seal_remote_verification(
         "current_attempt_id": attempt["attempt_id"],
     }
     observation = seal_remote_observation(
-        _resolve_stage_record(record["remote_observation"], record_resolver), **remote_binding
+        _resolve_stage_record(record["remote_observation"], record_resolver),
+        record_resolver=record_resolver,
+        **remote_binding,
     )
     classification = _resolve_stage_record(record["remote_classification"], record_resolver)
     _validate_candidate_identity(
@@ -3982,10 +4095,7 @@ def _read_cli_dispatch(command: str, environment: Mapping[str, str]) -> Mapping[
         ):
             _refuse("evidence dispatch cannot execute or accept build/promotion inputs")
         operation = inputs.get("evidence_operation")
-        if operation == "permission-probe":
-            if command != "admit-evidence" or inputs.get("evidence_request", ""):
-                _refuse("permission probe cannot retain evidence")
-        elif operation != "retain" or not inputs.get("evidence_request"):
+        if operation != "retain" or not inputs.get("evidence_request"):
             _refuse("evidence dispatch operation or request is unavailable")
     elif mode == "promote":
         if (
@@ -4015,6 +4125,7 @@ def _validate_cli_run(
     attempt: int,
     *,
     successful_build: bool,
+    completed_run: bool = False,
 ) -> None:
     source = context["source"]
     if (
@@ -4036,7 +4147,10 @@ def _validate_cli_run(
             or repository.get("full_name") != source["repository"]
         ):
             _refuse("workflow run belongs to a different repository or fork")
-    if successful_build:
+    if completed_run:
+        if run.get("status") != "completed" or not isinstance(run.get("conclusion"), str):
+            _refuse("predecessor run is not conclusively finished")
+    elif successful_build:
         if run.get("status") != "completed" or run.get("conclusion") != "success":
             _refuse("source build has not completed successfully")
     elif run.get("status") != "in_progress" or run.get("conclusion") is not None:
@@ -4084,12 +4198,7 @@ def _evidence_context(
         or _environment_value(environment, "GITHUB_TRIGGERING_ACTOR") != principal["login"]
     ):
         _refuse("evidence actor differs from the actual event or runner context")
-    expected_job = (
-        "probe_permissions"
-        if event["inputs"]["evidence_operation"] == "permission-probe"
-        else "retain_evidence"
-    )
-    if _environment_value(environment, "GITHUB_JOB") != expected_job:
+    if _environment_value(environment, "GITHUB_JOB") != "retain_evidence":
         _refuse("evidence command is running in a different job")
     context["actor"] = principal
     return context
@@ -4525,10 +4634,6 @@ def _read_evidence_stage(
 
 
 def _admit_evidence(root: Path, environment: Mapping[str, str], event: Mapping[str, Any]) -> None:
-    if event["inputs"]["evidence_operation"] == "permission-probe":
-        _evidence_context(root, environment, event)
-        _write_action_outputs({"retention_days": "7"}, environment)
-        return
     inputs = _evidence_inputs(root, environment, event, "admit-evidence")
     directory = Path(inputs["locations"]["records_directory"])
     try:
@@ -4880,13 +4985,78 @@ def _promotion_listing(inputs: Mapping[str, Any], route: str) -> list[Any]:
     _refuse("publisher listing exceeds its pagination bound")
 
 
+def _select_current_job(
+    jobs: Mapping,
+    *,
+    repository: str,
+    run_id: int,
+    run_attempt: int,
+    head_sha: str,
+    job_name: str,
+) -> Mapping:
+    """Return a new job/zero-based setup selector or refuse incomplete identity."""
+    if (
+        not isinstance(repository, str)
+        or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is None
+        or type(run_id) is not int
+        or run_id <= 0
+        or type(run_attempt) is not int
+        or run_attempt <= 0
+        or not isinstance(head_sha, str)
+        or re.fullmatch(r"[0-9a-fA-F]{40}", head_sha) is None
+        or not isinstance(job_name, str)
+        or not job_name.strip()
+    ):
+        raise ValueError("Current-job identity is missing or invalid.")
+    if not isinstance(jobs, Mapping):
+        raise ValueError("The job listing must be an API response mapping.")
+    entries = jobs.get("jobs")
+    total = jobs.get("total_count")
+    if not isinstance(entries, list) or type(total) is not int or total != len(entries):
+        raise ValueError("The job listing is malformed or incomplete.")
+    if any(
+        not isinstance(entry, Mapping) or not isinstance(entry.get("name"), str)
+        for entry in entries
+    ):
+        raise ValueError("The job listing contains malformed job metadata.")
+    matches = [entry for entry in entries if entry["name"] == job_name]
+    if len(matches) != 1:
+        raise ValueError("The current job name must identify exactly one job.")
+    job = matches[0]
+    job_id = job.get("id")
+    if (
+        type(job_id) is not int
+        or job_id <= 0
+        or type(job.get("run_id")) is not int
+        or job["run_id"] != run_id
+        or type(job.get("run_attempt")) is not int
+        or job["run_attempt"] != run_attempt
+        or job.get("head_sha") != head_sha
+        or job.get("status") != "in_progress"
+        or "conclusion" not in job
+        or job["conclusion"] is not None
+        or job.get("url") != f"https://api.github.com/repos/{repository}/actions/jobs/{job_id}"
+        or job.get("run_url") != f"https://api.github.com/repos/{repository}/actions/runs/{run_id}"
+    ):
+        raise ValueError("Job metadata does not bind to the requested running job.")
+    steps = job.get("steps")
+    if not isinstance(steps, list) or any(
+        not isinstance(step, Mapping) or not isinstance(step.get("name"), str) for step in steps
+    ):
+        raise ValueError("The current job has malformed setup metadata.")
+    positions = [index for index, step in enumerate(steps) if step["name"] == "Set up job"]
+    if positions != [0]:
+        raise ValueError("The setup step must occur exactly once at array position zero.")
+    setup = steps[0]
+    if setup.get("status") != "completed" or setup.get("conclusion") != "success":
+        raise ValueError("The setup step has not completed successfully.")
+    # Setup identity uses array position, not its unrelated API step number.
+    return {"job_id": job_id, "setup_step_position": positions[0]}
+
+
 def _promotion_context(
     root: Path, environment: Mapping[str, str], event: Mapping[str, Any]
 ) -> dict[str, Any]:
-    try:
-        from .stateless_preview_permissions import select_current_job
-    except ImportError:
-        from stateless_preview_permissions import select_current_job
     _environment_value(environment, "GITHUB_TOKEN")
     source = _canonical_build_source(root, environment)
     context = {
@@ -4949,7 +5119,7 @@ def _promotion_context(
         read_inputs,
         f"actions/runs/{context['run_id']}/attempts/{context['attempt']}/jobs?per_page=100",
     )
-    selected = select_current_job(
+    selected = _select_current_job(
         jobs,
         repository=source["repository"],
         run_id=int(context["run_id"]),
@@ -4981,6 +5151,24 @@ def _promotion_context(
     return context
 
 
+def _promotion_execution_policy(root: Path, current: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "model": "GITHUB_JOB_TOKEN_SERVER_ENFORCED",
+        "run_attempt": current["workflow_run"]["run_attempt"],
+        **{key: current[key] for key in ("job_key", "job_id", "workflow_sha")},
+        "workflow_blob_sha256": _sha256_bytes(
+            _read_tracked_authority(root, current["workflow_sha"], _TRUSTED_WORKFLOW_PATH)
+        ),
+        "execution_token": {
+            "source": "github.token",
+            "kind": "GITHUB_APP_INSTALLATION_TOKEN",
+            "identity_observation": "UNOBSERVED",
+            "app_id": None,
+            "installation_id": None,
+        },
+    }
+
+
 def _promotion_locations(
     environment: Mapping[str, str], context: Mapping[str, Any], step: int
 ) -> dict[str, str]:
@@ -4991,7 +5179,6 @@ def _promotion_locations(
         _refuse("publisher destination escapes the runner temporary directory")
     paths = {
         "stage": "pre-publication-stage.json",
-        "permission": "current-job-permissions.json",
         "observation": f"remote-observation-{step}.json",
         "classification": f"remote-classification-{step}.json",
         "attempt": "promotion-attempt.json",
@@ -5050,6 +5237,10 @@ def _promotion_artifact(
             reference["run_id"],
             attempt,
             successful_build=reference["run_id"] != inputs["context"]["run_id"],
+            completed_run=(
+                name.startswith("stateless-preview-promote-")
+                and (reference["run_id"], attempt) != (context["run_id"], context["attempt"])
+            ),
         )
         inputs["producers"][producer_key] = run
     digest = metadata.get("digest")
@@ -5082,6 +5273,428 @@ def _promotion_resolve(inputs: Mapping[str, Any], reference: Mapping[str, Any]) 
             _refuse("publisher retained raw record hash differs from its reference")
         inputs["resolved"][key] = raw
     return inputs["resolved"][key]
+
+
+def _promotion_collection(inputs: Mapping[str, Any], route: str, member: str) -> list[Any]:
+    entries: list[Any] = []
+    total = None
+    for page in range(1, 101):
+        separator = "&" if "?" in route else "?"
+        envelope = _promotion_api(inputs, f"{route}{separator}per_page=100&page={page}")
+        if not isinstance(envelope, Mapping):
+            _refuse("predecessor discovery listing is unavailable")
+        count = _expect_nonnegative_integer(envelope.get("total_count"), "discovery total")
+        batch = _expect_list(envelope.get(member), "discovery members")
+        if (
+            len(batch) > 100
+            or count > (1000 if member == "workflow_runs" else 10000)
+            or (total is not None and total != count)
+            or any(not isinstance(entry, Mapping) for entry in batch)
+        ):
+            _refuse("predecessor discovery listing is incomplete or changed")
+        total = count
+        entries.extend(batch)
+        if len(batch) < 100:
+            ids = [
+                str(_expect_positive_integer(item.get("id"), "discovery ID")) for item in entries
+            ]
+            if len(entries) != total or len(ids) != len(set(ids)):
+                _refuse("predecessor discovery listing is incomplete or duplicated")
+            return entries
+    _refuse("predecessor discovery exceeds its pagination bound")
+
+
+def _promotion_member(
+    inputs: Mapping[str, Any], metadata: Mapping[str, Any], run_id: str, filename: str
+) -> tuple[dict[str, str], Mapping[str, Any]]:
+    reference = {
+        "repository": inputs["candidate"]["source"]["repository"],
+        "run_id": run_id,
+        "artifact_id": str(_expect_positive_integer(metadata.get("id"), "predecessor artifact ID")),
+        "path": filename,
+        "sha256": "0" * 64,
+    }
+    artifact = _promotion_artifact(inputs, reference)
+    raw = inputs["downloader"]._member_bytes(reference["repository"], run_id, artifact, filename)
+    if len(raw) > _PROMOTION_JSON_LIMIT:
+        _refuse("predecessor member exceeds its byte bound")
+    reference["sha256"] = _sha256_bytes(raw)
+    inputs["resolved"][_evidence_reference_key(reference)] = raw
+    return reference, _load_json_object(raw, "predecessor record")
+
+
+def _promotion_possible_operations(
+    attempt: Mapping[str, Any],
+    classification: Mapping[str, Any],
+    observation: Mapping[str, Any],
+    observation_reference: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    candidate, state = attempt["candidate"], classification["state"]
+    common = {
+        "repository": candidate["source"]["repository"],
+        "candidate_identity_record": attempt["candidate_identity_record"],
+    }
+    targets = []
+    if state == "unstarted":
+        raw = _promotion_tag_bytes(attempt)
+        oid = hashlib.sha1(b"tag " + str(len(raw)).encode("ascii") + b"\0" + raw).hexdigest()
+        targets.append(("CREATE_TAG", {"tag": candidate["destination"]["tag"], "object_id": oid}))
+    if state in ("unstarted", "tag_only"):
+        targets.append(
+            (
+                "CREATE_DRAFT",
+                {
+                    "tag": candidate["destination"]["tag"],
+                    "source_commit": candidate["source"]["commit"],
+                },
+            )
+        )
+    if state in ("draft_empty", "draft_partial"):
+        for kind in ("archive", "manifest"):
+            if observation["asset_observations"][kind]["status"] == "ABSENT":
+                descriptor = (
+                    candidate["preview_manifest"]["contents"]["archive"]
+                    if kind == "archive"
+                    else candidate["preview_manifest"]["file"]
+                )
+                targets.append(
+                    (
+                        "UPLOAD_" + kind.upper(),
+                        {
+                            "release_id": observation["release_observation"]["release_id"],
+                            "descriptor": descriptor,
+                        },
+                    )
+                )
+    if state == "draft_complete":
+        number = re.fullmatch(r"remote-observation-([0-3])\.json", observation_reference["path"])
+        if number is None:
+            _refuse("predecessor publication lacks the genuine observation lineage")
+        fragment = _promotion_fragment({"candidate": candidate}, observation)
+        fragment_reference = {
+            **observation_reference,
+            "path": f"pre-publication-verification-{number[1]}.json",
+            "sha256": _sha256_bytes(_canonical_json_bytes(fragment, "pre-publication fragment")),
+        }
+        targets.append(
+            (
+                "PUBLISH_RELEASE",
+                {
+                    "release_id": observation["release_observation"]["release_id"],
+                    "pre_publication_verification": fragment_reference,
+                },
+            )
+        )
+    results = []
+    for operation, details in targets:
+        intent = {
+            "origin_attempt_id": attempt["attempt_id"],
+            "operation": operation,
+            "target": {**common, **details},
+        }
+        results.append(
+            {
+                **intent,
+                "intent_sha256": _sha256_bytes(_canonical_json_bytes(intent, "write intent")),
+                "sent_at": None,
+                "response": {
+                    "kind": "UNKNOWN",
+                    "http_status": None,
+                    "git_returncode": None,
+                    "resource_id": None,
+                },
+                "postcondition": "UNREADABLE",
+                "outcome": "UNKNOWN",
+            }
+        )
+    return results
+
+
+_PROMOTION_ADVANCEMENT_STEPS = (
+    "Read back A and execute the first legal advancement",
+    "Execute the second legal advancement from retained C1",
+    "Execute the third and final legal advancement from retained C2",
+)
+
+
+def _promotion_discover_predecessor(
+    inputs: MutableMapping[str, Any],
+) -> tuple[Mapping[str, Any] | None, list[Any]]:
+    context = inputs["context"]
+    runs = _promotion_collection(
+        inputs,
+        f"actions/workflows/stateless-preview.yml/runs?head_sha={context['source']['commit']}&event=workflow_dispatch&branch=main",
+        "workflow_runs",
+    )
+    current = [run for run in runs if str(run.get("id")) == context["run_id"]]
+    if len(current) != 1:
+        _refuse("complete predecessor discovery does not contain the current run")
+    current_time = _review_timestamp(current[0].get("created_at"), "current run creation")
+    predecessors = []
+    for run in runs:
+        run_id = str(_expect_positive_integer(run.get("id"), "discovered run ID"))
+        created = _review_timestamp(run.get("created_at"), "discovered run creation")
+        if (created, int(run_id)) > (current_time, int(context["run_id"])):
+            continue
+        latest = _expect_positive_integer(run.get("run_attempt"), "discovered run attempt")
+        maximum = context["attempt"] - 1 if run_id == context["run_id"] else latest
+        if maximum > 100:
+            _refuse("predecessor run attempts exceed their discovery bound")
+        artifacts = (
+            _promotion_collection(inputs, f"actions/runs/{run_id}/artifacts", "artifacts")
+            if maximum
+            else []
+        )
+        for number in range(1, maximum + 1):
+            producer = _promotion_api(inputs, f"actions/runs/{run_id}/attempts/{number}")
+            _validate_cli_run(
+                producer, context, run_id, number, successful_build=False, completed_run=True
+            )
+            jobs = _promotion_collection(
+                inputs, f"actions/runs/{run_id}/attempts/{number}/jobs", "jobs"
+            )
+            matches = [job for job in jobs if job.get("name") == _PROMOTION_JOB_NAME]
+            if not matches:
+                if any(
+                    item.get("name", "").startswith(
+                        f"stateless-preview-promote-attempt-{run_id}-{number}-"
+                    )
+                    for item in artifacts
+                ):
+                    _refuse("retained predecessor Attempt lacks its producing job")
+                # Complete exact-source job discovery establishes this route never ran.
+                continue
+            if len(matches) != 1:
+                _refuse("predecessor promote job is ambiguous")
+            job = matches[0]
+            job_id = str(_expect_positive_integer(job.get("id"), "predecessor job ID"))
+            if (
+                job.get("run_id") != int(run_id)
+                or job.get("run_attempt") != number
+                or job.get("head_sha") != context["source"]["commit"]
+                or job.get("url")
+                != f"https://api.github.com/repos/{context['source']['repository']}/actions/jobs/{job_id}"
+                or job.get("status") != "completed"
+            ):
+                _refuse("predecessor job does not bind a finished exact-source attempt")
+            steps = job.get("steps")
+            if not isinstance(steps, list) or any(not isinstance(step, Mapping) for step in steps):
+                _refuse("predecessor step evidence is incomplete")
+            advancement = []
+            for name in _PROMOTION_ADVANCEMENT_STEPS:
+                selected = [step for step in steps if step.get("name") == name]
+                if len(selected) != 1:
+                    _refuse("predecessor advancement evidence is incomplete or ambiguous")
+                advancement.append(selected[0])
+            suffix = f"{run_id}-{number}-{job_id}"
+            records = [
+                item
+                for item in artifacts
+                if item.get("name") == f"stateless-preview-promote-attempt-{suffix}"
+            ]
+            if not records:
+                upload = [
+                    step for step in steps if step.get("name") == "Retain the immutable Attempt (A)"
+                ]
+                if (
+                    len(upload) == 1
+                    and upload[0].get("status") == "completed"
+                    and upload[0].get("conclusion") == "skipped"
+                    and all(
+                        step.get("status") == "completed" and step.get("conclusion") == "skipped"
+                        for step in advancement
+                    )
+                ):
+                    continue
+                _refuse("possibly admitted/sent predecessor lacks its immutable Attempt")
+            if len(records) != 1:
+                _refuse("predecessor Attempt artifact is ambiguous")
+            reference, attempt = _promotion_member(
+                inputs, records[0], run_id, "promotion-attempt.json"
+            )
+            if (
+                attempt.get("candidate", {}).get("destination")
+                != inputs["candidate"]["destination"]
+            ):
+                continue
+            if attempt.get("candidate") != inputs["candidate"]:
+                _refuse("predecessor destination belongs to a different Candidate")
+            predecessors.append(
+                (
+                    created,
+                    int(run_id),
+                    number,
+                    job_id,
+                    reference,
+                    attempt,
+                    producer,
+                    artifacts,
+                    advancement,
+                )
+            )
+    predecessors.sort(key=lambda item: item[:3])
+    previous_reference, previous_results = None, []
+    for (
+        _,
+        run_number,
+        number,
+        job_id,
+        reference,
+        attempt,
+        producer,
+        artifacts,
+        advancement,
+    ) in predecessors:
+        run_id = str(run_number)
+        current_context = {
+            "current_attempt_id": f"a1-promote-{run_id}-{number}-{job_id}",
+            "workflow_run": {
+                "repository": context["source"]["repository"],
+                "workflow_path": _TRUSTED_WORKFLOW_PATH,
+                "mode": "promote",
+                "event": _TRUSTED_BUILD_EVENT,
+                "run_id": run_id,
+                "run_attempt": number,
+                "ref": _CANONICAL_SOURCE_REF,
+                "commit": context["source"]["commit"],
+            },
+            "job_id": job_id,
+            "job_key": "promote",
+            "workflow_sha": context["source"]["commit"],
+            "checkout_head": context["source"]["commit"],
+            "origin_main_target": context["source"]["commit"],
+            "current_github_actor": {
+                "id": str(producer["actor"]["id"]),
+                "login": producer["actor"]["login"],
+            },
+            "current_github_triggering_actor": {
+                "id": str(producer["triggering_actor"]["id"]),
+                "login": producer["triggering_actor"]["login"],
+            },
+            "predecessor_attempt": previous_reference,
+            "predecessor_operation_results": previous_results,
+        }
+        attempt = seal_promotion_attempt(
+            attempt, **inputs["binding"], current_promotion_context=current_context
+        )
+        observation_reference = attempt["remote_observation"]
+        observation = _resolve_stage_record(
+            observation_reference, inputs["binding"]["record_resolver"]
+        )
+        classification = _resolve_stage_record(
+            attempt["remote_classification"], inputs["binding"]["record_resolver"]
+        )
+        last_results = []
+        suffix = f"{run_id}-{number}-{job_id}"
+        for step_number, step in enumerate(advancement, 1):
+            if step.get("status") == "completed" and step.get("conclusion") == "skipped":
+                if any(later.get("conclusion") != "skipped" for later in advancement[step_number:]):
+                    _refuse("predecessor skipped a required advancement boundary")
+                break
+            possible = _promotion_possible_operations(
+                attempt, classification, observation, observation_reference
+            )
+            for possible_result in possible:
+                if possible_result["operation"] == "PUBLISH_RELEASE":
+                    fragment_reference = possible_result["target"]["pre_publication_verification"]
+                    if _resolve_stage_record(
+                        fragment_reference, inputs["binding"]["record_resolver"]
+                    ) != _promotion_fragment(inputs, observation):
+                        _refuse("predecessor publication fragment is unavailable or changed")
+                    inputs["predecessor_fragment_reference"] = fragment_reference
+            matches = [
+                item
+                for item in artifacts
+                if item.get("name")
+                == f"stateless-preview-promote-observation-{suffix}-{step_number}"
+            ]
+            if len(matches) > 1:
+                _refuse("predecessor outcome artifacts are ambiguous")
+            if matches:
+                result_reference, result_record = _promotion_member(
+                    inputs, matches[0], run_id, f"remote-observation-{step_number}.json"
+                )
+                result_record = seal_remote_observation(
+                    result_record,
+                    record_resolver=inputs["binding"]["record_resolver"],
+                    **{
+                        **_promotion_remote_binding(inputs),
+                        "current_attempt_id": attempt["attempt_id"],
+                    },
+                )
+                _validate_operation_results(
+                    result_record,
+                    inputs["candidate"],
+                    attempt["candidate_identity_record"],
+                    inputs["binding"]["record_resolver"],
+                )
+                actual = result_record["operation_results"]
+                if len(actual) > len(possible) or any(
+                    {
+                        k: result[k]
+                        for k in ("origin_attempt_id", "operation", "intent_sha256", "target")
+                    }
+                    != {
+                        k: expected[k]
+                        for k in ("origin_attempt_id", "operation", "intent_sha256", "target")
+                    }
+                    for result, expected in zip(actual, possible)
+                ):
+                    _refuse("predecessor outcomes do not bind their original admitted intents")
+                last_results = _thaw(actual)
+                if step.get("status") != "completed" or step.get("conclusion") != "success":
+                    # A successful prefix does not prove the remaining writes were never sent.
+                    if all(result["outcome"] in ("CONFIRMED", "RECONCILED") for result in actual):
+                        last_results.extend(_thaw(possible[len(actual) :]))
+                    break
+                classifications = [
+                    item
+                    for item in artifacts
+                    if item.get("name")
+                    == f"stateless-preview-promote-classification-{suffix}-{step_number}"
+                ]
+                if len(classifications) != 1:
+                    _refuse("predecessor success lacks its immutable classification")
+                _, sealed_classification = _promotion_member(
+                    inputs, classifications[0], run_id, f"remote-classification-{step_number}.json"
+                )
+                derived = classify_remote_observation(
+                    result_reference,
+                    classification_id=sealed_classification.get("classification_id"),
+                    classified_at=sealed_classification.get("classified_at"),
+                    current_workflow_run=attempt["workflow_run"],
+                    record_resolver=inputs["binding"]["record_resolver"],
+                    **{
+                        **_promotion_remote_binding(inputs),
+                        "current_attempt_id": attempt["attempt_id"],
+                    },
+                )
+                if (
+                    sealed_classification != derived
+                    or derived["admission"] != "ADMITTED"
+                    or len(actual) != len(possible)
+                ):
+                    _refuse("predecessor advancement has no conclusive complete outcome")
+                observation_reference, observation, classification = (
+                    result_reference,
+                    result_record,
+                    derived,
+                )
+            else:
+                last_results = possible
+                break
+        if classification["state"] == "draft_complete":
+            possible = _promotion_possible_operations(
+                attempt, classification, observation, observation_reference
+            )
+            fragment_reference = possible[0]["target"]["pre_publication_verification"]
+            if _resolve_stage_record(
+                fragment_reference, inputs["binding"]["record_resolver"]
+            ) != _promotion_fragment(inputs, observation):
+                _refuse("predecessor pre-publication fragment differs from retained draft")
+            inputs["predecessor_fragment_reference"] = fragment_reference
+        previous_reference, previous_results = reference, last_results
+    return previous_reference, previous_results
 
 
 def _promotion_inputs(
@@ -5244,6 +5857,10 @@ def _promotion_inputs(
     inputs.update(
         binding=binding, decision=decision, candidate=candidate, payload_paths=payload_paths
     )
+    predecessor, results = _promotion_discover_predecessor(inputs)
+    context["current"]["predecessor_attempt"] = predecessor
+    context["current"]["predecessor_operation_results"] = results
+    inputs["operation_results"] = _thaw(results) if command == "observe-promote" else []
     return inputs
 
 
@@ -5288,20 +5905,6 @@ def _promotion_stage(inputs: Mapping[str, Any]) -> Mapping[str, Any]:
     ):
         _refuse("publisher Stage is outside current pre-publication admission")
     return stage
-
-
-def _promotion_report(inputs: Mapping[str, Any]) -> Mapping[str, Any]:
-    stage = _promotion_stage(inputs)
-    report = _load_json_object(
-        _read_regular_bytes(Path(inputs["locations"]["permission_path"]), "current-job report"),
-        "current-job report",
-    )
-    return _validate_promotion_permission_report(
-        report,
-        inputs["context"]["current"],
-        not_before=_review_timestamp(stage["sealed_at"], "Stage time"),
-        recorded_at=datetime.now(timezone.utc),
-    )
 
 
 def _promotion_remote_binding(inputs: Mapping[str, Any]) -> dict[str, Any]:
@@ -5444,10 +6047,6 @@ def _promotion_attempt(inputs: Mapping[str, Any]) -> tuple[Mapping[str, Any], di
         ("remote_classification", "classification", "remote-classification-0.json"),
     ):
         _promotion_uploaded(inputs, kind, 0, filename, reference=record.get(field))
-    readback = record.get("authorization", {}).get("permission_readback", {})
-    permission_reference, _ = _promotion_uploaded(
-        inputs, "admission", 0, "current-job-permissions.json", reference=readback.get("reference")
-    )
     stage_reference, _ = _promotion_uploaded(
         inputs,
         "admission",
@@ -5458,18 +6057,16 @@ def _promotion_attempt(inputs: Mapping[str, Any]) -> tuple[Mapping[str, Any], di
     if (
         len(
             {
-                permission_reference["artifact_id"],
                 stage_reference["artifact_id"],
                 record["remote_observation"]["artifact_id"],
             }
         )
         != 1
     ):
-        _refuse("initial Stage/report/observation must share the retained admission artifact")
+        _refuse("initial Stage/observation must share the retained admission artifact")
     sealed = seal_promotion_attempt(
         record, **inputs["binding"], current_promotion_context=inputs["context"]["current"]
     )
-    _promotion_report(inputs)
     return sealed, reference
 
 
@@ -5477,7 +6074,22 @@ def _promotion_tag(inputs: Mapping[str, Any]) -> Mapping[str, Any]:
     tag = inputs["candidate"]["destination"]["tag"]
     ref = _promotion_api(inputs, f"git/ref/tags/{quote(tag, safe='')}", absent=True)
     if ref is None:
-        return {"status": "ABSENT"}
+        # A 404 can hide inaccessible resources; only a complete successful listing proves absence.
+        entries = _promotion_listing(inputs, f"git/matching-refs/tags/{quote(tag, safe='')}")
+        prefix = f"refs/tags/{tag}"
+        if any(
+            not isinstance(item.get("ref"), str)
+            or not item["ref"].startswith(prefix)
+            or not isinstance(item.get("object"), Mapping)
+            for item in entries
+        ):
+            _refuse("tag absence listing is malformed or outside the exact prefix")
+        matches = [item for item in entries if item["ref"] == prefix]
+        if not matches:
+            return {"status": "ABSENT"}
+        if len(matches) != 1:
+            _refuse("exact tag listing is ambiguous")
+        ref = matches[0]
     if (
         not isinstance(ref, Mapping)
         or ref.get("ref") != f"refs/tags/{tag}"
@@ -5665,30 +6277,34 @@ def _observe_promotion(
         if release["status"] != "PRESENT":
             release = {"status": "UNREADABLE", "reason_code": "RELEASE_READBACK_INCOMPLETE"}
     observation = seal_remote_observation(
-        {
-            "observation_schema_version": "1.0",
-            "observation_id": f"{inputs['context']['current']['current_attempt_id']}-o{step}-{label}",
-            "promotion_attempt_id": inputs["context"]["current"]["current_attempt_id"],
-            "candidate_identity_record": _compact_evidence_reference(
-                ArtifactFileReference.from_mapping(
-                    inputs["binding"]["candidate_identity_reference"], "Candidate"
-                )
-            ),
-            "candidate": candidate,
-            "retained_artifact_availability": {
-                "status": "AVAILABLE_AND_VERIFIED",
-                "observed_result": "SUCCESS",
+        _promotion_operation_readback(
+            inputs,
+            {
+                "observation_schema_version": "2.0",
+                "observation_id": f"{inputs['context']['current']['current_attempt_id']}-o{step}-{label}",
+                "promotion_attempt_id": inputs["context"]["current"]["current_attempt_id"],
+                "candidate_identity_record": _compact_evidence_reference(
+                    ArtifactFileReference.from_mapping(
+                        inputs["binding"]["candidate_identity_reference"], "Candidate"
+                    )
+                ),
+                "candidate": candidate,
+                "retained_artifact_availability": {
+                    "status": "AVAILABLE_AND_VERIFIED",
+                    "observed_result": "SUCCESS",
+                },
+                "tag_observation": tag,
+                "release_observation": release,
+                "asset_observations": assets,
+                "readback_status": {
+                    "expected_result": "EXPECT_SUCCESS",
+                    "observed_result": "FAILURE" if failed else "SUCCESS",
+                    "reason_code": "READBACK_INCOMPLETE" if failed else "READBACK_COMPLETE",
+                },
+                "observed_at": _utc_timestamp(),
             },
-            "tag_observation": tag,
-            "release_observation": release,
-            "asset_observations": assets,
-            "readback_status": {
-                "expected_result": "EXPECT_SUCCESS",
-                "observed_result": "FAILURE" if failed else "SUCCESS",
-                "reason_code": "READBACK_INCOMPLETE" if failed else "READBACK_COMPLETE",
-            },
-            "observed_at": _utc_timestamp(),
-        },
+        ),
+        record_resolver=inputs["binding"]["record_resolver"],
         **_promotion_remote_binding(inputs),
     )
     fragment = None
@@ -5767,12 +6383,12 @@ def _admit_promote(inputs: Mapping[str, Any]) -> None:
 
 
 def _classify_promote(inputs: Mapping[str, Any], step: int) -> None:
-    _promotion_report(inputs)
+    _promotion_stage(inputs)
     kind = "admission" if step == 0 else "observation"
     reference, _ = _promotion_uploaded(inputs, kind, step, f"remote-observation-{step}.json")
     _promotion_completed(inputs, step, reference)
     if step == 0:
-        for name in ("pre-publication-stage.json", "current-job-permissions.json"):
+        for name in ("pre-publication-stage.json",):
             predecessor = {
                 **reference,
                 "path": name,
@@ -5806,7 +6422,7 @@ def _classify_promote(inputs: Mapping[str, Any], step: int) -> None:
 
 
 def _seal_promote_attempt(inputs: Mapping[str, Any]) -> None:
-    _promotion_report(inputs)
+    _promotion_stage(inputs)
     classification, classification_reference, _, observation_reference = _promotion_classification(
         inputs, 0
     )
@@ -5822,7 +6438,6 @@ def _seal_promote_attempt(inputs: Mapping[str, Any]) -> None:
         return _promotion_uploaded(inputs, "admission", 0, name, reference=reference)[0]
 
     stage_reference = admission_reference("pre-publication-stage.json")
-    permission_reference = admission_reference("current-job-permissions.json")
     current = inputs["context"]["current"]
     compact = _compact_evidence_reference(
         ArtifactFileReference.from_mapping(
@@ -5830,7 +6445,7 @@ def _seal_promote_attempt(inputs: Mapping[str, Any]) -> None:
         )
     )
     record = {
-        "schema_version": "2.0",
+        "schema_version": "3.0",
         "attempt_id": current["current_attempt_id"],
         "candidate_identity_record": compact,
         "candidate_identity_record_sha256": compact["sha256"],
@@ -5859,23 +6474,12 @@ def _seal_promote_attempt(inputs: Mapping[str, Any]) -> None:
                 role: current[role]
                 for role in ("current_github_actor", "current_github_triggering_actor")
             },
-            "permission_readback": {
-                "reference": permission_reference,
-                "run_attempt": current["workflow_run"]["run_attempt"],
-                **{key: current[key] for key in ("job_key", "job_id", "workflow_sha")},
-                "execution_token": {
-                    "source": "github.token",
-                    "kind": "GITHUB_APP_INSTALLATION_TOKEN",
-                    "identity_observation": "UNOBSERVED",
-                    "app_id": None,
-                    "installation_id": None,
-                },
-                "permissions": {"actions": "read", "contents": "write"},
-            },
+            "execution_policy": _promotion_execution_policy(inputs["root"], current),
         },
         "workflow_run": current["workflow_run"],
         "remote_observation": observation_reference,
         "remote_classification": classification_reference,
+        "predecessor_attempt": current["predecessor_attempt"],
         "admission_status": "PASS",
         "recorded_at": _utc_timestamp(),
     }
@@ -5893,6 +6497,9 @@ class _PromotionNoRedirect(HTTPRedirectHandler):
 
 def _promotion_guard(inputs: Mapping[str, Any], attempt: Mapping[str, Any]) -> None:
     fresh = _promotion_context(inputs["root"], inputs["environment"], inputs["event"])
+    predecessor, results = _promotion_discover_predecessor(inputs)
+    fresh["current"]["predecessor_attempt"] = predecessor
+    fresh["current"]["predecessor_operation_results"] = results
     if fresh != inputs["context"]:
         _refuse("promotion runtime context changed before the protected write")
     inputs["resolved"].clear()
@@ -5930,6 +6537,11 @@ def _promotion_same_remote(expected: Mapping[str, Any], actual: Mapping[str, Any
 def _promotion_require_state(
     inputs: Mapping[str, Any], observation: Mapping[str, Any], states: tuple[str, ...]
 ) -> None:
+    if any(
+        result["outcome"] not in ("CONFIRMED", "RECONCILED")
+        for result in observation["operation_results"]
+    ):
+        _refuse("original operation is DENIED, COLLISION or unresolved UNKNOWN; sender stopped")
     if (
         _remote_collision_reason(observation, inputs["candidate"], datetime.now(timezone.utc))
         is not None
@@ -5954,25 +6566,105 @@ def _promotion_require_state(
 
 
 def _promotion_intent(
-    inputs: Mapping[str, Any], step: int, operation: str, details: Mapping[str, Any]
-) -> None:
+    inputs: MutableMapping[str, Any], step: int, operation: str, details: Mapping[str, Any]
+) -> MutableMapping[str, Any]:
+    names = {
+        "tag": "CREATE_TAG",
+        "draft": "CREATE_DRAFT",
+        "upload-archive": "UPLOAD_ARCHIVE",
+        "upload-manifest": "UPLOAD_MANIFEST",
+        "publish": "PUBLISH_RELEASE",
+    }
+    candidate = inputs["candidate"]
+    target = {
+        "repository": candidate["source"]["repository"],
+        "candidate_identity_record": _compact_evidence_reference(
+            ArtifactFileReference.from_mapping(
+                inputs["binding"]["candidate_identity_reference"], "Candidate"
+            )
+        ),
+        **details,
+    }
+    intent = {
+        "origin_attempt_id": inputs["context"]["current"]["current_attempt_id"],
+        "operation": names[operation],
+        "target": target,
+    }
     path = Path(inputs["locations"]["stage_path"]).parent / f"write-{step}-{operation}.json"
-    _write_bytes_once(
-        path,
-        _canonical_json_bytes({"operation": operation, **details}, "write intent"),
-        "single-send write intent",
-    )
+    raw = _canonical_json_bytes(intent, "write intent")
+    # A pre-intent readback cannot describe this write's possible outcome.
+    inputs.pop("last_observation", None)
+    inputs.pop("last_fragment", None)
+    _write_bytes_once(path, raw, "single-send write intent")
+    output = {
+        "tag": "tag",
+        "draft": "draft",
+        "upload-archive": "archive",
+        "upload-manifest": "manifest",
+        "publish": "publish",
+    }[operation]
+    _write_action_outputs({f"{output}_intent_path": str(path)}, inputs["environment"])
+    result = {
+        **intent,
+        "intent_sha256": _sha256_bytes(raw),
+        "sent_at": _utc_timestamp(),
+        "response": {
+            "kind": "UNKNOWN",
+            "http_status": None,
+            "git_returncode": None,
+            "resource_id": None,
+        },
+        "postcondition": "UNREADABLE",
+        "outcome": "UNKNOWN",
+    }
+    inputs.setdefault("operation_results", []).append(result)
+    return result
 
 
-def _promotion_create_tag(inputs: Mapping[str, Any], attempt: Mapping[str, Any], step: int) -> str:
-    candidate, decision_reference = inputs["candidate"], inputs["decision_reference"]
+def _promotion_http_response(status: int | None, resource_id: str | None = None) -> dict[str, Any]:
+    kind = "UNKNOWN"
+    if status in (409, 422):
+        kind = "CONFLICT"
+    elif status is not None and 400 <= status < 500:
+        kind = "DENIED"
+    elif status in (200, 201) and resource_id is not None:
+        kind = "ACKNOWLEDGED"
+    return {
+        "kind": kind,
+        "http_status": status or None,
+        "git_returncode": None,
+        "resource_id": resource_id,
+    }
+
+
+def _promotion_operation_readback(
+    inputs: MutableMapping[str, Any], observation: dict[str, Any]
+) -> dict[str, Any]:
+    results = _thaw(inputs.get("operation_results", []))
+    for result in results:
+        post = _operation_postcondition(
+            result, observation, inputs["candidate"], inputs["binding"]["record_resolver"]
+        )
+        result["postcondition"] = post
+        result["outcome"] = _operation_outcome(result["response"], post)
+    observation["operation_results"] = results
+    return observation
+
+
+def _promotion_tag_bytes(attempt: Mapping[str, Any]) -> bytes:
+    candidate = attempt["candidate"]
     epoch = int(_review_timestamp(attempt["recorded_at"], "Attempt time").timestamp())
-    raw = (
+    return (
         f"object {candidate['source']['commit']}\ntype commit\ntag {candidate['destination']['tag']}\n"
         "tagger github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com> "
         f"{epoch} +0000\n\nA1 opt-in preview\ncandidate-identity-sha256 {attempt['candidate_identity_record_sha256']}\n"
-        f"promotion-decision-sha256 {decision_reference['sha256']}\n"
+        f"promotion-decision-sha256 {attempt['promotion_decision_sha256']}\n"
     ).encode("utf-8")
+
+
+def _promotion_create_tag(inputs: Mapping[str, Any], attempt: Mapping[str, Any], step: int) -> str:
+    candidate = inputs["candidate"]
+    raw = _promotion_tag_bytes(attempt)
     child = _promotion_environment(inputs["environment"])
     token = child["GITHUB_TOKEN"]
     repository = candidate["source"]["repository"]
@@ -6016,7 +6708,9 @@ def _promotion_create_tag(inputs: Mapping[str, Any], attempt: Mapping[str, Any],
     expected = hashlib.sha1(b"tag " + str(len(raw)).encode("ascii") + b"\0" + raw).hexdigest()
     if oid != expected:
         _refuse("native Git tag OID does not identify the exact approved bytes")
-    _promotion_intent(inputs, step, "tag", {"object_id": oid})
+    result_record = _promotion_intent(
+        inputs, step, "tag", {"tag": candidate["destination"]["tag"], "object_id": oid}
+    )
     tag = candidate["destination"]["tag"]
     code, result = _promotion_process(
         inputs["root"],
@@ -6040,48 +6734,85 @@ def _promotion_create_tag(inputs: Mapping[str, Any], attempt: Mapping[str, Any],
         {
             "operation": "GIT_CREATE_TAG",
             "returncode": code,
-            "porcelain_flags": [line[0] for line in lines],
+            "porcelain_flags": [
+                line[0] for line in lines if line[0] in ("*", "!", "=", "+", "-", " ")
+            ],
             "known_object_id": oid,
         }
     )
-    if lines and (
-        len(lines) != 1
-        or lines[0][0] != "*"
-        or lines[0][1] != f"{oid}:refs/tags/{tag}"
-        or code != 0
+    kind = "UNKNOWN"
+    if (
+        len(lines) == 1
+        and lines[0][0] == "*"
+        and lines[0][1] == f"{oid}:refs/tags/{tag}"
+        and code == 0
     ):
-        _refuse("create-only tag push was rejected or did not create a new ref")
-    if code == 0 and not lines:
-        _refuse("create-only tag push lacks its new-ref result")
-    # A lost response is reconciled by this exact known object, never by peeled commit alone.
-    observed = _promotion_tag(inputs)
-    if observed != {
-        "status": "PRESENT",
-        "tag": tag,
-        "tag_type": "ANNOTATED",
-        "object_id": oid,
-        "peeled_commit": candidate["source"]["commit"],
-    }:
-        _refuse("tag write UNKNOWN: exact known-OID postcondition is unavailable")
+        kind = "ACKNOWLEDGED"
+    elif any(line[0] == "!" for line in lines):
+        kind = "DENIED"
+    elif lines:
+        kind = "CONFLICT"
+    result_record["response"] = {
+        "kind": kind,
+        "http_status": None,
+        "git_returncode": code,
+        "resource_id": None,
+    }
     return oid
 
 
 def _promotion_write_json(
-    inputs: Mapping[str, Any], step: int, operation: str, route: str, method: str, body: Any
+    inputs: MutableMapping[str, Any], step: int, operation: str, route: str, method: str, body: Any
 ) -> str | None:
-    _promotion_intent(inputs, step, operation, {"endpoint": route})
+    candidate = inputs["candidate"]
+    details = (
+        {"tag": candidate["destination"]["tag"], "source_commit": candidate["source"]["commit"]}
+        if operation == "draft"
+        else {
+            "release_id": route.rsplit("/", 1)[1],
+            "pre_publication_verification": inputs["publication_fragment_reference"],
+        }
+    )
+    result = _promotion_intent(inputs, step, operation, details)
+    url = f"https://api.github.com/repos/{candidate['source']['repository']}/{route}"
+    raw = _canonical_json_bytes(body, "publisher request")
+    request = Request(
+        url,
+        data=raw,
+        method=method,
+        headers={
+            "Authorization": "Bearer " + _environment_value(inputs["environment"], "GITHUB_TOKEN"),
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2026-03-10",
+            "Content-Type": "application/json",
+            "Content-Length": str(len(raw)),
+        },
+    )
+    status, resource_id = None, None
     try:
-        response = _promotion_api(inputs, route, method=method, body=body)
-        if not isinstance(response, Mapping):
-            _refuse("publisher mutation response is not a resource")
-        return str(_expect_positive_integer(response.get("id"), "mutation resource ID"))
+        with build_opener(ProxyHandler({}), _PromotionNoRedirect()).open(
+            request, timeout=60
+        ) as response:
+            status = response.status
+            wire = response.read(_PROMOTION_JSON_LIMIT + 1)
+            if len(wire) > _PROMOTION_JSON_LIMIT or response.geturl() != url:
+                _refuse("mutation response exceeds bounds or changes destination")
+            if status == (200 if operation == "publish" else 201):
+                metadata = _load_json_object(wire, "mutation resource")
+                resource_id = str(
+                    _expect_positive_integer(metadata.get("id"), "mutation resource ID")
+                )
+    except HTTPError as error:
+        status = error.code
     except (ValueError, OSError, URLError):
-        # One read-only postcondition reconciliation belongs to the caller; never resend.
-        return None
+        pass
+    result["response"] = _promotion_http_response(status, resource_id)
+    inputs["diagnostics"].append({"operation": method, "endpoint": route, "http_status": status})
+    return resource_id
 
 
 def _promotion_upload(
-    inputs: Mapping[str, Any], step: int, release_id: str, kind: str
+    inputs: MutableMapping[str, Any], step: int, release_id: str, kind: str
 ) -> str | None:
     release = _promotion_api(inputs, f"releases/{release_id}")
     if (
@@ -6128,12 +6859,16 @@ def _promotion_upload(
             "Content-Length": str(len(raw)),
         },
     )
-    _promotion_intent(
+    result = _promotion_intent(
         inputs,
         step,
         f"upload-{kind}",
-        {"release_id": release_id, "name": descriptor["name"], "sha256": descriptor["sha256"]},
+        {
+            "release_id": release_id,
+            "descriptor": descriptor,
+        },
     )
+    status, resource_id = None, None
     try:
         with build_opener(ProxyHandler({}), _PromotionNoRedirect()).open(
             request, timeout=60
@@ -6142,34 +6877,24 @@ def _promotion_upload(
             wire = response.read(_PROMOTION_JSON_LIMIT + 1)
             if len(wire) > _PROMOTION_JSON_LIMIT or response.geturl() != url:
                 _refuse("asset upload response exceeds bounds or changes destination")
-            inputs["diagnostics"].append(
-                {
-                    "operation": "UPLOAD",
-                    "release_id": release_id,
-                    "kind": kind,
-                    "http_status": status,
-                }
-            )
-            if status != 201:
-                _refuse("asset upload did not return its created resource")
-            metadata = _load_json_object(wire, "asset upload response")
-            if (
-                metadata.get("name") != descriptor["name"]
-                or metadata.get("size") != len(raw)
-                or metadata.get("state") != "uploaded"
-            ):
-                _refuse("asset upload response identity is incomplete")
-            return str(_expect_positive_integer(metadata.get("id"), "uploaded asset ID"))
-    except (HTTPError, URLError, OSError, ValueError) as error:
-        inputs["diagnostics"].append(
-            {
-                "operation": "UPLOAD_UNKNOWN",
-                "release_id": release_id,
-                "kind": kind,
-                "http_status": error.code if isinstance(error, HTTPError) else None,
-            }
-        )
-        return None
+            if status == 201:
+                metadata = _load_json_object(wire, "asset upload response")
+                if (
+                    metadata.get("name") != descriptor["name"]
+                    or metadata.get("size") != len(raw)
+                    or metadata.get("state") != "uploaded"
+                ):
+                    _refuse("asset upload response identity is incomplete")
+                resource_id = str(_expect_positive_integer(metadata.get("id"), "uploaded asset ID"))
+    except HTTPError as error:
+        status = error.code
+    except (URLError, OSError, ValueError):
+        pass
+    result["response"] = _promotion_http_response(status, resource_id)
+    inputs["diagnostics"].append(
+        {"operation": "UPLOAD", "release_id": release_id, "kind": kind, "http_status": status}
+    )
+    return resource_id
 
 
 def _promotion_retained_fragment(
@@ -6274,7 +6999,9 @@ def _advance_promote(inputs: MutableMapping[str, Any], step: int) -> None:
             observed = after
         _promotion_require_state(inputs, observed, ("draft_complete",))
     elif state == "draft_complete":
-        retained, _ = _promotion_retained_fragment(inputs, step - 1, previous, previous_reference)
+        retained, retained_reference = _promotion_retained_fragment(
+            inputs, step - 1, previous, previous_reference
+        )
         if fragment != retained:
             _refuse("fresh draft verification differs from retained pre-publication evidence")
         _promotion_guard(inputs, attempt)
@@ -6282,6 +7009,7 @@ def _advance_promote(inputs: MutableMapping[str, Any], step: int) -> None:
         if not _promotion_same_remote(observed, fresh) or fresh_fragment != retained:
             _refuse("draft changed immediately before publication")
         release_id = fresh["release_observation"]["release_id"]
+        inputs["publication_fragment_reference"] = retained_reference
         response_id = _promotion_write_json(
             inputs,
             step,
@@ -6364,6 +7092,12 @@ def _finish_promote(inputs: MutableMapping[str, Any], step: int) -> None:
             if fragment["release"] != _promotion_fragment(inputs, observation)["release"]:
                 _refuse("published identities differ from predecessor pre-publication evidence")
             break
+    if fragment_reference is None:
+        fragment_reference = inputs.get("predecessor_fragment_reference")
+        if fragment_reference is not None and _resolve_stage_record(
+            fragment_reference, inputs["binding"]["record_resolver"]
+        ) != _promotion_fragment(inputs, observation):
+            _refuse("predecessor pre-publication fragment does not match published identities")
     record = {
         "candidate_identity_record": attempt["candidate_identity_record"],
         "release_gate_catalog": inputs["binding"]["release_gate_catalog_reference"],
@@ -6372,7 +7106,6 @@ def _finish_promote(inputs: MutableMapping[str, Any], step: int) -> None:
         "pre_publication_stage_evidence": attempt["pre_publication_stage_evidence"][
             "record_reference"
         ],
-        "permission_report": attempt["authorization"]["permission_readback"]["reference"],
         "promotion_attempt": attempt_reference,
         "remote_observation": observation_reference,
         "remote_classification": classification_reference,
@@ -6392,7 +7125,7 @@ def _run_promote(
         if command == "admit-promote":
             _admit_promote(inputs)
         elif command == "observe-promote":
-            _promotion_report(inputs)
+            _promotion_stage(inputs)
             observation, fragment = _observe_promotion(inputs, step=0, label="initial")
             _promotion_save_observation(inputs, observation, fragment)
         elif command == "classify-promote":

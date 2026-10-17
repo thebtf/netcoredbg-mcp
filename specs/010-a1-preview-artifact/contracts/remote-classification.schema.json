@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "A1 preview Remote Recovery Classification",
   "description": "Immutable classification of one sealed remote observation for one exact Candidate Identity Record. It permits one closed action or refusal and stores only opaque identifiers and closed result or reason codes.",
-  "$comment": "Semantic admission resolves candidate_identity_record and remote_observed_state_reference by structural GitHub artifact reference and raw-byte SHA-256, validates both documents, and requires their candidate bindings and promotion_attempt_id to be equal. It derives state, result, and reason_codes from the sealed observation. This schema never authorizes overwrite, deletion, tag movement, tag reuse, release replacement, or a rebuild.",
+  "$comment": "Resolve exact Candidate and Observation 2.0 raw bytes, compare candidate/attempt identity, and re-derive state, operation results, reasons and action. A current DENIED, any COLLISION, or unresolved UNKNOWN refuses advancement even when resources match. A fresh independent attempt may preserve a predecessor DENIED and act only in safe exact state; no denial is relabeled reconciled success. No overwrite/delete/tag movement/rebuild authority.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -226,7 +226,10 @@
         "ASSET_IDENTITY_MISMATCH",
         "UNEXPECTED_ASSET_PRESENT",
         "REMOTE_READBACK_UNREADABLE",
-        "REMOTE_READBACK_INCOMPLETE"
+        "REMOTE_READBACK_INCOMPLETE",
+        "OPERATION_DENIED",
+        "OPERATION_COLLISION",
+        "OPERATION_UNKNOWN"
       ]
     },
     "classification_result": {
