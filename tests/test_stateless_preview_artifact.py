@@ -7380,6 +7380,207 @@ class _PromotionWorkflowCli(_EvidenceWorkflowCli):
         self.decision_reference["sha256"] = _sha256_bytes(raw)
         self.sync_promotion_request()
 
+    def begin_closeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Complete real publisher CLI steps, then switch to a distinct read-only Q."""
+        assert self.admit_attempt()["state"] == "unstarted"
+        for step, state in ((1, "draft_empty"), (2, "draft_complete"), (3, "published_complete")):
+            assert self.advance_and_retain(step)["state"] == state
+        self.publisher_handoff = self.finish(3)
+        self.publisher_attempt_id = self.current_attempt_id
+        handoff_raw = Path(self.locations["handoff_path"]).read_bytes()
+        artifact_id = str(self.next_artifact_id)
+        self.next_artifact_id += 1
+        self.publisher_handoff_reference = self.compact(
+            self.add_artifact(
+                artifact_id,
+                self.locations["attempt_artifact_name"] + "-handoff",
+                "801",
+                {"publisher-handoff.json": handoff_raw},
+            )
+        )
+        self.trace.append(("upload", artifact_id))
+        publisher = self.runs["801"]
+        publisher.update(status="completed", conclusion="success", updated_at=self.clock)
+        job = self.jobs["801"]["jobs"][0]
+        job.update(status="completed", conclusion="success", completed_at=self.clock)
+        for name in (
+            "Read back A and the last retained classification for the exact handoff",
+            "Retain exact published references for separate remote consumer proof",
+        ):
+            job["steps"].append({"name": name, "status": "completed", "conclusion": "success"})
+        self.attempt_jobs[("801", "2")] = deepcopy(self.jobs["801"])
+        pre_reference = self.publisher_handoff["pre_publication_verification"]
+        self.prepublication_bytes = self.artifacts[pre_reference["artifact_id"]]["members"][
+            pre_reference["path"]
+        ]
+        pre_phase = json.loads(self.prepublication_bytes)
+        assert pre_phase["phase"] == "PRE_PUBLICATION" and pre_phase["outcome"] == "PASS"
+
+        api = f"https://api.github.com/repos/{REPOSITORY}"
+        self.public_release = deepcopy(self.releases[0])
+        self.public_release.update(
+            html_url=f"https://github.com/{REPOSITORY}/releases/tag/{TAG}",
+            published_at=self.clock,
+            assets=deepcopy(self.assets[1901]),
+        )
+        for asset in self.public_release["assets"]:
+            asset["browser_download_url"] = (
+                f"https://github.com/{REPOSITORY}/releases/download/{TAG}/{asset['name']}"
+            )
+        self.public_ref = deepcopy(self.tag)
+        self.public_ref["object"]["url"] = f"{api}/git/tags/{self.known_tag_oid}"
+        self.public_tag = deepcopy(self.tag_objects[self.known_tag_oid])
+        self.public_tag["object"]["url"] = f"{api}/git/commits/{self.source_commit}"
+        self.public_asset_bytes = dict(self.asset_bytes)
+        self.public_downloads: list[int] = []
+        self.public_status = 200
+        self.public_after_download: Any = None
+        from scripts import stateless_preview_public_release as public_transport
+
+        monkeypatch.setattr(
+            public_transport, "build_opener", lambda *handlers: SimpleNamespace(open=self.http)
+        )
+
+        self.seconds += 10
+        self.clock = f"2029-01-02T00:{self.seconds // 60:02d}:{self.seconds % 60:02d}Z"
+        self.runs["803"] = {
+            **deepcopy(publisher),
+            "id": 803,
+            "run_attempt": 1,
+            "status": "in_progress",
+            "conclusion": None,
+            "created_at": self.clock,
+            "updated_at": self.clock,
+        }
+        self.run_attempts[("803", "1")] = self.runs["803"]
+        self.jobs["803"] = {
+            "total_count": 1,
+            "jobs": [
+                {
+                    **deepcopy(job),
+                    "id": 1003,
+                    "run_id": 803,
+                    "run_attempt": 1,
+                    "name": "Retain canonical-main preview closeout",
+                    "status": "in_progress",
+                    "conclusion": None,
+                    "completed_at": None,
+                    "url": f"{api}/actions/jobs/1003",
+                    "run_url": f"{api}/actions/runs/803",
+                    "steps": [
+                        {
+                            "name": "Set up job",
+                            "number": 1,
+                            "status": "completed",
+                            "conclusion": "success",
+                        }
+                    ],
+                }
+            ],
+        }
+        receipt = json.loads(self.records["consumer-proof.json"])
+        receipt.update(
+            receipt_id="simulated-root-public-consumer-proof",
+            proof_stage="remote_release",
+            download_origin=deepcopy(pre_phase["release"]),
+            recorded_at=self.clock,
+        )
+        self.records = {
+            "remote-consumer-proof.json": (json.dumps(receipt, indent=1) + "\r\n").encode()
+        }
+        self.request = {"publisher_handoff_reference": self.publisher_handoff_reference}
+        self.inputs.clear()
+        self.inputs.update(mode="evidence", evidence_operation="closeout", evidence_request="")
+        self.sync_request()
+        self.environment.update(
+            GITHUB_RUN_ID="803", GITHUB_RUN_ATTEMPT="1", GITHUB_JOB="retain_closeout"
+        )
+        for key in list(self.environment):
+            if key.startswith(("A1_PROMOTE_", "A1_EVIDENCE_")):
+                del self.environment[key]
+        self.locations.clear()
+        self.closeout_retained: dict[str, dict[str, Any]] = {}
+        self.closeout_bytes: dict[str, dict[str, bytes]] = {}
+        self.closeout_read_only = True
+        self.requests.clear()
+        self.trace.clear()
+        self.summary_path.write_text("", encoding="utf-8")
+
+    def public_http(self, request: Any) -> addinfourl:
+        """Only anonymous HTTPS wire bytes are simulated; the public downloader stays real."""
+        assert request.get_method() == "GET"
+        assert not {"authorization", "proxy-authorization", "cookie"} & {
+            key.lower() for key, _ in request.header_items()
+        }
+        prefix = f"https://api.github.com/repos/{REPOSITORY}"
+        assert request.full_url == prefix or request.full_url.startswith(prefix + "/")
+        self.trace.append(("public-read", request.full_url))
+        if len(self.public_downloads) == 2 and self.public_after_download is not None:
+            change, self.public_after_download = self.public_after_download, None
+            change(self.public_release)
+        route = request.full_url.removeprefix(prefix)
+        if route == "":
+            value: Any = {"full_name": REPOSITORY, "private": False}
+        elif route == "/releases/1901":
+            value = self.public_release
+        elif route == f"/git/ref/tags/{TAG}":
+            value = self.public_ref
+        elif route == f"/git/tags/{self.known_tag_oid}":
+            value = self.public_tag
+        else:
+            match = re.fullmatch(r"/releases/assets/([1-9][0-9]*)", route)
+            assert match is not None, f"unexpected anonymous target: {request.full_url}"
+            asset_id = int(match[1])
+            self.public_downloads.append(asset_id)
+            self.trace.append(("public-download", asset_id))
+            value = self.public_asset_bytes[asset_id]
+        raw = value if isinstance(value, bytes) else _canonical_json_bytes(value)
+        headers = HTTPMessage()
+        headers["Content-Length"] = str(len(raw))
+        return addinfourl(io.BytesIO(raw), headers, request.full_url, self.public_status)
+
+    def closeout_step(self, step: int, *, upload: bool = True) -> None:
+        command, kind, filenames = _CLOSEOUT_UPLOAD_STEPS[step]
+        assert self.invoke(command) == 0
+        outputs = self.outputs()
+        assert set(outputs) == {
+            *filenames,
+            f"closeout_{kind}_artifact_name",
+            "retention_days",
+        }
+        assert outputs["retention_days"] == "7"
+        assert outputs[f"closeout_{kind}_artifact_name"] == (
+            f"stateless-preview-closeout-{kind}-803-1-1003"
+        )
+        members = {}
+        for key, filename in filenames.items():
+            path = Path(outputs[key])
+            assert path.name == filename and path.resolve().is_relative_to(self.runner.resolve())
+            assert not path.is_symlink()
+            members[filename] = path.read_bytes()
+        self.closeout_bytes[kind] = members
+        if not upload:
+            return
+        artifact_id = str(self.next_artifact_id)
+        self.next_artifact_id += 1
+        reference = self.add_artifact(
+            artifact_id, outputs[f"closeout_{kind}_artifact_name"], "803", members
+        )
+        prefix = f"A1_CLOSEOUT_{kind.upper()}_ARTIFACT"
+        self.environment[f"{prefix}_ID"] = artifact_id
+        self.environment[f"{prefix}_DIGEST"] = reference["artifact"]["sha256"]
+        self.closeout_retained[kind] = reference
+        self.trace.append(("upload", artifact_id))
+        for key in filenames:
+            Path(outputs[key]).write_bytes(b"local staging is not retained evidence\n")
+
+    def assert_closeout_refused(self, command: str = "admit-closeout") -> None:
+        artifacts, mutations = deepcopy(self.artifacts), deepcopy(self.mutations)
+        assert self.invoke(command) == 1
+        assert self.outputs() == {}
+        assert self.artifacts == artifacts and self.mutations == mutations
+        assert "program_b_handoff_reference" not in self.summary_path.read_text(encoding="utf-8")
+
     def mutation(self, operation: str, target: str, raw: bytes) -> bool:
         self.mutations.append({"operation": operation, "target": target, "body": raw})
         self.trace.append(("mutation", operation))
@@ -7544,11 +7745,13 @@ class _PromotionWorkflowCli(_EvidenceWorkflowCli):
         return _canonical_json_bytes(release)
 
     def process(self, command: Any, *args: Any, **kwargs: Any) -> Any:
+        if getattr(self, "closeout_read_only", False) and command[0] == "git":
+            assert command[1] in ("rev-parse", "cat-file", "show", "merge-base", "config")
         if command[0] == "git":
             if command[1] == "config":
                 assert command[2:] == ["--null", "--list", "--no-includes"]
                 return self.native_run(command, *args, **kwargs)
-            if command[1] in ("rev-parse", "cat-file", "show", "merge-base"):
+            if command[1] in ("init", "rev-parse", "cat-file", "show", "merge-base"):
                 return self.native_run(command, *args, **kwargs)
             if command[1] == "mktag":
                 raw = kwargs["input"]
@@ -7634,6 +7837,8 @@ class _PromotionWorkflowCli(_EvidenceWorkflowCli):
             if "--method" in command
             else (command[command.index("-X") + 1] if "-X" in command else "GET")
         )
+        if getattr(self, "closeout_read_only", False):
+            assert method == "GET", f"closeout attempted a GitHub write: {command}"
         include_headers = "--include" in command or "-i" in command
         try:
             if method != "GET":
@@ -7677,6 +7882,10 @@ class _PromotionWorkflowCli(_EvidenceWorkflowCli):
 
     def http(self, request: Any, *args: Any, **kwargs: Any) -> addinfourl:
         url = request.full_url
+        if getattr(self, "closeout_read_only", False):
+            assert request.get_method() == "GET", "closeout must never mutate a release"
+            if not request.get_header("Authorization"):
+                return self.public_http(request)
         assert request.get_header("Authorization", "").endswith(" test-only-token")
         if url.startswith("https://uploads.github.com/"):
             assert request.get_method() == "POST"
@@ -7736,6 +7945,622 @@ def promotion_workflow_cli(
     promotion_attempt_inputs: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> _PromotionWorkflowCli:
     return _PromotionWorkflowCli(promotion_attempt_inputs, tmp_path, monkeypatch)
+
+
+_CLOSEOUT_UPLOAD_STEPS = (
+    (
+        "admit-closeout",
+        "records",
+        {
+            "remote_consumer_proof_path": "remote-consumer-proof.json",
+            "post_publication_verification_path": "post-publication-verification.json",
+        },
+    ),
+    (
+        "seal-closeout-verification",
+        "verification",
+        {"remote_verification_path": "remote-verification.json"},
+    ),
+    (
+        "seal-closeout-stage",
+        "stage",
+        {"post_publication_stage_path": "post-publication-stage.json"},
+    ),
+    ("seal-closeout-handoff", "handoff", {"program_b_handoff_path": "program-b-handoff.json"}),
+)
+
+
+@pytest.fixture
+def closeout_workflow_cli(
+    promotion_workflow_cli: _PromotionWorkflowCli, monkeypatch: pytest.MonkeyPatch
+) -> _PromotionWorkflowCli:
+    promotion_workflow_cli.begin_closeout(monkeypatch)
+    return promotion_workflow_cli
+
+
+def test_closeout_cli_completed_publisher_to_independently_retained_program_b_handoff(
+    closeout_workflow_cli: _PromotionWorkflowCli,
+) -> None:
+    cli = closeout_workflow_cli
+    publisher_artifacts, writes = deepcopy(cli.artifacts), deepcopy(cli.mutations)
+    original_proof = cli.records["remote-consumer-proof.json"]
+    previous_extractions = set(cli.runner.rglob(EXECUTABLE_NAME))
+    assert cli.runs["801"]["status"] == "completed"
+    assert cli.runs["801"]["conclusion"] == "success"
+    assert cli.environment["GITHUB_RUN_ID"] == "803"
+    for step, (_, kind, _) in enumerate(_CLOSEOUT_UPLOAD_STEPS):
+        start, existing = len(cli.trace), set(cli.artifacts)
+        cli.closeout_step(step)
+        reference = cli.closeout_retained[kind]
+        assert set(cli.artifacts) - existing == {reference["artifact"]["id"]}
+        if step:
+            previous_kind = _CLOSEOUT_UPLOAD_STEPS[step - 1][1]
+            previous_id = cli.closeout_retained[previous_kind]["artifact"]["id"]
+            readback = ("read", f"repos/{REPOSITORY}/actions/artifacts/{previous_id}/zip")
+            assert readback in cli.trace[start:-1], "each upload barrier needs a fresh readback"
+        else:
+            assert sorted(cli.public_downloads) == sorted(cli.public_asset_bytes)
+            assert cli.closeout_bytes["records"]["remote-consumer-proof.json"] == original_proof
+            extracted = set(cli.runner.rglob(EXECUTABLE_NAME)) - previous_extractions
+            assert extracted, "post-publication equations must exercise the inherited extractor"
+            assert all(
+                _sha256_path(path)
+                == cli.identity["candidate"]["preview_manifest"]["contents"]["executable"]["sha256"]
+                for path in extracted
+            )
+
+    verification = json.loads(cli.closeout_bytes["verification"]["remote-verification.json"])
+    stage = json.loads(cli.closeout_bytes["stage"]["post-publication-stage.json"])
+    handoff = json.loads(cli.closeout_bytes["handoff"]["program-b-handoff.json"])
+    post_phase = json.loads(cli.closeout_bytes["records"]["post-publication-verification.json"])
+    for record, schema in (
+        (verification, "remote-verification.schema.json"),
+        (stage, "stage-gate-evidence.schema.json"),
+        (handoff, "program-b-handoff.schema.json"),
+        (post_phase, "remote-verification.schema.json#/$defs/post_publication_verification"),
+    ):
+        _validate_review_schema(record, schema)
+        if "candidate" in record:
+            assert record["candidate"] == cli.identity["candidate"]
+    assert (
+        verification["promotion_attempt_id"]
+        == handoff["promotion_attempt_id"]
+        == cli.publisher_attempt_id
+    )
+    assert verification["pre_publication_verification"] == json.loads(cli.prepublication_bytes)
+    assert verification["post_publication_verification"] == post_phase
+    assert post_phase["phase"] == "POST_PUBLICATION"
+    assert post_phase["release"] == json.loads(original_proof)["download_origin"]
+    assert all(
+        post_phase[key] is True
+        for key in (
+            "archive_matches_candidate",
+            "manifest_matches_candidate",
+            "executable_matches_manifest",
+            "inherited_verifier_equations_pass",
+        )
+    )
+    proof_reference = {
+        **cli.compact(cli.closeout_retained["records"]),
+        "path": "remote-consumer-proof.json",
+        "sha256": _sha256_bytes(original_proof),
+    }
+    assert (
+        verification["remote_consumer_proof"] == handoff["remote_consumer_proof"] == proof_reference
+    )
+    assert handoff["remote_verification_receipt"] == cli.compact(
+        cli.closeout_retained["verification"]
+    )
+    assert handoff["post_publication_stage_evidence"] == cli.compact(cli.closeout_retained["stage"])
+    assert stage["stage"] == "post-publication" and stage["outcome"] == "PASS"
+    descriptors = [
+        descriptor
+        for descriptor in cli.catalog["catalog"]["gate_descriptors"]
+        if descriptor["stage"] == "post-publication"
+    ]
+    assert len(stage["gate_evidence"]) == len(descriptors) == 1
+    assert {key: stage["gate_evidence"][0][key] for key in descriptors[0]} == descriptors[0]
+    assert stage["gate_evidence"][0]["record_reference"] == proof_reference
+    for field, publisher_field in (
+        ("promotion_attempt", "promotion_attempt"),
+        ("published_remote_observation", "remote_observation"),
+        ("published_remote_classification", "remote_classification"),
+        ("pre_decision_stage_evidence", "pre_decision_stage_evidence"),
+        ("pre_publication_stage_evidence", "pre_publication_stage_evidence"),
+    ):
+        assert handoff[field] == cli.publisher_handoff[publisher_field]
+    assert handoff["completion_scope"] == "A1_OPT_IN_PREVIEW_COMPLETE"
+    assert handoff["program_b_authorization_required"] is True
+    assert handoff["program_c_authorization_required"] is True
+    assert cli.mutations == writes
+    assert all(cli.artifacts[key] == value for key, value in publisher_artifacts.items())
+
+    shutil.rmtree(cli.runner)
+    cli.runner.mkdir()
+    cli.requests.clear()
+    assert cli.invoke("verify-closeout-retention") == 0
+    assert set(cli.outputs()) == {"program_b_handoff_reference"}
+    final_reference = json.loads(cli.outputs()["program_b_handoff_reference"])
+    assert final_reference == cli.compact(cli.closeout_retained["handoff"])
+    assert set(final_reference) == {"repository", "run_id", "artifact_id", "path", "sha256"}
+    assert final_reference["run_id"] == "803"
+    for artifact_id in cli.artifacts:
+        if artifact_id != "501":
+            assert f"repos/{REPOSITORY}/actions/artifacts/{artifact_id}/zip" in cli.requests
+    summary = cli.summary_path.read_text(encoding="utf-8")
+    assert all(value in summary for value in final_reference.values())
+    assert cli.runs["803"]["status"] == "in_progress" and cli.mutations == writes
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "missing-handoff",
+        "missing-bundle",
+        "missing-hashes",
+        "caller-context",
+        "caller-stage",
+        "wrong-handoff-path",
+        "expanded-reference",
+        "extra-reference-field",
+        "legacy-triple",
+        "extra-member",
+        "duplicate-member",
+        "traversal",
+        "invalid-base64",
+        "wrong-raw-hash",
+        "duplicate-json-key",
+        "extra-hash",
+    ],
+)
+def test_closeout_cli_accepts_only_closed_request_and_original_single_member_bundle(
+    closeout_workflow_cli: _PromotionWorkflowCli, violation: str
+) -> None:
+    cli = closeout_workflow_cli
+    if violation in ("missing-handoff", "missing-bundle", "missing-hashes"):
+        field = {
+            "missing-handoff": "publisher_handoff_reference",
+            "missing-bundle": "bundle_base64",
+            "missing-hashes": "record_sha256",
+        }[violation]
+        del cli.request[field]
+    elif violation.startswith("caller-"):
+        cli.request[
+            "current_promotion_context"
+            if violation == "caller-context"
+            else "post_publication_stage"
+        ] = {}
+    elif violation == "wrong-handoff-path":
+        cli.request["publisher_handoff_reference"]["path"] = "promotion-attempt.json"
+    elif violation == "expanded-reference":
+        reference = deepcopy(cli.publisher_handoff_reference)
+        metadata = cli.artifacts[reference["artifact_id"]]["metadata"]
+        reference["artifact"] = {
+            "id": reference.pop("artifact_id"),
+            "name": metadata["name"],
+            "sha256": metadata["digest"].removeprefix("sha256:"),
+            "retention": {"configured_days": 7, "expires_at": metadata["expires_at"]},
+        }
+        cli.request["publisher_handoff_reference"] = reference
+    elif violation == "extra-reference-field":
+        cli.request["publisher_handoff_reference"]["context"] = {"run_id": "801"}
+    elif violation in (
+        "legacy-triple",
+        "extra-member",
+        "duplicate-member",
+        "traversal",
+        "duplicate-json-key",
+    ):
+        members = list(cli.records.items())
+        if violation == "legacy-triple":
+            members = [(name, b"{}\n") for name in _EVIDENCE_BUNDLE_MEMBERS]
+        elif violation == "extra-member":
+            members.append(("post-publication-stage.json", b"{}\n"))
+        elif violation == "duplicate-member":
+            members.append(members[0])
+        elif violation == "traversal":
+            members = [("../remote-consumer-proof.json", members[0][1])]
+        else:
+            members = [("remote-consumer-proof.json", b'{"outcome":"FAIL","outcome":"PASS"}\n')]
+        cli.request["bundle_base64"] = base64.b64encode(_evidence_bundle_zip(members)).decode(
+            "ascii"
+        )
+        cli.request["record_sha256"] = {name: _sha256_bytes(raw) for name, raw in members}
+    elif violation == "invalid-base64":
+        cli.request["bundle_base64"] += "\n"
+    elif violation == "wrong-raw-hash":
+        cli.request["record_sha256"]["remote-consumer-proof.json"] = "0" * 64
+    else:
+        cli.request["record_sha256"]["post-publication-stage.json"] = "0" * 64
+    cli.inputs["evidence_request"] = json.dumps(cli.request)
+    cli.assert_closeout_refused()
+    assert not list(cli.runner.rglob("remote-consumer-proof.json"))
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "q-actor",
+        "q-triggering-actor",
+        "event-sender",
+        "p-actor",
+        "p-triggering-actor",
+        "workflow-sha",
+        "q-source",
+        "p-source",
+        "p-fork",
+        "live-main",
+        "q-completed",
+        "q-job-key",
+        "q-job-name",
+        "q-job-ambiguous",
+        "q-jobs-incomplete",
+        "p-in-progress",
+        "p-failed",
+        "p-job-id",
+        "p-job-failed",
+        "p-finish-failed",
+        "p-upload-skipped",
+        "p-jobs-incomplete",
+        "q-as-publisher",
+    ],
+)
+def test_closeout_cli_independently_binds_current_q_and_completed_historical_p(
+    closeout_workflow_cli: _PromotionWorkflowCli, violation: str
+) -> None:
+    cli = closeout_workflow_cli
+    q, p = cli.runs["803"], cli.runs["801"]
+    q_job = cli.jobs["803"]["jobs"][0]
+    p_job = cli.attempt_jobs[("801", "2")]["jobs"][0]
+    if violation in ("q-actor", "q-triggering-actor", "p-actor", "p-triggering-actor"):
+        run = q if violation.startswith("q-") else p
+        run["triggering_actor" if violation.endswith("triggering-actor") else "actor"] = {
+            "id": 18,
+            "login": "other-bot",
+        }
+    elif violation == "event-sender":
+        cli.event["sender"] = {"id": 18, "login": "other-bot"}
+    elif violation == "workflow-sha":
+        cli.environment["GITHUB_WORKFLOW_SHA"] = "a" * 40
+    elif violation in ("q-source", "p-source"):
+        (q if violation == "q-source" else p)["head_sha"] = "a" * 40
+    elif violation == "p-fork":
+        p["head_repository"] = {"id": 4002, "full_name": "other/fork"}
+    elif violation == "live-main":
+        cli.main_target = "a" * 40
+    elif violation == "q-completed":
+        q.update(status="completed", conclusion="success")
+    elif violation == "q-job-key":
+        cli.environment["GITHUB_JOB"] = "promote"
+    elif violation == "q-job-name":
+        q_job["name"] = "Retain canonical-main preview evidence"
+    elif violation == "q-job-ambiguous":
+        cli.jobs["803"]["jobs"].append(deepcopy(q_job))
+        cli.jobs["803"]["total_count"] = 2
+    elif violation == "q-jobs-incomplete":
+        cli.jobs["803"]["total_count"] += 1
+    elif violation == "p-in-progress":
+        p.update(status="in_progress", conclusion=None)
+    elif violation == "p-failed":
+        p["conclusion"] = "failure"
+    elif violation == "p-job-id":
+        p_job["id"] += 1
+    elif violation == "p-job-failed":
+        p_job["conclusion"] = "failure"
+    elif violation in ("p-finish-failed", "p-upload-skipped"):
+        p_job["steps"][-2 if violation == "p-finish-failed" else -1]["conclusion"] = (
+            "failure" if violation == "p-finish-failed" else "skipped"
+        )
+    elif violation == "p-jobs-incomplete":
+        cli.attempt_jobs[("801", "2")]["total_count"] += 1
+    else:
+        reference = cli.request["publisher_handoff_reference"]
+        cli.artifacts[reference["artifact_id"]]["metadata"]["workflow_run"]["id"] = 803
+        reference["run_id"] = "803"
+        cli.sync_request()
+    cli.assert_closeout_refused()
+
+
+def test_closeout_cli_anchors_predecessor_discovery_to_p_not_later_q_or_latest_attempt(
+    closeout_workflow_cli: _PromotionWorkflowCli,
+) -> None:
+    cli = closeout_workflow_cli
+    exact_p = deepcopy(cli.runs["801"])
+    cli.run_attempts[("801", "2")] = exact_p
+    cli.runs["801"] = {**deepcopy(exact_p), "run_attempt": 3, "conclusion": "failure"}
+    cli.run_attempts[("801", "3")] = cli.runs["801"]
+    cli.runs["802"] = {
+        **deepcopy(exact_p),
+        "id": 802,
+        "run_attempt": 1,
+        "created_at": cli.runs["803"]["created_at"],
+        "status": "in_progress",
+        "conclusion": None,
+    }
+    cli.run_attempts[("802", "1")] = cli.runs["802"]
+    cli.closeout_step(0)
+    assert f"repos/{REPOSITORY}/actions/runs/801/attempts/2" in cli.requests
+    assert f"repos/{REPOSITORY}/actions/runs/801/attempts/3" not in cli.requests
+    assert f"repos/{REPOSITORY}/actions/runs/802/attempts/1" not in cli.requests
+
+
+@pytest.mark.parametrize(
+    "violation", ["null", "missing", "unavailable", "wrong-phase", "wrong-asset"]
+)
+def test_closeout_cli_requires_original_retained_prepublication_fragment(
+    closeout_workflow_cli: _PromotionWorkflowCli, violation: str
+) -> None:
+    cli = closeout_workflow_cli
+    handoff = deepcopy(cli.publisher_handoff)
+    reference = handoff["pre_publication_verification"]
+    if violation == "null":
+        handoff["pre_publication_verification"] = None
+    elif violation == "missing":
+        del handoff["pre_publication_verification"]
+    elif violation == "unavailable":
+        artifact = cli.artifacts[reference["artifact_id"]]
+        del artifact["members"][reference["path"]]
+        artifact["wire"] = _evidence_bundle_zip(list(artifact["members"].items()))
+        artifact["metadata"]["digest"] = f"sha256:{_sha256_bytes(artifact['wire'])}"
+    else:
+        fragment = json.loads(cli.prepublication_bytes)
+        if violation == "wrong-phase":
+            fragment["phase"] = "POST_PUBLICATION"
+        else:
+            fragment["release"]["archive_asset"]["id"] = "999"
+        raw = _canonical_json_bytes(fragment)
+        cli.replace_retained(reference["artifact_id"], reference["path"], raw)
+        reference["sha256"] = _sha256_bytes(raw)
+    raw = _canonical_json_bytes(handoff)
+    handoff_reference = cli.request["publisher_handoff_reference"]
+    cli.replace_retained(handoff_reference["artifact_id"], "publisher-handoff.json", raw)
+    handoff_reference["sha256"] = _sha256_bytes(raw)
+    cli.sync_request()
+    cli.assert_closeout_refused()
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "retained",
+        "matrix",
+        "rollback",
+        "eof",
+        "asset-id",
+        "candidate",
+        "before-publication",
+        "future",
+        "failed",
+    ],
+)
+def test_closeout_cli_admits_original_root_public_proof_not_runtime_claims(
+    closeout_workflow_cli: _PromotionWorkflowCli, violation: str
+) -> None:
+    cli = closeout_workflow_cli
+    proof = json.loads(cli.records["remote-consumer-proof.json"])
+    if violation == "retained":
+        proof["proof_stage"] = "retained_artifact"
+    elif violation == "matrix":
+        proof["scenario_matrix"]["results"].pop()
+    elif violation == "rollback":
+        proof["python_rollback_result"]["console_entrypoint_changed"] = True
+    elif violation == "eof":
+        proof["runtime_results"]["clean_eof"]["exited_cleanly"] = False
+    elif violation == "asset-id":
+        proof["download_origin"]["archive_asset"]["id"] = "999"
+    elif violation == "candidate":
+        proof["candidate"]["source"]["commit"] = "a" * 40
+    elif violation == "before-publication":
+        proof["recorded_at"] = "2029-01-01T00:00:00Z"
+    elif violation == "future":
+        proof["recorded_at"] = "2029-01-03T00:00:00Z"
+    else:
+        proof["outcome"] = "FAIL"
+    cli.records["remote-consumer-proof.json"] = _canonical_json_bytes(proof)
+    cli.sync_request()
+    cli.assert_closeout_refused()
+
+
+@pytest.mark.parametrize(
+    "violation",
+    ["unpublished", "unavailable", "raw-tamper", "replaced-asset", "changed-after-download"],
+)
+def test_closeout_cli_requires_fresh_anonymous_public_bytes_without_payload_fallback(
+    closeout_workflow_cli: _PromotionWorkflowCli, violation: str
+) -> None:
+    cli = closeout_workflow_cli
+    retained_payload = deepcopy(cli.artifacts["501"])
+    if violation == "unpublished":
+        cli.public_release["draft"] = True
+    elif violation == "unavailable":
+        cli.public_status = 404
+    elif violation == "raw-tamper":
+        asset_id = next(iter(cli.public_asset_bytes))
+        raw = cli.public_asset_bytes[asset_id]
+        cli.public_asset_bytes[asset_id] = bytes([raw[0] ^ 1]) + raw[1:]
+    elif violation == "replaced-asset":
+        asset = cli.public_release["assets"][0]
+        cli.public_asset_bytes[999] = cli.public_asset_bytes.pop(asset["id"])
+        asset.update(id=999, url=f"https://api.github.com/repos/{REPOSITORY}/releases/assets/999")
+    else:
+        cli.public_after_download = lambda release: release.update(draft=True)
+    cli.assert_closeout_refused()
+    assert cli.artifacts["501"] == retained_payload
+    assert not list(cli.runner.rglob("post-publication-verification.json"))
+
+
+@pytest.mark.parametrize(
+    ("boundary", "violation"),
+    [
+        (0, "missing"),
+        (1, "missing"),
+        (2, "missing"),
+        (3, "missing"),
+        (0, "invented"),
+        (1, "invented"),
+        (2, "invented"),
+        (3, "invented"),
+    ],
+)
+def test_closeout_cli_requires_actual_upload_identity_at_each_barrier(
+    closeout_workflow_cli: _PromotionWorkflowCli, boundary: int, violation: str
+) -> None:
+    cli = closeout_workflow_cli
+    for step in range(boundary):
+        cli.closeout_step(step)
+    cli.closeout_step(boundary, upload=False)
+    kind = _CLOSEOUT_UPLOAD_STEPS[boundary][1]
+    if violation == "invented":
+        prefix = f"A1_CLOSEOUT_{kind.upper()}_ARTIFACT"
+        cli.environment[f"{prefix}_ID"] = "999999"
+        cli.environment[f"{prefix}_DIGEST"] = "0" * 64
+    command = (
+        _CLOSEOUT_UPLOAD_STEPS[boundary + 1][0] if boundary < 3 else "verify-closeout-retention"
+    )
+    cli.assert_closeout_refused(command)
+    assert len(cli.closeout_retained) == boundary
+
+
+@pytest.mark.parametrize(
+    ("boundary", "violation"),
+    [
+        (0, "expired"),
+        (0, "expiry-time"),
+        (0, "wrong-run"),
+        (0, "wrong-source"),
+        (0, "wrong-name"),
+        (0, "wire-tamper"),
+        (0, "member-tamper"),
+        (0, "wrong-upload-digest"),
+        (0, "false-equation"),
+        (1, "failed-verification"),
+        (2, "wrong-stage"),
+        (3, "authorizing-handoff"),
+        (3, "expired-dependency"),
+    ],
+)
+def test_closeout_cli_refuses_untrusted_retention_before_dependent_record(
+    closeout_workflow_cli: _PromotionWorkflowCli, boundary: int, violation: str
+) -> None:
+    cli = closeout_workflow_cli
+    for step in range(boundary + 1):
+        cli.closeout_step(step)
+    kind = _CLOSEOUT_UPLOAD_STEPS[boundary][1]
+    reference = cli.closeout_retained[kind]
+    artifact_id = reference["artifact"]["id"]
+    artifact = cli.artifacts[artifact_id]
+    prefix = f"A1_CLOSEOUT_{kind.upper()}_ARTIFACT"
+    if violation == "expired":
+        artifact["metadata"]["expired"] = True
+    elif violation == "expiry-time":
+        artifact["metadata"]["expires_at"] = "2029-01-01T00:00:00Z"
+    elif violation == "wrong-run":
+        artifact["metadata"]["workflow_run"]["id"] = 801
+    elif violation == "wrong-source":
+        artifact["metadata"]["workflow_run"]["head_sha"] = "a" * 40
+    elif violation == "wrong-name":
+        artifact["metadata"]["name"] = "stateless-preview-closeout-records-803-1-999"
+    elif violation == "wire-tamper":
+        artifact["wire"] += b"tamper"
+    elif violation == "wrong-upload-digest":
+        cli.environment[f"{prefix}_DIGEST"] = "0" * 64
+    elif violation == "expired-dependency":
+        cli.artifacts[cli.publisher_handoff["promotion_attempt"]["artifact_id"]]["metadata"][
+            "expired"
+        ] = True
+    else:
+        filename = next(iter(artifact["members"]))
+        if violation == "member-tamper":
+            raw = b"{}\n"
+        else:
+            if violation == "false-equation":
+                filename = "post-publication-verification.json"
+            record = json.loads(artifact["members"][filename])
+            if violation == "false-equation":
+                record["inherited_verifier_equations_pass"] = False
+            elif violation == "failed-verification":
+                record["outcome"] = "FAIL"
+            elif violation == "wrong-stage":
+                record["stage"] = "pre-publication"
+            else:
+                record["program_b_authorization_required"] = False
+            raw = _canonical_json_bytes(record)
+        cli.replace_retained(artifact_id, filename, raw)
+        cli.environment[f"{prefix}_DIGEST"] = artifact["metadata"]["digest"].removeprefix("sha256:")
+    command = (
+        _CLOSEOUT_UPLOAD_STEPS[boundary + 1][0] if boundary < 3 else "verify-closeout-retention"
+    )
+    cli.assert_closeout_refused(command)
+    if boundary < 3:
+        for filename in _CLOSEOUT_UPLOAD_STEPS[boundary + 1][2].values():
+            assert not list(cli.runner.rglob(filename))
+
+
+@pytest.mark.parametrize("violation", ["live-main", "q-completed", "q-actor"])
+def test_closeout_cli_final_readback_rechecks_live_q_authority(
+    closeout_workflow_cli: _PromotionWorkflowCli, violation: str
+) -> None:
+    cli = closeout_workflow_cli
+    for step in range(4):
+        cli.closeout_step(step)
+    if violation == "live-main":
+        cli.main_target = "a" * 40
+    elif violation == "q-completed":
+        cli.runs["803"].update(status="completed", conclusion="success")
+    else:
+        cli.runs["803"]["triggering_actor"] = {"id": 18, "login": "other-bot"}
+    cli.assert_closeout_refused("verify-closeout-retention")
+
+
+@pytest.mark.parametrize(
+    "command", [step[0] for step in _CLOSEOUT_UPLOAD_STEPS] + ["verify-closeout-retention"]
+)
+def test_closeout_cli_commands_cannot_enter_legacy_retain(
+    evidence_workflow_cli: _EvidenceWorkflowCli, command: str
+) -> None:
+    cli = evidence_workflow_cli
+    assert cli.invoke(command) == 1
+    cli.assert_not_staged()
+
+
+@pytest.mark.parametrize(
+    ("command", "violation"),
+    [
+        ("admit-closeout", "build"),
+        ("admit-closeout", "promote"),
+        ("admit-closeout", "unknown-operation"),
+        ("admit-closeout", "build-input"),
+        ("admit-evidence", "closeout"),
+        ("seal-evidence-decision", "closeout"),
+        ("admit-promote", "closeout"),
+        ("prepare-payload", "closeout"),
+    ],
+)
+def test_closeout_cli_routing_never_enters_build_promotion_or_decision_effects(
+    closeout_workflow_cli: _PromotionWorkflowCli, command: str, violation: str
+) -> None:
+    cli = closeout_workflow_cli
+    if violation in ("build", "promote"):
+        cli.inputs["mode"] = violation
+    elif violation == "unknown-operation":
+        cli.inputs["evidence_operation"] = "closeout-unrecognized"
+    elif violation == "build-input":
+        cli.inputs["preview_tag"] = TAG
+    cli.assert_closeout_refused(command)
+
+
+@pytest.mark.parametrize("append", [False, True], ids=["replace-triple", "append-fourth"])
+def test_closeout_cli_does_not_expand_legacy_retain_three_record_bundle(
+    evidence_workflow_cli: _EvidenceWorkflowCli, append: bool
+) -> None:
+    cli = evidence_workflow_cli
+    remote = cli.records["consumer-proof.json"]
+    if not append:
+        cli.records.clear()
+    cli.records["remote-consumer-proof.json"] = remote
+    cli.sync_request()
+    assert cli.invoke("admit-evidence") == 1
+    cli.assert_not_staged()
 
 
 def test_promotion_cli_authorization_v3_publishes_without_current_job_log_grants(
@@ -9829,3 +10654,74 @@ def test_promotion_cli_denied_prefix_does_not_invent_unsent_successor(
     assert retained["path"] == Path(outputs["observation_path"]).name
     assert retained["artifact"]["name"] == outputs["observation_artifact_name"]
     assert cli.artifacts[retained["artifact"]["id"]]["members"][retained["path"]] == original
+
+
+@pytest.mark.parametrize(
+    "violation", ["expired", "fork", "wrong-name", "wire-tamper", "raw-hash", "missing-digest"]
+)
+def test_closeout_cli_requires_actual_publisher_handoff_artifact_provenance(
+    closeout_workflow_cli: _PromotionWorkflowCli, violation: str
+) -> None:
+    cli = closeout_workflow_cli
+    reference = cli.request["publisher_handoff_reference"]
+    artifact = cli.artifacts[reference["artifact_id"]]
+    if violation == "expired":
+        artifact["metadata"]["expired"] = True
+    elif violation == "fork":
+        artifact["metadata"]["workflow_run"]["head_repository_id"] = 4002
+    elif violation == "wrong-name":
+        artifact["metadata"]["name"] = "stateless-preview-promote-attempt-801-2-901-diagnostics"
+    elif violation == "wire-tamper":
+        artifact["wire"] += b"tamper"
+    elif violation == "raw-hash":
+        cli.replace_retained(
+            reference["artifact_id"],
+            reference["path"],
+            json.dumps(cli.publisher_handoff, indent=2).encode() + b"\n",
+        )
+    else:
+        del artifact["metadata"]["digest"]
+    cli.assert_closeout_refused()
+
+
+@pytest.mark.parametrize("outcome", ["DENIED", "UNKNOWN"])
+def test_closeout_cli_does_not_launder_denied_or_unknown_lineage_as_published_success(
+    closeout_workflow_cli: _PromotionWorkflowCli, outcome: str
+) -> None:
+    cli = closeout_workflow_cli
+    handoff = deepcopy(cli.publisher_handoff)
+    observation_reference = handoff["remote_observation"]
+    observation = json.loads(
+        cli.artifacts[observation_reference["artifact_id"]]["members"][
+            observation_reference["path"]
+        ]
+    )
+    result = observation["operation_results"][-1]
+    result["response"].update(
+        kind=outcome, http_status=403 if outcome == "DENIED" else None, resource_id=None
+    )
+    result["outcome"] = outcome
+    if outcome == "UNKNOWN":
+        result["postcondition"] = "UNREADABLE"
+    raw = _canonical_json_bytes(observation)
+    cli.replace_retained(observation_reference["artifact_id"], observation_reference["path"], raw)
+    observation_reference["sha256"] = _sha256_bytes(raw)
+    classification_reference = handoff["remote_classification"]
+    classification = json.loads(
+        cli.artifacts[classification_reference["artifact_id"]]["members"][
+            classification_reference["path"]
+        ]
+    )
+    assert classification["state"] == "published_complete"
+    classification["remote_observed_state_reference"] = deepcopy(observation_reference)
+    raw = _canonical_json_bytes(classification)
+    cli.replace_retained(
+        classification_reference["artifact_id"], classification_reference["path"], raw
+    )
+    classification_reference["sha256"] = _sha256_bytes(raw)
+    raw = _canonical_json_bytes(handoff)
+    reference = cli.request["publisher_handoff_reference"]
+    cli.replace_retained(reference["artifact_id"], reference["path"], raw)
+    reference["sha256"] = _sha256_bytes(raw)
+    cli.sync_request()
+    cli.assert_closeout_refused()

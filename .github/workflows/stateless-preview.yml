@@ -28,12 +28,12 @@ on:
         default: ""
         type: string
       evidence_operation:
-        description: Evidence operation (retain only)
+        description: Evidence operation (retain or closeout)
         required: false
         default: ""
         type: string
       evidence_request:
-        description: Closed evidence-retention request JSON (retain only)
+        description: Closed evidence request JSON (retain or closeout only)
         required: false
         default: ""
         type: string
@@ -233,7 +233,7 @@ jobs:
 
   retain_evidence:
     name: Retain canonical-main preview evidence
-    if: ${{ inputs.mode == 'evidence' }}
+    if: ${{ inputs.mode == 'evidence' && inputs.evidence_operation != 'closeout' }}
     runs-on: windows-latest
     permissions:
       actions: read
@@ -329,6 +329,146 @@ jobs:
           A1_EVIDENCE_DECISION_ARTIFACT_ID: ${{ steps.upload_decision.outputs.artifact-id }}
           A1_EVIDENCE_DECISION_ARTIFACT_DIGEST: ${{ steps.upload_decision.outputs.artifact-digest }}
         run: python scripts/stateless_preview_artifact.py verify-evidence-retention
+
+  retain_closeout:
+    name: Retain canonical-main preview closeout
+    if: ${{ inputs.mode == 'evidence' && inputs.evidence_operation == 'closeout' }}
+    runs-on: windows-latest
+    permissions:
+      actions: read
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out the dispatched revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch live canonical main
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to fetch canonical main."
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Admit the exact closeout source and original remote proof
+        id: admit
+        shell: pwsh
+        run: python scripts/stateless_preview_artifact.py admit-closeout
+
+      - name: Retain the original remote proof and fresh public-byte verification (R0)
+        id: upload_records
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.admit.outputs.closeout_records_artifact_name }}
+          path: |
+            ${{ steps.admit.outputs.remote_consumer_proof_path }}
+            ${{ steps.admit.outputs.post_publication_verification_path }}
+          archive: true
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+      - name: Read back R0 and seal Remote Verification
+        id: verification
+        shell: pwsh
+        env:
+          A1_CLOSEOUT_RECORDS_ARTIFACT_ID: ${{ steps.upload_records.outputs.artifact-id }}
+          A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST: ${{ steps.upload_records.outputs.artifact-digest }}
+        run: |
+          $env:A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST = $env:A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          python scripts/stateless_preview_artifact.py seal-closeout-verification
+
+      - name: Retain Remote Verification (R1)
+        id: upload_verification
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.verification.outputs.closeout_verification_artifact_name }}
+          path: ${{ steps.verification.outputs.remote_verification_path }}
+          archive: true
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.verification.outputs.retention_days }}
+
+      - name: Read back R1 and seal the post-publication Stage
+        id: stage
+        shell: pwsh
+        env:
+          A1_CLOSEOUT_RECORDS_ARTIFACT_ID: ${{ steps.upload_records.outputs.artifact-id }}
+          A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST: ${{ steps.upload_records.outputs.artifact-digest }}
+          A1_CLOSEOUT_VERIFICATION_ARTIFACT_ID: ${{ steps.upload_verification.outputs.artifact-id }}
+          A1_CLOSEOUT_VERIFICATION_ARTIFACT_DIGEST: ${{ steps.upload_verification.outputs.artifact-digest }}
+        run: |
+          $env:A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST = $env:A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          $env:A1_CLOSEOUT_VERIFICATION_ARTIFACT_DIGEST = $env:A1_CLOSEOUT_VERIFICATION_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          python scripts/stateless_preview_artifact.py seal-closeout-stage
+
+      - name: Retain the post-publication Stage (R2)
+        id: upload_stage
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.stage.outputs.closeout_stage_artifact_name }}
+          path: ${{ steps.stage.outputs.post_publication_stage_path }}
+          archive: true
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.stage.outputs.retention_days }}
+
+      - name: Read back R2 and seal the non-authorizing Program B Handoff
+        id: handoff
+        shell: pwsh
+        env:
+          A1_CLOSEOUT_RECORDS_ARTIFACT_ID: ${{ steps.upload_records.outputs.artifact-id }}
+          A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST: ${{ steps.upload_records.outputs.artifact-digest }}
+          A1_CLOSEOUT_VERIFICATION_ARTIFACT_ID: ${{ steps.upload_verification.outputs.artifact-id }}
+          A1_CLOSEOUT_VERIFICATION_ARTIFACT_DIGEST: ${{ steps.upload_verification.outputs.artifact-digest }}
+          A1_CLOSEOUT_STAGE_ARTIFACT_ID: ${{ steps.upload_stage.outputs.artifact-id }}
+          A1_CLOSEOUT_STAGE_ARTIFACT_DIGEST: ${{ steps.upload_stage.outputs.artifact-digest }}
+        run: |
+          $env:A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST = $env:A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          $env:A1_CLOSEOUT_VERIFICATION_ARTIFACT_DIGEST = $env:A1_CLOSEOUT_VERIFICATION_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          $env:A1_CLOSEOUT_STAGE_ARTIFACT_DIGEST = $env:A1_CLOSEOUT_STAGE_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          python scripts/stateless_preview_artifact.py seal-closeout-handoff
+
+      - name: Retain the non-authorizing Program B Handoff (R3)
+        id: upload_handoff
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.handoff.outputs.closeout_handoff_artifact_name }}
+          path: ${{ steps.handoff.outputs.program_b_handoff_path }}
+          archive: true
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.handoff.outputs.retention_days }}
+
+      - name: Independently verify the retained closeout chain
+        id: verify
+        shell: pwsh
+        env:
+          A1_CLOSEOUT_RECORDS_ARTIFACT_ID: ${{ steps.upload_records.outputs.artifact-id }}
+          A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST: ${{ steps.upload_records.outputs.artifact-digest }}
+          A1_CLOSEOUT_VERIFICATION_ARTIFACT_ID: ${{ steps.upload_verification.outputs.artifact-id }}
+          A1_CLOSEOUT_VERIFICATION_ARTIFACT_DIGEST: ${{ steps.upload_verification.outputs.artifact-digest }}
+          A1_CLOSEOUT_STAGE_ARTIFACT_ID: ${{ steps.upload_stage.outputs.artifact-id }}
+          A1_CLOSEOUT_STAGE_ARTIFACT_DIGEST: ${{ steps.upload_stage.outputs.artifact-digest }}
+          A1_CLOSEOUT_HANDOFF_ARTIFACT_ID: ${{ steps.upload_handoff.outputs.artifact-id }}
+          A1_CLOSEOUT_HANDOFF_ARTIFACT_DIGEST: ${{ steps.upload_handoff.outputs.artifact-digest }}
+        run: |
+          $env:A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST = $env:A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          $env:A1_CLOSEOUT_VERIFICATION_ARTIFACT_DIGEST = $env:A1_CLOSEOUT_VERIFICATION_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          $env:A1_CLOSEOUT_STAGE_ARTIFACT_DIGEST = $env:A1_CLOSEOUT_STAGE_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          $env:A1_CLOSEOUT_HANDOFF_ARTIFACT_DIGEST = $env:A1_CLOSEOUT_HANDOFF_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          python scripts/stateless_preview_artifact.py verify-closeout-retention
 
   promote:
     if: ${{ inputs.mode == 'promote' }}

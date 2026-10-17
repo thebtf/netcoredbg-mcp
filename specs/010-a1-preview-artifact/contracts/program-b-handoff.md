@@ -26,19 +26,43 @@ The handoff binds all of these records to the same canonical `refs/heads/main` c
 - three Stage Gate Evidence records
 
 The validator requires exact equality of candidate binding, source ref/commit,
-origin-main target, trusted build run, Decision hash/authorization, current
-attempt ID, workflow run/attempt/job and workflow SHA. Both current initiator
-ID/login maps must equal the Decision's authorized dispatcher. The resolved
-Attempt 3.0 exact tracked-workflow `execution_policy` and independently resolved
-predecessor history must validate, with fixed `github.token` installation-token
-provenance and unobserved/null App/installation IDs. Observation 2.0 operation
-outcomes must permit closure; a known denial is not erased by matching later
-state and unresolved UNKNOWN cannot be resent. Source/blob equality describes
-reviewed configuration, not observed grants, token introspection or live success.
+origin-main target, trusted build run, Decision hash/authorization, publisher P's
+attempt ID, workflow run/attempt/job and workflow SHA. Both P initiator ID/login
+maps must equal the Decision's authorized dispatcher. The resolved Attempt 3.0
+exact tracked-workflow `execution_policy` and independently resolved predecessor
+history must validate, with fixed `github.token` installation-token provenance
+and unobserved/null App/installation IDs. Observation 2.0 operation outcomes must
+permit closure; a known denial is not erased by matching later state and
+unresolved UNKNOWN cannot be resent. Source/blob equality describes reviewed
+configuration, not observed grants, token introspection or live success.
 Do not equate the dispatcher with a token principal or accept Attempt 1.0/2.0,
 removed permission fields or a compatibility shim. Outer Remote Verification and
 Handoff versions stay unchanged; their nested Attempt/Observation admission moves
 to 3.0/2.0. Source-only sealers do not establish actual published consumer proof.
+
+### Publisher P and separate closeout Q
+
+For the non-authorizing `evidence_operation=closeout` adapter only, P is the
+actual historical `completed/success` publisher and Q is the separately admitted
+current `in_progress` closeout run/job. Resolve P through the handoff's real
+Actions artifact metadata, original ZIP/member bytes, exact-attempt API,
+complete jobs/artifacts discovery and tracked workflow blob at Candidate SHA S.
+Reconstruct its actors and predecessor history independently, anchored before P,
+not Q; never trust context copied from Attempt or handoff records.
+
+The existing `current_promotion_context` parameter carries that independently
+reconstructed P context to the pure sealers. It does not identify Q. Attempt,
+Observation, Classification and `promotion_attempt_id` continue to identify P;
+the four new closeout artifacts identify Q. Independently admit Q's event,
+repository, exact run/attempt/current job, both dispatcher identities, workflow
+SHA, checkout and fetched/live main. Candidate/build/Catalog, P/Q workflow,
+checkout and current canonical main must all agree on S at `refs/heads/main`.
+
+A completed or foreign job must never masquerade as the current live publisher
+or Q. This historical-context exception permits read-only closure only; it does
+not weaken live promote admission, confer a write grant or authorize a resend.
+The workflow amendment must enter the new canonical candidate before its first
+successful publication; an earlier candidate's approval cannot be borrowed.
 
 ## Require every stage
 
@@ -75,6 +99,22 @@ fragment from expected hashes, boolean flags, publisher cache or
 `published_complete`. In particular, an initial published-state recovery with
 `pre_publication_verification: null` cannot seal Remote Verification or Handoff.
 An actual predecessor fragment is required; absence refuses closeout.
+
+The closeout adapter retains the original external remote-command receipt and
+its own freshly downloaded public-byte fragment together as R0. It does not run
+or claim CI execution of the installed-Python rollback. Actual upload/readback
+must precede every dependent record: R0 → Remote Verification R1 →
+post-publication Stage R2 → Program B Handoff R3 → independent recursive R3
+readback. R2's exact ordered Catalog subset references the R0 remote proof, not
+an invented Verification field; R1 is an adapter-order dependency. R3 resolves
+all original P records, R0 proof, R1 verification and all three Stages.
+
+Each reference is formed from a real immutable Actions upload and verified
+original bytes, never an invented artifact ID, local path, name or staging map.
+Only final successful retention/readback emits `program_b_handoff_reference`.
+The existing sealers, signatures and schemas remain unchanged; upload success,
+source fixtures or a local sealed object alone do not prove actual A1 closeout.
+See the [fixed workflow interface](stateless-preview-workflow.md#fixed-cli-four-upload-barriers-and-final-readback).
 
 Sonar is a separate asynchronous post-publication audit, not a handoff or
 `PASS` receipt dependency. Preserve its real red or blocked record; it does not
@@ -154,11 +194,14 @@ Prepare every input before calling it:
   `predecessor_operation_results`. The predecessor fields come from complete
   bounded canonical workflow run/attempt/artifact/job discovery; only
   `predecessor_attempt` persists in A, with operation results in Observation 2.0.
-  No new CLI/env inputs are introduced. Use the
+  No caller-supplied context CLI/env inputs are introduced. Use the
   [Attempt 3.0 context contract](../quickstart.md#revalidate-one-source-only-attempt-30),
-  not values copied from the record being admitted. An old completed/foreign job,
-  PAT/auth cache or a caller workflow hash is no substitute. Tracked-byte policy
-  resolution is not token introspection or an observed-grant report.
+  not values copied from the record being admitted. For separate closeout only,
+  use independently reconstructed historical P as described above and admit Q
+  separately. An old completed/foreign job is never a substitute for the current
+  live job. PAT/auth cache or a caller workflow hash is no substitute either.
+  Tracked-byte policy resolution is not token introspection or an observed-grant
+  report.
 
 Raw-record SHA-256, Actions ZIP-container SHA-256 and Candidate's ordered
 `SHA256(archive_bytes || manifest_bytes)` payload hash are distinct. Neither

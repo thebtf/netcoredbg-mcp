@@ -975,13 +975,18 @@ _EVIDENCE_BUNDLE_MAX_TOTAL_BYTES = 256 * 1024
 
 def decode_evidence_bundle(encoded: str, expected_sha256: Mapping[str, str]) -> Mapping[str, bytes]:
     """Decode original evidence bytes; semantic admission remains with the sealers."""
+    return _decode_evidence_bundle(encoded, expected_sha256, _EVIDENCE_BUNDLE_MEMBERS)
+
+
+def _decode_evidence_bundle(
+    encoded: str, expected_sha256: Mapping[str, str], member_names: tuple[str, ...]
+) -> Mapping[str, bytes]:
     encoded = _expect_string(encoded, "evidence bundle")
     if len(encoded) > _EVIDENCE_BUNDLE_MAX_ENCODED_CHARACTERS:
         _refuse("evidence bundle exceeds the encoded size limit")
-    expected = _expect_mapping(expected_sha256, "evidence bundle hashes", _EVIDENCE_BUNDLE_MEMBERS)
+    expected = _expect_mapping(expected_sha256, "evidence bundle hashes", member_names)
     hashes = {
-        name: _expect_sha256(expected[name], "evidence bundle record hash")
-        for name in _EVIDENCE_BUNDLE_MEMBERS
+        name: _expect_sha256(expected[name], "evidence bundle record hash") for name in member_names
     }
     try:
         raw_zip = base64.b64decode(encoded, validate=True)
@@ -996,10 +1001,10 @@ def decode_evidence_bundle(encoded: str, expected_sha256: Mapping[str, str]) -> 
     try:
         with zipfile.ZipFile(io.BytesIO(raw_zip)) as archive:
             members = archive.infolist()
-            if len(members) != 3 or {entry.filename for entry in members} != set(
-                _EVIDENCE_BUNDLE_MEMBERS
+            if len(members) != len(member_names) or {entry.filename for entry in members} != set(
+                member_names
             ):
-                _refuse("evidence bundle must contain exactly the three fixed records")
+                _refuse("evidence bundle must contain exactly its fixed records")
             declared_total = 0
             payload_ranges: dict[str, tuple[int, int]] = {}
             for entry in members:
@@ -4090,14 +4095,25 @@ def _read_cli_dispatch(command: str, environment: Mapping[str, str]) -> Mapping[
             if not inputs.get(key) or inputs[key] != _environment_value(environment, variable):
                 _refuse("build dispatch inputs differ from the runner inputs")
     elif mode == "evidence":
-        if command in (*build_commands, *promote_commands) or any(
-            inputs.get(key, "")
-            for key in ("preview_version", "preview_tag", "retention_days", "promote_request")
-        ):
-            _refuse("evidence dispatch cannot execute or accept build/promotion inputs")
+        evidence_commands = {
+            "retain": (
+                "admit-evidence",
+                "seal-evidence-stage",
+                "seal-evidence-decision",
+                "verify-evidence-retention",
+            ),
+            "closeout": _CLOSEOUT_COMMANDS,
+        }
         operation = inputs.get("evidence_operation")
-        if operation != "retain" or not inputs.get("evidence_request"):
-            _refuse("evidence dispatch operation or request is unavailable")
+        if (
+            command not in evidence_commands.get(operation, ())
+            or any(
+                inputs.get(key, "")
+                for key in ("preview_version", "preview_tag", "retention_days", "promote_request")
+            )
+            or not inputs.get("evidence_request")
+        ):
+            _refuse("evidence dispatch operation, command, or request is unsupported")
     elif mode == "promote":
         if (
             command not in promote_commands
@@ -4799,6 +4815,911 @@ def _verify_evidence_retention(
         _refuse("GitHub Actions summary file is unavailable")
 
 
+_CLOSEOUT_COMMANDS = (
+    "admit-closeout",
+    "seal-closeout-verification",
+    "seal-closeout-stage",
+    "seal-closeout-handoff",
+    "verify-closeout-retention",
+)
+_CLOSEOUT_FILES = {
+    "records": {
+        "remote_consumer_proof_path": "remote-consumer-proof.json",
+        "post_publication_verification_path": "post-publication-verification.json",
+    },
+    "verification": {"remote_verification_path": "remote-verification.json"},
+    "stage": {"post_publication_stage_path": "post-publication-stage.json"},
+    "handoff": {"program_b_handoff_path": "program-b-handoff.json"},
+}
+
+
+def _closeout_context(
+    root: Path, environment: Mapping[str, str], event: Mapping[str, Any]
+) -> dict[str, Any]:
+    context = {
+        "source": _canonical_build_source(root, environment),
+        "repository_id": _expect_environment_identifier(environment, "GITHUB_REPOSITORY_ID"),
+        "run_id": _expect_environment_identifier(environment, "GITHUB_RUN_ID"),
+        "attempt": int(_expect_environment_identifier(environment, "GITHUB_RUN_ATTEMPT")),
+    }
+    if (
+        _expect_commit(
+            _environment_value(environment, "GITHUB_WORKFLOW_SHA"), "closeout workflow SHA"
+        )
+        != context["source"]["commit"]
+    ):
+        _refuse("closeout workflow differs from the canonical source")
+    reads = {"root": root, "environment": environment, "context": context, "diagnostics": []}
+    live = _promotion_api(reads, "git/ref/heads/main")
+    if (
+        not isinstance(live, Mapping)
+        or live.get("ref") != _CANONICAL_SOURCE_REF
+        or not isinstance(live.get("object"), Mapping)
+        or live["object"].get("type") != "commit"
+        or live["object"].get("sha") != context["source"]["commit"]
+    ):
+        _refuse("closeout requires the exact live canonical main")
+    run = _promotion_api(reads, f"actions/runs/{context['run_id']}/attempts/{context['attempt']}")
+    _validate_cli_run(run, context, context["run_id"], context["attempt"], successful_build=False)
+    actors = {}
+    for role in ("actor", "triggering_actor"):
+        value = run.get(role)
+        if not isinstance(value, Mapping):
+            _refuse("closeout initiator is unavailable")
+        actors[role] = {
+            "id": str(_expect_positive_integer(value.get("id"), "closeout actor ID")),
+            "login": value.get("login"),
+        }
+        _decision_actor(actors[role], role)
+    sender = event.get("sender")
+    if (
+        not isinstance(sender, Mapping)
+        or {
+            "id": str(_expect_positive_integer(sender.get("id"), "closeout sender ID")),
+            "login": sender.get("login"),
+        }
+        != actors["actor"]
+        or _expect_environment_identifier(environment, "GITHUB_ACTOR_ID") != actors["actor"]["id"]
+        or _environment_value(environment, "GITHUB_ACTOR") != actors["actor"]["login"]
+        or _environment_value(environment, "GITHUB_TRIGGERING_ACTOR")
+        != actors["triggering_actor"]["login"]
+        or _environment_value(environment, "GITHUB_JOB") != "retain_closeout"
+    ):
+        _refuse("closeout actors or job differ from the actual event/runner")
+    selected = _select_current_job(
+        _promotion_api(
+            reads,
+            f"actions/runs/{context['run_id']}/attempts/{context['attempt']}/jobs?per_page=100",
+        ),
+        repository=context["source"]["repository"],
+        run_id=int(context["run_id"]),
+        run_attempt=context["attempt"],
+        head_sha=context["source"]["commit"],
+        job_name="Retain canonical-main preview closeout",
+    )
+    context.update(
+        actors=actors,
+        job_id=str(selected["job_id"]),
+        created_at=_expect_datetime(run.get("created_at"), "closeout run creation"),
+    )
+    if _review_timestamp(context["created_at"], "closeout run creation") > datetime.now(
+        timezone.utc
+    ):
+        _refuse("closeout run creation is in the future")
+    return context
+
+
+def _closeout_publisher(
+    inputs: MutableMapping[str, Any], reference: Mapping[str, Any]
+) -> dict[str, Any]:
+    artifact = _promotion_artifact(inputs, reference)
+    match = re.fullmatch(
+        rf"stateless-preview-promote-attempt-{reference['run_id']}-([1-9][0-9]*)-([1-9][0-9]*)-handoff",
+        artifact["name"],
+    )
+    if match is None or reference["run_id"] == inputs["closeout_context"]["run_id"]:
+        _refuse("closeout requires a distinct historical publisher handoff")
+    attempt, job_id = int(match[1]), match[2]
+    run_id = reference["run_id"]
+    run = inputs["producers"][(run_id, attempt)]
+    _validate_cli_run(run, inputs["context"], run_id, attempt, successful_build=True)
+    jobs = _promotion_collection(inputs, f"actions/runs/{run_id}/attempts/{attempt}/jobs", "jobs")
+    matches = [job for job in jobs if job.get("name") == _PROMOTION_JOB_NAME]
+    if len(matches) != 1:
+        _refuse("historical publisher job is absent or ambiguous")
+    job = matches[0]
+    repository = inputs["context"]["source"]["repository"]
+    source = inputs["context"]["source"]
+    if (
+        str(_expect_positive_integer(job.get("id"), "publisher job ID")) != job_id
+        or job.get("run_id") != int(run_id)
+        or job.get("run_attempt") != attempt
+        or job.get("head_sha") != source["commit"]
+        or job.get("url") != f"https://api.github.com/repos/{repository}/actions/jobs/{job_id}"
+        or job.get("run_url") != f"https://api.github.com/repos/{repository}/actions/runs/{run_id}"
+        or job.get("status") != "completed"
+        or job.get("conclusion") != "success"
+    ):
+        _refuse("publisher handoff does not bind its successful exact job")
+    steps = _expect_list(job.get("steps"), "publisher job steps")
+    if any(not isinstance(step, Mapping) for step in steps):
+        _refuse("publisher step evidence is incomplete")
+    for name in (
+        "Set up job",
+        "Read back A and the last retained classification for the exact handoff",
+        "Retain exact published references for separate remote consumer proof",
+    ):
+        selected = [step for step in steps if step.get("name") == name]
+        if (
+            len(selected) != 1
+            or selected[0].get("status") != "completed"
+            or selected[0].get("conclusion") != "success"
+            or (name == "Set up job" and steps[0] is not selected[0])
+        ):
+            _refuse("publisher finish or handoff retention did not complete successfully")
+    completed_at = _review_timestamp(job.get("completed_at"), "publisher completion")
+    if not (
+        _review_timestamp(run.get("created_at"), "publisher creation")
+        <= completed_at
+        <= _review_timestamp(inputs["closeout_context"]["created_at"], "closeout creation")
+        <= datetime.now(timezone.utc)
+    ):
+        _refuse("publisher does not precede the actual closeout run")
+    actors = {}
+    for role in ("actor", "triggering_actor"):
+        value = run.get(role)
+        if not isinstance(value, Mapping):
+            _refuse("historical publisher initiator is unavailable")
+        actors[role] = {
+            "id": str(_expect_positive_integer(value.get("id"), "publisher actor ID")),
+            "login": value.get("login"),
+        }
+        _decision_actor(actors[role], role)
+    context = {
+        "source": source,
+        "repository_id": inputs["context"]["repository_id"],
+        "run_id": run_id,
+        "attempt": attempt,
+        "history_created_at": run["created_at"],
+        "current": {
+            "current_attempt_id": f"a1-promote-{run_id}-{attempt}-{job_id}",
+            "workflow_run": {
+                "repository": repository,
+                "workflow_path": _TRUSTED_WORKFLOW_PATH,
+                "mode": "promote",
+                "event": _TRUSTED_BUILD_EVENT,
+                "run_id": run_id,
+                "run_attempt": attempt,
+                "ref": _CANONICAL_SOURCE_REF,
+                "commit": source["commit"],
+            },
+            "job_id": job_id,
+            "job_key": "promote",
+            "workflow_sha": source["commit"],
+            "checkout_head": source["commit"],
+            "origin_main_target": source["commit"],
+            "current_github_actor": actors["actor"],
+            "current_github_triggering_actor": actors["triggering_actor"],
+        },
+    }
+    inputs["publisher_job"] = job
+    inputs["publisher_completed_at"] = completed_at
+    return context
+
+
+def _closeout_resolve(inputs: Mapping[str, Any], reference: Mapping[str, Any]) -> bytes:
+    reference = _review_record_reference(reference, "closeout retained reference")
+    if reference["run_id"] == inputs["closeout_context"]["run_id"]:
+        for kind in _CLOSEOUT_FILES:
+            prefix = f"A1_CLOSEOUT_{kind.upper()}_ARTIFACT"
+            if reference["artifact_id"] == inputs["environment"].get(f"{prefix}_ID"):
+                records = _closeout_uploaded(inputs, kind)
+                retained, raw = records.get(reference["path"], (None, None))
+                if retained != reference:
+                    _refuse("closeout reference differs from its actual uploaded bytes")
+                return raw
+        _refuse("closeout reference has no actual upload output")
+    return _promotion_resolve(inputs, reference)
+
+
+def _closeout_inputs(
+    root: Path, environment: Mapping[str, str], event: Mapping[str, Any], command: str
+) -> dict[str, Any]:
+    request = _expect_mapping(
+        _load_json_object(event["inputs"]["evidence_request"].encode("utf-8"), "closeout request"),
+        "closeout request",
+        ("publisher_handoff_reference", "bundle_base64", "record_sha256"),
+    )
+    reference = _review_record_reference(
+        request["publisher_handoff_reference"], "publisher handoff"
+    )
+    if reference["path"] != "publisher-handoff.json":
+        _refuse("closeout request must select publisher-handoff.json")
+    records = _decode_evidence_bundle(
+        request["bundle_base64"], request["record_sha256"], ("remote-consumer-proof.json",)
+    )
+    context = _closeout_context(root, environment, event)
+    temporary = Path(_environment_value(environment, "RUNNER_TEMP")).resolve(strict=True)
+    suffix = f"{context['run_id']}-{context['attempt']}-{context['job_id']}"
+    directory = temporary / f"stateless-preview-closeout-{suffix}" / command
+    if not temporary.is_dir() or not _path_within(directory, temporary):
+        _refuse("closeout destination escapes the runner temporary directory")
+    for parent in (directory, *directory.parents):
+        if parent == temporary:
+            break
+        if parent.is_symlink() or (parent.exists() and parent.is_junction()):
+            _refuse("closeout destination is redirected")
+    directory.mkdir(parents=True, exist_ok=False)
+    inputs: dict[str, Any] = {
+        "root": root,
+        "environment": environment,
+        "event": event,
+        "context": context,
+        "closeout_context": context,
+        "directory": directory,
+        "suffix": suffix,
+        "records": records,
+        "publisher_handoff_reference": reference,
+        "resolved": {},
+        "producers": {},
+        "uploads": {},
+        "diagnostics": [],
+        "downloader": ArtifactDownloader(directory, environment=environment),
+    }
+    inputs["context"] = _closeout_publisher(inputs, reference)
+    handoff = _expect_mapping(
+        _load_json_object(_promotion_resolve(inputs, reference), "publisher handoff"),
+        "publisher handoff",
+        (
+            "candidate_identity_record",
+            "release_gate_catalog",
+            "promotion_decision",
+            "pre_decision_stage_evidence",
+            "pre_publication_stage_evidence",
+            "promotion_attempt",
+            "remote_observation",
+            "remote_classification",
+            "pre_publication_verification",
+        ),
+    )
+    for field in handoff:
+        retained = _review_record_reference(handoff[field], f"publisher handoff {field}")
+        if retained["repository"] != context["source"]["repository"]:
+            _refuse("publisher handoff dependency belongs to another repository")
+        if retained["run_id"] == context["run_id"]:
+            _refuse("historical publisher cannot depend on the current closeout")
+    resolve = lambda retained: _closeout_resolve(inputs, retained)
+    identity_compact = handoff["candidate_identity_record"]
+    identity_raw = resolve(identity_compact)
+    identity = _validate_candidate_identity(_load_json_object(identity_raw, "retained Candidate"))
+    candidate = identity["candidate"]
+    retention = candidate["build"]["artifact"]["retention"]["configured_days"]
+    _expect_retention_days({"A1_RETENTION_DAYS": str(retention)})
+    artifact = _promotion_artifact(inputs, identity_compact)
+    artifact = {**artifact, "retention": {**artifact["retention"], "configured_days": retention}}
+    identity_reference = {
+        **{key: identity_compact[key] for key in ("repository", "run_id", "path", "sha256")},
+        "artifact": artifact,
+    }
+    _verified_review_candidate(identity, identity_raw, identity_reference)
+    names = _artifact_names(
+        candidate["preview_manifest"]["contents"]["version"],
+        candidate["build"]["run_id"],
+        candidate["build"]["run_attempt"],
+    )
+    if (
+        any(candidate["source"][key] != value for key, value in context["source"].items())
+        or identity_compact["path"] != _CANDIDATE_IDENTITY_FILENAME
+        or identity_compact["run_id"] != candidate["build"]["run_id"]
+        or artifact["name"] != names["candidate_identity"]
+        or candidate["build"]["artifact"]["name"] != names["payload"]
+    ):
+        _refuse("closeout Candidate differs from the exact canonical source build")
+    completed_at = _verified_evidence_build(inputs["downloader"], context, candidate)
+    catalog_reference = handoff["release_gate_catalog"]
+    if (
+        catalog_reference["path"] != _RELEASE_GATE_CATALOG_FILENAME
+        or catalog_reference["run_id"] != candidate["build"]["run_id"]
+        or catalog_reference["artifact_id"] == identity_compact["artifact_id"]
+        or _promotion_artifact(inputs, catalog_reference)["name"] != names["release_gate_catalog"]
+    ):
+        _refuse("closeout Catalog does not bind the distinct source-build artifact")
+    catalog_raw = resolve(catalog_reference)
+    binding = {
+        "candidate_identity": identity,
+        "candidate_identity_bytes": identity_raw,
+        "candidate_identity_reference": identity_reference,
+        "release_gate_catalog": _load_json_object(catalog_raw, "Catalog"),
+        "release_gate_catalog_bytes": catalog_raw,
+        "release_gate_catalog_reference": catalog_reference,
+        "record_resolver": resolve,
+        "repository_root": root,
+    }
+    decision_reference = handoff["promotion_decision"]
+    if decision_reference["path"] != "promotion-decision.json":
+        _refuse("publisher handoff Decision has an unexpected path")
+    decision = seal_promotion_decision(
+        _load_json_object(resolve(decision_reference), "retained Decision"), **binding
+    )
+    if (
+        decision["decision"] != "APPROVE"
+        or decision["candidate_identity_record"] != identity_compact
+        or decision["evidence"]["pre_decision_stage_evidence"]["record_reference"]
+        != handoff["pre_decision_stage_evidence"]
+        or _review_timestamp(decision["decided_at"], "Decision time") > datetime.now(timezone.utc)
+    ):
+        _refuse("closeout requires the publisher's exact existing APPROVE")
+    decision_artifact = _promotion_artifact(inputs, decision_reference)
+    match = re.fullmatch(
+        rf"stateless-preview-evidence-decision-{decision_reference['run_id']}-([1-9][0-9]*)",
+        decision_artifact["name"],
+    )
+    if match is None:
+        _refuse("publisher Decision does not identify its evidence producer")
+    evidence_attempt = int(match[1])
+    evidence_suffix = f"{decision_reference['run_id']}-{evidence_attempt}"
+    stage_reference = handoff["pre_decision_stage_evidence"]
+    if (
+        stage_reference["path"] != "pre-decision-stage.json"
+        or stage_reference["run_id"] != decision_reference["run_id"]
+        or _promotion_artifact(inputs, stage_reference)["name"]
+        != f"stateless-preview-evidence-stage-{evidence_suffix}"
+    ):
+        _refuse("publisher pre-decision Stage has a different producer")
+    producer = inputs["producers"][(decision_reference["run_id"], evidence_attempt)]
+    for role in ("actor", "triggering_actor"):
+        observed = producer.get(role)
+        if (
+            not isinstance(observed, Mapping)
+            or {"id": str(observed.get("id")), "login": observed.get("login")}
+            != decision["promotion_attempt"]["decision_author"]
+            or context["actors"][role] != decision["promotion_attempt"]["authorized_dispatcher"]
+        ):
+            _refuse("Decision author or closeout initiators differ from authenticated provenance")
+    stage = _load_json_object(resolve(stage_reference), "pre-decision Stage")
+    for entry in stage["gate_evidence"]:
+        retained = entry["record_reference"]
+        if (
+            retained["run_id"] != decision_reference["run_id"]
+            or _promotion_artifact(inputs, retained)["name"]
+            != f"stateless-preview-evidence-records-{evidence_suffix}"
+        ):
+            _refuse("publisher pre-decision proof has a different evidence producer")
+        proof = _load_json_object(resolve(retained), "pre-decision proof")
+        times = [
+            proof[
+                "sealed_at"
+                if entry["record_type"] == "s2-s3-seven-lens-aggregate"
+                else "recorded_at"
+            ]
+        ]
+        if entry["record_type"] == "s2-s3-seven-lens-aggregate":
+            times.extend(lens["recorded_at"] for lens in proof["lens_results"])
+        if any(
+            not completed_at <= _review_timestamp(value, "proof time") <= datetime.now(timezone.utc)
+            for value in times
+        ):
+            _refuse("publisher proof does not follow its completed source build")
+    inputs.update(
+        binding=binding,
+        candidate=candidate,
+        retention_days=retention,
+        handoff=handoff,
+        decision=decision,
+        decision_reference=decision_reference,
+    )
+    # History is anchored at P, never Q or the latest attempt of P's run.
+    predecessor, results = _promotion_discover_predecessor(inputs)
+    inputs["context"]["current"].update(
+        predecessor_attempt=predecessor, predecessor_operation_results=results
+    )
+    _closeout_admit_lineage(inputs)
+    return inputs
+
+
+def _closeout_admit_lineage(inputs: MutableMapping[str, Any]) -> None:
+    handoff, binding, context = inputs["handoff"], inputs["binding"], inputs["context"]
+    suffix = f"{context['run_id']}-{context['attempt']}-{context['current']['job_id']}"
+    final_step = re.fullmatch(
+        r"remote-observation-([0-3])\.json", handoff["remote_observation"]["path"]
+    )
+    if final_step is None:
+        _refuse("publisher final observation has an unexpected path")
+    step = int(final_step[1])
+    for field, path, name in (
+        (
+            "promotion_attempt",
+            "promotion-attempt.json",
+            f"stateless-preview-promote-attempt-{suffix}",
+        ),
+        (
+            "pre_publication_stage_evidence",
+            "pre-publication-stage.json",
+            f"stateless-preview-promote-admission-{suffix}",
+        ),
+        (
+            "remote_observation",
+            f"remote-observation-{step}.json",
+            f"stateless-preview-promote-{'observation' if step else 'admission'}-{suffix}"
+            + (f"-{step}" if step else ""),
+        ),
+        (
+            "remote_classification",
+            f"remote-classification-{step}.json",
+            f"stateless-preview-promote-classification-{suffix}-{step}",
+        ),
+    ):
+        reference = handoff[field]
+        if (
+            reference["path"] != path
+            or reference["run_id"] != context["run_id"]
+            or _promotion_artifact(inputs, reference)["name"] != name
+        ):
+            _refuse("publisher handoff reference does not bind the exact producing job")
+    attempt = seal_promotion_attempt(
+        _resolve_stage_record(handoff["promotion_attempt"], binding["record_resolver"]),
+        current_promotion_context=context["current"],
+        **binding,
+    )
+    if not (
+        _review_timestamp(context["history_created_at"], "publisher run creation")
+        <= _review_timestamp(attempt["recorded_at"], "publisher Attempt time")
+        <= inputs["publisher_completed_at"]
+    ):
+        _refuse("publisher Attempt is outside its actual execution chronology")
+    if (
+        attempt["candidate_identity_record"] != handoff["candidate_identity_record"]
+        or attempt["promotion_decision"] != handoff["promotion_decision"]
+        or any(
+            attempt[f"{name}_stage_evidence"]["record_reference"]
+            != handoff[f"{name}_stage_evidence"]
+            for name in ("pre_decision", "pre_publication")
+        )
+    ):
+        _refuse("publisher handoff differs from its admitted Attempt lineage")
+    artifacts = _promotion_collection(
+        inputs, f"actions/runs/{context['run_id']}/artifacts", "artifacts"
+    )
+    expected_handoff = _promotion_artifact(inputs, inputs["publisher_handoff_reference"])
+    retained_handoffs = [item for item in artifacts if item.get("name") == expected_handoff["name"]]
+    if (
+        len(retained_handoffs) != 1
+        or str(retained_handoffs[0].get("id"))
+        != inputs["publisher_handoff_reference"]["artifact_id"]
+    ):
+        _refuse("complete publisher discovery does not contain the exact handoff")
+    advancement = []
+    for name in _PROMOTION_ADVANCEMENT_STEPS:
+        selected = [item for item in inputs["publisher_job"]["steps"] if item.get("name") == name]
+        if len(selected) != 1:
+            _refuse("publisher advancement evidence is absent or ambiguous")
+        advancement.append(selected[0])
+    observed_reference, classified_reference, observation, classification, _ = (
+        _promotion_revalidate_advancements(inputs, attempt, advancement, artifacts)
+    )
+    if (
+        observed_reference != handoff["remote_observation"]
+        or classified_reference != handoff["remote_classification"]
+        or classification["admission"] != "ADMITTED"
+        or classification["state"] != "published_complete"
+        or not (
+            _review_timestamp(attempt["recorded_at"], "Attempt time")
+            <= _review_timestamp(observation["observed_at"], "published observation time")
+            <= _review_timestamp(classification["classified_at"], "published classification time")
+            <= inputs["publisher_completed_at"]
+        )
+    ):
+        _refuse("publisher lineage does not prove completed, admitted publication")
+    pre_reference = handoff["pre_publication_verification"]
+    pre = _resolve_stage_record(pre_reference, binding["record_resolver"])
+    if pre != _promotion_fragment(inputs, observation) or pre_reference != inputs.get(
+        "predecessor_fragment_reference"
+    ):
+        _refuse("original PRE_PUBLICATION fragment is absent or disconnected from publication")
+    proof = _validate_stage_consumer_proof(
+        _load_json_object(inputs["records"]["remote-consumer-proof.json"], "root public proof"),
+        remote=True,
+        **{
+            key: binding[key]
+            for key in (
+                "candidate_identity",
+                "candidate_identity_bytes",
+                "candidate_identity_reference",
+                "release_gate_catalog",
+            )
+        },
+    )
+    if proof["download_origin"] != pre["release"] or not (
+        _review_timestamp(observation["observed_at"], "publication time")
+        <= _review_timestamp(proof["recorded_at"], "root public proof time")
+        <= datetime.now(timezone.utc)
+    ):
+        _refuse("root public proof does not follow this exact publication")
+    inputs.update(attempt=attempt, observation=observation, pre_publication_verification=pre)
+
+
+def _closeout_uploaded(
+    inputs: Mapping[str, Any], kind: str
+) -> dict[str, tuple[dict[str, str], bytes]]:
+    if kind in inputs["uploads"]:
+        return inputs["uploads"][kind]
+    context = inputs["closeout_context"]
+    prefix = f"A1_CLOSEOUT_{kind.upper()}_ARTIFACT"
+    artifact_id = _expect_environment_identifier(inputs["environment"], f"{prefix}_ID")
+    digest = _expect_sha256(
+        _environment_value(inputs["environment"], f"{prefix}_DIGEST").removeprefix("sha256:"),
+        "closeout upload container digest",
+    )
+    artifact = _checked_evidence_artifact(
+        inputs["downloader"],
+        context,
+        artifact_id,
+        context["run_id"],
+        f"stateless-preview-closeout-{kind}-{inputs['suffix']}",
+        inputs["retention_days"],
+        None,
+    )
+    if artifact["sha256"] != digest:
+        _refuse("closeout upload output differs from the actual container digest")
+    wire = inputs["downloader"]._archive(
+        context["source"]["repository"], context["run_id"], artifact
+    )
+    try:
+        with zipfile.ZipFile(io.BytesIO(wire)) as archive:
+            entries = archive.infolist()
+            if (
+                len(entries) != len(_CLOSEOUT_FILES[kind])
+                or {entry.filename for entry in entries} != set(_CLOSEOUT_FILES[kind].values())
+                or any(
+                    entry.is_dir()
+                    or entry.orig_filename != entry.filename
+                    or entry.file_size > _PROMOTION_JSON_LIMIT
+                    or stat.S_IFMT(entry.external_attr >> 16) not in (0, stat.S_IFREG)
+                    or entry.external_attr & (0x10 | 0x400)
+                    for entry in entries
+                )
+            ):
+                _refuse("closeout artifact does not contain exactly its original fixed records")
+    except (OSError, RuntimeError, zipfile.BadZipFile):
+        _refuse("closeout artifact ZIP is unreadable")
+    records = {}
+    for filename in _CLOSEOUT_FILES[kind].values():
+        retained, raw = inputs["downloader"]._download_record(
+            context["source"]["repository"], context["run_id"], artifact, filename
+        )
+        compact = _compact_evidence_reference(retained)
+        records[filename] = (compact, raw)
+        inputs["resolved"][_evidence_reference_key(compact)] = raw
+    inputs["uploads"][kind] = records
+    return records
+
+
+def _closeout_read_records(inputs: Mapping[str, Any]) -> tuple[dict[str, str], Mapping[str, Any]]:
+    records = _closeout_uploaded(inputs, "records")
+    proof_reference, proof_raw = records["remote-consumer-proof.json"]
+    if proof_raw != inputs["records"]["remote-consumer-proof.json"]:
+        _refuse("retained root public proof differs from its original dispatch bytes")
+    _, raw = records["post-publication-verification.json"]
+    post = _load_json_object(raw, "retained post-publication byte verification")
+    if post != {**inputs["pre_publication_verification"], "phase": "POST_PUBLICATION"}:
+        _refuse("retained post-publication fragment does not prove the published candidate")
+    return proof_reference, post
+
+
+def _closeout_verification_record(
+    inputs: Mapping[str, Any], proof_reference: Mapping[str, Any], post: Mapping[str, Any]
+) -> dict[str, Any]:
+    handoff = inputs["handoff"]
+    return {
+        "verification_schema_version": "1.0",
+        "verification_id": f"a1-closeout-verification-{inputs['suffix']}",
+        "promotion_attempt_id": inputs["attempt"]["attempt_id"],
+        **{
+            field: handoff[field]
+            for field in (
+                "candidate_identity_record",
+                "promotion_decision",
+                "promotion_attempt",
+                "remote_observation",
+                "remote_classification",
+            )
+        },
+        "candidate": inputs["candidate"],
+        "pre_publication_verification": inputs["pre_publication_verification"],
+        "post_publication_verification": post,
+        "remote_consumer_proof": proof_reference,
+        "outcome": "PASS",
+        "verified_at": _utc_timestamp(),
+    }
+
+
+def _closeout_read_verification(
+    inputs: Mapping[str, Any],
+) -> tuple[dict[str, str], Mapping[str, Any], dict[str, str]]:
+    proof_reference, post = _closeout_read_records(inputs)
+    reference, raw = _closeout_uploaded(inputs, "verification")["remote-verification.json"]
+    verification = seal_remote_verification(
+        _load_json_object(raw, "retained RemoteVerification"),
+        current_promotion_context=inputs["context"]["current"],
+        **inputs["binding"],
+    )
+    expected = _closeout_verification_record(inputs, proof_reference, post)
+    if any(
+        verification[key] != value for key, value in expected.items() if key != "verified_at"
+    ) or _review_timestamp(
+        verification["verified_at"], "retained Verification time"
+    ) > datetime.now(timezone.utc):
+        _refuse("retained Verification differs from the actual publisher/closeout graph")
+    return reference, verification, proof_reference
+
+
+def _closeout_stage_record(
+    inputs: Mapping[str, Any], proof_reference: Mapping[str, Any]
+) -> dict[str, Any]:
+    handoff, candidate = inputs["handoff"], inputs["candidate"]
+    identity_hash = handoff["candidate_identity_record"]["sha256"]
+    return {
+        "evidence_schema_version": "1.0",
+        "evidence_set_id": f"a1-closeout-stage-{inputs['suffix']}",
+        "producer": {
+            "helper_path": "scripts/stateless_preview_artifact.py",
+            "operation": "seal_stage_gate_evidence",
+        },
+        "release_gate_catalog": handoff["release_gate_catalog"],
+        "candidate_identity_record": handoff["candidate_identity_record"],
+        "candidate_identity_record_sha256": identity_hash,
+        "candidate": candidate,
+        "source_ref": candidate["source"]["ref"],
+        "source_commit": candidate["source"]["commit"],
+        "stage": "post-publication",
+        "gate_evidence": [
+            {
+                **descriptor,
+                "record_reference": proof_reference,
+                "candidate_identity_record_sha256": identity_hash,
+                "source_commit": candidate["source"]["commit"],
+                "outcome": "PASS",
+            }
+            for descriptor in inputs["binding"]["release_gate_catalog"]["catalog"][
+                "gate_descriptors"
+            ]
+            if descriptor["stage"] == "post-publication"
+        ],
+        "outcome": "PASS",
+        "sealed_at": _utc_timestamp(),
+    }
+
+
+def _closeout_read_stage(
+    inputs: Mapping[str, Any], verification: Mapping[str, Any], proof_reference: Mapping[str, Any]
+) -> tuple[dict[str, str], Mapping[str, Any]]:
+    reference, raw = _closeout_uploaded(inputs, "stage")["post-publication-stage.json"]
+    stage = seal_stage_gate_evidence(
+        _load_json_object(raw, "retained post-publication Stage"), **inputs["binding"]
+    )
+    expected = _closeout_stage_record(inputs, proof_reference)
+    if any(stage[key] != value for key, value in expected.items() if key != "sealed_at") or not (
+        _review_timestamp(verification["verified_at"], "Verification time")
+        <= _review_timestamp(stage["sealed_at"], "post-publication Stage time")
+        <= datetime.now(timezone.utc)
+    ):
+        _refuse("retained post-publication Stage differs from the read-back proof graph")
+    return reference, stage
+
+
+def _closeout_handoff_record(
+    inputs: Mapping[str, Any],
+    verification_reference: Mapping[str, Any],
+    proof_reference: Mapping[str, Any],
+    stage_reference: Mapping[str, Any],
+) -> dict[str, Any]:
+    publisher, candidate = inputs["handoff"], inputs["candidate"]
+    return {
+        "handoff_schema_version": "1.0",
+        "handoff_id": f"a1-closeout-handoff-{inputs['suffix']}",
+        "producer": {
+            "helper_path": "scripts/stateless_preview_artifact.py",
+            "operation": "seal_program_b_handoff",
+        },
+        "candidate_identity_record": publisher["candidate_identity_record"],
+        "candidate": candidate,
+        "source_ref": candidate["source"]["ref"],
+        "source_commit": candidate["source"]["commit"],
+        "approved_promotion_decision": publisher["promotion_decision"],
+        "promotion_attempt": publisher["promotion_attempt"],
+        "promotion_attempt_id": inputs["attempt"]["attempt_id"],
+        "published_remote_observation": publisher["remote_observation"],
+        "published_remote_classification": publisher["remote_classification"],
+        "remote_verification_receipt": verification_reference,
+        "remote_consumer_proof": proof_reference,
+        "release_gate_catalog": publisher["release_gate_catalog"],
+        "pre_decision_stage_evidence": publisher["pre_decision_stage_evidence"],
+        "pre_publication_stage_evidence": publisher["pre_publication_stage_evidence"],
+        "post_publication_stage_evidence": stage_reference,
+        "completion_scope": "A1_OPT_IN_PREVIEW_COMPLETE",
+        "program_b_authorization_required": True,
+        "program_c_authorization_required": True,
+        "recorded_at": _utc_timestamp(),
+    }
+
+
+def _closeout_recheck(inputs: Mapping[str, Any]) -> None:
+    fresh = _closeout_context(inputs["root"], inputs["environment"], inputs["event"])
+    if fresh != inputs["closeout_context"] or any(
+        actor != inputs["decision"]["promotion_attempt"]["authorized_dispatcher"]
+        for actor in fresh["actors"].values()
+    ):
+        _refuse("current closeout context or canonical source changed during readback")
+
+
+def _closeout_emit(inputs: Mapping[str, Any], kind: str, records: Mapping[str, bytes]) -> None:
+    _closeout_recheck(inputs)
+    paths = {
+        key: inputs["directory"] / "outputs" / filename
+        for key, filename in _CLOSEOUT_FILES[kind].items()
+    }
+    for key, path in paths.items():
+        _write_bytes_once(path, records[path.name], "closeout record")
+    _write_action_outputs(
+        {
+            **{key: str(path) for key, path in paths.items()},
+            f"closeout_{kind}_artifact_name": f"stateless-preview-closeout-{kind}-{inputs['suffix']}",
+            "retention_days": str(inputs["retention_days"]),
+        },
+        inputs["environment"],
+    )
+
+
+def _closeout_read_graph(inputs: Mapping[str, Any], handoff: Mapping[str, Any]) -> None:
+    pending: list[Any] = [handoff, inputs["handoff"]]
+    seen: set[tuple[str, ...]] = set()
+    compact_fields = {"repository", "run_id", "artifact_id", "path", "sha256"}
+    expanded_fields = {"repository", "run_id", "artifact", "path", "sha256"}
+    while pending:
+        value = pending.pop()
+        if isinstance(value, Mapping):
+            fields = set(value)
+            if fields in (compact_fields, expanded_fields):
+                reference = (
+                    _compact_evidence_reference(
+                        ArtifactFileReference.from_mapping(value, "graph reference")
+                    )
+                    if fields == expanded_fields
+                    else value
+                )
+                key = _evidence_reference_key(reference)
+                if key in seen:
+                    continue
+                if len(seen) >= 10000:
+                    _refuse("closeout reference graph exceeds its discovery bound")
+                seen.add(key)
+                raw = _closeout_resolve(inputs, reference)
+                if reference["path"].endswith(".json"):
+                    pending.append(_load_json_object(raw, "closeout graph record"))
+            else:
+                pending.extend(value.values())
+        elif isinstance(value, (list, tuple)):
+            pending.extend(value)
+
+
+def _run_closeout(
+    root: Path, environment: Mapping[str, str], event: Mapping[str, Any], command: str
+) -> None:
+    inputs = _closeout_inputs(root, environment, event, command)
+    if command == "admit-closeout":
+        from scripts.stateless_preview_public_release import download_public_release
+
+        expected_origin = inputs["pre_publication_verification"]["release"]
+        archive, manifest, origin = download_public_release(
+            inputs["candidate"], expected_origin["release_id"], inputs["directory"] / "public"
+        )
+        verified = verify_and_extract_retained_artifact(
+            inputs["binding"]["candidate_identity"],
+            archive,
+            manifest,
+            inputs["directory"] / "verified-executable",
+        )
+        if origin != expected_origin:
+            _refuse("fresh anonymous assets differ from publisher/root public proof")
+        # These equations follow the fresh public download and inherited extractor above.
+        post = {
+            "phase": "POST_PUBLICATION",
+            "expected_result": "EXPECT_SUCCESS",
+            "observed_result": "SUCCESS",
+            "outcome": "PASS",
+            "release": origin,
+            "executable": verified["executable"],
+            "archive_matches_candidate": verified["archive"]
+            == inputs["candidate"]["preview_manifest"]["contents"]["archive"],
+            "manifest_matches_candidate": verified["manifest"]
+            == inputs["candidate"]["preview_manifest"]["file"],
+            "executable_matches_manifest": verified["executable"]
+            == inputs["candidate"]["preview_manifest"]["contents"]["executable"],
+            "inherited_verifier_equations_pass": True,
+        }
+        if post != {**inputs["pre_publication_verification"], "phase": "POST_PUBLICATION"}:
+            _refuse("fresh public verification equations do not match the published candidate")
+        _closeout_emit(
+            inputs,
+            "records",
+            {
+                "remote-consumer-proof.json": inputs["records"]["remote-consumer-proof.json"],
+                "post-publication-verification.json": _canonical_json_bytes(
+                    post, "public verification"
+                ),
+            },
+        )
+        return
+    if command == "seal-closeout-verification":
+        proof_reference, post = _closeout_read_records(inputs)
+        verification = seal_remote_verification(
+            _closeout_verification_record(inputs, proof_reference, post),
+            current_promotion_context=inputs["context"]["current"],
+            **inputs["binding"],
+        )
+        _closeout_emit(
+            inputs,
+            "verification",
+            {"remote-verification.json": _canonical_json_bytes(verification, "RemoteVerification")},
+        )
+        return
+    verification_reference, verification, proof_reference = _closeout_read_verification(inputs)
+    if command == "seal-closeout-stage":
+        stage = seal_stage_gate_evidence(
+            _closeout_stage_record(inputs, proof_reference), **inputs["binding"]
+        )
+        if _review_timestamp(stage["sealed_at"], "new Stage time") < _review_timestamp(
+            verification["verified_at"], "retained Verification time"
+        ):
+            _refuse("post-publication Stage precedes its retained Verification")
+        _closeout_emit(
+            inputs,
+            "stage",
+            {"post-publication-stage.json": _canonical_json_bytes(stage, "post-publication Stage")},
+        )
+        return
+    stage_reference, _ = _closeout_read_stage(inputs, verification, proof_reference)
+    expected = _closeout_handoff_record(
+        inputs, verification_reference, proof_reference, stage_reference
+    )
+    if command == "seal-closeout-handoff":
+        handoff = seal_program_b_handoff(
+            expected, current_promotion_context=inputs["context"]["current"], **inputs["binding"]
+        )
+        _closeout_emit(
+            inputs,
+            "handoff",
+            {"program-b-handoff.json": _canonical_json_bytes(handoff, "Program B handoff")},
+        )
+        return
+    if command != "verify-closeout-retention":
+        _refuse("closeout command is unsupported")
+    reference, raw = _closeout_uploaded(inputs, "handoff")["program-b-handoff.json"]
+    handoff = seal_program_b_handoff(
+        _load_json_object(raw, "retained Program B handoff"),
+        current_promotion_context=inputs["context"]["current"],
+        **inputs["binding"],
+    )
+    if any(
+        handoff[key] != value for key, value in expected.items() if key != "recorded_at"
+    ) or _review_timestamp(handoff["recorded_at"], "retained handoff time") > datetime.now(
+        timezone.utc
+    ):
+        _refuse("retained handoff differs from the actual non-authorizing closeout graph")
+    _closeout_read_graph(inputs, handoff)
+    _closeout_recheck(inputs)
+    compact_json = json.dumps(reference, ensure_ascii=True, separators=(",", ":"))
+    try:
+        with Path(_environment_value(environment, "GITHUB_STEP_SUMMARY")).open(
+            "a", encoding="utf-8", newline="\n"
+        ) as output:
+            output.write("Retained A1 closeout (not Program B/C authorization):\n\n")
+            output.write(f"program_b_handoff_reference:\n```json\n{compact_json}\n```\n")
+    except OSError:
+        _refuse("GitHub Actions summary file is unavailable")
+    _write_action_outputs({"program_b_handoff_reference": compact_json}, environment)
+
+
 _PROMOTION_BINARY_LIMIT = 256 * 1024 * 1024
 _PROMOTION_JSON_LIMIT = 1024 * 1024
 _PROMOTION_JOB_NAME = "Promote canonical-main preview candidate"
@@ -5226,6 +6147,15 @@ def _promotion_artifact(
     producer_attempt = re.search(
         rf"-{reference['run_id']}-([1-9][0-9]*)(?:-[1-9][0-9]*(?:-[0-3])?)?$", name
     )
+    if (
+        producer_attempt is None
+        and reference == inputs.get("publisher_handoff_reference")
+        and reference["path"] == "publisher-handoff.json"
+    ):
+        producer_attempt = re.fullmatch(
+            rf"stateless-preview-promote-attempt-{reference['run_id']}-([1-9][0-9]*)-[1-9][0-9]*-handoff",
+            name,
+        )
     if producer_attempt is None:
         _refuse("retained artifact name does not identify its producer attempt")
     attempt = int(producer_attempt[1])
@@ -5418,6 +6348,149 @@ _PROMOTION_ADVANCEMENT_STEPS = (
 )
 
 
+def _promotion_revalidate_advancements(
+    inputs: MutableMapping[str, Any],
+    attempt: Mapping[str, Any],
+    advancement: Sequence[Mapping[str, Any]],
+    artifacts: Sequence[Mapping[str, Any]],
+) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any], Mapping[str, Any], list[Any]]:
+    run_id = attempt["workflow_run"]["run_id"]
+    number = attempt["workflow_run"]["run_attempt"]
+    job_id = attempt["authorization"]["execution_policy"]["job_id"]
+    observation_reference = attempt["remote_observation"]
+    classification_reference = attempt["remote_classification"]
+    observation = _resolve_stage_record(observation_reference, inputs["binding"]["record_resolver"])
+    classification = _resolve_stage_record(
+        classification_reference, inputs["binding"]["record_resolver"]
+    )
+    last_results = []
+    suffix = f"{run_id}-{number}-{job_id}"
+    for step_number, step in enumerate(advancement, 1):
+        if step.get("status") == "completed" and step.get("conclusion") == "skipped":
+            if any(later.get("conclusion") != "skipped" for later in advancement[step_number:]):
+                _refuse("predecessor skipped a required advancement boundary")
+            break
+        possible = _promotion_possible_operations(
+            attempt, classification, observation, observation_reference
+        )
+        for possible_result in possible:
+            if possible_result["operation"] == "PUBLISH_RELEASE":
+                fragment_reference = possible_result["target"]["pre_publication_verification"]
+                if _resolve_stage_record(
+                    fragment_reference, inputs["binding"]["record_resolver"]
+                ) != _promotion_fragment(inputs, observation):
+                    _refuse("predecessor publication fragment is unavailable or changed")
+                inputs["predecessor_fragment_reference"] = fragment_reference
+        matches = [
+            item
+            for item in artifacts
+            if item.get("name") == f"stateless-preview-promote-observation-{suffix}-{step_number}"
+        ]
+        if len(matches) > 1:
+            _refuse("predecessor outcome artifacts are ambiguous")
+        if matches:
+            result_reference, result_record = _promotion_member(
+                inputs, matches[0], run_id, f"remote-observation-{step_number}.json"
+            )
+            result_record = seal_remote_observation(
+                result_record,
+                record_resolver=inputs["binding"]["record_resolver"],
+                **{
+                    **_promotion_remote_binding(inputs),
+                    "current_attempt_id": attempt["attempt_id"],
+                },
+            )
+            _validate_operation_results(
+                result_record,
+                inputs["candidate"],
+                attempt["candidate_identity_record"],
+                inputs["binding"]["record_resolver"],
+            )
+            actual = result_record["operation_results"]
+            if len(actual) > len(possible) or any(
+                {
+                    k: result[k]
+                    for k in ("origin_attempt_id", "operation", "intent_sha256", "target")
+                }
+                != {
+                    k: expected[k]
+                    for k in ("origin_attempt_id", "operation", "intent_sha256", "target")
+                }
+                for result, expected in zip(actual, possible)
+            ):
+                _refuse("predecessor outcomes do not bind their original admitted intents")
+            last_results = _thaw(actual)
+            if step.get("status") != "completed" or step.get("conclusion") != "success":
+                # A successful prefix does not prove the remaining writes were never sent.
+                if all(result["outcome"] in ("CONFIRMED", "RECONCILED") for result in actual):
+                    last_results.extend(_thaw(possible[len(actual) :]))
+                break
+            classifications = [
+                item
+                for item in artifacts
+                if item.get("name")
+                == f"stateless-preview-promote-classification-{suffix}-{step_number}"
+            ]
+            if len(classifications) != 1:
+                _refuse("predecessor success lacks its immutable classification")
+            result_classification_reference, sealed_classification = _promotion_member(
+                inputs, classifications[0], run_id, f"remote-classification-{step_number}.json"
+            )
+            derived = classify_remote_observation(
+                result_reference,
+                classification_id=sealed_classification.get("classification_id"),
+                classified_at=sealed_classification.get("classified_at"),
+                current_workflow_run=attempt["workflow_run"],
+                record_resolver=inputs["binding"]["record_resolver"],
+                **{
+                    **_promotion_remote_binding(inputs),
+                    "current_attempt_id": attempt["attempt_id"],
+                },
+            )
+            if (
+                sealed_classification != derived
+                or derived["admission"] != "ADMITTED"
+                or len(actual) != len(possible)
+            ):
+                _refuse("predecessor advancement has no conclusive complete outcome")
+            if inputs.get("publisher_completed_at") is not None and not (
+                max(
+                    _review_timestamp(attempt["recorded_at"], "publisher Attempt time"),
+                    _review_timestamp(classification["classified_at"], "prior classification time"),
+                )
+                <= _review_timestamp(result_record["observed_at"], "publisher advancement time")
+                <= _review_timestamp(derived["classified_at"], "publisher classification time")
+                <= inputs["publisher_completed_at"]
+            ):
+                _refuse("publisher advancement is outside its actual retained chronology")
+            observation_reference, observation, classification = (
+                result_reference,
+                result_record,
+                derived,
+            )
+            classification_reference = result_classification_reference
+        else:
+            last_results = possible
+            break
+    if classification["state"] == "draft_complete":
+        possible = _promotion_possible_operations(
+            attempt, classification, observation, observation_reference
+        )
+        fragment_reference = possible[0]["target"]["pre_publication_verification"]
+        if _resolve_stage_record(
+            fragment_reference, inputs["binding"]["record_resolver"]
+        ) != _promotion_fragment(inputs, observation):
+            _refuse("predecessor pre-publication fragment differs from retained draft")
+        inputs["predecessor_fragment_reference"] = fragment_reference
+    return (
+        observation_reference,
+        classification_reference,
+        observation,
+        classification,
+        last_results,
+    )
+
+
 def _promotion_discover_predecessor(
     inputs: MutableMapping[str, Any],
 ) -> tuple[Mapping[str, Any] | None, list[Any]]:
@@ -5431,6 +6504,10 @@ def _promotion_discover_predecessor(
     if len(current) != 1:
         _refuse("complete predecessor discovery does not contain the current run")
     current_time = _review_timestamp(current[0].get("created_at"), "current run creation")
+    if context.get("history_created_at") is not None and current_time != _review_timestamp(
+        context["history_created_at"], "historical publisher creation"
+    ):
+        _refuse("publisher history anchor differs from its exact admitted attempt")
     predecessors = []
     for run in runs:
         run_id = str(_expect_positive_integer(run.get("id"), "discovered run ID"))
@@ -5583,122 +6660,9 @@ def _promotion_discover_predecessor(
         attempt = seal_promotion_attempt(
             attempt, **inputs["binding"], current_promotion_context=current_context
         )
-        observation_reference = attempt["remote_observation"]
-        observation = _resolve_stage_record(
-            observation_reference, inputs["binding"]["record_resolver"]
+        *_, last_results = _promotion_revalidate_advancements(
+            inputs, attempt, advancement, artifacts
         )
-        classification = _resolve_stage_record(
-            attempt["remote_classification"], inputs["binding"]["record_resolver"]
-        )
-        last_results = []
-        suffix = f"{run_id}-{number}-{job_id}"
-        for step_number, step in enumerate(advancement, 1):
-            if step.get("status") == "completed" and step.get("conclusion") == "skipped":
-                if any(later.get("conclusion") != "skipped" for later in advancement[step_number:]):
-                    _refuse("predecessor skipped a required advancement boundary")
-                break
-            possible = _promotion_possible_operations(
-                attempt, classification, observation, observation_reference
-            )
-            for possible_result in possible:
-                if possible_result["operation"] == "PUBLISH_RELEASE":
-                    fragment_reference = possible_result["target"]["pre_publication_verification"]
-                    if _resolve_stage_record(
-                        fragment_reference, inputs["binding"]["record_resolver"]
-                    ) != _promotion_fragment(inputs, observation):
-                        _refuse("predecessor publication fragment is unavailable or changed")
-                    inputs["predecessor_fragment_reference"] = fragment_reference
-            matches = [
-                item
-                for item in artifacts
-                if item.get("name")
-                == f"stateless-preview-promote-observation-{suffix}-{step_number}"
-            ]
-            if len(matches) > 1:
-                _refuse("predecessor outcome artifacts are ambiguous")
-            if matches:
-                result_reference, result_record = _promotion_member(
-                    inputs, matches[0], run_id, f"remote-observation-{step_number}.json"
-                )
-                result_record = seal_remote_observation(
-                    result_record,
-                    record_resolver=inputs["binding"]["record_resolver"],
-                    **{
-                        **_promotion_remote_binding(inputs),
-                        "current_attempt_id": attempt["attempt_id"],
-                    },
-                )
-                _validate_operation_results(
-                    result_record,
-                    inputs["candidate"],
-                    attempt["candidate_identity_record"],
-                    inputs["binding"]["record_resolver"],
-                )
-                actual = result_record["operation_results"]
-                if len(actual) > len(possible) or any(
-                    {
-                        k: result[k]
-                        for k in ("origin_attempt_id", "operation", "intent_sha256", "target")
-                    }
-                    != {
-                        k: expected[k]
-                        for k in ("origin_attempt_id", "operation", "intent_sha256", "target")
-                    }
-                    for result, expected in zip(actual, possible)
-                ):
-                    _refuse("predecessor outcomes do not bind their original admitted intents")
-                last_results = _thaw(actual)
-                if step.get("status") != "completed" or step.get("conclusion") != "success":
-                    # A successful prefix does not prove the remaining writes were never sent.
-                    if all(result["outcome"] in ("CONFIRMED", "RECONCILED") for result in actual):
-                        last_results.extend(_thaw(possible[len(actual) :]))
-                    break
-                classifications = [
-                    item
-                    for item in artifacts
-                    if item.get("name")
-                    == f"stateless-preview-promote-classification-{suffix}-{step_number}"
-                ]
-                if len(classifications) != 1:
-                    _refuse("predecessor success lacks its immutable classification")
-                _, sealed_classification = _promotion_member(
-                    inputs, classifications[0], run_id, f"remote-classification-{step_number}.json"
-                )
-                derived = classify_remote_observation(
-                    result_reference,
-                    classification_id=sealed_classification.get("classification_id"),
-                    classified_at=sealed_classification.get("classified_at"),
-                    current_workflow_run=attempt["workflow_run"],
-                    record_resolver=inputs["binding"]["record_resolver"],
-                    **{
-                        **_promotion_remote_binding(inputs),
-                        "current_attempt_id": attempt["attempt_id"],
-                    },
-                )
-                if (
-                    sealed_classification != derived
-                    or derived["admission"] != "ADMITTED"
-                    or len(actual) != len(possible)
-                ):
-                    _refuse("predecessor advancement has no conclusive complete outcome")
-                observation_reference, observation, classification = (
-                    result_reference,
-                    result_record,
-                    derived,
-                )
-            else:
-                last_results = possible
-                break
-        if classification["state"] == "draft_complete":
-            possible = _promotion_possible_operations(
-                attempt, classification, observation, observation_reference
-            )
-            fragment_reference = possible[0]["target"]["pre_publication_verification"]
-            if _resolve_stage_record(
-                fragment_reference, inputs["binding"]["record_resolver"]
-            ) != _promotion_fragment(inputs, observation):
-                _refuse("predecessor pre-publication fragment differs from retained draft")
-            inputs["predecessor_fragment_reference"] = fragment_reference
         previous_reference, previous_results = reference, last_results
     return previous_reference, previous_results
 
@@ -6668,30 +7632,97 @@ def _promotion_tag_bytes(attempt: Mapping[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
+def _promotion_git_path(path: Path, mode: int) -> Path:
+    if not path.is_absolute():
+        _refuse("native Git metadata path must be absolute")
+    for current in (*reversed(path.parents), path):
+        metadata = current.lstat()
+        expected = mode if current == path else stat.S_IFDIR
+        if stat.S_IFMT(metadata.st_mode) != expected or getattr(
+            metadata, "st_file_attributes", 0
+        ) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+            _refuse("native Git metadata path is redirected or has the wrong type")
+    return path.resolve(strict=True)
+
+
+def _promotion_source_objects(root: Path, child: Mapping[str, str]) -> Path:
+    code, raw = _promotion_process(
+        root,
+        child,
+        [
+            "git",
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--absolute-git-dir",
+            "--git-common-dir",
+        ],
+    )
+    paths = raw.decode("utf-8").splitlines()
+    if code != 0 or len(paths) != 3:
+        _refuse("native Git source metadata is unavailable")
+    native_root, git_dir, common = (
+        _promotion_git_path(Path(value), stat.S_IFDIR) for value in paths
+    )
+    if native_root != root:
+        _refuse("native Git source metadata belongs to another checkout")
+
+    def metadata_target(path: Path, prefix: str = "") -> Path:
+        path = _promotion_git_path(path, stat.S_IFREG)
+        with path.open("rb") as source:
+            raw = source.read(32769)
+        text = raw.decode("utf-8").rstrip("\r\n")
+        if (
+            len(raw) > 32768
+            or not text.startswith(prefix)
+            or any(character in text for character in ("\0", "\r", "\n"))
+            or not text[len(prefix) :]
+        ):
+            _refuse("native Git source metadata pointer is invalid")
+        return _promotion_git_path(path.parent / text[len(prefix) :], stat.S_IFDIR)
+
+    marker = root / ".git"
+    expected_git = (
+        _promotion_git_path(marker, stat.S_IFDIR)
+        if marker.is_dir()
+        else metadata_target(marker, "gitdir: ")
+    )
+    try:
+        (git_dir / "commondir").lstat()
+    except FileNotFoundError:
+        expected_common = git_dir
+    else:
+        expected_common = metadata_target(git_dir / "commondir")
+    if git_dir != expected_git or common != expected_common:
+        _refuse("native Git object store differs from the checkout metadata")
+    objects = _promotion_git_path(common / "objects", stat.S_IFDIR)
+    for name in ("info", "pack"):
+        _promotion_git_path(objects / name, stat.S_IFDIR)
+    for name in ("alternates", "http-alternates"):
+        try:
+            (objects / "info" / name).lstat()
+        except FileNotFoundError:
+            continue
+        _refuse("native Git source object store must not redirect to other stores")
+    return objects
+
+
 def _promotion_create_tag(inputs: Mapping[str, Any], attempt: Mapping[str, Any], step: int) -> str:
     candidate = inputs["candidate"]
     raw = _promotion_tag_bytes(attempt)
+    root = _promotion_git_path(Path(inputs["root"]), stat.S_IFDIR)
+    temporary = _promotion_git_path(
+        Path(_environment_value(inputs["environment"], "RUNNER_TEMP")), stat.S_IFDIR
+    )
+    if _path_within(temporary, root):
+        _refuse("private Git transport must be outside the source checkout")
     child = _promotion_environment(inputs["environment"])
     token = child["GITHUB_TOKEN"]
     repository = candidate["source"]["repository"]
     header = "AUTHORIZATION: basic " + base64.b64encode(f"x-access-token:{token}".encode()).decode(
         "ascii"
     )
-    code, local_config = _promotion_process(
-        inputs["root"], child, ["git", "config", "--null", "--list", "--no-includes"]
-    )
-    if code != 0:
-        _refuse("native Git configuration cannot be inspected safely")
-    for setting in local_config.split(b"\0"):
-        key = setting.partition(b"\n")[0].decode("utf-8", errors="strict").lower()
-        if (
-            key.startswith(("http.", "credential.", "url.", "include.", "includeif."))
-            or key in ("core.hookspath", "core.sshcommand", "core.gitproxy")
-            or (key.startswith("remote.") and key.endswith((".pushurl", ".proxy", ".mirror")))
-        ):
-            _refuse(
-                "native Git configuration contains an overriding transport/authentication setting"
-            )
+    source_objects = _promotion_source_objects(root, child)
     settings = [
         ("credential.helper", ""),
         ("credential.interactive", "false"),
@@ -6707,64 +7738,81 @@ def _promotion_create_tag(inputs: Mapping[str, Any], attempt: Mapping[str, Any],
     child["GIT_CONFIG_COUNT"] = str(len(settings))
     for index, (key, value) in enumerate(settings):
         child[f"GIT_CONFIG_KEY_{index}"], child[f"GIT_CONFIG_VALUE_{index}"] = key, value
-    code, result = _promotion_process(inputs["root"], child, ["git", "mktag"], data=raw)
-    if code != 0:
-        _refuse("native Git could not construct the exact annotated tag")
-    oid = _expect_commit(result.decode("ascii").strip(), "native annotated tag OID")
-    expected = hashlib.sha1(b"tag " + str(len(raw)).encode("ascii") + b"\0" + raw).hexdigest()
-    if oid != expected:
-        _refuse("native Git tag OID does not identify the exact approved bytes")
-    result_record = _promotion_intent(
-        inputs, step, "tag", {"tag": candidate["destination"]["tag"], "object_id": oid}
-    )
-    tag = candidate["destination"]["tag"]
-    code, result = _promotion_process(
-        inputs["root"],
-        child,
-        [
-            "git",
-            "push",
-            "--porcelain",
-            "--no-follow-tags",
-            f"--force-with-lease=refs/tags/{tag}:",
-            f"https://github.com/{repository}.git",
-            f"{oid}:refs/tags/{tag}",
-        ],
-    )
-    lines = [
-        line.split("\t")
-        for line in result.decode("utf-8", errors="replace").splitlines()
-        if "\t" in line
-    ]
-    inputs["diagnostics"].append(
-        {
-            "operation": "GIT_CREATE_TAG",
-            "returncode": code,
-            "porcelain_flags": [
-                line[0] for line in lines if line[0] in ("*", "!", "=", "+", "-", " ")
+    with tempfile.TemporaryDirectory(prefix="stateless-preview-git-", dir=temporary) as directory:
+        private = _promotion_git_path(Path(directory), stat.S_IFDIR)
+        code, _ = _promotion_process(
+            private, child, ["git", "init", "--bare", "--template=", "--object-format=sha1"]
+        )
+        if code != 0:
+            _refuse("native Git could not initialize the private tag object store")
+        # Only object bytes are shared; checkout config, refs and hooks stay outside this Git.
+        _write_bytes_once(
+            private / "objects" / "info" / "alternates",
+            (source_objects.as_posix() + "\n").encode("utf-8"),
+            "private Git source object reference",
+        )
+        commit = _expect_commit(candidate["source"]["commit"], "native Git source commit")
+        code, result = _promotion_process(private, child, ["git", "cat-file", "-t", commit])
+        if code != 0 or result.strip() != b"commit":
+            _refuse("private Git cannot resolve the exact source commit")
+        code, result = _promotion_process(private, child, ["git", "mktag"], data=raw)
+        if code != 0:
+            _refuse("native Git could not construct the exact annotated tag")
+        oid = _expect_commit(result.decode("ascii").strip(), "native annotated tag OID")
+        expected = hashlib.sha1(b"tag " + str(len(raw)).encode("ascii") + b"\0" + raw).hexdigest()
+        if oid != expected:
+            _refuse("native Git tag OID does not identify the exact approved bytes")
+        result_record = _promotion_intent(
+            inputs, step, "tag", {"tag": candidate["destination"]["tag"], "object_id": oid}
+        )
+        tag = candidate["destination"]["tag"]
+        code, result = _promotion_process(
+            private,
+            child,
+            [
+                "git",
+                "push",
+                "--porcelain",
+                "--no-follow-tags",
+                f"--force-with-lease=refs/tags/{tag}:",
+                f"https://github.com/{repository}.git",
+                f"{oid}:refs/tags/{tag}",
             ],
-            "known_object_id": oid,
+        )
+        lines = [
+            line.split("\t")
+            for line in result.decode("utf-8", errors="replace").splitlines()
+            if "\t" in line
+        ]
+        inputs["diagnostics"].append(
+            {
+                "operation": "GIT_CREATE_TAG",
+                "returncode": code,
+                "porcelain_flags": [
+                    line[0] for line in lines if line[0] in ("*", "!", "=", "+", "-", " ")
+                ],
+                "known_object_id": oid,
+            }
+        )
+        kind = "UNKNOWN"
+        if (
+            len(lines) == 1
+            and lines[0][0] == "*"
+            and lines[0][1] == f"{oid}:refs/tags/{tag}"
+            and code == 0
+        ):
+            kind = "ACKNOWLEDGED"
+        elif any(line[0] == "!" for line in lines):
+            kind = "DENIED"
+        elif lines:
+            kind = "CONFLICT"
+        result_record["response"] = {
+            "kind": kind,
+            "http_status": None,
+            "git_returncode": code,
+            "resource_id": None,
         }
-    )
-    kind = "UNKNOWN"
-    if (
-        len(lines) == 1
-        and lines[0][0] == "*"
-        and lines[0][1] == f"{oid}:refs/tags/{tag}"
-        and code == 0
-    ):
-        kind = "ACKNOWLEDGED"
-    elif any(line[0] == "!" for line in lines):
-        kind = "DENIED"
-    elif lines:
-        kind = "CONFLICT"
-    result_record["response"] = {
-        "kind": kind,
-        "http_status": None,
-        "git_returncode": code,
-        "resource_id": None,
-    }
-    return oid
+        return oid
 
 
 def _promotion_write_json(
@@ -7197,6 +8245,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "seal-evidence-stage",
         "seal-evidence-decision",
         "verify-evidence-retention",
+        *_CLOSEOUT_COMMANDS,
         "admit-promote",
         "observe-promote",
         "seal-promote-attempt",
@@ -7231,6 +8280,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             _seal_evidence_decision(Path.cwd(), os.environ, event)
         elif arguments.command == "verify-evidence-retention":
             _verify_evidence_retention(Path.cwd(), os.environ, event)
+        elif arguments.command in _CLOSEOUT_COMMANDS:
+            _run_closeout(Path.cwd(), os.environ, event, arguments.command)
         elif arguments.command in (
             "admit-promote",
             "observe-promote",
@@ -7303,4 +8354,5 @@ __all__ = [
 
 
 if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     raise SystemExit(main())

@@ -16,6 +16,7 @@ All durable records use closed fields only: structural GitHub references, bounde
 | --- | --- | --- |
 | `build` | `preview_version`, `preview_tag`, `retention_days` | Evidence and promote fields absent or empty. A missing `mode` preserves the legacy three-field build request; an explicitly empty or unknown mode refuses. |
 | `evidence` / `retain` | `evidence_request` | Build and promote fields absent or empty; retention belongs inside the request. |
+| `evidence` / `closeout` | `evidence_request` | Build and promote fields absent or empty; retention is derived from Candidate, never supplied by the request. |
 | `promote` | `preview_tag`, `promote_request` | Version, retention and evidence fields absent or empty. Retention comes from Candidate; the tag must equal its destination. |
 
 Each helper invocation closes the actual event inputs and checks command/mode compatibility. It derives source, repository, workflow/run identity, and receipt locations from trusted Actions, API, and Git facts. Unknown fields, unsupported operations, mixed-mode fields, missing required values, or more than 65,535 characters in the full escaped input object refuse. No request JSON is interpolated into a shell command or supplied as a path, URL, or script.
@@ -25,7 +26,8 @@ The job routes deliberately include invalid-value fallbacks rather than allowing
 | Job ID / exact display name | `if` expression | Permissions |
 | --- | --- | --- |
 | `build` / `Build canonical-main preview candidate` | `inputs.mode != 'evidence' && inputs.mode != 'promote'` | `contents: read`, `actions: read`, `pull-requests: read` |
-| `retain_evidence` / `Retain canonical-main preview evidence` | `inputs.mode == 'evidence'` | `contents: read`, `actions: read` |
+| `retain_evidence` / `Retain canonical-main preview evidence` | `inputs.mode == 'evidence' && inputs.evidence_operation != 'closeout'` | `contents: read`, `actions: read` |
+| `retain_closeout` / `Retain canonical-main preview closeout` | `inputs.mode == 'evidence' && inputs.evidence_operation == 'closeout'` | `contents: read`, `actions: read` |
 | `promote` / `Promote canonical-main preview candidate` | `inputs.mode == 'promote'` | `contents: write`, `actions: read` |
 
 Keep top-level `permissions: {}` and promote permissions exactly `actions: read` / `contents: write`. Unspecified configurable permissions are none; this does not claim absence of implicit metadata access or artifact-runtime credentials. Retention uses the live job's artifact credentials through `actions/upload-artifact@v7`, not a PAT or a contents grant. Promote uses job-scoped literal `GITHUB_TOKEN: ${{ github.token }}`, with no step token override. Reviewed configuration is not an observed effective-grant map; GitHub policy, rulesets, expiry and endpoint requirements can still refuse a request. `contents: write` is repository-wide; the reviewed publisher's exact-object guards impose the narrower approved tag/asset boundary.
@@ -113,6 +115,8 @@ The accepted authorization amendment replaces the former agent-selected running-
 
 Root must finish integrated source verification and canonical-main integration before freezing successor SHA S. Then use the existing canonical build at S for new payload/manifest/Candidate/Catalog, complete retained downloaded-candidate consumer/denial/EOF/unchanged-Python proof, S-bound seven-lens and distinct independent review, passing pre-decision Stage and new explicit Root S4. Policy changes here affect the Catalog; even identical executable bytes would not preserve the source/build/manifest/catalog tuple. Derive a noncolliding preview ordinal from current inventory. Promotion never rebuilds. Internal mechanism selection needs no operator click; Root's exact-candidate decision remains separate and mandatory.
 
+The closeout adapter and any publisher repair must enter that new canonical S before its first successful publication. Earlier Candidate/build/review/Decision receipts, including source `526df406fb3225a4d23686ac4de920b8067698d2`, remain historical-only; a successor cannot borrow their approval.
+
 Original commit `5f96014b930e269752b47e878f45f8d220b6bfc7`, build `38960876498/1` and its retained APPROVE remain unchanged and original-only. No newer workflow may check out that source to borrow its approval. Source tests and simulated publication cannot close actual public consumer acceptance.
 
 ### Historical permission experiment — superseded admission requirement
@@ -183,11 +187,74 @@ Each mutation is single-send. Observation 2.0 `operation_results` contains at mo
 
 Initial `published_complete` recovery reaches finish at step 0 without any mutation. If no genuine predecessor fragment is available, the handoff's `pre_publication_verification` is null; a new published-byte download never fabricates an earlier PASS. Root must resolve actual predecessor evidence before closing Remote Verification. Missing evidence leaves remote closeout incomplete, not permission to republish or undo the release. T027–T029/T034–T035 still own fresh public downloads into a new directory, complete consumer/denial/EOF/Python rollback proof, Remote Verification, post-publication Stage and the separate non-authorizing Program B Handoff. Publisher caches and this locator file cannot replace those records.
 
-## Post-publication closure — source APIs are not live evidence
+## Post-publication closeout retention
 
-After the prerelease is public, download the public archive and manifest into a new directory. Create the Remote Verification and remote-release Artifact Consumer Proof records. Then seal a passing `post-publication` Stage Gate Evidence record.
+The existing workflow accepts `mode=evidence`, `evidence_operation=closeout` through `retain_closeout` / `Retain canonical-main preview closeout`. The old retain job intentionally admits every other evidence operation to its existing fail-closed decoder; an unknown operation must not yield an all-skipped success. Closeout is not another publisher, Decision creator, consumer runner, or Program B/C entry point.
 
-A Program B Handoff requires passing evidence for all three stages, `published_complete`, matching remote verification, and matching remote proof. The handoff proves A1 only. It does not start Program B or Program C.
+### Closed request and original remote proof
+
+`evidence_request` contains exactly these three fields:
+
+| Field | Required value |
+| --- | --- |
+| `publisher_handoff_reference` | Real compact five-field Actions reference whose `path` is `publisher-handoff.json`. |
+| `bundle_base64` | Canonical base64 ZIP containing exactly `remote-consumer-proof.json`, preserving the original remote-command receipt bytes. |
+| `record_sha256` | Object with exactly `remote-consumer-proof.json` mapped to its original lowercase raw-file SHA-256. |
+
+The actual `remote` command in the [quickstart](../quickstart.md#run-public-remote-proof) runs outside CI on Windows x64 after publication. Root supplies its original `remote_release` PASS receipt, complete consumer/denial matrix, clean EOF and unchanged installed-Python rollback. Closeout checks that its timestamp is no earlier than the final published Observation and not in the future. CI retains that receipt without claiming to have executed its consumer journey or Python rollback. It separately downloads fresh anonymous public archive/manifest bytes with `download_public_release`, checks them and the extracted executable with `verify_and_extract_retained_artifact`, and only then creates the genuine `POST_PUBLICATION` fragment. Publisher caches or retained payload bytes are not public-download substitutes.
+
+`preview_version`, `preview_tag`, `retention_days` and `promote_request` are absent or empty. No caller context, candidate body, actor, timestamp, execution path/URL, future artifact ID, ready-made Stage/Verification/Handoff or additional input is accepted. Reuse the closed byte-ingress checks: 65,535 characters for the full escaped dispatch object, 60,000 base64 characters, 45,000 ZIP bytes, 128 KiB per original record, strict JSON, base64, member/path/duplicate/metadata/CRC/EOF/hash checks. The source-owned closeout route selects its one filename; the public retain decoder still accepts exactly its original three files. No managed-record schema changes.
+
+### Independently bind publisher P and current closeout Q
+
+Q is the real current `in_progress` closeout run/attempt and unique named job. Its event, repository, both initiators, Actions/API identity, exact checkout, fetched/live main and workflow SHA are independently admitted. Both initiators must match the Decision's authorized dispatcher. The job checks out `github.sha` with `actions/checkout@v6`, `fetch-depth: 0`, `persist-credentials: false`, fetches live main, uses `actions/setup-python@v6` with Python 3.12 and job-scoped `GITHUB_TOKEN: ${{ github.token }}`. There is no SDK setup, build, product installation, credential fallback or CI Python rollback.
+
+P is the distinct actual `completed/success` publisher. Its handoff is only a locator: exact-attempt API, full bounded jobs/artifacts discovery, successful finish/handoff upload steps, original artifacts/raw bytes and the tracked workflow blob at S establish P's provenance. Its artifact name is `stateless-preview-promote-attempt-{P_run}-{P_attempt}-{P_job}-handoff`; name components guide discovery but prove nothing by themselves. Candidate/Catalog/Decision and all nested original references must resolve, including a genuine matching `PRE_PUBLICATION` fragment; null, missing or reconstructed fragments refuse.
+
+Reconstruct P's run/attempt/job, actors, tracked execution policy and complete predecessor history independently, with discovery anchored before P, not Q. Pass that P context as the existing pure sealers' `current_promotion_context`; never copy trusted context from the records, spoof Q as P, or select a completed publisher as the live current job. Attempt/Observation/Classification and `promotion_attempt_id` retain P; new closeout artifact references name Q. Candidate source/build, Catalog source, P/Q workflow SHAs, checkout, fetched main and fresh GitHub main target all equal S at `refs/heads/main`. This narrow historical readback does not weaken live publisher admission or grant release-write authority. DENIED remains denied; UNKNOWN never triggers resend; closeout performs no release mutations.
+
+### Fixed CLI, four upload barriers and final readback
+
+All five commands take zero additional arguments and are admitted only for closeout:
+
+```text
+python scripts/stateless_preview_artifact.py admit-closeout
+R0 upload: remote-consumer-proof.json + post-publication-verification.json
+python scripts/stateless_preview_artifact.py seal-closeout-verification
+R1 upload: remote-verification.json
+python scripts/stateless_preview_artifact.py seal-closeout-stage
+R2 upload: post-publication-stage.json
+python scripts/stateless_preview_artifact.py seal-closeout-handoff
+R3 upload: program-b-handoff.json
+python scripts/stateless_preview_artifact.py verify-closeout-retention
+```
+
+The command steps and their exact output keys are:
+
+| Step ID / command | Output keys |
+| --- | --- |
+| `admit` / `admit-closeout` | `remote_consumer_proof_path`, `post_publication_verification_path`, `closeout_records_artifact_name`, `retention_days` |
+| `verification` / `seal-closeout-verification` | `remote_verification_path`, `closeout_verification_artifact_name`, `retention_days` |
+| `stage` / `seal-closeout-stage` | `post_publication_stage_path`, `closeout_stage_artifact_name`, `retention_days` |
+| `handoff` / `seal-closeout-handoff` | `program_b_handoff_path`, `closeout_handoff_artifact_name`, `retention_days` |
+| `verify` / `verify-closeout-retention` | `program_b_handoff_reference` |
+
+The helper owns every output path below its current `RUNNER_TEMP` namespace. The four uploads enumerate only the files above and use `actions/upload-artifact@v7`, `archive: true`, `overwrite: false`, `if-no-files-found: error`, and Candidate-derived validated 1–90-day retention. No scratch/download/log glob or extra public asset is uploaded.
+
+| Upload step / object | Artifact name | Environment prefix, with `_ID` and `_DIGEST` suffixes |
+| --- | --- | --- |
+| `upload_records` / R0 | `stateless-preview-closeout-records-{Q_run}-{Q_attempt}-{Q_job}` | `A1_CLOSEOUT_RECORDS_ARTIFACT` |
+| `upload_verification` / R1 | `stateless-preview-closeout-verification-{Q_run}-{Q_attempt}-{Q_job}` | `A1_CLOSEOUT_VERIFICATION_ARTIFACT` |
+| `upload_stage` / R2 | `stateless-preview-closeout-stage-{Q_run}-{Q_attempt}-{Q_job}` | `A1_CLOSEOUT_STAGE_ARTIFACT` |
+| `upload_handoff` / R3 | `stateless-preview-closeout-handoff-{Q_run}-{Q_attempt}-{Q_job}` | `A1_CLOSEOUT_HANDOFF_ARTIFACT` |
+
+Each consuming step receives all preceding real upload ID/digest pairs. YAML removes only the exact leading `sha256:`; the helper still requires 64 lowercase hex digits. Raw JSON, ZIP-container, ordered payload-pair and individual archive/manifest/executable hashes remain distinct. A new house `ArtifactDownloader` at every upload boundary independently checks actual metadata, repository/run/source/name/expiry, container bytes and original-member hashes. A local staging map, invented ID or artifact name cannot stand in for retained bytes.
+
+R0 readback precedes `seal_remote_verification`: R1 binds the original P references, genuine pre-publication fragment, fresh R0 post-publication fragment and R0 remote-proof reference. R1 and dependencies are read back before `seal_stage_gate_evidence` creates R2 with the exact ordered post-publication Catalog subset, currently the one `remote-downloaded-consumer-proof` reference from R0. R2 has no invented Verification-reference field; its dependency on R1 is adapter order, not a new schema. R2/R1 and the predecessor graph are read back before `seal_program_b_handoff` creates R3 with all three passing Stages and matching published proof. These existing sealers, schemas and signatures remain unchanged and pure.
+
+Final verification downloads R3 into a new directory, recursively resolves every reference, revalidates the existing sealers, and rechecks Q/live-main equality. Only after success does it emit the real compact `program_b_handoff_reference` to action output and `GITHUB_STEP_SUMMARY`. Every durable reference has exactly `repository`, `run_id`, `artifact_id`, `path`, `sha256`; no future-ID cycle, self-reference or extra closeout artifact is needed. The handoff keeps `completion_scope: A1_OPT_IN_PREVIEW_COMPLETE` and both Program B/C authorization-required flags true. It proves A1 only and grants no authority.
+
+A failure stops dependent steps without delete, overwrite, automatic retry, republish or rollback of public state. Preserve uploaded artifacts; their dependencies still expire at their original times, so the chain lasts no longer than its earliest expiry. A separately admitted later retention attempt has its own Q and must still satisfy canonical-main equality with S. Source fixtures or a green job alone do not complete actual A1 closeout: Root must obtain actual publication, original public consumer/Python-rollback proof and independent readback of all four real uploads.
 
 ## Test the workflow contract
 
