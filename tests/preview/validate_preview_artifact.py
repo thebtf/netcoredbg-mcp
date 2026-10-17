@@ -1,11 +1,11 @@
-"""Seal one A1 retained-artifact proof from downloaded GitHub Actions bytes only.
+"""Seal A1 retained-artifact or fresh public-release consumer proof.
 
-Candidate mode accepts a closed structural-reference bundle, downloads its Candidate
-Identity Record, archive, raw manifest, and Release Gate Catalog into a fresh local
-directory, verifies every declared hash before extraction, exercises the inherited
-consumer matrix, invokes the unchanged Python rollback oracle, and writes exactly
-one canonical receipt. It never accepts a source-tree executable, a local rebuild,
-or a caller-supplied candidate JSON as proof authority.
+Both modes resolve Candidate Identity and Release Gate Catalog metadata from a
+closed Actions reference bundle. Candidate mode downloads the retained payload;
+remote mode downloads payload bytes only from the exact public GitHub prerelease.
+Both verify the archive, raw manifest, and extracted executable, run the complete
+consumer matrix and unchanged Python rollback, then write one canonical receipt.
+Neither accepts a source-tree executable, rebuild, or caller-supplied candidate.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from typing import Any, NoReturn
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts import stateless_preview_artifact as _artifact
+from scripts.stateless_preview_public_release import download_public_release
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _EXECUTABLE_NAME = "netcoredbg-mcp-stateless-preview.exe"
@@ -719,6 +720,10 @@ def _write_receipt_once(path_value: str | Path, receipt: Mapping[str, Any]) -> N
 
 
 def run_candidate(arguments: argparse.Namespace) -> Mapping[str, Any]:
+    remote = arguments.command == "remote"
+    receipt_path = Path(arguments.receipt_output)
+    if receipt_path.exists() or receipt_path.is_symlink():
+        _refuse("consumer proof receipt already exists")
     references = CandidateReferences.load(arguments.references)
     fixture_root = _ordinary_directory(arguments.fixture_root, "fixture root")
     download_root = _ordinary_directory(arguments.download_root, "download root")
@@ -741,20 +746,39 @@ def run_candidate(arguments: argparse.Namespace) -> Mapping[str, Any]:
         _require_candidate_file_reference(
             references.manifest, manifest_binding["manifest_reference"], "manifest"
         )
-        archive_path, manifest_path = downloader.download_payload(
-            references.archive,
-            references.manifest,
-            candidate["build"]["artifact"]["sha256"],
-        )
+        if remote:
+            _artifact._verified_raw_candidate(
+                validated_identity, identity_bytes, references.candidate_identity.as_mapping()
+            )
+        else:
+            archive_path, manifest_path = downloader.download_payload(
+                references.archive,
+                references.manifest,
+                candidate["build"]["artifact"]["sha256"],
+            )
         catalog_path = downloader.download_file(references.release_gate_catalog)
-        if archive_path.parent != manifest_path.parent:
-            _refuse("archive and manifest were not retained in one fresh payload directory")
         catalog_bytes = _read_regular_bytes(catalog_path, "downloaded release gate catalog")
         if _sha256_bytes(catalog_bytes) != references.release_gate_catalog.sha256:
             _refuse("downloaded release gate catalog hash is wrong")
         catalog = _artifact._load_retained_json_object(
             catalog_bytes, "downloaded release gate catalog"
         )
+        if remote:
+            _artifact._validate_release_gate_catalog_for_consumer_proof(catalog, candidate)
+            archive_path, manifest_path, download_origin = download_public_release(
+                candidate, arguments.release_id, fresh / "public-assets"
+            )
+        else:
+            download_origin = {
+                "repository": candidate["build"]["repository"],
+                "workflow_path": ".github/workflows/stateless-preview.yml",
+                "run_id": candidate["build"]["run_id"],
+                "artifact": candidate["build"]["artifact"],
+                "archive_path": manifest_binding["archive_reference"]["path"],
+                "manifest_path": manifest_binding["manifest_reference"]["path"],
+            }
+        if archive_path.parent != manifest_path.parent:
+            _refuse("archive and manifest were not downloaded into one fresh payload directory")
         verified = verify_and_extract_retained_artifact(
             validated_identity,
             archive_path,
@@ -792,15 +816,8 @@ def run_candidate(arguments: argparse.Namespace) -> Mapping[str, Any]:
             "receipt_id": arguments.receipt_id,
             "candidate_identity_record": references.candidate_identity.as_mapping(),
             "candidate": candidate,
-            "proof_stage": "retained_artifact",
-            "download_origin": {
-                "repository": candidate["build"]["repository"],
-                "workflow_path": ".github/workflows/stateless-preview.yml",
-                "run_id": candidate["build"]["run_id"],
-                "artifact": candidate["build"]["artifact"],
-                "archive_path": manifest_binding["archive_reference"]["path"],
-                "manifest_path": manifest_binding["manifest_reference"]["path"],
-            },
+            "proof_stage": "remote_release" if remote else "retained_artifact",
+            "download_origin": download_origin,
             "input_identity_results": {
                 "archive": verified["archive"],
                 "manifest": verified["manifest"],
@@ -838,13 +855,18 @@ def run_candidate(arguments: argparse.Namespace) -> Mapping[str, Any]:
             "outcome": "PASS",
             "recorded_at": arguments.recorded_at,
         }
-        sealed = seal_artifact_consumer_proof(
-            receipt,
-            candidate_identity=validated_identity,
-            candidate_identity_bytes=identity_bytes,
-            candidate_identity_reference=references.candidate_identity.as_mapping(),
-            release_gate_catalog=catalog,
-        )
+        binding = {
+            "candidate_identity": validated_identity,
+            "candidate_identity_bytes": identity_bytes,
+            "candidate_identity_reference": references.candidate_identity.as_mapping(),
+            "release_gate_catalog": catalog,
+        }
+        if remote:
+            sealed = _artifact._freeze(
+                _artifact._validate_stage_consumer_proof(receipt, remote=True, **binding)
+            )
+        else:
+            sealed = seal_artifact_consumer_proof(receipt, **binding)
     _write_receipt_once(arguments.receipt_output, sealed)
     return sealed
 
@@ -852,22 +874,28 @@ def run_candidate(arguments: argparse.Namespace) -> Mapping[str, Any]:
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    candidate = commands.add_parser("candidate", help="prove one downloaded retained candidate")
-    candidate.add_argument("--references", required=True)
-    candidate.add_argument("--download-root", required=True)
-    candidate.add_argument("--fixture-root", required=True)
-    candidate.add_argument("--receipt-output", required=True)
-    candidate.add_argument("--receipt-id", required=True)
-    candidate.add_argument("--recorded-at", required=True)
-    candidate.add_argument("--python-rollback-command", required=True)
-    candidate.add_argument("--python-rollback-argument", action="append", default=[])
+    for command, description in (
+        ("candidate", "prove one downloaded retained candidate"),
+        ("remote", "prove freshly downloaded public prerelease assets"),
+    ):
+        consumer = commands.add_parser(command, help=description)
+        consumer.add_argument("--references", required=True)
+        consumer.add_argument("--download-root", required=True)
+        consumer.add_argument("--fixture-root", required=True)
+        consumer.add_argument("--receipt-output", required=True)
+        consumer.add_argument("--receipt-id", required=True)
+        consumer.add_argument("--recorded-at", required=True)
+        consumer.add_argument("--python-rollback-command", required=True)
+        consumer.add_argument("--python-rollback-argument", action="append", default=[])
+        if command == "remote":
+            consumer.add_argument("--release-id", required=True, type=int)
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = parse_args(argv)
     try:
-        if arguments.command == "candidate":
+        if arguments.command in ("candidate", "remote"):
             run_candidate(arguments)
         else:
             raise AssertionError("unreachable")

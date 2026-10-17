@@ -233,7 +233,7 @@ The Promotion Decision is the candidate-approval record defined by [promotion-de
 
 ## Promotion Attempt
 
-A Promotion Attempt 2.0 is the fresh execution-admission record defined by [promotion-attempt.schema.json](contracts/promotion-attempt.schema.json). The pure `seal_promotion_attempt` library revalidates one `APPROVE` Decision against independent current facts before any remote mutation. The workflow's complete publisher source now calls that seam through immutable upload/readback boundaries; source implementation is not live authorization. Permission capability remains `UNKNOWN`, and each actual promote still requires its own qualified same-job report.
+A Promotion Attempt 3.0 is the fresh execution-admission record defined by [promotion-attempt.schema.json](contracts/promotion-attempt.schema.json). `seal_promotion_attempt` revalidates one `APPROVE` Decision against independent current facts and immutable retained evidence before any remote mutation. Its admission PASS identifies the reviewed execution policy, not observed effective grants or successful server authorization. GitHub enforces each actual request; Observation 2.0 records the response and exact resulting state.
 
 ### Fields
 
@@ -244,25 +244,26 @@ A Promotion Attempt 2.0 is the fresh execution-admission record defined by [prom
 | `authorization.decision_authorization` | The exact resolved Decision's `decision_author` and `authorized_dispatcher` template. |
 | `authorization.current_github_actor` and `authorization.current_github_triggering_actor` | Separate current actor/rerun initiator ID/login maps; both must equal the Decision's dispatcher, who may differ from its author. |
 | `workflow_run` | The unchanged eight-field canonical promote run context: repository, workflow path, mode, event, run ID/attempt, ref, and commit. |
-| `authorization.permission_readback` | Raw report reference, run attempt, positive decimal-string job ID, fixed `job_key: promote`, workflow SHA, exact `actions: read`/`contents: write` projection, and execution-token provenance. |
-| `authorization.permission_readback.execution_token` | `source: github.token`, `kind: GITHUB_APP_INSTALLATION_TOKEN`, `identity_observation: UNOBSERVED`, and required `app_id: null`/`installation_id: null`. Neither initiator is the token principal. |
+| `authorization.execution_policy` | Model `GITHUB_JOB_TOKEN_SERVER_ENFORCED`, current positive run attempt/job ID, fixed `job_key: promote`, exact `workflow_sha` and SHA-256 of its tracked workflow bytes. No permission-report reference or grant projection. |
+| `authorization.execution_policy.execution_token` | `source: github.token`, `kind: GITHUB_APP_INSTALLATION_TOKEN`, `identity_observation: UNOBSERVED`, and required `app_id: null`/`installation_id: null`. Neither initiator is the token principal. |
 | `pre_decision_stage_evidence` and `pre_publication_stage_evidence` | The approved pre-decision set and the newly validated pre-publication set. |
 | `remote_observation` and `remote_classification` | Fresh current-attempt records used to select the only legal remote action. |
+| `predecessor_attempt` | Null only after complete discovery establishes no prior admitted canonical attempt for this candidate/destination; otherwise the compact immutable predecessor Attempt reference. |
 
 ### Validation rules
 
-- The closed independent current context supplies `current_attempt_id`, `workflow_run`, `job_id`, `job_key`, `workflow_sha`, `checkout_head`, `origin_main_target`, and both actor maps. It must come from trusted runtime admission, not the Attempt or dispatch request. Candidate source/build commit, main target, checkout HEAD, workflow commit, and workflow SHA must agree.
-- Resolve and hash raw Candidate/Catalog/Decision/Stages/report/remote records. Reuse the existing Decision and Stage sealers; require `APPROVE`, exact Decision authorization and pre-decision receipt, plus a PASS pre-publication record even for the empty subset. Attempt 1.0, `authenticated_actor`, extra fields, and post-publication proof refuse without a shim.
-- The referenced report must have the closed qualified-report shape, native log hash/source, ordered before/log/after HTTP evidence, exact numeric run/attempt/job and source/workflow SHA binding, fixed `Promote canonical-main preview candidate` name, and current initiator logins. Probe reports, missing grants, `INSUFFICIENT`/`UNAVAILABLE`, and declarations are not permission evidence. Preserve the complete explicit grants in the report; the Attempt stores only the verified two-right projection.
-- Chronology is pre-decision seal ≤ Decision ≤ pre-publication seal ≤ permission start ≤ permission finish ≤ observation ≤ classification ≤ Attempt, before candidate retention expiry. Remote records must bind the independently supplied fresh attempt ID/current run; re-derive the whole classification and require `ADMITTED`, never collision. This does not itself establish live readback truth.
-- The same dispatcher may retry only with a new independently captured attempt and fresh records. Fixed `github.token` provenance comes from trusted workflow wiring, not token introspection; App/installation IDs remain unobserved/null. An Attempt cannot start Program B/C or perform an effect.
-- The complete workflow retains Stage/report/O0 together as P0, then C0, then A, using only actual post-upload IDs/digests. Protected actions independently read back A first. A remains immutable with its initial O0/C0; later O_N/C_N records are separate retained evidence for the same attempt.
+- The closed independent current context supplies `current_attempt_id`, `workflow_run`, `job_id`, `job_key`, `workflow_sha`, `checkout_head`, `origin_main_target`, both actor maps, `predecessor_attempt` and `predecessor_operation_results`. Trusted admission derives predecessor fields through complete bounded canonical workflow run/attempt/artifact/job discovery, never dispatch or copied Attempt claims. A persists only `predecessor_attempt`; operation results belong in Observation 2.0. Candidate source/build commit, main target, checkout HEAD, workflow commit and workflow SHA must agree. No new CLI/env inputs are introduced.
+- Resolve and hash raw Candidate/Catalog/Decision/Stages/remote records. Reuse the existing Decision and Stage sealers; require `APPROVE`, exact Decision authorization and pre-decision receipt, plus a PASS pre-publication record even for the empty subset. Attempt 1.0/2.0, `authenticated_actor`, removed permission fields, extras, and post-publication proof refuse without a shim.
+- Resolve `workflow_blob_sha256` from the exact tracked workflow at the candidate/workflow SHA, not an arbitrary path or caller hash. Reviewed source preserves top-level `permissions: {}`, exactly `actions: read` / `contents: write` for `promote`, and job-scoped literal `GITHUB_TOKEN: ${{ github.token }}`. Blob equality binds that configuration; it does not report effective grants or introspect a token.
+- Chronology is pre-decision seal ≤ Decision ≤ pre-publication seal ≤ O0 ≤ C0 ≤ Attempt, before candidate retention expiry. Remote records bind the independently supplied fresh attempt ID/current run; re-derive the complete classification and require `ADMITTED`, never collision.
+- Independently resolve predecessor history and original operation identities before new mutation. Missing/expired/ambiguous evidence cannot establish no-send. Reconcile an uncertain predecessor operation read-only; never resend it under a new run or rewrite its historical UNKNOWN. A definite denial terminates its sending attempt; a fresh attempt may retry only a definitely-not-applied refusal after resolving its cause under safe exact state.
+- The complete workflow retains Stage/O0 and any genuine fragment together as P0, then C0, then A, using only actual post-upload IDs/digests. Protected actions independently read back A first. A remains immutable with its initial O0/C0; later O_N/C_N records are separate retained evidence. Fixed `github.token` provenance is not token introspection; App/installation IDs stay unobserved/null. An Attempt cannot start Program B/C.
 - When draft assets are complete, a real `pre-publication-verification-N.json` typed fragment is retained with O_N before publication and rechecked against fresh exact release/asset IDs and bytes. It is an existing Remote Verification fragment, not a new schema or consumer proof. Initial published recovery cannot manufacture it retrospectively.
 - `publisher-handoff.json` carries exact retained references for later remote closure, including a nullable predecessor fragment reference. It is not the Program B Handoff, Remote Verification, post-publication Stage or fresh public consumer proof, and grants no new authority.
 
 ## Remote Observed State
 
-Remote Observed State is a sealed point-in-time observation of the prerelease destination that validates against [remote-observation.schema.json](contracts/remote-observation.schema.json). The [Promotion recovery contract](contracts/promotion-recovery.md) and [remote-classification schema](contracts/remote-classification.schema.json) derive the only allowed action from it. It records closed live-readback facts, never arbitrary diagnostics.
+Remote Observed State 2.0 is a sealed point-in-time observation of the prerelease destination that validates against [remote-observation.schema.json](contracts/remote-observation.schema.json). The [Promotion recovery contract](contracts/promotion-recovery.md) and [remote-classification schema](contracts/remote-classification.schema.json) derive the only allowed action from it. It records closed live-readback facts and operation outcomes, never arbitrary diagnostics.
 
 ### Fields
 
@@ -274,6 +275,7 @@ Remote Observed State is a sealed point-in-time observation of the prerelease de
 | `tag_observation` and `release_observation` | Closed absence/presence/type/state facts, tag name, peeled target commit, and expected prerelease metadata. |
 | `asset_observations` | Bounded expected asset identities, metadata size, downloaded-byte size, and SHA-256 comparison results. |
 | `readback_status` | A closed complete/unreadable status and safe reason code; no raw API, path, endpoint, or credential text. |
+| `operation_results` | Required closed list, at most two results for one advancement block: tag+draft, archive+manifest, or publication. Initial O0 is empty without a predecessor; predecessor O0 may reconcile the interrupted block's original operations. |
 
 ### Validation rules
 
@@ -283,6 +285,9 @@ Remote Observed State is a sealed point-in-time observation of the prerelease de
 - Asset metadata alone does not prove identity. The observer downloads remote assets and compares their bytes, sizes, and SHA-256 values to the Candidate Identity Record and inherited manifest.
 - An unreadable API response, incomplete asset readback, unavailable retained artifact, or mismatched byte result remains an observation. It is never treated as an absent tag or release.
 - The snapshot is immutable. A later retry creates a new Remote Observed State.
+- Each result binds `origin_attempt_id`, `operation`, canonical credential-free `intent_sha256`, exact operation-discriminated `target`, `sent_at`, closed `response`, `postcondition`, and `outcome`. Operations are `CREATE_TAG`, `CREATE_DRAFT`, `UPLOAD_ARCHIVE`, `UPLOAD_MANIFEST`, or `PUBLISH_RELEASE`; targets bind repository/Candidate and the known tag OID, commit, release/asset descriptors or genuine publication fragment as applicable. A predecessor's null `sent_at` means unobserved, never not-sent.
+- Response kind is `ACKNOWLEDGED`, `DENIED`, `CONFLICT`, or `UNKNOWN`, with bounded/null HTTP status, Git return code and resource ID. Postcondition is `MATCH`, `ABSENT`, `UNREADABLE`, or `MISMATCH`. `CONFIRMED` requires the expected valid acknowledgement and complete exact postcondition; `RECONCILED` requires an ambiguous/unobserved original outcome and complete exact postcondition, not exclusive sender attribution.
+- `DENIED`/conflict cannot become `RECONCILED` because matching foreign state appears. Acknowledgement without exact readback cannot pass. The classifier re-derives outcomes and refuses dependent continuation after `DENIED`, `COLLISION` or unresolved `UNKNOWN` even when resource state alone appears complete. Original intents and failed diagnostics are explicitly retained; their upload never authorizes another block.
 - The pure `seal_remote_observation` API validates supplied recorded facts and freezes them without reading the network, consulting the wall clock, or creating a Promotion Attempt. It admits negative observations as evidence, not as permission to act. Root verification of the source implementation remains pending.
 
 ### State transitions
@@ -330,10 +335,10 @@ and classification cannot precede observation. No wall-clock read or new TTL is
 part of either pure API. The observer owns live readback, complete asset listing,
 and download hashing. Neither stored run ID nor opaque attempt ID proves
 freshness for a repeated workflow `run_attempt`: the observation has no such
-field. A future collector/admission must bind a newly captured observation and
-new attempt ID to each current invocation before remote mutation. Classification
-does not validate dispatcher permission, Decision/stage admission, consumer
-proof, or publication authority.
+field. Current admission must bind a newly captured observation and new attempt
+ID to each invocation and independently resolve predecessor history before mutation.
+Classification validates operation outcomes but does not establish token grants,
+Decision/stage admission, consumer proof, or publication authority.
 
 | Observed state | Required facts | Allowed action | Resulting state or result |
 | --- | --- | --- | --- |
@@ -370,7 +375,7 @@ The Program B Handoff is the durable A1 closeout record defined by the [Program 
 ### Validation rules
 
 - A handoff validates only through the Program B Handoff semantic validator: it resolves and hashes every structured record, validates its typed shape, and requires canonical candidate/source equality across the Candidate Identity, Decision, Attempt, stage evidence, remote evidence, proof, and catalog.
-- The Decision must be `APPROVE`; the resolved Attempt must be 2.0, with the exact Decision authorization, both current initiators equal to its named dispatcher, and matching run/attempt/job/workflow SHA plus qualified same-promote-job permission evidence. The execution token remains a distinct GitHub App installation token with unobserved/null IDs. Both pre-mutation Stages must pass.
+- The Decision must be `APPROVE`; the resolved Attempt must be 3.0, with exact Decision authorization, both current initiators equal to its named dispatcher, matching run/attempt/job/workflow SHA, tracked workflow-blob execution policy and admitted predecessor history. The execution token remains distinct with unobserved/null App/installation IDs. Observation 2.0 outcomes must permit continuation; neither a declaration nor later matching state erases a denial. Both pre-mutation Stages must pass.
 - The remote classification must be `published_complete`; remote archive, manifest, and executable bytes must equal the Candidate Identity Record; and the remote Consumer Proof Receipt must pass the complete matrix, clean EOF, and unchanged Python rollback.
 - The static catalog must bind the same exact head and five authority snapshots. The handoff requires a passing stage record for each of the three stages, so the post-publication remote proof is required only after publication.
 - Literal `program_b_authorization_required: true` and `program_c_authorization_required: true` prove the handoff is evidence only. The record cannot start Program B/C, change Python/default selection, or contain extracted executable, local project path, process ID, debug session, subscription, artifact handle, or preview runtime state.

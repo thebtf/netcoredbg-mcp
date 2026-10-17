@@ -1,6 +1,9 @@
 using System.Diagnostics;
 using System.IO.Compression;
+using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using ModelContextProtocol;
@@ -22,6 +25,29 @@ public sealed class PreviewArtifactConsumerTests
 
         await AssertMcpConsumerContractAsync(artifact.ExecutablePath);
         await AssertCleanEofAsync(artifact.ExecutablePath);
+    }
+
+    [Fact]
+    public async Task LoopbackDownloadedArtifact_DiscoverListAndCall_StaysOpenAndExitsCleanlyAfterStdinCloses()
+    {
+        await using var server = new LoopbackArtifactServer(ArtifactInputDirectory);
+        await server.DownloadAsync();
+        using var artifact = VerifiedPreviewArtifact.Extract(server.DownloadDirectory);
+
+        await AssertMcpConsumerContractAsync(artifact.ExecutablePath);
+        await AssertCleanEofAsync(artifact.ExecutablePath);
+    }
+
+    [Fact]
+    public async Task LoopbackDownloadedArtifact_TamperedArchive_RefusesIdentityBeforeLaunch()
+    {
+        await using var server = new LoopbackArtifactServer(ArtifactInputDirectory, tamperArchive: true);
+        await server.DownloadAsync();
+
+        Assert.Throws<Xunit.Sdk.EqualException>(() =>
+        {
+            using var artifact = VerifiedPreviewArtifact.Extract(server.DownloadDirectory);
+        });
     }
 
     private static async Task AssertMcpConsumerContractAsync(string executablePath)
@@ -107,6 +133,134 @@ public sealed class PreviewArtifactConsumerTests
     private static string RequiredString(JsonElement value, string propertyName) =>
         Assert.IsType<string>(value.GetProperty(propertyName).GetString());
 
+    private static string ArtifactInputDirectory =>
+        Environment.GetEnvironmentVariable("NETCOREDBG_PREVIEW_ARTIFACT_ROOT")
+        ?? Path.Combine(PreviewRepositoryLayout.Root, "artifacts", "stateless-preview");
+
+    // Controlled HTTP transfer of source-run fixtures, not a public GitHub release proof.
+    private sealed class LoopbackArtifactServer : IAsyncDisposable
+    {
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+        private readonly CancellationTokenSource _stop = new();
+        private readonly Task _serve;
+        private readonly string _manifestPath;
+        private readonly string _archivePath;
+        private readonly byte[] _manifestBytes;
+        private readonly bool _tamperArchive;
+
+        internal LoopbackArtifactServer(string sourceDirectory, bool tamperArchive = false)
+        {
+            _manifestPath = Assert.Single(Directory.EnumerateFiles(
+                sourceDirectory, $"{ArtifactPrefix}*.manifest.json", SearchOption.TopDirectoryOnly));
+            _manifestBytes = File.ReadAllBytes(_manifestPath);
+            using var manifest = JsonDocument.Parse(_manifestBytes);
+            ArchiveName = RequiredString(manifest.RootElement.GetProperty("archive"), "name");
+            Assert.Equal(Path.GetFileName(ArchiveName), ArchiveName);
+            _archivePath = Path.Combine(sourceDirectory, ArchiveName);
+            Assert.True(File.Exists(_archivePath), $"Controlled fixture archive is absent: '{_archivePath}'.");
+            _tamperArchive = tamperArchive;
+            DownloadDirectory = Path.Combine(Path.GetTempPath(), $"netcoredbg-preview-download-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(DownloadDirectory);
+            try
+            {
+                _listener.Start();
+                _stop.CancelAfter(TimeSpan.FromSeconds(60));
+                _serve = ServeAsync();
+            }
+            catch
+            {
+                _listener.Stop();
+                _stop.Dispose();
+                Directory.Delete(DownloadDirectory, recursive: true);
+                throw;
+            }
+        }
+
+        internal string DownloadDirectory { get; }
+
+        internal string ArchiveName { get; }
+
+        internal async Task DownloadAsync()
+        {
+            var endpoint = (IPEndPoint)_listener.LocalEndpoint;
+            using var handler = new HttpClientHandler
+            {
+                UseProxy = false,
+                AllowAutoRedirect = false,
+                UseCookies = false,
+                UseDefaultCredentials = false,
+            };
+            using var client = new HttpClient(handler)
+            {
+                BaseAddress = new Uri($"http://127.0.0.1:{endpoint.Port}/"),
+                Timeout = TimeSpan.FromSeconds(60),
+            };
+            foreach (var name in new[] { Path.GetFileName(_manifestPath), ArchiveName })
+            {
+                using var response = await client.GetAsync(name, HttpCompletionOption.ResponseHeadersRead);
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+                await using var destination = new FileStream(
+                    Path.Combine(DownloadDirectory, name), FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                await response.Content.CopyToAsync(destination, _stop.Token);
+                Assert.Equal(response.Content.Headers.ContentLength, destination.Length);
+            }
+
+            await _serve.WaitAsync(TimeSpan.FromSeconds(60));
+            var receivedManifest = File.ReadAllBytes(Path.Combine(DownloadDirectory, Path.GetFileName(_manifestPath)));
+            Assert.Equal(_manifestBytes.Length, receivedManifest.Length);
+            Assert.Equal(SHA256.HashData(_manifestBytes), SHA256.HashData(receivedManifest));
+        }
+
+        private async Task ServeAsync()
+        {
+            foreach (var path in new[] { _manifestPath, _archivePath })
+            {
+                using var connection = await _listener.AcceptTcpClientAsync(_stop.Token);
+                await using var stream = connection.GetStream();
+                using var reader = new StreamReader(
+                    stream, Encoding.ASCII, detectEncodingFromByteOrderMarks: false, bufferSize: 1024, leaveOpen: true);
+                Assert.Equal($"GET /{Path.GetFileName(path)} HTTP/1.1", await reader.ReadLineAsync(_stop.Token));
+                string? header;
+                while (!string.IsNullOrEmpty(header = await reader.ReadLineAsync(_stop.Token)))
+                {
+                    Assert.False(header.StartsWith("Authorization:", StringComparison.OrdinalIgnoreCase));
+                    Assert.False(header.StartsWith("Proxy-Authorization:", StringComparison.OrdinalIgnoreCase));
+                    Assert.False(header.StartsWith("Cookie:", StringComparison.OrdinalIgnoreCase));
+                }
+
+                await using var source = File.OpenRead(path);
+                var headers = Encoding.ASCII.GetBytes(
+                    $"HTTP/1.1 200 OK\r\nContent-Length: {source.Length}\r\nConnection: close\r\n\r\n");
+                await stream.WriteAsync(headers, _stop.Token);
+                if (_tamperArchive && path == _archivePath)
+                {
+                    var firstByte = source.ReadByte();
+                    Assert.NotEqual(-1, firstByte);
+                    await stream.WriteAsync(new[] { (byte)(firstByte ^ 1) }, _stop.Token);
+                }
+                await source.CopyToAsync(stream, _stop.Token);
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            await _stop.CancelAsync();
+            _listener.Stop();
+            try
+            {
+                await _serve;
+            }
+            catch (OperationCanceledException) when (_stop.IsCancellationRequested)
+            {
+            }
+            finally
+            {
+                _stop.Dispose();
+                Directory.Delete(DownloadDirectory, recursive: true);
+            }
+        }
+    }
+
     private sealed class VerifiedPreviewArtifact : IDisposable
     {
         private VerifiedPreviewArtifact(string extractionDirectory, string executablePath)
@@ -119,10 +273,10 @@ public sealed class PreviewArtifactConsumerTests
 
         internal string ExecutablePath { get; }
 
-        internal static VerifiedPreviewArtifact Extract()
+        internal static VerifiedPreviewArtifact Extract() => Extract(ArtifactInputDirectory);
+
+        internal static VerifiedPreviewArtifact Extract(string artifactDirectory)
         {
-            var artifactDirectory = Environment.GetEnvironmentVariable("NETCOREDBG_PREVIEW_ARTIFACT_ROOT")
-                ?? Path.Combine(PreviewRepositoryLayout.Root, "artifacts", "stateless-preview");
             Assert.True(
                 Directory.Exists(artifactDirectory),
                 $"Required source-run preview artifact input is absent: '{artifactDirectory}'. Consumer proof must use a downloaded archive and manifest, never repository bin output.");

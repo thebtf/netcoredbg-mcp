@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "A1 preview Remote Observation Receipt",
-  "description": "Immutable point-in-time observation of the candidate prerelease destination. It preserves structural GitHub identifiers, byte identities, and closed readback codes without storing a URL, local path, command, secret, or diagnostic text.",
-  "$comment": "Semantic admission resolves candidate_identity_record by its repository, run_id, artifact_id, path, and raw-byte SHA-256; validates that record; requires candidate to equal its candidate binding; and requires promotion_attempt_id to equal the fresh promotion attempt that owns this observation. It compares tag, release, and asset facts with that resolved candidate. An unreadable or mismatched readback is an observed fact and must never be reinterpreted as absence.",
+  "description": "Immutable Observation 2.0 of exact destination bytes and at most two original operation results for one advancement block; no credentials or raw diagnostics.",
+  "$comment": "Resolve the exact Candidate/attempt. Re-derive canonical intent hash, discriminated target, exact postcondition and outcome. CONFIRMED requires valid ACK plus MATCH; RECONCILED requires UNKNOWN plus MATCH and attests state, not exclusive sender attribution. DENIED/CONFLICT never become reconciled success. Initial O0 has no results without a predecessor; recovery preserves original IDs and refusal/UNKNOWN history. Null sent_at means unobserved, never not-sent. Missing, unreadable or mismatched UNKNOWN cannot permit resend. Publication reconciliation resolves the genuine retained pre-publication fragment and compares exact release/asset IDs and downloaded bytes.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -16,11 +16,12 @@
     "release_observation",
     "asset_observations",
     "readback_status",
+    "operation_results",
     "observed_at"
   ],
   "properties": {
     "observation_schema_version": {
-      "const": "1.0"
+      "const": "2.0"
     },
     "observation_id": {
       "$ref": "#/$defs/safe_opaque_id"
@@ -49,12 +50,306 @@
     "readback_status": {
       "$ref": "#/$defs/readback_status"
     },
+    "operation_results": {
+      "type": "array",
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/$defs/operation_result"
+      }
+    },
     "observed_at": {
       "type": "string",
       "format": "date-time"
     }
   },
   "$defs": {
+    "operation_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "origin_attempt_id",
+        "operation",
+        "intent_sha256",
+        "target",
+        "sent_at",
+        "response",
+        "postcondition",
+        "outcome"
+      ],
+      "properties": {
+        "origin_attempt_id": {
+          "$ref": "#/$defs/safe_opaque_id"
+        },
+        "operation": {
+          "enum": [
+            "CREATE_TAG",
+            "CREATE_DRAFT",
+            "UPLOAD_ARCHIVE",
+            "UPLOAD_MANIFEST",
+            "PUBLISH_RELEASE"
+          ]
+        },
+        "intent_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "target": {
+          "type": "object"
+        },
+        "sent_at": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "format": "date-time"
+            }
+          ]
+        },
+        "response": {
+          "$ref": "#/$defs/operation_response"
+        },
+        "postcondition": {
+          "enum": [
+            "MATCH",
+            "ABSENT",
+            "UNREADABLE",
+            "MISMATCH"
+          ]
+        },
+        "outcome": {
+          "enum": [
+            "CONFIRMED",
+            "RECONCILED",
+            "DENIED",
+            "COLLISION",
+            "UNKNOWN"
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "operation": {
+              "const": "CREATE_TAG"
+            },
+            "target": {
+              "$ref": "#/$defs/tag_target"
+            }
+          }
+        },
+        {
+          "properties": {
+            "operation": {
+              "const": "CREATE_DRAFT"
+            },
+            "target": {
+              "$ref": "#/$defs/draft_target"
+            }
+          }
+        },
+        {
+          "properties": {
+            "operation": {
+              "const": "UPLOAD_ARCHIVE"
+            },
+            "target": {
+              "$ref": "#/$defs/archive_target"
+            }
+          }
+        },
+        {
+          "properties": {
+            "operation": {
+              "const": "UPLOAD_MANIFEST"
+            },
+            "target": {
+              "$ref": "#/$defs/manifest_target"
+            }
+          }
+        },
+        {
+          "properties": {
+            "operation": {
+              "const": "PUBLISH_RELEASE"
+            },
+            "target": {
+              "$ref": "#/$defs/publication_target"
+            }
+          }
+        }
+      ]
+    },
+    "operation_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "http_status",
+        "git_returncode",
+        "resource_id"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "ACKNOWLEDGED",
+            "DENIED",
+            "CONFLICT",
+            "UNKNOWN"
+          ]
+        },
+        "http_status": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 599
+            }
+          ]
+        },
+        "git_returncode": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "resource_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/github_identifier"
+            }
+          ]
+        }
+      }
+    },
+    "tag_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "candidate_identity_record",
+        "tag",
+        "object_id"
+      ],
+      "properties": {
+        "repository": {
+          "$ref": "candidate-identity.schema.json#/$defs/github_repository"
+        },
+        "candidate_identity_record": {
+          "$ref": "#/$defs/github_artifact_file_reference"
+        },
+        "tag": {
+          "$ref": "#/$defs/tag"
+        },
+        "object_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      }
+    },
+    "draft_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "candidate_identity_record",
+        "tag",
+        "source_commit"
+      ],
+      "properties": {
+        "repository": {
+          "$ref": "candidate-identity.schema.json#/$defs/github_repository"
+        },
+        "candidate_identity_record": {
+          "$ref": "#/$defs/github_artifact_file_reference"
+        },
+        "tag": {
+          "$ref": "#/$defs/tag"
+        },
+        "source_commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      }
+    },
+    "archive_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "candidate_identity_record",
+        "release_id",
+        "descriptor"
+      ],
+      "properties": {
+        "repository": {
+          "$ref": "candidate-identity.schema.json#/$defs/github_repository"
+        },
+        "candidate_identity_record": {
+          "$ref": "#/$defs/github_artifact_file_reference"
+        },
+        "release_id": {
+          "$ref": "#/$defs/github_identifier"
+        },
+        "descriptor": {
+          "$ref": "#/$defs/archive"
+        }
+      }
+    },
+    "manifest_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "candidate_identity_record",
+        "release_id",
+        "descriptor"
+      ],
+      "properties": {
+        "repository": {
+          "$ref": "candidate-identity.schema.json#/$defs/github_repository"
+        },
+        "candidate_identity_record": {
+          "$ref": "#/$defs/github_artifact_file_reference"
+        },
+        "release_id": {
+          "$ref": "#/$defs/github_identifier"
+        },
+        "descriptor": {
+          "$ref": "#/$defs/manifest"
+        }
+      }
+    },
+    "publication_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "candidate_identity_record",
+        "release_id",
+        "pre_publication_verification"
+      ],
+      "properties": {
+        "repository": {
+          "$ref": "candidate-identity.schema.json#/$defs/github_repository"
+        },
+        "candidate_identity_record": {
+          "$ref": "#/$defs/github_artifact_file_reference"
+        },
+        "release_id": {
+          "$ref": "#/$defs/github_identifier"
+        },
+        "pre_publication_verification": {
+          "$ref": "#/$defs/github_artifact_file_reference"
+        }
+      }
+    },
     "safe_opaque_id": {
       "$ref": "artifact-consumer-proof.schema.json#/$defs/safe_opaque_id"
     },

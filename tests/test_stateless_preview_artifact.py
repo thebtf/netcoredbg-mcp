@@ -144,6 +144,15 @@ def _create_authority_repository(
         target.write_bytes(payload)
         policy_payloads[relative_path] = payload
 
+    # Workflow provenance belongs to the same commit, not the five policy snapshots.
+    workflow = authority_root / ".github" / "workflows" / "stateless-preview.yml"
+    workflow.parent.mkdir(parents=True, exist_ok=True)
+    workflow.write_bytes(
+        (PROJECT_ROOT / ".github" / "workflows" / "stateless-preview.yml")
+        .read_bytes()
+        .replace(b"\r\n", b"\n")
+    )
+
     _git(authority_root, "add", ".")
     _git(authority_root, "commit", "-m", "snapshot release authorities")
     source_commit = _git(authority_root, "rev-parse", "HEAD")
@@ -3304,7 +3313,7 @@ def remote_observation_inputs(semantic_review_inputs: dict[str, Any]) -> dict[st
             "identity_status": "MATCHES_CANDIDATE",
         }
     inputs["observation"] = {
-        "observation_schema_version": "1.0",
+        "observation_schema_version": "2.0",
         "observation_id": "simulated-observation-001",
         "promotion_attempt_id": inputs["current_attempt_id"],
         "candidate_identity_record": deepcopy(inputs["candidate_identity_reference"]),
@@ -3329,6 +3338,7 @@ def remote_observation_inputs(semantic_review_inputs: dict[str, Any]) -> dict[st
             "destination_metadata_status": "MATCHING",
         },
         "asset_observations": {**assets, "unexpected_asset_ids": []},
+        "operation_results": [],
         "readback_status": {
             "expected_result": "EXPECT_SUCCESS",
             "observed_result": "SUCCESS",
@@ -3944,7 +3954,7 @@ def test_remote_observation_semantics_refuse_unclosed_or_invalid_records(
             "approved": True,
         }[violation]
     elif violation == "version":
-        observation["observation_schema_version"] = "2.0"
+        observation["observation_schema_version"] = "1.0"
     elif violation == "unsafe_id":
         observation["observation_id"] = "../simulated-observation"
     elif violation == "missing_attempt":
@@ -4562,7 +4572,7 @@ def _replace_simulated_attempt_record(
 def promotion_attempt_inputs(
     promotion_decision_inputs: dict[str, Any], remote_observation_inputs: dict[str, Any]
 ) -> dict[str, Any]:
-    """SIMULATED Attempt 2.0 inputs; never live grants, approval, or effect authority."""
+    """SIMULATED Attempt 3.0 inputs; never observed grants, approval, or effect authority."""
     inputs = promotion_decision_inputs
     # Keep the reused proof chain before the candidate's fixed 2030 retention expiry.
     for record, timestamp in (
@@ -4620,48 +4630,6 @@ def promotion_attempt_inputs(
         "simulated-remote-classification.json", inputs["classification"]
     )
     dispatcher = inputs["decision_record"]["promotion_attempt"]["authorized_dispatcher"]
-    inputs["permission_report"] = {
-        "diagnostic": "current-job-permissions",
-        "meaning": "RUNNER_REPORTED_GRANT_NOT_TOKEN_INTROSPECTION",
-        "status": "QUALIFIED",
-        "availability": "AVAILABLE",
-        "reason_code": "REQUIRED_RUNNER_GRANTS_REPORTED",
-        "started_at": "2029-12-31T23:59:52Z",
-        "finished_at": "2029-12-31T23:59:53Z",
-        "binding": {
-            "repository": REPOSITORY,
-            "run_id": 801,
-            "run_attempt": 2,
-            "head_sha": source_commit,
-            "job_key": "promote",
-            "workflow_sha": source_commit,
-            "job_name": "Promote canonical-main preview candidate",
-            "job_id": 901,
-            "setup_step_position": 0,
-        },
-        "actor_provenance": {
-            "GITHUB_ACTOR": dispatcher["login"],
-            "GITHUB_TRIGGERING_ACTOR": dispatcher["login"],
-        },
-        "grants": {
-            "actions": "read",
-            "contents": "write",
-            "metadata": "read",
-            "pullrequests": "read",
-        },
-        "log_sha256": _sha256_bytes(b"SIMULATED native setup permission log"),
-        "log_source": "setup_step_logs",
-        "requests": [
-            {
-                "phase": phase,
-                "http_status": 200,
-                "reason_code": "HTTP_RESPONSE",
-                "started_at": "2029-12-31T23:59:52Z",
-                "finished_at": "2029-12-31T23:59:53Z",
-            }
-            for phase in ("current_attempt_jobs", "setup_step_logs", "current_job_after")
-        ],
-    }
     inputs["current_promotion_context"] = {
         "current_attempt_id": inputs["current_attempt_id"],
         "workflow_run": deepcopy(inputs["current_workflow_run"]),
@@ -4672,9 +4640,11 @@ def promotion_attempt_inputs(
         "origin_main_target": source_commit,
         "current_github_actor": deepcopy(dispatcher),
         "current_github_triggering_actor": deepcopy(dispatcher),
+        "predecessor_attempt": None,
+        "predecessor_operation_results": [],
     }
     inputs["attempt_record"] = {
-        "schema_version": "2.0",
+        "schema_version": "3.0",
         "attempt_id": inputs["current_attempt_id"],
         "candidate_identity_record": deepcopy(inputs["candidate_identity_reference"]),
         "candidate_identity_record_sha256": _sha256_bytes(inputs["candidate_identity_bytes"]),
@@ -4687,14 +4657,25 @@ def promotion_attempt_inputs(
             "decision_authorization": deepcopy(inputs["decision_record"]["promotion_attempt"]),
             "current_github_actor": deepcopy(dispatcher),
             "current_github_triggering_actor": deepcopy(dispatcher),
-            "permission_readback": {
-                "reference": retain(
-                    "simulated-current-job-permissions.json", inputs["permission_report"]
-                ),
+            "execution_policy": {
+                "model": "GITHUB_JOB_TOKEN_SERVER_ENFORCED",
                 "run_attempt": 2,
                 "job_key": "promote",
                 "job_id": "901",
                 "workflow_sha": source_commit,
+                "workflow_blob_sha256": _sha256_bytes(
+                    subprocess.run(
+                        [
+                            "git",
+                            "cat-file",
+                            "blob",
+                            f"{source_commit}:.github/workflows/stateless-preview.yml",
+                        ],
+                        cwd=inputs["repository_root"],
+                        capture_output=True,
+                        check=True,
+                    ).stdout
+                ),
                 "execution_token": {
                     "source": "github.token",
                     "kind": "GITHUB_APP_INSTALLATION_TOKEN",
@@ -4702,12 +4683,12 @@ def promotion_attempt_inputs(
                     "app_id": None,
                     "installation_id": None,
                 },
-                "permissions": {"actions": "read", "contents": "write"},
             },
         },
         "workflow_run": deepcopy(inputs["current_workflow_run"]),
         "remote_observation": observation_reference,
         "remote_classification": classification_reference,
+        "predecessor_attempt": None,
         "admission_status": "PASS",
         "recorded_at": "2029-12-31T23:59:56Z",
     }
@@ -4721,7 +4702,7 @@ def _attempt_binding(inputs: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def test_promotion_attempt_schema_accepts_simulated_2_0_with_eight_field_workflow(
+def test_promotion_attempt_schema_accepts_simulated_3_0_with_eight_field_workflow(
     promotion_attempt_inputs: dict[str, Any],
 ) -> None:
     inputs = promotion_attempt_inputs
@@ -4750,15 +4731,15 @@ def test_promotion_attempt_schema_refuses_legacy_or_open_identity_shape(
     if violation == "legacy":
         record["schema_version"] = "1.0"
     elif violation == "authenticated_actor":
-        authorization["permission_readback"]["authenticated_actor"] = deepcopy(
+        authorization["execution_policy"]["authenticated_actor"] = deepcopy(
             authorization["current_github_actor"]
         )
     elif violation == "missing_triggering_actor":
         del authorization["current_github_triggering_actor"]
     elif violation == "missing_token_id":
-        del authorization["permission_readback"]["execution_token"]["installation_id"]
+        del authorization["execution_policy"]["execution_token"]["installation_id"]
     else:
-        authorization["permission_readback"]["execution_token"]["owner"] = "simulated-dispatcher"
+        authorization["execution_policy"]["execution_token"]["owner"] = "simulated-dispatcher"
     with pytest.raises(ValidationError):
         _validate_review_schema(record, "promotion-attempt.schema.json")
 
@@ -4791,33 +4772,25 @@ def test_promotion_attempt_semantics_output_is_detached_and_deeply_immutable(
     for branch, field, value in (
         (sealed["workflow_run"], "commit", "a" * 40),
         (sealed["authorization"]["current_github_triggering_actor"], "id", "999"),
-        (sealed["authorization"]["permission_readback"]["execution_token"], "app_id", "999"),
+        (sealed["authorization"]["execution_policy"]["execution_token"], "app_id", "999"),
     ):
         with pytest.raises(TypeError):
             branch[field] = value
 
 
-@pytest.mark.parametrize("log_source", ["setup_step_logs", "job_logs"])
-def test_promotion_attempt_semantics_accept_rehashed_equivalent_permission_bytes(
+def test_promotion_attempt_uses_exact_tracked_workflow_not_working_tree_declaration(
     promotion_attempt_inputs: dict[str, Any],
-    log_source: str,
 ) -> None:
     inputs = promotion_attempt_inputs
-    report = inputs["permission_report"]
-    report["log_source"] = log_source
-    if log_source == "job_logs":
-        report["requests"][1]["http_status"] = 404
-        report["requests"].insert(2, {**report["requests"][2], "phase": "job_logs"})
-    reference = inputs["attempt_record"]["authorization"]["permission_readback"]["reference"]
-    raw = json.dumps(inputs["permission_report"], indent=4, sort_keys=False).encode("utf-8")
-    inputs["records"][reference["path"]] = raw
-    reference["sha256"] = _sha256_bytes(raw)
-
+    path = inputs["repository_root"] / ".github" / "workflows" / "stateless-preview.yml"
+    path.write_bytes(b"SIMULATED untracked declaration and different token wiring\n")
     sealed = artifact_contract.seal_promotion_attempt(
         inputs["attempt_record"], **_attempt_binding(inputs)
     )
-
-    assert sealed["authorization"]["permission_readback"]["reference"] == reference
+    assert (
+        sealed["authorization"]["execution_policy"]
+        == inputs["attempt_record"]["authorization"]["execution_policy"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -4828,7 +4801,6 @@ def test_promotion_attempt_semantics_accept_rehashed_equivalent_permission_bytes
         "decision",
         "pre-decision",
         "pre-publication",
-        "permissions",
         "observation",
         "classification",
     ],
@@ -4848,7 +4820,6 @@ def test_promotion_attempt_semantics_reject_changed_raw_bytes(
             "decision": record["promotion_decision"],
             "pre-decision": record["pre_decision_stage_evidence"]["record_reference"],
             "pre-publication": record["pre_publication_stage_evidence"]["record_reference"],
-            "permissions": record["authorization"]["permission_readback"]["reference"],
             "observation": record["remote_observation"],
             "classification": record["remote_classification"],
         }[document]
@@ -4918,42 +4889,28 @@ def test_promotion_attempt_semantics_require_closed_current_context(
 
 
 @pytest.mark.parametrize(
-    ("branch", "field", "value"),
+    ("field", "value"),
     [
-        ("binding", "repository", "other/repository"),
-        ("binding", "run_id", 999),
-        ("binding", "run_attempt", 1),
-        ("binding", "job_id", 999),
-        ("binding", "job_id", "901"),
-        ("binding", "head_sha", "a" * 40),
-        ("binding", "workflow_sha", "a" * 40),
-        ("binding", "setup_step_position", -1),
-        ("grants", "contents", "read"),
-        ("grants", "actions", "none"),
-        ("actor_provenance", "GITHUB_TRIGGERING_ACTOR", "simulated-other-rerunner"),
-        (None, "status", "INSUFFICIENT"),
-        (None, "availability", "UNAVAILABLE"),
-        (None, "meaning", "WORKFLOW_DECLARED_PERMISSIONS"),
-        (None, "reason_code", "REQUIRED_RUNNER_GRANTS_NOT_REPORTED"),
-        (None, "log_source", "workflow_yaml"),
-        (None, "log_sha256", None),
-        (None, "log_sha256", "not-a-hash"),
-        (None, "started_at", "not-a-timestamp"),
-        (None, "finished_at", "2029-12-31T23:59:51Z"),
-        (None, "finished_at", "2029-12-31T23:59:57Z"),
-        (None, "declared_permissions", {"actions": "read", "contents": "write"}),
+        ("model", "WORKFLOW_DECLARED_PERMISSIONS"),
+        ("workflow_blob_sha256", "a" * 64),
+        ("workflow_blob_sha256", "not-a-hash"),
+        ("run_attempt", True),
+        ("run_attempt", 1),
+        ("job_id", 901),
+        ("job_id", "999"),
+        ("job_key", "retain_evidence"),
+        ("workflow_sha", "a" * 40),
+        ("grants", {"contents": "write"}),
+        ("reference", {"path": "current-job-permissions.json"}),
     ],
 )
-def test_promotion_attempt_semantics_reject_unqualified_permission_report(
-    promotion_attempt_inputs: dict[str, Any], branch: str | None, field: str, value: Any
+def test_promotion_attempt_semantics_reject_substituted_execution_policy(
+    promotion_attempt_inputs: dict[str, Any],
+    field: str,
+    value: Any,
 ) -> None:
     inputs = promotion_attempt_inputs
-    report = inputs["permission_report"]
-    target = report if branch is None else report[branch]
-    target[field] = value
-    reference = inputs["attempt_record"]["authorization"]["permission_readback"]["reference"]
-    _replace_simulated_attempt_record(inputs, reference, report)
-
+    inputs["attempt_record"]["authorization"]["execution_policy"][field] = value
     with pytest.raises(ValueError):
         artifact_contract.seal_promotion_attempt(
             inputs["attempt_record"], **_attempt_binding(inputs)
@@ -4962,37 +4919,39 @@ def test_promotion_attempt_semantics_reject_unqualified_permission_report(
 
 @pytest.mark.parametrize(
     "violation",
-    ["probe_report", "unavailable", "missing_log_hash", "missing_binding", "missing_timestamp"],
+    [
+        "legacy-1",
+        "legacy-2",
+        "legacy-report",
+        "fake-grants",
+        "missing-blob",
+        "invented-predecessor",
+    ],
 )
-def test_promotion_attempt_semantics_do_not_substitute_probe_or_unavailable_readback(
-    promotion_attempt_inputs: dict[str, Any], violation: str
+def test_promotion_attempt_semantics_reject_legacy_attestation_and_predecessor_shapes(
+    promotion_attempt_inputs: dict[str, Any],
+    violation: str,
 ) -> None:
     inputs = promotion_attempt_inputs
-    report = inputs["permission_report"]
-    if violation == "probe_report":
-        report["binding"].update(
-            job_key="probe_permissions", job_name="Probe current job permissions"
-        )
-    elif violation == "unavailable":
-        report.update(
-            status="UNAVAILABLE",
-            availability="UNAVAILABLE",
-            reason_code="CURRENT_JOB_LOGS_UNAVAILABLE",
-            grants={},
-            log_sha256=None,
-        )
-    elif violation == "missing_log_hash":
-        del report["log_sha256"]
-    elif violation == "missing_binding":
-        del report["binding"]["workflow_sha"]
+    record = inputs["attempt_record"]
+    if violation.startswith("legacy-") and violation != "legacy-report":
+        record["schema_version"] = violation.removeprefix("legacy-") + ".0"
+    elif violation == "legacy-report":
+        record["authorization"]["permission_readback"] = {
+            "status": "QUALIFIED",
+            "grants": {"contents": "write"},
+        }
+    elif violation == "fake-grants":
+        record["authorization"]["execution_policy"]["permissions"] = {
+            "actions": "read",
+            "contents": "write",
+        }
+    elif violation == "missing-blob":
+        del record["authorization"]["execution_policy"]["workflow_blob_sha256"]
     else:
-        del report["finished_at"]
-    reference = inputs["attempt_record"]["authorization"]["permission_readback"]["reference"]
-    _replace_simulated_attempt_record(inputs, reference, report)
+        record["predecessor_attempt"] = record["promotion_decision"]
     with pytest.raises(ValueError):
-        artifact_contract.seal_promotion_attempt(
-            inputs["attempt_record"], **_attempt_binding(inputs)
-        )
+        artifact_contract.seal_promotion_attempt(record, **_attempt_binding(inputs))
 
 
 @pytest.mark.parametrize(
@@ -5002,7 +4961,7 @@ def test_promotion_attempt_semantics_do_not_substitute_probe_or_unavailable_read
         (None, "job_key", "probe_permissions"),
         (None, "job_id", "999"),
         (None, "workflow_sha", "a" * 40),
-        ("permissions", "contents", "read"),
+        (None, "permissions", {"contents": "write"}),
         ("execution_token", "source", "PAT"),
         ("execution_token", "kind", "PERSONAL_ACCESS_TOKEN"),
         ("execution_token", "identity_observation", "OBSERVED"),
@@ -5011,11 +4970,11 @@ def test_promotion_attempt_semantics_do_not_substitute_probe_or_unavailable_read
         (None, "authenticated_actor", {"id": "102", "login": "simulated-dispatcher"}),
     ],
 )
-def test_promotion_attempt_semantics_bind_permission_projection_and_token_provenance(
+def test_promotion_attempt_semantics_bind_execution_policy_and_token_provenance(
     promotion_attempt_inputs: dict[str, Any], branch: str | None, field: str, value: Any
 ) -> None:
     inputs = promotion_attempt_inputs
-    readback = inputs["attempt_record"]["authorization"]["permission_readback"]
+    readback = inputs["attempt_record"]["authorization"]["execution_policy"]
     target = readback if branch is None else readback[branch]
     target[field] = value
     with pytest.raises(ValueError):
@@ -5147,6 +5106,773 @@ def test_promotion_attempt_semantics_revalidate_decision_stages_and_remote_admis
 
     with pytest.raises(ValueError):
         artifact_contract.seal_promotion_attempt(record, **_attempt_binding(inputs))
+
+
+_CLOSEOUT_SEALERS = (
+    ("seal_remote_verification", "verification", "remote-verification.schema.json"),
+    ("seal_program_b_handoff", "handoff", "program-b-handoff.schema.json"),
+)
+
+
+def _retain_simulated_closeout_records(inputs: dict[str, Any]) -> None:
+    """Rehash dependencies in order so tampering tests reach semantics, not stale digests."""
+    documents = inputs["closeout_documents"]
+    references = inputs["closeout_references"]
+    for name, reference in references.items():
+        previous_hash = reference["sha256"]
+        _replace_simulated_attempt_record(inputs, reference, documents[name])
+        if (
+            name == "decision"
+            and documents["attempt"]["promotion_decision_sha256"] == previous_hash
+        ):
+            documents["attempt"]["promotion_decision_sha256"] = reference["sha256"]
+
+
+@pytest.fixture
+def remote_closeout_inputs(promotion_attempt_inputs: dict[str, Any]) -> dict[str, Any]:
+    """SIMULATED complete graph; neither publication proof nor Program B/C authority."""
+    inputs = promotion_attempt_inputs
+    attempt = inputs["attempt_record"]
+    candidate = inputs["candidate_identity"]["candidate"]
+    references = {
+        "pre_decision_stage": attempt["pre_decision_stage_evidence"]["record_reference"],
+        "pre_publication_stage": attempt["pre_publication_stage_evidence"]["record_reference"],
+        "decision": attempt["promotion_decision"],
+        "admission_observation": attempt["remote_observation"],
+        "admission_classification": attempt["remote_classification"],
+    }
+    documents = {
+        "pre_decision_stage": inputs["stage_record"],
+        "pre_publication_stage": inputs["pre_publication_record"],
+        "decision": inputs["decision_record"],
+        "admission_observation": inputs["observation"],
+        "admission_classification": inputs["classification"],
+        "attempt": attempt,
+    }
+    documents["decision"]["evidence"]["pre_decision_stage_evidence"]["record_reference"] = (
+        references["pre_decision_stage"]
+    )
+    documents["admission_classification"]["remote_observed_state_reference"] = references[
+        "admission_observation"
+    ]
+    for name in (
+        "attempt",
+        "published_observation",
+        "published_classification",
+        "remote_consumer",
+        "post_publication_stage",
+        "verification",
+    ):
+        references[name] = {
+            **references["decision"],
+            "path": f"simulated-closeout-{name}.json",
+            "sha256": "0" * 64,
+        }
+
+    # The pre-phase is based on the independent draft observation, not a published result.
+    draft = documents["admission_observation"]
+    pre_phase = {
+        "phase": "PRE_PUBLICATION",
+        "expected_result": "EXPECT_SUCCESS",
+        "observed_result": "SUCCESS",
+        "outcome": "PASS",
+        "release": {
+            "repository": candidate["source"]["repository"],
+            "release_id": draft["release_observation"]["release_id"],
+            "tag": draft["release_observation"]["tag"],
+            "prerelease": draft["release_observation"]["is_prerelease"],
+            **{
+                f"{kind}_asset": {
+                    "id": draft["asset_observations"][kind]["metadata"]["id"],
+                    **draft["asset_observations"][kind]["downloaded_identity"],
+                }
+                for kind in ("archive", "manifest")
+            },
+        },
+        "executable": deepcopy(candidate["preview_manifest"]["contents"]["executable"]),
+        "archive_matches_candidate": True,
+        "manifest_matches_candidate": True,
+        "executable_matches_manifest": True,
+        "inherited_verifier_equations_pass": True,
+    }
+    published = deepcopy(draft)
+    published.update(
+        observation_id="simulated-closeout-published-observation",
+        observed_at="2029-12-31T23:59:57Z",
+    )
+    published["release_observation"]["is_draft"] = False
+    documents["published_observation"] = published
+    _replace_simulated_attempt_record(inputs, references["published_observation"], published)
+    documents["published_classification"] = json.loads(
+        _canonical_json_bytes(
+            artifact_contract.classify_remote_observation(
+                references["published_observation"],
+                **{
+                    **_remote_classification_binding(inputs),
+                    "classification_id": "simulated-closeout-published-classification",
+                    "classified_at": "2029-12-31T23:59:58Z",
+                    "record_resolver": inputs["record_resolver"],
+                },
+            )
+        )
+    )
+    documents["published_classification"]["remote_observed_state_reference"] = references[
+        "published_observation"
+    ]
+    post_inputs = _simulated_stage_inputs(deepcopy(inputs), "post-publication")
+    documents["remote_consumer"] = json.loads(
+        post_inputs["records"]["remote-downloaded-consumer-proof.json"]
+    )
+    documents["remote_consumer"]["recorded_at"] = "2029-12-31T23:59:58Z"
+    documents["post_publication_stage"] = post_inputs["stage_record"]
+    documents["post_publication_stage"]["sealed_at"] = "2029-12-31T23:59:59Z"
+    documents["post_publication_stage"]["gate_evidence"][0]["record_reference"] = references[
+        "remote_consumer"
+    ]
+    for name in ("pre_decision_stage", "pre_publication_stage", "post_publication_stage"):
+        documents[name]["release_gate_catalog"] = inputs["release_gate_catalog_reference"]
+    post_phase = deepcopy(pre_phase)
+    post_phase["phase"] = "POST_PUBLICATION"
+    documents["verification"] = {
+        "verification_schema_version": "1.0",
+        "verification_id": "simulated-closeout-verification",
+        "promotion_attempt_id": attempt["attempt_id"],
+        "candidate_identity_record": deepcopy(inputs["candidate_identity_reference"]),
+        "candidate": deepcopy(candidate),
+        "promotion_decision": references["decision"],
+        "promotion_attempt": references["attempt"],
+        "remote_observation": references["published_observation"],
+        "remote_classification": references["published_classification"],
+        "pre_publication_verification": pre_phase,
+        "post_publication_verification": post_phase,
+        "remote_consumer_proof": references["remote_consumer"],
+        "outcome": "PASS",
+        "verified_at": "2029-12-31T23:59:59Z",
+    }
+    documents["handoff"] = {
+        "handoff_schema_version": "1.0",
+        "handoff_id": "simulated-closeout-program-b-handoff",
+        "producer": {
+            "helper_path": "scripts/stateless_preview_artifact.py",
+            "operation": "seal_program_b_handoff",
+        },
+        "candidate_identity_record": deepcopy(inputs["candidate_identity_reference"]),
+        "candidate": deepcopy(candidate),
+        "source_ref": SOURCE_REF,
+        "source_commit": candidate["source"]["commit"],
+        "approved_promotion_decision": references["decision"],
+        "promotion_attempt": references["attempt"],
+        "promotion_attempt_id": attempt["attempt_id"],
+        "published_remote_observation": references["published_observation"],
+        "published_remote_classification": references["published_classification"],
+        "remote_verification_receipt": references["verification"],
+        "remote_consumer_proof": references["remote_consumer"],
+        "release_gate_catalog": inputs["release_gate_catalog_reference"],
+        "pre_decision_stage_evidence": references["pre_decision_stage"],
+        "pre_publication_stage_evidence": references["pre_publication_stage"],
+        "post_publication_stage_evidence": references["post_publication_stage"],
+        "completion_scope": "A1_OPT_IN_PREVIEW_COMPLETE",
+        "program_b_authorization_required": True,
+        "program_c_authorization_required": True,
+        "recorded_at": "2029-12-31T23:59:59Z",
+    }
+    inputs["closeout_documents"] = documents
+    inputs["closeout_references"] = references
+    _retain_simulated_closeout_records(inputs)
+    identity_reference = inputs["candidate_identity_reference"]
+    inputs["records"][identity_reference["path"]] = inputs["candidate_identity_bytes"]
+    inputs["records"][inputs["release_gate_catalog_reference"]["path"]] = inputs[
+        "release_gate_catalog_bytes"
+    ]
+    stage_resolver = inputs["record_resolver"]
+
+    def record_resolver(reference: Mapping[str, Any]) -> bytes:
+        if all(
+            reference[key] == identity_reference[key]
+            for key in ("repository", "run_id", "artifact_id", "path")
+        ):
+            return inputs["records"][identity_reference["path"]]
+        return stage_resolver(reference)
+
+    inputs["record_resolver"] = record_resolver
+    return inputs
+
+
+@pytest.mark.parametrize(("operation", "record_key", "schema"), _CLOSEOUT_SEALERS)
+def test_remote_closeout_seals_complete_graph_without_mutating_inputs(
+    remote_closeout_inputs: dict[str, Any], operation: str, record_key: str, schema: str
+) -> None:
+    inputs = remote_closeout_inputs
+    record = inputs["closeout_documents"][record_key]
+    original = deepcopy(record)
+    snapshot = deepcopy(
+        {
+            key: inputs[key]
+            for key in (
+                "closeout_documents",
+                "records",
+                "candidate_identity",
+                "candidate_identity_bytes",
+                "catalog",
+                "release_gate_catalog_bytes",
+                "current_promotion_context",
+            )
+        }
+    )
+    _validate_review_schema(record, schema)
+
+    sealed = getattr(artifact_contract, operation)(record, **_attempt_binding(inputs))
+
+    _validate_review_schema(sealed, schema)
+    assert sealed == original
+    assert {key: inputs[key] for key in snapshot} == snapshot
+    assert sealed["candidate"] == inputs["candidate_identity"]["candidate"]
+    assert (
+        sealed["promotion_attempt_id"] == inputs["current_promotion_context"]["current_attempt_id"]
+    )
+    assert sealed["promotion_attempt"] == inputs["closeout_references"]["attempt"]
+    if record_key == "verification":
+        for phase in ("pre_publication_verification", "post_publication_verification"):
+            assert (
+                sealed[phase]["release"]
+                == inputs["closeout_documents"]["remote_consumer"]["download_origin"]
+            )
+            assert (
+                sealed[phase]["executable"]
+                == sealed["candidate"]["preview_manifest"]["contents"]["executable"]
+            )
+    else:
+        assert (
+            sealed["remote_verification_receipt"] == inputs["closeout_references"]["verification"]
+        )
+        assert [
+            sealed[f"{stage}_stage_evidence"]
+            for stage in ("pre_decision", "pre_publication", "post_publication")
+        ] == [
+            inputs["closeout_references"][f"{stage}_stage"]
+            for stage in ("pre_decision", "pre_publication", "post_publication")
+        ]
+        assert sealed["program_b_authorization_required"] is True
+        assert sealed["program_c_authorization_required"] is True
+    for branch, field in (
+        (sealed, "promotion_attempt_id"),
+        (sealed["candidate"]["source"], "commit"),
+        (sealed["promotion_attempt"], "sha256"),
+        (sealed["candidate"]["build"]["artifact"]["retention"], "configured_days"),
+    ):
+        with pytest.raises(TypeError):
+            branch[field] = "SIMULATED_MUTATION"
+    record["candidate"]["source"]["commit"] = "a" * 40
+    inputs["current_promotion_context"]["workflow_run"]["commit"] = "a" * 40
+    inputs["records"][inputs["closeout_references"]["published_observation"]["path"]] += b" "
+    assert sealed == original
+
+
+@pytest.mark.parametrize(("operation", "record_key", "_schema"), _CLOSEOUT_SEALERS)
+@pytest.mark.parametrize(
+    "document",
+    [
+        "candidate",
+        "catalog",
+        "pre_decision_stage",
+        "pre_publication_stage",
+        "decision",
+        "admission_observation",
+        "admission_classification",
+        "attempt",
+        "published_observation",
+        "published_classification",
+        "remote_consumer",
+    ],
+)
+def test_remote_closeout_refuses_raw_hash_substitution(
+    remote_closeout_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    _schema: str,
+    document: str,
+) -> None:
+    inputs = remote_closeout_inputs
+    if document in ("candidate", "catalog"):
+        key = (
+            "candidate_identity_bytes" if document == "candidate" else "release_gate_catalog_bytes"
+        )
+        inputs[key] += b" "
+    else:
+        reference = inputs["closeout_references"][document]
+        inputs["records"][reference["path"]] += b" "
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(
+            inputs["closeout_documents"][record_key], **_attempt_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize(("operation", "record_key", "_schema"), _CLOSEOUT_SEALERS)
+@pytest.mark.parametrize(
+    ("document", "path", "value"),
+    [
+        ("decision", ("decision",), "DECLINE"),
+        ("decision", ("candidate", "build", "artifact", "id"), "999"),
+        ("attempt", ("schema_version",), "1.0"),
+        ("attempt", ("attempt_id",), "simulated-previous-attempt"),
+        ("attempt", ("candidate_identity_record_sha256",), "a" * 64),
+        ("attempt", ("promotion_decision_sha256",), "a" * 64),
+        ("attempt", ("workflow_run", "run_attempt"), 1),
+        (
+            "attempt",
+            ("authorization", "decision_authorization", "authorized_dispatcher", "id"),
+            "999",
+        ),
+        ("attempt", ("authorization", "current_github_actor", "id"), "999"),
+        (
+            "attempt",
+            ("authorization", "current_github_triggering_actor", "login"),
+            "simulated-other",
+        ),
+        ("attempt", ("authorization", "execution_policy", "execution_token", "app_id"), "999"),
+        (
+            "attempt",
+            ("authorization", "execution_policy", "execution_token", "installation_id"),
+            "999",
+        ),
+        ("attempt", ("authorization", "execution_policy", "execution_token", "source"), "PAT"),
+        ("attempt", ("authorization", "execution_policy", "job_id"), "999"),
+        ("attempt", ("authorization", "execution_policy", "run_attempt"), 1),
+        ("attempt", ("authorization", "execution_policy", "workflow_sha"), "a" * 40),
+        ("attempt", ("authorization", "execution_policy", "workflow_blob_sha256"), "a" * 64),
+        ("published_observation", ("candidate", "source", "commit"), "a" * 40),
+        ("published_observation", ("promotion_attempt_id",), "simulated-previous-attempt"),
+        ("published_observation", ("release_observation", "is_draft"), True),
+        ("published_classification", ("promotion_attempt_id",), "simulated-previous-attempt"),
+        ("published_classification", ("candidate", "source", "origin_main_target"), "a" * 40),
+    ],
+)
+def test_remote_closeout_refuses_rehashed_lineage_substitution(
+    remote_closeout_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    _schema: str,
+    document: str,
+    path: tuple[str, ...],
+    value: Any,
+) -> None:
+    inputs = remote_closeout_inputs
+    target = inputs["closeout_documents"][document]
+    for field in path[:-1]:
+        target = target[field]
+    target[path[-1]] = value
+    _retain_simulated_closeout_records(inputs)
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(
+            inputs["closeout_documents"][record_key], **_attempt_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize(("operation", "record_key", "_schema"), _CLOSEOUT_SEALERS)
+@pytest.mark.parametrize(
+    ("branch", "field", "value"),
+    [
+        (None, "current_attempt_id", "simulated-previous-attempt"),
+        (None, "checkout_head", "a" * 40),
+        (None, "origin_main_target", "a" * 40),
+        (None, "job_id", "999"),
+        ("workflow_run", "run_attempt", 1),
+        ("current_github_actor", "id", "999"),
+        ("current_github_triggering_actor", "login", "simulated-other"),
+    ],
+)
+def test_remote_closeout_requires_independent_current_context(
+    remote_closeout_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    _schema: str,
+    branch: str | None,
+    field: str,
+    value: Any,
+) -> None:
+    inputs = remote_closeout_inputs
+    context = inputs["current_promotion_context"]
+    (context if branch is None else context[branch])[field] = value
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(
+            inputs["closeout_documents"][record_key], **_attempt_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize(("operation", "record_key", "_schema"), _CLOSEOUT_SEALERS)
+@pytest.mark.parametrize("phase", ["pre_publication_verification", "post_publication_verification"])
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "missing",
+        "null",
+        "wrong_phase",
+        "release_id",
+        "archive_id",
+        "manifest_id",
+        "archive_hash",
+        "manifest_hash",
+        "asset_size",
+        "prerelease",
+        "executable",
+        "false_equation",
+        "integer_equation",
+    ],
+)
+def test_remote_closeout_requires_both_exact_publication_phases(
+    remote_closeout_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    _schema: str,
+    phase: str,
+    violation: str,
+) -> None:
+    inputs = remote_closeout_inputs
+    verification = inputs["closeout_documents"]["verification"]
+    if violation == "missing":
+        del verification[phase]
+    elif violation == "null":
+        verification[phase] = None
+    elif violation == "wrong_phase":
+        verification[phase]["phase"] = (
+            "POST_PUBLICATION" if phase.startswith("pre_") else "PRE_PUBLICATION"
+        )
+    elif violation == "release_id":
+        verification[phase]["release"]["release_id"] = "999"
+    elif violation in ("archive_id", "manifest_id"):
+        verification[phase]["release"][violation.replace("_id", "_asset")]["id"] = "999"
+    elif violation in ("archive_hash", "manifest_hash"):
+        kind = violation.replace("_hash", "_asset")
+        verification[phase]["release"][kind]["sha256"] = "a" * 64
+    elif violation == "asset_size":
+        verification[phase]["release"]["archive_asset"]["size_bytes"] += 1
+    elif violation == "prerelease":
+        verification[phase]["release"]["prerelease"] = False
+    elif violation == "executable":
+        verification[phase]["executable"]["sha256"] = "a" * 64
+    elif violation == "integer_equation":
+        verification[phase]["inherited_verifier_equations_pass"] = 1
+    else:
+        verification[phase]["inherited_verifier_equations_pass"] = False
+    _retain_simulated_closeout_records(inputs)
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(
+            inputs["closeout_documents"][record_key], **_attempt_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize(("operation", "record_key", "_schema"), _CLOSEOUT_SEALERS)
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "retained",
+        "partial_matrix",
+        "wrong_repository",
+        "wrong_release",
+        "wrong_asset",
+        "unclean_eof",
+        "changed_python",
+    ],
+)
+def test_remote_closeout_requires_complete_matching_remote_consumer(
+    remote_closeout_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    _schema: str,
+    violation: str,
+) -> None:
+    inputs = remote_closeout_inputs
+    remote = inputs["closeout_documents"]["remote_consumer"]
+    if violation == "retained":
+        inputs["closeout_documents"]["remote_consumer"] = deepcopy(inputs["consumer"])
+    elif violation == "partial_matrix":
+        remote["scenario_matrix"]["results"].pop()
+    elif violation == "wrong_repository":
+        remote["download_origin"]["repository"] = "other/repository"
+    elif violation == "wrong_release":
+        remote["download_origin"]["release_id"] = "999"
+    elif violation == "wrong_asset":
+        remote["download_origin"]["archive_asset"]["id"] = "999"
+    elif violation == "unclean_eof":
+        remote["runtime_results"]["clean_eof"]["exited_cleanly"] = False
+    else:
+        remote["python_rollback_result"]["console_entrypoint_changed"] = True
+    _retain_simulated_closeout_records(inputs)
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(
+            inputs["closeout_documents"][record_key], **_attempt_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize("stage", ["pre_decision", "pre_publication", "post_publication"])
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "missing_reference",
+        "missing_record",
+        "duplicate_reference",
+        "wrong_stage",
+        "wrong_source",
+        "wrong_catalog",
+        "failed",
+    ],
+)
+def test_remote_closeout_handoff_requires_all_three_exact_stages(
+    remote_closeout_inputs: dict[str, Any],
+    stage: str,
+    violation: str,
+) -> None:
+    inputs = remote_closeout_inputs
+    handoff = inputs["closeout_documents"]["handoff"]
+    record = inputs["closeout_documents"][f"{stage}_stage"]
+    field = f"{stage}_stage_evidence"
+    if violation == "missing_reference":
+        del handoff[field]
+    elif violation == "duplicate_reference":
+        other = "post_publication" if stage == "pre_decision" else "pre_decision"
+        handoff[field] = inputs["closeout_references"][f"{other}_stage"]
+    elif violation == "wrong_stage":
+        record["stage"] = "post-publication" if stage == "pre_decision" else "pre-decision"
+    elif violation == "wrong_source":
+        record["source_commit"] = "a" * 40
+    elif violation == "wrong_catalog":
+        record["release_gate_catalog"] = {**record["release_gate_catalog"], "sha256": "a" * 64}
+    elif violation == "failed":
+        record["outcome"] = "FAIL"
+    _retain_simulated_closeout_records(inputs)
+    if violation == "missing_record":
+        del inputs["records"][inputs["closeout_references"][f"{stage}_stage"]["path"]]
+    with pytest.raises(ValueError):
+        artifact_contract.seal_program_b_handoff(handoff, **_attempt_binding(inputs))
+
+
+@pytest.mark.parametrize(
+    ("stage", "violation"),
+    [
+        ("pre_decision", "missing"),
+        ("pre_decision", "duplicate"),
+        ("pre_decision", "reordered"),
+        ("pre_decision", "wrong_type"),
+        ("pre_publication", "extra"),
+        ("post_publication", "missing"),
+        ("post_publication", "duplicate"),
+        ("post_publication", "wrong_type"),
+    ],
+)
+def test_remote_closeout_handoff_rederives_ordered_stage_subsets(
+    remote_closeout_inputs: dict[str, Any],
+    stage: str,
+    violation: str,
+) -> None:
+    inputs = remote_closeout_inputs
+    rows = inputs["closeout_documents"][f"{stage}_stage"]["gate_evidence"]
+    if violation == "missing":
+        rows.pop()
+    elif violation == "duplicate":
+        rows.append(deepcopy(rows[0]))
+    elif violation == "reordered":
+        rows.reverse()
+    elif violation == "wrong_type":
+        rows[0]["record_type"] = "independent-pr-review"
+    else:
+        rows.append(
+            deepcopy(inputs["closeout_documents"]["pre_decision_stage"]["gate_evidence"][0])
+        )
+    _retain_simulated_closeout_records(inputs)
+    with pytest.raises(ValueError):
+        artifact_contract.seal_program_b_handoff(
+            inputs["closeout_documents"]["handoff"], **_attempt_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize("violation", ["policy_snapshot", "descriptor"])
+def test_remote_closeout_handoff_refuses_rehashed_catalog_policy_drift(
+    remote_closeout_inputs: dict[str, Any],
+    violation: str,
+) -> None:
+    inputs = remote_closeout_inputs
+    catalog = inputs["catalog"]["catalog"]
+    if violation == "policy_snapshot":
+        catalog["policy_authority_snapshots"][0]["sha256"] = "a" * 64
+    else:
+        catalog["gate_descriptors"][0]["stage"] = "post-publication"
+    raw = _canonical_json_bytes(inputs["catalog"])
+    inputs["release_gate_catalog_bytes"] = raw
+    reference = inputs["release_gate_catalog_reference"]
+    reference["sha256"] = _sha256_bytes(raw)
+    inputs["records"][reference["path"]] = raw
+    _retain_simulated_closeout_records(inputs)
+    with pytest.raises(ValueError):
+        artifact_contract.seal_program_b_handoff(
+            inputs["closeout_documents"]["handoff"], **_attempt_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize(
+    "field", ["program_b_authorization_required", "program_c_authorization_required"]
+)
+@pytest.mark.parametrize("value", [False, 1, None])
+def test_remote_closeout_handoff_never_grants_program_b_or_c(
+    remote_closeout_inputs: dict[str, Any],
+    field: str,
+    value: Any,
+) -> None:
+    inputs = remote_closeout_inputs
+    handoff = inputs["closeout_documents"]["handoff"]
+    handoff[field] = value
+    with pytest.raises(ValueError):
+        artifact_contract.seal_program_b_handoff(handoff, **_attempt_binding(inputs))
+
+
+@pytest.mark.parametrize(("operation", "record_key", "_schema"), _CLOSEOUT_SEALERS)
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("raw_diagnostics", "SIMULATED raw stdout"),
+        ("local_path", "C:\\SIMULATED\\private"),
+        ("token", "SIMULATED_NOT_A_TOKEN"),
+        ("program_b_authorized", True),
+        ("program_c_authorized", True),
+        ("unexpected", {}),
+    ],
+)
+def test_remote_closeout_refuses_leaked_or_authorizing_fields(
+    remote_closeout_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    _schema: str,
+    field: str,
+    value: Any,
+) -> None:
+    inputs = remote_closeout_inputs
+    record = inputs["closeout_documents"][record_key]
+    record[field] = value
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(record, **_attempt_binding(inputs))
+
+
+@pytest.mark.parametrize(("operation", "record_key", "_schema"), _CLOSEOUT_SEALERS)
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("candidate_identity_record", "sha256"), "a" * 64),
+        (("candidate", "source", "ref"), "refs/heads/other"),
+        (("candidate", "source", "commit"), "a" * 40),
+        (("candidate", "source", "origin_main_target"), "a" * 40),
+        (("candidate", "build", "run_id"), "999"),
+        (("promotion_attempt_id",), "simulated-previous-attempt"),
+        (("promotion_attempt",), None),
+        (("source_ref",), "refs/heads/other"),
+        (("source_commit",), "a" * 40),
+    ],
+)
+def test_remote_closeout_refuses_substituted_root_binding(
+    remote_closeout_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    _schema: str,
+    path: tuple[str, ...],
+    value: Any,
+) -> None:
+    inputs = remote_closeout_inputs
+    record = inputs["closeout_documents"][record_key]
+    target = record
+    for field in path[:-1]:
+        target = target[field]
+    target[path[-1]] = value
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(record, **_attempt_binding(inputs))
+
+
+@pytest.mark.parametrize(("operation", "record_key", "_schema"), _CLOSEOUT_SEALERS)
+def test_remote_closeout_refuses_honestly_derived_nonpublished_classification(
+    remote_closeout_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    _schema: str,
+) -> None:
+    inputs = remote_closeout_inputs
+    documents = inputs["closeout_documents"]
+    documents["published_observation"]["release_observation"]["is_draft"] = True
+    _retain_simulated_closeout_records(inputs)
+    classification = artifact_contract.classify_remote_observation(
+        inputs["closeout_references"]["published_observation"],
+        **{
+            **_remote_classification_binding(inputs),
+            "classification_id": "simulated-closeout-published-classification",
+            "classified_at": "2029-12-31T23:59:58Z",
+            "record_resolver": inputs["record_resolver"],
+        },
+    )
+    assert classification["state"] == "draft_complete"
+    documents["published_classification"] = json.loads(_canonical_json_bytes(classification))
+    _retain_simulated_closeout_records(inputs)
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(documents[record_key], **_attempt_binding(inputs))
+
+
+@pytest.mark.parametrize(("operation", "record_key", "_schema"), _CLOSEOUT_SEALERS)
+@pytest.mark.parametrize("identity", ["release_id", "archive_asset", "manifest_asset"])
+def test_remote_closeout_does_not_trust_self_consistent_but_wrong_phase_origins(
+    remote_closeout_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    _schema: str,
+    identity: str,
+) -> None:
+    inputs = remote_closeout_inputs
+    documents = inputs["closeout_documents"]
+    verification = documents["verification"]
+    for origin in (
+        verification["pre_publication_verification"]["release"],
+        verification["post_publication_verification"]["release"],
+        documents["remote_consumer"]["download_origin"],
+    ):
+        if identity == "release_id":
+            origin[identity] = "999"
+        else:
+            origin[identity]["id"] = "999"
+    _retain_simulated_closeout_records(inputs)
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(documents[record_key], **_attempt_binding(inputs))
+
+
+@pytest.mark.parametrize("document", ["post_publication_stage", "verification"])
+def test_remote_closeout_handoff_hashes_its_additional_predecessors(
+    remote_closeout_inputs: dict[str, Any],
+    document: str,
+) -> None:
+    inputs = remote_closeout_inputs
+    inputs["records"][inputs["closeout_references"][document]["path"]] += b" "
+    with pytest.raises(ValueError):
+        artifact_contract.seal_program_b_handoff(
+            inputs["closeout_documents"]["handoff"], **_attempt_binding(inputs)
+        )
+
+
+@pytest.mark.parametrize(("operation", "record_key", "_schema"), _CLOSEOUT_SEALERS)
+@pytest.mark.parametrize("location", ["reference", "phase", "origin", "execution_token"])
+def test_remote_closeout_refuses_nested_raw_or_unexpected_fields(
+    remote_closeout_inputs: dict[str, Any],
+    operation: str,
+    record_key: str,
+    _schema: str,
+    location: str,
+) -> None:
+    inputs = remote_closeout_inputs
+    documents = inputs["closeout_documents"]
+    if location == "reference":
+        target = documents[record_key]["candidate_identity_record"]
+    elif location == "phase":
+        target = documents["verification"]["pre_publication_verification"]
+    elif location == "origin":
+        target = documents["remote_consumer"]["download_origin"]
+    else:
+        target = documents["attempt"]["authorization"]["execution_policy"]["execution_token"]
+    target["raw_diagnostics"] = "SIMULATED raw response"
+    _retain_simulated_closeout_records(inputs)
+    with pytest.raises(ValueError):
+        getattr(artifact_contract, operation)(documents[record_key], **_attempt_binding(inputs))
 
 
 class _EvidenceWorkflowCli:
@@ -6038,7 +6764,7 @@ def test_evidence_cli_permission_probe_admission_has_no_retain_build_or_publish_
     for name in ("A1_PREVIEW_VERSION", "A1_PREVIEW_TAG", "A1_RETENTION_DAYS"):
         del cli.environment[name]
 
-    assert cli.invoke("admit-evidence") == 0
+    assert cli.invoke("admit-evidence") == 1
 
     assert not list(cli.runner.iterdir())
     assert not (cli.root / "artifacts").exists()
@@ -6255,14 +6981,30 @@ class _PromotionWorkflowCli(_EvidenceWorkflowCli):
                 }
             ],
         }
-        self.permission_report = deepcopy(inputs["permission_report"])
-        self.permission_report["binding"].update(
-            head_sha=self.source_commit, workflow_sha=self.source_commit
-        )
-        self.permission_report["actor_provenance"] = {
-            "GITHUB_ACTOR": dispatcher["login"],
-            "GITHUB_TRIGGERING_ACTOR": dispatcher["login"],
+        # Historical unavailable-log input is deliberately never written or consumed.
+        self.permission_report = {"requests": [{}]}
+        self.jobs["201"] = {"total_count": 0, "jobs": []}
+        self.run_attempts[("201", "1")] = {**self.runs["201"], "run_attempt": 1}
+        self.run_attempts[("801", "1")] = {
+            **self.runs["801"],
+            "run_attempt": 1,
+            "status": "completed",
+            "conclusion": "cancelled",
         }
+        self.attempt_jobs = {("801", "1"): {"total_count": 0, "jobs": []}}
+        self.next_artifact_id = 1100
+        self.denial_foreign_apply = True
+        self.discovery_incomplete = False
+        self.jobs["801"]["jobs"][0]["steps"].extend(
+            [
+                {"name": name, "status": "queued", "conclusion": None}
+                for name in (
+                    "Read back A and execute the first legal advancement",
+                    "Execute the second legal advancement from retained C1",
+                    "Execute the third and final legal advancement from retained C2",
+                )
+            ]
+        )
         self.inputs.clear()
         self.inputs.update(mode="promote", preview_tag=TAG, promote_request="")
         self.event["sender"] = dict(principal)
@@ -6288,6 +7030,7 @@ class _PromotionWorkflowCli(_EvidenceWorkflowCli):
         self.known_tag_oid: str | None = None
         self.tag_input: bytes | None = None
         self.push_race: str | None = None
+        self.denied_operation: str | None = None
         self.unknown_operation: str | None = None
         self.unknown_after_apply = False
         self.unreadable_reconciliation = False
@@ -6301,6 +7044,53 @@ class _PromotionWorkflowCli(_EvidenceWorkflowCli):
             artifact_contract, "build_opener", lambda *handlers: SimpleNamespace(open=self.http)
         )
 
+    @property
+    def current_attempt_id(self) -> str:
+        return f"a1-promote-{self.environment['GITHUB_RUN_ID']}-{self.environment['GITHUB_RUN_ATTEMPT']}-{self.jobs[self.environment['GITHUB_RUN_ID']]['jobs'][0]['id']}"
+
+    def fresh_attempt(self, *, rerun: bool = False) -> None:
+        old_id, old_attempt = (
+            self.environment["GITHUB_RUN_ID"],
+            self.environment["GITHUB_RUN_ATTEMPT"],
+        )
+        old_run, old_job = self.runs[old_id], self.jobs[old_id]["jobs"][0]
+        old_run.update(status="completed", conclusion="failure")
+        old_job.update(status="completed", conclusion="failure")
+        for step in old_job["steps"]:
+            if step["status"] != "completed":
+                step.update(status="completed", conclusion="skipped")
+        self.attempt_jobs[(old_id, old_attempt)] = deepcopy(self.jobs[old_id])
+        new_id = old_id if rerun else str(int(old_id) + 1)
+        new_attempt = int(old_attempt) + 1 if rerun else 1
+        new_job = deepcopy(old_job)
+        new_job.update(
+            id=int(old_job["id"]) + 1,
+            run_id=int(new_id),
+            run_attempt=new_attempt,
+            status="in_progress",
+            conclusion=None,
+            url=f"https://api.github.com/repos/{REPOSITORY}/actions/jobs/{int(old_job['id']) + 1}",
+            run_url=f"https://api.github.com/repos/{REPOSITORY}/actions/runs/{new_id}",
+        )
+        for step in new_job["steps"][1:]:
+            step.update(status="queued", conclusion=None)
+        self.jobs[new_id] = {"total_count": 1, "jobs": [new_job]}
+        self.runs[new_id] = {
+            **old_run,
+            "id": int(new_id),
+            "run_attempt": new_attempt,
+            "status": "in_progress",
+            "conclusion": None,
+            "created_at": old_run["created_at"] if rerun else self.clock,
+        }
+        self.run_attempts[(new_id, str(new_attempt))] = self.runs[new_id]
+        self.environment.update(GITHUB_RUN_ID=new_id, GITHUB_RUN_ATTEMPT=str(new_attempt))
+        for key in list(self.environment):
+            if key.startswith("A1_PROMOTE_"):
+                del self.environment[key]
+        self.retained.clear()
+        self.locations.clear()
+
     def sync_promotion_request(self) -> None:
         self.inputs["promote_request"] = json.dumps(self.decision_reference, separators=(",", ":"))
 
@@ -6310,27 +7100,19 @@ class _PromotionWorkflowCli(_EvidenceWorkflowCli):
         self.event_path.write_text(json.dumps(self.event), encoding="utf-8")
         self.output_path.write_text("", encoding="utf-8")
         arguments = [command] if step is None else [command, "--step", str(step)]
+        advance = None
+        if command == "advance-promote":
+            advance = self.jobs[self.environment["GITHUB_RUN_ID"]]["jobs"][0]["steps"][step]
+            advance.update(status="in_progress", conclusion=None)
         result = artifact_contract.main(arguments)
+        if advance is not None:
+            advance.update(status="completed", conclusion="success" if result == 0 else "failure")
         self.locations.update(self.outputs())
         return result
 
-    def write_permission_report(self) -> bytes:
-        report = self.permission_report
-        report["started_at"] = report["finished_at"] = self.clock
-        for request in report["requests"]:
-            request["started_at"] = request["finished_at"] = self.clock
-        raw = (json.dumps(report, indent=1) + "\r\n").encode("utf-8")
-        path = Path(self.locations["permission_path"])
-        assert path.resolve().is_relative_to(self.runner.resolve())
-        path.write_bytes(raw)
-        return raw
-
     def retain(self, kind: str, step: int = 0) -> dict[str, Any]:
         if kind == "admission":
-            paths = [
-                Path(self.locations[key])
-                for key in ("stage_path", "permission_path", "observation_path")
-            ]
+            paths = [Path(self.locations[key]) for key in ("stage_path", "observation_path")]
         elif kind == "observation":
             paths = [Path(self.locations["observation_path"])]
         else:
@@ -6346,13 +7128,17 @@ class _PromotionWorkflowCli(_EvidenceWorkflowCli):
         for path in paths:
             assert path.resolve().is_relative_to(self.runner.resolve()) and not path.is_symlink()
         members = {path.name: path.read_bytes() for path in paths}
-        artifact_id = str(1100 + len(self.retained))
+        artifact_id = str(self.next_artifact_id)
+        self.next_artifact_id += 1
         assert all(
             self.locations[f"{kind}_artifact_name"] != reference["artifact"]["name"]
             for reference in self.retained.values()
         ), "immutable workflow uploads must have distinct artifact names"
         reference = self.add_artifact(
-            artifact_id, self.locations[f"{kind}_artifact_name"], "801", members
+            artifact_id,
+            self.locations[f"{kind}_artifact_name"],
+            self.environment["GITHUB_RUN_ID"],
+            members,
         )
         prefix = f"A1_PROMOTE_{kind.upper()}_ARTIFACT"
         self.environment[f"{prefix}_ID"] = artifact_id
@@ -6366,16 +7152,15 @@ class _PromotionWorkflowCli(_EvidenceWorkflowCli):
         return reference
 
     def stage_and_observe(self) -> None:
+        mutations = deepcopy(self.mutations)
         assert self.invoke("admit-promote") == 0
         assert self.locations["retention_days"] == "7"
         stage = json.loads(Path(self.locations["stage_path"]).read_bytes())
         _validate_review_schema(stage, "stage-gate-evidence.schema.json")
         assert stage["stage"] == "pre-publication" and stage["outcome"] == "PASS"
         assert stage["candidate"] == self.identity["candidate"]
-        permission_raw = self.write_permission_report()
         assert self.invoke("observe-promote") == 0
-        assert Path(self.locations["permission_path"]).read_bytes() == permission_raw
-        assert self.mutations == []
+        assert self.mutations == mutations
 
     def classify_and_retain(self, step: int) -> dict[str, Any]:
         assert self.invoke("classify-promote", step=step) == 0
@@ -6385,19 +7170,20 @@ class _PromotionWorkflowCli(_EvidenceWorkflowCli):
         return record
 
     def admit_attempt(self) -> dict[str, Any]:
+        mutations = deepcopy(self.mutations)
         self.stage_and_observe()
         self.retain("admission")
         initial = self.classify_and_retain(0)
         assert self.invoke("seal-promote-attempt") == 0
         attempt = json.loads(Path(self.locations["attempt_path"]).read_bytes())
         _validate_review_schema(attempt, "promotion-attempt.schema.json")
-        assert attempt["schema_version"] == "2.0"
-        assert attempt["attempt_id"] == "a1-promote-801-2-901"
+        assert attempt["schema_version"] == "3.0"
+        assert attempt["attempt_id"] == self.current_attempt_id
         assert (
             attempt["authorization"]["current_github_actor"]
             == self.request["authorized_dispatcher"]
         )
-        assert attempt["authorization"]["permission_readback"]["execution_token"] == {
+        assert attempt["authorization"]["execution_policy"]["execution_token"] == {
             "source": "github.token",
             "kind": "GITHUB_APP_INSTALLATION_TOKEN",
             "identity_observation": "UNOBSERVED",
@@ -6405,14 +7191,14 @@ class _PromotionWorkflowCli(_EvidenceWorkflowCli):
             "installation_id": None,
         }
         self.retain("attempt")
-        assert self.mutations == []
+        assert self.mutations == mutations
         return initial
 
     def advance_and_retain(self, step: int) -> dict[str, Any]:
         assert self.invoke("advance-promote", step=step) == 0
         observation = json.loads(Path(self.locations["observation_path"]).read_bytes())
         _validate_review_schema(observation, "remote-observation.schema.json")
-        assert observation["promotion_attempt_id"] == "a1-promote-801-2-901"
+        assert observation["promotion_attempt_id"] == self.current_attempt_id
         self.retain("observation", step)
         return self.classify_and_retain(step)
 
@@ -6492,6 +7278,39 @@ class _PromotionWorkflowCli(_EvidenceWorkflowCli):
     def mutation(self, operation: str, target: str, raw: bytes) -> bool:
         self.mutations.append({"operation": operation, "target": target, "body": raw})
         self.trace.append(("mutation", operation))
+        if operation == self.denied_operation:
+            if not self.denial_foreign_apply and operation != "create-tag":
+                raise HTTPError(
+                    f"https://api.github.com/{target}",
+                    403,
+                    "SIMULATED refusal",
+                    HTTPMessage(),
+                    io.BytesIO(b"{}"),
+                )
+            # Another writer wins the race; the sending token's request is still refused.
+            if operation == "create-tag":
+                assert self.known_tag_oid is not None
+                self.set_tag(self.known_tag_oid)
+            elif operation == "create-draft":
+                self.releases.append(self.release_metadata(1901))
+                self.assets[1901] = []
+            elif operation.startswith("upload-"):
+                self.remote_asset(operation.removeprefix("upload-"))
+            else:
+                assert operation == "publish"
+                next(value for value in self.releases if value["id"] == 1901)["draft"] = False
+            self.trace.append(("foreign-write", operation))
+            if operation != "create-tag":
+                url = (
+                    target if target.startswith("https://") else f"https://api.github.com/{target}"
+                )
+                raise HTTPError(
+                    url,
+                    403,
+                    "SIMULATED server refusal",
+                    HTTPMessage(),
+                    io.BytesIO(b'{"message":"Resource not accessible by integration"}'),
+                )
         return operation == self.unknown_operation
 
     @staticmethod
@@ -6501,6 +7320,37 @@ class _PromotionWorkflowCli(_EvidenceWorkflowCli):
         )
 
     def response(self, endpoint: str) -> bytes:
+        action_prefix = f"repos/{REPOSITORY}/actions/"
+        action_route, _, query = endpoint.removeprefix(action_prefix).partition("?")
+        if hasattr(self, "trace") and endpoint.startswith(action_prefix):
+            value = None
+            page = int(parse_qs(query).get("page", ["1"])[0])
+            if action_route == "workflows/stateless-preview.yml/runs":
+                values = list(self.runs.values())
+                value = {
+                    "total_count": len(values) + int(self.discovery_incomplete),
+                    "workflow_runs": values[(page - 1) * 100 : page * 100],
+                }
+            elif re.fullmatch(r"runs/\d+/artifacts", action_route):
+                run_id = action_route.split("/")[1]
+                values = [
+                    item["metadata"]
+                    for item in self.artifacts.values()
+                    if str(item["metadata"]["workflow_run"]["id"]) == run_id
+                ]
+                value = {
+                    "total_count": len(values),
+                    "artifacts": values[(page - 1) * 100 : page * 100],
+                }
+            elif re.fullmatch(r"runs/\d+/attempts/\d+/jobs", action_route):
+                _, run_id, _, attempt, _ = action_route.split("/")
+                value = self.attempt_jobs.get(
+                    (run_id, attempt), self.jobs.get(run_id, {"total_count": 0, "jobs": []})
+                )
+            if value is not None:
+                self.requests.append(endpoint)
+                self.trace.append(("read", endpoint))
+                return _canonical_json_bytes(value)
         if not hasattr(self, "trace") or "/actions/" in endpoint:
             if hasattr(self, "trace"):
                 self.trace.append(("read", endpoint))
@@ -6521,6 +7371,8 @@ class _PromotionWorkflowCli(_EvidenceWorkflowCli):
             if self.tag is None:
                 raise self.not_found(endpoint)
             value = self.tag
+        elif route == f"git/matching-refs/tags/{TAG}":
+            value = [] if self.tag is None else [self.tag]
         elif route.startswith("git/tags/"):
             oid = route.removeprefix("git/tags/")
             if oid not in self.tag_objects:
@@ -6631,6 +7483,19 @@ class _PromotionWorkflowCli(_EvidenceWorkflowCli):
                 for key, value in config
             )
             assert self.environment["GITHUB_TOKEN"] not in " ".join(command)
+            if self.denied_operation == "create-tag":
+                wire = (
+                    f"!\t{self.known_tag_oid}:refs/tags/{TAG}"
+                    "\t[remote rejected] (permission denied)\n"
+                )
+                return subprocess.CompletedProcess(
+                    command,
+                    1,
+                    wire if kwargs.get("text") else wire.encode(),
+                    "SIMULATED server refusal"
+                    if kwargs.get("text")
+                    else b"SIMULATED server refusal",
+                )
             if self.push_race is not None:
                 oid = self.known_tag_oid if self.push_race == "same-oid" else "e" * 40
                 self.set_tag(oid)
@@ -6768,6 +7633,170 @@ def promotion_workflow_cli(
     return _PromotionWorkflowCli(promotion_attempt_inputs, tmp_path, monkeypatch)
 
 
+def test_promotion_cli_authorization_v3_publishes_without_current_job_log_grants(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+) -> None:
+    cli = promotion_workflow_cli
+    workflow = cli.native_run(
+        ["git", "show", f"{cli.source_commit}:.github/workflows/stateless-preview.yml"],
+        cwd=cli.root,
+        capture_output=True,
+        check=True,
+    ).stdout
+    cli.permission_report.update(
+        status="UNAVAILABLE",
+        availability="UNAVAILABLE",
+        reason_code="CURRENT_JOB_LOGS_UNAVAILABLE",
+        grants={},
+        log_sha256=None,
+        log_source="job_logs",
+    )
+    request = cli.permission_report["requests"][0]
+    cli.permission_report["requests"] = [
+        {**request, "phase": phase, "http_status": status}
+        for phase, status in (
+            ("current_attempt_jobs", 200),
+            ("setup_step_logs", 404),
+            ("job_logs", 404),
+        )
+    ]
+
+    # On old source this reaches the actual collector gate with valid retained authority.
+    cli.stage_and_observe()
+    cli.retain("admission")
+    assert cli.classify_and_retain(0)["state"] == "unstarted"
+    assert cli.invoke("seal-promote-attempt") == 0
+    attempt_raw = Path(cli.locations["attempt_path"]).read_bytes()
+    attempt = json.loads(attempt_raw)
+    assert attempt["schema_version"] == "3.0"
+    assert attempt["attempt_id"] == "a1-promote-801-2-901"
+    assert attempt["candidate"] == cli.identity["candidate"]
+    assert attempt["promotion_decision"] == cli.decision_reference
+    assert attempt["predecessor_attempt"] is None
+    assert set(attempt["authorization"]) == {
+        "decision_authorization",
+        "current_github_actor",
+        "current_github_triggering_actor",
+        "execution_policy",
+    }
+    for role in ("current_github_actor", "current_github_triggering_actor"):
+        assert attempt["authorization"][role] == cli.request["authorized_dispatcher"]
+    assert attempt["authorization"]["execution_policy"] == {
+        "model": "GITHUB_JOB_TOKEN_SERVER_ENFORCED",
+        "run_attempt": 2,
+        "job_key": "promote",
+        "job_id": "901",
+        "workflow_sha": cli.source_commit,
+        "workflow_blob_sha256": _sha256_bytes(workflow),
+        "execution_token": {
+            "source": "github.token",
+            "kind": "GITHUB_APP_INSTALLATION_TOKEN",
+            "identity_observation": "UNOBSERVED",
+            "app_id": None,
+            "installation_id": None,
+        },
+    }
+    assert attempt["workflow_run"]["run_id"] == "801"
+    assert attempt["workflow_run"]["run_attempt"] == 2
+    assert attempt["workflow_run"]["commit"] == cli.source_commit
+    assert (
+        not {
+            "promotion_permission_readback",
+            "qualified_permission_report",
+            "permission_http_response",
+        }
+        & attempt.keys()
+    )
+    assert "current-job-permissions.json" not in cli.admission_bytes
+    _validate_review_schema(attempt, "promotion-attempt.schema.json")
+    cli.retain("attempt")
+    assert cli.mutations == []
+
+    for step, state in enumerate(("draft_empty", "draft_complete", "published_complete"), 1):
+        assert cli.advance_and_retain(step)["state"] == state
+    handoff = cli.finish(3)
+    assert handoff["promotion_attempt"] == cli.compact(cli.retained[("attempt", 0)])
+    assert "permission_report" not in handoff
+    assert [entry["operation"] for entry in cli.mutations] == [
+        "create-tag",
+        "create-draft",
+        "upload-archive",
+        "upload-manifest",
+        "publish",
+    ]
+    assert Path(cli.locations["attempt_path"]).read_bytes() == attempt_raw
+
+
+@pytest.mark.parametrize(
+    ("operation", "state", "recorded_operation"),
+    [
+        ("create-draft", "tag_only", "CREATE_DRAFT"),
+        ("upload-archive", "draft_empty", "UPLOAD_ARCHIVE"),
+        ("upload-manifest", "draft_archive_only", "UPLOAD_MANIFEST"),
+        ("publish", "draft_complete", "PUBLISH_RELEASE"),
+    ],
+)
+def test_promotion_cli_authorization_v3_denial_cannot_be_reconciled_from_another_writer(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+    operation: str,
+    state: str,
+    recorded_operation: str,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.seed_remote(state)
+    cli.admit_attempt()
+    admitted_attempt = Path(cli.locations["attempt_path"]).read_bytes()
+    cli.denied_operation = operation
+
+    assert cli.invoke("advance-promote", step=1) == 1
+    assert ("foreign-write", operation) in cli.trace
+    assert [entry["operation"] for entry in cli.mutations] == [operation]
+    observation = json.loads(Path(cli.locations["observation_path"]).read_bytes())
+    (result,) = observation["operation_results"]
+    assert result["origin_attempt_id"] == "a1-promote-801-2-901"
+    assert result["operation"] == recorded_operation
+    assert result["response"] == {
+        "kind": "DENIED",
+        "http_status": 403,
+        "git_returncode": None,
+        "resource_id": None,
+    }
+    assert result["postcondition"] == "MATCH"
+    assert result["outcome"] == "DENIED"
+    _validate_review_schema(observation, "remote-observation.schema.json")
+    cli.retain("observation", 1)
+    writes = deepcopy(cli.mutations)
+    if cli.invoke("classify-promote", step=1) == 0:
+        classification = json.loads(Path(cli.locations["classification_path"]).read_bytes())
+        assert classification["admission"] == "REFUSED"
+        assert classification["allowed_action"] == "REFUSE"
+        cli.retain("classification", 1)
+    assert cli.invoke("advance-promote", step=2) == 1
+    assert cli.invoke("finish-promote", step=1) == 1
+    assert cli.mutations == writes
+    assert Path(cli.locations["attempt_path"]).read_bytes() == admitted_attempt
+
+
+def test_promotion_cli_authorization_v3_git_rejection_stops_even_with_matching_foreign_tag(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.admit_attempt()
+    cli.denied_operation = "create-tag"
+
+    assert cli.invoke("advance-promote", step=1) == 1
+    assert ("foreign-write", "create-tag") in cli.trace
+    assert cli.tag is not None and cli.tag["object"]["sha"] == cli.known_tag_oid
+    assert [entry["operation"] for entry in cli.mutations] == ["create-tag"]
+    assert cli.releases == []
+    cli.retain("observation", 1)
+    assert cli.invoke("classify-promote", step=1) == 1
+    writes = deepcopy(cli.mutations)
+    assert cli.invoke("advance-promote", step=1) == 1
+    assert cli.invoke("advance-promote", step=2) == 1
+    assert cli.mutations == writes
+
+
 def test_promotion_cli_unstarted_to_published_complete(
     promotion_workflow_cli: _PromotionWorkflowCli,
 ) -> None:
@@ -6822,8 +7851,9 @@ def test_promotion_cli_unstarted_to_published_complete(
         handoff["pre_publication_stage_evidence"]
         == attempt["pre_publication_stage_evidence"]["record_reference"]
     )
+    assert "permission_report" not in handoff
     assert (
-        handoff["permission_report"] == attempt["authorization"]["permission_readback"]["reference"]
+        attempt["authorization"]["execution_policy"]["model"] == "GITHUB_JOB_TOKEN_SERVER_ENFORCED"
     )
     assert (
         not {
@@ -6896,10 +7926,7 @@ def test_promotion_cli_unstarted_to_published_complete(
         ).encode()
     )
     assert cli.tag is not None and cli.tag["object"]["sha"] == cli.known_tag_oid
-    assert (
-        cli.admission_bytes["current-job-permissions.json"]
-        == Path(cli.locations["permission_path"]).read_bytes()
-    )
+    assert "current-job-permissions.json" not in cli.admission_bytes
     for name in (
         "remote-consumer-proof.json",
         "remote-verification.json",
@@ -7119,73 +8146,49 @@ def test_promotion_cli_requires_independent_current_promote_context(
 
 
 @pytest.mark.parametrize(
-    "violation",
-    [
-        "unavailable",
-        "unqualified",
-        "contents-read",
-        "probe",
-        "other-run",
-        "other-attempt",
-        "other-job",
-        "other-workflow",
-        "other-actor",
-        "missing-native-log",
-        "stale-report",
-    ],
+    "violation", ["workflow-blob", "execution-token", "legacy-report", "wrong-attempt", "wrong-job"]
 )
-def test_promotion_cli_refuses_unqualified_or_substituted_same_job_report(
-    promotion_workflow_cli: _PromotionWorkflowCli, violation: str
+def test_promotion_cli_refuses_substituted_retained_execution_policy(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+    violation: str,
 ) -> None:
     cli = promotion_workflow_cli
-    assert cli.invoke("admit-promote") == 0
-    report = cli.permission_report
-    if violation == "unavailable":
-        report.update(status="UNAVAILABLE", availability="UNAVAILABLE")
-    elif violation == "unqualified":
-        report["status"] = "UNQUALIFIED"
-    elif violation == "contents-read":
-        report["grants"]["contents"] = "read"
-    elif violation == "probe":
-        report["binding"].update(
-            job_key="probe_permissions", job_name="Probe current job permissions"
-        )
-    elif violation.startswith("other-"):
-        key, value = {
-            "other-run": ("run_id", 999),
-            "other-attempt": ("run_attempt", 1),
-            "other-job": ("job_id", 999),
-            "other-workflow": ("workflow_sha", "a" * 40),
-            "other-actor": ("GITHUB_TRIGGERING_ACTOR", "thebtf"),
-        }[violation]
-        report["actor_provenance" if violation == "other-actor" else "binding"][key] = value
-    elif violation == "missing-native-log":
-        report["log_sha256"] = None
-    cli.write_permission_report()
-    if violation == "stale-report":
-        report["started_at"] = report["finished_at"] = "2029-01-01T00:00:00Z"
-        Path(cli.locations["permission_path"]).write_bytes(_canonical_json_bytes(report))
-    assert cli.invoke("observe-promote") == 1
-    assert not list(cli.runner.rglob("promotion-attempt.json"))
+    cli.admit_attempt()
+    record = json.loads(cli.attempt_bytes)
+    policy = record["authorization"]["execution_policy"]
+    if violation == "workflow-blob":
+        policy["workflow_blob_sha256"] = "a" * 64
+    elif violation == "execution-token":
+        policy["execution_token"]["installation_id"] = "999"
+    elif violation == "legacy-report":
+        record["authorization"]["permission_readback"] = {"status": "QUALIFIED"}
+    elif violation == "wrong-attempt":
+        policy["run_attempt"] = 1
+    else:
+        policy["job_id"] = "999"
+    artifact_id = cli.retained[("attempt", 0)]["artifact"]["id"]
+    cli.replace_retained(artifact_id, "promotion-attempt.json", _canonical_json_bytes(record))
+    assert cli.invoke("advance-promote", step=1) == 1
     assert cli.mutations == []
 
 
-def test_promotion_cli_job_id_is_not_sourced_from_the_permission_report(
+def test_promotion_cli_job_identity_is_selected_independently_without_log_report(
     promotion_workflow_cli: _PromotionWorkflowCli,
 ) -> None:
     cli = promotion_workflow_cli
     job = cli.jobs["801"]["jobs"][0]
     job.update(id=902, url=f"https://api.github.com/repos/{REPOSITORY}/actions/jobs/902")
-    assert cli.invoke("admit-promote") == 0
-    cli.write_permission_report()
-    assert cli.invoke("observe-promote") == 1
+    cli.admit_attempt()
+    attempt = json.loads(cli.attempt_bytes)
+    assert attempt["authorization"]["execution_policy"]["job_id"] == "902"
     assert any("/actions/runs/801/attempts/2/jobs" in endpoint for endpoint in cli.requests)
+    assert not list(cli.runner.rglob("current-job-permissions.json"))
     assert cli.mutations == []
 
 
 @pytest.mark.parametrize(
     "violation",
-    ["main-moved", "actor-changed", "job-changed", "decision-tamper", "report-tamper", "expired"],
+    ["main-moved", "actor-changed", "job-changed", "decision-tamper", "attempt-tamper", "expired"],
 )
 def test_promotion_cli_rechecks_authority_immediately_before_mutation(
     promotion_workflow_cli: _PromotionWorkflowCli, violation: str
@@ -7206,7 +8209,9 @@ def test_promotion_cli_rechecks_authority_immediately_before_mutation(
         if violation == "expired":
             cli.artifacts[artifact_id]["metadata"]["expired"] = True
         else:
-            cli.replace_retained(artifact_id, "current-job-permissions.json", b"{}\n")
+            cli.replace_retained(
+                cli.retained[("attempt", 0)]["artifact"]["id"], "promotion-attempt.json", b"{}\n"
+            )
     assert cli.invoke("advance-promote", step=1) == 1
     assert cli.mutations == []
 
@@ -7727,3 +8732,892 @@ def test_promotion_rest_transport_preserves_binary_header_like_bytes(
         "SIMULATED binary asset",
     )
     assert status == 200 and raw == payload
+
+
+@pytest.fixture
+def current_promote_jobs() -> dict[str, Any]:
+    return {
+        "total_count": 1,
+        "jobs": [
+            {
+                "id": 901,
+                "run_id": 801,
+                "run_attempt": 2,
+                "head_sha": "a" * 40,
+                "name": "Promote canonical-main preview candidate",
+                "status": "in_progress",
+                "conclusion": None,
+                "url": f"https://api.github.com/repos/{REPOSITORY}/actions/jobs/901",
+                "run_url": f"https://api.github.com/repos/{REPOSITORY}/actions/runs/801",
+                "steps": [
+                    {
+                        "name": "Set up job",
+                        "number": 1,
+                        "status": "completed",
+                        "conclusion": "success",
+                    },
+                    {
+                        "name": "Admit approved candidate",
+                        "number": 2,
+                        "status": "in_progress",
+                        "conclusion": None,
+                    },
+                ],
+            }
+        ],
+    }
+
+
+def _select_promote_job(jobs: Mapping[str, Any], **overrides: Any) -> Mapping[str, Any]:
+    identity = {
+        "repository": REPOSITORY,
+        "run_id": 801,
+        "run_attempt": 2,
+        "head_sha": "a" * 40,
+        "job_name": "Promote canonical-main preview candidate",
+    }
+    return artifact_contract._select_current_job(jobs, **{**identity, **overrides})
+
+
+def test_current_promote_job_selector_is_exact_detached_and_zero_based(
+    current_promote_jobs: dict[str, Any],
+) -> None:
+    jobs = current_promote_jobs
+    original = deepcopy(jobs)
+    assert _select_promote_job(jobs) == {"job_id": 901, "setup_step_position": 0}
+    assert jobs == original
+    other = {**jobs["jobs"][0], "id": 902, "name": "Unrelated completed job", "status": "completed"}
+    jobs["jobs"].insert(0, other)
+    jobs["total_count"] = 2
+    assert _select_promote_job(jobs)["job_id"] == 901
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("id", None),
+        ("id", True),
+        ("id", 0),
+        ("id", -1),
+        ("id", "901"),
+        ("run_id", 802),
+        ("run_id", True),
+        ("run_id", "801"),
+        ("run_attempt", 1),
+        ("run_attempt", True),
+        ("run_attempt", "2"),
+        ("head_sha", "b" * 40),
+        ("name", "Unrelated job"),
+        ("status", "completed"),
+        ("status", "queued"),
+        ("status", "waiting"),
+        ("conclusion", "success"),
+        ("url", f"https://api.github.com/repos/other/repo/actions/jobs/901"),
+        ("url", f"https://api.github.com/repos/{REPOSITORY}/actions/jobs/902"),
+        ("run_url", f"https://api.github.com/repos/{REPOSITORY}/actions/runs/802"),
+    ],
+)
+def test_current_promote_job_selector_refuses_foreign_or_nonrunning_identity(
+    current_promote_jobs: dict[str, Any],
+    field: str,
+    value: Any,
+) -> None:
+    current_promote_jobs["jobs"][0][field] = value
+    with pytest.raises(ValueError):
+        _select_promote_job(current_promote_jobs)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "id",
+        "run_id",
+        "run_attempt",
+        "head_sha",
+        "name",
+        "url",
+        "run_url",
+        "status",
+        "conclusion",
+        "steps",
+    ],
+)
+def test_current_promote_job_selector_refuses_missing_identity(
+    current_promote_jobs: dict[str, Any], field: str
+) -> None:
+    del current_promote_jobs["jobs"][0][field]
+    with pytest.raises(ValueError):
+        _select_promote_job(current_promote_jobs)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("repository", "other/repo"),
+        ("repository", "not-a-repository"),
+        ("run_id", 802),
+        ("run_id", True),
+        ("run_attempt", 1),
+        ("run_attempt", 0),
+        ("head_sha", "b" * 40),
+        ("head_sha", "bad"),
+        ("job_name", "Other job"),
+        ("job_name", ""),
+    ],
+)
+def test_current_promote_job_selector_never_infers_requested_identity(
+    current_promote_jobs: dict[str, Any],
+    field: str,
+    value: Any,
+) -> None:
+    with pytest.raises(ValueError):
+        _select_promote_job(current_promote_jobs, **{field: value})
+
+
+@pytest.mark.parametrize(
+    "violation",
+    ["empty", "duplicate", "distinct-same-name", "incomplete", "malformed", "bool-total"],
+)
+def test_current_promote_job_selector_refuses_ambiguous_or_incomplete_listing(
+    current_promote_jobs: dict[str, Any],
+    violation: str,
+) -> None:
+    jobs = current_promote_jobs
+    if violation == "empty":
+        jobs.update(total_count=0, jobs=[])
+    elif violation in ("duplicate", "distinct-same-name"):
+        jobs["jobs"].append(deepcopy(jobs["jobs"][0]))
+        jobs["total_count"] = 2
+        if violation == "distinct-same-name":
+            jobs["jobs"][1]["id"] = 902
+    elif violation == "incomplete":
+        jobs["total_count"] = 2
+    elif violation == "bool-total":
+        jobs["total_count"] = True
+    else:
+        jobs["jobs"].append(None)
+        jobs["total_count"] = 2
+    with pytest.raises(ValueError):
+        _select_promote_job(jobs)
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "empty",
+        "missing",
+        "duplicate",
+        "not-first",
+        "in-progress",
+        "queued",
+        "failed",
+        "cancelled",
+        "skipped",
+        "null",
+        "missing-status",
+        "missing-conclusion",
+        "malformed",
+    ],
+)
+def test_current_promote_job_selector_requires_exact_successful_setup(
+    current_promote_jobs: dict[str, Any],
+    violation: str,
+) -> None:
+    job = current_promote_jobs["jobs"][0]
+    steps = job["steps"]
+    if violation == "empty":
+        job["steps"] = []
+    elif violation == "missing":
+        job["steps"] = steps[1:]
+    elif violation == "duplicate":
+        steps.insert(0, deepcopy(steps[0]))
+    elif violation == "not-first":
+        steps.reverse()
+    elif violation in ("in-progress", "queued"):
+        steps[0].update(status=violation.replace("-", "_"), conclusion=None)
+    elif violation in ("failed", "cancelled", "skipped", "null"):
+        steps[0]["conclusion"] = None if violation == "null" else violation
+    elif violation.startswith("missing-"):
+        del steps[0][violation.removeprefix("missing-")]
+    else:
+        steps.append({"status": "queued"})
+    with pytest.raises(ValueError):
+        _select_promote_job(current_promote_jobs)
+
+
+@pytest.mark.parametrize("rerun", [False, True], ids=["new-run", "new-attempt"])
+def test_promotion_cli_predecessor_unknown_absence_never_permits_resend(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+    rerun: bool,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.seed_remote("tag_only")
+    cli.admit_attempt()
+    original_attempt = cli.attempt_bytes
+    original_reference = cli.compact(cli.retained[("attempt", 0)])
+    cli.unknown_operation = "create-draft"
+    assert cli.invoke("advance-promote", step=1) == 1
+    original_observation = Path(cli.locations["observation_path"]).read_bytes()
+    retained = cli.retain("observation", 1)
+    writes = deepcopy(cli.mutations)
+    cli.fresh_attempt(rerun=rerun)
+    cli.stage_and_observe()
+    observation = json.loads(Path(cli.locations["observation_path"]).read_bytes())
+    (result,) = observation["operation_results"]
+    assert result["origin_attempt_id"] == json.loads(original_attempt)["attempt_id"]
+    assert result["response"]["kind"] == "UNKNOWN"
+    assert result["postcondition"] == "ABSENT" and result["outcome"] == "UNKNOWN"
+    cli.retain("admission")
+    classification = cli.classify_and_retain(0)
+    assert classification["admission"] == "REFUSED" and classification["reason_codes"] == [
+        "OPERATION_UNKNOWN"
+    ]
+    assert cli.invoke("seal-promote-attempt") == 1
+    assert cli.mutations == writes
+    assert (
+        cli.artifacts[original_reference["artifact_id"]]["members"]["promotion-attempt.json"]
+        == original_attempt
+    )
+    assert (
+        cli.artifacts[retained["artifact"]["id"]]["members"]["remote-observation-1.json"]
+        == original_observation
+    )
+
+
+def test_promotion_cli_crash_after_retained_attempt_without_outcomes_is_potentially_sent(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.admit_attempt()
+    old_attempt = json.loads(cli.attempt_bytes)
+    cli.jobs["801"]["jobs"][0]["steps"][1].update(status="completed", conclusion="cancelled")
+    cli.fresh_attempt()
+    cli.stage_and_observe()
+    observation = json.loads(Path(cli.locations["observation_path"]).read_bytes())
+    assert [result["operation"] for result in observation["operation_results"]] == [
+        "CREATE_TAG",
+        "CREATE_DRAFT",
+    ]
+    assert all(
+        result["sent_at"] is None and result["outcome"] == "UNKNOWN"
+        for result in observation["operation_results"]
+    )
+    assert all(
+        result["origin_attempt_id"] == old_attempt["attempt_id"]
+        for result in observation["operation_results"]
+    )
+    cli.retain("admission")
+    assert cli.classify_and_retain(0)["admission"] == "REFUSED"
+    assert cli.invoke("seal-promote-attempt") == 1
+    assert cli.mutations == []
+
+
+def test_promotion_cli_predecessor_crash_reconciles_original_tag_oid_without_resending(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.admit_attempt()
+    old_attempt = cli.attempt_bytes
+    old_reference = cli.compact(cli.retained[("attempt", 0)])
+    assert cli.invoke("advance-promote", step=1) == 0
+    known_oid = cli.known_tag_oid
+    # No O1/C1 or diagnostics reached immutable storage before the runner disappeared.
+    old_writes = deepcopy(cli.mutations)
+    cli.fresh_attempt()
+    assert cli.admit_attempt()["state"] == "draft_empty"
+    attempt = json.loads(cli.attempt_bytes)
+    assert attempt["predecessor_attempt"] == old_reference
+    observation = json.loads(cli.admission_bytes["remote-observation-0.json"])
+    tag, draft = observation["operation_results"]
+    assert tag["target"]["object_id"] == known_oid
+    assert tag["sent_at"] is None and tag["outcome"] == "RECONCILED"
+    assert draft["sent_at"] is None and draft["outcome"] == "RECONCILED"
+    assert (
+        tag["origin_attempt_id"]
+        == draft["origin_attempt_id"]
+        == json.loads(old_attempt)["attempt_id"]
+    )
+    assert cli.advance_and_retain(1)["state"] == "draft_complete"
+    assert cli.mutations[: len(old_writes)] == old_writes
+    assert [entry["operation"] for entry in cli.mutations[len(old_writes) :]] == [
+        "upload-archive",
+        "upload-manifest",
+    ]
+    assert (
+        cli.artifacts[old_reference["artifact_id"]]["members"]["promotion-attempt.json"]
+        == old_attempt
+    )
+
+
+def test_promotion_cli_conclusively_unstarted_predecessor_keeps_immutable_lineage(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.admit_attempt()
+    prior_reference = cli.compact(cli.retained[("attempt", 0)])
+    cli.fresh_attempt()
+    assert cli.admit_attempt()["state"] == "unstarted"
+    assert json.loads(cli.attempt_bytes)["predecessor_attempt"] == prior_reference
+    assert json.loads(cli.admission_bytes["remote-observation-0.json"])["operation_results"] == []
+    assert cli.mutations == []
+
+
+def test_promotion_cli_fresh_attempt_retries_only_proven_not_applied_denial(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.seed_remote("tag_only")
+    cli.admit_attempt()
+    old_id = cli.current_attempt_id
+    cli.denied_operation = "create-draft"
+    cli.denial_foreign_apply = False
+    assert cli.invoke("advance-promote", step=1) == 1
+    original = Path(cli.locations["observation_path"]).read_bytes()
+    retained = cli.retain("observation", 1)
+    assert json.loads(original)["operation_results"][0]["outcome"] == "DENIED"
+    assert json.loads(original)["operation_results"][0]["postcondition"] == "ABSENT"
+    cli.fresh_attempt()
+    cli.denied_operation = None
+    assert cli.admit_attempt()["state"] == "tag_only"
+    result = json.loads(cli.admission_bytes["remote-observation-0.json"])["operation_results"][0]
+    assert result["origin_attempt_id"] == old_id and result["outcome"] == "DENIED"
+    assert result["response"]["kind"] == "DENIED"
+    assert cli.advance_and_retain(1)["state"] == "draft_empty"
+    assert [item["operation"] for item in cli.mutations] == ["create-draft", "create-draft"]
+    assert (
+        cli.artifacts[retained["artifact"]["id"]]["members"]["remote-observation-1.json"]
+        == original
+    )
+
+
+def test_promotion_cli_read_only_recovery_preserves_denied_sender_and_genuine_fragment(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.seed_remote("draft_complete")
+    cli.admit_attempt()
+    old_id = cli.current_attempt_id
+    original_fragment = cli.compact(cli.retained[("admission", 0)])
+    cli.denied_operation = "publish"
+    assert cli.invoke("advance-promote", step=1) == 1
+    original = Path(cli.locations["observation_path"]).read_bytes()
+    retained = cli.retain("observation", 1)
+    writes = deepcopy(cli.mutations)
+    cli.fresh_attempt()
+    assert cli.admit_attempt()["state"] == "published_complete"
+    result = json.loads(cli.admission_bytes["remote-observation-0.json"])["operation_results"][0]
+    assert result["origin_attempt_id"] == old_id and result["outcome"] == "DENIED"
+    assert result["response"]["kind"] == "DENIED" and result["postcondition"] == "MATCH"
+    handoff = cli.finish(0)
+    assert (
+        handoff["pre_publication_verification"]["artifact_id"] == original_fragment["artifact_id"]
+    )
+    assert handoff["pre_publication_verification"]["path"] == "pre-publication-verification-0.json"
+    assert cli.mutations == writes
+    assert (
+        cli.artifacts[retained["artifact"]["id"]]["members"]["remote-observation-1.json"]
+        == original
+    )
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "missing-attempt",
+        "expired-attempt",
+        "duplicate-attempt",
+        "missing-step",
+        "incomplete-runs",
+        "forged-lineage",
+        "different-candidate",
+    ],
+)
+def test_promotion_cli_incomplete_or_conflicting_predecessor_holds_dependent_mutation(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+    violation: str,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.admit_attempt()
+    prior = cli.retained[("attempt", 0)]
+    artifact_id = prior["artifact"]["id"]
+    cli.jobs["801"]["jobs"][0]["steps"][1].update(status="completed", conclusion="cancelled")
+    if violation == "missing-attempt":
+        del cli.artifacts[artifact_id]
+    elif violation == "expired-attempt":
+        cli.artifacts[artifact_id]["metadata"]["expired"] = True
+    elif violation == "duplicate-attempt":
+        cli.add_artifact(
+            "9999", prior["artifact"]["name"], "801", cli.artifacts[artifact_id]["members"]
+        )
+    elif violation == "missing-step":
+        del cli.jobs["801"]["jobs"][0]["steps"][2]
+    elif violation == "incomplete-runs":
+        cli.discovery_incomplete = True
+    else:
+        record = json.loads(cli.attempt_bytes)
+        if violation == "forged-lineage":
+            record["predecessor_attempt"] = record["promotion_decision"]
+        else:
+            record["candidate"]["build"]["artifact"]["sha256"] = "a" * 64
+        cli.replace_retained(artifact_id, "promotion-attempt.json", _canonical_json_bytes(record))
+    cli.fresh_attempt()
+    assert cli.invoke("admit-promote") == 1
+    assert cli.mutations == []
+    assert not Path(cli.locations.get("attempt_path", cli.runner / "no-new-attempt")).exists()
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 409, 422, 500, 502])
+@pytest.mark.parametrize("matching_state", [False, True], ids=["absent", "matching-state"])
+def test_promotion_cli_server_response_kind_is_not_inferred_from_matching_state(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    matching_state: bool,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.seed_remote("tag_only")
+    cli.admit_attempt()
+
+    def provider(method: str, endpoint: str, raw: bytes) -> bytes:
+        assert method == "POST"
+        cli.mutation("create-draft", endpoint, raw)
+        if matching_state:
+            cli.releases.append(cli.release_metadata(1901))
+            cli.assets[1901] = []
+        raise HTTPError(
+            f"https://api.github.com/{endpoint}",
+            status,
+            "SIMULATED provider response",
+            HTTPMessage(),
+            io.BytesIO(b"{}"),
+        )
+
+    monkeypatch.setattr(cli, "api_write", provider)
+    assert cli.invoke("advance-promote", step=1) == (0 if status >= 500 and matching_state else 1)
+    observation = json.loads(Path(cli.locations["observation_path"]).read_bytes())
+    (result,) = observation["operation_results"]
+    kind = "CONFLICT" if status in (409, 422) else "DENIED" if status < 500 else "UNKNOWN"
+    assert result["response"]["kind"] == kind and result["response"]["http_status"] == status
+    assert result["postcondition"] == ("MATCH" if matching_state else "ABSENT")
+    assert result["outcome"] == (
+        "COLLISION"
+        if kind == "CONFLICT"
+        else "DENIED"
+        if kind == "DENIED"
+        else "RECONCILED"
+        if matching_state
+        else "UNKNOWN"
+    )
+    intent_path = Path(cli.locations["draft_intent_path"])
+    assert _sha256_path(intent_path) == result["intent_sha256"]
+    assert json.loads(intent_path.read_bytes()) == {
+        key: result[key] for key in ("origin_attempt_id", "operation", "target")
+    }
+    assert len(cli.mutations) == 1
+    _validate_review_schema(observation, "remote-observation.schema.json")
+
+
+@pytest.mark.parametrize("response", ["wrong-id", "absent-state", "malformed-after-apply"])
+def test_promotion_cli_acknowledgement_still_requires_exact_resource_readback(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+    monkeypatch: pytest.MonkeyPatch,
+    response: str,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.seed_remote("tag_only")
+    cli.admit_attempt()
+    original = cli.api_write
+
+    def provider(method: str, endpoint: str, raw: bytes) -> bytes:
+        if response == "absent-state":
+            cli.mutation("create-draft", endpoint, raw)
+            return _canonical_json_bytes(cli.release_metadata(1901))
+        wire = original(method, endpoint, raw)
+        return (
+            b"{"
+            if response == "malformed-after-apply"
+            else _canonical_json_bytes({**json.loads(wire), "id": 1902})
+        )
+
+    monkeypatch.setattr(cli, "api_write", provider)
+    assert cli.invoke("advance-promote", step=1) == (
+        0 if response == "malformed-after-apply" else 1
+    )
+    result = json.loads(Path(cli.locations["observation_path"]).read_bytes())["operation_results"][
+        0
+    ]
+    assert (
+        result["outcome"]
+        == {
+            "wrong-id": "COLLISION",
+            "absent-state": "UNKNOWN",
+            "malformed-after-apply": "RECONCILED",
+        }[response]
+    )
+    assert result["response"]["kind"] == (
+        "UNKNOWN" if response == "malformed-after-apply" else "ACKNOWLEDGED"
+    )
+    assert len(cli.mutations) == 1
+
+
+def test_promotion_cli_502_starter_asset_is_preserved_without_delete_or_overwrite(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.seed_remote("draft_empty")
+    cli.admit_attempt()
+    original = cli.http
+
+    def provider(request: Any, *args: Any, **kwargs: Any) -> Any:
+        if request.full_url.startswith("https://uploads.github.com/"):
+            cli.mutation("upload-archive", request.full_url, request.data)
+            asset = cli.remote_asset("archive")
+            asset["state"] = "starter"
+            raise HTTPError(
+                request.full_url, 502, "SIMULATED starter asset", HTTPMessage(), io.BytesIO(b"{}")
+            )
+        return original(request, *args, **kwargs)
+
+    monkeypatch.setattr(
+        artifact_contract, "build_opener", lambda *handlers: SimpleNamespace(open=provider)
+    )
+    assert cli.invoke("advance-promote", step=1) == 1
+    observation = json.loads(Path(cli.locations["observation_path"]).read_bytes())
+    assert observation["operation_results"][0]["response"]["kind"] == "UNKNOWN"
+    assert observation["operation_results"][0]["response"]["http_status"] == 502
+    assert cli.assets[1901][0]["state"] == "starter"
+    assert [entry["operation"] for entry in cli.mutations] == ["upload-archive"]
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "forged-hash",
+        "foreign-target",
+        "foreign-candidate",
+        "wrong-source",
+        "null-current-time",
+        "future-time",
+        "duplicate",
+        "extra-target",
+        "extra-response",
+        "boolean-status",
+        "forged-outcome",
+        "forged-postcondition",
+        "laundered-denial",
+    ],
+)
+def test_promotion_operation_results_rederive_closed_exact_outcomes(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+    violation: str,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.seed_remote("tag_only")
+    cli.admit_attempt()
+    assert cli.invoke("advance-promote", step=1) == 0
+    observation = json.loads(Path(cli.locations["observation_path"]).read_bytes())
+    result = observation["operation_results"][0]
+    if violation == "forged-hash":
+        result["intent_sha256"] = "a" * 64
+    elif violation == "foreign-target":
+        result["target"]["repository"] = "other/repo"
+    elif violation == "foreign-candidate":
+        result["target"]["candidate_identity_record"]["sha256"] = "a" * 64
+    elif violation == "wrong-source":
+        result["target"]["source_commit"] = "a" * 40
+    elif violation == "null-current-time":
+        result["sent_at"] = None
+    elif violation == "future-time":
+        result["sent_at"] = "2030-01-01T00:00:00Z"
+    elif violation == "duplicate":
+        observation["operation_results"].append(deepcopy(result))
+    elif violation == "extra-target":
+        result["target"]["authenticated_actor"] = {"id": "17", "login": "release-bot"}
+    elif violation == "extra-response":
+        result["response"]["raw_diagnostics"] = "SIMULATED raw response"
+    elif violation == "boolean-status":
+        result["response"]["http_status"] = True
+    elif violation == "forged-outcome":
+        result["outcome"] = "RECONCILED"
+    elif violation == "forged-postcondition":
+        result["postcondition"] = "ABSENT"
+    else:
+        result["response"].update(kind="UNKNOWN", http_status=403, resource_id=None)
+        result["outcome"] = "RECONCILED"
+    with pytest.raises(ValueError):
+        artifact_contract.seal_remote_observation(
+            observation,
+            candidate_identity=cli.identity,
+            candidate_identity_bytes=cli.identity_bytes,
+            candidate_identity_reference=cli.request["candidate_identity_reference"],
+            current_attempt_id=cli.current_attempt_id,
+        )
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "legacy-version",
+        "missing-results",
+        "too-many-results",
+        "open-envelope",
+        "open-result",
+        "open-target",
+        "open-response",
+    ],
+)
+def test_promotion_operation_results_schema_rejects_legacy_and_open_shapes(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+    violation: str,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.seed_remote("tag_only")
+    cli.admit_attempt()
+    assert cli.invoke("advance-promote", step=1) == 0
+    observation = json.loads(Path(cli.locations["observation_path"]).read_bytes())
+    if violation == "legacy-version":
+        observation["observation_schema_version"] = "1.0"
+    elif violation == "missing-results":
+        del observation["operation_results"]
+    elif violation == "too-many-results":
+        observation["operation_results"] *= 3
+    else:
+        target = (
+            observation if violation == "open-envelope" else observation["operation_results"][0]
+        )
+        if violation == "open-target":
+            target = target["target"]
+        elif violation == "open-response":
+            target = target["response"]
+        target["raw_diagnostics"] = "SIMULATED unbounded text"
+    with pytest.raises(ValidationError):
+        _validate_review_schema(observation, "remote-observation.schema.json")
+
+
+@pytest.mark.parametrize("listing", ["matching-tag", "unreadable"])
+def test_promotion_cli_tag_404_is_not_itself_absence_or_write_authority(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+    monkeypatch: pytest.MonkeyPatch,
+    listing: str,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.seed_remote("tag_only")
+    original = cli.response
+
+    def provider(endpoint: str) -> bytes:
+        if endpoint.partition("?")[0] == f"repos/{REPOSITORY}/git/ref/tags/{TAG}":
+            raise cli.not_found(endpoint)
+        if listing == "unreadable" and "/git/matching-refs/" in endpoint:
+            raise HTTPError(
+                f"https://api.github.com/{endpoint}",
+                403,
+                "SIMULATED unavailable listing",
+                HTTPMessage(),
+                io.BytesIO(b"{}"),
+            )
+        return original(endpoint)
+
+    monkeypatch.setattr(cli, "response", provider)
+    cli.stage_and_observe()
+    cli.retain("admission")
+    classification = cli.classify_and_retain(0)
+    if listing == "matching-tag":
+        assert classification["state"] == "tag_only"
+    else:
+        assert classification["admission"] == "REFUSED"
+        assert cli.invoke("seal-promote-attempt") == 1
+    assert cli.mutations == []
+
+
+@pytest.mark.parametrize("rerun", [False, True], ids=["new-run", "new-attempt"])
+def test_promotion_cli_stale_failure_observation_preserves_unknown_and_blocks_resend(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+    monkeypatch: pytest.MonkeyPatch,
+    rerun: bool,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.admit_attempt()
+    original_attempt = cli.attempt_bytes
+    original_attempt_id = cli.current_attempt_id
+    original_reference = cli.compact(cli.retained[("attempt", 0)])
+
+    def process(command: Any, *args: Any, **kwargs: Any) -> Any:
+        if command[:2] == ["git", "push"]:
+            cli.mutation("create-tag", " ".join(command), b"")
+            # The request was sent, but no remote effect is observable yet.
+            kwargs["stdout"].write(b"x" * (artifact_contract._PROMOTION_JSON_LIMIT + 1))
+            return subprocess.CompletedProcess(command, 0)
+        return cli.process(command, *args, **kwargs)
+
+    monkeypatch.setattr(artifact_contract.subprocess, "run", process)
+    assert cli.invoke("advance-promote", step=1) == 1
+    monkeypatch.setattr(artifact_contract.subprocess, "run", cli.process)
+    outputs = cli.outputs()
+    observation_path = Path(outputs["observation_path"]) if "observation_path" in outputs else None
+    original_observation = observation_path.read_bytes() if observation_path is not None else None
+    intent_bytes = Path(outputs["tag_intent_path"]).read_bytes()
+    intent = json.loads(intent_bytes)
+    retained = cli.retain("observation", 1) if original_observation is not None else None
+    writes = deepcopy(cli.mutations)
+    assert [entry["operation"] for entry in writes] == ["create-tag"]
+    assert cli.tag is None and cli.releases == []
+
+    cli.fresh_attempt(rerun=rerun)
+    cli.stage_and_observe()
+    recovery = json.loads(Path(cli.locations["observation_path"]).read_bytes())
+    cli.retain("admission")
+    classification = cli.classify_and_retain(0)
+    sealed = cli.invoke("seal-promote-attempt")
+    if sealed == 0:
+        cli.retain("attempt")
+    advanced = cli.invoke("advance-promote", step=1)
+
+    assert cli.mutations == writes, "retained failure O1 must not authorize another send"
+    assert classification["admission"] == "REFUSED"
+    assert classification["reason_codes"] == ["OPERATION_UNKNOWN"]
+    assert sealed == advanced == 1
+    assert recovery["tag_observation"]["status"] == "ABSENT"
+    recovered_results = [
+        result for result in recovery["operation_results"] if result["operation"] == "CREATE_TAG"
+    ]
+    assert len(recovered_results) == 1, recovery
+    recovered_result = recovered_results[0]
+    assert recovered_result["origin_attempt_id"] == original_attempt_id
+    assert {key: recovered_result[key] for key in intent} == intent
+    assert recovered_result["intent_sha256"] == _sha256_bytes(intent_bytes)
+    assert recovered_result["response"]["kind"] == recovered_result["outcome"] == "UNKNOWN"
+    assert recovered_result["postcondition"] == "ABSENT"
+    assert (
+        cli.artifacts[original_reference["artifact_id"]]["members"]["promotion-attempt.json"]
+        == original_attempt
+    )
+    if retained is not None:
+        assert retained["path"] == Path(outputs["observation_path"]).name
+        assert retained["artifact"]["name"] == outputs["observation_artifact_name"]
+        assert (
+            cli.artifacts[retained["artifact"]["id"]]["members"][retained["path"]]
+            == original_observation
+        )
+
+
+@pytest.mark.parametrize("retained_prefix", ["empty", "tag"])
+@pytest.mark.parametrize("applied", [False, True], ids=["absent", "applied"])
+def test_promotion_cli_partial_predecessor_history_preserves_possible_send(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+    monkeypatch: pytest.MonkeyPatch,
+    retained_prefix: str,
+    applied: bool,
+) -> None:
+    cli = promotion_workflow_cli
+    cli.admit_attempt()
+    original_id = cli.current_attempt_id
+    observe = artifact_contract._observe_promotion
+    stale_observation = None
+    stale_locations: dict[str, str] = {}
+
+    def interrupted_observe(inputs: Any, *, step: int, label: str) -> Any:
+        nonlocal stale_observation
+        if label == "draft":
+            raise ValueError("SIMULATED process loss before draft readback")
+        observation, fragment = observe(inputs, step=step, label=label)
+        if label == ("before" if retained_prefix == "empty" else "before-draft"):
+            stale_observation = _canonical_json_bytes(artifact_contract._thaw(observation))
+            stale_locations.update(
+                {
+                    key: inputs["locations"][key]
+                    for key in ("observation_path", "observation_artifact_name")
+                }
+            )
+        return observation, fragment
+
+    cli.unknown_operation = "create-draft"
+    cli.unknown_after_apply = applied
+    monkeypatch.setattr(artifact_contract, "_observe_promotion", interrupted_observe)
+    assert cli.invoke("advance-promote", step=1) == 1
+    monkeypatch.setattr(artifact_contract, "_observe_promotion", observe)
+    assert stale_observation is not None
+    intent_bytes = Path(cli.outputs()["draft_intent_path"]).read_bytes()
+    # Replay an actual pre-send snapshot under the interrupted step's immutable identity.
+    cli.locations.update(stale_locations)
+    Path(stale_locations["observation_path"]).write_bytes(stale_observation)
+    retained = cli.retain("observation", 1)
+    writes = deepcopy(cli.mutations)
+    known_oid = cli.known_tag_oid
+
+    cli.fresh_attempt()
+    cli.stage_and_observe()
+    recovery = json.loads(Path(cli.locations["observation_path"]).read_bytes())
+    tag, draft = recovery["operation_results"]
+    assert tag["target"]["object_id"] == known_oid
+    assert tag["outcome"] in ("CONFIRMED", "RECONCILED")
+    assert tag["origin_attempt_id"] == draft["origin_attempt_id"] == original_id
+    assert {key: draft[key] for key in json.loads(intent_bytes)} == json.loads(intent_bytes)
+    assert draft["intent_sha256"] == _sha256_bytes(intent_bytes)
+    assert draft["sent_at"] is None and draft["response"]["kind"] == "UNKNOWN"
+    assert draft["postcondition"] == ("MATCH" if applied else "ABSENT")
+    assert draft["outcome"] == ("RECONCILED" if applied else "UNKNOWN")
+    cli.retain("admission")
+    classification = cli.classify_and_retain(0)
+    if applied:
+        assert classification["admission"] == "ADMITTED"
+        assert classification["state"] == "draft_empty"
+        assert cli.invoke("seal-promote-attempt") == 0
+        cli.retain("attempt")
+        assert cli.advance_and_retain(1)["state"] == "draft_complete"
+        assert [item["operation"] for item in cli.mutations[len(writes) :]] == [
+            "upload-archive",
+            "upload-manifest",
+        ]
+    else:
+        assert classification["admission"] == "REFUSED"
+        assert classification["reason_codes"] == ["OPERATION_UNKNOWN"]
+        assert cli.invoke("seal-promote-attempt") == 1
+        assert cli.invoke("advance-promote", step=1) == 1
+        assert cli.mutations == writes
+    assert retained["path"] == Path(stale_locations["observation_path"]).name
+    assert retained["artifact"]["name"] == stale_locations["observation_artifact_name"]
+    assert (
+        cli.artifacts[retained["artifact"]["id"]]["members"][retained["path"]] == stale_observation
+    )
+
+
+@pytest.mark.parametrize(
+    ("operation", "state", "advanced_state", "new_operations"),
+    [
+        ("upload-archive", "draft_empty", "draft_complete", ["upload-archive", "upload-manifest"]),
+    ],
+)
+def test_promotion_cli_denied_prefix_does_not_invent_unsent_successor(
+    promotion_workflow_cli: _PromotionWorkflowCli,
+    operation: str,
+    state: str,
+    advanced_state: str,
+    new_operations: list[str],
+) -> None:
+    cli = promotion_workflow_cli
+    if state != "unstarted":
+        cli.seed_remote(state)
+    cli.admit_attempt()
+    original_id = cli.current_attempt_id
+    cli.denied_operation = operation
+    cli.denial_foreign_apply = False
+    assert cli.invoke("advance-promote", step=1) == 1
+    outputs = cli.outputs()
+    original = Path(outputs["observation_path"]).read_bytes()
+    retained = cli.retain("observation", 1)
+    writes = deepcopy(cli.mutations)
+
+    cli.fresh_attempt()
+    cli.denied_operation = None
+    assert cli.admit_attempt()["state"] == state
+    (result,) = json.loads(cli.admission_bytes["remote-observation-0.json"])["operation_results"]
+    assert result["origin_attempt_id"] == original_id
+    assert result["response"]["kind"] == result["outcome"] == "DENIED"
+    assert result["postcondition"] == "ABSENT"
+    assert cli.advance_and_retain(1)["state"] == advanced_state
+    assert cli.mutations[: len(writes)] == writes
+    assert [item["operation"] for item in cli.mutations[len(writes) :]] == new_operations
+    assert retained["path"] == Path(outputs["observation_path"]).name
+    assert retained["artifact"]["name"] == outputs["observation_artifact_name"]
+    assert cli.artifacts[retained["artifact"]["id"]]["members"][retained["path"]] == original

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Build a candidate, retain evidence / probe permissions, or promote
+        description: Build a candidate, retain evidence, or promote
         required: true
         default: build
         type: choice
@@ -28,7 +28,7 @@ on:
         default: ""
         type: string
       evidence_operation:
-        description: Evidence operation (retain or permission-probe)
+        description: Evidence operation (retain only)
         required: false
         default: ""
         type: string
@@ -59,7 +59,7 @@ jobs:
       contents: read
       pull-requests: read
     env:
-      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: 'false'
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: "false"
       A1_PREVIEW_VERSION: ${{ inputs.preview_version }}
       A1_PREVIEW_TAG: ${{ inputs.preview_tag }}
       A1_RETENTION_DAYS: ${{ inputs.retention_days }}
@@ -233,7 +233,7 @@ jobs:
 
   retain_evidence:
     name: Retain canonical-main preview evidence
-    if: ${{ inputs.mode == 'evidence' && inputs.evidence_operation != 'permission-probe' }}
+    if: ${{ inputs.mode == 'evidence' }}
     runs-on: windows-latest
     permissions:
       actions: read
@@ -330,59 +330,6 @@ jobs:
           A1_EVIDENCE_DECISION_ARTIFACT_DIGEST: ${{ steps.upload_decision.outputs.artifact-digest }}
         run: python scripts/stateless_preview_artifact.py verify-evidence-retention
 
-  probe_permissions:
-    name: Probe current job permissions
-    if: ${{ inputs.mode == 'evidence' && inputs.evidence_operation == 'permission-probe' }}
-    runs-on: windows-latest
-    permissions:
-      actions: read
-      contents: write
-    steps:
-      - name: Check out the dispatched revision
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Fetch live canonical main
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
-          if ($LASTEXITCODE -ne 0) {
-            throw "Unable to fetch canonical main."
-          }
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Admit the exact nonmutating permission probe
-        id: admit
-        shell: pwsh
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python scripts/stateless_preview_artifact.py admit-evidence
-
-      - name: Read the invoking job's runner-reported permissions
-        id: probe
-        shell: pwsh
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python scripts/stateless_preview_permissions.py --output current-job-permissions.json
-
-      - name: Retain only the attempted permission diagnostic
-        if: ${{ always() && (steps.probe.outcome == 'success' || steps.probe.outcome == 'failure') }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: stateless-preview-current-job-permissions-${{ github.run_id }}-${{ github.run_attempt }}
-          path: current-job-permissions.json
-          if-no-files-found: error
-          overwrite: false
-          retention-days: ${{ steps.admit.outputs.retention_days }}
-
   promote:
     if: ${{ inputs.mode == 'promote' }}
     name: Promote canonical-main preview candidate
@@ -418,37 +365,19 @@ jobs:
         shell: pwsh
         run: python scripts/stateless_preview_artifact.py admit-promote
 
-      - name: Read this promote job's actual runner-reported grants
-        id: permissions
-        shell: pwsh
-        env:
-          A1_PROMOTE_PERMISSION_PATH: ${{ steps.admit.outputs.permission_path }}
-        run: python scripts/stateless_preview_permissions.py --output "$env:A1_PROMOTE_PERMISSION_PATH"
-
-      - name: Retain an unsuccessful permission report without admitting promotion
-        if: ${{ always() && steps.admit.outcome == 'success' && steps.permissions.outcome == 'failure' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ steps.admit.outputs.admission_artifact_name }}-permission-diagnostic
-          path: ${{ steps.admit.outputs.permission_path }}
-          if-no-files-found: error
-          overwrite: false
-          retention-days: ${{ steps.admit.outputs.retention_days }}
-
-      - name: Observe the initial remote state only after qualified permission readback
+      - name: Observe the initial remote state after exact source and Decision admission
         id: observe
-        if: ${{ success() && steps.permissions.outcome == 'success' }}
+        if: ${{ success() && steps.admit.outcome == 'success' }}
         shell: pwsh
         run: python scripts/stateless_preview_artifact.py observe-promote
 
-      - name: Retain the immutable Stage, report and initial observation (P0)
+      - name: Retain the immutable Stage and initial observation (P0)
         id: upload_admission
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.admit.outputs.admission_artifact_name }}
           path: |
             ${{ steps.admit.outputs.stage_path }}
-            ${{ steps.admit.outputs.permission_path }}
             ${{ steps.observe.outputs.observation_path }}
             ${{ steps.observe.outputs.pre_publication_verification_path }}
           if-no-files-found: error
@@ -497,7 +426,7 @@ jobs:
 
       - name: Read back A and execute the first legal advancement
         id: advance_1
-        if: ${{ success() && steps.permissions.outcome == 'success' && steps.classify_0.outputs.state != 'published_complete' }}
+        if: ${{ success() && steps.upload_attempt.outcome == 'success' && steps.upload_classification_0.outcome == 'success' && steps.classify_0.outputs.state != 'published_complete' }}
         shell: pwsh
         env:
           A1_PROMOTE_ATTEMPT_ARTIFACT_ID: ${{ steps.upload_attempt.outputs.artifact-id }}
@@ -524,7 +453,7 @@ jobs:
 
       - name: Read back the completed first advancement and classify it
         id: classify_1
-        if: ${{ success() && steps.advance_1.outcome == 'success' }}
+        if: ${{ success() && steps.advance_1.outcome == 'success' && steps.upload_observation_1.outcome == 'success' }}
         shell: pwsh
         env:
           A1_PROMOTE_ATTEMPT_ARTIFACT_ID: ${{ steps.upload_attempt.outputs.artifact-id }}
@@ -549,7 +478,7 @@ jobs:
 
       - name: Execute the second legal advancement from retained C1
         id: advance_2
-        if: ${{ success() && steps.permissions.outcome == 'success' && steps.classify_1.outcome == 'success' && steps.classify_1.outputs.state != 'published_complete' }}
+        if: ${{ success() && steps.upload_attempt.outcome == 'success' && steps.upload_classification_1.outcome == 'success' && steps.classify_1.outcome == 'success' && steps.classify_1.outputs.state != 'published_complete' }}
         shell: pwsh
         env:
           A1_PROMOTE_ATTEMPT_ARTIFACT_ID: ${{ steps.upload_attempt.outputs.artifact-id }}
@@ -576,7 +505,7 @@ jobs:
 
       - name: Read back the completed second advancement and classify it
         id: classify_2
-        if: ${{ success() && steps.advance_2.outcome == 'success' }}
+        if: ${{ success() && steps.advance_2.outcome == 'success' && steps.upload_observation_2.outcome == 'success' }}
         shell: pwsh
         env:
           A1_PROMOTE_ATTEMPT_ARTIFACT_ID: ${{ steps.upload_attempt.outputs.artifact-id }}
@@ -601,7 +530,7 @@ jobs:
 
       - name: Execute the third and final legal advancement from retained C2
         id: advance_3
-        if: ${{ success() && steps.permissions.outcome == 'success' && steps.classify_2.outcome == 'success' && steps.classify_2.outputs.state != 'published_complete' }}
+        if: ${{ success() && steps.upload_attempt.outcome == 'success' && steps.upload_classification_2.outcome == 'success' && steps.classify_2.outcome == 'success' && steps.classify_2.outputs.state != 'published_complete' }}
         shell: pwsh
         env:
           A1_PROMOTE_ATTEMPT_ARTIFACT_ID: ${{ steps.upload_attempt.outputs.artifact-id }}
@@ -628,7 +557,7 @@ jobs:
 
       - name: Read back the completed final advancement and classify it
         id: classify_3
-        if: ${{ success() && steps.advance_3.outcome == 'success' }}
+        if: ${{ success() && steps.advance_3.outcome == 'success' && steps.upload_observation_3.outcome == 'success' }}
         shell: pwsh
         env:
           A1_PROMOTE_ATTEMPT_ARTIFACT_ID: ${{ steps.upload_attempt.outputs.artifact-id }}
@@ -653,7 +582,7 @@ jobs:
 
       - name: Read back A and the last retained classification for the exact handoff
         id: finish
-        if: ${{ success() && steps.permissions.outcome == 'success' }}
+        if: ${{ success() && steps.upload_attempt.outcome == 'success' && (steps.upload_classification_3.outcome == 'success' || steps.upload_classification_2.outcome == 'success' || steps.upload_classification_1.outcome == 'success' || steps.upload_classification_0.outcome == 'success') }}
         shell: pwsh
         env:
           A1_PROMOTE_FINAL_STEP: ${{ steps.classify_3.outputs.state && '3' || steps.classify_2.outputs.state && '2' || steps.classify_1.outputs.state && '1' || '0' }}
@@ -677,7 +606,7 @@ jobs:
           overwrite: false
           retention-days: ${{ steps.admit.outputs.retention_days }}
 
-      - name: Retain only bounded publisher command diagnostics
+      - name: Retain only bounded publisher diagnostics and original safe intents
         if: ${{ always() && steps.admit.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
@@ -688,10 +617,25 @@ jobs:
             ${{ steps.classify_0.outputs.diagnostics_path }}
             ${{ steps.attempt.outputs.diagnostics_path }}
             ${{ steps.advance_1.outputs.diagnostics_path }}
+            ${{ steps.advance_1.outputs.tag_intent_path }}
+            ${{ steps.advance_1.outputs.draft_intent_path }}
+            ${{ steps.advance_1.outputs.archive_intent_path }}
+            ${{ steps.advance_1.outputs.manifest_intent_path }}
+            ${{ steps.advance_1.outputs.publish_intent_path }}
             ${{ steps.classify_1.outputs.diagnostics_path }}
             ${{ steps.advance_2.outputs.diagnostics_path }}
+            ${{ steps.advance_2.outputs.tag_intent_path }}
+            ${{ steps.advance_2.outputs.draft_intent_path }}
+            ${{ steps.advance_2.outputs.archive_intent_path }}
+            ${{ steps.advance_2.outputs.manifest_intent_path }}
+            ${{ steps.advance_2.outputs.publish_intent_path }}
             ${{ steps.classify_2.outputs.diagnostics_path }}
             ${{ steps.advance_3.outputs.diagnostics_path }}
+            ${{ steps.advance_3.outputs.tag_intent_path }}
+            ${{ steps.advance_3.outputs.draft_intent_path }}
+            ${{ steps.advance_3.outputs.archive_intent_path }}
+            ${{ steps.advance_3.outputs.manifest_intent_path }}
+            ${{ steps.advance_3.outputs.publish_intent_path }}
             ${{ steps.classify_3.outputs.diagnostics_path }}
             ${{ steps.finish.outputs.diagnostics_path }}
           if-no-files-found: error
