@@ -1,10 +1,12 @@
-"""Built-wheel MCP proof for bridge-owned typed BitBlt fallback recovery."""
+"""Built-wheel MCP proof for exact-HWND compositor screenshot recovery."""
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import ctypes
 import hashlib
+import io
 import json
 import os
 import time
@@ -15,7 +17,7 @@ from typing import Any
 import psutil
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, ImageContent, TextContent
 from PIL import Image
 
 POLL_DEADLINE_SECONDS = 15.0
@@ -35,21 +37,21 @@ def _environment(name: str) -> str:
 def _select_cases(
     cases: tuple[tuple[Any, ...], ...],
 ) -> tuple[tuple[Any, ...], ...]:
-    selection = os.environ.get("NETCOREDBG_TYPED_BITBLT_CASES")
+    selection = os.environ.get("NETCOREDBG_COMPOSITOR_CASES")
     if selection is None:
         return cases
 
     requested = tuple(name.strip() for name in selection.split(","))
     assert requested and all(requested), (
-        "NETCOREDBG_TYPED_BITBLT_CASES must select at least one named case"
+        "NETCOREDBG_COMPOSITOR_CASES must select at least one named case"
     )
     assert len(set(requested)) == len(requested), (
-        "NETCOREDBG_TYPED_BITBLT_CASES must not select a case more than once"
+        "NETCOREDBG_COMPOSITOR_CASES must not select a case more than once"
     )
     known = {case[0] for case in cases}
     unknown = set(requested) - known
     assert not unknown, (
-        f"NETCOREDBG_TYPED_BITBLT_CASES contains unknown case names: {', '.join(sorted(unknown))}"
+        f"NETCOREDBG_COMPOSITOR_CASES contains unknown case names: {', '.join(sorted(unknown))}"
     )
     return tuple(case for case in cases if case[0] in requested)
 
@@ -64,6 +66,89 @@ def _payload(result: CallToolResult) -> dict[str, Any]:
     payload = json.loads(texts[-1].text)
     assert isinstance(payload, dict), f"tool call returned non-object JSON: {payload!r}"
     return payload
+
+
+def _assert_spatial_images(
+    result: CallToolResult,
+    metadata: dict[str, Any],
+    samples: tuple[tuple[int, int, tuple[int, int, int]], ...],
+) -> dict[str, str]:
+    images = [content for content in result.content if isinstance(content, ImageContent)]
+    assert len(images) == 1 and images[0].mimeType == "image/webp", result
+    inline_bytes = base64.b64decode(images[0].data, validate=True)
+    raw_bytes = Path(str(metadata["raw_path"])).read_bytes()
+    assert hashlib.sha256(raw_bytes).hexdigest() == metadata["raw_sha256"], metadata
+    with Image.open(io.BytesIO(raw_bytes)) as raw, Image.open(io.BytesIO(inline_bytes)) as inline:
+        assert raw.format == "PNG" and inline.format == "WEBP", metadata
+        assert raw.size == (metadata["raw_width"], metadata["raw_height"]), metadata
+        raw.load()
+        inline.load()
+        raw_rgb, inline_rgb = raw.convert("RGB"), inline.convert("RGB")
+        for x, y, expected_rgb in samples:
+            assert 0 <= x < raw.width and 0 <= y < raw.height, (x, y, raw.size)
+            assert raw_rgb.getpixel((x, y)) == expected_rgb, (x, y, metadata)
+            inline_xy = (x * inline.width // raw.width, y * inline.height // raw.height)
+            actual = inline_rgb.getpixel(inline_xy)
+            assert isinstance(actual, tuple), (inline.mode, actual)
+            assert all(abs(a - b) <= 12 for a, b in zip(actual, expected_rgb)), (
+                inline_xy,
+                actual,
+                expected_rgb,
+                metadata,
+            )
+    return {
+        "raw_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+        "inline_sha256": hashlib.sha256(inline_bytes).hexdigest(),
+    }
+
+
+def _calibration_samples(
+    hwnd: int, color: tuple[int, int, int] = CALIBRATION_RGB
+) -> tuple[tuple[int, int, tuple[int, int, int]], ...]:
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    client_to_screen = user32.ClientToScreen
+    client_to_screen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+    client_to_screen.restype = wintypes.BOOL
+    get_window_rect = user32.GetWindowRect
+    get_window_rect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    get_window_rect.restype = wintypes.BOOL
+    origin, bounds = wintypes.POINT(0, 0), wintypes.RECT()
+    assert client_to_screen(hwnd, ctypes.byref(origin)), ctypes.get_last_error()
+    assert get_window_rect(hwnd, ctypes.byref(bounds)), ctypes.get_last_error()
+    offset_x, offset_y = origin.x - bounds.left, origin.y - bounds.top
+    return (
+        (offset_x + 40, offset_y + 40, color),
+        (offset_x + 120, offset_y + 120, (255, 255, 255)),
+    )
+
+
+def _set_calibration_state(hwnd: int, process_id: int, state: int) -> None:
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    owner = wintypes.DWORD()
+    get_owner = user32.GetWindowThreadProcessId
+    get_owner.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    get_owner.restype = wintypes.DWORD
+    assert get_owner(hwnd, ctypes.byref(owner)) and owner.value == process_id, (hwnd, owner.value)
+    send = user32.SendMessageTimeoutW
+    send.argtypes = [
+        wintypes.HWND,
+        wintypes.UINT,
+        wintypes.WPARAM,
+        wintypes.LPARAM,
+        wintypes.UINT,
+        wintypes.UINT,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    send.restype = wintypes.LPARAM
+    result = ctypes.c_size_t()
+    assert send(hwnd, 0x802A, state, 0, 0x0002, 2_000, ctypes.byref(result)), (
+        ctypes.get_last_error()
+    )
+    assert result.value == 1, "owned compositor-marker fixture did not acknowledge repaint"
 
 
 async def _call(session: ClientSession, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -286,18 +371,18 @@ async def _run_case(
     server_env = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith(("NETCOREDBG_TEST_", "NETCOREDBG_TYPED_BITBLT_"))
+        if not key.startswith(("NETCOREDBG_TEST_", "NETCOREDBG_COMPOSITOR_"))
     }
     server_env.update(
         {
             "FLAUI_BRIDGE_PATH": str(bridge_path),
-            "NETCOREDBG_TYPED_BITBLT_SOURCE_SHA256": source_identity,
+            "NETCOREDBG_COMPOSITOR_SOURCE_SHA256": source_identity,
             "TEMP": str(case_root),
             "TMP": str(case_root),
         }
     )
     if trace_path is not None:
-        server_env["NETCOREDBG_TYPED_BITBLT_TRACE_FILE"] = str(trace_path)
+        server_env["NETCOREDBG_COMPOSITOR_TRACE_FILE"] = str(trace_path)
     server_env.update(fixture_env)
     params = StdioServerParameters(
         command=consumer_cli,
@@ -307,7 +392,7 @@ async def _run_case(
     )
     evidence: dict[str, Any] = {"case": name}
     launched = False
-    raw_path: Path | None = None
+    raw_paths: list[Path] = []
     spawned_processes: list[dict[str, int | str]] = []
 
     async with stdio_client(params) as (read_stream, write_stream):
@@ -401,7 +486,13 @@ async def _run_case(
                             "expected_physical_height": expected_height,
                         }
                     )
-                response = await _call(session, "ui_take_screenshot", screenshot_arguments)
+                screenshot_result = await session.call_tool(
+                    "ui_take_screenshot", screenshot_arguments
+                )
+                response = _payload(screenshot_result)
+                images = [
+                    item for item in screenshot_result.content if isinstance(item, ImageContent)
+                ]
 
                 if expected in {"control", "fallback", "ordinary_fallback"}:
                     _assert_bridge_artifact_identity(
@@ -410,94 +501,106 @@ async def _run_case(
                         bridge_identity_sha256,
                         response=response,
                     )
-                if expected == "control":
                     metadata = response
-                    assert metadata.get("evidence_grade") == "lossless_raster", metadata
-                    assert metadata.get("method") == "PrintWindow", metadata
-                    assert metadata.get("physical_target", {}).get("status") == "matched", metadata
-                    raw_path = Path(str(metadata["raw_path"]))
-                    with Image.open(raw_path) as image:
-                        assert CALIBRATION_RGB in set(image.convert("RGB").getdata()), metadata
-                elif expected in {"fallback", "ordinary_fallback"}:
-                    metadata = response
-                    assert metadata.get("evidence_grade") == "typed_bitblt_fallback", metadata
-                    assert metadata.get("method") == "BitBlt", metadata
-                    assert metadata.get("fallback_reason") == "probable_black_printwindow", metadata
-                    assert metadata.get("alternate_attempts") == 1, metadata
-                    assert metadata.get("hwnd") == hwnd, metadata
-                    assert metadata.get("process_id") == process_id, metadata
-                    assert type(metadata.get("dpi")) is int and metadata["dpi"] > 0, metadata
-                    assert metadata.get("client_rect", {}).get("right") > metadata.get(
-                        "client_rect", {}
-                    ).get("left", 0), metadata
+                    if expected == "control":
+                        assert metadata.get("evidence_grade") == "lossless_raster", metadata
+                        assert metadata.get("method") == "PrintWindow", metadata
+                    else:
+                        assert metadata.get("evidence_grade") == "compositor_window_raster", (
+                            metadata
+                        )
+                        assert metadata.get("method") == "WindowsGraphicsCapture", metadata
+                        assert (
+                            metadata.get("source_api") == "GraphicsCaptureItem.CreateForWindow"
+                        ), metadata
+                        assert metadata.get("capture_authority") == "hwnd_compositor_frame", (
+                            metadata
+                        )
+                        assert metadata.get("alternate_attempts") == 1, metadata
+                        compositor = metadata.get("compositor", {})
+                        assert type(compositor.get("frame_time_ticks")) is int, metadata
+                        assert compositor["frame_time_ticks"] > 0, metadata
+                        assert compositor.get("item_size") == {"width": width, "height": height}, (
+                            metadata
+                        )
+                        assert compositor.get("frame_content_size") == compositor["item_size"], (
+                            metadata
+                        )
+                        assert compositor.get("policy") == {"status": "ALLOWED", "affinity": 0}, (
+                            metadata
+                        )
+                        assert compositor.get("window_closed") is False, metadata
                     assert (
-                        metadata.get("window_bounds", {}).get("right")
-                        - metadata.get("window_bounds", {}).get("left", 0)
-                        == width
+                        metadata.get("hwnd") == hwnd and metadata.get("process_id") == process_id
                     ), metadata
                     assert metadata.get("capture_stability", {}).get("before") == metadata.get(
                         "capture_stability", {}
                     ).get("after"), metadata
-                    foreground = metadata.get("foreground", {})
-                    assert foreground.get("activation", {}).get("verified") is True, foreground
-                    assert foreground.get("restoration", {}).get("verified") is True, foreground
-                    assert foreground.get("restoration", {}).get("process_id") > 0, foreground
-                    assert (
-                        foreground.get("restoration", {}).get("foreground_hwnd")
-                        == foreground_before
+                    assert metadata.get("foreground") == {"mutation_attempted": False}, metadata
+                    assert _foreground_hwnd() == foreground_before, metadata
+                    assert metadata.get("target_comparability", {}).get("status") == (
+                        "UNASSERTED" if expected == "ordinary_fallback" else "MATCHED"
+                    ), metadata
+                    raw_paths.append(Path(str(metadata["raw_path"])))
+                    first_images = _assert_spatial_images(
+                        screenshot_result, metadata, _calibration_samples(hwnd)
                     )
-                    assert _foreground_hwnd() == foreground_before, foreground
-                    if expected == "ordinary_fallback":
-                        assert metadata.get("target_comparability") == {"status": "UNASSERTED"}, (
-                            metadata
-                        )
-                    else:
+                    _set_calibration_state(hwnd, process_id, 1)
+                    second_result = await session.call_tool(
+                        "ui_take_screenshot", screenshot_arguments
+                    )
+                    second = _payload(second_result)
+                    assert second.get("hwnd") == hwnd and second.get("process_id") == process_id, (
+                        second
+                    )
+                    assert second.get("evidence_grade") == metadata["evidence_grade"], second
+                    assert second.get("foreground") == {"mutation_attempted": False}, second
+                    assert second.get("target_comparability") == metadata["target_comparability"], (
+                        second
+                    )
+                    raw_paths.append(Path(str(second["raw_path"])))
+                    second_images = _assert_spatial_images(
+                        second_result, second, _calibration_samples(hwnd, (222, 18, 192))
+                    )
+                    assert second_images["raw_sha256"] != first_images["raw_sha256"], second
+                    assert second_images["inline_sha256"] != first_images["inline_sha256"], second
+                    if expected != "control":
                         assert (
-                            metadata.get("target_comparability", {}).get("status") == "MATCHED"
-                        ), metadata
-                    raw_path = Path(str(metadata["raw_path"]))
-                    raw = raw_path.read_bytes()
-                    assert hashlib.sha256(raw).hexdigest() == metadata.get("raw_sha256"), metadata
-                    with Image.open(raw_path) as image:
-                        assert CALIBRATION_RGB in set(image.convert("RGB").getdata()), metadata
-                elif expected in {"target_mismatch", "dimension_mismatch"}:
-                    expected_mismatch_fields = [
-                        "hwnd" if expected == "target_mismatch" else "width"
-                    ]
+                            second["compositor"]["frame_time_ticks"]
+                            > metadata["compositor"]["frame_time_ticks"]
+                        ), second
+                    assert _foreground_hwnd() == foreground_before, second
+                    evidence["images"] = [first_images, second_images]
+                elif expected == "dimension_mismatch":
+                    assert len(images) == 1, screenshot_result
+                    assert response.get("evidence_grade") == "preview_only", response
                     assert response.get("target_comparability", {}).get("status") == "MISMATCH", (
                         response
                     )
-                    assert response.get("target_comparability", {}).get("code") == (
-                        "PHYSICAL_CAPTURE_MISMATCH"
+                    assert (
+                        response.get("target_comparability", {}).get("code")
+                        == "PHYSICAL_CAPTURE_MISMATCH"
                     ), response
-                    assert response.get("target_comparability", {}).get("mismatch_fields") == (
-                        expected_mismatch_fields
-                    ), response
+                    assert response.get("target_comparability", {}).get("mismatch_fields") == [
+                        "width"
+                    ], response
                     assert response.get("physical_target", {}).get("status") == "mismatch", response
                     _assert_no_persistence(case_root, response)
                 elif expected in {"final_black", "ordinary_final_black"}:
+                    assert not images, screenshot_result
                     assert response.get("classification") == "PROBABLE_BLACK_FRAME", response
                     _assert_no_persistence(case_root, response)
                     if expected == "ordinary_final_black":
                         diagnostics = response.get("data", {}).get("capture_diagnostics", {})
                         assert diagnostics.get("producer") == "flaui_bridge", response
-                        assert diagnostics.get("capture_method") == "BitBlt", response
-                        assert diagnostics.get("hwnd") == hwnd, response
-                        assert diagnostics.get("process_id") == process_id, response
-                        assert type(diagnostics.get("dpi")) is int and diagnostics["dpi"] > 0, (
+                        assert diagnostics.get("capture_method") == "WindowsGraphicsCapture", (
                             response
                         )
-                        assert diagnostics.get("primary_analysis", {}).get("classification") == (
-                            "PROBABLE_BLACK_FRAME"
-                        ), response
                         assert (
                             diagnostics.get("fallback_analysis", {}).get("probable_black") is True
                         ), response
-                        assert (
-                            diagnostics.get("foreground", {}).get("restoration", {}).get("verified")
-                            is True
-                        ), response
                 else:
+                    assert not images, screenshot_result
                     assert response.get("code") == "PHYSICAL_CAPTURE_PROVENANCE_UNAVAILABLE", (
                         response
                     )
@@ -542,7 +645,7 @@ async def _run_case(
                     cleanup, spawned_processes if launched else []
                 )
 
-    if raw_path is not None:
+    for raw_path in raw_paths:
         assert not raw_path.exists(), f"session cleanup retained raw evidence: {raw_path}"
     if trace_path is not None:
         evidence["trace"] = _trace(trace_path)
@@ -553,18 +656,18 @@ async def main() -> None:
     _enable_per_monitor_dpi_coordinates()
     consumer_cli = _environment("NETCOREDBG_MCP_CONSUMER_CLI")
     fixture_root = Path(_environment("NETCOREDBG_MCP_WPF_ROOT"))
-    production_bridge = Path(_environment("NETCOREDBG_TYPED_BITBLT_PRODUCTION_BRIDGE_PATH"))
-    production_hash = _environment("NETCOREDBG_TYPED_BITBLT_PRODUCTION_BRIDGE_SHA256")
-    production_identity = Path(_environment("NETCOREDBG_TYPED_BITBLT_PRODUCTION_IDENTITY_PATH"))
-    production_identity_hash = _environment("NETCOREDBG_TYPED_BITBLT_PRODUCTION_IDENTITY_SHA256")
-    test_bridge = Path(_environment("NETCOREDBG_TYPED_BITBLT_TEST_BRIDGE_PATH"))
-    test_hash = _environment("NETCOREDBG_TYPED_BITBLT_TEST_BRIDGE_SHA256")
-    host_managed_library = Path(_environment("NETCOREDBG_TYPED_BITBLT_TEST_HOST_LIBRARY_PATH"))
-    host_managed_library_hash = _environment("NETCOREDBG_TYPED_BITBLT_TEST_HOST_LIBRARY_SHA256")
-    host_bridge_library = Path(_environment("NETCOREDBG_TYPED_BITBLT_TEST_LIBRARY_PATH"))
-    host_bridge_library_hash = _environment("NETCOREDBG_TYPED_BITBLT_TEST_LIBRARY_SHA256")
-    source_identity = _environment("NETCOREDBG_TYPED_BITBLT_SOURCE_SHA256")
-    root = Path(_environment("NETCOREDBG_TYPED_BITBLT_TEMP_ROOT"))
+    production_bridge = Path(_environment("NETCOREDBG_COMPOSITOR_PRODUCTION_BRIDGE_PATH"))
+    production_hash = _environment("NETCOREDBG_COMPOSITOR_PRODUCTION_BRIDGE_SHA256")
+    production_identity = Path(_environment("NETCOREDBG_COMPOSITOR_PRODUCTION_IDENTITY_PATH"))
+    production_identity_hash = _environment("NETCOREDBG_COMPOSITOR_PRODUCTION_IDENTITY_SHA256")
+    test_bridge = Path(_environment("NETCOREDBG_COMPOSITOR_TEST_BRIDGE_PATH"))
+    test_hash = _environment("NETCOREDBG_COMPOSITOR_TEST_BRIDGE_SHA256")
+    host_managed_library = Path(_environment("NETCOREDBG_COMPOSITOR_TEST_HOST_LIBRARY_PATH"))
+    host_managed_library_hash = _environment("NETCOREDBG_COMPOSITOR_TEST_HOST_LIBRARY_SHA256")
+    host_bridge_library = Path(_environment("NETCOREDBG_COMPOSITOR_TEST_LIBRARY_PATH"))
+    host_bridge_library_hash = _environment("NETCOREDBG_COMPOSITOR_TEST_LIBRARY_SHA256")
+    source_identity = _environment("NETCOREDBG_COMPOSITOR_SOURCE_SHA256")
+    root = Path(_environment("NETCOREDBG_COMPOSITOR_TEMP_ROOT"))
     assert hashlib.sha256(production_bridge.read_bytes()).hexdigest() == production_hash
     assert hashlib.sha256(production_identity.read_bytes()).hexdigest() == production_identity_hash
     assert hashlib.sha256(test_bridge.read_bytes()).hexdigest() == test_hash
@@ -581,7 +684,7 @@ async def main() -> None:
             production_hash,
             production_identity,
             production_identity_hash,
-            {"NETCOREDBG_TEST_CAPTURE_CALIBRATION": "marker"},
+            {"NETCOREDBG_TEST_CAPTURE_CALIBRATION": "compositor-marker"},
             "control",
             None,
         ),
@@ -591,7 +694,7 @@ async def main() -> None:
             test_hash,
             host_bridge_library,
             host_bridge_library_hash,
-            {"NETCOREDBG_TEST_CAPTURE_CALIBRATION": "marker"},
+            {"NETCOREDBG_TEST_CAPTURE_CALIBRATION": "compositor-marker"},
             "fallback",
             root / "fallback.trace",
         ),
@@ -602,8 +705,8 @@ async def main() -> None:
             host_bridge_library,
             host_bridge_library_hash,
             {
-                "NETCOREDBG_TEST_CAPTURE_CALIBRATION": "marker",
-                "NETCOREDBG_TYPED_BITBLT_PRIMARY_SHAPE": "short",
+                "NETCOREDBG_TEST_CAPTURE_CALIBRATION": "compositor-marker",
+                "NETCOREDBG_COMPOSITOR_PRIMARY_SHAPE": "short",
             },
             "reject",
             root / "primary-malformed.trace",
@@ -614,7 +717,7 @@ async def main() -> None:
             test_hash,
             host_bridge_library,
             host_bridge_library_hash,
-            {"NETCOREDBG_TEST_CAPTURE_CALIBRATION": "marker"},
+            {"NETCOREDBG_TEST_CAPTURE_CALIBRATION": "compositor-marker"},
             "target_mismatch",
             root / "target-mismatch.trace",
         ),
@@ -624,7 +727,7 @@ async def main() -> None:
             test_hash,
             host_bridge_library,
             host_bridge_library_hash,
-            {"NETCOREDBG_TEST_CAPTURE_CALIBRATION": "marker"},
+            {"NETCOREDBG_TEST_CAPTURE_CALIBRATION": "compositor-marker"},
             "dimension_mismatch",
             root / "dimension-mismatch.trace",
         ),
@@ -635,11 +738,24 @@ async def main() -> None:
             host_bridge_library,
             host_bridge_library_hash,
             {
-                "NETCOREDBG_TEST_CAPTURE_CALIBRATION": "marker",
-                "NETCOREDBG_TYPED_BITBLT_SNAPSHOT_PROCESS": "foreign",
+                "NETCOREDBG_TEST_CAPTURE_CALIBRATION": "compositor-marker",
+                "NETCOREDBG_COMPOSITOR_SNAPSHOT_PROCESS": "foreign",
             },
             "foreign_reject",
             root / "foreign-target.trace",
+        ),
+        (
+            "target_change",
+            test_bridge,
+            test_hash,
+            host_bridge_library,
+            host_bridge_library_hash,
+            {
+                "NETCOREDBG_TEST_CAPTURE_CALIBRATION": "compositor-marker",
+                "NETCOREDBG_COMPOSITOR_CAPTURE_MODE": "target-change",
+            },
+            "target_change",
+            root / "target-change.trace",
         ),
         (
             "final_black",
@@ -657,7 +773,7 @@ async def main() -> None:
             test_hash,
             host_bridge_library,
             host_bridge_library_hash,
-            {"NETCOREDBG_TEST_CAPTURE_CALIBRATION": "marker"},
+            {"NETCOREDBG_TEST_CAPTURE_CALIBRATION": "compositor-marker"},
             "ordinary_fallback",
             root / "ordinary-fallback.trace",
         ),
@@ -671,6 +787,30 @@ async def main() -> None:
             "ordinary_final_black",
             root / "ordinary-final-black.trace",
         ),
+    )
+    cases += tuple(
+        (
+            mode,
+            test_bridge,
+            test_hash,
+            host_bridge_library,
+            host_bridge_library_hash,
+            {
+                "NETCOREDBG_TEST_CAPTURE_CALIBRATION": "compositor-marker",
+                "NETCOREDBG_COMPOSITOR_CAPTURE_MODE": mode,
+            },
+            mode,
+            root / f"{mode}.trace",
+        )
+        for mode in (
+            "process-change",
+            "resize",
+            "closed",
+            "timeout",
+            "policy-unknown",
+            "protected",
+            "close-at-acceptance",
+        )
     )
     cases = _select_cases(cases)
     evidence = []
@@ -705,22 +845,33 @@ async def main() -> None:
             )
             if trace_path is None:
                 assert "trace" not in result, result
+            elif expected in {"fallback", "ordinary_fallback"}:
+                assert result["trace"] == ["primary", "alternate"] * 2, result
             elif expected in {
-                "fallback",
-                "ordinary_fallback",
                 "final_black",
                 "ordinary_final_black",
-                "target_mismatch",
                 "dimension_mismatch",
+                "target_change",
+                "process-change",
+                "resize",
+                "closed",
+                "timeout",
             }:
                 assert result["trace"] == ["primary", "alternate"], result
+            elif expected == "close-at-acceptance":
+                assert result["trace"] == [
+                    "primary",
+                    "alternate",
+                    "acceptance-window-replaced",
+                    "acceptance-close-observed",
+                ], result
             elif expected == "reject":
                 assert result["trace"] == ["primary"], result
             else:
                 assert result["trace"] == [], result
             evidence.append(result)
     finally:
-        print(f"Typed BitBlt installed consumer evidence: {json.dumps(evidence, sort_keys=True)}")
+        print(f"Compositor installed consumer evidence: {json.dumps(evidence, sort_keys=True)}")
 
 
 if __name__ == "__main__":

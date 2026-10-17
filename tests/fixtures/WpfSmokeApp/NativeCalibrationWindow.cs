@@ -7,6 +7,8 @@ internal sealed class NativeCalibrationWindow : IDisposable
 {
     private const int WmEraseBackground = 0x0014;
     private const int WmPaint = 0x000F;
+    private const int WmSetMarkerState = 0x802A;
+    private const int WmReplaceCaptureWindow = 0x802B;
     private const int SwShow = 5;
     private const int Blackness = 0x00000042;
     private const int WhiteBrush = 0;
@@ -14,20 +16,24 @@ internal sealed class NativeCalibrationWindow : IDisposable
     private const uint WsPopup = 0x80000000;
     private const uint WsVisible = 0x10000000;
     private const uint CalibrationMarkerColorRef = 0x00DEC012;
+    private const uint SecondMarkerColorRef = 0x00C012DE;
 
     private static readonly WindowProcedure Procedure = Dispatch;
     private static NativeCalibrationWindow? _active;
 
     private readonly bool _drawMarker;
+    private readonly bool _compositorMarker;
+    private bool _secondMarkerState;
     private readonly string _className = $"WpfSmokeApp.Calibration.{Environment.ProcessId}";
     private readonly IntPtr _instance = GetModuleHandle(null);
     private bool _classRegistered;
     private bool _disposed;
     private IntPtr _hwnd;
 
-    public NativeCalibrationWindow(bool drawMarker)
+    public NativeCalibrationWindow(bool drawMarker, bool compositorMarker)
     {
         _drawMarker = drawMarker;
+        _compositorMarker = compositorMarker;
         var windowClass = new WindowClass
         {
             cbSize = checked((uint)Marshal.SizeOf<WindowClass>()),
@@ -39,7 +45,7 @@ internal sealed class NativeCalibrationWindow : IDisposable
             throw new Win32Exception(Marshal.GetLastWin32Error());
 
         _classRegistered = true;
-        var style = _drawMarker ? WsOverlappedWindow : WsPopup;
+        var style = _drawMarker && !_compositorMarker ? WsOverlappedWindow : WsPopup;
         _hwnd = CreateWindowEx(
             0,
             _className,
@@ -63,7 +69,15 @@ internal sealed class NativeCalibrationWindow : IDisposable
         _active = this;
     }
 
-    public void Show() => ShowWindow(_hwnd, SwShow);
+    public void Show()
+    {
+        ShowWindow(_hwnd, SwShow);
+        if (_compositorMarker)
+        {
+            if (!InvalidateRect(_hwnd, IntPtr.Zero, false) || !UpdateWindow(_hwnd))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+    }
 
     public void Dispose()
     {
@@ -92,6 +106,26 @@ internal sealed class NativeCalibrationWindow : IDisposable
 
     private IntPtr HandleMessage(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam)
     {
+        if (_compositorMarker && message == WmReplaceCaptureWindow)
+        {
+            if (hwnd != _hwnd || !GetWindowRect(hwnd, out var bounds) || !DestroyWindow(hwnd))
+                return IntPtr.Zero;
+            _hwnd = CreateWindowEx(0, _className, "WPF Smoke Capture Calibration", WsPopup | WsVisible,
+                bounds.Left, bounds.Top, bounds.Right - bounds.Left, bounds.Bottom - bounds.Top,
+                IntPtr.Zero, IntPtr.Zero, _instance, IntPtr.Zero);
+            if (_hwnd == IntPtr.Zero || !InvalidateRect(_hwnd, IntPtr.Zero, false) || !UpdateWindow(_hwnd))
+                return IntPtr.Zero;
+            return _hwnd;
+        }
+        if (_compositorMarker && message == WmSetMarkerState)
+        {
+            if (wParam != IntPtr.Zero && wParam != new IntPtr(1))
+                return IntPtr.Zero;
+            _secondMarkerState = wParam != IntPtr.Zero;
+            if (!InvalidateRect(hwnd, IntPtr.Zero, false) || !UpdateWindow(hwnd))
+                return IntPtr.Zero;
+            return new IntPtr(1);
+        }
         if (message == WmEraseBackground)
             return new IntPtr(1);
         if (message == WmPaint)
@@ -126,7 +160,7 @@ internal sealed class NativeCalibrationWindow : IDisposable
 
             FillRect(hdc, ref clientRect, GetStockObject(WhiteBrush));
             var marker = new NativeRect { Left = 20, Top = 20, Right = 60, Bottom = 60 };
-            var markerBrush = CreateSolidBrush(CalibrationMarkerColorRef);
+            var markerBrush = CreateSolidBrush(_secondMarkerState ? SecondMarkerColorRef : CalibrationMarkerColorRef);
             try
             {
                 FillRect(hdc, ref marker, markerBrush);
@@ -197,6 +231,15 @@ internal sealed class NativeCalibrationWindow : IDisposable
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetClientRect(IntPtr hwnd, out NativeRect rect);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetWindowRect(IntPtr hwnd, out NativeRect rect);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool InvalidateRect(IntPtr hwnd, IntPtr rect, bool erase);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UpdateWindow(IntPtr hwnd);
 
     [DllImport("user32.dll")]
     private static extern int FillRect(IntPtr hdc, ref NativeRect rect, IntPtr brush);

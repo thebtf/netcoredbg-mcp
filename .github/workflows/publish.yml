@@ -3,24 +3,223 @@ name: Publish to PyPI
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   # Manual trigger for testing
   workflow_dispatch:
     inputs:
       target:
-        description: 'Publish target'
+        description: "Publish target or verify-bridge/source-build (no publication)"
         required: true
-        default: 'testpypi'
+        default: "testpypi"
         type: choice
         options:
           - testpypi
           - pypi
+          - verify-bridge
+          - source-build
+      source_sha:
+        description: "source-build only: exact 40-character commit SHA"
+        required: false
+        default: ""
+        type: string
 
 jobs:
+  bridge-verify:
+    name: Verify bridge compilation
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'verify-bridge'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "8.0.425"
+
+      - name: Show source revision and SDK
+        shell: pwsh
+        run: |
+          git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to read the checked-out source revision."
+          }
+          dotnet --info
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to read .NET SDK information."
+          }
+
+      - name: Compile bridge, test host, and WPF fixture; package bridge
+        shell: pwsh
+        run: |
+          dotnet build bridge/FlaUIBridge.csproj --configuration Release --artifacts-path .artifacts/bridge-verify --disable-build-servers
+          if ($LASTEXITCODE -ne 0) {
+            throw "Bridge compilation failed."
+          }
+          dotnet build tests/fixtures/TypedBitBltFallbackBridgeHost/TypedBitBltFallbackBridgeHost.csproj --configuration Debug --artifacts-path .artifacts/bridge-verify --disable-build-servers
+          if ($LASTEXITCODE -ne 0) {
+            throw "Bridge test host compilation failed."
+          }
+          dotnet build tests/fixtures/WpfSmokeApp/WpfSmokeApp.csproj --configuration Debug --artifacts-path .artifacts/bridge-verify --disable-build-servers
+          if ($LASTEXITCODE -ne 0) {
+            throw "WPF smoke fixture compilation failed."
+          }
+          dotnet publish bridge/FlaUIBridge.csproj --configuration Release --artifacts-path .artifacts/bridge-verify --disable-build-servers --no-build
+          if ($LASTEXITCODE -ne 0) {
+            throw "Bridge executable packaging failed."
+          }
+
+      - name: Upload compilation and packaging artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: bridge-verify-${{ github.sha }}
+          path: |
+            .artifacts/bridge-verify/bin/
+            .artifacts/bridge-verify/publish/
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Record runtime file hashes
+        shell: pwsh
+        run: |
+          $sourceSha = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to read the checked-out source revision."
+          }
+          $artifactRoot = (Resolve-Path .artifacts/bridge-verify).Path
+          $runtimeFiles = @(Get-ChildItem -LiteralPath "$artifactRoot/bin", "$artifactRoot/publish" -Recurse -File |
+            Where-Object { $_.Name -match '\.(exe|dll|deps\.json|runtimeconfig\.json)$' } |
+            Sort-Object FullName)
+          if ($runtimeFiles.Count -eq 0 -or $runtimeFiles.Count -gt 517) {
+            throw "Expected between 1 and 517 runtime files, found $($runtimeFiles.Count)."
+          }
+          $files = @(foreach ($file in $runtimeFiles) {
+            [ordered]@{
+              path = [System.IO.Path]::GetRelativePath($artifactRoot, $file.FullName).Replace('\', '/')
+              size = $file.Length
+              sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+          })
+          $managedFiles = @($files | Where-Object { $_.path -in @(
+            'bin/TypedBitBltFallbackBridgeHost/debug_win-x64/FlaUIBridge.dll',
+            'bin/TypedBitBltFallbackBridgeHost/debug_win-x64/FlaUIBridge.exe',
+            'bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.dll',
+            'bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.exe',
+            'bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.deps.json',
+            'bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.runtimeconfig.json',
+            'bin/WpfSmokeApp/debug/WpfSmokeApp.dll',
+            'bin/WpfSmokeApp/debug/WpfSmokeApp.deps.json',
+            'bin/WpfSmokeApp/debug/WpfSmokeApp.runtimeconfig.json'
+          ) })
+          if ($managedFiles.Count -ne 9 -or ($managedFiles | Measure-Object -Property size -Sum).Sum -ge 1MB) {
+            throw "Expected nine managed runtime files totaling less than 1 MiB."
+          }
+          [ordered]@{
+            source_sha = $sourceSha
+            github_sha = $env:GITHUB_SHA
+            repository = $env:GITHUB_REPOSITORY
+            workflow = $env:GITHUB_WORKFLOW
+            workflow_ref = $env:GITHUB_WORKFLOW_REF
+            workflow_sha = $env:GITHUB_WORKFLOW_SHA
+            run_id = $env:GITHUB_RUN_ID
+            run_attempt = $env:GITHUB_RUN_ATTEMPT
+            job = $env:GITHUB_JOB
+            files = $files
+          } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "$artifactRoot/runtime-files.json" -Encoding utf8
+
+      - name: Upload managed runtime artifacts and hashes
+        uses: actions/upload-artifact@v7
+        with:
+          name: bridge-verify-managed-${{ github.sha }}
+          path: |
+            .artifacts/bridge-verify/bin/TypedBitBltFallbackBridgeHost/debug_win-x64/FlaUIBridge.dll
+            .artifacts/bridge-verify/bin/TypedBitBltFallbackBridgeHost/debug_win-x64/FlaUIBridge.exe
+            .artifacts/bridge-verify/bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.dll
+            .artifacts/bridge-verify/bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.exe
+            .artifacts/bridge-verify/bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.deps.json
+            .artifacts/bridge-verify/bin/TypedBitBltFallbackBridgeHost/debug_win-x64/TypedBitBltFallbackBridgeHost.runtimeconfig.json
+            .artifacts/bridge-verify/bin/WpfSmokeApp/debug/WpfSmokeApp.dll
+            .artifacts/bridge-verify/bin/WpfSmokeApp/debug/WpfSmokeApp.deps.json
+            .artifacts/bridge-verify/bin/WpfSmokeApp/debug/WpfSmokeApp.runtimeconfig.json
+            .artifacts/bridge-verify/runtime-files.json
+          retention-days: 1
+          if-no-files-found: error
+
+  source-verify:
+    name: Build exact source package
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'source-build'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+
+      - name: Verify source revision and record provenance
+        shell: bash
+        env:
+          VERIFY_SOURCE_SHA: ${{ inputs.source_sha }}
+          VERIFY_WORKFLOW_SHA: ${{ github.sha }}
+          GIT_NO_REPLACE_OBJECTS: "1"
+        run: |
+          set -euo pipefail
+          if [[ ! "$VERIFY_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "source_sha must be an exact 40-character lowercase hexadecimal commit SHA." >&2
+            exit 1
+          fi
+          actual_source_sha="$(git rev-parse HEAD)"
+          if [[ "$actual_source_sha" != "$VERIFY_SOURCE_SHA" ]]; then
+            echo "Checked-out source revision does not match source_sha." >&2
+            exit 1
+          fi
+          export VERIFIED_SOURCE_SHA="$actual_source_sha"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          Path("build-source.json").write_text(
+              json.dumps({
+                  "source_sha": os.environ["VERIFIED_SOURCE_SHA"],
+                  "workflow_sha": os.environ["VERIFY_WORKFLOW_SHA"],
+              }) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build package
+        run: python -m build --outdir dist
+
+      - name: Upload source build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: source-build-${{ inputs.source_sha }}
+          path: |
+            dist/
+            build-source.json
+          retention-days: 1
+          if-no-files-found: error
+
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || (github.event.inputs.target != 'verify-bridge' && github.event.inputs.target != 'source-build'))
     permissions:
       contents: write
     outputs:
@@ -40,6 +239,7 @@ jobs:
 
   build:
     name: Build package
+    if: github.event_name != 'workflow_dispatch' || (github.event.inputs.target != 'verify-bridge' && github.event.inputs.target != 'source-build')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -47,7 +247,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Install build tools
         run: pip install build
@@ -71,7 +271,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Download build artifact archive
         uses: actions/download-artifact@v8
@@ -142,7 +342,7 @@ jobs:
     name: Publish to PyPI
     runs-on: ubuntu-latest
     needs: [build, test]
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'pypi')
+    if: (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'pypi')) && (github.event_name != 'workflow_dispatch' || (github.event.inputs.target != 'verify-bridge' && github.event.inputs.target != 'source-build'))
     environment: pypi
     permissions:
       id-token: write

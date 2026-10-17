@@ -4,9 +4,10 @@ Prepared: 2026-10-11
 
 ## Summary
 
-`v0.23.14` is a PATCH for failed pre-launch restore/build diagnostics.
-A failed prebuild remains a failed launch; its result is retained for inspection
-through the public `get_build_diagnostics` tool.
+The pending `v0.23.14` PATCH retains failed pre-launch restore/build diagnostics
+and includes a bounded compositor screenshot candidate. A failed prebuild
+remains a failed launch; its result is available through `get_build_diagnostics`.
+The screenshot candidate is not yet an accepted fix for the original window.
 
 ## Failed-prebuild diagnostics
 
@@ -30,8 +31,28 @@ The Python entry point, locked dependency versions, and public catalog remain
 unchanged: 135 tools, 8 prompts, and 4 resources. Existing process-owner cleanup
 and explicit external-path behavior are preserved.
 
-This PATCH does not change the screenshot backend and does not fix the separate
-Novascript capture that returned the desktop instead of the target window.
+## Screenshot candidate — pending verification
+
+With the selected FlaUI backend, ordinary and evidence screenshots share one
+guarded lossless source: PrintWindow followed by at most one exact-HWND Windows
+Graphics Capture attempt. Evidence controls raw/crop persistence only; the
+accepted PNG also produces the inline image. Compositor evidence is labelled
+`WindowsGraphicsCapture` / `compositor_window_raster`, with actual frame time,
+item/frame dimensions, process creation/session, observed policy and stable
+physical geometry. It is never labelled as PrintWindow or BitBlt.
+
+The compositor route requires the bridge and supported WGC APIs. The normal
+system capture indicator remains enabled; no picker, permission request,
+indicator suppression, protection change, foreground activation or desktop
+capture is introduced. Unknown/denied policy or changed target/acquisition
+geometry fails without an image or persistence. A correct-target frame whose
+size differs from caller expectations remains a preview-only `MISMATCH`, with
+no raw, crop or HD persistence. Ordinary previews retain their HD derivative.
+
+Existing non-FlaUI ordinary capture and non-strict PrintWindow evidence are
+preserved; strict assertions remain bridge-only. The annotated screenshot path
+is unchanged. Controlled current-content checks, same-original-window replay
+and installed-consumer proof must pass before this candidate can be promoted.
 
 ---
 

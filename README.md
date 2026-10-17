@@ -15,9 +15,10 @@ stop it deliberately, and inspect the state that explains the behavior.
 
 **Python 3.10+ · Windows GUI automation · 135 tools · 8 prompts · 4 resources · v0.23.14**
 
-The v0.23.14 PATCH retains failed prebuild diagnostics: actual argv, working
-directory, exit code, and captured stdout/stderr remain inspectable without
-substituting a previous result. This PATCH does not change the screenshot backend.
+The pending v0.23.14 PATCH retains failed prebuild diagnostics: actual argv,
+working directory, exit code, and captured stdout/stderr remain inspectable
+without substituting a previous result. It also contains a bounded screenshot
+candidate, not yet an accepted fix for the reported Novascript capture.
 
 ## What it enables
 
@@ -249,16 +250,33 @@ in explicitly:
 ui_take_screenshot(evidence=true)
 ```
 
-Normally this mode returns `evidence_grade=lossless_raster`, persists a session-scoped
-PrintWindow PNG, and includes SHA-256 and geometry provenance. For a strict physical
-target, a probable-black PrintWindow raster may make one verified `BitBlt` attempt.
-That response is explicitly `method=BitBlt`, `fallback=flash-focus`,
-`fallback_reason=probable_black_printwindow`, and
-`evidence_grade=typed_bitblt_fallback`; it records the `GetWindowDC` authority,
-ROP, target PID, stable geometry/DPI, and foreground activation/restoration proof.
-Any malformed, black, unstable, mismatched, or incompletely proven fallback persists
-nothing. Any raw-derived crop requires `evidence=true`; preview-only captures do not
-provide it.
+The pending compositor candidate uses the selected FlaUI bridge's same guarded
+lossless acquisition for ordinary and evidence calls: PrintWindow, then at most
+one Windows Graphics Capture attempt for the exact HWND. `evidence` controls
+raw/crop persistence, not the acquisition backend. PrintWindow retains
+`method=PrintWindow` and `evidence_grade=lossless_raster` when evidence is saved.
+An accepted compositor result uses `method=WindowsGraphicsCapture`,
+`source_api=GraphicsCaptureItem.CreateForWindow`,
+`capture_authority=hwnd_compositor_frame`, and
+`evidence_grade=compositor_window_raster`. It records actual frame time,
+item/frame dimensions, stable HWND/PID/process creation/session, physical
+geometry/DPI, and observed capture policy. Raw, crop and inline derive from
+the same accepted PNG; there is no desktop/monitor or further GDI fallback.
+
+This candidate requires the FlaUI bridge and supported WGC APIs (Windows 10
+1903 or later). The normal system capture indicator is allowed. It does not
+activate or restore the window, suppress the indicator, request permissions,
+or change capture protection. Unknown or denied protection, target changes,
+unstable acquisition geometry, malformed provenance, timeout and probable-black
+frames fail without an image or evidence persistence. Uniform white is not
+classified as a failed capture. Controlled and same-original-window current
+content proof, followed by installed-consumer proof, are still required before
+promotion; metadata `MATCHED` alone does not prove the visual content.
+
+When the existing backend factory selects a non-FlaUI backend, ordinary Python
+capture and its PrintWindow-only non-strict evidence route remain unchanged.
+Strict physical assertions still require the bridge. A failed bridge capture
+never switches to that legacy route. A raw-derived crop requires `evidence=true`.
 
 Without an expected target, persisted evidence reports
 `target_comparability.status=UNASSERTED`: it is valid lossless evidence, but
@@ -270,14 +288,19 @@ ui_take_screenshot(evidence=true, expected_hwnd=..., expected_physical_width=...
 ```
 
 The response reports `MATCHED` or `MISMATCH`; only `MATCHED` persists raw
-evidence. `max_width` affects only the preview and HD derivative, never this
-comparison. `ui_resize_window()` reports request-versus-readback
-`target_comparability.status` as `MATCHED`, `MISMATCH`, or `UNAVAILABLE`;
-`resized=true` confirms request completion, not target equality.
+evidence. A reliable frame from the correct HWND with a different caller-expected
+size returns a `preview_only` `MISMATCH`, without raw, crop or HD persistence.
+A foreign HWND/PID or acquisition instability is an error, not a comparable
+preview. `max_width` affects only the preview and HD derivative, never this
+comparison. Ordinary `evidence=false` calls retain their existing HD derivative
+semantics. `ui_resize_window()` reports request-versus-readback comparability as
+`MATCHED`, `MISMATCH`, or `UNAVAILABLE`; `resized=true` is not target equality.
 
 Use `ui_take_annotated_screenshot()` to receive Set-of-Mark labels, then invoke
 `ui_click_annotated(element_id=...)`. Use `ui_bring_to_front()` only when the
 debuggee should intentionally leave stealth mode.
+The annotated screenshot tool keeps its separate Python capture path; this
+compositor candidate makes no claim about that path.
 
 ## Tool map
 
