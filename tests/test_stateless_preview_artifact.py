@@ -7978,6 +7978,53 @@ def closeout_workflow_cli(
     return promotion_workflow_cli
 
 
+def test_closeout_cli_admits_existing_parent_without_path_is_junction(
+    closeout_workflow_cli: _PromotionWorkflowCli, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli = closeout_workflow_cli
+    parent = cli.runner / "stateless-preview-closeout-803-1-1003"
+    parent.mkdir()
+    for path_type in type(parent).__mro__:
+        if "is_junction" in vars(path_type):
+            monkeypatch.delattr(path_type, "is_junction")
+    assert not hasattr(parent, "is_junction")
+
+    cli.closeout_step(0, upload=False)
+
+    assert (
+        cli.closeout_bytes["records"]["remote-consumer-proof.json"]
+        == (cli.records["remote-consumer-proof.json"])
+    )
+
+
+def test_closeout_cli_refuses_reparse_parent_without_path_is_junction(
+    closeout_workflow_cli: _PromotionWorkflowCli, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli = closeout_workflow_cli
+    parent = cli.runner / "stateless-preview-closeout-803-1-1003"
+    parent.mkdir()
+    original_stat = Path.stat
+
+    def parent_metadata(path: Path, *, follow_symlinks: bool = True) -> Any:
+        metadata = original_stat(path, follow_symlinks=follow_symlinks)
+        if path == parent and not follow_symlinks:
+            return SimpleNamespace(
+                st_mode=metadata.st_mode,
+                st_file_attributes=getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+            )
+        return metadata
+
+    monkeypatch.setattr(Path, "stat", parent_metadata)
+    for path_type in type(parent).__mro__:
+        if "is_junction" in vars(path_type):
+            monkeypatch.delattr(path_type, "is_junction")
+    assert not hasattr(parent, "is_junction")
+
+    cli.assert_closeout_refused()
+
+    assert not (parent / "admit-closeout").exists()
+
+
 def test_closeout_cli_completed_publisher_to_independently_retained_program_b_handoff(
     closeout_workflow_cli: _PromotionWorkflowCli,
 ) -> None:
