@@ -143,6 +143,14 @@ the residue documented in the original checkout.
 
 **Before writing tests, read:** `.agent/guides/TESTING_GUIDELINES.md`
 
+**SDK launch safety:** Never modify User or Machine `PATH`, registry environment
+settings, or shell profiles for tool lookup; never use `setx`. Use explicit tool
+paths or child-process-only environment overrides. Before the first `dotnet`
+invocation with a temporary SDK home, set `DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=false`
+in that child's environment to prevent SDK first-run PATH additions. This rule
+does not authorize cleanup of existing PATH entries or interruption of running
+applications.
+
 | Rule | Description |
 |------|-------------|
 | **Unit tests** | Required for ALL new code |

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Text.Json.Nodes;
 using FlaUI.Core;
@@ -15,6 +16,10 @@ public static class ElementCommands
         var pid = @params?["pid"]?.GetValue<int>()
             ?? throw new ArgumentException("Missing required parameter: pid");
         var requestedStealth = @params?["stealth"]?.GetValue<bool>() ?? false;
+        using var process = Process.GetProcessById(pid);
+        _ = process.SafeHandle;
+        var creationTicks = process.StartTime.ToUniversalTime().Ticks;
+        var sessionId = checked((uint)process.SessionId);
 
         var desktop = automation.GetDesktop();
         var windows = desktop.FindAllChildren(
@@ -27,10 +32,15 @@ public static class ElementCommands
         var window = SelectPrimaryWindow(windows)
             ?? throw new InvalidOperationException(
                 $"No window found for process {pid}: no usable top-level window yet");
+        var hwnd = window.Properties.NativeWindowHandle.ValueOrDefault;
+        if (process.HasExited || NativeScreenshotCaptureTransport.ReadWindowProcessId(hwnd) != checked((uint)pid))
+            throw new InvalidOperationException("Connect target changed while binding process identity.");
         JsonRpcHandler.MainWindow = window;
         // Store pid independently so window enumeration still works after
         // set_active_window switches MainWindow to a dialog that later closes.
         JsonRpcHandler.ProcessId = pid;
+        JsonRpcHandler.ProcessCreationTicks = creationTicks;
+        JsonRpcHandler.ProcessSessionId = sessionId;
         JsonRpcHandler.Stealth = requestedStealth;
 
         Program.Log($"Connected to window: {SafeString(() => window.Name)} (pid={pid})");

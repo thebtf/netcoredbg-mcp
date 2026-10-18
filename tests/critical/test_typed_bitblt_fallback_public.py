@@ -1,4 +1,4 @@
-"""Exact-build installed-wheel contract for typed BitBlt fallback recovery."""
+"""Exact-build installed-wheel contract for compositor screenshot recovery."""
 
 from __future__ import annotations
 
@@ -20,7 +20,12 @@ PUBLISHED_BRIDGE_NAME = "FlaUIBridge.exe"
 HOST_ROOT = REPO_ROOT / "tests" / "fixtures" / "TypedBitBltFallbackBridgeHost"
 HOST_PROJECT = HOST_ROOT / "TypedBitBltFallbackBridgeHost.csproj"
 HOST_EXE = (
-    HOST_ROOT / "bin" / "Debug" / "net8.0-windows" / "win-x64" / "TypedBitBltFallbackBridgeHost.exe"
+    HOST_ROOT
+    / "bin"
+    / "Debug"
+    / "net8.0-windows10.0.22621.0"
+    / "win-x64"
+    / "TypedBitBltFallbackBridgeHost.exe"
 )
 HOST_MANAGED_LIBRARY = HOST_EXE.with_suffix(".dll")
 HOST_BRIDGE_LIBRARY = HOST_EXE.with_name("FlaUIBridge.dll")
@@ -38,6 +43,12 @@ def _source_identity() -> str:
         REPO_ROOT / "bridge" / "JsonRpcHandler.cs",
         REPO_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs",
         REPO_ROOT / "bridge" / "Commands" / "ScreenshotCaptureTransport.cs",
+        REPO_ROOT / "bridge" / "Commands" / "CompositorWindowCapture.cs",
+        REPO_ROOT / "bridge" / "Commands" / "ElementCommands.cs",
+        FIXTURE_ROOT / "NativeCalibrationWindow.cs",
+        FIXTURE_ROOT / "MainWindow.xaml.cs",
+        REPO_ROOT / "src" / "netcoredbg_mcp" / "tools" / "ui.py",
+        CONSUMER_PROOF,
         REPO_ROOT / "bridge" / "BridgeTestInternals.cs",
         HOST_PROJECT,
         HOST_ROOT / "Program.cs",
@@ -63,14 +74,14 @@ def _run(command: list[str], *, timeout: int = 180) -> subprocess.CompletedProce
 
 
 @pytest.mark.critical
-def test_installed_public_strict_bitblt_fallback_has_real_transport_proof(tmp_path: Path) -> None:
+def test_installed_public_compositor_capture_has_real_transport_proof(tmp_path: Path) -> None:
     """Run the built wheel against both production and non-shipped bridge binaries."""
     if sys.platform != "win32":
-        pytest.fail("typed BitBlt fallback public proof requires Windows")
+        pytest.fail("compositor screenshot public proof requires Windows")
 
     debugger_path = os.environ.get("NETCOREDBG_PATH") or shutil.which("netcoredbg")
     assert debugger_path and Path(debugger_path).is_file(), (
-        "typed BitBlt fallback public proof requires NETCOREDBG_PATH or netcoredbg on PATH"
+        "compositor screenshot public proof requires NETCOREDBG_PATH or netcoredbg on PATH"
     )
     source_identity = _source_identity()
 
@@ -137,18 +148,18 @@ def test_installed_public_strict_bitblt_fallback_has_real_transport_proof(tmp_pa
             "NETCOREDBG_PATH": str(debugger_path),
             "NETCOREDBG_MCP_CONSUMER_CLI": str(consumer_cli),
             "NETCOREDBG_MCP_WPF_ROOT": str(FIXTURE_ROOT),
-            "NETCOREDBG_TYPED_BITBLT_PRODUCTION_BRIDGE_PATH": str(production_bridge),
-            "NETCOREDBG_TYPED_BITBLT_PRODUCTION_BRIDGE_SHA256": _sha256(production_bridge),
-            "NETCOREDBG_TYPED_BITBLT_PRODUCTION_IDENTITY_PATH": str(production_bridge),
-            "NETCOREDBG_TYPED_BITBLT_PRODUCTION_IDENTITY_SHA256": _sha256(production_bridge),
-            "NETCOREDBG_TYPED_BITBLT_TEST_BRIDGE_PATH": str(HOST_EXE),
-            "NETCOREDBG_TYPED_BITBLT_TEST_BRIDGE_SHA256": _sha256(HOST_EXE),
-            "NETCOREDBG_TYPED_BITBLT_TEST_HOST_LIBRARY_PATH": str(HOST_MANAGED_LIBRARY),
-            "NETCOREDBG_TYPED_BITBLT_TEST_HOST_LIBRARY_SHA256": _sha256(HOST_MANAGED_LIBRARY),
-            "NETCOREDBG_TYPED_BITBLT_TEST_LIBRARY_PATH": str(HOST_BRIDGE_LIBRARY),
-            "NETCOREDBG_TYPED_BITBLT_TEST_LIBRARY_SHA256": _sha256(HOST_BRIDGE_LIBRARY),
-            "NETCOREDBG_TYPED_BITBLT_SOURCE_SHA256": source_identity,
-            "NETCOREDBG_TYPED_BITBLT_TEMP_ROOT": str(temp_root),
+            "NETCOREDBG_COMPOSITOR_PRODUCTION_BRIDGE_PATH": str(production_bridge),
+            "NETCOREDBG_COMPOSITOR_PRODUCTION_BRIDGE_SHA256": _sha256(production_bridge),
+            "NETCOREDBG_COMPOSITOR_PRODUCTION_IDENTITY_PATH": str(production_bridge),
+            "NETCOREDBG_COMPOSITOR_PRODUCTION_IDENTITY_SHA256": _sha256(production_bridge),
+            "NETCOREDBG_COMPOSITOR_TEST_BRIDGE_PATH": str(HOST_EXE),
+            "NETCOREDBG_COMPOSITOR_TEST_BRIDGE_SHA256": _sha256(HOST_EXE),
+            "NETCOREDBG_COMPOSITOR_TEST_HOST_LIBRARY_PATH": str(HOST_MANAGED_LIBRARY),
+            "NETCOREDBG_COMPOSITOR_TEST_HOST_LIBRARY_SHA256": _sha256(HOST_MANAGED_LIBRARY),
+            "NETCOREDBG_COMPOSITOR_TEST_LIBRARY_PATH": str(HOST_BRIDGE_LIBRARY),
+            "NETCOREDBG_COMPOSITOR_TEST_LIBRARY_SHA256": _sha256(HOST_BRIDGE_LIBRARY),
+            "NETCOREDBG_COMPOSITOR_SOURCE_SHA256": source_identity,
+            "NETCOREDBG_COMPOSITOR_TEMP_ROOT": str(temp_root),
             "TEMP": str(temp_root),
             "TMP": str(temp_root),
         }
@@ -164,7 +175,7 @@ def test_installed_public_strict_bitblt_fallback_has_real_transport_proof(tmp_pa
     )
     print(consumer.stdout, end="")
     assert consumer.returncode == 0, consumer.stdout + consumer.stderr
-    assert "Typed BitBlt installed consumer evidence:" in consumer.stdout
+    assert "Compositor installed consumer evidence:" in consumer.stdout
 
 
 @pytest.mark.asyncio
@@ -235,3 +246,51 @@ async def test_public_consumer_rejects_live_spawned_role_after_cleanup(
         await consumer._prove_post_cleanup_liveness(
             {"terminated": 1}, [{"role": "debuggee", "pid": 303}]
         )
+
+
+@pytest.mark.parametrize("inline_color", [(18, 192, 222), (255, 255, 255)])
+def test_public_consumer_checks_spatial_pixels_in_same_result_raw_and_inline(
+    tmp_path, inline_color
+):
+    import base64
+    import io
+
+    from mcp.types import CallToolResult, ImageContent, TextContent
+    from PIL import Image
+
+    spec = importlib.util.spec_from_file_location("compositor_consumer", CONSUMER_PROOF)
+    assert spec is not None and spec.loader is not None
+    consumer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(consumer)
+    raw = Image.new("RGB", (64, 64), "white")
+    for x in range(8, 24):
+        for y in range(8, 24):
+            raw.putpixel((x, y), (18, 192, 222))
+    raw_path = tmp_path / "raw.png"
+    raw.save(raw_path, format="PNG")
+    inline = raw.copy() if inline_color == (18, 192, 222) else Image.new("RGB", (64, 64), "white")
+    buffer = io.BytesIO()
+    inline.save(buffer, format="WEBP", quality=80)
+    result = CallToolResult(
+        isError=False,
+        content=[
+            ImageContent(
+                type="image",
+                data=base64.b64encode(buffer.getvalue()).decode("ascii"),
+                mimeType="image/webp",
+            ),
+            TextContent(type="text", text="{}"),
+        ],
+    )
+    metadata = {
+        "raw_path": str(raw_path),
+        "raw_sha256": _sha256(raw_path),
+        "raw_width": 64,
+        "raw_height": 64,
+    }
+    samples = ((16, 16, (18, 192, 222)), (48, 48, (255, 255, 255)))
+    if inline_color == (18, 192, 222):
+        assert consumer._assert_spatial_images(result, metadata, samples)["inline_sha256"]
+    else:
+        with pytest.raises(AssertionError):
+            consumer._assert_spatial_images(result, metadata, samples)
