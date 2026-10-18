@@ -1329,10 +1329,23 @@ internal static class RepositoryLayout
 {
     public static readonly string Root = FindRoot();
     public static readonly string ControlledAdapterDirectory = Path.Combine(Root, "host", "NetCoreDbg.Mcp.Stateless.Tests", "Fixtures", "ControlledDapAdapter");
-    public static readonly string ScratchRoot = Path.Combine(Root, ".agent", "tmp", "netcoredbg-mcp-stateless-tests");
+    public static readonly string ScratchRoot = OutputRoot("NETCOREDBG_MCP_TEST_SCRATCH_ROOT")
+        ?? Path.Combine(Root, ".agent", "tmp", "netcoredbg-mcp-stateless-tests");
 
-    private static string FindRoot()
+    private static string FindRoot([System.Runtime.CompilerServices.CallerFilePath] string sourceFile = "")
     {
+        if (Environment.GetEnvironmentVariable("NETCOREDBG_MCP_TEST_SOURCE_ROOT") is { } sourceRoot)
+        {
+            var compiledRoot = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(sourceFile)!, "..", "..", ".."));
+            if (!Path.IsPathFullyQualified(sourceRoot) || !Directory.Exists(sourceRoot)
+                || !string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(sourceRoot)), compiledRoot,
+                    OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Explicit test source root does not match the compiled source checkout.");
+            }
+            return compiledRoot;
+        }
+
         for (var current = new DirectoryInfo(AppContext.BaseDirectory); current is not null; current = current.Parent)
         {
             if (Directory.Exists(Path.Combine(current.FullName, ".git")) || File.Exists(Path.Combine(current.FullName, "AGENTS.md")))
@@ -1342,6 +1355,50 @@ internal static class RepositoryLayout
         }
 
         throw new InvalidOperationException("Repository root could not be located from the test assembly base directory.");
+    }
+
+    internal static string? OutputRoot(string variable)
+    {
+        var value = Environment.GetEnvironmentVariable(variable);
+        if (value is null)
+        {
+            return null;
+        }
+        if (Environment.GetEnvironmentVariable("NETCOREDBG_MCP_TEST_SOURCE_ROOT") is null)
+        {
+            throw new InvalidOperationException("Explicit test output requires an explicit compiled-source root.");
+        }
+        var owner = Root;
+        var gitFile = Path.Combine(Root, ".git");
+        if (File.Exists(gitFile))
+        {
+            var marker = File.ReadAllText(gitFile).Trim();
+            if (!marker.StartsWith("gitdir: ", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Test checkout has invalid Git coordination metadata.");
+            }
+            var gitDirectory = Path.GetFullPath(marker[8..], Root);
+            owner = Directory.GetParent(gitDirectory)?.Parent?.Parent?.FullName
+                ?? throw new InvalidOperationException("Test Git coordination owner is unavailable.");
+        }
+        if (!Path.IsPathFullyQualified(value))
+        {
+            throw new InvalidOperationException($"{variable} must be an absolute primary-owned output path.");
+        }
+        var path = Path.GetFullPath(value);
+        var prefix = Path.Combine(owner, ".agent") + Path.DirectorySeparatorChar;
+        if (!path.StartsWith(prefix, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"{variable} must stay beneath the Git coordination owner's .agent directory.");
+        }
+        for (var current = new DirectoryInfo(path); current is not null && current.FullName.Length > owner.Length; current = current.Parent)
+        {
+            if (current.Exists && (current.Attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidOperationException($"{variable} contains a reparse point.");
+            }
+        }
+        return path;
     }
 }
 
@@ -1372,7 +1429,10 @@ internal static class TestOutputPathResolver
         var projectDirectory = projectRelativePath is null
             ? projectDirectoryOrRepositoryRoot
             : Path.Combine(projectDirectoryOrRepositoryRoot, projectRelativePath);
-        var targetPath = Path.Combine(projectDirectory, "bin", configuration, targetFramework, $"{assemblyName}.dll");
+        var artifactsPath = RepositoryLayout.OutputRoot("NETCOREDBG_MCP_TEST_ARTIFACTS_PATH");
+        var targetPath = string.IsNullOrEmpty(artifactsPath)
+            ? Path.Combine(projectDirectory, "bin", configuration, targetFramework, $"{assemblyName}.dll")
+            : Path.Combine(artifactsPath, "bin", Path.GetFileName(projectDirectory), outputDirectory.Name, $"{assemblyName}.dll");
         Assert.True(File.Exists(targetPath), $"Built test target is absent: '{targetPath}'.");
         return targetPath;
     }

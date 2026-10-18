@@ -2505,6 +2505,48 @@ def test_unified_v3_receipt_accepts_each_complete_legal_role_outcome(
     )
 
 
+def test_primary_owned_v4_receipt_preserves_historical_v3_and_binds_published_identity() -> None:
+    runner, validator = _v3_receipt_validator()
+    historical = _complete_v3_exact_head_receipt(
+        "a" * 40, role="post-merge", outcome="PASS", release_intent="v0.23.12"
+    )
+    original = deepcopy(historical)
+    validator(historical)
+    receipt = deepcopy(historical)
+    receipt["schema_version"] = 4
+    receipt["release_intent"] = "v1.2.3"
+    receipt["published_release"] = {
+        "tag": "v1.2.3",
+        "commit": "a" * 40,
+        "tag_object": "b" * 40,
+        "release_id": 42,
+    }
+    old_root = f".tmp/sonarqube-coverage/{_V3_RUN_ID}"
+    root = f".agent/e/sonarqube/{runner.PROJECT_KEY}/{'a' * 40}/runs/{_V3_RUN_ID}/coverage"
+    for reference in [
+        receipt["coverage"]["marker"],
+        *receipt["coverage"]["final_reports"],
+        *receipt["coverage"]["dotnet_producers"],
+    ]:
+        reference["relative_path"] = reference["relative_path"].replace(old_root, root)
+    receipt["cleanup"]["claimed_root"] = root
+    receipt["cleanup"]["removed_paths"] = [root]
+    validator(receipt)
+    assert historical == original
+    for mutation in (
+        lambda value: value["published_release"].update(commit="c" * 40),
+        lambda value: value["published_release"].update(tag="v1.2.4"),
+        lambda value: value["coverage"]["marker"].update(
+            relative_path=f"{old_root}/coverage-run.json"
+        ),
+        lambda value: value["cleanup"].update(claimed_root=old_root),
+    ):
+        invalid = deepcopy(receipt)
+        mutation(invalid)
+        with pytest.raises(runner.RunnerError):
+            validator(invalid)
+
+
 @pytest.mark.parametrize(
     ("role", "outcome", "release_intent"),
     [

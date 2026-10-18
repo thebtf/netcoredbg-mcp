@@ -140,10 +140,10 @@ only dotenv path as `<coordination-root>/.env`, where `coordination-root` is
 the parent of `git rev-parse --git-common-dir`. It verifies and reads the same
 no-follow file object, requiring owner-only access. On Windows, this includes a
 non-reparse file, the current user's owner SID, a protected DACL, and no allow
-ACE for another SID. The declared credential-free HTTP(S) `SONAR_HOST_URL` origin
-is authoritative. The runner accepts a pathless origin or a root `/` suffix and
-canonicalizes both to `scheme://netloc`; it does not upgrade or rewrite the
-configured scheme or authority. Explicit process
+ACE for another SID. The declared credential-free **HTTPS** `SONAR_HOST_URL`
+origin is authoritative; certificate verification stays enabled. A pathless
+origin or root `/` suffix is canonicalized without rewriting its authority.
+Explicit process
 values override the file only when their names use exact canonical casing. The
 runner rejects `SONAR_ADMIN_TOKEN`, every other or mis-cased `SONAR_*` credential
 name, and a scanner worktree containing `.env`, a symbolic link, or any reparse
@@ -151,28 +151,40 @@ point, including the root. It scrubs every `SONAR_*` case variant from build/tes
 children, redacts the configured origin and tokens from scanner argv/output, and
 writes the role-aware secret-free receipt under the coordination root.
 
-After publication, create a clean detached worktree at the captured source SHA
-and use the existing post-merge role. Its name is analysis metadata, not a tag
-authorization. The unchanged STRICT runner requires `HEAD == origin/main` against
-the current `origin/main`; a delayed audit of an older published tag can
-therefore truthfully block. Retain that blocked audit rather than substituting
-a different SHA or making it a publication gate:
+After publication, create a clean detached source worktree at the actual
+published commit. Capture its stable release tag and full SHA, then execute:
 
 ```powershell
-python scripts/run_sonarqube_exact_head.py --role post-merge
+python scripts/run_sonarqube_exact_head.py --role post-merge --published-tag $PublishedTag --published-commit $PublishedCommit
 ```
 
-The historical candidate role remains analysis metadata only; neither role is
-a release prerequisite. The unchanged runner and receipt validator hardcode
-nondiagnostic `release_intent` to `v0.23.12`. Actual audit receipts MUST retain
-the captured source SHA and existing real metadata; do not relabel that intent
-or claim a version-correct audit for later releases. Both limitations remain
-analysis-only debt in NCD7, next patch `immutable-published-sonar-audit`. Its
-implementation and RED/GREEN acceptance contract is recorded in the primary
-coordination receipt `.agent/reports/sonar-policy-runner-nextpatch-native.json`.
+The two published options must be supplied together and only for `post-merge`.
+The runner verifies the fixed repository's real nondraft stable GitHub release,
+annotated tag and peeled commit, requires that commit to equal detached HEAD,
+and matches the source package version to the tag. `release_intent` records the
+actual tag. A later `origin/main` is not source identity for this route. No-pair
+`post-merge` callers retain the `HEAD == origin/main` guard; candidate/diagnostic
+roles retain their audit-only meaning. No role is a publication prerequisite.
+
+Source **S** and output **O** are separate. O is always
+`<coordination-root>/.agent/e/sonarqube/thebtf_netcoredbg_mcp/<sha>/runs/<run-id>`.
+Scanner begin/end and their real metadata/task readers use O; XML, project base
+and build inputs use S. Scanner 11.2.1 runs with `/install:false`, explicit
+installed integration targets and disabled user ImportBefore hooks. Every .NET
+producer, including coverage restore/test, nested fixture builds and preview
+publish, shares `O/artifacts` and `O/.sonarqube`. Child-only cache, venv, temp,
+scratch/results and SDK-home settings remain in O, with no profile/PATH edits.
+
+An immutable source without compatible external-output test drivers refuses
+before scanner begin; do not patch that tag, redirect output into source `bin`,
+copy metadata, or substitute another SHA. Focused no-scan tests do not prove a
+live scan or server import. New schema-4 per-run receipts preserve verified
+published binding and primary-relative paths; historical schema-3 receipts and
+their role-named paths are unchanged. See the onboarding runbook for the full
+producer and no-scan qualification boundary.
 For each post-release scan, perform and record all of the following:
 
-1. Create a new detached scanner worktree at the captured target SHA, outside the permanent release checkout, before scanner begin. It must contain the committed `SonarQube.Analysis.xml` from that exact head and no `.env`, symbolic link, or reparse point anywhere in the scanner tree, including the root. The primary coordination root, resolved from the Git common directory, retains the sole allowed `.env`. Before scanning, require `git rev-parse HEAD` to equal the captured SHA and require `git status --porcelain=v1 --untracked-files=all --ignored` to report no tracked, untracked, or ignored entry within the configured scan scope. Refuse the scan otherwise. Run the scanner only in this isolated worktree; never treat permanent root `.agent` coordination residue as scanner source. The XML exclusions complement this check but do not replace it.
+1. Create a new detached source worktree S at the captured target SHA, outside the permanent release checkout, before scanner begin. It must contain the committed `SonarQube.Analysis.xml` from that exact head and no `.env`, symbolic link, or reparse point anywhere in the source tree, including the root. The primary coordination root, resolved from the Git common directory, retains the sole allowed `.env`. Before scanning, require `git rev-parse HEAD` to equal the captured SHA and require `git status --porcelain=v1 --untracked-files=all --ignored` to report no tracked, untracked, or ignored entry within the configured scan scope. Refuse otherwise. Run scanner begin/end from the separate primary-owned O with `sonar.projectBaseDir=S`; never treat permanent root `.agent` output as source. XML exclusions complement this check but do not replace it.
 2. Read `sonar.projectKey` from that worktree's `SonarQube.Analysis.xml`. The XML key, scanner metadata key, submitted task-report key, and the submitted Compute Engine task's required `componentKey` MUST all equal the fixed repository project key `thebtf_netcoredbg_mcp`. Because the returned analysis item has no project field, its recorded `project=thebtf_netcoredbg_mcp` request, `analysis.key == task.analysisId`, and `revision == HEAD_SHA` are the project/revision proof. A candidate must not redirect analysis by changing XML. Invoke the repository-configured .NET scanner with that XML, the credential-free `SONAR_HOST_URL` origin, and `sonar.scm.revision=$HEAD_SHA`; the runner provides `SONAR_TOKEN` to `begin` and `end` only, with redacted display, then builds the repository between them. Preserve scanner metadata and task-report evidence without token values.
 3. Poll **only** the submitted Compute Engine task every five seconds for no more than **10 minutes**. A completed analysis must terminate as `SUCCESS` and resolve exactly one analysis ID for `thebtf_netcoredbg_mcp`; record its real analysis-bound quality-gate status. Only `OK` can support a passing audit receipt. A latest-project quality-gate result is not evidence. If the deadline expires, write the terminal timeout receipt with the target SHA, submitted task ID, polling start/deadline, and last observed task state (or no response). A failed task or any nonterminal result at that deadline is `PROJECT_RELEASE_PROTOCOL_BLOCKED` for this audit only.
 4. Before scanner begin, create a baseline finding-key inventory by retrieving **every page** of current project findings. Record the fixed project key, query, total, page sequence, and every unique key; do not accept a first page, server result cap, or missing page as complete. After the exact-head analysis, **serialize all analysis activity for the fixed project** from the submitted Compute Engine task through the final receipt: no other scan may submit or complete for that project during this interval. Before and after the exact-head finding pagination, read the **current project analysis ID and revision** and require both to equal the **submitted analysis ID and `HEAD_SHA`**. Retrieve every finding page only between those matching readbacks. A mismatch, concurrent analysis, missing readback, or changed project analysis is `PROJECT_RELEASE_PROTOCOL_BLOCKED` for the audit; rescan the captured target after the project is quiescent. Preserve the union of baseline keys and keys discovered by any exact-head readback, their actual dispositions, and explicit empty-result and `pagination_complete=true` results when the inventory is complete. An unresolved finding makes the audit receipt non-passing, not the release. Live `OPEN`, `CONFIRMED`, `FALSE_POSITIVE`, `ACCEPTED`, and `IN_SANDBOX` statuses, plus `WONTFIX`, `FALSE-POSITIVE`, accepted risk, `NOSONAR`, issue suppression, and quality-profile exclusion do not establish `FIXED_IN_CURRENT_HEAD`. Do not suppress, accept, or mark a finding false-positive to fabricate a passing receipt. Route confirmed substantial defects to a subsequent corrective patch and other findings to the backlog; retain the original red evidence.

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  printf '%s\n' 'usage: coverage.sh --repo-root <absolute-path> --python-data <absolute-path> --python-report <absolute-path> --dotnet-project <id> <absolute-csproj> <absolute-output-prefix> <absolute-include-or-dash> [--dotnet-project ...]...' >&2
+  printf '%s\n' 'usage: coverage.sh --repo-root <absolute-path> --output-root <absolute-path> --integration-targets <absolute-installed-targets> --python-data <absolute-path> --python-report <absolute-path> --dotnet-project <id> <absolute-csproj> <absolute-output-prefix> <absolute-include-or-dash> [--dotnet-project ...]...' >&2
   exit 64
 }
 
@@ -15,6 +15,8 @@ to_shell_path() {
 }
 
 repo_root=""
+output_root=""
+integration_targets=""
 python_data=""
 python_report=""
 declare -a dotnet_ids=()
@@ -28,6 +30,18 @@ while (( $# > 0 )); do
       (( $# >= 2 )) || usage
       [[ -z "$repo_root" && -n "$2" ]] || usage
       repo_root="$2"
+      shift 2
+      ;;
+    --output-root)
+      (( $# >= 2 )) || usage
+      [[ -z "$output_root" && -n "$2" ]] || usage
+      output_root="$2"
+      shift 2
+      ;;
+    --integration-targets)
+      (( $# >= 2 )) || usage
+      [[ -z "$integration_targets" && -n "$2" ]] || usage
+      integration_targets="$2"
       shift 2
       ;;
     --python-data)
@@ -61,11 +75,21 @@ done
 is_absolute_path "$repo_root" || usage
 is_absolute_path "$python_data" || usage
 is_absolute_path "$python_report" || usage
+is_absolute_path "$output_root" || usage
+is_absolute_path "$integration_targets" || usage
+[[ -f "$(to_shell_path "$integration_targets")" ]] || usage
 (( ${#dotnet_ids[@]} == 5 )) || usage
 
 shell_repo_root="$(to_shell_path "$repo_root")"
 shell_python_data="$(to_shell_path "$python_data")"
 shell_python_report="$(to_shell_path "$python_report")"
+shell_output_root="$(to_shell_path "$output_root")"
+dotnet_properties=(
+  "-p:ArtifactsPath=$output_root/artifacts"
+  "-p:SonarQubeTempPath=$output_root/.sonarqube"
+  "-p:CustomBeforeMicrosoftCommonTargets=$integration_targets"
+  -p:ImportUserLocationsByWildcardBeforeMicrosoftCommonTargets=false
+)
 
 expected_ids=(codesearch-core host stateless-preview stateless host-prompts)
 for index in "${!expected_ids[@]}"; do
@@ -121,7 +145,7 @@ coverage run --source=src/netcoredbg_mcp --data-file="$shell_python_data" -m pyt
   --cache-clear -o "cache_dir=$python_cache_directory" "${python_test_paths[@]}"
 coverage xml --data-file="$shell_python_data" -o "$shell_python_report"
 
-coverage_root="$(dirname "$(dirname "$shell_python_data")")"
+coverage_root="$shell_output_root/coverage"
 preview_publish_directory="$coverage_root/preview/publish"
 preview_artifact_directory="$coverage_root/preview/artifact"
 preview_project="$shell_repo_root/host/NetCoreDbg.Mcp.Stateless.Preview/NetCoreDbg.Mcp.Stateless.Preview.csproj"
@@ -133,6 +157,7 @@ dotnet publish "$preview_project" \
   -nr:false \
   -p:PublishSingleFile=true \
   -p:PublishTrimmed=false \
+  "${dotnet_properties[@]}" \
   --output "$preview_publish_directory"
 python "$shell_repo_root/scripts/stateless_preview_runtime.py" \
   --executable "$preview_publish_directory/NetCoreDbg.Mcp.Stateless.Preview.exe" \
@@ -153,13 +178,15 @@ for index in "${!dotnet_ids[@]}"; do
     include_directory="$(to_shell_path "$include_directory")"
   fi
   mkdir -p "$(dirname "$output_prefix")"
-  dotnet restore "$project" -nr:false
+  dotnet restore "$project" -nr:false "${dotnet_properties[@]}"
 
   test_arguments=(
     "$project"
     --configuration Debug
     --no-restore
     -nr:false
+    "${dotnet_properties[@]}"
+    --results-directory "$output_root/test-results/${dotnet_ids[$index]}"
     -p:CollectCoverage=true
     -p:CoverletOutputFormat=cobertura
     "-p:CoverletOutput=$output_prefix"

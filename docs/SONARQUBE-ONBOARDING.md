@@ -13,25 +13,22 @@ Ask. Artifact-build workflow completion is not consumer publication.
 
 ## One-time local onboarding
 
-Install the supported SonarScanner for .NET on `PATH`:
-
-```powershell
-dotnet tool install --global dotnet-sonarscanner
-```
-
-If the tool is already installed, use `dotnet tool update --global
-dotnet-sonarscanner`. The runner discovers `dotnet-sonarscanner`,
-`SonarScanner.MSBuild.exe`, or `SonarScanner.MSBuild`; an exceptional local
-path can be supplied as a single executable with `--scanner <path>`.
+The supported primary-owned output layout uses SonarScanner for .NET **11.2.1**.
+One-time scanner installation is a separate, explicitly authorized maintainer
+operation; the audit runner does not install or update tools or edit profiles.
+Select the installed executable with `--scanner <absolute-path>` when PATH is
+ambiguous. The runner resolves that executable's installed
+`Targets/SonarQube.Integration.targets`, including the 11.2.1 .NET tool store.
+Missing or ambiguous installed targets refuse before scanner begin.
 
 The maintainer performing this one-time onboarding creates two **project-scoped**
 SonarQube tokens for `thebtf_netcoredbg_mcp`: an analysis token with Execute
 Analysis access and a separate non-admin Browse token. The maintainer writes
-them, together with a declared credential-free HTTP(S) SonarQube origin, to the
+them, together with a declared credential-free **HTTPS** SonarQube origin, to the
 primary repository-root `.env`. `SONAR_HOST_URL` is authoritative: the runner
-accepts a pathless origin or a root `/` suffix and canonicalizes both to
-`scheme://netloc`; it does not upgrade or rewrite the configured scheme or
-authority. This is the durable local runtime source for the runner.
+accepts a pathless HTTPS origin or a root `/` suffix and canonicalizes both to
+`scheme://netloc`; it does not upgrade or rewrite the configured authority.
+Certificate verification remains enabled. HTTP is not a credential-bearing route.
 
 The runner derives that root instead of trusting its current working directory:
 
@@ -83,22 +80,39 @@ to Git, a tracked file, a receipt, or an unredacted log.
 
 ## Post-release audit
 
-After publication, run the audit from a new clean detached linked worktree at the recorded exact SHA.
-That worktree must not contain `.env`; the runner obtains credentials only from
-the coordination-root `.env` and explicit process overrides described above.
-The runner checks clean status before and after scanning, uses the committed
-`SonarQube.Analysis.xml`, sets `sonar.scm.revision` to the captured
-40-character HEAD, builds the solution plus every maintained `.csproj` omitted
-by it, and requires the submitted CE task, current-analysis bookends, observed
-scanner/task metadata, analysis-bound quality gate, full issue disposition
-inventory, and full hotspot inventory to match that SHA.
-The runner appends `-nr:false` to every runner-owned `dotnet build` command so
-MSBuild worker nodes cannot retain scanner-artifact handles after a build. Its
-post-scan cleanup records a receipt-safe `cleanup` outcome: `PASS` includes
-the deterministic repository-relative removal list; an `OSError` is `BLOCKED`
-with only the failed relative path, operation, and error type. A cleanup block
-retains the already-collected gate and finding diagnostics but cannot publish
-post-cleanliness, final-analysis binding, or a passing receipt.
+After publication, use a clean detached linked source worktree **S** at the
+published commit. It must contain no `.env`, symbolic link, reparse point, or
+tracked/untracked/ignored residue. The committed `SonarQube.Analysis.xml` and
+all project inputs come from S; the captured 40-character HEAD remains source
+identity throughout the transaction.
+
+The separate output root **O** is derived from the Git coordination owner:
+
+```text
+<coordination-root>/.agent/e/sonarqube/thebtf_netcoredbg_mcp/<sha>/runs/<run-id>
+```
+
+Scanner `begin` and `end` run with **cwd=O**, `/s:<absolute-S-XML>`,
+`sonar.projectBaseDir=S`, and `/install:false`. Every runner-owned .NET restore,
+build, test, and preview publish uses `ArtifactsPath=O/artifacts`,
+`SonarQubeTempPath=O/.sonarqube`, the installed integration targets as
+`CustomBeforeMicrosoftCommonTargets`, disabled user ImportBefore wildcard hooks,
+and `-nr:false`. Conflicting custom imports refuse. The real metadata and
+`report-task.txt` are read from O, never copied from S.
+
+Child-only environment overrides remove every case variant of `TF_BUILD`,
+`TF_BUILD_BUILDDIRECTORY`, and `AGENT_BUILDDIRECTORY`. Python environments,
+bytecode, uv/NuGet/.NET/scanner caches, temporary files, test scratch/results,
+compiler output, coverage reports, and preview fixtures stay under O.
+`DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=false` prevents SDK first-run PATH registration;
+the parent environment and user profile are unchanged.
+
+The five fixed coverage producers, curated Python workload, positive coverage
+denominators, Stateless production DLL/PDB restoration, exact normalization,
+and bounded CE/current-analysis checks are unchanged. Coverage cleanup removes
+only this run's consumed `O/coverage`; scanner metadata, receipts, and remaining
+primary-owned outputs retain their actual provenance. Source cleanliness is
+checked again before receipt publication.
 
 
 Because SonarQube's analysis item has no project field, project proof is the
@@ -115,20 +129,32 @@ source SHA. Do not suppress findings or fabricate a pass.
 The live issue search uses `components=thebtf_netcoredbg_mcp`; it does not use
 the legacy `componentKeys` filter.
 
-After publication, capture the intended published source SHA, create a new clean
-detached scanner worktree at that exact commit, and run:
+Capture the actual published stable tag and its full commit SHA, then execute
+from S (the variables below denote those captured values, not moving refs):
 
 ```powershell
-python scripts/run_sonarqube_exact_head.py --role post-merge
+python scripts/run_sonarqube_exact_head.py --role post-merge --published-tag $PublishedTag --published-commit $PublishedCommit
 ```
 
-The `post-merge` role additionally refuses unless `HEAD == origin/main`. If that
-guard cannot hold for the intended published target, preserve the blocked audit;
-do not substitute another SHA or delay publication. The historical `candidate`
-role and existing role-named receipt paths remain analysis metadata only. No
-candidate or post-merge receipt authorizes tagging or is a required gate,
-release-seal, or release PASS dependency. Do not schedule a pre-merge scan or
-attach an audit job to a build-only workflow as a release prerequisite.
+`--published-tag` and `--published-commit` are an inseparable pair, supported
+only for `post-merge`. Before scanner begin, the existing GitHub CLI reads the
+fixed repository on `github.com`: the release must exist, be nondraft and stable;
+its tag must be annotated and peel to the supplied commit, which must equal
+detached HEAD. The source `pyproject.toml` version must match the tag. A newer
+`origin/main` does not change that identity. The receipt's `release_intent` is
+the actual selected tag, not a pinned release version.
+
+For existing no-pair callers, the `post-merge` role still requires
+`HEAD == origin/main`; `candidate` retains its existing audit classification.
+Their nondiagnostic intent comes from the actual source version. None of these
+roles authorizes publication or creates a release gate.
+
+The source's test drivers must support external artifacts and explicit compiled
+source binding. Preparation refuses an incompatible immutable older checkout
+with `COVERAGE_OUTPUT_INCOMPATIBLE` before scanner begin. Do not edit its source,
+copy binaries into source `bin`, add links, or audit a newer SHA under the old
+tag. Preserve the refusal; only a compatible, actually published target can take
+the full route.
 
 The runner serializes local scans for this project, requires a clean detached
 linked worktree before and after scanning, polls only the scanner-submitted CE
@@ -156,12 +182,16 @@ normal issue types, including security and vulnerability issues, through
 that that legacy-looking parameter scoped the request. Endpoint removal or an
 inaccessible endpoint is incomplete audit evidence and prevents a passing receipt.
 
-Receipts are atomically written beneath the Git common directory's parent so
-all worktrees share one evidence root:
+New receipts use schema **4**, retaining the role, captured SHA, project,
+coverage/analysis/inventory/cleanup fields and adding the verified
+`published_release` binding (or null for a no-pair run). Artifact references are
+relative to the coordination root. The same validator continues to read
+historical schema-3 receipts with their original `.tmp/sonarqube-coverage` paths;
+it does not migrate or rewrite them. New per-run receipts never replace old
+role-named receipts:
 
 ```text
-<coordination-root>/.agent/e/sonarqube/thebtf_netcoredbg_mcp/<sha>/candidate.json
-<coordination-root>/.agent/e/sonarqube/thebtf_netcoredbg_mcp/<sha>/post-merge.json
+<coordination-root>/.agent/e/sonarqube/thebtf_netcoredbg_mcp/<sha>/runs/<run-id>/post-merge.json
 ```
 
 Receipts never record credential values, the configured origin, or raw
@@ -172,3 +202,11 @@ safe failure reason.
 audit. Record unavailable input names, never their values; do not infer a scan
 or pass. Never replace original failure evidence with a stale/latest-project
 result or treat a later corrective patch's analysis as proof for an older SHA.
+
+Source qualification without a scan consists of the focused runner/receipt
+tests and actual external-artifacts test-driver execution with outputs under
+the coordination owner's `.agent`. It is not scanner, server, credential, CE,
+coverage-import, or quality-gate proof. There is no new preflight-only CLI:
+the command above is the real execution route and starts the scanner only after
+its existing preparation succeeds. Preserve any unavailable tool or incompatible
+source as an explicit no-scan result rather than fabricating a passing audit.

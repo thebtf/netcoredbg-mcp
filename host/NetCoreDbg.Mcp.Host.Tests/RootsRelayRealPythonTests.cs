@@ -34,11 +34,23 @@ public sealed class RootsRelayRealPythonTests
     private const string ProjectRootEnvironmentVariable = "NETCOREDBG_PROJECT_ROOT";
 
     private static readonly string RepoRoot = LocateRepoRoot();
-    private static readonly string PythonExecutable = Path.Combine(RepoRoot, ".venv", "Scripts", "python.exe");
+    private static readonly string PythonExecutable = ResolvePythonExecutable();
     private static readonly ImmutableArray<string> ProjectFromCurrentDirectoryArguments = ImmutableArray.Create("--project-from-cwd");
 
-    private static string LocateRepoRoot()
+    internal static string LocateRepoRoot([System.Runtime.CompilerServices.CallerFilePath] string sourceFile = "")
     {
+        if (Environment.GetEnvironmentVariable("NETCOREDBG_MCP_TEST_SOURCE_ROOT") is { } sourceRoot)
+        {
+            var compiledRoot = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(sourceFile)!, "..", ".."));
+            if (!Path.IsPathFullyQualified(sourceRoot) || !Directory.Exists(sourceRoot)
+                || !string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(sourceRoot)), compiledRoot,
+                    OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Explicit test source root does not match the compiled source checkout.");
+            }
+            return compiledRoot;
+        }
+
         for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent!)
         {
             if (File.Exists(Path.Combine(dir.FullName, "pyproject.toml")))
@@ -49,6 +61,61 @@ public sealed class RootsRelayRealPythonTests
 
         throw new InvalidOperationException(
             $"Could not locate the repository root (pyproject.toml) above {AppContext.BaseDirectory}.");
+    }
+
+    internal static string ResolvePythonExecutable()
+    {
+        var path = OutputRoot("NETCOREDBG_MCP_TEST_PYTHON_EXECUTABLE")
+            ?? Path.Combine(RepoRoot, ".venv", OperatingSystem.IsWindows() ? Path.Combine("Scripts", "python.exe") : Path.Combine("bin", "python"));
+        if (Environment.GetEnvironmentVariable("NETCOREDBG_MCP_TEST_PYTHON_EXECUTABLE") is not null && !File.Exists(path))
+        {
+            throw new InvalidOperationException("The selected test Python interpreter is unavailable.");
+        }
+        return path;
+    }
+
+    internal static string? OutputRoot(string variable)
+    {
+        var value = Environment.GetEnvironmentVariable(variable);
+        if (value is null)
+        {
+            return null;
+        }
+        if (Environment.GetEnvironmentVariable("NETCOREDBG_MCP_TEST_SOURCE_ROOT") is null)
+        {
+            throw new InvalidOperationException("Explicit test output requires an explicit compiled-source root.");
+        }
+        var owner = RepoRoot;
+        var gitFile = Path.Combine(RepoRoot, ".git");
+        if (File.Exists(gitFile))
+        {
+            var marker = File.ReadAllText(gitFile).Trim();
+            if (!marker.StartsWith("gitdir: ", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Test checkout has invalid Git coordination metadata.");
+            }
+            var gitDirectory = Path.GetFullPath(marker[8..], RepoRoot);
+            owner = Directory.GetParent(gitDirectory)?.Parent?.Parent?.FullName
+                ?? throw new InvalidOperationException("Test Git coordination owner is unavailable.");
+        }
+        if (!Path.IsPathFullyQualified(value))
+        {
+            throw new InvalidOperationException($"{variable} must be an absolute primary-owned output path.");
+        }
+        var path = Path.GetFullPath(value);
+        var prefix = Path.Combine(owner, ".agent") + Path.DirectorySeparatorChar;
+        if (!path.StartsWith(prefix, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"{variable} must stay beneath the Git coordination owner's .agent directory.");
+        }
+        for (var current = new DirectoryInfo(path); current is not null && current.FullName.Length > owner.Length; current = current.Parent)
+        {
+            if (current.Exists && (current.Attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidOperationException($"{variable} contains a reparse point.");
+            }
+        }
+        return path;
     }
 
     private static void WriteMarkerCSharpFile(string directory)
