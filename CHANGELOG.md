@@ -39,15 +39,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preview artifact publishing preserves distinct preview/core assembly names during restore and publish, then renames only the published apphost to `netcoredbg-mcp-stateless-preview.exe`. The self-contained, single-file Windows x64 artifact contract and Python default remain unchanged.
 - The retained-preview validator resolves the selected rollback executable and prepends its directory only to the child PATH, preserving inherited entries and the parent environment. Its separate total-journey budget is 120 seconds to admit an observed 74.9-second retained-Python replay; per-call deadlines, the driver, package, and Python default remain unchanged. This controller correction is not a startup-performance fix or evidence that T014 passed.
 
-## [0.23.14] - 2026-10-11
+## [0.23.14] - 2026-10-19
 
 ### Fixed
 - Completed failed pre-launch restore/build results are included in the first `start_debug` failure response's `data` and remain available through `get_build_diagnostics`, including the failed stage, actual executed argv and working directory, nonzero exit code, and captured stdout/stderr when no MSBuild diagnostics were parsed. Cancelled or timed-out attempts omit first-response `data`, including explicit cancellation followed by stream EOF. Validation failures do not attach an older build result, unrelated exceptions do not attach retained build diagnostics, and a failed pre-build does not launch the debugger. Successful-result serialization remains compact, and no environment dump is added.
 - Ordinary subprocess cancellation and timeout settle cancelled output readers, drain remaining stdout/stderr pipes, and reap the exact launched build root within the existing cleanup budget before returning. Repeated cancellation does not abandon cleanup; a failed drain remains a build failure.
 - Removed the obsolete pre-publication Sonar gate regression to match the accepted postrelease audit policy and mandatory runtime-smoke release command.
+- Maintainer Sonar source supports paired published stable tag/commit identity without substituting a later `origin/main`. Scanner metadata, producer outputs, and child caches use a Git-owner-derived primary `.agent` run directory separate from immutable source; import hooks and SDK PATH registration stay disabled. Incompatible immutable sources refuse before scanning, and new per-run receipts preserve old receipts. This is a post-publication audit capability, not a claimed Sonar pass or a release gate.
+- Maintainer preview-closeout source uses no-follow destination metadata instead of `Path.is_junction`, preserving ancestor, symlink, reparse-point, and escape refusals when that API is unavailable. Its retained-record resolver is a typed local function with unchanged behavior (#341, #342). These source-distribution changes add no Python tools or preview executable to the stable wheel; fresh archive membership requires package verification.
 
 ### Compatibility
-- The Python entry point, locked dependency versions, and public tool catalog remain unchanged. This PATCH does not change the screenshot backend or fix the separate Novascript desktop-capture defect.
+- The Python entry point, default selector, locked dependency versions, and public catalog remain unchanged: 135 tools, 8 prompts, and 4 resources. Process-ownership safeguards and explicit external-path behavior are preserved.
+- The .NET search/schema corrections (#343, #344) have separate corrected preview delivery pending; the stable wheel does not ship that preview executable. B3 native `step_over` remains additive modern-host source-only work, not a Python tool. Other historical Unreleased preview claims are not promoted into this PATCH.
+- This PATCH does not change the screenshot backend, fix the separate NCD4 Novascript desktop-capture defect, or establish a working Windows Sandbox journey. This dated section describes release preparation, not publication or transfer of earlier installed-payload proof.
 
 ## [0.23.13] - 2026-10-10
 
