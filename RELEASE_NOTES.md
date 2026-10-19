@@ -1,12 +1,14 @@
 # netcoredbg-mcp v0.23.14
 
-Prepared: 2026-10-11
+Prepared: 2026-10-19
 
 ## Summary
 
-`v0.23.14` is a PATCH for failed pre-launch restore/build diagnostics.
-A failed prebuild remains a failed launch; its result is retained for inspection
-through the public `get_build_diagnostics` tool.
+`v0.23.14` is a nonbreaking PATCH for failed pre-launch restore/build diagnostics,
+with bounded maintainer-script source corrections. A failed prebuild remains a
+failed launch; its result is retained in the first `start_debug` error response
+and through public `get_build_diagnostics`. These notes describe the prepared
+candidate, not a publication receipt.
 
 ## Failed-prebuild diagnostics
 
@@ -24,14 +26,50 @@ through the public `get_build_diagnostics` tool.
   a previous build. A prior success cannot stand in for the current failure.
 - Successful-result serialization remains compact. No environment dump is added.
 
+## Maintainer source-distribution changes
+
+- The exact-head Sonar runner accepts paired `--published-tag` and
+  `--published-commit` inputs for a real published stable release. It verifies
+  the annotated tag, peeled commit, detached source HEAD, and package version
+  instead of substituting a later `origin/main`. Scanner metadata, build/test/
+  coverage/preview outputs, and child caches use a Git-owner-derived primary
+  `.agent` run directory, separate from immutable source. Scanner import hooks
+  and SDK PATH registration stay disabled. New per-run receipts preserve old
+  receipts; incompatible immutable source refuses before scanning. This is a
+  post-publication audit capability, not a release gate or a claimed Sonar pass.
+- Preview closeout destination checks use no-follow metadata rather than
+  `Path.is_junction`, retaining ancestor, symlink, reparse-point, and escape
+  refusals when that API is unavailable. The retained-record resolver is a typed
+  local function with unchanged behavior (#341, #342).
+
+These are maintainer-script sources in the source-distribution scope, not new
+Python MCP tools or a preview executable bundled in the stable wheel. Fresh
+source-archive membership remains part of the release's package verification.
+
 ## Compatibility and scope
 
-The Python entry point, locked dependency versions, and public catalog remain
-unchanged: 135 tools, 8 prompts, and 4 resources. Existing process-owner cleanup
-and explicit external-path behavior are preserved.
+The Python entry point, default selector, locked dependency versions, and public
+catalog remain unchanged: 135 tools, 8 prompts, and 4 resources. Existing
+process-owner cleanup and explicit external-path behavior are preserved.
+
+The .NET search-allocation and preview schema-document disposal corrections
+(#343, #344) require a separate corrected preview delivery, which remains
+pending. The stable Python wheel does not ship that preview executable. B3
+native `step_over` work is additive modern-host source-only work, not a new
+Python tool. Historical Unreleased preview work is not promoted wholesale into
+this stable PATCH.
 
 This PATCH does not change the screenshot backend and does not fix the separate
-Novascript capture that returned the desktop instead of the target window.
+NCD4 Novascript capture that returned the desktop instead of the target window.
+It does not establish a working Windows Sandbox journey.
+
+## Verification boundary
+
+Earlier private installed NCD3 evidence remains tied to its original payload;
+it is not transferred to this candidate. Fresh built-wheel installation and
+public CLI/MCP journeys must satisfy the
+[release protocol](docs/RELEASE-PROTOCOL.md) before tagging. These preparation
+notes claim neither fresh artifact proof nor GitHub/PyPI publication.
 
 ---
 

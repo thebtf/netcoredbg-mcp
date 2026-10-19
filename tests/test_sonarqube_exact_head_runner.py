@@ -24,6 +24,24 @@ SPEC.loader.exec_module(runner)
 
 
 class TestSonarqubeExactHeadRunner(TestCase):
+    def setUp(self):
+        patches = ExitStack()
+        self.addCleanup(patches.close)
+        patches.enter_context(patch.object(runner, "prepare_output_directory"))
+        patches.enter_context(
+            patch.object(runner, "installed_scanner_targets", return_value=RUNNER_PATH)
+        )
+        patches.enter_context(
+            patch.object(runner, "scanner_integration_targets", return_value=RUNNER_PATH)
+        )
+        patches.enter_context(
+            patch.object(
+                runner,
+                "_release_intent_for_role",
+                side_effect=lambda role, _context: "none" if role == "diagnostic" else "v1.2.3",
+            )
+        )
+
     @staticmethod
     def credentials():
         return {
@@ -40,7 +58,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
 
     @staticmethod
     def patch_wave3_transaction(patches: ExitStack) -> None:
-        plan = SimpleNamespace()
+        plan = SimpleNamespace(
+            root=RUNNER_PATH.parents[1] / "coverage", repository_root=RUNNER_PATH.parents[1]
+        )
         patches.enter_context(patch.object(runner, "resolve_wave2_entry", return_value={}))
         patches.enter_context(patch.object(runner, "verify_wave2_entry", return_value={}))
         patches.enter_context(patch.object(runner, "preflight_coverage_toolchain", return_value={}))
@@ -49,6 +69,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
         patches.enter_context(
             patch.object(runner, "claim_coverage_run", return_value=SimpleNamespace())
         )
+        patches.enter_context(patch.object(runner, "prepare_worktree_python_environment"))
         patches.enter_context(patch.object(runner, "run_coverage_producer"))
         patches.enter_context(patch.object(runner, "normalize_dotnet_cobertura", return_value={}))
         patches.enter_context(patch.object(runner, "validate_coverage_reports", return_value={}))
@@ -1127,7 +1148,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     runner.execute("candidate", "scanner")
 
         self.assertEqual(
-            [command for command in process_commands if command[:2] == ["dotnet", "build"]],
+            [command[:4] for command in process_commands if command[:2] == ["dotnet", "build"]],
             [
                 ["dotnet", "build", str(solution), "-nr:false"],
                 ["dotnet", "build", str(standalone_project), "-nr:false"],
@@ -1907,6 +1928,24 @@ class TestSonarqubeExactHeadRunner(TestCase):
 class TestWave3CoverageProducerRedContracts(TestCase):
     """Behavior-first RED contracts for the Wave-3 coverage transaction."""
 
+    def setUp(self):
+        patches = ExitStack()
+        self.addCleanup(patches.close)
+        patches.enter_context(patch.object(runner, "prepare_output_directory"))
+        patches.enter_context(
+            patch.object(runner, "installed_scanner_targets", return_value=RUNNER_PATH)
+        )
+        patches.enter_context(
+            patch.object(runner, "scanner_integration_targets", return_value=RUNNER_PATH)
+        )
+        patches.enter_context(
+            patch.object(
+                runner,
+                "_release_intent_for_role",
+                side_effect=lambda role, _context: "none" if role == "diagnostic" else "v1.2.3",
+            )
+        )
+
     HEAD = "a" * 40
     RUN_ID = "123e4567-e89b-12d3-a456-426614174000"
     SHA256 = "b" * 64
@@ -1929,7 +1968,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         (
             "stateless",
             "host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj",
-            "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0",
+            "artifacts/bin/NetCoreDbg.Mcp.Stateless/debug",
         ),
         (
             "host-prompts",
@@ -2076,7 +2115,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         generated_cleanup_calls: list[str] | None = None,
     ) -> None:
         context = self._context(root)
-        plan = SimpleNamespace()
+        plan = SimpleNamespace(root=self._plan(root).root, repository_root=root)
         claim = SimpleNamespace()
 
         def step(name, result=None):
@@ -2378,7 +2417,9 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         )
         self.assertIn(Path(command[11]).name.casefold(), {"bash", "bash.exe"})
         self.assertEqual(command.count("--dotnet-project"), 5)
-        self.assertEqual(kwargs["environment"], {"SAFE_VALUE": "kept"})
+        self.assertEqual(kwargs["environment"]["SAFE_VALUE"], "kept")
+        self.assertFalse(any(name.upper().startswith("SONAR_") for name in kwargs["environment"]))
+        self.assertEqual(Path(kwargs["environment"]["UV_CACHE_DIR"]).parent, plan.root.parent)
 
     def test_r03b_worktree_python_environment_is_locked_secret_free_and_cleanup_owned(self):
         with TemporaryDirectory() as temporary_directory:
@@ -2393,25 +2434,29 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             with patch.object(runner, "run_process", side_effect=capture):
                 runner.prepare_worktree_python_environment(
                     context,
-                    {
-                        "SAFE_VALUE": "kept",
-                        "SONAR_HOST_URL": "https://sonar.example.test",
-                        "SONAR_TOKEN": "secret",
-                        "UV_PROJECT_ENVIRONMENT": "foreign-environment",
-                        "VIRTUAL_ENV": "foreign-venv",
-                    },
+                    runner.output_environment(
+                        {
+                            "SAFE_VALUE": "kept",
+                            "SONAR_TOKEN": "secret",
+                            "VIRTUAL_ENV": "foreign-venv",
+                        },
+                        self._plan(root).root.parent,
+                        root,
+                    ),
                     {"secret"},
                 )
 
             self.assertEqual(captured["command"], ["uv", "sync", "--locked", "--extra", "dev"])
             self.assertEqual(captured["cwd"], root)
+            self.assertEqual(captured["environment"]["SAFE_VALUE"], "kept")
             self.assertEqual(
-                captured["environment"],
-                {
-                    "SAFE_VALUE": "kept",
-                    "UV_PROJECT_ENVIRONMENT": str(root / ".venv"),
-                },
+                captured["environment"]["UV_PROJECT_ENVIRONMENT"],
+                str(self._plan(root).root.parent / "venv"),
             )
+            self.assertFalse(
+                any(name.upper().startswith("SONAR_") for name in captured["environment"])
+            )
+            self.assertNotIn("VIRTUAL_ENV", captured["environment"])
             self.assertEqual(captured["label"], "Worktree Python environment")
 
             venv = root / ".venv"
@@ -2558,11 +2603,11 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             self.assertFalse((root / ".tmp").exists())
             self.assertEqual(
                 self._absolute(plan.python_report).relative_to(root).as_posix(),
-                f".tmp/sonarqube-coverage/{self.RUN_ID}/python/coverage.xml",
+                f".agent/e/sonarqube/{runner.PROJECT_KEY}/{self.HEAD}/runs/{self.RUN_ID}/coverage/python/coverage.xml",
             )
             self.assertEqual(
                 self._absolute(plan.dotnet_report).relative_to(root).as_posix(),
-                f".tmp/sonarqube-coverage/{self.RUN_ID}/dotnet/coverage.xml",
+                f".agent/e/sonarqube/{runner.PROJECT_KEY}/{self.HEAD}/runs/{self.RUN_ID}/coverage/dotnet/coverage.xml",
             )
             claim = runner.claim_coverage_run(context, plan, self._resolved_wave2_entry())
             marker_path = self._absolute(getattr(claim, "marker", plan.marker))
@@ -2600,8 +2645,8 @@ class TestWave3CoverageProducerRedContracts(TestCase):
         self.assertEqual(
             properties,
             (
-                f"/d:sonar.python.coverage.reportPaths=.tmp/sonarqube-coverage/{self.RUN_ID}/python/coverage.xml",
-                f"/d:sonar.cs.cobertura.reportsPaths=.tmp/sonarqube-coverage/{self.RUN_ID}/dotnet/coverage.xml",
+                f"/d:sonar.python.coverage.reportPaths={plan.python_report}",
+                f"/d:sonar.cs.cobertura.reportsPaths={plan.dotnet_report}",
             ),
         )
         self.assertEqual(
@@ -2709,9 +2754,7 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             self.assertTrue(
                 any("NetCoreDbg.Mcp.Stateless.Tests.csproj" in item for item in include_commands[0])
             )
-            include_directory = str(
-                root / "host" / "NetCoreDbg.Mcp.Stateless" / "bin" / "Debug" / "net8.0"
-            )
+            include_directory = str(runner.stateless_output_directory(plan))
             self.assertTrue(any(item.endswith(include_directory) for item in include_commands[0]))
 
             stateless = plan.dotnet_inputs[3]
@@ -3250,3 +3293,459 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             "tests/test_stateless_preview_artifact.py",
         ):
             self.assertNotIn(excluded, script)
+
+
+class TestImmutablePublishedSonarRedContracts(TestCase):
+    HEAD = "a" * 40
+    LATER_MAIN = "b" * 40
+    RUN_ID = "123e4567-e89b-12d3-a456-426614174000"
+    TAG = "v1.2.3"
+    STOP = "stop after real scanner metadata and task readback"
+
+    def setUp(self):
+        checkout = RUNNER_PATH.parents[1]
+        if checkout.parent.name == "worktrees" and checkout.parent.parent.name == ".agent":
+            checkout = checkout.parents[2]
+        scratch = checkout / ".agent"
+        scratch.mkdir(exist_ok=True)
+        temporary = TemporaryDirectory(prefix="immutable-sonar-test-", dir=scratch)
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.source = self.root / "detached source"
+        self.primary = self.root / "primary checkout"
+        self.source.mkdir()
+        self.primary.mkdir()
+        self.context = runner.GitContext(
+            self.source, self.primary / ".git", self.root / "git", self.primary, self.HEAD
+        )
+        self.output = (
+            self.primary
+            / ".agent"
+            / "e"
+            / "sonarqube"
+            / runner.PROJECT_KEY
+            / self.HEAD
+            / "runs"
+            / self.RUN_ID
+        )
+        self.analysis_xml = self.source / "SonarQube.Analysis.xml"
+        self.analysis_xml.write_text(
+            '<SonarQubeAnalysisProperties><Property Name="sonar.projectKey">'
+            f"{runner.PROJECT_KEY}</Property></SonarQubeAnalysisProperties>",
+            encoding="utf-8",
+        )
+        (self.source / "pyproject.toml").write_text(
+            '[project]\nname = "netcoredbg-mcp"\nversion = "1.2.3"\n', encoding="utf-8"
+        )
+        self.scanner = self.root / "installed scanner" / "dotnet-sonarscanner.exe"
+        self.integration_targets = self.scanner.parent / "Targets" / "SonarQube.Integration.targets"
+        self.integration_targets.parent.mkdir(parents=True)
+        self.integration_targets.write_text("<Project />", encoding="utf-8")
+        self.credentials = TestSonarqubeExactHeadRunner.credentials()
+        self.environment = {
+            **self.credentials,
+            "SAFE_VALUE": "kept",
+            "TF_BUILD": "true",
+            "TF_BUILD_BUILDDIRECTORY": str(self.root / "foreign build"),
+            "AGENT_BUILDDIRECTORY": str(self.root / "foreign agent"),
+            "tf_build_builddirectory": str(self.root / "foreign lowercase build"),
+            "MSBuildArtifactsPath": str(self.root / "foreign artifacts"),
+            "VIRTUAL_ENV": str(self.root / "foreign venv"),
+        }
+        self.release = {"id": 42, "tag_name": self.TAG, "draft": False, "prerelease": False}
+        self.tag_commit = self.HEAD
+        self.tag_kind = "tag"
+        self.release_missing = False
+        self.metadata_key = runner.PROJECT_KEY
+        self.metadata_head = self.HEAD
+        self.task_key = runner.PROJECT_KEY
+        self.task_host = self.credentials["SONAR_HOST_URL"]
+        self.task_id = "task-immutable"
+        self.calls = []
+        self.release_reads = []
+        self.receipts = []
+        patches = ExitStack()
+        self.addCleanup(patches.close)
+        for name, value in (
+            ("process_environment", self.environment),
+            ("git_context", self.context),
+            ("project_lock", nullcontext()),
+            ("resolve_wave2_entry", {}),
+            ("verify_wave2_entry", {}),
+            ("preflight_coverage_toolchain", {}),
+            ("load_credentials", self.credentials),
+            ("clear_generated_artifacts", []),
+            ("strict_cleanliness", {"status": "clean"}),
+            ("discover_scanner", [str(self.scanner)]),
+            ("issue_inventory", {"records": []}),
+            ("claim_coverage_run", SimpleNamespace()),
+            (
+                "project_inventory",
+                (
+                    self.source / "netcoredbg-mcp.sln",
+                    [],
+                    [self.source / "tools" / "Standalone.csproj"],
+                ),
+            ),
+            ("capture_stateless_binary_hashes", {"dll_sha256": "c" * 64, "pdb_sha256": "d" * 64}),
+            ("validate_dotnet_cobertura_inputs", []),
+            ("normalize_dotnet_cobertura", {}),
+            ("validate_coverage_reports", {}),
+            ("cleanup_coverage_run", {}),
+            ("assert_head_unchanged", None),
+        ):
+            setattr(
+                self, name, patches.enter_context(patch.object(runner, name, return_value=value))
+            )
+        patches.enter_context(patch.object(runner.uuid, "uuid4", return_value=self.RUN_ID))
+        patches.enter_context(patch.object(runner.shutil, "which", side_effect=lambda name: name))
+        patches.enter_context(
+            patch.object(runner.subprocess, "run", side_effect=self._external_cli)
+        )
+        patches.enter_context(patch.object(runner, "run_process", side_effect=self._fake_cli))
+        patches.enter_context(
+            patch.object(
+                runner,
+                "write_receipt",
+                side_effect=lambda _path, receipt, _secrets: self.receipts.append(
+                    deepcopy(receipt)
+                ),
+            )
+        )
+        self.metadata_reader = patches.enter_context(
+            patch.object(runner, "scanner_metadata", wraps=runner.scanner_metadata)
+        )
+        self.task_reader = patches.enter_context(
+            patch.object(runner, "report_task", wraps=runner.report_task)
+        )
+        self.ce_reader = patches.enter_context(
+            patch.object(runner, "wait_for_ce_task", side_effect=runner.RunnerError(self.STOP))
+        )
+
+    def _external_cli(self, command, **kwargs):
+        text = ""
+        returncode = 0
+        if command[:2] == ["gh", "api"]:
+            endpoint = command[2]
+            self.release_reads.append(endpoint)
+            if endpoint == f"repos/thebtf/netcoredbg-mcp/releases/tags/{self.TAG}":
+                payload = self.release
+                returncode = int(self.release_missing)
+            elif endpoint == f"repos/thebtf/netcoredbg-mcp/git/ref/tags/{self.TAG}":
+                payload = {
+                    "ref": f"refs/tags/{self.TAG}",
+                    "object": {"type": self.tag_kind, "sha": "e" * 40},
+                }
+            elif endpoint == f"repos/thebtf/netcoredbg-mcp/git/tags/{'e' * 40}":
+                payload = {
+                    "tag": self.TAG,
+                    "sha": "e" * 40,
+                    "object": {"type": "commit", "sha": self.tag_commit},
+                }
+            else:
+                self.fail(f"Unexpected GitHub endpoint: {endpoint}")
+            text = json.dumps(payload)
+        elif command[0] == "git":
+            arguments = command[1:]
+            if arguments[0] == "rev-parse":
+                revision = arguments[-1]
+                if revision == "origin/main^{commit}":
+                    text = self.LATER_MAIN
+                elif revision == "HEAD":
+                    text = self.HEAD
+                elif revision in (f"{self.TAG}^{{commit}}", f"refs/tags/{self.TAG}^{{commit}}"):
+                    text = self.tag_commit
+                elif revision in (f"{self.TAG}^{{tag}}", f"refs/tags/{self.TAG}^{{tag}}"):
+                    text, returncode = "e" * 40, int(self.tag_kind != "tag")
+                else:
+                    self.fail(f"Unexpected Git revision: {revision}")
+            elif arguments[0:2] == ["cat-file", "-t"]:
+                text = self.tag_kind
+            elif arguments[0] == "show" and arguments[-1].endswith(":pyproject.toml"):
+                text = (self.source / "pyproject.toml").read_text(encoding="utf-8")
+            elif arguments[0] == "check-ref-format":
+                returncode = int(arguments[-1] != f"refs/tags/{self.TAG}")
+            else:
+                self.fail(f"Unexpected Git command: {command}")
+        else:
+            self.fail(f"Unexpected external command: {command}")
+        return SimpleNamespace(
+            returncode=returncode,
+            stdout=text if kwargs.get("text") else text.encode("utf-8"),
+            stderr="" if kwargs.get("text") else b"",
+        )
+
+    def _fake_cli(self, command, **kwargs):
+        self.calls.append((list(command), kwargs))
+        if command[:2] == [str(self.scanner), "begin"]:
+            config = Path(kwargs["cwd"]) / ".sonarqube" / "conf" / "SonarQubeAnalysisConfig.xml"
+            config.parent.mkdir(parents=True, exist_ok=True)
+            config.write_text(
+                "<SonarQubeAnalysisConfig>"
+                f"<SonarProjectKey>{self.metadata_key}</SonarProjectKey>"
+                '<LocalSettings><Property Name="sonar.scm.revision">'
+                f"{self.metadata_head}</Property></LocalSettings></SonarQubeAnalysisConfig>",
+                encoding="utf-8",
+            )
+        elif command[:2] == [str(self.scanner), "end"]:
+            task = Path(kwargs["cwd"]) / ".sonarqube" / "out" / ".sonar" / "report-task.txt"
+            task.parent.mkdir(parents=True, exist_ok=True)
+            task.write_text(
+                f"projectKey={self.task_key}\nserverUrl={self.task_host}\n"
+                f"ceTaskId={self.task_id}\n"
+                f"dashboardUrl={self.task_host}/dashboard?id={runner.PROJECT_KEY}\n",
+                encoding="utf-8",
+            )
+
+    def _capture(self, role="diagnostic", **binding):
+        with self.assertRaisesRegex(runner.RunnerError, self.STOP):
+            runner.execute(role, str(self.scanner), **binding)
+
+    def test_published_options_accept_exact_tag_and_full_commit_pair(self):
+        arguments = runner.parse_args(
+            [
+                "--role",
+                "post-merge",
+                "--published-tag",
+                self.TAG,
+                "--published-commit",
+                self.HEAD,
+            ]
+        )
+        self.assertEqual(
+            (arguments.published_tag, arguments.published_commit), (self.TAG, self.HEAD)
+        )
+
+    def test_published_options_refuse_incomplete_or_wrong_role_pair(self):
+        for arguments in (
+            ["--role", "post-merge", "--published-tag", self.TAG],
+            ["--role", "post-merge", "--published-commit", self.HEAD],
+            ["--role", "diagnostic", "--published-tag", self.TAG, "--published-commit", self.HEAD],
+            ["--role", "candidate", "--published-tag", self.TAG, "--published-commit", self.HEAD],
+        ):
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(SystemExit) as raised:
+                    runner.parse_args(arguments)
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_published_audit_binds_release_intent_when_origin_main_has_advanced(self):
+        self._capture("post-merge", published_tag=self.TAG, published_commit=self.HEAD)
+        self.assertCountEqual(
+            self.release_reads,
+            [
+                f"repos/thebtf/netcoredbg-mcp/releases/tags/{self.TAG}",
+                f"repos/thebtf/netcoredbg-mcp/git/ref/tags/{self.TAG}",
+                f"repos/thebtf/netcoredbg-mcp/git/tags/{'e' * 40}",
+            ],
+        )
+        self.assertTrue(self.receipts)
+        for receipt in self.receipts:
+            with self.subTest(outcome=receipt["outcome"]):
+                self.assertEqual(receipt["release_intent"], self.TAG)
+                self.assertEqual(receipt["identity"]["captured_head"], self.HEAD)
+        self.ce_reader.assert_called_once_with(
+            self.credentials["SONAR_HOST_URL"], self.task_id, self.credentials["SONAR_TOKEN"], {}
+        )
+
+    def test_published_audit_refuses_unbound_release_tag_version_or_head_before_begin(self):
+        cases = (
+            ("peeled-tag", "tag_commit", "c" * 40, {}),
+            ("lightweight-tag", "tag_kind", "commit", {}),
+            ("draft-release", "release", {**self.release, "draft": True}, {}),
+            ("different-release", "release", {**self.release, "tag_name": "v1.2.4"}, {}),
+            ("missing-release", "release_missing", True, {}),
+            ("different-head", "tag_commit", "c" * 40, {"published_commit": "c" * 40}),
+            ("short-sha", "tag_commit", self.HEAD, {"published_commit": self.HEAD[:12]}),
+            ("revision-expression", "tag_commit", self.HEAD, {"published_commit": "HEAD"}),
+            ("invalid-ref", "tag_commit", self.HEAD, {"published_tag": "../v1.2.3"}),
+            ("option-ref", "tag_commit", self.HEAD, {"published_tag": "--help"}),
+        )
+        for name, attribute, value, overrides in cases:
+            binding = {"published_tag": self.TAG, "published_commit": self.HEAD, **overrides}
+            with self.subTest(case=name), patch.object(self, attribute, value):
+                self.calls.clear()
+                with self.assertRaises(runner.RunnerError) as raised:
+                    runner.execute("post-merge", str(self.scanner), **binding)
+                self.assertNotIn("Unexpected", str(raised.exception))
+                self.assertEqual(self.calls, [], "Invalid binding must refuse before scanner begin")
+        (self.source / "pyproject.toml").write_text(
+            '[project]\nversion = "1.2.4"\n', encoding="utf-8"
+        )
+        with self.subTest(case="source-version"):
+            with self.assertRaises(runner.RunnerError) as raised:
+                runner.execute(
+                    "post-merge",
+                    str(self.scanner),
+                    published_tag=self.TAG,
+                    published_commit=self.HEAD,
+                )
+            self.assertNotIn("Unexpected", str(raised.exception))
+            self.assertEqual(self.calls, [])
+
+    def test_published_execute_refuses_half_binding_without_scanner_side_effects(self):
+        for binding in ({"published_tag": self.TAG}, {"published_commit": self.HEAD}):
+            with self.subTest(binding=binding), self.assertRaises(runner.RunnerError):
+                runner.execute("post-merge", str(self.scanner), **binding)
+            self.assertEqual(self.calls, [])
+
+    def test_scanner_cwd_and_real_metadata_readers_use_primary_output_not_source(self):
+        self._capture()
+        scanner_calls = [
+            (command, kwargs) for command, kwargs in self.calls if command[0] == str(self.scanner)
+        ]
+        self.assertEqual([command[1] for command, _ in scanner_calls], ["begin", "end"])
+        for command, kwargs in scanner_calls:
+            with self.subTest(phase=command[1]):
+                self.assertEqual(Path(kwargs["cwd"]), self.output)
+        self.metadata_reader.assert_called_once_with(self.output, self.HEAD)
+        self.task_reader.assert_called_once_with(self.output, self.credentials["SONAR_HOST_URL"])
+        self.assertTrue(
+            (self.output / ".sonarqube" / "out" / ".sonar" / "report-task.txt").is_file()
+        )
+        self.assertFalse((self.source / ".sonarqube").exists())
+
+    def test_scanner_begin_uses_absolute_source_and_primary_owned_reports_without_install(self):
+        self._capture()
+        begin = next(command for command, _ in self.calls if "begin" in command)
+        self.assertIn(f"/s:{self.analysis_xml}", begin)
+        self.assertIn(f"/d:sonar.projectBaseDir={self.source}", begin)
+        self.assertIn(f"/d:sonar.scm.revision={self.HEAD}", begin)
+        self.assertIn("/install:false", begin)
+        for prefix in (
+            "/d:sonar.python.coverage.reportPaths=",
+            "/d:sonar.cs.cobertura.reportsPaths=",
+            "/d:sonar.userHome=",
+            "/d:sonar.plugin.cache.directory=",
+        ):
+            with self.subTest(property=prefix):
+                values = [
+                    argument.removeprefix(prefix)
+                    for argument in begin
+                    if argument.startswith(prefix)
+                ]
+                self.assertEqual(len(values), 1)
+                self.assertTrue(Path(values[0]).is_absolute())
+                self.assertTrue(Path(values[0]).is_relative_to(self.output))
+
+    def test_all_build_restore_and_test_commands_confine_compiler_and_results_outputs(self):
+        self._capture()
+        plan = runner.derive_coverage_plan(self.context, self.RUN_ID)
+        commands = [command for command, _ in self.calls if command[:2] == ["dotnet", "build"]]
+        self.assertEqual(
+            [Path(command[2]) for command in commands],
+            [self.source / "netcoredbg-mcp.sln", self.source / "tools" / "Standalone.csproj"],
+        )
+        commands.extend(runner.dotnet_producer_commands(plan))
+        self.assertEqual(len(commands), 12)
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertTrue(Path(command[2]).is_absolute())
+                self.assertTrue(Path(command[2]).is_relative_to(self.source))
+                self.assertIn("-nr:false", command)
+                self.assertIn(f"-p:ArtifactsPath={self.output / 'artifacts'}", command)
+                self.assertIn(f"-p:SonarQubeTempPath={self.output / '.sonarqube'}", command)
+                imports = [
+                    argument.split("=", 1)[1]
+                    for argument in command
+                    if argument.startswith("-p:CustomBeforeMicrosoftCommonTargets=")
+                ]
+                self.assertEqual(len(imports), 1)
+                self.assertEqual(Path(imports[0]), self.integration_targets)
+                self.assertTrue(Path(imports[0]).is_file())
+                self.assertIn(
+                    "-p:ImportUserLocationsByWildcardBeforeMicrosoftCommonTargets=false", command
+                )
+                if command[1] == "test":
+                    self.assertIn("--results-directory", command)
+                    results = Path(command[command.index("--results-directory") + 1])
+                    self.assertTrue(results.is_absolute() and results.is_relative_to(self.output))
+        for report in (
+            plan.python_data,
+            plan.python_report,
+            plan.dotnet_report,
+            *(spec.raw_cobertura_input for spec in plan.dotnet_inputs),
+        ):
+            with self.subTest(report=str(report)):
+                self.assertTrue(report.is_absolute() and report.is_relative_to(self.output))
+
+    def test_real_child_environments_scrub_external_build_dirs_and_confine_caches(self):
+        self._capture()
+        self.assertEqual(len(self.calls), 6)
+        for command, kwargs in self.calls:
+            environment = kwargs["environment"]
+            with self.subTest(command=command):
+                self.assertFalse(
+                    {name.upper() for name in environment}
+                    & {"TF_BUILD", "TF_BUILD_BUILDDIRECTORY", "AGENT_BUILDDIRECTORY"}
+                )
+                self.assertEqual(environment["SAFE_VALUE"], "kept")
+                self.assertEqual(environment.get("DOTNET_ADD_GLOBAL_TOOLS_TO_PATH"), "false")
+                for name in (
+                    "TMP",
+                    "TEMP",
+                    "TMPDIR",
+                    "PYTHONPYCACHEPREFIX",
+                    "UV_CACHE_DIR",
+                    "UV_PROJECT_ENVIRONMENT",
+                    "DOTNET_CLI_HOME",
+                    "NUGET_PACKAGES",
+                    "NUGET_HTTP_CACHE_PATH",
+                    "MSBuildArtifactsPath",
+                ):
+                    with self.subTest(variable=name):
+                        value = Path(environment.get(name, ""))
+                        self.assertTrue(value.is_absolute() and value.is_relative_to(self.output))
+                sonar_names = {name for name in environment if name.upper().startswith("SONAR_")}
+                if command[0] == str(self.scanner):
+                    self.assertEqual(sonar_names, {"SONAR_HOST_URL", "SONAR_TOKEN"})
+                else:
+                    self.assertEqual(sonar_names, set())
+                    self.assertNotIn("VIRTUAL_ENV", environment)
+        self.assertEqual(self.environment["TF_BUILD"], "true")
+        self.assertEqual(
+            self.environment["MSBuildArtifactsPath"], str(self.root / "foreign artifacts")
+        )
+
+    def test_output_split_preserves_source_cleanliness_and_xml_project_guards(self):
+        with patch.object(
+            runner, "strict_cleanliness", side_effect=runner.RunnerError("source dirty")
+        ):
+            with self.assertRaisesRegex(runner.RunnerError, "source dirty"):
+                runner.execute("diagnostic", str(self.scanner))
+        self.assertEqual(self.calls, [])
+        self.analysis_xml.write_text(
+            '<SonarQubeAnalysisProperties><Property Name="sonar.projectKey">foreign</Property>'
+            "</SonarQubeAnalysisProperties>",
+            encoding="utf-8",
+        )
+        with (
+            patch.object(
+                runner.uuid,
+                "uuid4",
+                return_value=runner.uuid.uuid5(runner.uuid.NAMESPACE_URL, "bad-xml"),
+            ),
+            self.assertRaisesRegex(runner.RunnerError, "fixed project key"),
+        ):
+            runner.execute("diagnostic", str(self.scanner))
+        self.assertEqual(self.calls, [])
+
+    def test_output_split_preserves_real_metadata_and_task_identity_refusals(self):
+        for name, value, message in (
+            ("metadata_key", "foreign", "fixed project and exact HEAD"),
+            ("metadata_head", "c" * 40, "fixed project and exact HEAD"),
+            ("task_key", "foreign", "report-task project key"),
+            ("task_host", "https://foreign.example.test", "server origin"),
+            ("task_id", "", "Compute Engine task ID"),
+        ):
+            with (
+                self.subTest(field=name),
+                patch.object(self, name, value),
+                patch.object(
+                    runner.uuid,
+                    "uuid4",
+                    return_value=runner.uuid.uuid5(runner.uuid.NAMESPACE_URL, name),
+                ),
+            ):
+                with self.assertRaisesRegex(runner.RunnerError, message):
+                    runner.execute("diagnostic", str(self.scanner))
+                self.ce_reader.assert_not_called()

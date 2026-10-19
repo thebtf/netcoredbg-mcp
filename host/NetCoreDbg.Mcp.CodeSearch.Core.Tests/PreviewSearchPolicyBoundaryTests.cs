@@ -146,11 +146,9 @@ public sealed class PreviewSearchPolicyBoundaryTests
     }
 
     [Theory]
-    [InlineData("private\n!Allowed.cs\n", false)]
-    [InlineData("\uFEFFprivate/\n", true)]
-    public void PreviewPolicyDoesNotReadOrReturnIgnoredSourceDespiteUnrelatedNegationOrUtf8Bom(
-        string ignoreRules,
-        bool allowClosedIgnoreRefusal)
+    [InlineData("private\n!Allowed.cs\n")]
+    [InlineData("\uFEFFprivate/\n")]
+    public void PreviewPolicyDoesNotReadOrReturnIgnoredSourceDespiteUnrelatedNegationOrUtf8Bom(string ignoreRules)
     {
         using var root = TestRoot.Create();
         var gitIgnore = Path.Combine(root.Path, ".gitignore");
@@ -181,26 +179,9 @@ public sealed class PreviewSearchPolicyBoundaryTests
                         ? ignoreRules
                         : "public sealed class HiddenMarker { }\n"));
             });
-        IReadOnlyList<SymbolMatch>? symbols = null;
-
-        var failure = Record.Exception(() =>
-        {
-            symbols = engine.FindCodeSymbol("HiddenMarker", "class");
-        });
+        var symbols = engine.FindCodeSymbol("HiddenMarker", "class");
 
         Assert.DoesNotContain(secret.FullName, opened, StringComparer.Ordinal);
-        if (allowClosedIgnoreRefusal && failure is SearchFailureException refusal)
-        {
-            Assert.Equal(
-                new SearchFailure("preview_search_unreadable", "PREVIEW_SEARCH_UNREADABLE", "find_code_symbol"),
-                refusal.Failure);
-            Assert.Null(symbols);
-            Assert.DoesNotContain(allowed.FullName, opened, StringComparer.Ordinal);
-            return;
-        }
-
-        Assert.Null(failure);
-        Assert.NotNull(symbols);
         Assert.Equal(["Allowed.cs"], symbols.Select(static match => match.File));
         Assert.Contains(allowed.FullName, opened, StringComparer.Ordinal);
     }

@@ -19,7 +19,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import xml.etree.ElementTree as ElementTree
-from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -32,6 +32,8 @@ SONAR_ENV = (*REQUIRED_ENV, "SONAR_ADMIN_TOKEN")
 SIMPLE_DOTENV_ASSIGNMENT_RE = re.compile(r"(?P<name>[A-Z_][A-Z0-9_]*)=(?P<value>[^\r\n]*)\Z")
 RECEIPT_SCHEMA_VERSION = 2
 EXACT_HEAD_RECEIPT_V3_SCHEMA_VERSION = 3
+EXACT_HEAD_RECEIPT_SCHEMA_VERSION = 4
+RELEASE_TAG_RE = re.compile(r"^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$")
 CE_TIMEOUT_SECONDS = 10 * 60
 INDEX_TIMEOUT_SECONDS = 2 * 60
 POLL_SECONDS = 5
@@ -48,7 +50,7 @@ GENERATED_ROOT_NAMES = {".sonarqube", ".scannerwork", ".venv"}
 
 WAVE2_ENTRY_RELATIVE_PATH = "specs/013-owner-scoped-prebuild-cleanup/wave-closure-v1.json"
 WAVE2_RECEIPT_RELATIVE_PATH = "specs/013-owner-scoped-prebuild-cleanup/acceptance-receipt.md"
-COVERAGE_PARENT_RELATIVE_PATH = ".tmp/sonarqube-coverage"
+COVERAGE_PARENT_RELATIVE_PATH = ".agent/e/sonarqube"
 COVERAGE_PY_VERSION = "7.15.4"
 COVERLET_MSBUILD_VERSION = "10.1.0"
 TEST_SDK_VERSION = "17.12.0"
@@ -75,7 +77,7 @@ FIXED_COVERAGE_PROJECTS = (
     (
         "stateless",
         "host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj",
-        "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0",
+        "artifacts/bin/NetCoreDbg.Mcp.Stateless/debug",
     ),
     (
         "host-prompts",
@@ -154,6 +156,7 @@ class CoveragePlan:
     run_id: str
     head: str
     repository_root: Path
+    coordination_root: Path
     root: Path
     marker: Path
     tracked_wave2_entry: Path
@@ -191,7 +194,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--scanner",
         help="Optional SonarScanner for .NET executable path/name; never a shell command.",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--published-tag", help="Exact existing stable release tag; post-merge only."
+    )
+    parser.add_argument(
+        "--published-commit", help="Full immutable published commit SHA; post-merge only."
+    )
+    arguments = parser.parse_args(argv)
+    if bool(arguments.published_tag) != bool(arguments.published_commit):
+        parser.error("--published-tag and --published-commit must be supplied together")
+    if arguments.published_tag and arguments.role != "post-merge":
+        parser.error("published binding is supported only with --role post-merge")
+    return arguments
 
 
 def is_sonar_environment_name(name: str) -> bool:
@@ -742,6 +756,8 @@ def load_credentials(
     if missing:
         raise CredentialsUnavailable(*missing)
     credentials["SONAR_HOST_URL"] = credential_free_host(credentials["SONAR_HOST_URL"])
+    if urllib.parse.urlsplit(credentials["SONAR_HOST_URL"]).scheme != "https":
+        raise CredentialsUnavailable("SONAR_HOST_URL")
     return credentials
 
 
@@ -943,14 +959,109 @@ def clear_generated_artifacts(context: GitContext, environment: Mapping[str, str
     return removed
 
 
+def output_environment(
+    environment: Mapping[str, str], output_root: Path, source_root: Path
+) -> dict[str, str]:
+    removed = {
+        "TF_BUILD",
+        "TF_BUILD_BUILDDIRECTORY",
+        "AGENT_BUILDDIRECTORY",
+        "VIRTUAL_ENV",
+        "CUSTOMBEFOREMICROSOFTCOMMONTARGETS",
+        "MSBUILDARTIFACTSPATH",
+        "ARTIFACTSPATH",
+        "SONARQUBETEMPPATH",
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "BASEINTERMEDIATEOUTPUTPATH",
+        "BASEOUTPUTPATH",
+        "OUTPUTPATH",
+        "INTERMEDIATEOUTPUTPATH",
+        "MSBUILDPROJECTEXTENSIONSPATH",
+        "SONARQUBEBUILDTASKSASSEMBLYFILE",
+        "SONARQUBECONFIGPATH",
+        "SONARQUBEOUTPUTPATH",
+        "CUSTOMAFTERMICROSOFTCOMMONTARGETS",
+    }
+    child = {
+        name: value
+        for name, value in scrub_sonar_environment(environment).items()
+        if name.upper() not in removed
+    }
+    paths = {
+        "TMP": "tmp",
+        "TEMP": "tmp",
+        "TMPDIR": "tmp",
+        "PYTHONPYCACHEPREFIX": "python-bytecode",
+        "UV_CACHE_DIR": "uv-cache",
+        "UV_PROJECT_ENVIRONMENT": "venv",
+        "DOTNET_CLI_HOME": "dotnet-home",
+        "NUGET_PACKAGES": "nuget/packages",
+        "NUGET_HTTP_CACHE_PATH": "nuget/http-cache",
+        "NUGET_SCRATCH": "nuget/scratch",
+        "MSBuildArtifactsPath": "artifacts",
+        "ArtifactsPath": "artifacts",
+        "SonarQubeTempPath": ".sonarqube",
+        "SonarQubeConfigPath": ".sonarqube/conf",
+        "SonarQubeOutputPath": ".sonarqube/out",
+    }
+    child.update({name: str(output_root / relative) for name, relative in paths.items()})
+    child.update(
+        {
+            "DOTNET_ADD_GLOBAL_TOOLS_TO_PATH": "false",
+            "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
+            "DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE": "true",
+            "ImportUserLocationsByWildcardBeforeMicrosoftCommonTargets": "false",
+            "UseArtifactsOutput": "true",
+            "NETCOREDBG_MCP_TEST_SOURCE_ROOT": str(source_root),
+            "NETCOREDBG_MCP_TEST_ARTIFACTS_PATH": str(output_root / "artifacts"),
+            "NETCOREDBG_MCP_TEST_SCRATCH_ROOT": str(output_root / "test-scratch"),
+            "PYTHONPATH": str(source_root / "src"),
+        }
+    )
+    python = output_root / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    child["NETCOREDBG_MCP_TEST_PYTHON_EXECUTABLE"] = str(python)
+    child["NETCOREDBG_MCP_PYTHON_EXECUTABLE"] = str(python)
+    if environment.get("CustomBeforeMicrosoftCommonTargets"):
+        child["CustomBeforeMicrosoftCommonTargets"] = environment[
+            "CustomBeforeMicrosoftCommonTargets"
+        ]
+    canonical_names = {name.upper(): name for name in paths}
+    canonical_names.update(
+        {
+            name.upper(): name
+            for name in (
+                "DOTNET_ADD_GLOBAL_TOOLS_TO_PATH",
+                "DOTNET_CLI_TELEMETRY_OPTOUT",
+                "DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE",
+                "ImportUserLocationsByWildcardBeforeMicrosoftCommonTargets",
+                "UseArtifactsOutput",
+                "NETCOREDBG_MCP_TEST_SOURCE_ROOT",
+                "NETCOREDBG_MCP_TEST_ARTIFACTS_PATH",
+                "NETCOREDBG_MCP_TEST_SCRATCH_ROOT",
+                "NETCOREDBG_MCP_TEST_PYTHON_EXECUTABLE",
+                "NETCOREDBG_MCP_PYTHON_EXECUTABLE",
+                "CustomBeforeMicrosoftCommonTargets",
+                "PYTHONPATH",
+            )
+        }
+    )
+    return {
+        name: value
+        for name, value in child.items()
+        if canonical_names.get(name.upper(), name) == name
+    }
+
+
 def prepare_worktree_python_environment(
     context: GitContext,
     environment: Mapping[str, str],
-    secrets: Iterable[str],
+    secrets: Collection[str],
 ) -> None:
     child_environment = scrub_sonar_environment(environment)
     child_environment.pop("VIRTUAL_ENV", None)
-    child_environment["UV_PROJECT_ENVIRONMENT"] = str(context.repository_root / ".venv")
+    if not child_environment.get("UV_PROJECT_ENVIRONMENT"):
+        raise RunnerError("COVERAGE_OUTPUT_INVALID: primary-owned Python environment is required.")
     run_process(
         ["uv", "sync", "--locked", "--extra", "dev"],
         cwd=context.repository_root,
@@ -1370,6 +1481,21 @@ def _coverage_executable(name: str) -> str | None:
 def _runtime_coverage_toolchain(
     context: GitContext, environment: Mapping[str, str]
 ) -> dict[str, Any]:
+    for relative in (
+        "host/NetCoreDbg.Mcp.Stateless.Tests/DebugAdapter/NetCoreDbgSessionContractDriver.cs",
+        "host/NetCoreDbg.Mcp.Stateless.Preview.Tests/PreviewMcpProcessDriver.cs",
+        "host/NetCoreDbg.Mcp.Host.Tests/RootsRelayRealPythonTests.cs",
+    ):
+        try:
+            compatible = "NETCOREDBG_MCP_TEST_SOURCE_ROOT" in (
+                context.repository_root / relative
+            ).read_text(encoding="utf-8")
+        except OSError:
+            compatible = False
+        if not compatible:
+            raise RunnerError(
+                "COVERAGE_OUTPUT_INCOMPATIBLE: immutable source requires source-bin output; no scan was started."
+            )
     executables: dict[str, str | None] = {
         name: _coverage_executable(name) for name in ("uv", "bash", "dotnet")
     }
@@ -1512,7 +1638,7 @@ def preflight_coverage_toolchain(
 
 def _coverage_relative(plan: CoveragePlan, path: Path) -> str:
     try:
-        relative = path.relative_to(plan.repository_root).as_posix()
+        relative = path.relative_to(plan.coordination_root).as_posix()
     except ValueError as error:
         raise RunnerError(
             "COVERAGE_MARKER_INVALID: coverage path escapes the repository."
@@ -1533,7 +1659,15 @@ def derive_coverage_plan(context: GitContext, run_id: str) -> CoveragePlan:
         raise RunnerError(
             "COVERAGE_HEAD_MISMATCH: coverage plan requires a complete captured head."
         )
-    root = context.repository_root / COVERAGE_PARENT_RELATIVE_PATH / normalized_run_id
+    root = (
+        context.coordination_root
+        / COVERAGE_PARENT_RELATIVE_PATH
+        / PROJECT_KEY
+        / context.head
+        / "runs"
+        / normalized_run_id
+        / "coverage"
+    )
     inputs = tuple(
         CoverageProjectSpec(
             identifier,
@@ -1548,6 +1682,7 @@ def derive_coverage_plan(context: GitContext, run_id: str) -> CoveragePlan:
         normalized_run_id,
         context.head,
         context.repository_root,
+        context.coordination_root,
         root,
         root / "coverage-run.json",
         context.repository_root / WAVE2_ENTRY_RELATIVE_PATH,
@@ -1560,8 +1695,10 @@ def derive_coverage_plan(context: GitContext, run_id: str) -> CoveragePlan:
 
 
 def coverage_scanner_properties(plan: CoveragePlan) -> tuple[str, str]:
-    python_path = _coverage_relative(plan, plan.python_report)
-    dotnet_path = _coverage_relative(plan, plan.dotnet_report)
+    _coverage_relative(plan, plan.python_report)
+    _coverage_relative(plan, plan.dotnet_report)
+    python_path = str(plan.python_report)
+    dotnet_path = str(plan.dotnet_report)
     return (
         f"/d:sonar.python.coverage.reportPaths={python_path}",
         f"/d:sonar.cs.cobertura.reportsPaths={dotnet_path}",
@@ -1611,7 +1748,7 @@ def _resolved_wave2_copy(plan: CoveragePlan, resolved_entry: Mapping[str, Any]) 
 def _coverage_marker(plan: CoveragePlan, resolved_entry: Mapping[str, Any]) -> dict[str, Any]:
     resolved_copy = _resolved_wave2_copy(plan, resolved_entry)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": plan.run_id,
         "captured_head": plan.head,
         "project_key": PROJECT_KEY,
@@ -1640,7 +1777,9 @@ def _coverage_marker(plan: CoveragePlan, resolved_entry: Mapping[str, Any]) -> d
                 "id": spec.id,
                 "project": spec.project.as_posix(),
                 "raw_cobertura_path": _coverage_relative(plan, spec.raw_cobertura_input),
-                "include_directory": spec.include_directory,
+                "include_directory": _coverage_relative(plan, stateless_output_directory(plan))
+                if spec.include_directory
+                else None,
             }
             for spec in plan.dotnet_inputs
         ],
@@ -1664,7 +1803,9 @@ def validate_coverage_marker(plan: CoveragePlan, marker: Mapping[str, Any]) -> N
             spec.id,
             spec.project.as_posix(),
             _coverage_relative(plan, spec.raw_cobertura_input),
-            spec.include_directory,
+            _coverage_relative(plan, stateless_output_directory(plan))
+            if spec.include_directory
+            else None,
         )
         for spec in plan.dotnet_inputs
     ]
@@ -1687,7 +1828,7 @@ def validate_coverage_marker(plan: CoveragePlan, marker: Mapping[str, Any]) -> N
             "producer_sha256",
             "coveragerc_sha256",
         }
-        or marker.get("schema_version") != 1
+        or marker.get("schema_version") != 2
         or marker.get("run_id") != plan.run_id
         or marker.get("captured_head") != plan.head
         or marker.get("project_key") != PROJECT_KEY
@@ -1761,11 +1902,55 @@ def _cobertura_output_prefix(path: Path) -> Path:
     return path.with_name(path.name[: -len(suffix)])
 
 
+def stateless_output_directory(plan: CoveragePlan) -> Path:
+    return plan.root.parent / "artifacts" / "bin" / "NetCoreDbg.Mcp.Stateless" / "debug"
+
+
+def scanner_integration_targets(environment: Mapping[str, str]) -> Path:
+    configured = environment.get("CustomBeforeMicrosoftCommonTargets")
+    if configured:
+        target = Path(configured)
+        if target.is_absolute() and target.is_file():
+            return target
+        raise RunnerError(
+            "SONAR_SCANNER_UNAVAILABLE: installed integration targets are unavailable."
+        )
+    scanner = discover_scanner(None)
+    return installed_scanner_targets(scanner)
+
+
+def installed_scanner_targets(scanner: Sequence[str]) -> Path:
+    executable = Path(scanner[0]).resolve()
+    adjacent = executable.parent / "Targets" / "SonarQube.Integration.targets"
+    if adjacent.is_file():
+        return adjacent
+    package = executable.parent / ".store" / "dotnet-sonarscanner" / "11.2.1"
+    targets = list(
+        package.glob("dotnet-sonarscanner/11.2.1/tools/*/any/Targets/SonarQube.Integration.targets")
+    )
+    if len(targets) != 1:
+        raise RunnerError(
+            "SONAR_SCANNER_UNAVAILABLE: supported 11.2.1 integration targets are unavailable."
+        )
+    return targets[0].resolve()
+
+
+def dotnet_output_properties(plan: CoveragePlan, target: Path | None = None) -> list[str]:
+    target = target or scanner_integration_targets({})
+    return [
+        f"-p:ArtifactsPath={plan.root.parent / 'artifacts'}",
+        f"-p:SonarQubeTempPath={plan.root.parent / '.sonarqube'}",
+        f"-p:CustomBeforeMicrosoftCommonTargets={target}",
+        "-p:ImportUserLocationsByWildcardBeforeMicrosoftCommonTargets=false",
+    ]
+
+
 def dotnet_producer_commands(plan: CoveragePlan) -> list[list[str]]:
     commands: list[list[str]] = []
     for spec in plan.dotnet_inputs:
         project = plan.repository_root / spec.project
-        commands.append(["dotnet", "restore", str(project), "-nr:false"])
+        properties = dotnet_output_properties(plan)
+        commands.append(["dotnet", "restore", str(project), "-nr:false", *properties])
         command = [
             "dotnet",
             "test",
@@ -1774,14 +1959,15 @@ def dotnet_producer_commands(plan: CoveragePlan) -> list[list[str]]:
             "Debug",
             "--no-restore",
             "-nr:false",
+            *properties,
+            "--results-directory",
+            str(plan.root.parent / "test-results" / spec.id),
             "-p:CollectCoverage=true",
             "-p:CoverletOutputFormat=cobertura",
             f"-p:CoverletOutput={_cobertura_output_prefix(spec.raw_cobertura_input)}",
         ]
         if spec.include_directory is not None:
-            command.append(
-                f"-p:IncludeDirectory={plan.repository_root / Path(spec.include_directory)}"
-            )
+            command.append(f"-p:IncludeDirectory={stateless_output_directory(plan)}")
         if spec.id == "stateless":
             command.extend(["--filter", "Coverage!=Exclude"])
         commands.append(command)
@@ -1808,6 +1994,10 @@ def run_coverage_producer(plan: CoveragePlan, environment: Mapping[str, str]) ->
         str(producer),
         "--repo-root",
         str(plan.repository_root),
+        "--output-root",
+        str(plan.root.parent),
+        "--integration-targets",
+        str(scanner_integration_targets(environment)),
         "--python-data",
         str(plan.python_data),
         "--python-report",
@@ -1820,12 +2010,12 @@ def run_coverage_producer(plan: CoveragePlan, environment: Mapping[str, str]) ->
                 spec.id,
                 str(plan.repository_root / spec.project),
                 str(_cobertura_output_prefix(spec.raw_cobertura_input)),
-                str(plan.repository_root / spec.include_directory)
+                str(stateless_output_directory(plan))
                 if spec.include_directory is not None
                 else "-",
             ]
         )
-    clean_environment = scrub_sonar_environment(environment)
+    clean_environment = output_environment(environment, plan.root.parent, plan.repository_root)
     run_process(
         command,
         cwd=plan.repository_root,
@@ -2504,7 +2694,7 @@ def validate_final_dotnet_cobertura(
 
 
 def capture_stateless_binary_hashes(plan: CoveragePlan) -> dict[str, str]:
-    directory = plan.repository_root / "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0"
+    directory = stateless_output_directory(plan)
     dll = directory / "NetCoreDbg.Mcp.Stateless.dll"
     pdb = directory / "NetCoreDbg.Mcp.Stateless.pdb"
     try:
@@ -2673,6 +2863,7 @@ def scanner_begin_command(
     token: str,
     *,
     coverage_properties: Sequence[str] = (),
+    output_root: Path | None = None,
 ) -> list[str]:
     properties = tuple(coverage_properties)
     if properties and len(properties) != 2:
@@ -2684,6 +2875,16 @@ def scanner_begin_command(
         "begin",
         f"/k:{PROJECT_KEY}",
         f"/s:{analysis_xml}",
+        f"/d:sonar.projectBaseDir={analysis_xml.resolve().parent}",
+        "/install:false",
+        *(
+            [
+                f"/d:sonar.userHome={output_root / 'sonar-home'}",
+                f"/d:sonar.plugin.cache.directory={output_root / 'plugin-cache'}",
+            ]
+            if output_root is not None
+            else []
+        ),
         f"/d:sonar.host.url={host}",
         f"/d:sonar.scm.revision={head}",
         f"/d:sonar.token={token}",
@@ -3726,8 +3927,8 @@ def _v3_source_set(value: Any) -> None:
         _v3_fail("coverage source set is incomplete")
 
 
-def _v3_final_report(value: Any, run_id: str, report_id: str) -> Mapping[str, Any]:
-    expected_path = f".tmp/sonarqube-coverage/{run_id}/{report_id}/coverage.xml"
+def _v3_final_report(value: Any, coverage_prefix: str, report_id: str) -> Mapping[str, Any]:
+    expected_path = f"{coverage_prefix}/{report_id}/coverage.xml"
     required = {
         "id",
         "language",
@@ -3770,12 +3971,10 @@ def _v3_final_report(value: Any, run_id: str, report_id: str) -> Mapping[str, An
 
 
 def _v3_dotnet_input(
-    value: Any, run_id: str, expected: tuple[str, str, str | None]
+    value: Any, coverage_prefix: str, expected: tuple[str, str, str | None]
 ) -> Mapping[str, Any]:
     identifier, project, _ = expected
-    expected_path = (
-        f".tmp/sonarqube-coverage/{run_id}/dotnet/inputs/{identifier}/coverage.cobertura.xml"
-    )
+    expected_path = f"{coverage_prefix}/dotnet/inputs/{identifier}/coverage.cobertura.xml"
     required = {
         "id",
         "project",
@@ -3841,7 +4040,7 @@ def _v3_inventory_summary(value: Any) -> None:
 
 
 def validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None:
-    """Pure v3 discriminator shared by every exact-head receipt consumer."""
+    """Validate historical v3 and primary-owned v4 exact-head receipts without rewriting either."""
 
     required = {
         "schema_version",
@@ -3856,12 +4055,19 @@ def validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None:
         "cleanup",
         "failure",
     }
+    primary_owned = (
+        isinstance(receipt, Mapping)
+        and receipt.get("schema_version") == EXACT_HEAD_RECEIPT_SCHEMA_VERSION
+    )
+    if primary_owned:
+        required.add("published_release")
     if (
         not isinstance(receipt, Mapping)
         or set(receipt) != required
-        or receipt.get("schema_version") != EXACT_HEAD_RECEIPT_V3_SCHEMA_VERSION
+        or receipt.get("schema_version")
+        not in {EXACT_HEAD_RECEIPT_V3_SCHEMA_VERSION, EXACT_HEAD_RECEIPT_SCHEMA_VERSION}
     ):
-        _v3_fail("receipt is not schema version 3")
+        _v3_fail("receipt is not a supported exact-head schema")
     role = receipt.get("role")
     outcome = receipt.get("outcome")
     intent = receipt.get("release_intent")
@@ -3873,7 +4079,11 @@ def validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None:
         ):
             _v3_fail("diagnostic role has illegal outcome or release authority")
     elif role in {"candidate", "post-merge"}:
-        if outcome not in {"PASS", "BLOCKED"} or intent != "v0.23.12":
+        if (
+            outcome not in {"PASS", "BLOCKED"}
+            or not isinstance(intent, str)
+            or not RELEASE_TAG_RE.fullmatch(intent)
+        ):
             _v3_fail("release role has illegal outcome or intent")
     else:
         _v3_fail("receipt role is invalid")
@@ -3890,6 +4100,20 @@ def validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None:
         )
     ):
         _v3_fail("receipt identity is invalid")
+    published = receipt.get("published_release")
+    if published is not None and (
+        not primary_owned
+        or role != "post-merge"
+        or not isinstance(published, Mapping)
+        or set(published) != {"tag", "commit", "tag_object", "release_id"}
+        or published.get("tag") != intent
+        or published.get("commit") != identity["captured_head"]
+        or not isinstance(published.get("tag_object"), str)
+        or not SHA_RE.fullmatch(published["tag_object"])
+        or type(published.get("release_id")) is not int
+        or published["release_id"] <= 0
+    ):
+        _v3_fail("published release binding is invalid")
     if outcome == "BLOCKED":
         failure = receipt.get("failure")
         if (
@@ -3934,7 +4158,12 @@ def validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None:
         run_id = str(uuid.UUID(str(coverage.get("run_id"))))
     except (ValueError, AttributeError):
         _v3_fail("coverage run ID is invalid")
-    _v3_artifact(coverage.get("marker"), f".tmp/sonarqube-coverage/{run_id}/coverage-run.json")
+    coverage_prefix = (
+        f".agent/e/sonarqube/{PROJECT_KEY}/{identity['captured_head']}/runs/{run_id}/coverage"
+        if primary_owned
+        else f".tmp/sonarqube-coverage/{run_id}"
+    )
+    _v3_artifact(coverage.get("marker"), f"{coverage_prefix}/coverage-run.json")
     reports = coverage.get("final_reports")
     producers = coverage.get("dotnet_producers")
     if (
@@ -3944,10 +4173,10 @@ def validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None:
         or len(producers) != 5
     ):
         _v3_fail("coverage report or private-input cardinality is invalid")
-    _v3_final_report(reports[0], run_id, "python")
-    _v3_final_report(reports[1], run_id, "dotnet")
+    _v3_final_report(reports[0], coverage_prefix, "python")
+    _v3_final_report(reports[1], coverage_prefix, "dotnet")
     for item, expected in zip(producers, FIXED_COVERAGE_PROJECTS, strict=True):
-        _v3_dotnet_input(item, run_id, expected)
+        _v3_dotnet_input(item, coverage_prefix, expected)
     normalization = coverage.get("normalization")
     stateless = coverage.get("stateless_host_binary")
     if (
@@ -4055,7 +4284,7 @@ def validate_exact_head_receipt_v3(receipt: Mapping[str, Any]) -> None:
             "status",
             "failure",
         }
-        or cleanup.get("claimed_root") != f".tmp/sonarqube-coverage/{run_id}"
+        or cleanup.get("claimed_root") != coverage_prefix
         or cleanup.get("producer_terminal") is not True
         or cleanup.get("removed_paths") != [cleanup.get("claimed_root")]
         or type(cleanup.get("parent_removed_if_empty")) is not bool
@@ -4328,8 +4557,124 @@ def write_diagnostic_inventory(
     }
 
 
-def _release_intent_for_role(role: str) -> str:
-    return "none" if role == "diagnostic" else "v0.23.12"
+def _release_intent_for_role(role: str, context: GitContext) -> str:
+    if role == "diagnostic":
+        return "none"
+    try:
+        if sys.version_info >= (3, 11):
+            import tomllib
+        else:
+            import tomli as tomllib
+    except ImportError as error:
+        raise RunnerError(
+            "COVERAGE_TOOL_UNAVAILABLE: Python 3.10 requires the existing dev tomli dependency."
+        ) from error
+    try:
+        version = tomllib.loads(
+            (context.repository_root / "pyproject.toml").read_text(encoding="utf-8")
+        )["project"]["version"]
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise RunnerError(
+            "COVERAGE_PUBLISHED_BINDING_INVALID: source version is unavailable."
+        ) from error
+    tag = f"v{version}"
+    if not RELEASE_TAG_RE.fullmatch(tag):
+        raise RunnerError(
+            "COVERAGE_PUBLISHED_BINDING_INVALID: source version is not a stable release."
+        )
+    return tag
+
+
+def published_release_binding(
+    context: GitContext, environment: Mapping[str, str], tag: str, commit: str
+) -> dict[str, Any]:
+    if not RELEASE_TAG_RE.fullmatch(tag) or not SHA_RE.fullmatch(commit) or commit != context.head:
+        raise RunnerError(
+            "COVERAGE_PUBLISHED_BINDING_INVALID: exact stable tag and captured commit are required."
+        )
+    if _release_intent_for_role("post-merge", context) != tag:
+        raise RunnerError(
+            "COVERAGE_PUBLISHED_BINDING_INVALID: source version differs from published tag."
+        )
+    gh = shutil.which("gh")
+    if not gh:
+        raise RunnerError("COVERAGE_PUBLISHED_BINDING_UNAVAILABLE: GitHub CLI is required.")
+    api_environment = dict(environment)
+    api_environment["GH_HOST"] = "github.com"
+    api_environment["GH_PROMPT_DISABLED"] = "1"
+
+    def get(endpoint: str) -> dict[str, Any]:
+        try:
+            result = subprocess.run(
+                [gh, "api", f"repos/thebtf/netcoredbg-mcp/{endpoint}"],
+                cwd=context.repository_root,
+                env=api_environment,
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise RunnerError(
+                "COVERAGE_PUBLISHED_BINDING_UNAVAILABLE: GitHub evidence is unavailable."
+            ) from error
+        if result.returncode:
+            raise RunnerError(
+                "COVERAGE_PUBLISHED_BINDING_UNAVAILABLE: GitHub evidence is unavailable."
+            )
+        return _load_json_object(result.stdout, "published release evidence")
+
+    release = get(f"releases/tags/{tag}")
+    reference = get(f"git/ref/tags/{tag}")
+    target = reference.get("object")
+    if (
+        release.get("tag_name") != tag
+        or release.get("draft") is not False
+        or release.get("prerelease") is not False
+        or type(release.get("id")) is not int
+        or release["id"] <= 0
+        or reference.get("ref") != f"refs/tags/{tag}"
+        or not isinstance(target, Mapping)
+        or target.get("type") != "tag"
+        or not isinstance(target.get("sha"), str)
+        or not SHA_RE.fullmatch(target["sha"])
+    ):
+        raise RunnerError(
+            "COVERAGE_PUBLISHED_BINDING_INVALID: release or annotated tag is invalid."
+        )
+    annotated = get(f"git/tags/{target['sha']}")
+    peeled = annotated.get("object")
+    if (
+        annotated.get("sha") != target["sha"]
+        or annotated.get("tag") != tag
+        or not isinstance(peeled, Mapping)
+        or peeled.get("type") != "commit"
+        or peeled.get("sha") != commit
+    ):
+        raise RunnerError(
+            "COVERAGE_PUBLISHED_BINDING_INVALID: annotated tag does not peel to captured HEAD."
+        )
+    return {"tag": tag, "commit": commit, "tag_object": target["sha"], "release_id": release["id"]}
+
+
+def prepare_output_directory(context: GitContext, plan: CoveragePlan) -> None:
+    output = plan.root.parent
+    try:
+        relative = output.relative_to(context.coordination_root)
+        if output.is_relative_to(context.repository_root):
+            raise ValueError("output belongs to source")
+        current = context.coordination_root
+        _scanner_tree_metadata(current)
+        for component in relative.parts[:-1]:
+            current /= component
+            current.mkdir(exist_ok=True)
+            if not stat.S_ISDIR(_scanner_tree_metadata(current).st_mode):
+                raise ValueError("output ancestor is not a directory")
+        output.mkdir()
+        (output / "tmp").mkdir()
+    except (OSError, ValueError, RunnerError) as error:
+        raise RunnerError(
+            "COVERAGE_OUTPUT_INVALID: primary-owned run root is unsafe or already exists."
+        ) from error
 
 
 def _blocked_failure(stage: str, error: BaseException) -> dict[str, Any]:
@@ -4347,12 +4692,15 @@ def _blocked_failure(stage: str, error: BaseException) -> dict[str, Any]:
     }
 
 
-def receipt_base(context: GitContext, role: str, run_id: str) -> dict[str, Any]:
+def receipt_base(
+    context: GitContext, role: str, run_id: str, *, release_intent: str | None = None
+) -> dict[str, Any]:
     return {
-        "schema_version": EXACT_HEAD_RECEIPT_V3_SCHEMA_VERSION,
+        "schema_version": EXACT_HEAD_RECEIPT_SCHEMA_VERSION,
         "role": role,
         "outcome": "BLOCKED",
-        "release_intent": _release_intent_for_role(role),
+        "release_intent": release_intent or _release_intent_for_role(role, context),
+        "published_release": None,
         "identity": {
             "captured_head": context.head,
             "project_key": PROJECT_KEY,
@@ -4373,42 +4721,71 @@ def receipt_base(context: GitContext, role: str, run_id: str) -> dict[str, Any]:
     }
 
 
-def execute(role: str, scanner_override: str | None) -> Path:
+def execute(
+    role: str,
+    scanner_override: str | None,
+    *,
+    published_tag: str | None = None,
+    published_commit: str | None = None,
+) -> Path:
+    if bool(published_tag) != bool(published_commit) or (published_tag and role != "post-merge"):
+        raise RunnerError(
+            "COVERAGE_PUBLISHED_BINDING_INVALID: post-merge requires a complete published pair."
+        )
     inherited_environment = process_environment()
     clean_environment = scrub_sonar_environment(inherited_environment)
     context = git_context(Path.cwd(), clean_environment)
     run_id = str(uuid.uuid4())
-    target_receipt = receipt_path(context, role)
-    receipt = receipt_base(context, role, run_id)
+    binding = (
+        published_release_binding(context, clean_environment, published_tag, published_commit)
+        if published_tag is not None and published_commit is not None
+        else None
+    )
+    release_intent = binding["tag"] if binding else _release_intent_for_role(role, context)
+    receipt = receipt_base(context, role, run_id, release_intent=release_intent)
+    receipt["published_release"] = binding
+    target_receipt = receipt_path(context, role).parent / "runs" / run_id / f"{role}.json"
     secrets = sonar_secret_values(inherited_environment)
     stage = "PLANNED"
-    plan: CoveragePlan | None = None
+    plan = derive_coverage_plan(context, run_id)
     claim: CoverageRunClaim | None = None
     producer_terminal = False
 
     with project_lock(context.coordination_root, role, context.head, run_id):
+        prepare_output_directory(context, plan)
         validate_exact_head_receipt_v3(receipt)
         write_receipt(target_receipt, receipt, secrets)
         try:
             entry = resolve_wave2_entry(context, clean_environment)
             resolved_wave2 = verify_wave2_entry(entry, context, clean_environment)
-            preflight_coverage_toolchain(context=context, environment=clean_environment)
-            stage = "TOOLCHAIN_READY"
-            plan = derive_coverage_plan(context, run_id)
-            credentials = load_credentials(context, inherited_environment, secrets)
-            secrets.update(credentials.values())
-            if role == "post-merge":
-                assert_post_merge_target(context, clean_environment)
             clear_generated_artifacts(context, clean_environment)
             strict_cleanliness(context, clean_environment, "scanner begin")
+            clean_environment = output_environment(
+                clean_environment, plan.root.parent, context.repository_root
+            )
+            preflight_coverage_toolchain(context=context, environment=clean_environment)
+            stage = "TOOLCHAIN_READY"
+            credentials = load_credentials(context, inherited_environment, secrets)
+            secrets.update(credentials.values())
+            if role == "post-merge" and published_tag is None:
+                assert_post_merge_target(context, clean_environment)
             analysis_xml = context.repository_root / "SonarQube.Analysis.xml"
             if project_key_from_xml(analysis_xml) != PROJECT_KEY:
-                raise RunnerError("COVERAGE_PROJECT_IDENTITY_INVALID: project key mismatch")
+                raise RunnerError("COVERAGE_PROJECT_IDENTITY_INVALID: expected fixed project key.")
             scanner = discover_scanner(scanner_override)
+            integration_targets = installed_scanner_targets(scanner)
+            for name, value in inherited_environment.items():
+                if (
+                    name.upper() == "CUSTOMBEFOREMICROSOFTCOMMONTARGETS"
+                    and value != str(integration_targets)
+                ) or (name.upper() == "CUSTOMAFTERMICROSOFTCOMMONTARGETS" and value):
+                    raise RunnerError("COVERAGE_OUTPUT_INVALID: conflicting custom MSBuild import.")
+            clean_environment["CustomBeforeMicrosoftCommonTargets"] = str(integration_targets)
+            properties = dotnet_output_properties(plan, integration_targets)
             pre_scan_issues = issue_inventory(
                 credentials["SONAR_HOST_URL"], credentials["SONAR_READ_TOKEN"]
             )
-            scanner_env = scanner_environment(inherited_environment, credentials)
+            scanner_env = scanner_environment(clean_environment, credentials)
             run_process(
                 scanner_begin_command(
                     scanner,
@@ -4417,8 +4794,9 @@ def execute(role: str, scanner_override: str | None) -> Path:
                     context.head,
                     credentials["SONAR_TOKEN"],
                     coverage_properties=coverage_scanner_properties(plan),
+                    output_root=plan.root.parent,
                 ),
-                cwd=context.repository_root,
+                cwd=plan.root.parent,
                 environment=scanner_env,
                 secrets=secrets,
                 label="SonarScanner begin",
@@ -4427,10 +4805,10 @@ def execute(role: str, scanner_override: str | None) -> Path:
             stage = "SCANNER_BEGUN"
             claim = claim_coverage_run(context, plan, resolved_wave2)
             stage = "RUN_CLAIMED"
-            prepare_worktree_python_environment(context, inherited_environment, secrets)
+            prepare_worktree_python_environment(context, clean_environment, secrets)
             solution, _, standalone_projects = project_inventory(context.repository_root)
             run_process(
-                ["dotnet", "build", str(solution), "-nr:false"],
+                ["dotnet", "build", str(solution), "-nr:false", *properties],
                 cwd=context.repository_root,
                 environment=clean_environment,
                 secrets=secrets,
@@ -4438,7 +4816,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
             )
             for project in standalone_projects:
                 run_process(
-                    ["dotnet", "build", str(project), "-nr:false"],
+                    ["dotnet", "build", str(project), "-nr:false", *properties],
                     cwd=context.repository_root,
                     environment=clean_environment,
                     secrets=secrets,
@@ -4446,7 +4824,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 )
             stateless_before = capture_stateless_binary_hashes(plan)
             try:
-                run_coverage_producer(plan, inherited_environment)
+                run_coverage_producer(plan, clean_environment)
             finally:
                 producer_terminal = True
             stage = "PRODUCING"
@@ -4467,15 +4845,15 @@ def execute(role: str, scanner_override: str | None) -> Path:
             assert_head_unchanged(context, clean_environment)
             run_process(
                 scanner_end_command(scanner, credentials["SONAR_TOKEN"]),
-                cwd=context.repository_root,
+                cwd=plan.root.parent,
                 environment=scanner_env,
                 secrets=secrets,
                 label="SonarScanner end",
                 credential_input_names=("SONAR_TOKEN",),
             )
             stage = "SCANNER_ENDED"
-            scanner_metadata(context.repository_root, context.head)
-            task_report = report_task(context.repository_root, credentials["SONAR_HOST_URL"])
+            scanner_metadata(plan.root.parent, context.head)
+            task_report = report_task(plan.root.parent, credentials["SONAR_HOST_URL"])
             analysis_id = wait_for_ce_task(
                 credentials["SONAR_HOST_URL"],
                 task_report["ce_task_id"],
@@ -4582,10 +4960,11 @@ def execute(role: str, scanner_override: str | None) -> Path:
                         f"Analysis-bound quality gate is {gate_status}; only OK passes."
                     )
             receipt = {
-                "schema_version": EXACT_HEAD_RECEIPT_V3_SCHEMA_VERSION,
+                "schema_version": EXACT_HEAD_RECEIPT_SCHEMA_VERSION,
                 "role": role,
                 "outcome": outcome,
-                "release_intent": _release_intent_for_role(role),
+                "release_intent": release_intent,
+                "published_release": receipt["published_release"],
                 "identity": identity,
                 "coverage": coverage,
                 "analysis": analysis,
@@ -4611,10 +4990,11 @@ def execute(role: str, scanner_override: str | None) -> Path:
                     f"Generated-artifact cleanup also failed: {cleanup_error.__class__.__name__}."
                 )
             blocked = {
-                "schema_version": EXACT_HEAD_RECEIPT_V3_SCHEMA_VERSION,
+                "schema_version": EXACT_HEAD_RECEIPT_SCHEMA_VERSION,
                 "role": role,
                 "outcome": "BLOCKED",
-                "release_intent": _release_intent_for_role(role),
+                "release_intent": release_intent,
+                "published_release": receipt["published_release"],
                 "identity": receipt.get(
                     "identity",
                     {
@@ -4641,7 +5021,12 @@ def execute(role: str, scanner_override: str | None) -> Path:
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = parse_args(argv)
     try:
-        written_receipt = execute(arguments.role, arguments.scanner)
+        written_receipt = execute(
+            arguments.role,
+            arguments.scanner,
+            published_tag=arguments.published_tag,
+            published_commit=arguments.published_commit,
+        )
     except RunnerError as error:
         print(f"PROJECT_RELEASE_PROTOCOL_BLOCKED: {error}", file=sys.stderr)
         return 1

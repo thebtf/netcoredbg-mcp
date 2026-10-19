@@ -271,6 +271,7 @@ async def _run_case(
     name: str,
     consumer_cli: str,
     fixture_root: Path,
+    fixture_program: Path,
     bridge_path: Path,
     bridge_sha256: str,
     bridge_identity_path: Path,
@@ -341,7 +342,7 @@ async def _run_case(
                         session,
                         "start_debug",
                         {
-                            "program": "bin/Debug/net8.0-windows/WpfSmokeApp.dll",
+                            "program": str(fixture_program),
                             "cwd": str(fixture_root),
                             "env": fixture_env,
                             "pre_build": False,
@@ -553,6 +554,8 @@ async def main() -> None:
     _enable_per_monitor_dpi_coordinates()
     consumer_cli = _environment("NETCOREDBG_MCP_CONSUMER_CLI")
     fixture_root = Path(_environment("NETCOREDBG_MCP_WPF_ROOT"))
+    fixture_program = Path(_environment("NETCOREDBG_MCP_WPF_PROGRAM"))
+    assert fixture_program.is_file(), f"missing built WPF fixture: {fixture_program}"
     production_bridge = Path(_environment("NETCOREDBG_TYPED_BITBLT_PRODUCTION_BRIDGE_PATH"))
     production_hash = _environment("NETCOREDBG_TYPED_BITBLT_PRODUCTION_BRIDGE_SHA256")
     production_identity = Path(_environment("NETCOREDBG_TYPED_BITBLT_PRODUCTION_IDENTITY_PATH"))
@@ -691,6 +694,7 @@ async def main() -> None:
                 name=name,
                 consumer_cli=consumer_cli,
                 fixture_root=fixture_root,
+                fixture_program=fixture_program,
                 bridge_path=bridge,
                 bridge_sha256=bridge_hash,
                 bridge_identity_path=bridge_identity_path,

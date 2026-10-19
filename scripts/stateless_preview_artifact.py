@@ -5047,7 +5047,13 @@ def _closeout_inputs(
     for parent in (directory, *directory.parents):
         if parent == temporary:
             break
-        if parent.is_symlink() or (parent.exists() and parent.is_junction()):
+        try:
+            metadata = parent.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & getattr(
+            stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+        ):
             _refuse("closeout destination is redirected")
     directory.mkdir(parents=True, exist_ok=False)
     inputs: dict[str, Any] = {
@@ -5088,7 +5094,10 @@ def _closeout_inputs(
             _refuse("publisher handoff dependency belongs to another repository")
         if retained["run_id"] == context["run_id"]:
             _refuse("historical publisher cannot depend on the current closeout")
-    resolve = lambda retained: _closeout_resolve(inputs, retained)
+
+    def resolve(retained: Mapping[str, Any]) -> bytes:
+        return _closeout_resolve(inputs, retained)
+
     identity_compact = handoff["candidate_identity_record"]
     identity_raw = resolve(identity_compact)
     identity = _validate_candidate_identity(_load_json_object(identity_raw, "retained Candidate"))

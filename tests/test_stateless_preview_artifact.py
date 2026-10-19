@@ -2505,6 +2505,48 @@ def test_unified_v3_receipt_accepts_each_complete_legal_role_outcome(
     )
 
 
+def test_primary_owned_v4_receipt_preserves_historical_v3_and_binds_published_identity() -> None:
+    runner, validator = _v3_receipt_validator()
+    historical = _complete_v3_exact_head_receipt(
+        "a" * 40, role="post-merge", outcome="PASS", release_intent="v0.23.12"
+    )
+    original = deepcopy(historical)
+    validator(historical)
+    receipt = deepcopy(historical)
+    receipt["schema_version"] = 4
+    receipt["release_intent"] = "v1.2.3"
+    receipt["published_release"] = {
+        "tag": "v1.2.3",
+        "commit": "a" * 40,
+        "tag_object": "b" * 40,
+        "release_id": 42,
+    }
+    old_root = f".tmp/sonarqube-coverage/{_V3_RUN_ID}"
+    root = f".agent/e/sonarqube/{runner.PROJECT_KEY}/{'a' * 40}/runs/{_V3_RUN_ID}/coverage"
+    for reference in [
+        receipt["coverage"]["marker"],
+        *receipt["coverage"]["final_reports"],
+        *receipt["coverage"]["dotnet_producers"],
+    ]:
+        reference["relative_path"] = reference["relative_path"].replace(old_root, root)
+    receipt["cleanup"]["claimed_root"] = root
+    receipt["cleanup"]["removed_paths"] = [root]
+    validator(receipt)
+    assert historical == original
+    for mutation in (
+        lambda value: value["published_release"].update(commit="c" * 40),
+        lambda value: value["published_release"].update(tag="v1.2.4"),
+        lambda value: value["coverage"]["marker"].update(
+            relative_path=f"{old_root}/coverage-run.json"
+        ),
+        lambda value: value["cleanup"].update(claimed_root=old_root),
+    ):
+        invalid = deepcopy(receipt)
+        mutation(invalid)
+        with pytest.raises(runner.RunnerError):
+            validator(invalid)
+
+
 @pytest.mark.parametrize(
     ("role", "outcome", "release_intent"),
     [
@@ -7976,6 +8018,53 @@ def closeout_workflow_cli(
 ) -> _PromotionWorkflowCli:
     promotion_workflow_cli.begin_closeout(monkeypatch)
     return promotion_workflow_cli
+
+
+def test_closeout_cli_admits_existing_parent_without_path_is_junction(
+    closeout_workflow_cli: _PromotionWorkflowCli, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli = closeout_workflow_cli
+    parent = cli.runner / "stateless-preview-closeout-803-1-1003"
+    parent.mkdir()
+    for path_type in type(parent).__mro__:
+        if "is_junction" in vars(path_type):
+            monkeypatch.delattr(path_type, "is_junction")
+    assert not hasattr(parent, "is_junction")
+
+    cli.closeout_step(0, upload=False)
+
+    assert (
+        cli.closeout_bytes["records"]["remote-consumer-proof.json"]
+        == (cli.records["remote-consumer-proof.json"])
+    )
+
+
+def test_closeout_cli_refuses_reparse_parent_without_path_is_junction(
+    closeout_workflow_cli: _PromotionWorkflowCli, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli = closeout_workflow_cli
+    parent = cli.runner / "stateless-preview-closeout-803-1-1003"
+    parent.mkdir()
+    original_stat = Path.stat
+
+    def parent_metadata(path: Path, *, follow_symlinks: bool = True) -> Any:
+        metadata = original_stat(path, follow_symlinks=follow_symlinks)
+        if path == parent and not follow_symlinks:
+            return SimpleNamespace(
+                st_mode=metadata.st_mode,
+                st_file_attributes=getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+            )
+        return metadata
+
+    monkeypatch.setattr(Path, "stat", parent_metadata)
+    for path_type in type(parent).__mro__:
+        if "is_junction" in vars(path_type):
+            monkeypatch.delattr(path_type, "is_junction")
+    assert not hasattr(parent, "is_junction")
+
+    cli.assert_closeout_refused()
+
+    assert not (parent / "admit-closeout").exists()
 
 
 def test_closeout_cli_completed_publisher_to_independently_retained_program_b_handoff(

@@ -12,16 +12,22 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_host_proxy import (
+    _dotnet_test_args,
+    _dotnet_test_output,
+    _test_child_env,
+    _test_scratch_directory,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "WpfSmokeApp"
-FIXTURE_DLL = FIXTURE_ROOT / "bin" / "Debug" / "net8.0-windows" / "WpfSmokeApp.dll"
+FIXTURE_PROJECT = FIXTURE_ROOT / "WpfSmokeApp.csproj"
+FIXTURE_DLL = _dotnet_test_output(FIXTURE_PROJECT, "Debug", "WpfSmokeApp.dll")
 BRIDGE_PROJECT = REPO_ROOT / "bridge" / "FlaUIBridge.csproj"
 PUBLISHED_BRIDGE_NAME = "FlaUIBridge.exe"
 HOST_ROOT = REPO_ROOT / "tests" / "fixtures" / "TypedBitBltFallbackBridgeHost"
 HOST_PROJECT = HOST_ROOT / "TypedBitBltFallbackBridgeHost.csproj"
-HOST_EXE = (
-    HOST_ROOT / "bin" / "Debug" / "net8.0-windows" / "win-x64" / "TypedBitBltFallbackBridgeHost.exe"
-)
+HOST_EXE = _dotnet_test_output(HOST_PROJECT, "Debug", "TypedBitBltFallbackBridgeHost.exe")
 HOST_MANAGED_LIBRARY = HOST_EXE.with_suffix(".dll")
 HOST_BRIDGE_LIBRARY = HOST_EXE.with_name("FlaUIBridge.dll")
 CONSUMER_PROOF = REPO_ROOT / "tests" / "typed_bitblt_fallback_consumer.py"
@@ -55,6 +61,7 @@ def _run(command: list[str], *, timeout: int = 180) -> subprocess.CompletedProce
     return subprocess.run(
         command,
         cwd=REPO_ROOT,
+        env=_test_child_env(),
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -73,17 +80,36 @@ def test_installed_public_strict_bitblt_fallback_has_real_transport_proof(tmp_pa
         "typed BitBlt fallback public proof requires NETCOREDBG_PATH or netcoredbg on PATH"
     )
     source_identity = _source_identity()
+    tmp_path = _test_scratch_directory(f"{tmp_path.name}-")
 
-    fixture_build = _run(["dotnet", "build", str(FIXTURE_ROOT), "-c", "Debug"])
+    fixture_build = _run(
+        ["dotnet", "build", str(FIXTURE_PROJECT), "-c", "Debug", *_dotnet_test_args("Debug")]
+    )
     assert fixture_build.returncode == 0, fixture_build.stdout + fixture_build.stderr
     assert FIXTURE_DLL.is_file(), f"fixture build did not produce {FIXTURE_DLL}"
 
     host_clean = _run(
-        ["dotnet", "clean", str(HOST_PROJECT), "-c", "Debug", "-p:BridgeTestHost=true"]
+        [
+            "dotnet",
+            "clean",
+            str(HOST_PROJECT),
+            "-c",
+            "Debug",
+            "-p:BridgeTestHost=true",
+            *_dotnet_test_args("Debug"),
+        ]
     )
     assert host_clean.returncode == 0, host_clean.stdout + host_clean.stderr
     host_build = _run(
-        ["dotnet", "build", str(HOST_PROJECT), "-c", "Debug", "-p:BridgeTestHost=true"]
+        [
+            "dotnet",
+            "build",
+            str(HOST_PROJECT),
+            "-c",
+            "Debug",
+            "-p:BridgeTestHost=true",
+            *_dotnet_test_args("Debug"),
+        ]
     )
     assert host_build.returncode == 0, host_build.stdout + host_build.stderr
     assert HOST_EXE.is_file(), f"test bridge host build did not produce {HOST_EXE}"
@@ -98,6 +124,7 @@ def test_installed_public_strict_bitblt_fallback_has_real_transport_proof(tmp_pa
             str(BRIDGE_PROJECT),
             "-c",
             "Release",
+            *_dotnet_test_args("Release"),
             "--self-contained",
             "true",
             "-p:PublishSingleFile=true",
@@ -130,13 +157,14 @@ def test_installed_public_strict_bitblt_fallback_has_real_transport_proof(tmp_pa
     assert consumer_cli.is_file(), f"wheel did not install CLI: {consumer_cli}"
 
     temp_root = tmp_path / "evidence"
-    environment = dict(os.environ)
+    environment = _test_child_env()
     environment.pop("PYTHONPATH", None)
     environment.update(
         {
             "NETCOREDBG_PATH": str(debugger_path),
             "NETCOREDBG_MCP_CONSUMER_CLI": str(consumer_cli),
             "NETCOREDBG_MCP_WPF_ROOT": str(FIXTURE_ROOT),
+            "NETCOREDBG_MCP_WPF_PROGRAM": str(FIXTURE_DLL),
             "NETCOREDBG_TYPED_BITBLT_PRODUCTION_BRIDGE_PATH": str(production_bridge),
             "NETCOREDBG_TYPED_BITBLT_PRODUCTION_BRIDGE_SHA256": _sha256(production_bridge),
             "NETCOREDBG_TYPED_BITBLT_PRODUCTION_IDENTITY_PATH": str(production_bridge),
