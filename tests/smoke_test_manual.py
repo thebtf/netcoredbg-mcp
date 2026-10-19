@@ -21,6 +21,7 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from netcoredbg_mcp.session import SessionManager
@@ -493,8 +494,21 @@ async def test_failed_prebuild_response_data(
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
 
+    from tests.test_host_proxy import _test_child_env
+
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in ("PYTHONPATH", "MCP_PROJECT_ROOT")
+        and (not key.startswith("NETCOREDBG_") or key == "NETCOREDBG_PATH")
+    }
+    if server_env is not None:
+        environment.update(server_env)
+    environment = _test_child_env(environment)
+    environment.pop("PYTHONPATH", None)
+
     print("\nFAILED PRE-BUILD RESPONSE DATA (PUBLIC MCP)")
-    with TemporaryDirectory(prefix="failed-prebuild-smoke-", dir=Path.home()) as workspace:
+    with TemporaryDirectory(prefix="failed-prebuild-smoke-", dir=environment["TMP"]) as workspace:
         root = Path(workspace).resolve()
         project = root / "FailedPrebuildSmoke.csproj"
         project.write_text(
@@ -511,14 +525,6 @@ async def test_failed_prebuild_response_data(
             json.dumps({"sdk": {"version": "99.0.100", "rollForward": "disable"}}),
             encoding="utf-8",
         )
-        environment = {
-            key: value
-            for key, value in os.environ.items()
-            if key not in ("PYTHONPATH", "MCP_PROJECT_ROOT")
-            and (not key.startswith("NETCOREDBG_") or key == "NETCOREDBG_PATH")
-        }
-        if server_env is not None:
-            environment.update(server_env)
         environment.update(
             NETCOREDBG_PROJECT_ROOT=str(root),
             NETCOREDBG_ALLOWED_PATHS=str(root),
@@ -3775,17 +3781,32 @@ async def test_wpf_one_call_runtime_smoke_workflow():
     )
 
 
+def _build_wpf_smoke_artifacts() -> tuple[str, str, str]:
+    from pathlib import Path
+
+    from tests.test_host_proxy import _build_dotnet_test_project
+
+    project = Path(BASE) / "tests" / "fixtures" / "WpfSmokeApp" / "WpfSmokeApp.csproj"
+    program = _build_dotnet_test_project(project, "Debug", "WpfSmokeApp.dll")
+    bridge = _build_dotnet_test_project(
+        Path(BASE) / "bridge" / "FlaUIBridge.csproj", "Release", "FlaUIBridge.exe"
+    )
+    return str(project), str(program), str(bridge)
+
+
 async def run_wpf_v2_state_oracle_runtime_smoke() -> dict[str, Any]:
+    if sys.platform != "win32":
+        return {
+            "status": "BLOCKED",
+            "reason": "WPF v2 state oracle smoke requires Windows UI automation",
+        }
+    project, program, bridge = _build_wpf_smoke_artifacts()
     return await _run_v2_state_oracle_runtime_smoke(
         label="WPF",
-        program=WPF_DLL,
-        build_project=os.path.join(
-            BASE,
-            "tests",
-            "fixtures",
-            "WpfSmokeApp",
-            "WpfSmokeApp.csproj",
-        ),
+        program=program,
+        build_project=project,
+        pre_build=False,
+        bridge_path=bridge,
     )
 
 
@@ -4394,6 +4415,8 @@ async def _run_v2_state_oracle_runtime_smoke(
     label: str,
     program: str,
     build_project: str,
+    pre_build: bool = True,
+    bridge_path: str | None = None,
 ) -> dict[str, Any]:
     from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner
     from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
@@ -4407,8 +4430,14 @@ async def _run_v2_state_oracle_runtime_smoke(
         }
 
     m = SessionManager(project_path=BASE)
+
+    def new_backend():
+        if bridge_path is not None:
+            return FlaUIBackend(bridge_path, m.process_registry)
+        return create_backend(process_registry=m.process_registry)
+
     backend_holder: dict[str, object | None] = {"backend": None}
-    backend_holder["backend"] = create_backend(process_registry=m.process_registry)
+    backend_holder["backend"] = new_backend()
     if not isinstance(backend_holder["backend"], FlaUIBackend):
         return {
             "status": "BLOCKED",
@@ -4419,7 +4448,7 @@ async def _run_v2_state_oracle_runtime_smoke(
     async def ensure_ui_connected():
         backend = backend_holder["backend"]
         if backend is None:
-            backend = create_backend(process_registry=m.process_registry)
+            backend = new_backend()
             backend_holder["backend"] = backend
         pid = m.state.process_id
         if not pid:
@@ -4434,12 +4463,14 @@ async def _run_v2_state_oracle_runtime_smoke(
         program=program,
         build_project=build_project,
         selector={"automation_id": "btnInvoke"},
+        pre_build=pre_build,
     )
     blocked_plan = _v2_state_oracle_plan(
         name=f"{label.lower()} v2 state oracle selector miss",
         program=program,
         build_project=build_project,
         selector={"automation_id": "missingV2Button"},
+        pre_build=pre_build,
     )
 
     try:
@@ -4475,6 +4506,7 @@ def _v2_state_oracle_plan(
     program: str,
     build_project: str,
     selector: dict[str, str],
+    pre_build: bool = True,
 ) -> dict[str, Any]:
     return {
         "schema": "netcoredbg.runtime_smoke.v2",
@@ -4487,7 +4519,7 @@ def _v2_state_oracle_plan(
                     "launch": {
                         "program": program,
                         "cwd": os.path.dirname(program),
-                        "pre_build": True,
+                        "pre_build": pre_build,
                         "build_project": build_project,
                         "build_configuration": "Debug",
                     },
@@ -5032,7 +5064,6 @@ def _wpf_guarded_child_admission_matrix_cases() -> list[dict[str, Any]]:
 async def run_wpf_v2_guarded_child_drag_runtime_smoke() -> dict[str, Any]:
     from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner
     from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
-    from netcoredbg_mcp.ui.backend import create_backend
     from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
 
     if sys.platform != "win32":
@@ -5041,22 +5072,15 @@ async def run_wpf_v2_guarded_child_drag_runtime_smoke() -> dict[str, Any]:
             "reason": "WPF guarded-child drag smoke requires Windows UI automation",
         }
 
+    project, program, bridge = _build_wpf_smoke_artifacts()
     m = SessionManager(project_path=BASE)
     backend_holder: dict[str, object | None] = {"backend": None}
-    backend_holder["backend"] = create_backend(process_registry=m.process_registry)
-    if not isinstance(backend_holder["backend"], FlaUIBackend):
-        return {
-            "status": "BLOCKED",
-            "backend": type(backend_holder["backend"]).__name__,
-            "reason": "FlaUI bridge required for WPF guarded-child drag smoke",
-            "accepted": {"backend": "FlaUI guarded-child admission and drag"},
-            "next_step": "Build the FlaUI bridge and run on a Windows desktop session.",
-        }
+    backend_holder["backend"] = FlaUIBackend(bridge, m.process_registry)
 
     async def ensure_ui_connected():
         backend = backend_holder["backend"]
         if backend is None:
-            backend = create_backend(process_registry=m.process_registry)
+            backend = FlaUIBackend(bridge, m.process_registry)
             backend_holder["backend"] = backend
         pid = m.state.process_id
         if not pid:
@@ -5066,15 +5090,11 @@ async def run_wpf_v2_guarded_child_drag_runtime_smoke() -> dict[str, Any]:
         return backend
 
     plan = _v2_guarded_child_drag_plan(
-        program=WPF_DLL,
-        build_project=os.path.join(
-            BASE,
-            "tests",
-            "fixtures",
-            "WpfSmokeApp",
-            "WpfSmokeApp.csproj",
-        ),
+        program=program,
+        build_project=project,
     )
+    # The real fixture was built above; this case proves GUI behavior, not pre-build.
+    plan["baseline"]["steps"][0]["launch"]["pre_build"] = False
     try:
         result = await RuntimeSmokeRunner(
             m,
