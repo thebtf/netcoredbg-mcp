@@ -240,9 +240,11 @@ public sealed class StepOverContractTests
     }
 
     [Theory]
-    [InlineData("terminal-before-ack", "exited", true)]
-    [InlineData("terminal-after-ack", "terminated", false)]
-    public async Task StepOver_TerminalEvent_SettlesWithNormalizedTerminalOnly(string nextResponseMode, string terminal, bool hasExitCode)
+    [InlineData("terminal-before-ack", "exited", 23)]
+    [InlineData("terminal-after-ack", "terminated", null)]
+    [InlineData("terminal-exit-zero", "exited", 0)]
+    [InlineData("terminal-exit-negative", "exited", -1)]
+    public async Task StepOver_TerminalEvent_SettlesWithNormalizedTerminalOnly(string nextResponseMode, string terminal, int? expectedExitCode)
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync(StepOver(nextResponseMode: nextResponseMode));
         var debugSessionId = await StartStoppedSessionAsync(driver, $"step-over-{nextResponseMode}-start");
@@ -255,7 +257,11 @@ public sealed class StepOverContractTests
 
         Assert.Equal("step_over_terminal", content["kind"]?.GetValue<string>());
         Assert.Equal(terminal, content["terminal"]?.GetValue<string>());
-        Assert.Equal(hasExitCode, content.ContainsKey("exitCode"));
+        Assert.Equal(expectedExitCode.HasValue, content.ContainsKey("exitCode"));
+        if (expectedExitCode is { } exitCode)
+        {
+            Assert.Equal(exitCode, content["exitCode"]?.GetValue<int>());
+        }
         Assert.DoesNotContain("body", content.Select(static property => property.Key));
         Assert.DoesNotContain("message", content.Select(static property => property.Key));
     }
@@ -277,6 +283,21 @@ public sealed class StepOverContractTests
     [InlineData("negative-stop-sequence")]
     [InlineData("overflow-stop-sequence")]
     [InlineData("underflow-stop-sequence")]
+    [InlineData("exited-missing-sequence")]
+    [InlineData("exited-wrong-type-sequence")]
+    [InlineData("exited-zero-sequence")]
+    [InlineData("exited-negative-sequence")]
+    [InlineData("exited-overflow-sequence")]
+    [InlineData("exited-underflow-sequence")]
+    [InlineData("terminated-missing-sequence")]
+    [InlineData("terminated-wrong-type-sequence")]
+    [InlineData("terminated-zero-sequence")]
+    [InlineData("terminated-negative-sequence")]
+    [InlineData("terminated-overflow-sequence")]
+    [InlineData("terminated-underflow-sequence")]
+    [InlineData("exited-missing-exit-code")]
+    [InlineData("exited-wrong-type-exit-code")]
+    [InlineData("exited-overflow-exit-code")]
     public async Task StepOver_MalformedOrWronglyCorrelatedActiveExchange_ReturnsRedactedProtocolErrorAndEvicts(string nextResponseMode)
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync(StepOver(nextResponseMode: nextResponseMode));

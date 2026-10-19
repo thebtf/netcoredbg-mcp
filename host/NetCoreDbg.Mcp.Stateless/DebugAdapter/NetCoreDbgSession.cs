@@ -809,7 +809,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 break;
             case "exited":
             case "terminated":
-                HandleTerminalEvent(eventName, body);
+                HandleTerminalEvent(message, eventName, body);
                 break;
         }
     }
@@ -1004,15 +1004,24 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
-    private void HandleTerminalEvent(string eventName, JsonElement body)
+    private void HandleTerminalEvent(JsonElement message, string eventName, JsonElement body)
     {
         _callStackAdmissionGate.Wait();
         try
         {
             lock (_stateGate)
             {
+                if (_activeStepOver is not null && RequireInt32(message, "seq") <= 0)
+                {
+                    throw new InvalidDataException("DAP step terminal event sequence must be positive.");
+                }
+
                 _state = eventName == "exited"
-                    ? _state with { Event = eventName, ExitCode = TryGetInt32(body, "exitCode") }
+                    ? _state with
+                    {
+                        Event = eventName,
+                        ExitCode = _activeStepOver is null ? TryGetInt32(body, "exitCode") : RequireInt32(body, "exitCode"),
+                    }
                     : _state with { Event = eventName };
                 ClearCallStackEligibility();
                 _activeStepOver?.ObserveTerminal(eventName, _state.ExitCode);

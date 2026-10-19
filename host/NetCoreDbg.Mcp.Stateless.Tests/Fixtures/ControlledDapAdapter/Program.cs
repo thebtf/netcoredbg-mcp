@@ -1183,6 +1183,32 @@ internal sealed class ControlledDapAdapter
                 await WriteEventAsync("terminated", body: null, cancellationToken);
                 await RecordAsync(new { kind = "next-terminal-after-ack", sequence }, cancellationToken);
                 return false;
+            case "terminal-exit-zero":
+            case "terminal-exit-negative":
+                await WriteEventAsync("exited", new { exitCode = _options.NextResponseMode == "terminal-exit-zero" ? 0 : -1 }, cancellationToken);
+                return false;
+            case "exited-missing-sequence":
+            case "exited-wrong-type-sequence":
+            case "exited-zero-sequence":
+            case "exited-negative-sequence":
+            case "exited-overflow-sequence":
+            case "exited-underflow-sequence":
+            case "terminated-missing-sequence":
+            case "terminated-wrong-type-sequence":
+            case "terminated-zero-sequence":
+            case "terminated-negative-sequence":
+            case "terminated-overflow-sequence":
+            case "terminated-underflow-sequence":
+            case "exited-missing-exit-code":
+            case "exited-wrong-type-exit-code":
+            case "exited-overflow-exit-code":
+                var terminal = _options.NextResponseMode.StartsWith("exited-", StringComparison.Ordinal) ? "exited" : "terminated";
+                if (terminal == "terminated")
+                {
+                    await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+                }
+                await WriteMalformedNextTerminalEventAsync(terminal, cancellationToken);
+                return false;
             default:
                 throw new InvalidOperationException($"Unknown next response mode '{_options.NextResponseMode}'.");
         }
@@ -1546,6 +1572,52 @@ internal sealed class ControlledDapAdapter
         }
         await WriteMessageAsync(message, cancellationToken);
         await RecordAsync(new { kind = "event", @event = "stopped" }, cancellationToken);
+    }
+
+    private async Task WriteMalformedNextTerminalEventAsync(string terminal, CancellationToken cancellationToken)
+    {
+        var body = terminal == "exited" ? new Dictionary<string, object?> { ["exitCode"] = _options.ExitCode } : null;
+        var message = new Dictionary<string, object?>
+        {
+            ["seq"] = _outgoingSequence++,
+            ["type"] = "event",
+            ["event"] = terminal,
+            ["body"] = body,
+        };
+        switch (_options.NextResponseMode[(terminal.Length + 1)..])
+        {
+            case "missing-sequence":
+                message.Remove("seq");
+                break;
+            case "wrong-type-sequence":
+                message["seq"] = "not-an-int32";
+                break;
+            case "zero-sequence":
+                message["seq"] = 0;
+                break;
+            case "negative-sequence":
+                message["seq"] = -1;
+                break;
+            case "overflow-sequence":
+                message["seq"] = (long)int.MaxValue + 1;
+                break;
+            case "underflow-sequence":
+                message["seq"] = (long)int.MinValue - 1;
+                break;
+            case "missing-exit-code":
+                body!.Remove("exitCode");
+                break;
+            case "wrong-type-exit-code":
+                body!["exitCode"] = "not-an-int32";
+                break;
+            case "overflow-exit-code":
+                body!["exitCode"] = (long)int.MaxValue + 1;
+                break;
+            default:
+                throw new InvalidOperationException("Unknown malformed next terminal-event mode.");
+        }
+        await WriteMessageAsync(message, cancellationToken);
+        await RecordAsync(new { kind = "event", @event = terminal }, cancellationToken);
     }
 
     private async Task WriteEventAsync(string eventName, object? body, CancellationToken cancellationToken)
