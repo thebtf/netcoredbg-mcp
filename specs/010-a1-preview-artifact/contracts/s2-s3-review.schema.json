@@ -2,8 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "s2-s3-review.schema.json",
   "title": "A1 preview S2/S3 Seven-Lens Review Aggregate",
-  "description": "Immutable, sealed aggregate for the one exact candidate reviewed by the required seven ordered S2/S3 lenses. Every lens carries its own candidate binding, reviewer and producer provenance, nonzero denominator, closed findings, result codes, and status. The aggregate stores no raw diagnostic, command, secret, URI, or free-form path.",
-  "$comment": "Semantic admission resolves aggregate candidate_identity_record by repository, run_id, artifact_id, path, and raw-byte SHA-256; validates the Candidate Identity Record; and requires the aggregate and every lens candidate reference, candidate SHA-256, and candidate object to equal it exactly. LENS_REVIEWER_PRODUCER_INDEPENDENCE requires each lens reviewer_provenance.reviewer_principal_id to differ from its producer_provenance.producer_principal_id. AGGREGATE_COVERAGE_RECOMPUTATION derives the fixed ordered lens set, required_lens_count=7, completed_lens_count, and unresolved_high_severity_count from the seven sealed lens results and findings; a passing aggregate requires exactly 7 required, 7 completed, and 0 unresolved high-severity findings. The aggregate is distinct from independent-pr-review.schema.json, which alone satisfies the independent PR-review gate.",
+  "description": "Immutable, sealed aggregate for the one exact candidate reviewed by the required seven ordered S2/S3 lenses. Every lens carries its own candidate binding, reviewer and producer provenance, nonzero check-derived denominator, closed checks and findings, result codes, and status. The aggregate stores no raw diagnostic, command, secret, URI, or free-form path.",
+  "$comment": "Semantic admission resolves aggregate candidate_identity_record by repository, run_id, artifact_id, path, and raw-byte SHA-256; validates the Candidate Identity Record; and requires the aggregate and every lens candidate reference, candidate SHA-256, and candidate object to equal it exactly. LENS_REVIEWER_PRODUCER_INDEPENDENCE requires each lens reviewer_provenance.reviewer_principal_id to differ from its producer_provenance.producer_principal_id. Each lens requires 1..128 checks unique by check_id; required_evidence_count equals their count, completed_evidence_count counts only PASS checks with matching expected/observed codes, and all required checks must complete. Findings independently determine unresolved HIGH/CRITICAL counts and may be empty. AGGREGATE_COVERAGE_RECOMPUTATION derives the fixed ordered lens set, required_lens_count=7, completed_lens_count, and unresolved_high_severity_count from the seven sealed lens results and findings; a passing aggregate requires exactly 7 required, 7 completed, and 0 unresolved high-severity findings. The aggregate is distinct from independent-pr-review.schema.json, which alone satisfies the independent PR-review gate.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -200,6 +200,36 @@
         }
       }
     },
+    "review_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "check_id",
+        "result",
+        "status"
+      ],
+      "properties": {
+        "check_id": {
+          "$ref": "#/$defs/safe_opaque_id"
+        },
+        "result": {
+          "$ref": "#/$defs/review_result_codes"
+        },
+        "status": {
+          "$ref": "#/$defs/review_status"
+        }
+      }
+    },
+    "review_checks": {
+      "$comment": "Semantic admission requires unique check_id values even when records differ, recomputes coverage from these required checks, and rejects incomplete or mismatched results.",
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/review_check"
+      }
+    },
     "finding": {
       "type": "object",
       "additionalProperties": false,
@@ -290,6 +320,7 @@
         "reviewer_provenance",
         "producer_provenance",
         "denominator",
+        "checks",
         "findings",
         "result",
         "outcome",
@@ -322,6 +353,9 @@
         "denominator": {
           "$ref": "#/$defs/denominator"
         },
+        "checks": {
+          "$ref": "#/$defs/review_checks"
+        },
         "findings": {
           "$ref": "#/$defs/findings"
         },
@@ -351,6 +385,15 @@
                 "properties": {
                   "completed_evidence_count": {
                     "minimum": 1
+                  }
+                }
+              },
+              "checks": {
+                "items": {
+                  "properties": {
+                    "status": {
+                      "const": "PASS"
+                    }
                   }
                 }
               },

@@ -16,6 +16,11 @@
 
 - Q: Must a published, remotely verified preview be required before Program B begins? → A: Yes. Program B begins only after the exact approved opt-in preview is published and its remote bytes are verified.
 
+### Session 2026-10-17 — Authorization amendment
+
+- Root replaced the agent-selected running-job log attestation with Attempt 3.0 exact-source execution policy and GitHub enforcement of each real intended operation, recorded in Observation 2.0. No operator approval of this internal mechanism is required. Reviewed workflow declarations and blob equality are not observed grants or token introspection; actual requests may still be refused.
+- Original `5f96014b930e269752b47e878f45f8d220b6bfc7` / build `38960876498/1` and its APPROVE remain original-only. The successor needs its own canonical build, Candidate/Catalog, complete downloaded consumer proof, seven-lens and distinct independent review, passing pre-decision Stage and explicit Root S4 before a new noncolliding tag. This amendment is not that decision or live release proof.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Use a Safe Opt-In Preview (Priority: P1)
@@ -74,6 +79,8 @@ A release authority needs to approve or decline distribution of one exact previe
 - A user supplies an invalid project authority, requests an excluded capability, or encounters a bounded preview refusal: the preview returns only its documented refusal and does not alter the Python route or expose partial output.
 - A prior tag or draft release already exists: it is recoverable only when it represents the exact approved candidate; a collision or mismatched published state is not overwritten, moved, or deleted.
 - An approval is declined: no distribution is performed, and the retained Python route remains the available consumer route.
+- A definite server refusal remains `DENIED` and stops the sending attempt even if matching state appears later. Preserve partial publication; never delete, overwrite, or broaden credentials. A later independently admitted attempt may retry only a definitely-not-applied refusal after resolving its cause and rechecking exact safe state.
+- A missing, ambiguous or malformed mutation response is `UNKNOWN`. Reconcile its original intent read-only; exact complete postcondition may establish `RECONCILED`, not exclusive sender attribution. Missing, unreadable or mismatched state and missing predecessor evidence cannot justify resend, including under a new run/attempt.
 
 ## Scope Boundaries
 
@@ -97,8 +104,8 @@ This feature does not change the default selector, publish to the existing Pytho
 - **FR-005**: The candidate proof MUST execute every defined launch, authority, input, containment, resource, protocol, transport, and rollback denial case and record whether each case produces only its documented outcome with no partial output or unintended side effect.
 - **FR-006**: The candidate MUST receive independent security and code-review evidence scoped to its exact identity record, with nonzero required evidence denominators and no unresolved high-severity finding before it can be approved.
 - **FR-007**: The system MUST record an explicit `APPROVE` or `DECLINE` promotion decision that names the exact identity record, review evidence, decision time, and intended preview destination. A decision MUST NOT apply to any other candidate.
-- **FR-008**: Promotion MUST occur only for an approved candidate and MUST distribute only the exact reviewed package and manifest. The externally available package MUST match the approved identity record after distribution.
-- **FR-009**: A promotion retry MUST recover only an absent or exactly matching interrupted state. It MUST NOT overwrite assets, move or delete a tag, replace a different release, or reinterpret mismatched remote evidence as recoverable.
+- **FR-008**: Promotion MUST occur only for an approved candidate and MUST distribute only the exact reviewed package and manifest. Before any write, Attempt 3.0 MUST independently bind current actors, job, run, canonical source and exact tracked workflow blob to that candidate and retained immutable evidence. Its `GITHUB_JOB_TOKEN_SERVER_ENFORCED` policy MUST use only the reviewed job token; it MUST NOT claim observed grants or infer a token principal. The externally available package MUST match the approved identity record after distribution.
+- **FR-009**: A promotion retry MUST recover only an absent or exactly matching interrupted state after complete predecessor-attempt admission. Observation 2.0 MUST retain original operation outcomes. Only `CONFIRMED` or exactly `RECONCILED` outcomes permit advancement; `DENIED`, `COLLISION` or unresolved `UNKNOWN` MUST stop dependent writes. A definite refusal MUST NOT become success through matching later state; an uncertain operation MUST NOT be resent across steps or runs. Promotion MUST NOT overwrite assets, move or delete a tag, replace a different release, or reinterpret mismatched remote evidence as recoverable.
 - **FR-010**: A declined, unreviewed, incomplete, expired, or mismatched candidate MUST leave the preview unpublished and the Python route selected and usable.
 - **FR-011**: The feature MUST preserve the public Python package, console entrypoint, default selection, legacy rollback journey, and all non-A1 route families unchanged.
 - **FR-012**: A Program B handoff MUST record the published exact opt-in preview, its verified remote identity, its rollback result, and the explicit boundary for separately authorized Program B and Program C work.
@@ -112,6 +119,8 @@ This feature does not change the default selector, publish to the existing Pytho
 - **Independent PR Review Receipt**: The distinct project release-review record for the same Candidate Identity Record; it does not substitute for an S2/S3 lens.
 - **Stage Gate Evidence**: The sealed exact-candidate evidence record for one pre-decision, pre-publication, or post-publication catalog stage.
 - **Promotion Decision**: An explicit `APPROVE` or `DECLINE` bound to one Candidate Identity Record and passing pre-decision Stage Gate Evidence.
+- **Promotion Attempt 3.0**: Immutable execution admission with independent current context, exact tracked-workflow execution policy and nullable independently resolved predecessor reference; admission PASS is not observed server authorization. Attempt 1.0/2.0 and removed permission-report fields are rejected by the active route.
+- **Remote Observation 2.0**: Immutable exact remote-state evidence with at most two closed operation results per existing advancement block; it preserves original intent/response/postcondition/outcome and cannot erase a denial or unresolved uncertainty.
 - **Published Preview**: The externally distributed package state, which is valid only when its identity matches an approved Candidate Identity Record.
 
 ## Success Criteria *(mandatory)*

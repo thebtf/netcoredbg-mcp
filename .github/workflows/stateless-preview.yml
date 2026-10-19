@@ -3,27 +3,55 @@ name: Stateless Preview Build
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: Build a candidate, retain evidence, or promote
+        required: true
+        default: build
+        type: choice
+        options:
+          - build
+          - evidence
+          - promote
       preview_version:
         description: Preview version in x.y.z-preview.n form
-        required: true
+        required: false
+        default: ""
         type: string
       preview_tag:
         description: Preview tag matching stateless-preview-v<preview_version>
-        required: true
+        required: false
+        default: ""
         type: string
       retention_days:
         description: Retention period from 1 through 90 days
-        required: true
+        required: false
+        default: ""
+        type: string
+      evidence_operation:
+        description: Evidence operation (retain or closeout)
+        required: false
+        default: ""
+        type: string
+      evidence_request:
+        description: Closed evidence request JSON (retain or closeout only)
+        required: false
+        default: ""
+        type: string
+      promote_request:
+        description: Closed retained promotion-decision.json reference (promote only)
+        required: false
+        default: ""
         type: string
 
 permissions: {}
 
 concurrency:
-  group: stateless-preview-build-${{ inputs.preview_tag }}
+  group: stateless-preview-${{ inputs.preview_tag || format('run-{0}-{1}', github.run_id, github.run_attempt) }}
   cancel-in-progress: false
 
 jobs:
   build:
+    if: ${{ inputs.mode != 'evidence' && inputs.mode != 'promote' }}
     name: Build canonical-main preview candidate
     runs-on: windows-latest
     permissions:
@@ -31,6 +59,7 @@ jobs:
       contents: read
       pull-requests: read
     env:
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: "false"
       A1_PREVIEW_VERSION: ${{ inputs.preview_version }}
       A1_PREVIEW_TAG: ${{ inputs.preview_tag }}
       A1_RETENTION_DAYS: ${{ inputs.retention_days }}
@@ -149,9 +178,18 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          dotnet publish host/NetCoreDbg.Mcp.Stateless.Preview/NetCoreDbg.Mcp.Stateless.Preview.csproj --configuration Release --runtime win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishTrimmed=false -p:AssemblyName=netcoredbg-mcp-stateless-preview --output artifacts/stateless-preview/publish
+          dotnet publish host/NetCoreDbg.Mcp.Stateless.Preview/NetCoreDbg.Mcp.Stateless.Preview.csproj --configuration Release --runtime win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishTrimmed=false --output artifacts/stateless-preview/publish
           if ($LASTEXITCODE -ne 0) {
             throw "Preview publish failed."
+          }
+          Rename-Item -Path artifacts/stateless-preview/publish/NetCoreDbg.Mcp.Stateless.Preview.exe -NewName netcoredbg-mcp-stateless-preview.exe
+
+      - name: Verify the published embedded runtime
+        shell: pwsh
+        run: |
+          python scripts/stateless_preview_runtime.py --executable artifacts/stateless-preview/publish/netcoredbg-mcp-stateless-preview.exe --expected-runtime 8.0.32 --diagnostics-directory artifacts/stateless-preview/runtime-evidence
+          if ($LASTEXITCODE -ne 0) {
+            throw "Published preview runtime verification failed."
           }
 
       - name: Archive and manifest the preview payload
@@ -189,6 +227,557 @@ jobs:
         with:
           name: ${{ steps.admit.outputs.release_gate_catalog_artifact_name }}
           path: artifacts/stateless-preview/records/release-gate-catalog.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+  retain_evidence:
+    name: Retain canonical-main preview evidence
+    if: ${{ inputs.mode == 'evidence' && inputs.evidence_operation != 'closeout' }}
+    runs-on: windows-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out the dispatched revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch live canonical main
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to fetch canonical main."
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Admit the exact evidence source and request
+        id: admit
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/stateless_preview_artifact.py admit-evidence
+
+      - name: Retain the three original evidence records (E0)
+        id: upload_records
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.admit.outputs.records_artifact_name }}
+          path: |
+            ${{ steps.admit.outputs.records_directory }}/consumer-proof.json
+            ${{ steps.admit.outputs.records_directory }}/s2-s3-review.json
+            ${{ steps.admit.outputs.records_directory }}/independent-pr-review.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+      - name: Read back E0 and seal the pre-decision Stage
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          A1_EVIDENCE_RECORDS_ARTIFACT_ID: ${{ steps.upload_records.outputs.artifact-id }}
+          A1_EVIDENCE_RECORDS_ARTIFACT_DIGEST: ${{ steps.upload_records.outputs.artifact-digest }}
+        run: python scripts/stateless_preview_artifact.py seal-evidence-stage
+
+      - name: Retain the pre-decision Stage (E1)
+        id: upload_stage
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.admit.outputs.stage_artifact_name }}
+          path: ${{ steps.admit.outputs.stage_path }}
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+      - name: Read back E1 and seal the explicit Decision
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          A1_EVIDENCE_RECORDS_ARTIFACT_ID: ${{ steps.upload_records.outputs.artifact-id }}
+          A1_EVIDENCE_RECORDS_ARTIFACT_DIGEST: ${{ steps.upload_records.outputs.artifact-digest }}
+          A1_EVIDENCE_STAGE_ARTIFACT_ID: ${{ steps.upload_stage.outputs.artifact-id }}
+          A1_EVIDENCE_STAGE_ARTIFACT_DIGEST: ${{ steps.upload_stage.outputs.artifact-digest }}
+        run: python scripts/stateless_preview_artifact.py seal-evidence-decision
+
+      - name: Retain the explicit Promotion Decision (E2)
+        id: upload_decision
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.admit.outputs.decision_artifact_name }}
+          path: ${{ steps.admit.outputs.decision_path }}
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+      - name: Independently verify all retained evidence
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          A1_EVIDENCE_RECORDS_ARTIFACT_ID: ${{ steps.upload_records.outputs.artifact-id }}
+          A1_EVIDENCE_RECORDS_ARTIFACT_DIGEST: ${{ steps.upload_records.outputs.artifact-digest }}
+          A1_EVIDENCE_STAGE_ARTIFACT_ID: ${{ steps.upload_stage.outputs.artifact-id }}
+          A1_EVIDENCE_STAGE_ARTIFACT_DIGEST: ${{ steps.upload_stage.outputs.artifact-digest }}
+          A1_EVIDENCE_DECISION_ARTIFACT_ID: ${{ steps.upload_decision.outputs.artifact-id }}
+          A1_EVIDENCE_DECISION_ARTIFACT_DIGEST: ${{ steps.upload_decision.outputs.artifact-digest }}
+        run: python scripts/stateless_preview_artifact.py verify-evidence-retention
+
+  retain_closeout:
+    name: Retain canonical-main preview closeout
+    if: ${{ inputs.mode == 'evidence' && inputs.evidence_operation == 'closeout' }}
+    runs-on: windows-latest
+    permissions:
+      actions: read
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out the dispatched revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch live canonical main
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to fetch canonical main."
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Admit the exact closeout source and original remote proof
+        id: admit
+        shell: pwsh
+        run: python scripts/stateless_preview_artifact.py admit-closeout
+
+      - name: Retain the original remote proof and fresh public-byte verification (R0)
+        id: upload_records
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.admit.outputs.closeout_records_artifact_name }}
+          path: |
+            ${{ steps.admit.outputs.remote_consumer_proof_path }}
+            ${{ steps.admit.outputs.post_publication_verification_path }}
+          archive: true
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+      - name: Read back R0 and seal Remote Verification
+        id: verification
+        shell: pwsh
+        env:
+          A1_CLOSEOUT_RECORDS_ARTIFACT_ID: ${{ steps.upload_records.outputs.artifact-id }}
+          A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST: ${{ steps.upload_records.outputs.artifact-digest }}
+        run: |
+          $env:A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST = $env:A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          python scripts/stateless_preview_artifact.py seal-closeout-verification
+
+      - name: Retain Remote Verification (R1)
+        id: upload_verification
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.verification.outputs.closeout_verification_artifact_name }}
+          path: ${{ steps.verification.outputs.remote_verification_path }}
+          archive: true
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.verification.outputs.retention_days }}
+
+      - name: Read back R1 and seal the post-publication Stage
+        id: stage
+        shell: pwsh
+        env:
+          A1_CLOSEOUT_RECORDS_ARTIFACT_ID: ${{ steps.upload_records.outputs.artifact-id }}
+          A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST: ${{ steps.upload_records.outputs.artifact-digest }}
+          A1_CLOSEOUT_VERIFICATION_ARTIFACT_ID: ${{ steps.upload_verification.outputs.artifact-id }}
+          A1_CLOSEOUT_VERIFICATION_ARTIFACT_DIGEST: ${{ steps.upload_verification.outputs.artifact-digest }}
+        run: |
+          $env:A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST = $env:A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          $env:A1_CLOSEOUT_VERIFICATION_ARTIFACT_DIGEST = $env:A1_CLOSEOUT_VERIFICATION_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          python scripts/stateless_preview_artifact.py seal-closeout-stage
+
+      - name: Retain the post-publication Stage (R2)
+        id: upload_stage
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.stage.outputs.closeout_stage_artifact_name }}
+          path: ${{ steps.stage.outputs.post_publication_stage_path }}
+          archive: true
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.stage.outputs.retention_days }}
+
+      - name: Read back R2 and seal the non-authorizing Program B Handoff
+        id: handoff
+        shell: pwsh
+        env:
+          A1_CLOSEOUT_RECORDS_ARTIFACT_ID: ${{ steps.upload_records.outputs.artifact-id }}
+          A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST: ${{ steps.upload_records.outputs.artifact-digest }}
+          A1_CLOSEOUT_VERIFICATION_ARTIFACT_ID: ${{ steps.upload_verification.outputs.artifact-id }}
+          A1_CLOSEOUT_VERIFICATION_ARTIFACT_DIGEST: ${{ steps.upload_verification.outputs.artifact-digest }}
+          A1_CLOSEOUT_STAGE_ARTIFACT_ID: ${{ steps.upload_stage.outputs.artifact-id }}
+          A1_CLOSEOUT_STAGE_ARTIFACT_DIGEST: ${{ steps.upload_stage.outputs.artifact-digest }}
+        run: |
+          $env:A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST = $env:A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          $env:A1_CLOSEOUT_VERIFICATION_ARTIFACT_DIGEST = $env:A1_CLOSEOUT_VERIFICATION_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          $env:A1_CLOSEOUT_STAGE_ARTIFACT_DIGEST = $env:A1_CLOSEOUT_STAGE_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          python scripts/stateless_preview_artifact.py seal-closeout-handoff
+
+      - name: Retain the non-authorizing Program B Handoff (R3)
+        id: upload_handoff
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.handoff.outputs.closeout_handoff_artifact_name }}
+          path: ${{ steps.handoff.outputs.program_b_handoff_path }}
+          archive: true
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.handoff.outputs.retention_days }}
+
+      - name: Independently verify the retained closeout chain
+        id: verify
+        shell: pwsh
+        env:
+          A1_CLOSEOUT_RECORDS_ARTIFACT_ID: ${{ steps.upload_records.outputs.artifact-id }}
+          A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST: ${{ steps.upload_records.outputs.artifact-digest }}
+          A1_CLOSEOUT_VERIFICATION_ARTIFACT_ID: ${{ steps.upload_verification.outputs.artifact-id }}
+          A1_CLOSEOUT_VERIFICATION_ARTIFACT_DIGEST: ${{ steps.upload_verification.outputs.artifact-digest }}
+          A1_CLOSEOUT_STAGE_ARTIFACT_ID: ${{ steps.upload_stage.outputs.artifact-id }}
+          A1_CLOSEOUT_STAGE_ARTIFACT_DIGEST: ${{ steps.upload_stage.outputs.artifact-digest }}
+          A1_CLOSEOUT_HANDOFF_ARTIFACT_ID: ${{ steps.upload_handoff.outputs.artifact-id }}
+          A1_CLOSEOUT_HANDOFF_ARTIFACT_DIGEST: ${{ steps.upload_handoff.outputs.artifact-digest }}
+        run: |
+          $env:A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST = $env:A1_CLOSEOUT_RECORDS_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          $env:A1_CLOSEOUT_VERIFICATION_ARTIFACT_DIGEST = $env:A1_CLOSEOUT_VERIFICATION_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          $env:A1_CLOSEOUT_STAGE_ARTIFACT_DIGEST = $env:A1_CLOSEOUT_STAGE_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          $env:A1_CLOSEOUT_HANDOFF_ARTIFACT_DIGEST = $env:A1_CLOSEOUT_HANDOFF_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          python scripts/stateless_preview_artifact.py verify-closeout-retention
+
+  promote:
+    if: ${{ inputs.mode == 'promote' }}
+    name: Promote canonical-main preview candidate
+    runs-on: windows-latest
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out the dispatched revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch live canonical main
+        shell: pwsh
+        run: |
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to fetch canonical main."
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Admit the retained APPROVE and seal the pre-publication Stage
+        id: admit
+        shell: pwsh
+        run: python scripts/stateless_preview_artifact.py admit-promote
+
+      - name: Observe the initial remote state after exact source and Decision admission
+        id: observe
+        if: ${{ success() && steps.admit.outcome == 'success' }}
+        shell: pwsh
+        run: python scripts/stateless_preview_artifact.py observe-promote
+
+      - name: Retain the immutable Stage and initial observation (P0)
+        id: upload_admission
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.admit.outputs.admission_artifact_name }}
+          path: |
+            ${{ steps.admit.outputs.stage_path }}
+            ${{ steps.observe.outputs.observation_path }}
+            ${{ steps.observe.outputs.pre_publication_verification_path }}
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+      - name: Read back P0 and classify the initial state
+        id: classify_0
+        shell: pwsh
+        env:
+          A1_PROMOTE_ADMISSION_ARTIFACT_ID: ${{ steps.upload_admission.outputs.artifact-id }}
+          A1_PROMOTE_ADMISSION_ARTIFACT_DIGEST: ${{ steps.upload_admission.outputs.artifact-digest }}
+        run: |
+          $env:A1_PROMOTE_ADMISSION_ARTIFACT_DIGEST = $env:A1_PROMOTE_ADMISSION_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          python scripts/stateless_preview_artifact.py classify-promote --step 0
+
+      - name: Retain the initial immutable classification (C0)
+        id: upload_classification_0
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.classify_0.outputs.classification_artifact_name }}
+          path: ${{ steps.classify_0.outputs.classification_path }}
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+      - name: Read back C0 and seal the immutable Attempt
+        id: attempt
+        shell: pwsh
+        env:
+          A1_PROMOTE_CLASSIFICATION_ARTIFACT_ID: ${{ steps.upload_classification_0.outputs.artifact-id }}
+          A1_PROMOTE_CLASSIFICATION_ARTIFACT_DIGEST: ${{ steps.upload_classification_0.outputs.artifact-digest }}
+        run: |
+          $env:A1_PROMOTE_CLASSIFICATION_ARTIFACT_DIGEST = $env:A1_PROMOTE_CLASSIFICATION_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          python scripts/stateless_preview_artifact.py seal-promote-attempt
+
+      - name: Retain the immutable Attempt (A)
+        id: upload_attempt
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.attempt.outputs.attempt_artifact_name }}
+          path: ${{ steps.attempt.outputs.attempt_path }}
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+      - name: Read back A and execute the first legal advancement
+        id: advance_1
+        if: ${{ success() && steps.upload_attempt.outcome == 'success' && steps.upload_classification_0.outcome == 'success' && steps.classify_0.outputs.state != 'published_complete' }}
+        shell: pwsh
+        env:
+          A1_PROMOTE_ATTEMPT_ARTIFACT_ID: ${{ steps.upload_attempt.outputs.artifact-id }}
+          A1_PROMOTE_ATTEMPT_ARTIFACT_DIGEST: ${{ steps.upload_attempt.outputs.artifact-digest }}
+          A1_PROMOTE_CLASSIFICATION_ARTIFACT_ID: ${{ steps.upload_classification_0.outputs.artifact-id }}
+          A1_PROMOTE_CLASSIFICATION_ARTIFACT_DIGEST: ${{ steps.upload_classification_0.outputs.artifact-digest }}
+        run: |
+          $env:A1_PROMOTE_ATTEMPT_ARTIFACT_DIGEST = $env:A1_PROMOTE_ATTEMPT_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          $env:A1_PROMOTE_CLASSIFICATION_ARTIFACT_DIGEST = $env:A1_PROMOTE_CLASSIFICATION_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          python scripts/stateless_preview_artifact.py advance-promote --step 1
+
+      - name: Retain the first advancement observation and any pre-publication fragment
+        id: upload_observation_1
+        if: ${{ always() && (steps.advance_1.outcome == 'success' || steps.advance_1.outcome == 'failure') && steps.advance_1.outputs.observation_path != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.advance_1.outputs.observation_artifact_name }}
+          path: |
+            ${{ steps.advance_1.outputs.observation_path }}
+            ${{ steps.advance_1.outputs.pre_publication_verification_path }}
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+      - name: Read back the completed first advancement and classify it
+        id: classify_1
+        if: ${{ success() && steps.advance_1.outcome == 'success' && steps.upload_observation_1.outcome == 'success' }}
+        shell: pwsh
+        env:
+          A1_PROMOTE_ATTEMPT_ARTIFACT_ID: ${{ steps.upload_attempt.outputs.artifact-id }}
+          A1_PROMOTE_ATTEMPT_ARTIFACT_DIGEST: ${{ steps.upload_attempt.outputs.artifact-digest }}
+          A1_PROMOTE_OBSERVATION_ARTIFACT_ID: ${{ steps.upload_observation_1.outputs.artifact-id }}
+          A1_PROMOTE_OBSERVATION_ARTIFACT_DIGEST: ${{ steps.upload_observation_1.outputs.artifact-digest }}
+        run: |
+          $env:A1_PROMOTE_ATTEMPT_ARTIFACT_DIGEST = $env:A1_PROMOTE_ATTEMPT_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          $env:A1_PROMOTE_OBSERVATION_ARTIFACT_DIGEST = $env:A1_PROMOTE_OBSERVATION_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          python scripts/stateless_preview_artifact.py classify-promote --step 1
+
+      - name: Retain the first advancement classification (C1)
+        id: upload_classification_1
+        if: ${{ success() && steps.classify_1.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.classify_1.outputs.classification_artifact_name }}
+          path: ${{ steps.classify_1.outputs.classification_path }}
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+      - name: Execute the second legal advancement from retained C1
+        id: advance_2
+        if: ${{ success() && steps.upload_attempt.outcome == 'success' && steps.upload_classification_1.outcome == 'success' && steps.classify_1.outcome == 'success' && steps.classify_1.outputs.state != 'published_complete' }}
+        shell: pwsh
+        env:
+          A1_PROMOTE_ATTEMPT_ARTIFACT_ID: ${{ steps.upload_attempt.outputs.artifact-id }}
+          A1_PROMOTE_ATTEMPT_ARTIFACT_DIGEST: ${{ steps.upload_attempt.outputs.artifact-digest }}
+          A1_PROMOTE_CLASSIFICATION_ARTIFACT_ID: ${{ steps.upload_classification_1.outputs.artifact-id }}
+          A1_PROMOTE_CLASSIFICATION_ARTIFACT_DIGEST: ${{ steps.upload_classification_1.outputs.artifact-digest }}
+        run: |
+          $env:A1_PROMOTE_ATTEMPT_ARTIFACT_DIGEST = $env:A1_PROMOTE_ATTEMPT_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          $env:A1_PROMOTE_CLASSIFICATION_ARTIFACT_DIGEST = $env:A1_PROMOTE_CLASSIFICATION_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          python scripts/stateless_preview_artifact.py advance-promote --step 2
+
+      - name: Retain the second advancement observation and any pre-publication fragment
+        id: upload_observation_2
+        if: ${{ always() && (steps.advance_2.outcome == 'success' || steps.advance_2.outcome == 'failure') && steps.advance_2.outputs.observation_path != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.advance_2.outputs.observation_artifact_name }}
+          path: |
+            ${{ steps.advance_2.outputs.observation_path }}
+            ${{ steps.advance_2.outputs.pre_publication_verification_path }}
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+      - name: Read back the completed second advancement and classify it
+        id: classify_2
+        if: ${{ success() && steps.advance_2.outcome == 'success' && steps.upload_observation_2.outcome == 'success' }}
+        shell: pwsh
+        env:
+          A1_PROMOTE_ATTEMPT_ARTIFACT_ID: ${{ steps.upload_attempt.outputs.artifact-id }}
+          A1_PROMOTE_ATTEMPT_ARTIFACT_DIGEST: ${{ steps.upload_attempt.outputs.artifact-digest }}
+          A1_PROMOTE_OBSERVATION_ARTIFACT_ID: ${{ steps.upload_observation_2.outputs.artifact-id }}
+          A1_PROMOTE_OBSERVATION_ARTIFACT_DIGEST: ${{ steps.upload_observation_2.outputs.artifact-digest }}
+        run: |
+          $env:A1_PROMOTE_ATTEMPT_ARTIFACT_DIGEST = $env:A1_PROMOTE_ATTEMPT_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          $env:A1_PROMOTE_OBSERVATION_ARTIFACT_DIGEST = $env:A1_PROMOTE_OBSERVATION_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          python scripts/stateless_preview_artifact.py classify-promote --step 2
+
+      - name: Retain the second advancement classification (C2)
+        id: upload_classification_2
+        if: ${{ success() && steps.classify_2.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.classify_2.outputs.classification_artifact_name }}
+          path: ${{ steps.classify_2.outputs.classification_path }}
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+      - name: Execute the third and final legal advancement from retained C2
+        id: advance_3
+        if: ${{ success() && steps.upload_attempt.outcome == 'success' && steps.upload_classification_2.outcome == 'success' && steps.classify_2.outcome == 'success' && steps.classify_2.outputs.state != 'published_complete' }}
+        shell: pwsh
+        env:
+          A1_PROMOTE_ATTEMPT_ARTIFACT_ID: ${{ steps.upload_attempt.outputs.artifact-id }}
+          A1_PROMOTE_ATTEMPT_ARTIFACT_DIGEST: ${{ steps.upload_attempt.outputs.artifact-digest }}
+          A1_PROMOTE_CLASSIFICATION_ARTIFACT_ID: ${{ steps.upload_classification_2.outputs.artifact-id }}
+          A1_PROMOTE_CLASSIFICATION_ARTIFACT_DIGEST: ${{ steps.upload_classification_2.outputs.artifact-digest }}
+        run: |
+          $env:A1_PROMOTE_ATTEMPT_ARTIFACT_DIGEST = $env:A1_PROMOTE_ATTEMPT_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          $env:A1_PROMOTE_CLASSIFICATION_ARTIFACT_DIGEST = $env:A1_PROMOTE_CLASSIFICATION_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          python scripts/stateless_preview_artifact.py advance-promote --step 3
+
+      - name: Retain the final advancement observation and any pre-publication fragment
+        id: upload_observation_3
+        if: ${{ always() && (steps.advance_3.outcome == 'success' || steps.advance_3.outcome == 'failure') && steps.advance_3.outputs.observation_path != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.advance_3.outputs.observation_artifact_name }}
+          path: |
+            ${{ steps.advance_3.outputs.observation_path }}
+            ${{ steps.advance_3.outputs.pre_publication_verification_path }}
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+      - name: Read back the completed final advancement and classify it
+        id: classify_3
+        if: ${{ success() && steps.advance_3.outcome == 'success' && steps.upload_observation_3.outcome == 'success' }}
+        shell: pwsh
+        env:
+          A1_PROMOTE_ATTEMPT_ARTIFACT_ID: ${{ steps.upload_attempt.outputs.artifact-id }}
+          A1_PROMOTE_ATTEMPT_ARTIFACT_DIGEST: ${{ steps.upload_attempt.outputs.artifact-digest }}
+          A1_PROMOTE_OBSERVATION_ARTIFACT_ID: ${{ steps.upload_observation_3.outputs.artifact-id }}
+          A1_PROMOTE_OBSERVATION_ARTIFACT_DIGEST: ${{ steps.upload_observation_3.outputs.artifact-digest }}
+        run: |
+          $env:A1_PROMOTE_ATTEMPT_ARTIFACT_DIGEST = $env:A1_PROMOTE_ATTEMPT_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          $env:A1_PROMOTE_OBSERVATION_ARTIFACT_DIGEST = $env:A1_PROMOTE_OBSERVATION_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          python scripts/stateless_preview_artifact.py classify-promote --step 3
+
+      - name: Retain the final advancement classification (C3)
+        id: upload_classification_3
+        if: ${{ success() && steps.classify_3.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.classify_3.outputs.classification_artifact_name }}
+          path: ${{ steps.classify_3.outputs.classification_path }}
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+      - name: Read back A and the last retained classification for the exact handoff
+        id: finish
+        if: ${{ success() && steps.upload_attempt.outcome == 'success' && (steps.upload_classification_3.outcome == 'success' || steps.upload_classification_2.outcome == 'success' || steps.upload_classification_1.outcome == 'success' || steps.upload_classification_0.outcome == 'success') }}
+        shell: pwsh
+        env:
+          A1_PROMOTE_FINAL_STEP: ${{ steps.classify_3.outputs.state && '3' || steps.classify_2.outputs.state && '2' || steps.classify_1.outputs.state && '1' || '0' }}
+          A1_PROMOTE_ATTEMPT_ARTIFACT_ID: ${{ steps.upload_attempt.outputs.artifact-id }}
+          A1_PROMOTE_ATTEMPT_ARTIFACT_DIGEST: ${{ steps.upload_attempt.outputs.artifact-digest }}
+          A1_PROMOTE_CLASSIFICATION_ARTIFACT_ID: ${{ steps.upload_classification_3.outputs.artifact-id || steps.upload_classification_2.outputs.artifact-id || steps.upload_classification_1.outputs.artifact-id || steps.upload_classification_0.outputs.artifact-id }}
+          A1_PROMOTE_CLASSIFICATION_ARTIFACT_DIGEST: ${{ steps.upload_classification_3.outputs.artifact-digest || steps.upload_classification_2.outputs.artifact-digest || steps.upload_classification_1.outputs.artifact-digest || steps.upload_classification_0.outputs.artifact-digest }}
+        run: |
+          $env:A1_PROMOTE_ATTEMPT_ARTIFACT_DIGEST = $env:A1_PROMOTE_ATTEMPT_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          $env:A1_PROMOTE_CLASSIFICATION_ARTIFACT_DIGEST = $env:A1_PROMOTE_CLASSIFICATION_ARTIFACT_DIGEST -creplace '^sha256:', ''
+          python scripts/stateless_preview_artifact.py finish-promote --step $env:A1_PROMOTE_FINAL_STEP
+
+      - name: Retain exact published references for separate remote consumer proof
+        id: upload_handoff
+        if: ${{ success() && steps.finish.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.admit.outputs.attempt_artifact_name }}-handoff
+          path: ${{ steps.finish.outputs.handoff_path }}
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ steps.admit.outputs.retention_days }}
+
+      - name: Retain only bounded publisher diagnostics and original safe intents
+        if: ${{ always() && steps.admit.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.admit.outputs.attempt_artifact_name }}-diagnostics
+          path: |
+            ${{ steps.admit.outputs.diagnostics_path }}
+            ${{ steps.observe.outputs.diagnostics_path }}
+            ${{ steps.classify_0.outputs.diagnostics_path }}
+            ${{ steps.attempt.outputs.diagnostics_path }}
+            ${{ steps.advance_1.outputs.diagnostics_path }}
+            ${{ steps.advance_1.outputs.tag_intent_path }}
+            ${{ steps.advance_1.outputs.draft_intent_path }}
+            ${{ steps.advance_1.outputs.archive_intent_path }}
+            ${{ steps.advance_1.outputs.manifest_intent_path }}
+            ${{ steps.advance_1.outputs.publish_intent_path }}
+            ${{ steps.classify_1.outputs.diagnostics_path }}
+            ${{ steps.advance_2.outputs.diagnostics_path }}
+            ${{ steps.advance_2.outputs.tag_intent_path }}
+            ${{ steps.advance_2.outputs.draft_intent_path }}
+            ${{ steps.advance_2.outputs.archive_intent_path }}
+            ${{ steps.advance_2.outputs.manifest_intent_path }}
+            ${{ steps.advance_2.outputs.publish_intent_path }}
+            ${{ steps.classify_2.outputs.diagnostics_path }}
+            ${{ steps.advance_3.outputs.diagnostics_path }}
+            ${{ steps.advance_3.outputs.tag_intent_path }}
+            ${{ steps.advance_3.outputs.draft_intent_path }}
+            ${{ steps.advance_3.outputs.archive_intent_path }}
+            ${{ steps.advance_3.outputs.manifest_intent_path }}
+            ${{ steps.advance_3.outputs.publish_intent_path }}
+            ${{ steps.classify_3.outputs.diagnostics_path }}
+            ${{ steps.finish.outputs.diagnostics_path }}
           if-no-files-found: error
           overwrite: false
           retention-days: ${{ steps.admit.outputs.retention_days }}

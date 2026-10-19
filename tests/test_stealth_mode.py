@@ -1616,6 +1616,7 @@ async def test_session_manager_stop_cancels_stealth_foreground_restore_task() ->
     manager._client = SimpleNamespace(
         is_running=False,
         adapter_owner=None,
+        adapter_cleanup_owner=None,
         adapter_pid=None,
         stop=AsyncMock(),
     )

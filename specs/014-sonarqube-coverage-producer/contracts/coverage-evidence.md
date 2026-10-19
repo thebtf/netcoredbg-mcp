@@ -13,7 +13,7 @@ Before the runner starts a scanner transaction, it must:
 5. Require the accepted candidate to be ancestor-or-equal to the actual PR head, require equal PR-head and merge trees, record their shared `integrated_tree_sha`, and require the tracked artifact blob to equal the PR-head artifact blob.
 6. Derive `artifact_commit_sha` from current path history. Require it to equal `merge_commit_sha` or be ancestor-or-equal to `observed_main_sha`, and require `merge_commit_sha` to be ancestor-or-equal to `observed_main_sha`.
 7. Resolve and version-check `uv`, `bash`, and `dotnet`.
-8. Evaluate each fixed project for `net8.0`, direct private `coverlet.msbuild` `10.0.1`, `Microsoft.NET.Test.Sdk` `17.12.0`, and VSTest selection.
+8. Evaluate each fixed project for `net8.0`, direct private `coverlet.msbuild` `10.1.0`, `Microsoft.NET.Test.Sdk` `17.12.0`, and VSTest selection.
 9. Refuse MTP, including `TestingPlatformDotnetTestSupport` activation and Microsoft Testing Platform references.
 
 A failed entry or preflight emits a planned-stage failure. It has zero scanner-begin calls and zero run-root claims.

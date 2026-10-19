@@ -145,6 +145,66 @@ public sealed class PreviewSearchPolicyBoundaryTests
         Assert.Equal(0, stream.ReadOperations);
     }
 
+    [Theory]
+    [InlineData("private\n!Allowed.cs\n", false)]
+    [InlineData("\uFEFFprivate/\n", true)]
+    public void PreviewPolicyDoesNotReadOrReturnIgnoredSourceDespiteUnrelatedNegationOrUtf8Bom(
+        string ignoreRules,
+        bool allowClosedIgnoreRefusal)
+    {
+        using var root = TestRoot.Create();
+        var gitIgnore = Path.Combine(root.Path, ".gitignore");
+        var privateDirectory = new DirectoryInfo(Path.Combine(root.Path, "private"));
+        var secret = new FileInfo(Path.Combine(privateDirectory.FullName, "Secret.cs"));
+        var allowed = new FileInfo(Path.Combine(root.Path, "Allowed.cs"));
+        var opened = new List<string>();
+        var inspector = new RecordingStrictPathInspector(root.Path, new Dictionary<string, StrictPathInfo>(StringComparer.Ordinal)
+        {
+            [gitIgnore] = RegularFile,
+        });
+        var engine = new SymbolSearchEngine(
+            root.Path,
+            PreviewSearchPolicy.Instance,
+            inspector,
+            enumerateDirectories: directory => string.Equals(directory.FullName, root.Path, StringComparison.Ordinal)
+                ? [privateDirectory]
+                : [],
+            enumerateFiles: directory => string.Equals(directory.FullName, root.Path, StringComparison.Ordinal)
+                ? [allowed]
+                : [secret],
+            openRead: path =>
+            {
+                opened.Add(path);
+                Assert.NotEqual(secret.FullName, path);
+                return new TrackingReadStream(Encoding.UTF8.GetBytes(
+                    string.Equals(path, gitIgnore, StringComparison.Ordinal)
+                        ? ignoreRules
+                        : "public sealed class HiddenMarker { }\n"));
+            });
+        IReadOnlyList<SymbolMatch>? symbols = null;
+
+        var failure = Record.Exception(() =>
+        {
+            symbols = engine.FindCodeSymbol("HiddenMarker", "class");
+        });
+
+        Assert.DoesNotContain(secret.FullName, opened, StringComparer.Ordinal);
+        if (allowClosedIgnoreRefusal && failure is SearchFailureException refusal)
+        {
+            Assert.Equal(
+                new SearchFailure("preview_search_unreadable", "PREVIEW_SEARCH_UNREADABLE", "find_code_symbol"),
+                refusal.Failure);
+            Assert.Null(symbols);
+            Assert.DoesNotContain(allowed.FullName, opened, StringComparer.Ordinal);
+            return;
+        }
+
+        Assert.Null(failure);
+        Assert.NotNull(symbols);
+        Assert.Equal(["Allowed.cs"], symbols.Select(static match => match.File));
+        Assert.Contains(allowed.FullName, opened, StringComparer.Ordinal);
+    }
+
     [Fact]
     public void PreviewPolicyAcceptsExactly16MiBAndRefusesTheNextByteBeforeItIsRead()
     {

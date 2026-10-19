@@ -50,7 +50,7 @@ ToolchainPreflight {
 ProjectCompatibility {
   id: ProjectId
   target_framework: net8.0
-  coverlet_msbuild: 10.0.1
+  coverlet_msbuild: 10.1.0
   coverlet_private_assets: all
   test_sdk: 17.12.0
   test_platform: vstest

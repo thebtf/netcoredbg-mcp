@@ -756,6 +756,123 @@ point; rolling back requires no uninstall and no data migration:
   build/configure/exchange/evidence/rollback contract against the packaged
   artifact instead of a source-tree publish.
 
+### 11. A1 Opt-In Read-Only Preview — Retained and Public-Remote Journey
+
+This journey is separate from flow 10's Python-backed compatibility proxy and
+flows 1–9's installed Python/PyPI product. A1 exposes only read-only
+`find_code_symbol`; it does not add desktop debugging or change the default.
+Source availability, a local publish, a unit PASS or controlled loopback download
+is not evidence that an A1 GitHub prerelease exists or works for a consumer.
+
+#### 11.1 Exact Inputs and Two Consumer Modes
+
+Follow the [A1 artifact quickstart](../specs/010-a1-preview-artifact/quickstart.md#inputs)
+to obtain the four expanded Actions metadata references in
+`C:\preview-validation\candidate-references.json`, create separate empty ordinary
+download roots, and prepare the **unchanged retained-Python oracle**. That
+procedure supplies `$consumerPython` and
+`.agent/tmp/t001-retained-python-consumer.py`; an arbitrary successful command is
+not an oracle. Use Windows x64 with PowerShell, Python, GitHub CLI, a contained
+`tests\fixtures\PreviewSearchApp` fixture and permission to create its required
+reparse fixtures. Missing denial fixtures refuse rather than skip the matrix.
+
+Run from the repository root. Replace receipt IDs and RFC 3339 UTC `Z` timestamps
+with actual values. Receipt output paths must not already exist. First, retained
+proof uses only the sealed build's retained archive/manifest:
+
+```powershell
+python tests/preview/validate_preview_artifact.py candidate `
+  --references C:\preview-validation\candidate-references.json `
+  --download-root C:\preview-validation\downloads `
+  --fixture-root tests\fixtures\PreviewSearchApp `
+  --receipt-output C:\preview-validation\retained-artifact-proof.json `
+  --receipt-id retained-proof-<opaque-id> `
+  --recorded-at <utc-rfc3339-timestamp-ending-z> `
+  --python-rollback-command $consumerPython `
+  --python-rollback-argument .agent/tmp/t001-retained-python-consumer.py
+```
+
+After actual publication, the separate remote journey requires the same sealed
+references plus the matching positive numeric GitHub release ID:
+
+```powershell
+python tests/preview/validate_preview_artifact.py remote `
+  --references C:\preview-validation\candidate-references.json `
+  --release-id <positive-github-release-id> `
+  --download-root C:\preview-validation\remote-downloads `
+  --fixture-root tests\fixtures\PreviewSearchApp `
+  --receipt-output C:\preview-validation\remote-release-proof.json `
+  --receipt-id remote-proof-<opaque-id> `
+  --recorded-at <utc-rfc3339-timestamp-ending-z> `
+  --python-rollback-command $consumerPython `
+  --python-rollback-argument .agent/tmp/t001-retained-python-consumer.py
+```
+
+`--python-rollback-argument` is repeatable. Neither mode accepts token/URL/mirror
+overrides, local payload input or partial-matrix options.
+Expanded transport metadata includes artifact name, ZIP digest and retention;
+compact durable record locators contain only repository/run/artifact ID/path/raw
+hash. Keep raw file hashes, Actions container digest and Candidate's ordered
+archive-plus-manifest payload digest distinct.
+
+#### 11.2 Public Bytes, Exact Identity and Full Runtime Matrix
+
+Remote mode still resolves identity/catalog through retained Actions evidence,
+but uses fresh **anonymous** stdlib HTTPS reads for the public archive/manifest.
+It sends no Authorization or inherited GitHub credentials and accepts no publisher
+cache as proof. The downloader checks the public repository and nondraft
+prerelease, exact release/tag/commit, annotated tag object dereferenced to the
+candidate commit, and exactly two distinct matching asset IDs/names/sizes. Bounded
+HTTP 200 or allowlisted HTTPS 302 asset delivery must yield exact raw hashes;
+the ordered pair digest and manifest's extracted-executable equation must pass.
+Stable release/tag/asset identity is re-read after downloading; provider download
+counters are not identity. A symbolic target or nullable API digest is not byte
+proof. Only the verified extracted executable may run.
+
+The controller passes `--project <absolute-fixture-root>` explicitly and requires
+the full closed [consumer matrix](../specs/010-a1-preview-artifact/quickstart.md#what-both-modes-must-prove):
+tools-only `server/discover`, exactly `find_code_symbol` in `tools/list`, successful
+`PreviewMarker` class search via `tools/call`, every root/configuration/containment/
+input/unreadable-file/resource-ceiling/protocol denial, and clean EOF/cancellation
+without partial output or unintended side effects. Hostile CWD/environment values
+must not change project authority. Stdout stays JSON-RPC-only; stdin close must
+exit cleanly without a cancellation result or retained state. One absent or
+failed scenario refuses proof; no source-bin/rebuild shortcut is accepted.
+
+#### 11.3 Unchanged Python Rollback and Evidence Boundary
+
+Both modes replay the same retained installed-Python driver. Remove only explicit
+preview selection; do not reinstall/replace Python, alter its console entry point
+or change its default selector. The controller prepends the selected interpreter's
+directory only to the rollback child's PATH, leaves the parent unchanged, and
+requires the driver's exact `PRODUCT_WORKS` JSON result, not just exit zero.
+The Python/PyPI installation and instructions above remain intact.
+
+A successful command exits zero, prints
+`PREVIEW_ARTIFACT_CONSUMER_PROOF_SEALED`, and writes a new receipt with
+`proof_stage: retained_artifact` or `remote_release`. A proof refusal exits
+nonzero, prints `PREVIEW_ARTIFACT_CONSUMER_PROOF_REFUSED` to stderr and writes no
+receipt. Preserve the actual command, original receipt bytes/hash, candidate
+binding, complete scenario denominator and exact remote asset identities.
+
+Remote Verification and Program B Handoff are separate pure
+[source-only APIs](../specs/010-a1-preview-artifact/contracts/program-b-handoff.md#source-only-sealing-apis),
+not evidence collectors or authority. They require real original predecessor
+records, Attempt 3.0 exact-source execution policy, admitted predecessor and
+Observation 2.0 operation history, genuine pre/post byte fragments and all three
+catalog Stage subsets. Source/blob equality is not observed grants or token
+introspection; DENIED and unresolved UNKNOWN cannot be erased by matching state.
+Missing pre-publication fragments refuse even after `published_complete`;
+published recovery cannot invent them. Neither API authorizes Program B/C,
+defaults or package cutover.
+
+Controlled-loopback HTTP/MCP/EOF/tamper checks and simulated unit records are
+supporting source proof, not public GitHub release receipts. Record actual source,
+runtime and publication results separately before closing the corresponding
+tasks. A retained-only receipt cannot establish the public-remote journey;
+unit results or source availability cannot make an incomplete or failed consumer
+journey `PRODUCT_WORKS`.
+
 ## Failure-Mode Catalog
 
 - CLI exits non-zero or fails to import the package.
@@ -786,6 +903,10 @@ point; rolling back requires no uninstall and no data migration:
 - The candidate host's documentation claims publication, packaging
   completion, or that it replaces `netcoredbg-mcp --project-from-cwd` as the
   default entry point.
+- A1 preview proof substitutes retained/cache/local-build bytes for anonymous
+  public assets, omits any closed matrix/EOF/unchanged-Python-rollback scenario,
+  or treats a pure verification/handoff record as live evidence or Program B/C
+  authority.
 - Flow 10 invents a second parallel installed smoke instead of extending the
   same `$ConsumerNetHost` exchange plus the supporting
   `tests/critical/test_host_proxy_critical.py` gate for roots, progress/
@@ -804,6 +925,7 @@ point; rolling back requires no uninstall and no data migration:
 | WPF DataGrid drag/drop customer-mode gate | `docs/examples/runtime-smoke-v2-drag-drop-grid.json` returns PASS or an honest BLOCKED with route, viewport, selected-payload, negative no-op, and offscreen row-target `drop.ensure_visible=true` evidence requirements named |  |  |
 | NovaScript action-oracle app diagnostics | `docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json` expands to `app_diagnostics` and returns PASS or an honest BLOCKED with freshness and cleanup evidence |  |  |
 | .NET compatibility-host candidate journey | `$ConsumerNetHost` real external client exchange returns `catalog_match=true` against the same-run direct-Python tool list, matching tools/prompts/resources/x-mux capabilities (logging absent), eight prompts, four resources/zero templates/read, and PASS on a real `tools/call`, with supporting critical proof of roots/progress/subscriptions; or an honest BLOCKED/FAIL naming the missing prerequisite; rollback to `$ConsumerCli` still works |  |  |
+| A1 opt-in preview journey (when claimed) | Exact retained and fresh anonymous public assets bind the candidate/annotated tag/raw hashes; sole read-only capability, complete denial matrix, EOF and unchanged installed-Python rollback pass with original receipts; no Program B/C or default/package authority inferred |  |  |
 
 Overall verdict: `PRODUCT_WORKS` / `PARTIALLY_WORKS` / `BROKEN`
 

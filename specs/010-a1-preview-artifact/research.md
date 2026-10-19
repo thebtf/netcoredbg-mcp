@@ -20,7 +20,7 @@ This work makes the existing A1 source-run preview distributable and verifiable 
 
 ## Decision 2 — Use a dedicated manual preview workflow, not the Python publish workflow
 
-**Decision:** Add one dedicated manual `.github/workflows/stateless-preview.yml` with `mode=build|promote`. `build` derives its source from canonical `refs/heads/main`, verifies the live origin-main target and trusted build-run provenance, then publishes the one self-contained Windows x64 executable, creates the archive and manifest, computes all identities, and uploads one uniquely named retained Actions artifact with no overwrite. `promote` accepts only an exact `APPROVE` Decision and a fresh current-attempt authorization by the Decision's named dispatcher; it downloads the retained artifact by its run/artifact identity, verifies stage-appropriate gates, and never rebuilds.
+**Decision:** Use one dedicated manual `.github/workflows/stateless-preview.yml` with `mode=build|evidence|promote`. `build` derives its source from canonical `refs/heads/main`, verifies live origin-main and trusted build provenance, then publishes the self-contained Windows x64 executable, archive/manifest and identities into immutable Actions artifacts. Nonpublishing `evidence` retains original proof/review bytes, Stage and explicit Decision. `promote` accepts only an exact retained `APPROVE` and fresh current-attempt admission by its named dispatcher, downloads the retained build artifact, validates stage-appropriate gates and never rebuilds. The former permission-probe selector is removed and rejected, not aliased.
 
 The namespace is fixed by the inherited manifest schema:
 
@@ -35,7 +35,7 @@ The namespace is fixed by the inherited manifest schema:
 **Alternatives considered:**
 
 - Extend `publish.yml` — rejected because its trigger, artifacts, permissions, and PyPI behavior belong exclusively to the Python channel.
-- Split build and promotion into separate workflows — deferred; technically viable but creates another workflow identity and more cross-workflow drift than the parent plan's one manual two-mode workflow.
+- Split build and promotion into separate workflows — rejected for this amendment; it adds another publisher identity and would not let newer tooling inherit an old candidate's approval.
 - Automatically promote on `push` or `workflow_run` — rejected because publication must follow an explicit exact-candidate S4 decision.
 - Publish a preview through PyPI or alter default selection — rejected as Program C work.
 
@@ -97,7 +97,7 @@ Every attempt starts with live remote classification. Upload only missing matchi
 
 ## Decision 6 — Record retention and approval configuration rather than inventing them
 
-**Decision:** Treat Actions retention and any GitHub environment guard as observed candidate/run facts, not fixed repository constants. The build records the selected retention metadata; proof and promotion refuse an expired, unavailable, or mismatched artifact and require a new candidate/version rather than rebuilding. The Promotion Decision names the authorized dispatcher, while the fresh Promotion Attempt proves the consuming run's actor, run/attempt, permissions, and canonical-main provenance. An environment guard may add protection but never replaces candidate or attempt validation.
+**Decision:** Treat Actions retention and any GitHub environment guard as observed candidate/run facts, not invented repository constants. The build records selected retention metadata; proof and promotion refuse expired/unavailable/mismatched artifacts and require a new candidate rather than rebuilding under old approval. The Decision names the dispatcher; Attempt 3.0 independently binds current actors/run/attempt/job, canonical source and exact tracked-workflow execution policy. This is configuration evidence, not observed token grants. GitHub enforces each actual operation, whose response and exact readback are recorded in Observation 2.0. An environment guard never replaces candidate or Attempt validation.
 
 **Rationale:** GitHub permits repository/organization policies to constrain artifact retention, and the current repository does not define a preview-specific duration or environment. Choosing a number or assuming an environment would be fictitious policy. Recording the actual value preserves exact evidence while keeping unavailability fail-closed.
 
@@ -108,6 +108,21 @@ Every attempt starts with live remote classification. Upload only missing matchi
 - Infer approval from a workflow-dispatch actor or environment presence — rejected because neither binds the exact run and hashes.
 
 **Evidence:** GitHub Actions [`upload-artifact` retention documentation](https://github.com/actions/upload-artifact#retention-period); `specs/010-a1-preview-artifact/spec.md` edge cases and FR-002 through FR-009; `docs/adr/ADR-004-stateless-preview.md`.
+
+## Decision 7 — Bind exact execution policy and preserve operation outcomes
+
+**Decision:** Replace mandatory running-job grant-log attestation with Attempt 3.0 `execution_policy`, model `GITHUB_JOB_TOKEN_SERVER_ENFORCED`, exact current job/run/source/workflow and tracked workflow-blob SHA-256. Keep top-level `permissions: {}`, promote exactly `actions: read` / `contents: write`, and job-scoped `GITHUB_TOKEN: ${{ github.token }}`. App/installation identity remains `UNOBSERVED`/null. This deliberately removes the former pre-write log observation; declarations/source are not renamed as observed grants, token introspection or guaranteed authorization. Retire the collector/probe/report; do not add another credential, service or publisher.
+
+**Operation boundary:** GitHub authorizes the actual intended request. Valid expected acknowledgement plus complete exact readback is `CONFIRMED`; ambiguous/unobserved original response plus exact read-only reconciliation is `RECONCILED`, proving resulting state rather than exclusive sender attribution. A definite refusal stays `DENIED` and ends its sending attempt even after matching foreign state. Conflict/collision stops; rate-limit 403 is not proof of a missing grant, 404 is not absence, and lost/malformed/truncated/potentially applied responses remain `UNKNOWN` until exact reconciliation. Never resend uncertainty under a new step/run/request ID, delete a starter asset, overwrite, or broaden credentials. Preserve partial publication.
+
+**Predecessors:** Complete independent canonical run/artifact discovery derives nullable `predecessor_attempt`. Missing conclusive evidence after retained A is potentially sent, not unstarted. Resolve original immutable intent/outcome and known tag OID read-only in new O0; never rewrite historical UNKNOWN or attribute later state to a denied sender. A fresh independently admitted attempt may retry only definitely-not-applied refusal after its cause is resolved under fresh context and safe exact state, or perform genuinely remaining operations after predecessor reconciliation. Observation 2.0 closes these outcomes inside the existing envelope, at most two per fixed block; no new ledger/retry coordinator is introduced.
+
+**Historical evidence:** Run `38937481596/1`, source `541b57007b0f56c0bfabe9bd1dd94a20daeac6df`, job `117096512282` observed `UNAVAILABLE/CURRENT_JOB_LOGS_UNAVAILABLE` at offsets 0/60 seconds while the job remained `in_progress`; both reports had no grants/log hash. Preserve artifact `12061642440`, original reports/timing summary and earlier negative run `38907673130`. These observations establish neither publication denial, universal log impossibility nor completion-only semantics. The old requirement is superseded, not passed; no replacement probe is scheduled.
+
+**Migration/authority:** Root accepted this internal mechanism change under its delegated A1 mandate; it needs no operator click. Exact candidate S4 still follows evidence. Preserve original `5f96014b930e269752b47e878f45f8d220b6bfc7` / build `38960876498/1` and APPROVE unchanged as original-only. Changed workflow/publisher and policy snapshots require successor canonical SHA S, a new canonical payload/manifest/Candidate/Catalog, complete retained downloaded consumer/denial/EOF/unchanged-Python proof, S-bound seven-lens and distinct independent review, passing pre-decision Stage and Root's new explicit S4 before a new noncolliding tag. Source tests/simulations or identical executable bytes cannot transfer approval or prove public release. Actual public consumer/rollback, Remote Verification, post-publication Stage and non-authorizing Handoff remain required.
+
+**Primary basis:** GitHub documents [job-token provenance/lifetime](https://docs.github.com/en/actions/concepts/security/github_token), [job-scoped permissions](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#permissions), [REST refusal ambiguity](https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api) and [release-asset collisions/starter assets](https://docs.github.com/en/rest/releases/assets#upload-a-release-asset). The accepted source-owned amendment is retained at `.agent/runs/a1-release-authorization-20261017/design.json`; this research performs no live request. `contents: write` is repository-wide; reviewed exact-object guards impose the narrower boundary. Current-main equality also avoids introducing another credential for the [release workflow-target caveat](https://docs.github.com/en/rest/releases/releases#create-a-release). No suitable existing-token full effective-permission introspection route was established; that scoped conclusion is not a universal impossibility claim. Revisit only with an explicit applicable primary contract, not a probe or new credential.
+
 
 ## Resolved Technical Context Inputs
 

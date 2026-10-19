@@ -1,11 +1,11 @@
-"""Seal one A1 retained-artifact proof from downloaded GitHub Actions bytes only.
+"""Seal A1 retained-artifact or fresh public-release consumer proof.
 
-Candidate mode accepts a closed structural-reference bundle, downloads its Candidate
-Identity Record, archive, raw manifest, and Release Gate Catalog into a fresh local
-directory, verifies every declared hash before extraction, exercises the inherited
-consumer matrix, invokes the unchanged Python rollback oracle, and writes exactly
-one canonical receipt. It never accepts a source-tree executable, a local rebuild,
-or a caller-supplied candidate JSON as proof authority.
+Both modes resolve Candidate Identity and Release Gate Catalog metadata from a
+closed Actions reference bundle. Candidate mode downloads the retained payload;
+remote mode downloads payload bytes only from the exact public GitHub prerelease.
+Both verify the archive, raw manifest, and extracted executable, run the complete
+consumer matrix and unchanged Python rollback, then write one canonical receipt.
+Neither accepts a source-tree executable, rebuild, or caller-supplied candidate.
 """
 
 from __future__ import annotations
@@ -13,24 +13,25 @@ from __future__ import annotations
 import argparse
 import ctypes
 import hashlib
-import importlib.util
-import io
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
 import threading
-import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_ARTIFACT_HELPER_PATH = _PROJECT_ROOT / "scripts" / "stateless_preview_artifact.py"
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from scripts import stateless_preview_artifact as _artifact
+from scripts.stateless_preview_public_release import download_public_release
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _EXECUTABLE_NAME = "netcoredbg-mcp-stateless-preview.exe"
 _PROTOCOL_VERSION = "2026-07-28"
 _REQUEST_META = {
@@ -47,17 +48,9 @@ _EXPECTED_OBSERVED = {
     "EXPECT_REFUSAL": "REFUSAL",
 }
 
-_spec = importlib.util.spec_from_file_location("_preview_artifact_contract", _ARTIFACT_HELPER_PATH)
-if _spec is None or _spec.loader is None:
-    raise RuntimeError("A1 artifact contract is unavailable")
-_artifact = importlib.util.module_from_spec(_spec)
-sys.modules[_spec.name] = _artifact
-_spec.loader.exec_module(_artifact)
-
 assemble_candidate_identity = _artifact.assemble_candidate_identity
 consumer_proof_scenario_catalog = _artifact.consumer_proof_scenario_catalog
 seal_artifact_consumer_proof = _artifact.seal_artifact_consumer_proof
-validate_artifact_consumer_proof_reference = _artifact.validate_artifact_consumer_proof_reference
 verify_and_extract_retained_artifact = _artifact.verify_and_extract_retained_artifact
 
 
@@ -89,24 +82,6 @@ def _read_regular_bytes(path_value: str | Path, name: str) -> bytes:
     raise AssertionError("unreachable")
 
 
-def _load_json_object(raw: bytes, name: str) -> dict[str, Any]:
-    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                _refuse(f"{name} has duplicate keys")
-            result[key] = value
-        return result
-
-    try:
-        result = json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicates)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        _refuse(f"{name} is not valid UTF-8 JSON")
-    if not isinstance(result, dict):
-        _refuse(f"{name} must be an object")
-    return result
-
-
 def _ordinary_directory(path_value: str | Path, name: str) -> Path:
     path = Path(path_value)
     if path.is_symlink():
@@ -120,90 +95,17 @@ def _ordinary_directory(path_value: str | Path, name: str) -> Path:
     return resolved
 
 
-def _path_within(path: Path, parent: Path) -> bool:
-    try:
-        path.resolve(strict=False).relative_to(parent.resolve(strict=True))
-    except ValueError:
-        return False
-    return True
-
-
-@dataclass(frozen=True)
-class ArtifactFileReference:
-    repository: str
-    run_id: str
-    artifact_id: str
-    artifact_name: str
-    artifact_sha256: str
-    retention_days: int
-    expires_at: str
-    path: str
-    sha256: str
-
-    @classmethod
-    def from_mapping(cls, value: Mapping[str, Any], name: str) -> ArtifactFileReference:
-        validated = validate_artifact_consumer_proof_reference(value)
-        artifact = validated["artifact"]
-        return cls(
-            repository=validated["repository"],
-            run_id=validated["run_id"],
-            artifact_id=artifact["id"],
-            artifact_name=artifact["name"],
-            artifact_sha256=artifact["sha256"],
-            retention_days=artifact["retention"]["configured_days"],
-            expires_at=artifact["retention"]["expires_at"],
-            path=validated["path"],
-            sha256=validated["sha256"],
-        )
-
-    def as_mapping(self) -> dict[str, Any]:
-        return {
-            "repository": self.repository,
-            "run_id": self.run_id,
-            "artifact": {
-                "id": self.artifact_id,
-                "name": self.artifact_name,
-                "sha256": self.artifact_sha256,
-                "retention": {
-                    "configured_days": self.retention_days,
-                    "expires_at": self.expires_at,
-                },
-            },
-            "path": self.path,
-            "sha256": self.sha256,
-        }
-
-    def same_artifact(self, other: ArtifactFileReference) -> bool:
-        return (
-            self.repository,
-            self.run_id,
-            self.artifact_id,
-            self.artifact_name,
-            self.artifact_sha256,
-            self.retention_days,
-            self.expires_at,
-        ) == (
-            other.repository,
-            other.run_id,
-            other.artifact_id,
-            other.artifact_name,
-            other.artifact_sha256,
-            other.retention_days,
-            other.expires_at,
-        )
-
-
 @dataclass(frozen=True)
 class CandidateReferences:
-    candidate_identity: ArtifactFileReference
-    archive: ArtifactFileReference
-    manifest: ArtifactFileReference
-    release_gate_catalog: ArtifactFileReference
+    candidate_identity: _artifact.ArtifactFileReference
+    archive: _artifact.ArtifactFileReference
+    manifest: _artifact.ArtifactFileReference
+    release_gate_catalog: _artifact.ArtifactFileReference
 
     @classmethod
     def load(cls, path_value: str | Path) -> CandidateReferences:
         raw = _read_regular_bytes(path_value, "candidate reference bundle")
-        value = _load_json_object(raw, "candidate reference bundle")
+        value = _artifact._load_retained_json_object(raw, "candidate reference bundle")
         if (
             set(value)
             != {
@@ -217,7 +119,9 @@ class CandidateReferences:
         ):
             _refuse("candidate reference bundle has unsupported or missing fields")
         fields = {
-            field: ArtifactFileReference.from_mapping(value[field], f"candidate {field} reference")
+            field: _artifact.ArtifactFileReference.from_mapping(
+                value[field], f"candidate {field} reference"
+            )
             for field in (
                 "candidate_identity",
                 "archive",
@@ -230,139 +134,8 @@ class CandidateReferences:
         return cls(**fields)
 
 
-class ArtifactDownloader:
-    def __init__(self, root: Path):
-        self._root = root
-        self._archives: dict[tuple[str, str, str], tuple[Path, str]] = {}
-        self._archive_directory: Path | None = None
-
-    def _run_gh(self, arguments: Sequence[str], name: str) -> bytes:
-        try:
-            result = subprocess.run(
-                ["gh", *arguments],
-                cwd=self._root,
-                capture_output=True,
-                check=False,
-                timeout=60,
-            )
-        except (OSError, subprocess.SubprocessError):
-            _refuse(f"{name} could not be downloaded")
-        if result.returncode != 0:
-            _refuse(f"{name} could not be downloaded")
-        return result.stdout
-
-    def _metadata(self, reference: ArtifactFileReference) -> None:
-        raw = self._run_gh(
-            ["api", f"repos/{reference.repository}/actions/artifacts/{reference.artifact_id}"],
-            "retained artifact metadata",
-        )
-        metadata = _load_json_object(raw, "retained artifact metadata")
-        workflow_run = metadata.get("workflow_run")
-        if (
-            str(metadata.get("id")) != reference.artifact_id
-            or metadata.get("name") != reference.artifact_name
-            or metadata.get("expired") is not False
-            or not isinstance(workflow_run, Mapping)
-            or str(workflow_run.get("id")) != reference.run_id
-            or metadata.get("expires_at") != reference.expires_at
-        ):
-            _refuse("retained artifact metadata does not match its structural reference")
-        digest = metadata.get("digest")
-        if digest is not None and digest != f"sha256:{reference.artifact_sha256}":
-            _refuse("retained artifact metadata digest does not match its structural reference")
-
-    def _archive(self, reference: ArtifactFileReference) -> bytes:
-        key = (reference.repository, reference.artifact_id, reference.artifact_sha256)
-        cached = self._archives.get(key)
-        if cached is not None:
-            cached_path, wire_sha256 = cached
-            wire_bytes = _read_regular_bytes(cached_path, "cached retained artifact")
-            if _sha256_bytes(wire_bytes) != wire_sha256 or wire_sha256 != reference.artifact_sha256:
-                _refuse("cached retained artifact wire bytes do not match the structural reference")
-            return wire_bytes
-        self._metadata(reference)
-        wire_bytes = self._run_gh(
-            [
-                "api",
-                f"repos/{reference.repository}/actions/artifacts/{reference.artifact_id}/zip",
-            ],
-            "retained artifact",
-        )
-        wire_sha256 = _sha256_bytes(wire_bytes)
-        if wire_sha256 != reference.artifact_sha256:
-            _refuse("retained artifact wire bytes do not match the structural reference")
-        destination = (
-            self._root / "artifacts" / f"{reference.artifact_id}-{reference.artifact_sha256}.zip"
-        )
-        try:
-            if self._archive_directory is None:
-                destination.parent.mkdir(parents=True, exist_ok=False)
-                self._archive_directory = destination.parent
-            elif destination.parent != self._archive_directory:
-                _refuse("retained artifact directory is inconsistent")
-            with destination.open("xb") as output:
-                output.write(wire_bytes)
-        except FileExistsError:
-            _refuse("retained artifact destination already exists")
-        except OSError:
-            _refuse("fresh retained artifact directory is unavailable")
-        self._archives[key] = (destination, wire_sha256)
-        return wire_bytes
-
-    def _artifact_member(self, reference: ArtifactFileReference) -> bytes:
-        wire_bytes = self._archive(reference)
-        try:
-            with zipfile.ZipFile(io.BytesIO(wire_bytes)) as archive:
-                entries = [
-                    entry for entry in archive.infolist() if entry.filename == reference.path
-                ]
-                if len(entries) != 1 or entries[0].is_dir():
-                    _refuse("retained artifact file is absent or ambiguous")
-                contents = archive.read(entries[0])
-        except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile):
-            _refuse("retained artifact is unreadable")
-        if _sha256_bytes(contents) != reference.sha256:
-            _refuse("retained artifact file bytes do not match the structural reference")
-        return contents
-
-    def _retain_file(self, reference: ArtifactFileReference, contents: bytes) -> Path:
-        destination = self._root / "downloaded" / Path(*reference.path.split("/"))
-        if not _path_within(destination, self._root):
-            _refuse("retained artifact path escapes the fresh download directory")
-        try:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            with destination.open("xb") as output:
-                output.write(contents)
-        except OSError:
-            _refuse("retained artifact file cannot be retained locally")
-        return destination
-
-    def download_file(self, reference: ArtifactFileReference) -> Path:
-        return self._retain_file(reference, self._artifact_member(reference))
-
-    def download_payload(
-        self,
-        archive: ArtifactFileReference,
-        manifest: ArtifactFileReference,
-        candidate_artifact_sha256: str,
-    ) -> tuple[Path, Path]:
-        if not archive.same_artifact(manifest):
-            _refuse("payload references do not name one retained artifact")
-        archive_contents = self._artifact_member(archive)
-        manifest_contents = self._artifact_member(manifest)
-        payload_digest = hashlib.sha256()
-        payload_digest.update(archive_contents)
-        payload_digest.update(manifest_contents)
-        if payload_digest.hexdigest() != candidate_artifact_sha256:
-            _refuse("downloaded retained payload does not match the candidate artifact")
-        return (
-            self._retain_file(archive, archive_contents),
-            self._retain_file(manifest, manifest_contents),
-        )
-
-
 def _require_candidate_file_reference(
-    actual: ArtifactFileReference, expected: Mapping[str, Any], name: str
+    actual: _artifact.ArtifactFileReference, expected: Mapping[str, Any], name: str
 ) -> None:
     if (
         actual.repository != expected["repository"]
@@ -851,12 +624,21 @@ _PYTHON_ROLLBACK_PRODUCT_WORKS_MARKER = {
 
 def _run_python_rollback(command: str, arguments: Sequence[str]) -> dict[str, Any]:
     try:
+        resolved_command = shutil.which(command)
+        if resolved_command is None:
+            _refuse("unchanged Python rollback oracle could not run")
+        resolved_command = str(Path(resolved_command).absolute())
+        environment = os.environ.copy()
+        environment["PATH"] = (
+            str(Path(resolved_command).parent) + os.pathsep + environment.get("PATH", "")
+        )
         result = subprocess.run(
-            [command, *arguments],
+            [resolved_command, *arguments],
             cwd=_PROJECT_ROOT,
+            env=environment,
             capture_output=True,
             check=False,
-            timeout=30,
+            timeout=120,
         )
     except (OSError, subprocess.SubprocessError):
         _refuse("unchanged Python rollback oracle could not run")
@@ -864,7 +646,9 @@ def _run_python_rollback(command: str, arguments: Sequence[str]) -> dict[str, An
         _refuse("unchanged Python rollback oracle did not reach PRODUCT_WORKS")
     if (
         not isinstance(result.stdout, bytes)
-        or _load_json_object(result.stdout, "unchanged Python rollback oracle output")
+        or _artifact._load_retained_json_object(
+            result.stdout, "unchanged Python rollback oracle output"
+        )
         != _PYTHON_ROLLBACK_PRODUCT_WORKS_MARKER
     ):
         _refuse("unchanged Python rollback oracle did not emit PRODUCT_WORKS")
@@ -936,17 +720,23 @@ def _write_receipt_once(path_value: str | Path, receipt: Mapping[str, Any]) -> N
 
 
 def run_candidate(arguments: argparse.Namespace) -> Mapping[str, Any]:
+    remote = arguments.command == "remote"
+    receipt_path = Path(arguments.receipt_output)
+    if receipt_path.exists() or receipt_path.is_symlink():
+        _refuse("consumer proof receipt already exists")
     references = CandidateReferences.load(arguments.references)
     fixture_root = _ordinary_directory(arguments.fixture_root, "fixture root")
     download_root = _ordinary_directory(arguments.download_root, "download root")
     with tempfile.TemporaryDirectory(prefix="a1-preview-artifact-", dir=download_root) as temporary:
         fresh = Path(temporary)
-        downloader = ArtifactDownloader(fresh)
+        downloader = _artifact.ArtifactDownloader(fresh)
         identity_path = downloader.download_file(references.candidate_identity)
         identity_bytes = _read_regular_bytes(identity_path, "downloaded candidate identity")
         if _sha256_bytes(identity_bytes) != references.candidate_identity.sha256:
             _refuse("downloaded candidate identity hash is wrong")
-        identity = _load_json_object(identity_bytes, "downloaded candidate identity")
+        identity = _artifact._load_retained_json_object(
+            identity_bytes, "downloaded candidate identity"
+        )
         validated_identity = assemble_candidate_identity(identity)
         candidate = validated_identity["candidate"]
         manifest_binding = candidate["preview_manifest"]
@@ -956,18 +746,39 @@ def run_candidate(arguments: argparse.Namespace) -> Mapping[str, Any]:
         _require_candidate_file_reference(
             references.manifest, manifest_binding["manifest_reference"], "manifest"
         )
-        archive_path, manifest_path = downloader.download_payload(
-            references.archive,
-            references.manifest,
-            candidate["build"]["artifact"]["sha256"],
-        )
+        if remote:
+            _artifact._verified_raw_candidate(
+                validated_identity, identity_bytes, references.candidate_identity.as_mapping()
+            )
+        else:
+            archive_path, manifest_path = downloader.download_payload(
+                references.archive,
+                references.manifest,
+                candidate["build"]["artifact"]["sha256"],
+            )
         catalog_path = downloader.download_file(references.release_gate_catalog)
-        if archive_path.parent != manifest_path.parent:
-            _refuse("archive and manifest were not retained in one fresh payload directory")
         catalog_bytes = _read_regular_bytes(catalog_path, "downloaded release gate catalog")
         if _sha256_bytes(catalog_bytes) != references.release_gate_catalog.sha256:
             _refuse("downloaded release gate catalog hash is wrong")
-        catalog = _load_json_object(catalog_bytes, "downloaded release gate catalog")
+        catalog = _artifact._load_retained_json_object(
+            catalog_bytes, "downloaded release gate catalog"
+        )
+        if remote:
+            _artifact._validate_release_gate_catalog_for_consumer_proof(catalog, candidate)
+            archive_path, manifest_path, download_origin = download_public_release(
+                candidate, arguments.release_id, fresh / "public-assets"
+            )
+        else:
+            download_origin = {
+                "repository": candidate["build"]["repository"],
+                "workflow_path": ".github/workflows/stateless-preview.yml",
+                "run_id": candidate["build"]["run_id"],
+                "artifact": candidate["build"]["artifact"],
+                "archive_path": manifest_binding["archive_reference"]["path"],
+                "manifest_path": manifest_binding["manifest_reference"]["path"],
+            }
+        if archive_path.parent != manifest_path.parent:
+            _refuse("archive and manifest were not downloaded into one fresh payload directory")
         verified = verify_and_extract_retained_artifact(
             validated_identity,
             archive_path,
@@ -975,7 +786,7 @@ def run_candidate(arguments: argparse.Namespace) -> Mapping[str, Any]:
             fresh / "extracted",
         )
         executable_path = Path(verified["executable_path"])
-        if executable_path.name != _EXECUTABLE_NAME or not _path_within(
+        if executable_path.name != _EXECUTABLE_NAME or not _artifact._path_within(
             executable_path, fresh / "extracted"
         ):
             _refuse("extracted executable is not the verified retained artifact member")
@@ -1005,15 +816,8 @@ def run_candidate(arguments: argparse.Namespace) -> Mapping[str, Any]:
             "receipt_id": arguments.receipt_id,
             "candidate_identity_record": references.candidate_identity.as_mapping(),
             "candidate": candidate,
-            "proof_stage": "retained_artifact",
-            "download_origin": {
-                "repository": candidate["build"]["repository"],
-                "workflow_path": ".github/workflows/stateless-preview.yml",
-                "run_id": candidate["build"]["run_id"],
-                "artifact": candidate["build"]["artifact"],
-                "archive_path": manifest_binding["archive_reference"]["path"],
-                "manifest_path": manifest_binding["manifest_reference"]["path"],
-            },
+            "proof_stage": "remote_release" if remote else "retained_artifact",
+            "download_origin": download_origin,
             "input_identity_results": {
                 "archive": verified["archive"],
                 "manifest": verified["manifest"],
@@ -1051,13 +855,18 @@ def run_candidate(arguments: argparse.Namespace) -> Mapping[str, Any]:
             "outcome": "PASS",
             "recorded_at": arguments.recorded_at,
         }
-        sealed = seal_artifact_consumer_proof(
-            receipt,
-            candidate_identity=validated_identity,
-            candidate_identity_bytes=identity_bytes,
-            candidate_identity_reference=references.candidate_identity.as_mapping(),
-            release_gate_catalog=catalog,
-        )
+        binding = {
+            "candidate_identity": validated_identity,
+            "candidate_identity_bytes": identity_bytes,
+            "candidate_identity_reference": references.candidate_identity.as_mapping(),
+            "release_gate_catalog": catalog,
+        }
+        if remote:
+            sealed = _artifact._freeze(
+                _artifact._validate_stage_consumer_proof(receipt, remote=True, **binding)
+            )
+        else:
+            sealed = seal_artifact_consumer_proof(receipt, **binding)
     _write_receipt_once(arguments.receipt_output, sealed)
     return sealed
 
@@ -1065,22 +874,28 @@ def run_candidate(arguments: argparse.Namespace) -> Mapping[str, Any]:
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    candidate = commands.add_parser("candidate", help="prove one downloaded retained candidate")
-    candidate.add_argument("--references", required=True)
-    candidate.add_argument("--download-root", required=True)
-    candidate.add_argument("--fixture-root", required=True)
-    candidate.add_argument("--receipt-output", required=True)
-    candidate.add_argument("--receipt-id", required=True)
-    candidate.add_argument("--recorded-at", required=True)
-    candidate.add_argument("--python-rollback-command", required=True)
-    candidate.add_argument("--python-rollback-argument", action="append", default=[])
+    for command, description in (
+        ("candidate", "prove one downloaded retained candidate"),
+        ("remote", "prove freshly downloaded public prerelease assets"),
+    ):
+        consumer = commands.add_parser(command, help=description)
+        consumer.add_argument("--references", required=True)
+        consumer.add_argument("--download-root", required=True)
+        consumer.add_argument("--fixture-root", required=True)
+        consumer.add_argument("--receipt-output", required=True)
+        consumer.add_argument("--receipt-id", required=True)
+        consumer.add_argument("--recorded-at", required=True)
+        consumer.add_argument("--python-rollback-command", required=True)
+        consumer.add_argument("--python-rollback-argument", action="append", default=[])
+        if command == "remote":
+            consumer.add_argument("--release-id", required=True, type=int)
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = parse_args(argv)
     try:
-        if arguments.command == "candidate":
+        if arguments.command in ("candidate", "remote"):
             run_candidate(arguments)
         else:
             raise AssertionError("unreachable")

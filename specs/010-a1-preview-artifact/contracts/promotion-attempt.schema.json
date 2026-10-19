@@ -2,8 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "promotion-attempt.schema.json",
   "title": "A1 preview Promotion Attempt",
-  "description": "Immutable admission record for one current promotion run. Before its first remote mutation it revalidates the Decision's passing pre-decision evidence and binds a passing pre-publication evidence set, then records the current dispatcher, run, permission readback, observation, and classification. It neither requires nor accepts post-publication proof.",
-  "$comment": "Semantic admission resolves candidate, decision, and both stage evidence records by their structural references and raw-byte SHA-256. ATTEMPT_CANDIDATE_DECISION_EQUALITY requires all candidate bindings and decision hashes to agree. ATTEMPT_PRE_MUTATION_STAGE_ADMISSION requires pre_decision_stage_evidence to be the exact same resolved record named by the approved Decision, revalidates its stage=pre-decision PASS result and the seven-lens aggregate, and requires pre_publication_stage_evidence to resolve to a PASS pre-publication set for the same candidate, source commit, and catalog before any Remote Observation, Remote Classification, tag, release, or asset mutation. POST_PUBLICATION_PROOF_ABSENCE is deliberate: this closed record has no post-publication field and cannot require remote proof before publication. ATTEMPT_DECISION_AUTHORIZATION, ATTEMPT_WORKFLOW_CONTEXT_EQUALITY, and ATTEMPT_PERMISSION_READBACK_EQUALITY retain current dispatcher, current workflow run/attempt, and current permission binding requirements.",
+  "description": "Immutable Attempt 3.0 admission binds exact-source execution policy, not observed grants or a guarantee of server authorization.",
+  "$comment": "Resolve and hash Candidate, Catalog, APPROVE Decision, both passing pre-mutation Stages, Observation 2.0 and classification. Independently captured source/build/checkout/live-main/workflow SHA and both initiators must match the candidate and authorized dispatcher. execution_policy identifies the exact tracked workflow blob and fixed github.token provenance; App/installation IDs stay UNOBSERVED/null. Complete prior-run/attempt/artifact discovery independently determines predecessor_attempt, including evidence for null. Preserve original operation identities, denials and UNKNOWN; no uncertain resend. Chronology: pre-decision <= Decision <= pre-publication <= O0 <= C0 <= A before expiry. PASS is admission only. Reject legacy 1.0/2.0 and retired fields without upgrading history.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -20,12 +20,13 @@
     "workflow_run",
     "remote_observation",
     "remote_classification",
+    "predecessor_attempt",
     "admission_status",
     "recorded_at"
   ],
   "properties": {
     "schema_version": {
-      "const": "1.0"
+      "const": "3.0"
     },
     "attempt_id": {
       "$ref": "artifact-consumer-proof.schema.json#/$defs/safe_opaque_id"
@@ -62,6 +63,16 @@
     },
     "remote_classification": {
       "$ref": "#/$defs/github_artifact_file_reference"
+    },
+    "predecessor_attempt": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/github_artifact_file_reference"
+        }
+      ]
     },
     "admission_status": {
       "const": "PASS"
@@ -184,41 +195,40 @@
         }
       }
     },
-    "promotion_permission_readback": {
+    "execution_policy": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "reference",
+        "model",
         "run_attempt",
-        "authenticated_actor",
-        "permissions"
+        "job_key",
+        "job_id",
+        "workflow_sha",
+        "workflow_blob_sha256",
+        "execution_token"
       ],
       "properties": {
-        "reference": {
-          "$ref": "#/$defs/github_artifact_file_reference"
+        "model": {
+          "const": "GITHUB_JOB_TOKEN_SERVER_ENFORCED"
         },
         "run_attempt": {
           "type": "integer",
           "minimum": 1
         },
-        "authenticated_actor": {
-          "$ref": "#/$defs/github_actor_identity"
+        "job_key": {
+          "const": "promote"
         },
-        "permissions": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "actions",
-            "contents"
-          ],
-          "properties": {
-            "actions": {
-              "const": "read"
-            },
-            "contents": {
-              "const": "write"
-            }
-          }
+        "job_id": {
+          "$ref": "#/$defs/github_identifier"
+        },
+        "workflow_sha": {
+          "$ref": "#/$defs/source_commit"
+        },
+        "workflow_blob_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "execution_token": {
+          "$ref": "#/$defs/execution_token_provenance"
         }
       }
     },
@@ -228,7 +238,8 @@
       "required": [
         "decision_authorization",
         "current_github_actor",
-        "permission_readback"
+        "current_github_triggering_actor",
+        "execution_policy"
       ],
       "properties": {
         "decision_authorization": {
@@ -237,8 +248,11 @@
         "current_github_actor": {
           "$ref": "#/$defs/github_actor_identity"
         },
-        "permission_readback": {
-          "$ref": "#/$defs/promotion_permission_readback"
+        "current_github_triggering_actor": {
+          "$ref": "#/$defs/github_actor_identity"
+        },
+        "execution_policy": {
+          "$ref": "#/$defs/execution_policy"
         }
       }
     },
@@ -280,6 +294,34 @@
         },
         "commit": {
           "$ref": "#/$defs/source_commit"
+        }
+      }
+    },
+    "execution_token_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "kind",
+        "identity_observation",
+        "app_id",
+        "installation_id"
+      ],
+      "properties": {
+        "source": {
+          "const": "github.token"
+        },
+        "kind": {
+          "const": "GITHUB_APP_INSTALLATION_TOKEN"
+        },
+        "identity_observation": {
+          "const": "UNOBSERVED"
+        },
+        "app_id": {
+          "const": null
+        },
+        "installation_id": {
+          "const": null
         }
       }
     },

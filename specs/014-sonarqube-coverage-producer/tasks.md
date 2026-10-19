@@ -9,6 +9,7 @@ description: "Dependency-ordered Wave-3 tasks for the parent-compatible exact-he
 **Release intent**: `none`.
 **Execution gate**: T000 passed against merged Wave-2 evidence. T001 through T028 may proceed in dependency order; no scanner, diagnostic, receipt, or release action is authorized before its owning task.
 **Receipt state**: No actual diagnostic record, inventory artifact, or acceptance receipt may exist before T028.
+**Technical amendment — 2026-10-16**: The active COV-004/COV-009 tuple now requires `coverlet.msbuild` `10.1.0` for the [known upstream hit-file publication race fix](research.md#technical-amendment--2026-10-16). Completed T009 below retains its original `10.0.1` implementation and evidence. All other historical run records remain unchanged; none is relabeled as a `10.1.0` PASS. Canonical run `38947862318` remains RED after its observed EOF failure following Host `132/132`; the historical writer/PID and root cause remain **UNKNOWN**. Fresh exact-head proof must still cover Python and all five .NET producers, normalized reports, production-source mappings, positive denominators, restored DLL/PDB hashes, and cleanliness.
 
 ## Binding RED/GREEN matrix
 
