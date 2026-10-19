@@ -4980,7 +4980,7 @@ def _closeout_publisher(
         "repository_id": inputs["context"]["repository_id"],
         "run_id": run_id,
         "attempt": attempt,
-        "history_created_at": run["created_at"],
+        "publisher_attempt_created_at": run["created_at"],
         "current": {
             "current_attempt_id": f"a1-promote-{run_id}-{attempt}-{job_id}",
             "workflow_run": {
@@ -5271,7 +5271,7 @@ def _closeout_admit_lineage(inputs: MutableMapping[str, Any]) -> None:
         **binding,
     )
     if not (
-        _review_timestamp(context["history_created_at"], "publisher run creation")
+        _review_timestamp(context["publisher_attempt_created_at"], "publisher attempt creation")
         <= _review_timestamp(attempt["recorded_at"], "publisher Attempt time")
         <= inputs["publisher_completed_at"]
     ):
@@ -6512,11 +6512,28 @@ def _promotion_discover_predecessor(
     current = [run for run in runs if str(run.get("id")) == context["run_id"]]
     if len(current) != 1:
         _refuse("complete predecessor discovery does not contain the current run")
-    current_time = _review_timestamp(current[0].get("created_at"), "current run creation")
-    if context.get("history_created_at") is not None and current_time != _review_timestamp(
-        context["history_created_at"], "historical publisher creation"
+    anchor = current[0]
+    source = context["source"]
+    if (
+        str(_expect_positive_integer(anchor.get("id"), "history anchor run ID"))
+        != context["run_id"]
+        or anchor.get("event") != _TRUSTED_BUILD_EVENT
+        or anchor.get("path") != _TRUSTED_WORKFLOW_PATH
+        or anchor.get("head_branch") != "main"
+        or anchor.get("head_sha") != source["commit"]
     ):
-        _refuse("publisher history anchor differs from its exact admitted attempt")
+        _refuse("publisher history anchor does not bind the exact canonical source")
+    for field in ("repository", "head_repository"):
+        repository = anchor.get(field)
+        if not isinstance(repository, Mapping):
+            _refuse("publisher history anchor repository is unavailable")
+        if (
+            str(_expect_positive_integer(repository.get("id"), "history anchor repository ID"))
+            != context["repository_id"]
+            or repository.get("full_name") != source["repository"]
+        ):
+            _refuse("publisher history anchor belongs to a different repository or fork")
+    current_time = _review_timestamp(anchor.get("created_at"), "current run creation")
     predecessors = []
     for run in runs:
         run_id = str(_expect_positive_integer(run.get("id"), "discovered run ID"))
