@@ -305,11 +305,20 @@ public sealed class RootsRelayRealPythonTests
     {
         var projectRoot = Path.Combine(Path.GetTempPath(), "roots-relay-cwd-" + Guid.NewGuid().ToString("N"));
         WriteMarkerCSharpFile(projectRoot);
-        // find_dotnet_project_root's marker search would otherwise walk up from this
-        // process's own cwd into the repository's own .sln/.git; a project marker placed
-        // directly in the temp cwd itself is matched on the very first ancestor check, so
-        // the resolved root is deterministic regardless of the surrounding repository.
+        // find_dotnet_project_root searches all ancestors for solutions before projects.
+        // A local solution keeps this fixture's cwd authoritative even inside the repository.
         File.WriteAllText(Path.Combine(projectRoot, "Fixture.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        File.WriteAllText(Path.Combine(projectRoot, "Fixture.sln"),
+            """
+            Microsoft Visual Studio Solution File, Format Version 12.00
+            # Visual Studio Version 17
+            VisualStudioVersion = 17.5.2.0
+            MinimumVisualStudioVersion = 10.0.40219.1
+            Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Fixture", "Fixture.csproj", "{7C021712-8E17-4B22-BE89-482BF7B3BD23}"
+            EndProject
+            Global
+            EndGlobal
+            """);
 
         var originalCwd = Environment.CurrentDirectory;
         (RelaySession Session, PythonBackendProcess Python, DuplexChannel Downstream) started;
