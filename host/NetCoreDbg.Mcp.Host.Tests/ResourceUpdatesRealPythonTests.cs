@@ -27,7 +27,8 @@ public sealed class ResourceUpdatesRealPythonTests
         "fixtures",
         "SmokeTestApp",
         "SmokeTestApp.csproj");
-    private static readonly string SmokeDll = RootsRelayRealPythonTests.OutputRoot("NETCOREDBG_MCP_TEST_ARTIFACTS_PATH") is { } artifactsPath
+    private static readonly string? ArtifactsPath = RootsRelayRealPythonTests.OutputRoot("NETCOREDBG_MCP_TEST_ARTIFACTS_PATH");
+    private static readonly string SmokeDll = ArtifactsPath is { } artifactsPath
         ? Path.Combine(artifactsPath, "bin", "SmokeTestApp", "debug", "SmokeTestApp.dll")
         : Path.Combine(RepoRoot, "tests", "fixtures", "SmokeTestApp", "bin", "Debug", "net8.0-windows", "SmokeTestApp.dll");
     private static readonly ImmutableArray<string> TerminalStates = ImmutableArray.Create("idle", "terminated");
@@ -56,7 +57,12 @@ public sealed class ResourceUpdatesRealPythonTests
                 "-nr:false",
             },
         };
-        foreach (var property in new[] { "ArtifactsPath", "SonarQubeTempPath", "CustomBeforeMicrosoftCommonTargets", "ImportUserLocationsByWildcardBeforeMicrosoftCommonTargets" })
+        start.Environment.Remove("ArtifactsPath");
+        if (ArtifactsPath is { } artifactsPath)
+        {
+            start.ArgumentList.Add($"-p:ArtifactsPath={artifactsPath}");
+        }
+        foreach (var property in new[] { "SonarQubeTempPath", "CustomBeforeMicrosoftCommonTargets", "ImportUserLocationsByWildcardBeforeMicrosoftCommonTargets" })
         {
             if (Environment.GetEnvironmentVariable(property) is { Length: > 0 } value)
             {
