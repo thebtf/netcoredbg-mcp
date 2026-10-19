@@ -51,7 +51,8 @@ internal sealed record AdapterOptions(
     bool OmitDelayedStackTraceLoading,
     string LifecycleMode,
     bool SuppressContinuedAfterStopped,
-    string StackTraceResponseMode)
+    string StackTraceResponseMode,
+    string NextResponseMode)
 {
     public static AdapterOptions Parse(string[] args, string? environmentOptions)
     {
@@ -82,6 +83,7 @@ internal sealed record AdapterOptions(
         var lifecycleMode = "default";
         var suppressContinuedAfterStopped = false;
         var stackTraceResponseMode = "success";
+        var nextResponseMode = "success";
 
         foreach (var argument in args.Concat(SplitOptions(environmentOptions)))
         {
@@ -172,6 +174,9 @@ internal sealed record AdapterOptions(
                 case var _ when argument.StartsWith("--stack-trace-response=", StringComparison.Ordinal):
                     stackTraceResponseMode = argument["--stack-trace-response=".Length..];
                     break;
+                case var _ when argument.StartsWith("--next-response=", StringComparison.Ordinal):
+                    nextResponseMode = argument["--next-response=".Length..];
+                    break;
                 default:
                     throw new ArgumentException($"Unknown fixture option '{argument}'.", nameof(args));
             }
@@ -204,7 +209,8 @@ internal sealed record AdapterOptions(
             omitDelayedStackTraceLoading,
             lifecycleMode,
             suppressContinuedAfterStopped,
-            stackTraceResponseMode);
+            stackTraceResponseMode,
+            nextResponseMode);
     }
 
     private static IEnumerable<string> SplitOptions(string? options) =>
@@ -329,12 +335,15 @@ internal sealed class ControlledDapAdapter
     private readonly string? _secondWindowedDescendantReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_SECOND_WINDOWED_DESCENDANT_RELEASE");
     private readonly string? _threadsResponseReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_THREADS_RESPONSE_RELEASE");
     private readonly string? _stackTraceResponseReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_STACK_TRACE_RESPONSE_RELEASE");
+    private readonly string? _nextResponseReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_NEXT_RESPONSE_RELEASE");
     private Process? _descendant;
     private Process? _secondDescendant;
     private Task? _lifecycleEvents;
     private readonly CancellationTokenSource _lifecycleEventsCancellation = new();
     private Task? _heldStackTraceResponse;
+    private int? _heldStackTraceResponseSequence;
     private Task? _heldThreadsResponse;
+    private Task? _heldNextResponse;
     private static readonly TimeSpan InitializeGateWindow = TimeSpan.FromMilliseconds(75);
     private static readonly TimeSpan GracefulReleaseTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ConfigurationDoneCapabilityDeltaReleaseTimeout = TimeSpan.FromSeconds(2);
@@ -398,6 +407,17 @@ internal sealed class ControlledDapAdapter
                 catch (OperationCanceledException) when (_lifecycleEventsCancellation.IsCancellationRequested)
                 {
                     // Fixture teardown aborts an unreleased held response after cleanup commands were observed.
+                }
+            }
+            if (_heldNextResponse is { } heldNextResponse)
+            {
+                try
+                {
+                    await heldNextResponse.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (_lifecycleEventsCancellation.IsCancellationRequested)
+                {
+                    // Fixture teardown aborts an unreleased held next response after cleanup commands were observed.
                 }
             }
 
@@ -563,6 +583,8 @@ internal sealed class ControlledDapAdapter
                 return await HandleThreadsRequestAsync(sequence, cancellationToken);
             case "stackTrace":
                 return await HandleStackTraceRequestAsync(sequence, cancellationToken);
+            case "next":
+                return await HandleNextRequestAsync(sequence, root, cancellationToken);
             default:
                 await WriteResponseAsync(sequence, command, body: null, cancellationToken);
                 return false;
@@ -716,9 +738,14 @@ internal sealed class ControlledDapAdapter
                 throw new InvalidOperationException($"Unknown lifecycle mode '{_options.LifecycleMode}'.");
         }
     }
-    private async Task WriteStoppedEventAsync(int? threadId, bool? allThreadsStopped, CancellationToken cancellationToken, string? recordKind = null)
+    private async Task WriteStoppedEventAsync(
+        int? threadId,
+        bool? allThreadsStopped,
+        CancellationToken cancellationToken,
+        string? recordKind = null,
+        string? reason = null)
     {
-        var body = new Dictionary<string, object?> { ["reason"] = _options.StopReason };
+        var body = new Dictionary<string, object?> { ["reason"] = reason ?? _options.StopReason };
         if (threadId is { } target)
         {
             body["threadId"] = target;
@@ -987,6 +1014,38 @@ internal sealed class ControlledDapAdapter
         await WaitForThreadsResponseReleaseAsync(cancellationToken);
         await WriteResponseAsync(sequence, "threads", new { threads = Threads(1, "worker") }, cancellationToken);
     }
+    private async Task WaitForNextResponseReleaseAsync(CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(_nextResponseReleasePath))
+        {
+            throw new InvalidOperationException("CONTROLLED_DAP_NEXT_RESPONSE_RELEASE is required when the next response is held.");
+        }
+
+        while (!File.Exists(_nextResponseReleasePath))
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken);
+        }
+    }
+
+    private async Task CompleteHeldNextResponseAsync(int sequence, int threadId, CancellationToken cancellationToken)
+    {
+        await WaitForNextResponseReleaseAsync(cancellationToken);
+        await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+        await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "step");
+    }
+
+    private async Task CompleteHeldNextStopAsync(int threadId, CancellationToken cancellationToken)
+    {
+        await WaitForNextResponseReleaseAsync(cancellationToken);
+        await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "step");
+    }
+
+    private async Task CompleteHeldNextAcknowledgementAsync(int sequence, CancellationToken cancellationToken)
+    {
+        await WaitForNextResponseReleaseAsync(cancellationToken);
+        await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+        await RecordAsync(new { kind = "next-acknowledged", sequence }, cancellationToken);
+    }
 
     private async Task<DapFrame?> ReadFrameAsync(CancellationToken cancellationToken)
     {
@@ -1031,6 +1090,141 @@ internal sealed class ControlledDapAdapter
                 }
             }
         }
+    }
+    private async Task<bool> HandleNextRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)
+    {
+        var threadId = ReadRequiredNextThreadId(root);
+        var differentThreadId = threadId == int.MaxValue ? int.MinValue : threadId + 1;
+        switch (_options.NextResponseMode)
+        {
+            case "success":
+                await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+                await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "step");
+                return false;
+            case "negative":
+                await WriteResponseAsync(sequence, "next", new { message = "controlled adapter next refusal" }, cancellationToken, success: false);
+                return false;
+            case "wrong-command":
+                await WriteResponseAsync(sequence, "threads", body: null, cancellationToken);
+                return false;
+            case "wrong-request-sequence":
+                await WriteResponseAsync(sequence == int.MaxValue ? int.MinValue : sequence + 1, "next", body: null, cancellationToken);
+                return false;
+            case "wrong-request-sequence-collides-with-stack-trace":
+                if (_heldStackTraceResponseSequence is not { } heldStackTraceSequence)
+                {
+                    throw new InvalidOperationException("The collision response requires a held stackTrace request.");
+                }
+
+                await WriteResponseAsync(heldStackTraceSequence, "next", body: null, cancellationToken);
+                return false;
+            case "malformed-success":
+                await WriteMalformedNextSuccessResponseAsync(sequence, cancellationToken);
+                return false;
+            case "missing-response-sequence":
+            case "wrong-type-response-sequence":
+            case "zero-response-sequence":
+            case "negative-response-sequence":
+            case "overflow-response-sequence":
+            case "underflow-response-sequence":
+                await WriteMalformedNextSequenceResponseAsync(sequence, cancellationToken);
+                await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "step");
+                return false;
+            case "missing-stop-sequence":
+            case "wrong-type-stop-sequence":
+            case "zero-stop-sequence":
+            case "negative-stop-sequence":
+            case "overflow-stop-sequence":
+            case "underflow-stop-sequence":
+                await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+                await WriteMalformedNextStoppedSequenceEventAsync(threadId, cancellationToken);
+                return false;
+            case "reader-failure":
+                await WriteMalformedDapFrameAsync(cancellationToken);
+                return true;
+            case "timeout":
+                await RecordAsync(new { kind = "next-response-timeout", sequence }, cancellationToken);
+                return false;
+            case "hold-ack-no-stop":
+                await RecordAsync(new { kind = "next-response-gated", sequence }, cancellationToken);
+                _heldNextResponse = CompleteHeldNextAcknowledgementAsync(sequence, _lifecycleEventsCancellation.Token);
+                return false;
+            case "hold":
+                await RecordAsync(new { kind = "next-response-gated", sequence }, cancellationToken);
+                _heldNextResponse = CompleteHeldNextResponseAsync(sequence, threadId, _lifecycleEventsCancellation.Token);
+                return false;
+            case "hold-then-continued":
+                await WriteContinuedEventAsync(threadId, allThreadsContinued: true, cancellationToken);
+                await RecordAsync(new { kind = "next-response-gated", sequence }, cancellationToken);
+                _heldNextResponse = CompleteHeldNextResponseAsync(sequence, threadId, _lifecycleEventsCancellation.Token);
+                return false;
+            case "pre-ack-ignored-stops":
+                await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "breakpoint");
+                await WriteStoppedEventAsync(threadId: null, allThreadsStopped: true, cancellationToken, reason: "step");
+                await WriteStoppedEventAsync(differentThreadId, allThreadsStopped: true, cancellationToken, reason: "step");
+                await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "step");
+                await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+                await RecordAsync(new { kind = "next-final-stop-gated", sequence }, cancellationToken);
+                _heldNextResponse = CompleteHeldNextStopAsync(threadId, _lifecycleEventsCancellation.Token);
+                return false;
+            case "post-ack-ignored-stops":
+                await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+                await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "breakpoint");
+                await WriteStoppedEventAsync(threadId: null, allThreadsStopped: true, cancellationToken, reason: "step");
+                await WriteStoppedEventAsync(differentThreadId, allThreadsStopped: true, cancellationToken, reason: "step");
+                await RecordAsync(new { kind = "next-final-stop-gated", sequence }, cancellationToken);
+                _heldNextResponse = CompleteHeldNextStopAsync(threadId, _lifecycleEventsCancellation.Token);
+                return false;
+            case "terminal-before-ack":
+                await WriteEventAsync("exited", new { exitCode = _options.ExitCode }, cancellationToken);
+                return false;
+            case "terminal-after-ack":
+                await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+                await WriteEventAsync("terminated", body: null, cancellationToken);
+                await RecordAsync(new { kind = "next-terminal-after-ack", sequence }, cancellationToken);
+                return false;
+            case "terminal-exit-zero":
+            case "terminal-exit-negative":
+                await WriteEventAsync("exited", new { exitCode = _options.NextResponseMode == "terminal-exit-zero" ? 0 : -1 }, cancellationToken);
+                return false;
+            case "exited-missing-sequence":
+            case "exited-wrong-type-sequence":
+            case "exited-zero-sequence":
+            case "exited-negative-sequence":
+            case "exited-overflow-sequence":
+            case "exited-underflow-sequence":
+            case "terminated-missing-sequence":
+            case "terminated-wrong-type-sequence":
+            case "terminated-zero-sequence":
+            case "terminated-negative-sequence":
+            case "terminated-overflow-sequence":
+            case "terminated-underflow-sequence":
+            case "exited-missing-exit-code":
+            case "exited-wrong-type-exit-code":
+            case "exited-overflow-exit-code":
+                var terminal = _options.NextResponseMode.StartsWith("exited-", StringComparison.Ordinal) ? "exited" : "terminated";
+                if (terminal == "terminated")
+                {
+                    await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+                }
+                await WriteMalformedNextTerminalEventAsync(terminal, cancellationToken);
+                return false;
+            default:
+                throw new InvalidOperationException($"Unknown next response mode '{_options.NextResponseMode}'.");
+        }
+    }
+
+    private static int ReadRequiredNextThreadId(JsonElement root)
+    {
+        if (root.TryGetProperty("arguments", out var arguments)
+            && arguments.ValueKind == JsonValueKind.Object
+            && arguments.TryGetProperty("threadId", out var threadId)
+            && threadId.TryGetInt32(out var value))
+        {
+            return value;
+        }
+
+        throw new InvalidDataException("DAP next requires an Int32 threadId.");
     }
     private async Task<bool> HandleThreadsRequestAsync(int sequence, CancellationToken cancellationToken)
     {
@@ -1170,6 +1364,7 @@ internal sealed class ControlledDapAdapter
                 }, cancellationToken);
                 return false;
             case "hold":
+                _heldStackTraceResponseSequence = sequence;
                 await RecordAsync(new { kind = "stack-trace-response-gated", sequence }, cancellationToken);
                 _heldStackTraceResponse = CompleteHeldStackTraceResponseAsync(sequence, _lifecycleEventsCancellation.Token);
                 return false;
@@ -1315,6 +1510,114 @@ internal sealed class ControlledDapAdapter
             command,
             body,
         }, cancellationToken);
+    }
+    private Task WriteMalformedNextSuccessResponseAsync(int requestSequence, CancellationToken cancellationToken) =>
+        WriteMessageAsync(new
+        {
+            seq = _outgoingSequence++,
+            type = "response",
+            request_seq = requestSequence,
+            success = "true",
+            command = "next",
+            body = (object?)null,
+        }, cancellationToken);
+
+    private Task WriteMalformedNextSequenceResponseAsync(int requestSequence, CancellationToken cancellationToken)
+    {
+        var response = new Dictionary<string, object?>
+        {
+            ["type"] = "response",
+            ["request_seq"] = requestSequence,
+            ["success"] = true,
+            ["command"] = "next",
+            ["body"] = new { message = "controlled private next acknowledgement" },
+        };
+        _outgoingSequence++;
+        if (_options.NextResponseMode != "missing-response-sequence")
+        {
+            response["seq"] = _options.NextResponseMode switch
+            {
+                "wrong-type-response-sequence" => (object)"not-an-int32",
+                "zero-response-sequence" => 0,
+                "negative-response-sequence" => -1,
+                "overflow-response-sequence" => (long)int.MaxValue + 1,
+                "underflow-response-sequence" => (long)int.MinValue - 1,
+                _ => throw new InvalidOperationException("Unknown malformed next response sequence mode."),
+            };
+        }
+        return WriteMessageAsync(response, cancellationToken);
+    }
+
+
+    private async Task WriteMalformedNextStoppedSequenceEventAsync(int threadId, CancellationToken cancellationToken)
+    {
+        var message = new Dictionary<string, object?>
+        {
+            ["type"] = "event",
+            ["event"] = "stopped",
+            ["body"] = new { reason = "step", threadId, allThreadsStopped = true },
+        };
+        _outgoingSequence++;
+        if (_options.NextResponseMode != "missing-stop-sequence")
+        {
+            message["seq"] = _options.NextResponseMode switch
+            {
+                "wrong-type-stop-sequence" => (object)"not-an-int32",
+                "zero-stop-sequence" => 0,
+                "negative-stop-sequence" => -1,
+                "overflow-stop-sequence" => (long)int.MaxValue + 1,
+                "underflow-stop-sequence" => (long)int.MinValue - 1,
+                _ => throw new InvalidOperationException("Unknown malformed next stopped-event sequence mode."),
+            };
+        }
+        await WriteMessageAsync(message, cancellationToken);
+        await RecordAsync(new { kind = "event", @event = "stopped" }, cancellationToken);
+    }
+
+    private async Task WriteMalformedNextTerminalEventAsync(string terminal, CancellationToken cancellationToken)
+    {
+        var body = terminal == "exited" ? new Dictionary<string, object?> { ["exitCode"] = _options.ExitCode } : null;
+        var message = new Dictionary<string, object?>
+        {
+            ["seq"] = _outgoingSequence++,
+            ["type"] = "event",
+            ["event"] = terminal,
+            ["body"] = body,
+        };
+        switch (_options.NextResponseMode[(terminal.Length + 1)..])
+        {
+            case "missing-sequence":
+                message.Remove("seq");
+                break;
+            case "wrong-type-sequence":
+                message["seq"] = "not-an-int32";
+                break;
+            case "zero-sequence":
+                message["seq"] = 0;
+                break;
+            case "negative-sequence":
+                message["seq"] = -1;
+                break;
+            case "overflow-sequence":
+                message["seq"] = (long)int.MaxValue + 1;
+                break;
+            case "underflow-sequence":
+                message["seq"] = (long)int.MinValue - 1;
+                break;
+            case "missing-exit-code":
+                body!.Remove("exitCode");
+                break;
+            case "wrong-type-exit-code":
+                body!["exitCode"] = "not-an-int32";
+                break;
+            case "overflow-exit-code":
+                body!["exitCode"] = (long)int.MaxValue + 1;
+                break;
+            default:
+                throw new InvalidOperationException("Unknown malformed next terminal-event mode.");
+        }
+        await WriteMessageAsync(message, cancellationToken);
+        await RecordAsync(new { kind = "event", @event = terminal }, cancellationToken);
     }
 
     private async Task WriteEventAsync(string eventName, object? body, CancellationToken cancellationToken)

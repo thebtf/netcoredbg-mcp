@@ -5,6 +5,7 @@ using Microsoft.Win32.SafeHandles;
 using System.Text;
 using System.Text.Json;
 using System.Diagnostics;
+using Microsoft.Extensions.Time.Testing;
 using Xunit;
 
 namespace NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter;
@@ -27,6 +28,65 @@ public sealed class NetCoreDbgSessionTests
         "continued",
         "exited",
         "terminated");
+
+    [Theory]
+    [InlineData("primary")]
+    [InlineData("linked-relative")]
+    [InlineData("linked-absolute")]
+    [InlineData("invalid-gitdir")]
+    [InlineData("empty-commondir")]
+    [InlineData("missing-common")]
+    public void RepositoryLayout_ScratchUsesSharedGitOwnerOrFailsClosed(string layout)
+    {
+        var scratchDirectory = Path.Combine(RepositoryLayout.ScratchRoot, $"repository-layout-{Guid.NewGuid():N}");
+        var coordinationRoot = Path.Combine(scratchDirectory, "primary repository");
+        var commonDirectory = Path.Combine(coordinationRoot, ".git");
+        var sourceRoot = layout == "primary" ? coordinationRoot : Path.Combine(scratchDirectory, "linked source");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(commonDirectory, "objects"));
+            Directory.CreateDirectory(sourceRoot);
+            if (layout != "primary")
+            {
+                var gitDirectory = Path.Combine(commonDirectory, "worktrees", "linked-test");
+                Directory.CreateDirectory(gitDirectory);
+                File.WriteAllText(Path.Combine(sourceRoot, ".git"), "gitdir: "
+                    + (layout == "linked-absolute" ? gitDirectory : Path.GetRelativePath(sourceRoot, gitDirectory)) + "\n");
+                File.WriteAllText(Path.Combine(gitDirectory, "commondir"),
+                    layout == "linked-absolute" ? commonDirectory : Path.GetRelativePath(gitDirectory, commonDirectory));
+                switch (layout)
+                {
+                    case "invalid-gitdir":
+                        File.WriteAllText(Path.Combine(sourceRoot, ".git"), "not a Git directory pointer");
+                        break;
+                    case "empty-commondir":
+                        File.WriteAllText(Path.Combine(gitDirectory, "commondir"), " \r\n");
+                        break;
+                    case "missing-common":
+                        File.WriteAllText(Path.Combine(gitDirectory, "commondir"), commonDirectory + "-missing");
+                        break;
+                }
+            }
+
+            if (layout is "invalid-gitdir" or "empty-commondir" or "missing-common")
+            {
+                Assert.Throws<InvalidDataException>(() => RepositoryLayout.ResolveScratchCoordinationRoot(sourceRoot));
+            }
+            else
+            {
+                Assert.Equal(coordinationRoot, RepositoryLayout.ResolveScratchCoordinationRoot(sourceRoot));
+            }
+
+            Assert.False(Directory.Exists(Path.Combine(sourceRoot, ".agent")));
+        }
+        finally
+        {
+            if (Directory.Exists(scratchDirectory))
+            {
+                Directory.Delete(scratchDirectory, recursive: true);
+            }
+        }
+    }
 
     [Fact]
     public void UnixProcessGroupOwnership_UsesLiveGuardianTerminationControl() =>
@@ -87,7 +147,7 @@ public sealed class NetCoreDbgSessionTests
     {
         var transcript = new List<FixtureTranscriptEntry>();
         NetCoreDbgSessionContractDriver? session = null;
-        var failure = await Record.ExceptionAsync(async () => session = await NetCoreDbgSessionContractDriver.StartAsync(
+        var failure = await Record.ExceptionAsync(async () => session = await NetCoreDbgSessionContractDriver.StartWithInitializeContinuationGateAsync(
             new FixtureConfiguration(
                 InitializedBeforeCorrectInitializeResponse: true,
                 SuppressInitializedAfterInitializeResponse: true),
@@ -109,7 +169,7 @@ public sealed class NetCoreDbgSessionTests
         var earlyInitialized = Array.FindIndex(transcript.ToArray(), entry => entry.Kind == "early-initialized-event");
         var initializeResponse = Array.FindIndex(transcript.ToArray(), entry => entry.Kind == "initialize-response");
         Assert.True(unmatched >= 0 && unmatched < earlyInitialized && earlyInitialized < initializeResponse,
-            "The unmatched response and early initialized event must precede the correlated initialize response.");
+            $"The unmatched response and early initialized event must precede the correlated initialize response. Indices: unmatched={unmatched}, earlyInitialized={earlyInitialized}, initializeResponse={initializeResponse}. Failure: {failure}. Transcript: {JsonSerializer.Serialize(transcript)}");
         Assert.DoesNotContain(transcript, entry => entry.Kind == "request" && entry.Command == "launch");
     }
 
@@ -307,6 +367,529 @@ public sealed class NetCoreDbgSessionTests
         }
     }
 
+
+    [Fact]
+    public async Task StepOver_DelayedAcknowledgementSharesPostWriteDeadlineAndDrainsThroughRegistry()
+    {
+        var clock = new FakeTimeProvider();
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(LifecycleMode: "all-stop", NextResponseMode: "hold-ack-no-stop"),
+            "D:\\fixtures\\program.dll",
+            InitializeTimeout,
+            TimeSpan.FromSeconds(30),
+            StopTimeout,
+            CancellationToken.None,
+            stepOverTimeProvider: clock);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        var operation = session.StepOverThroughRegistryAsync(1, observation.Token);
+        await session.Fixture.WaitForNextRequestAsync(observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+
+        clock.Advance(TimeSpan.FromSeconds(20));
+        Assert.False(operation.IsCompleted, "The next acknowledgement is still held before the shared deadline.");
+        session.Fixture.ReleaseNextResponse();
+        await session.Fixture.WaitForTranscriptKindAsync("next-acknowledged", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+
+        clock.Advance(TimeSpan.FromSeconds(9));
+        Assert.False(operation.IsCompleted, "The observation phase still has one second of the original post-write deadline.");
+        clock.Advance(TimeSpan.FromSeconds(1));
+        var probe = await operation.WaitAsync(observation.Token);
+
+        Assert.Equal("complete", probe.Result.ResultType);
+        Assert.False(probe.Result.IsError == true);
+        var content = Assert.IsType<JsonElement>(probe.Result.StructuredContent);
+        Assert.Equal("step_over_timed_out", content.GetProperty("kind").GetString());
+        Assert.Equal(1, content.GetProperty("threadId").GetInt32());
+        Assert.Equal(30, content.GetProperty("timeoutSeconds").GetInt32());
+        Assert.Equal(3, content.EnumerateObject().Count());
+        var text = Assert.IsType<ModelContextProtocol.Protocol.TextContentBlock>(Assert.Single(probe.Result.Content));
+        Assert.Equal(content.GetRawText(), text.Text);
+        Assert.False(probe.TokenRetained);
+        Assert.False(probe.SlotRetained);
+        Assert.False(probe.AdapterAlive);
+        var transcript = await session.Fixture.ReadTranscriptAsync();
+        Assert.Single(transcript, static entry => entry.Command == "next");
+        Assert.Single(transcript, static entry => entry.Command == "terminate");
+        Assert.Single(transcript, static entry => entry.Command == "disconnect");
+    }
+
+    [Theory]
+    [InlineData("write-gate")]
+    [InlineData("pre-header")]
+    public async Task StepOver_CancellationBeforeWriterEntry_PreservesRegisteredSessionAndLiveTransport(string barrier)
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SupportsDelayedStackTraceLoading: true, LifecycleMode: "all-stop"),
+            "D:\\fixtures\\program.dll",
+            InitializeTimeout,
+            RequestTimeout,
+            StopTimeout,
+            CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var writeHeld = barrier == "write-gate";
+        if (writeHeld)
+        {
+            await session.HoldDapWriteAsync(observation.Token);
+        }
+        else
+        {
+            session.ArmDapWriteBeforeHeaderBarrier();
+        }
+        void ReleaseBarrier()
+        {
+            if (writeHeld)
+            {
+                session.ReleaseDapWrite();
+                writeHeld = false;
+            }
+            session.ReleaseDapWriteBarrier();
+        }
+        var writesBefore = session.DapWriteCalls;
+        using var cancellation = new CancellationTokenSource();
+        var operation = session.StepOverThroughRegistryAsync(1, cancellation.Token, inspectCancellation: true,
+            beforeCancellationInspection: async () =>
+            {
+                Assert.False(session.StepOverDrainRequired);
+                Assert.False(session.HasActiveStepOver);
+                Assert.Equal(0, session.PendingRequestCount);
+                Assert.Equal(writesBefore, session.DapWriteCalls);
+                Assert.True(session.IsUsable);
+                ReleaseBarrier();
+                Assert.True(await session.GetCallStackIsRefusedAsync(1, 0, 20, observation.Token));
+                await session.StepOverAsync(1, observation.Token);
+            });
+        try
+        {
+            if (barrier == "write-gate")
+            {
+                await session.WaitForPendingNextAsync(observation.Token);
+            }
+            else
+            {
+                await session.WaitForDapPreHeaderWriteAsync(observation.Token);
+            }
+            cancellation.Cancel();
+            var probe = await operation.WaitAsync(observation.Token);
+
+            Assert.True(probe.CancellationObserved);
+            Assert.True(probe.TokenRetained);
+            Assert.True(probe.SlotRetained);
+            Assert.True(probe.AdapterAlive);
+            Assert.Null(probe.LeaseReleasedBeforeRemoval);
+            Assert.Equal("debug_state_success", Assert.IsType<JsonElement>(probe.Result.StructuredContent).GetProperty("kind").GetString());
+            var threads = Assert.IsType<ModelContextProtocol.Protocol.CallToolResult>(probe.RetainedThreadsResult);
+            Assert.Equal("complete", threads.ResultType);
+            Assert.False(threads.IsError == true);
+            var content = Assert.IsType<JsonElement>(threads.StructuredContent);
+            Assert.Equal("threads_success", content.GetProperty("kind").GetString());
+            var text = Assert.IsType<ModelContextProtocol.Protocol.TextContentBlock>(Assert.Single(threads.Content));
+            Assert.Equal(content.GetRawText(), text.Text);
+            var transcript = await session.Fixture.ReadTranscriptAsync();
+            Assert.Equal(2, transcript.Count(static entry => entry.Command == "threads"));
+            Assert.DoesNotContain(transcript, static entry => entry.Command is "next" or "stackTrace");
+        }
+        finally
+        {
+            ReleaseBarrier();
+        }
+    }
+
+    [Theory]
+    [InlineData("zero", 0, false, false)]
+    [InlineData("header-prefix", 1, false, false)]
+    [InlineData("opaque-oce", 1, true, false)]
+    [InlineData("cancel-on-entry", 0, false, true)]
+    public async Task StepOver_CancellationAfterWriterEntry_ZeroPartialOrUnknown_DrainsRegisteredSession(
+        string writeMode, int prefixBytes, bool opaqueCancellation, bool cancelOnEntry)
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(LifecycleMode: "all-stop"),
+            "D:\\fixtures\\program.dll",
+            InitializeTimeout,
+            RequestTimeout,
+            StopTimeout,
+            CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        using var cancellation = new CancellationTokenSource();
+        session.ArmDapWriteAtHeaderEntryBarrier(prefixBytes, opaqueCancellation, cancelOnEntry ? cancellation.Cancel : null);
+        var operation = session.StepOverThroughRegistryAsync(1, cancellation.Token, inspectCancellation: true,
+            beforeCancellationInspection: () =>
+            {
+                Assert.False(session.HasActiveStepOver);
+                Assert.Equal(0, session.PendingRequestCount);
+                return Task.CompletedTask;
+            });
+        try
+        {
+            await session.WaitForDapHeaderEntryAsync(observation.Token);
+            cancellation.Cancel();
+            var probe = await operation.WaitAsync(observation.Token);
+            var content = Assert.IsType<JsonElement>(probe.Result.StructuredContent);
+            var diagnostic = $"mode={writeMode}; stdin={session.DapUnderlyingInputStreamType}; underlyingHeaderCalls={session.ArmedHeaderUnderlyingWriteCalls}; forwardedHeaderBytes={session.ArmedHeaderBytesForwarded}; cancellationObserved={probe.CancellationObserved}; tokenRetained={probe.TokenRetained}; slotRetained={probe.SlotRetained}; adapterAlive={probe.AdapterAlive}; state={content.GetRawText()}";
+
+            Assert.True(probe.CancellationObserved, diagnostic);
+            Assert.Equal(prefixBytes == 0 ? 0 : 1, session.ArmedHeaderUnderlyingWriteCalls);
+            Assert.Equal((long)prefixBytes, session.ArmedHeaderBytesForwarded);
+            var transcript = await session.Fixture.ReadTranscriptAsync();
+            Assert.DoesNotContain(transcript, static entry => entry.Command == "next");
+            Assert.Single(transcript, static entry => entry.Command == "threads");
+            Assert.False(probe.TokenRetained, diagnostic);
+            Assert.False(probe.SlotRetained, diagnostic);
+            Assert.False(probe.AdapterAlive, diagnostic);
+            Assert.True(probe.LeaseReleasedBeforeRemoval == true, diagnostic);
+            Assert.Null(probe.RetainedThreadsResult);
+            Assert.Equal("complete", probe.Result.ResultType);
+            Assert.True(probe.Result.IsError == true);
+            Assert.Equal("debug_session_not_found", content.GetProperty("kind").GetString());
+            Assert.Equal("DEBUG_SESSION_NOT_FOUND", content.GetProperty("error").GetString());
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+        }
+    }
+
+    [Fact]
+    public async Task StepOver_ConcurrentPreAdmissionCancellation_CannotReleaseWrittenRequestBeforeRealCleanup()
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(LifecycleMode: "all-stop"),
+            "D:\\fixtures\\program.dll",
+            InitializeTimeout,
+            RequestTimeout,
+            StopTimeout,
+            CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        using var cancellationA = new CancellationTokenSource();
+        using var cancellationB = new CancellationTokenSource();
+        cancellationB.Cancel();
+        using var releaseStateGate = new ManualResetEventSlim();
+        using var releaseBUsability = new ManualResetEventSlim();
+        var bUsabilityObserved = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stateGateEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stopEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseStop = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var disposeEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseDispose = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<ModelContextProtocol.Protocol.CallToolResult>? requestA = null;
+        Task<ModelContextProtocol.Protocol.CallToolResult>? requestB = null;
+        Task? stateGateHolder = null;
+        Task? cancelA = null;
+        var exerciseStarted = false;
+
+        void ReleaseBarriers()
+        {
+            releaseStateGate.Set();
+            releaseBUsability.Set();
+            session.ReleaseDapWriteBarrier();
+            releaseStop.TrySetResult(true);
+            releaseDispose.TrySetResult(true);
+        }
+        using var releaseOnObservationDeadline = observation.Token.Register(ReleaseBarriers);
+
+        async Task AssertRequestAWaitsForCleanupAsync(string stage)
+        {
+            var completion = await Record.ExceptionAsync(() => requestA!.WaitAsync(TimeSpan.FromMilliseconds(150), observation.Token));
+            Assert.True(completion is TimeoutException,
+                $"Request A must remain incomplete while real {stage} is held; expected an observation TimeoutException, got {completion?.ToString() ?? "successful completion"}.");
+        }
+
+        session.ArmDapWriteAtHeaderEntryBarrier(prefixBytes: 1);
+        try
+        {
+            var probe = await session.StepOverThroughRegistryAsync(1, cancellationA.Token, inspectCancellation: true,
+                invokeSteps: async invokeStep =>
+                {
+                    exerciseStarted = true;
+                    try
+                    {
+                        var invocationA = Task.Factory.StartNew(() => invokeStep("step-over-concurrent-A", cancellationA.Token),
+                            CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+                        requestA = invocationA.Unwrap();
+                        await session.WaitForDapHeaderEntryAsync(observation.Token);
+
+                        var invocationB = Task.Factory.StartNew(() => invokeStep("step-over-concurrent-B", cancellationB.Token),
+                            CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+                        requestB = invocationB.Unwrap();
+                        Assert.True(await bUsabilityObserved.Task.WaitAsync(observation.Token), "B must first observe the real session as usable.");
+                        stateGateHolder = session.HoldStateGateAsync(stateGateEntered, releaseStateGate, observation.Token);
+                        await stateGateEntered.Task.WaitAsync(observation.Token);
+                        cancelA = Task.Factory.StartNew(cancellationA.Cancel,
+                            CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+                        // The flag only places B before A can unwind; completion against held cleanup is the oracle.
+                        await WaitUntilAsync(() => Task.FromResult(session.StepOverDrainRequired), TimeSpan.FromSeconds(2));
+                        releaseBUsability.Set();
+                        // Invoke has returned only after B's synchronous pre-admission cancellation catch ran.
+                        _ = await invocationB.WaitAsync(observation.Token);
+                        releaseStateGate.Set();
+                        await stateGateHolder.WaitAsync(observation.Token);
+                        await cancelA.WaitAsync(observation.Token);
+
+                        await stopEntered.Task.WaitAsync(observation.Token);
+                        await AssertRequestAWaitsForCleanupAsync("StopAsync");
+                        releaseStop.TrySetResult(true);
+                        await disposeEntered.Task.WaitAsync(observation.Token);
+                        await AssertRequestAWaitsForCleanupAsync("DisposeAsync");
+                        releaseDispose.TrySetResult(true);
+
+                        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => requestA).WaitAsync(observation.Token);
+                        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => requestB).WaitAsync(observation.Token);
+                    }
+                    catch (OperationCanceledException exception)
+                    {
+                        throw new InvalidOperationException("The regression interleaving timed out before both real cleanup barriers were exercised.", exception);
+                    }
+                    finally
+                    {
+                        ReleaseBarriers();
+                        cancelA ??= Task.Factory.StartNew(cancellationA.Cancel,
+                            CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+                        _ = await Record.ExceptionAsync(() => Task.WhenAll(new Task?[] { requestA, requestB, stateGateHolder, cancelA }.OfType<Task>()));
+                    }
+                    return await requestA!;
+                },
+                beforeStop: async () =>
+                {
+                    if (exerciseStarted)
+                    {
+                        stopEntered.TrySetResult(true);
+                        await releaseStop.Task;
+                    }
+                },
+                beforeDispose: async () =>
+                {
+                    if (exerciseStarted)
+                    {
+                        disposeEntered.TrySetResult(true);
+                        await releaseDispose.Task;
+                    }
+                },
+                afterUsabilityObservation: (requestId, usable) =>
+                {
+                    if (requestId == "step-over-concurrent-B")
+                    {
+                        bUsabilityObserved.TrySetResult(usable);
+                        releaseBUsability.Wait(observation.Token);
+                    }
+                });
+
+            Assert.True(probe.CancellationObserved);
+            Assert.False(session.HasActiveStepOver);
+            Assert.Equal(0, session.PendingRequestCount);
+            Assert.Equal(0, probe.ActiveRequestCount);
+            Assert.False(probe.TokenRetained);
+            Assert.False(probe.SlotRetained);
+            Assert.False(probe.AdapterAlive);
+            Assert.False(session.IsUsable);
+            Assert.Equal("complete", probe.Result.ResultType);
+            Assert.True(probe.Result.IsError == true);
+            var content = Assert.IsType<JsonElement>(probe.Result.StructuredContent);
+            Assert.Equal("debug_session_not_found", content.GetProperty("kind").GetString());
+            Assert.Equal("DEBUG_SESSION_NOT_FOUND", content.GetProperty("error").GetString());
+        }
+        finally
+        {
+            ReleaseBarriers();
+        }
+    }
+
+    [Fact]
+    public async Task StepOver_NextCorrelationCollisionWithPendingStackTrace_FailsActiveBeforeUnrelatedRouting()
+    {
+        await using var session = await StartAsync(new FixtureConfiguration(
+            SupportsDelayedStackTraceLoading: true,
+            LifecycleMode: "all-stop",
+            StackTraceResponseMode: "hold",
+            NextResponseMode: "wrong-request-sequence-collides-with-stack-trace"));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        var stackTrace = session.GetCallStackIsRefusedAsync(1, 0, 20, observation.Token);
+        await session.WaitForPendingStackTraceAsync(observation.Token);
+        await session.Fixture.WaitForTranscriptKindAsync("stack-trace-response-gated", observation.Token);
+
+        var stepOver = session.StepOverAsync(1, CancellationToken.None);
+        try
+        {
+            await Assert.ThrowsAsync<InvalidDataException>(() => stepOver);
+            Assert.False(stackTrace.IsCompleted, "A corrupt next response must fail the active step before it can settle the colliding stackTrace request.");
+            session.Fixture.ReleaseStackTraceResponse();
+            Assert.True(await stackTrace);
+            Assert.True(session.IsUsable);
+        }
+        finally
+        {
+            session.Fixture.ReleaseStackTraceResponse();
+        }
+    }
+
+    [Fact]
+    public async Task StepOver_CancellationAfterHeaderBeforePayload_DrainsRegisteredSession()
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(LifecycleMode: "all-stop"),
+            "D:\\fixtures\\program.dll",
+            InitializeTimeout,
+            RequestTimeout,
+            StopTimeout,
+            CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        using var cancellation = new CancellationTokenSource();
+        session.ArmDapWriteAfterHeaderBarrier();
+        var operation = session.StepOverThroughRegistryAsync(1, cancellation.Token, inspectCancellation: true);
+        try
+        {
+            await session.WaitForDapHeaderWriteAsync(observation.Token);
+            cancellation.Cancel();
+            var probe = await operation.WaitAsync(observation.Token);
+
+            Assert.True(probe.CancellationObserved);
+            Assert.False(session.HasActiveStepOver);
+            Assert.Equal(0, session.PendingRequestCount);
+            Assert.False(probe.TokenRetained);
+            Assert.False(probe.SlotRetained);
+            Assert.False(probe.AdapterAlive);
+            Assert.True(probe.LeaseReleasedBeforeRemoval == true);
+            Assert.Equal("debug_session_not_found", Assert.IsType<JsonElement>(probe.Result.StructuredContent).GetProperty("kind").GetString());
+            Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "next");
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+        }
+    }
+
+    [Fact]
+    public async Task StepOver_DeadlineStartsAfterCompleteWrite_NotAtPossibleWriteMarker()
+    {
+        var clock = new FakeTimeProvider();
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(LifecycleMode: "all-stop", NextResponseMode: "hold-ack-no-stop"),
+            "D:\\fixtures\\program.dll",
+            InitializeTimeout,
+            TimeSpan.FromSeconds(30),
+            StopTimeout,
+            CancellationToken.None,
+            stepOverTimeProvider: clock);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        session.ArmDapWriteAfterHeaderBarrier();
+        var operation = session.StepOverThroughRegistryAsync(1, observation.Token);
+        try
+        {
+            await session.WaitForDapHeaderWriteAsync(observation.Token);
+            clock.Advance(TimeSpan.FromSeconds(31));
+            Assert.False(operation.IsCompleted, "A possible or partial write must not start the post-commit observation deadline.");
+            session.ReleaseDapWriteBarrier();
+            await session.Fixture.WaitForNextRequestAsync(observation.Token);
+            await session.WaitForReaderBarrierAsync(observation.Token);
+            clock.Advance(TimeSpan.FromSeconds(29));
+            Assert.False(operation.IsCompleted, "The complete write must receive its full 30-second post-commit budget.");
+            clock.Advance(TimeSpan.FromSeconds(1));
+            var probe = await operation.WaitAsync(observation.Token);
+
+            var content = Assert.IsType<JsonElement>(probe.Result.StructuredContent);
+            Assert.Equal("step_over_timed_out", content.GetProperty("kind").GetString());
+            Assert.Equal(30, content.GetProperty("timeoutSeconds").GetInt32());
+            Assert.False(probe.TokenRetained);
+            Assert.False(probe.SlotRetained);
+            Assert.False(probe.AdapterAlive);
+            Assert.True(probe.LeaseReleasedBeforeRemoval == true);
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+            session.Fixture.ReleaseNextResponse();
+        }
+    }
+
+    [Fact]
+    public async Task StepOver_WriterHeldPastOrdinaryRequestTimeout_CompletesOnlyAfterFullWriteAndStepStop()
+    {
+        var ordinaryRequestTimeout = TimeSpan.FromMilliseconds(500);
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(LifecycleMode: "all-stop"),
+            "D:\\fixtures\\program.dll",
+            InitializeTimeout,
+            ordinaryRequestTimeout,
+            StopTimeout,
+            CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var cancellation = new CancellationTokenSource();
+        using var releaseOnDeadline = observation.Token.Register(session.ReleaseDapWriteBarrier);
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        session.ArmDapWriteAfterHeaderBarrier();
+        var operation = session.StepOverAsync(1, cancellation.Token);
+        try
+        {
+            await session.WaitForDapHeaderWriteAsync(observation.Token);
+            var completion = await Record.ExceptionAsync(() => operation.WaitAsync(ordinaryRequestTimeout * 3, observation.Token));
+            Assert.True(completion is TimeoutException,
+                $"A held, uncommitted next must outlive the real ordinary request timeout; expected observation TimeoutException, got {completion?.ToString() ?? "successful completion"}.");
+            session.ReleaseDapWriteBarrier();
+            await operation.WaitAsync(observation.Token);
+            await session.WaitForReaderBarrierAsync(observation.Token);
+
+            Assert.Equal(new DapSessionSnapshot("stopped", "step", null), session.State);
+            Assert.True(session.IsUsable);
+            Assert.False(session.HasActiveStepOver);
+            Assert.Equal(0, session.PendingRequestCount);
+            Assert.Single(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "next");
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+            cancellation.Cancel();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
+    [Fact]
+    public async Task GetThreads_PreHeaderWriterHeld_StillHonorsOrdinaryRequestTimeout()
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(LifecycleMode: "all-stop"),
+            "D:\\fixtures\\program.dll",
+            InitializeTimeout,
+            TimeSpan.FromMilliseconds(500),
+            StopTimeout,
+            CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var cancellation = new CancellationTokenSource();
+        using var releaseOnDeadline = observation.Token.Register(session.ReleaseDapWriteBarrier);
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        session.ArmDapWriteBeforeHeaderBarrier();
+        var operation = session.WaitForReaderBarrierAsync(cancellation.Token);
+        try
+        {
+            await session.WaitForDapPreHeaderWriteAsync(observation.Token);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation).WaitAsync(observation.Token);
+            Assert.False(cancellation.IsCancellationRequested);
+            Assert.False(observation.IsCancellationRequested);
+            Assert.Equal(0, session.PendingRequestCount);
+            Assert.True(session.IsUsable);
+            session.ReleaseDapWriteBarrier();
+            await session.WaitForReaderBarrierAsync(observation.Token);
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+            cancellation.Cancel();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
 
     [Fact]
     public async Task StopAsync_ReaderFailureSkipsGracefulRequestTimeouts()

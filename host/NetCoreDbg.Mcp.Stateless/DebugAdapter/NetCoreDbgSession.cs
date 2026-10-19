@@ -62,10 +62,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private CallStackEligibility? _allThreadsStoppedEligibility;
     private Dictionary<int, CallStackEligibility>? _threadEligibility;
     private HashSet<int>? _invalidatedAllThreadTargets;
+    private StepOverRecord? _activeStepOver;
+    private int _stepOverDrainRequired;
     private bool _initializeResponseObserved;
     private bool CapabilitiesObserved { get; set; }
     private readonly TaskCompletionSource<bool>? _initializeResponseContinuationReached;
     private readonly Task? _initializeResponseContinuationRelease;
+    private readonly Func<CancellationToken, Task>? _preHeaderWriteGate;
+    private readonly TimeProvider _stepOverTimeProvider;
     private NetCoreDbgSession(
         Process process,
         Stream input,
@@ -75,7 +79,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         TimeSpan stopTimeout,
         IProcessTreeOwnership? processTreeOwnership,
         TaskCompletionSource<bool>? initializeResponseContinuationReached = null,
-        Task? initializeResponseContinuationRelease = null)
+        Task? initializeResponseContinuationRelease = null,
+        Func<CancellationToken, Task>? preHeaderWriteGate = null,
+        TimeProvider? stepOverTimeProvider = null)
     {
         _process = process;
         _input = input;
@@ -86,6 +92,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         _stopTimeout = RequirePositiveTimeout(stopTimeout, nameof(stopTimeout));
         _initializeResponseContinuationReached = initializeResponseContinuationReached;
         _initializeResponseContinuationRelease = initializeResponseContinuationRelease;
+        _preHeaderWriteGate = preHeaderWriteGate;
+        _stepOverTimeProvider = stepOverTimeProvider ?? TimeProvider.System;
         _readerTask = ReadMessagesAsync();
         _stderrTask = DrainStandardErrorAsync();
     }
@@ -307,6 +315,96 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         return DapCallStackResult.Succeeded(normalized, totalFrames);
     }
 
+    internal async Task<DapStepOverResult> StepOverAsync(int threadId, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (Volatile.Read(ref _activeStepOver) is not null)
+        {
+            return DapStepOverResult.Refused;
+        }
+
+        StepOverRecord? active = null;
+        PendingRequest? request = null;
+        await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            lock (_stateGate)
+            {
+                if (_activeStepOver is not null || !HasStepOverAuthority(threadId))
+                {
+                    return DapStepOverResult.Refused;
+                }
+
+                active = new StepOverRecord(threadId, cancellationToken);
+                _activeStepOver = active;
+                ClearCallStackEligibility();
+            }
+
+            request = await BeginRequestAsync(
+                "next",
+                new { threadId },
+                _requestTimeout,
+                cancellationToken,
+                stepOver: active).ConfigureAwait(false);
+        }
+        catch
+        {
+            if (active?.WriteStarted == true)
+            {
+                Interlocked.Exchange(ref _stepOverDrainRequired, 1);
+            }
+
+            lock (_stateGate)
+            {
+                if (ReferenceEquals(_activeStepOver, active))
+                {
+                    _activeStepOver = null;
+                }
+            }
+
+            active?.Dispose();
+            throw;
+        }
+        finally
+        {
+            _callStackAdmissionGate.Release();
+        }
+
+        try
+        {
+            return await WaitForStepOverOutcomeAsync(request!, active!, active!.DeadlineToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            Interlocked.Exchange(ref _stepOverDrainRequired, 1);
+            return DapStepOverResult.TimedOut(threadId);
+        }
+        catch (OperationCanceledException)
+        {
+            if (active!.CommittedWrite)
+            {
+                Interlocked.Exchange(ref _stepOverDrainRequired, 1);
+            }
+
+            throw;
+        }
+        finally
+        {
+            RemovePending(request!);
+            lock (_stateGate)
+            {
+                if (ReferenceEquals(_activeStepOver, active))
+                {
+                    _activeStepOver = null;
+                }
+            }
+            active!.Dispose();
+        }
+    }
+
+    internal bool RequiresStepOverDrain() => Volatile.Read(ref _stepOverDrainRequired) != 0;
+
+
     public ValueTask DisposeAsync() => new(EnsureCleanupAsync());
 
     private Task StartProtocolAsync(string programPath, TimeSpan initializeTimeout, CancellationToken cancellationToken) =>
@@ -451,7 +549,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         object? arguments,
         TimeSpan timeout,
         CancellationToken cancellationToken,
-        CapturedCallStackTarget? stackTraceTarget = null)
+        CapturedCallStackTarget? stackTraceTarget = null,
+        StepOverRecord? stepOver = null)
     {
         if (Volatile.Read(ref _readerFailure) is { } readerFailure)
         {
@@ -459,7 +558,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
 
         var sequence = Interlocked.Increment(ref _outgoingSequence);
-        var request = new PendingRequest(sequence, command, stackTraceTarget);
+        stepOver?.SetRequestSequence(sequence);
+        var request = new PendingRequest(sequence, command, stackTraceTarget, stepOver);
         if (!_pending.TryAdd(sequence, request))
         {
             throw new InvalidOperationException($"DAP request sequence '{sequence}' was reused.");
@@ -467,14 +567,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         try
         {
-            using var deadline = CreateDeadline(timeout, cancellationToken);
+            using var deadline = stepOver is null ? CreateDeadline(timeout, cancellationToken) : null;
             await WriteMessageAsync(new
             {
                 seq = sequence,
                 type = "request",
                 command,
                 arguments,
-            }, deadline.Token).ConfigureAwait(false);
+            }, deadline?.Token ?? cancellationToken, stepOver).ConfigureAwait(false);
             return request;
         }
         catch (Exception exception)
@@ -490,17 +590,39 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         TimeSpan timeout,
         CancellationToken cancellationToken) =>
         await request.Completion.Task.WaitAsync(timeout, cancellationToken).ConfigureAwait(false);
+    private static async Task<DapStepOverResult> WaitForStepOverOutcomeAsync(
+        PendingRequest request,
+        StepOverRecord active,
+        CancellationToken cancellationToken)
+    {
+        var first = await Task.WhenAny(request.Completion.Task, active.Completion.Task)
+            .WaitAsync(cancellationToken).ConfigureAwait(false);
+        if (ReferenceEquals(first, request.Completion.Task))
+        {
+            _ = await request.Completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
 
-    private async Task WriteMessageAsync(object message, CancellationToken cancellationToken)
+        return await active.Completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+
+    private async Task WriteMessageAsync(
+        object message,
+        CancellationToken cancellationToken,
+        StepOverRecord? stepOver = null)
     {
         var payload = JsonSerializer.SerializeToUtf8Bytes(message, JsonOptions);
         var header = HeaderEncoding.GetBytes($"Content-Length: {payload.Length}\r\n\r\n");
         await _writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            await (_preHeaderWriteGate?.Invoke(cancellationToken) ?? Task.CompletedTask).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            stepOver?.MarkWriteStarted();
             await _input.WriteAsync(header, cancellationToken).ConfigureAwait(false);
             await _input.WriteAsync(payload, cancellationToken).ConfigureAwait(false);
             await _input.FlushAsync(cancellationToken).ConfigureAwait(false);
+            stepOver?.Commit(_requestTimeout, _stepOverTimeProvider);
         }
         finally
         {
@@ -564,9 +686,34 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
+    private bool FailActiveStepOverForWrongCorrelation(int requestSequence, string? command)
+    {
+        if (!string.Equals(command, "next", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        lock (_stateGate)
+        {
+            if (_activeStepOver is not { } active || active.RequestSequence == requestSequence)
+            {
+                return false;
+            }
+
+            active.Completion.TrySetException(new InvalidDataException(
+                $"DAP next response for request '{requestSequence}' did not match active request '{active.RequestSequence}'."));
+            return true;
+        }
+    }
+
     private void HandleResponse(JsonElement message)
     {
         var requestSequence = RequireInt32(message, "request_seq");
+        if (FailActiveStepOverForWrongCorrelation(requestSequence, TryGetString(message, "command")))
+        {
+            return;
+        }
+
         if (!_pending.TryGetValue(requestSequence, out var request))
         {
             return;
@@ -595,6 +742,22 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             ReadInitializeCapabilities(body);
             _initializeResponseObserved = true;
+        }
+
+        if (request.StepOver is { } stepOver)
+        {
+            lock (_stateGate)
+            {
+                if (ReferenceEquals(_activeStepOver, stepOver))
+                {
+                    if (RequireInt32(message, "seq") <= 0)
+                    {
+                        throw new InvalidDataException("DAP next response sequence must be positive.");
+                    }
+
+                    stepOver.ObserveAcknowledgement(success.ValueKind == JsonValueKind.True);
+                }
+            }
         }
 
         var targetCurrent = request.StackTraceTarget is not { } target || IsCallStackTargetCurrent(target);
@@ -639,14 +802,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 CapabilitiesObserved = true;
                 break;
             case "stopped":
-                HandleStoppedEvent(body);
+                HandleStoppedEvent(message, body);
                 break;
             case "continued":
                 HandleContinuedEvent(body);
                 break;
             case "exited":
             case "terminated":
-                HandleTerminalEvent(eventName, body);
+                HandleTerminalEvent(message, eventName, body);
                 break;
         }
     }
@@ -777,10 +940,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             _state = update(_state);
         }
     }
-    private void HandleStoppedEvent(JsonElement body)
+    private void HandleStoppedEvent(JsonElement message, JsonElement body)
     {
         var allThreadsStopped = ReadOptionalBoolean(body, "allThreadsStopped");
         var threadId = TryGetInt32(body, "threadId");
+        var reason = TryGetString(body, "reason");
         _callStackAdmissionGate.Wait();
         try
         {
@@ -789,7 +953,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 _state = _state with
                 {
                     Event = "stopped",
-                    StopReason = TryGetString(body, "reason"),
+                    StopReason = reason,
                 };
                 ClearCallStackEligibility();
                 if (allThreadsStopped)
@@ -800,6 +964,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 {
                     (_threadEligibility ??= new())[stoppedThreadId] = new CallStackEligibility();
                 }
+                _activeStepOver?.ObserveStopped(message, reason, threadId);
             }
         }
         finally
@@ -839,17 +1004,27 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
-    private void HandleTerminalEvent(string eventName, JsonElement body)
+    private void HandleTerminalEvent(JsonElement message, string eventName, JsonElement body)
     {
         _callStackAdmissionGate.Wait();
         try
         {
             lock (_stateGate)
             {
+                if (_activeStepOver is not null && RequireInt32(message, "seq") <= 0)
+                {
+                    throw new InvalidDataException("DAP step terminal event sequence must be positive.");
+                }
+
                 _state = eventName == "exited"
-                    ? _state with { Event = eventName, ExitCode = TryGetInt32(body, "exitCode") }
+                    ? _state with
+                    {
+                        Event = eventName,
+                        ExitCode = _activeStepOver is null ? TryGetInt32(body, "exitCode") : RequireInt32(body, "exitCode"),
+                    }
                     : _state with { Event = eventName };
                 ClearCallStackEligibility();
+                _activeStepOver?.ObserveTerminal(eventName, _state.ExitCode);
             }
         }
         finally
@@ -857,6 +1032,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             _callStackAdmissionGate.Release();
         }
     }
+
+    private bool HasStepOverAuthority(int threadId) =>
+        (_allThreadsStoppedEligibility is not null
+            && (_invalidatedAllThreadTargets is null || !_invalidatedAllThreadTargets.Contains(threadId)))
+        || (_threadEligibility is not null && _threadEligibility.ContainsKey(threadId));
 
     private CapturedCallStackTarget? CaptureCallStackTarget(int threadId)
     {
@@ -1947,12 +2127,98 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
-    private sealed class PendingRequest(int sequence, string command, CapturedCallStackTarget? stackTraceTarget = null)
+    private sealed class PendingRequest(
+        int sequence,
+        string command,
+        CapturedCallStackTarget? stackTraceTarget = null,
+        StepOverRecord? stepOver = null)
     {
         public int Sequence { get; } = sequence;
         public string Command { get; } = command;
         public CapturedCallStackTarget? StackTraceTarget { get; } = stackTraceTarget;
+        public StepOverRecord? StepOver { get; } = stepOver;
         public TaskCompletionSource<DapResponse> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    private sealed class StepOverRecord(int threadId, CancellationToken callerCancellation) : IDisposable
+    {
+        private bool _acknowledged;
+        private int _writeStarted;
+        private int _committedWrite;
+        private int _requestSequence;
+        private CancellationTokenSource? _deadline;
+        private CancellationTokenRegistration _callerCancellationRegistration;
+
+        public int ThreadId { get; } = threadId;
+        public int RequestSequence => Volatile.Read(ref _requestSequence);
+        public bool WriteStarted => Volatile.Read(ref _writeStarted) != 0;
+        public bool CommittedWrite => Volatile.Read(ref _committedWrite) != 0;
+        public CancellationToken DeadlineToken => (_deadline
+            ?? throw new InvalidOperationException("The step-over write has not committed.")).Token;
+        public TaskCompletionSource<DapStepOverResult> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void SetRequestSequence(int requestSequence) => Volatile.Write(ref _requestSequence, requestSequence);
+
+        public void MarkWriteStarted() => Volatile.Write(ref _writeStarted, 1);
+
+        public void Commit(TimeSpan timeout, TimeProvider timeProvider)
+        {
+            if (Interlocked.Exchange(ref _committedWrite, 1) != 0)
+            {
+                throw new InvalidOperationException("The step-over record was already committed.");
+            }
+
+            _deadline = new CancellationTokenSource(timeout, timeProvider);
+            _callerCancellationRegistration = callerCancellation.Register(
+                static state => ((CancellationTokenSource)state!).Cancel(), _deadline);
+        }
+
+        public void ObserveAcknowledgement(bool success)
+        {
+            if (_deadline?.IsCancellationRequested == true)
+            {
+                return;
+            }
+
+            if (success)
+            {
+                _acknowledged = true;
+            }
+            else
+            {
+                Completion.TrySetResult(DapStepOverResult.Refused);
+            }
+        }
+
+        public void ObserveStopped(JsonElement message, string? reason, int? threadId)
+        {
+            if (_deadline?.IsCancellationRequested != true
+                && _acknowledged
+                && string.Equals(reason, "step", StringComparison.Ordinal)
+                && threadId == ThreadId)
+            {
+                if (RequireInt32(message, "seq") <= 0)
+                {
+                    throw new InvalidDataException("DAP step stop event sequence must be positive.");
+                }
+
+                Completion.TrySetResult(DapStepOverResult.Succeeded(ThreadId));
+            }
+        }
+
+        public void ObserveTerminal(string terminal, int? exitCode)
+        {
+            if (_deadline?.IsCancellationRequested != true)
+            {
+                Completion.TrySetResult(DapStepOverResult.ForTerminal(terminal, exitCode));
+            }
+        }
+
+        public void Dispose()
+        {
+            _callerCancellationRegistration.Dispose();
+            _deadline?.Dispose();
+        }
     }
 
     private sealed class CallStackEligibility;
@@ -1962,6 +2228,26 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private readonly record struct CapturedCallStackTarget(CallStackEligibility Eligibility, int ThreadId);
 
     private sealed record DapResponse(JsonElement Body, bool Success, bool TargetCurrent = true);
+}
+
+internal enum DapStepOverOutcome
+{
+    Refused,
+    Succeeded,
+    Terminal,
+    TimedOut,
+}
+
+internal sealed record DapStepOverResult(
+    DapStepOverOutcome Outcome,
+    int ThreadId,
+    string? Terminal = null,
+    int? ExitCode = null)
+{
+    internal static DapStepOverResult Refused { get; } = new(DapStepOverOutcome.Refused, 0);
+    internal static DapStepOverResult Succeeded(int threadId) => new(DapStepOverOutcome.Succeeded, threadId);
+    internal static DapStepOverResult ForTerminal(string terminal, int? exitCode) => new(DapStepOverOutcome.Terminal, 0, terminal, exitCode);
+    internal static DapStepOverResult TimedOut(int threadId) => new(DapStepOverOutcome.TimedOut, threadId);
 }
 
 internal sealed record DapThread(
