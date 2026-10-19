@@ -1121,6 +1121,15 @@ internal sealed class ControlledDapAdapter
             case "malformed-success":
                 await WriteMalformedNextSuccessResponseAsync(sequence, cancellationToken);
                 return false;
+            case "missing-response-sequence":
+            case "wrong-type-response-sequence":
+            case "zero-response-sequence":
+            case "negative-response-sequence":
+            case "overflow-response-sequence":
+            case "underflow-response-sequence":
+                await WriteMalformedNextSequenceResponseAsync(sequence, cancellationToken);
+                await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "step");
+                return false;
             case "reader-failure":
                 await WriteMalformedDapFrameAsync(cancellationToken);
                 return true;
@@ -1477,6 +1486,33 @@ internal sealed class ControlledDapAdapter
             command = "next",
             body = (object?)null,
         }, cancellationToken);
+
+    private Task WriteMalformedNextSequenceResponseAsync(int requestSequence, CancellationToken cancellationToken)
+    {
+        var response = new Dictionary<string, object?>
+        {
+            ["type"] = "response",
+            ["request_seq"] = requestSequence,
+            ["success"] = true,
+            ["command"] = "next",
+            ["body"] = new { message = "controlled private next acknowledgement" },
+        };
+        _outgoingSequence++;
+        if (_options.NextResponseMode != "missing-response-sequence")
+        {
+            response["seq"] = _options.NextResponseMode switch
+            {
+                "wrong-type-response-sequence" => (object)"not-an-int32",
+                "zero-response-sequence" => 0,
+                "negative-response-sequence" => -1,
+                "overflow-response-sequence" => (long)int.MaxValue + 1,
+                "underflow-response-sequence" => (long)int.MinValue - 1,
+                _ => throw new InvalidOperationException("Unknown malformed next response sequence mode."),
+            };
+        }
+        return WriteMessageAsync(response, cancellationToken);
+    }
+
 
     private async Task WriteEventAsync(string eventName, object? body, CancellationToken cancellationToken)
     {

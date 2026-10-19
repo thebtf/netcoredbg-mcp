@@ -812,6 +812,85 @@ public sealed class NetCoreDbgSessionTests
             session.Fixture.ReleaseNextResponse();
         }
     }
+
+    [Fact]
+    public async Task StepOver_WriterHeldPastOrdinaryRequestTimeout_CompletesOnlyAfterFullWriteAndStepStop()
+    {
+        var ordinaryRequestTimeout = TimeSpan.FromMilliseconds(500);
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(LifecycleMode: "all-stop"),
+            "D:\\fixtures\\program.dll",
+            InitializeTimeout,
+            ordinaryRequestTimeout,
+            StopTimeout,
+            CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var cancellation = new CancellationTokenSource();
+        using var releaseOnDeadline = observation.Token.Register(session.ReleaseDapWriteBarrier);
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        session.ArmDapWriteAfterHeaderBarrier();
+        var operation = session.StepOverAsync(1, cancellation.Token);
+        try
+        {
+            await session.WaitForDapHeaderWriteAsync(observation.Token);
+            var completion = await Record.ExceptionAsync(() => operation.WaitAsync(ordinaryRequestTimeout * 3, observation.Token));
+            Assert.True(completion is TimeoutException,
+                $"A held, uncommitted next must outlive the real ordinary request timeout; expected observation TimeoutException, got {completion?.ToString() ?? "successful completion"}.");
+            session.ReleaseDapWriteBarrier();
+            await operation.WaitAsync(observation.Token);
+            await session.WaitForReaderBarrierAsync(observation.Token);
+
+            Assert.Equal(new DapSessionSnapshot("stopped", "step", null), session.State);
+            Assert.True(session.IsUsable);
+            Assert.False(session.HasActiveStepOver);
+            Assert.Equal(0, session.PendingRequestCount);
+            Assert.Single(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "next");
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+            cancellation.Cancel();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
+    [Fact]
+    public async Task GetThreads_PreHeaderWriterHeld_StillHonorsOrdinaryRequestTimeout()
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(LifecycleMode: "all-stop"),
+            "D:\\fixtures\\program.dll",
+            InitializeTimeout,
+            TimeSpan.FromMilliseconds(500),
+            StopTimeout,
+            CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var cancellation = new CancellationTokenSource();
+        using var releaseOnDeadline = observation.Token.Register(session.ReleaseDapWriteBarrier);
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        session.ArmDapWriteBeforeHeaderBarrier();
+        var operation = session.WaitForReaderBarrierAsync(cancellation.Token);
+        try
+        {
+            await session.WaitForDapPreHeaderWriteAsync(observation.Token);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation).WaitAsync(observation.Token);
+            Assert.False(cancellation.IsCancellationRequested);
+            Assert.False(observation.IsCancellationRequested);
+            Assert.Equal(0, session.PendingRequestCount);
+            Assert.True(session.IsUsable);
+            session.ReleaseDapWriteBarrier();
+            await session.WaitForReaderBarrierAsync(observation.Token);
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+            cancellation.Cancel();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
     [Fact]
     public async Task StopAsync_ReaderFailureSkipsGracefulRequestTimeouts()
     {

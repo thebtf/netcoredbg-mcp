@@ -567,14 +567,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         try
         {
-            using var deadline = CreateDeadline(timeout, cancellationToken);
+            using var deadline = stepOver is null ? CreateDeadline(timeout, cancellationToken) : null;
             await WriteMessageAsync(new
             {
                 seq = sequence,
                 type = "request",
                 command,
                 arguments,
-            }, deadline.Token, stepOver).ConfigureAwait(false);
+            }, deadline?.Token ?? cancellationToken, stepOver).ConfigureAwait(false);
             return request;
         }
         catch (Exception exception)
@@ -750,6 +750,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             {
                 if (ReferenceEquals(_activeStepOver, stepOver))
                 {
+                    if (RequireInt32(message, "seq") <= 0)
+                    {
+                        throw new InvalidDataException("DAP next response sequence must be positive.");
+                    }
+
                     stepOver.ObserveAcknowledgement(success.ValueKind == JsonValueKind.True);
                 }
             }
