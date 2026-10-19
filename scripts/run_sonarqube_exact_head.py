@@ -1908,7 +1908,7 @@ def stateless_output_directory(plan: CoveragePlan) -> Path:
 
 def scanner_integration_targets(environment: Mapping[str, str]) -> Path:
     configured = environment.get("CustomBeforeMicrosoftCommonTargets")
-    if configured:
+    if configured is not None:
         target = Path(configured)
         if target.is_absolute() and target.is_file():
             return target
@@ -1996,13 +1996,13 @@ def run_coverage_producer(plan: CoveragePlan, environment: Mapping[str, str]) ->
         str(plan.repository_root),
         "--output-root",
         str(plan.root.parent),
-        "--integration-targets",
-        str(scanner_integration_targets(environment)),
         "--python-data",
         str(plan.python_data),
         "--python-report",
         str(plan.python_report),
     ]
+    if "CustomBeforeMicrosoftCommonTargets" in environment:
+        command.extend(["--integration-targets", str(scanner_integration_targets(environment))])
     for spec in plan.dotnet_inputs:
         command.extend(
             [

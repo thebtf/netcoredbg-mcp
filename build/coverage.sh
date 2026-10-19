@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  printf '%s\n' 'usage: coverage.sh --repo-root <absolute-path> --output-root <absolute-path> --integration-targets <absolute-installed-targets> --python-data <absolute-path> --python-report <absolute-path> --dotnet-project <id> <absolute-csproj> <absolute-output-prefix> <absolute-include-or-dash> [--dotnet-project ...]...' >&2
+  printf '%s\n' 'usage: coverage.sh --repo-root <absolute-path> --output-root <absolute-path> [--integration-targets <absolute-installed-targets>] --python-data <absolute-path> --python-report <absolute-path> --dotnet-project <id> <absolute-csproj> <absolute-output-prefix> <absolute-include-or-dash> [--dotnet-project ...]...' >&2
   exit 64
 }
 
@@ -76,8 +76,10 @@ is_absolute_path "$repo_root" || usage
 is_absolute_path "$python_data" || usage
 is_absolute_path "$python_report" || usage
 is_absolute_path "$output_root" || usage
-is_absolute_path "$integration_targets" || usage
-[[ -f "$(to_shell_path "$integration_targets")" ]] || usage
+if [[ -n "$integration_targets" ]]; then
+  is_absolute_path "$integration_targets" || usage
+  [[ -f "$(to_shell_path "$integration_targets")" ]] || usage
+fi
 (( ${#dotnet_ids[@]} == 5 )) || usage
 
 shell_repo_root="$(to_shell_path "$repo_root")"
@@ -86,10 +88,14 @@ shell_python_report="$(to_shell_path "$python_report")"
 shell_output_root="$(to_shell_path "$output_root")"
 dotnet_properties=(
   "-p:ArtifactsPath=$output_root/artifacts"
-  "-p:SonarQubeTempPath=$output_root/.sonarqube"
-  "-p:CustomBeforeMicrosoftCommonTargets=$integration_targets"
   -p:ImportUserLocationsByWildcardBeforeMicrosoftCommonTargets=false
 )
+if [[ -n "$integration_targets" ]]; then
+  dotnet_properties+=(
+    "-p:SonarQubeTempPath=$output_root/.sonarqube"
+    "-p:CustomBeforeMicrosoftCommonTargets=$integration_targets"
+  )
+fi
 
 expected_ids=(codesearch-core host stateless-preview stateless host-prompts)
 for index in "${!expected_ids[@]}"; do
