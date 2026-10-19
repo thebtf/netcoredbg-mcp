@@ -227,14 +227,25 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         }
 
         using var operation = CreateBoundedCancellation(cancellationToken, timeout);
-        return await Client.SendRequestAsync(
-            new JsonRpcRequest
-            {
-                Id = id,
-                Method = method,
-                Params = parameters?.DeepClone(),
-            },
-            operation.Token).ConfigureAwait(false);
+        try
+        {
+            return await Client.SendRequestAsync(
+                new JsonRpcRequest
+                {
+                    Id = id,
+                    Method = method,
+                    Params = parameters?.DeepClone(),
+                },
+                operation.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            await Client.SendNotificationAsync(
+                NotificationMethods.CancelledNotification,
+                new CancelledNotificationParams { RequestId = id },
+                cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
     }
 
     internal static JsonObject RequireResult(JsonRpcResponse response) =>
@@ -274,6 +285,18 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         }
     }
 
+    internal async Task WaitForNextRequestAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await _fixture.WaitForNextRequestAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new Xunit.Sdk.XunitException("step_over did not emit a DAP 'next' request before the test deadline.");
+        }
+    }
+
     internal Task WaitForFixtureEventAsync(string eventName, CancellationToken cancellationToken = default) =>
         _fixture.WaitForEventAsync(eventName, cancellationToken);
 
@@ -282,6 +305,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
 
     internal void ReleaseThreadsResponse() => _fixture.ReleaseThreadsResponse();
     internal void ReleaseStackTraceResponse() => _fixture.ReleaseStackTraceResponse();
+    internal void ReleaseNextResponse() => _fixture.ReleaseNextResponse();
 
     internal async Task<int> ReadDescendantProcessIdAsync(CancellationToken cancellationToken = default)
     {

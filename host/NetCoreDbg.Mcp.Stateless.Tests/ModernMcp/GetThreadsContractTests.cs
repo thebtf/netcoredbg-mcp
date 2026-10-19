@@ -42,6 +42,7 @@ public sealed class GetThreadsContractTests
                 "stop_debug",
                 Tool,
                 "get_call_stack",
+                "step_over",
                 "get_ui_probe_capabilities",
                 "capture_visual_evidence",
                 "read_capture_artifact",
