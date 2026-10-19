@@ -305,7 +305,7 @@ public sealed class PreviewArtifactConsumerTests
             var executableName = RequiredString(executable, "name");
             Assert.Equal("netcoredbg-mcp-stateless-preview.exe", executableName);
 
-            var extractionDirectory = Path.Combine(Path.GetTempPath(), $"netcoredbg-preview-artifact-{Guid.NewGuid():N}");
+            var extractionDirectory = Path.Combine(Path.GetTempPath(), $"preview-{Guid.NewGuid():N}");
             Directory.CreateDirectory(extractionDirectory);
             try
             {
