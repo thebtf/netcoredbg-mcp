@@ -1130,6 +1130,15 @@ internal sealed class ControlledDapAdapter
                 await WriteMalformedNextSequenceResponseAsync(sequence, cancellationToken);
                 await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "step");
                 return false;
+            case "missing-stop-sequence":
+            case "wrong-type-stop-sequence":
+            case "zero-stop-sequence":
+            case "negative-stop-sequence":
+            case "overflow-stop-sequence":
+            case "underflow-stop-sequence":
+                await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+                await WriteMalformedNextStoppedSequenceEventAsync(threadId, cancellationToken);
+                return false;
             case "reader-failure":
                 await WriteMalformedDapFrameAsync(cancellationToken);
                 return true;
@@ -1513,6 +1522,31 @@ internal sealed class ControlledDapAdapter
         return WriteMessageAsync(response, cancellationToken);
     }
 
+
+    private async Task WriteMalformedNextStoppedSequenceEventAsync(int threadId, CancellationToken cancellationToken)
+    {
+        var message = new Dictionary<string, object?>
+        {
+            ["type"] = "event",
+            ["event"] = "stopped",
+            ["body"] = new { reason = "step", threadId, allThreadsStopped = true },
+        };
+        _outgoingSequence++;
+        if (_options.NextResponseMode != "missing-stop-sequence")
+        {
+            message["seq"] = _options.NextResponseMode switch
+            {
+                "wrong-type-stop-sequence" => (object)"not-an-int32",
+                "zero-stop-sequence" => 0,
+                "negative-stop-sequence" => -1,
+                "overflow-stop-sequence" => (long)int.MaxValue + 1,
+                "underflow-stop-sequence" => (long)int.MinValue - 1,
+                _ => throw new InvalidOperationException("Unknown malformed next stopped-event sequence mode."),
+            };
+        }
+        await WriteMessageAsync(message, cancellationToken);
+        await RecordAsync(new { kind = "event", @event = "stopped" }, cancellationToken);
+    }
 
     private async Task WriteEventAsync(string eventName, object? body, CancellationToken cancellationToken)
     {

@@ -271,6 +271,12 @@ public sealed class StepOverContractTests
     [InlineData("negative-response-sequence")]
     [InlineData("overflow-response-sequence")]
     [InlineData("underflow-response-sequence")]
+    [InlineData("missing-stop-sequence")]
+    [InlineData("wrong-type-stop-sequence")]
+    [InlineData("zero-stop-sequence")]
+    [InlineData("negative-stop-sequence")]
+    [InlineData("overflow-stop-sequence")]
+    [InlineData("underflow-stop-sequence")]
     public async Task StepOver_MalformedOrWronglyCorrelatedActiveExchange_ReturnsRedactedProtocolErrorAndEvicts(string nextResponseMode)
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync(StepOver(nextResponseMode: nextResponseMode));

@@ -802,7 +802,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 CapabilitiesObserved = true;
                 break;
             case "stopped":
-                HandleStoppedEvent(body);
+                HandleStoppedEvent(message, body);
                 break;
             case "continued":
                 HandleContinuedEvent(body);
@@ -940,7 +940,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             _state = update(_state);
         }
     }
-    private void HandleStoppedEvent(JsonElement body)
+    private void HandleStoppedEvent(JsonElement message, JsonElement body)
     {
         var allThreadsStopped = ReadOptionalBoolean(body, "allThreadsStopped");
         var threadId = TryGetInt32(body, "threadId");
@@ -964,7 +964,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 {
                     (_threadEligibility ??= new())[stoppedThreadId] = new CallStackEligibility();
                 }
-                _activeStepOver?.ObserveStopped(reason, threadId);
+                _activeStepOver?.ObserveStopped(message, reason, threadId);
             }
         }
         finally
@@ -2181,13 +2181,18 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             }
         }
 
-        public void ObserveStopped(string? reason, int? threadId)
+        public void ObserveStopped(JsonElement message, string? reason, int? threadId)
         {
             if (_deadline?.IsCancellationRequested != true
                 && _acknowledged
                 && string.Equals(reason, "step", StringComparison.Ordinal)
                 && threadId == ThreadId)
             {
+                if (RequireInt32(message, "seq") <= 0)
+                {
+                    throw new InvalidDataException("DAP step stop event sequence must be positive.");
+                }
+
                 Completion.TrySetResult(DapStepOverResult.Succeeded(ThreadId));
             }
         }
