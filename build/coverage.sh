@@ -148,6 +148,7 @@ python_test_paths=(
   tests/test_ui_screenshot.py
 )
 coverage run --source=src/netcoredbg_mcp --data-file="$shell_python_data" -m pytest \
+  --basetemp="$shell_output_root/coverage/pytest" \
   --cache-clear -o "cache_dir=$python_cache_directory" "${python_test_paths[@]}"
 coverage xml --data-file="$shell_python_data" -o "$shell_python_report"
 
