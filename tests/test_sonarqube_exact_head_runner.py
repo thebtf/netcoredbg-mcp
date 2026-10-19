@@ -3298,7 +3298,12 @@ class TestWave3CoverageProducerRedContracts(TestCase):
 
 class TestFunctionalCoverageScannerBoundary(TestCase):
     def test_scanner_free_producer_reaches_real_shell_python_workload(self):
-        with TemporaryDirectory(dir=RUNNER_PATH.parents[1] / ".agent") as temporary_directory:
+        checkout = RUNNER_PATH.parents[1]
+        if checkout.parent.name == "worktrees" and checkout.parent.parent.name == ".agent":
+            checkout = checkout.parents[2]
+        scratch = checkout / ".agent"
+        scratch.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(dir=scratch) as temporary_directory:
             plan = TestWave3CoverageProducerRedContracts._plan(Path(temporary_directory))
             plan = replace(plan, repository_root=RUNNER_PATH.parents[1])
             environment = runner.scrub_sonar_environment(runner.process_environment())
@@ -3345,7 +3350,12 @@ class TestFunctionalCoverageScannerBoundary(TestCase):
             producer.assert_called_once()
 
     def test_invalid_explicit_target_refuses_before_producer_or_scanner(self):
-        with TemporaryDirectory(dir=RUNNER_PATH.parents[1] / ".agent") as temporary_directory:
+        checkout = RUNNER_PATH.parents[1]
+        if checkout.parent.name == "worktrees" and checkout.parent.parent.name == ".agent":
+            checkout = checkout.parents[2]
+        scratch = checkout / ".agent"
+        scratch.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(dir=scratch) as temporary_directory:
             root = Path(temporary_directory)
             plan = TestWave3CoverageProducerRedContracts._plan(root)
             for target in ("", "relative.targets", str(root / "missing.targets"), str(root)):
