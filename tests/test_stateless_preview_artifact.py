@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import base64
 import hashlib
 import importlib.util
@@ -18,6 +19,8 @@ from collections.abc import Mapping
 from copy import deepcopy
 from http.client import HTTPMessage
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from textwrap import dedent
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -2458,6 +2461,93 @@ def _blocked_v3_exact_head_receipt(
             "safe_message": "fixture coverage transaction blocked",
         },
     }
+
+
+def test_functional_workflow_prepares_python_in_primary_owned_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import run_sonarqube_exact_head as runner
+
+    checkout = PROJECT_ROOT
+    if checkout.parent.name == "worktrees" and checkout.parent.parent.name == ".agent":
+        checkout = checkout.parents[2]
+    scratch = checkout / ".agent"
+    scratch.mkdir(exist_ok=True)
+    with TemporaryDirectory(prefix="preview-functional-python-", dir=scratch) as temporary:
+        root = Path(temporary)
+        primary = root / "primary checkout"
+        source = root / "detached source"
+        common = primary / ".git"
+        git_dir = common / "worktrees" / "functional"
+        git_dir.mkdir(parents=True)
+        source.mkdir()
+        context = runner.GitContext(source, common, git_dir, primary, "a" * 40)
+        environment = {"SAFE_VALUE": "kept"}
+        calls = []
+
+        def produce_python_environment(command, **kwargs):
+            assert command == ["uv", "sync", "--locked", "--extra", "dev"]
+            assert kwargs["cwd"] == source
+            child = kwargs["environment"]
+            assert child["SAFE_VALUE"] == "kept"
+            assert not any(name.upper().startswith("SONAR_") for name in child)
+            for name in ("UV_PROJECT_ENVIRONMENT", "UV_CACHE_DIR", "PYTHONPYCACHEPREFIX"):
+                output = Path(child[name])
+                assert output.is_relative_to(primary / ".agent")
+                assert not output.is_relative_to(source)
+                output.mkdir(parents=True, exist_ok=True)
+                (output / "producer-output").write_bytes(b"owned")
+            calls.append((command, kwargs))
+
+        monkeypatch.setattr(runner, "run_process", produce_python_environment)
+        with pytest.raises(runner.RunnerError, match="COVERAGE_OUTPUT_INVALID"):
+            runner.prepare_worktree_python_environment(context, environment, ())
+        assert calls == [], "The old call must refuse before install, build, or scan"
+
+        plan = runner.derive_coverage_plan(context, "123e4567-e89b-12d3-a456-426614174000")
+        runner.prepare_output_directory(context, plan)
+        intended_environment = runner.output_environment(environment, plan.root.parent, source)
+        runner.prepare_worktree_python_environment(context, intended_environment, ())
+        assert (plan.root.parent / "venv" / "producer-output").read_bytes() == b"owned"
+        assert not tuple(source.iterdir())
+        calls.clear()
+
+        workflow_path = PROJECT_ROOT / ".github" / "workflows" / "stateless-preview.yml"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        functional_step = workflow.split(
+            "      - name: Run required builds and functional producers\n", 1
+        )[1].split("\n      - name:", 1)[0]
+        embedded_python = dedent(
+            functional_step.split("          @'\n", 1)[1].split("\n          '@", 1)[0]
+        )
+        module = ast.parse(embedded_python, filename=str(workflow_path))
+        (preparation_index,) = [
+            index
+            for index, statement in enumerate(module.body)
+            if isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            and isinstance(statement.value.func, ast.Attribute)
+            and statement.value.func.attr == "prepare_worktree_python_environment"
+        ]
+        prefix = ast.Module(body=module.body[: preparation_index + 1], type_ignores=[])
+        monkeypatch.setattr(runner, "process_environment", lambda: dict(environment))
+        monkeypatch.setattr(runner, "git_context", lambda *_: context)
+        for name in (
+            "resolve_wave2_entry",
+            "verify_wave2_entry",
+            "assert_post_merge_target",
+            "strict_cleanliness",
+            "preflight_coverage_toolchain",
+        ):
+            monkeypatch.setattr(runner, name, lambda *args, **kwargs: None)
+
+        exec(compile(prefix, str(workflow_path), "exec"), {})
+
+        assert len(calls) == 1
+        child = calls[0][1]["environment"]
+        for name in ("UV_PROJECT_ENVIRONMENT", "UV_CACHE_DIR", "PYTHONPYCACHEPREFIX"):
+            assert (Path(child[name]) / "producer-output").read_bytes() == b"owned"
+        assert not tuple(source.iterdir())
 
 
 def _exact_head_runner_for_receipt_tests() -> Any:

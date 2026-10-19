@@ -132,6 +132,11 @@ jobs:
           runner.assert_post_merge_target(context, environment)
           runner.clear_generated_artifacts(context, environment)
           runner.strict_cleanliness(context, environment, "functional producer start")
+          plan = runner.derive_coverage_plan(context, str(uuid.uuid4()))
+          runner.prepare_output_directory(context, plan)
+          environment = runner.output_environment(
+              environment, plan.root.parent, context.repository_root,
+          )
           runner.preflight_coverage_toolchain(context=context, environment=environment)
           runner.prepare_worktree_python_environment(context, environment, ())
           solution, _, standalone_projects = runner.project_inventory(context.repository_root)
@@ -143,7 +148,6 @@ jobs:
                   secrets=(),
                   label=f"Required build ({project.name})",
               )
-          plan = runner.derive_coverage_plan(context, str(uuid.uuid4()))
           claim = runner.claim_coverage_run(context, plan, resolved_wave2)
           stateless_before = runner.capture_stateless_binary_hashes(plan)
           runner.run_coverage_producer(plan, environment)
