@@ -110,6 +110,30 @@ public sealed class StructuredContentSchemaParityTests
         ValidateVariant(schema, protocolError);
     }
 
+    [Fact]
+    public async Task LiveHost_StructuredContentMatchesEveryFrozenStepOverSchemaVariant()
+    {
+        var schema = LoadSchema();
+        var success = await StepOverContentAsync("success", "step-over-schema-success");
+        var terminal = await StepOverContentAsync("terminal-before-ack", "step-over-schema-terminal");
+        var timedOut = await StepOverContentAsync("timeout", "step-over-schema-timeout");
+        var refused = await StepOverContentAsync("negative", "step-over-schema-refused");
+        var protocolError = await StepOverContentAsync("wrong-command", "step-over-schema-protocol-error");
+        var invalidArguments = await StepOverInvalidArgumentsContentAsync();
+
+        Assert.Equal("step_over_success", success["kind"]?.GetValue<string>());
+        Assert.Equal("step_over_terminal", terminal["kind"]?.GetValue<string>());
+        Assert.Equal("step_over_timed_out", timedOut["kind"]?.GetValue<string>());
+        Assert.Equal("dap_step_over_refused", refused["kind"]?.GetValue<string>());
+        Assert.Equal("dap_step_over_protocol_error", protocolError["kind"]?.GetValue<string>());
+        Assert.Equal("invalid_tool_arguments", invalidArguments["kind"]?.GetValue<string>());
+        Assert.Equal("step_over", invalidArguments["tool"]?.GetValue<string>());
+        foreach (var content in new[] { success, terminal, timedOut, refused, protocolError, invalidArguments })
+        {
+            ValidateVariant(schema, content);
+        }
+    }
+
 
     private static JsonObject LoadSchema() => JsonNode.Parse(File.ReadAllText(Path.Combine(
         RepositoryLayout.Root,
@@ -160,6 +184,40 @@ public sealed class StructuredContentSchemaParityTests
             new JsonObject { ["debugSessionId"] = debugSessionId, ["threadId"] = 1 },
             meta,
             new RequestId(requestId)));
+    }
+
+    private static async Task<JsonObject> StepOverContentAsync(string responseMode, string requestId)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            DisableFormElicitation: true,
+            FixtureConfiguration: new FixtureConfiguration(
+                LifecycleMode: "all-stop",
+                NextResponseMode: responseMode)));
+        var meta = ModernMcpProcessDriver.CurrentMeta();
+        var start = Structured(await driver.CallToolRawAsync(
+            "start_debug",
+            new JsonObject { ["program"] = driver.InertProgramPath },
+            meta,
+            new RequestId($"{requestId}-start")));
+        var debugSessionId = Assert.IsType<string>(start["debugSessionId"]?.GetValue<string>());
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+        return Structured(await driver.CallToolRawAsync(
+            "step_over",
+            new JsonObject { ["debugSessionId"] = debugSessionId, ["threadId"] = 1 },
+            meta,
+            new RequestId(requestId),
+            timeout: responseMode == "timeout" ? TimeSpan.FromSeconds(35) : null));
+    }
+
+    private static async Task<JsonObject> StepOverInvalidArgumentsContentAsync()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(DisableFormElicitation: true));
+        return Structured(await driver.CallToolRawAsync(
+            "step_over",
+            new JsonObject { ["debugSessionId"] = "opaque" },
+            ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("step-over-schema-invalid")));
     }
 
 

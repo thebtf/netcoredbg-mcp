@@ -103,6 +103,25 @@
       },
       "additionalProperties": false
     },
+    "stepOverArguments": {
+      "type": "object",
+      "required": [
+        "debugSessionId",
+        "threadId"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "threadId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
     "startDebugSuccess": {
       "type": "object",
       "required": [
@@ -259,6 +278,72 @@
       },
       "additionalProperties": false
     },
+    "stepOverSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "threadId"
+      ],
+      "properties": {
+        "kind": {
+          "const": "step_over_success"
+        },
+        "threadId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
+    "stepOverTerminal": {
+      "type": "object",
+      "required": [
+        "kind",
+        "terminal"
+      ],
+      "properties": {
+        "kind": {
+          "const": "step_over_terminal"
+        },
+        "terminal": {
+          "enum": [
+            "exited",
+            "terminated"
+          ]
+        },
+        "exitCode": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
+    "stepOverTimedOut": {
+      "type": "object",
+      "required": [
+        "kind",
+        "threadId",
+        "timeoutSeconds"
+      ],
+      "properties": {
+        "kind": {
+          "const": "step_over_timed_out"
+        },
+        "threadId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 30
+        }
+      },
+      "additionalProperties": false
+    },
     "debugSessionNotFound": {
       "type": "object",
       "required": [
@@ -339,6 +424,38 @@
       },
       "additionalProperties": false
     },
+    "dapStepOverRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_step_over_refused"
+        },
+        "error": {
+          "const": "DAP_STEP_OVER_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapStepOverProtocolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_step_over_protocol_error"
+        },
+        "error": {
+          "const": "DAP_STEP_OVER_PROTOCOL_ERROR"
+        }
+      },
+      "additionalProperties": false
+    },
     "missingProgramCapability": {
       "type": "object",
       "required": [
@@ -375,7 +492,8 @@
             "get_debug_state",
             "stop_debug",
             "get_threads",
-            "get_call_stack"
+            "get_call_stack",
+            "step_over"
           ]
         }
       },
@@ -399,6 +517,15 @@
           "$ref": "#/$defs/callStackSuccess"
         },
         {
+          "$ref": "#/$defs/stepOverSuccess"
+        },
+        {
+          "$ref": "#/$defs/stepOverTerminal"
+        },
+        {
+          "$ref": "#/$defs/stepOverTimedOut"
+        },
+        {
           "$ref": "#/$defs/debugSessionNotFound"
         },
         {
@@ -415,6 +542,12 @@
         },
         {
           "$ref": "#/$defs/dapStackTraceProtocolError"
+        },
+        {
+          "$ref": "#/$defs/dapStepOverRefused"
+        },
+        {
+          "$ref": "#/$defs/dapStepOverProtocolError"
         },
         {
           "$ref": "#/$defs/invalidToolArguments"

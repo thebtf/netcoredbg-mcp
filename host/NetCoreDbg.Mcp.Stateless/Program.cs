@@ -60,20 +60,55 @@ internal static class Program
                 ValueTask.FromResult(ToolCatalog.List()))
             .WithCallToolHandler((context, cancellationToken) =>
                 sessions.CallAsync(context, cancellationToken))
-            .WithMessageFilters(filters => filters.AddOutgoingFilter(next => async (context, cancellationToken) =>
+            .WithMessageFilters(filters =>
             {
-                if (context.JsonRpcMessage is JsonRpcResponse { Result: JsonObject result }
-                    && result.ContainsKey("supportedVersions")
-                    && result.ContainsKey("capabilities"))
+                filters.AddIncomingFilter(next => async (context, cancellationToken) =>
                 {
-                    result["ttlMs"] = (long)CacheLifetime.TotalMilliseconds;
-                    result["cacheScope"] = "public";
-                }
+                    if (context.JsonRpcMessage is JsonRpcNotification
+                        {
+                            Method: NotificationMethods.CancelledNotification,
+                            Params: JsonObject parameters,
+                        }
+                        && TryReadCancelledRequestId(parameters["requestId"], out var requestId))
+                    {
+                        sessions.CancelStepOver(requestId);
+                    }
 
-                await next(context, cancellationToken).ConfigureAwait(false);
-            }));
+                    await next(context, cancellationToken).ConfigureAwait(false);
+                });
+                filters.AddOutgoingFilter(next => async (context, cancellationToken) =>
+                {
+                    if (context.JsonRpcMessage is JsonRpcResponse { Result: JsonObject result }
+                        && result.ContainsKey("supportedVersions")
+                        && result.ContainsKey("capabilities"))
+                    {
+                        result["ttlMs"] = (long)CacheLifetime.TotalMilliseconds;
+                        result["cacheScope"] = "public";
+                    }
+
+                    await next(context, cancellationToken).ConfigureAwait(false);
+                });
+            });
 
         return builder.Build();
+    }
+
+    private static bool TryReadCancelledRequestId(JsonNode? value, out RequestId requestId)
+    {
+        if (value is JsonValue stringValue && stringValue.TryGetValue<string>(out var stringId))
+        {
+            requestId = new RequestId(stringId);
+            return true;
+        }
+
+        if (value is JsonValue numericValue && numericValue.TryGetValue<long>(out var numericId))
+        {
+            requestId = new RequestId(numericId);
+            return true;
+        }
+
+        requestId = default;
+        return false;
     }
 
     private static async Task RunUnixProcessGroupProxyAsync(string debuggerPath, string terminationControlHandle)
@@ -116,6 +151,7 @@ internal static class Program
         private const string StopDebug = "stop_debug";
         private const string GetThreads = "get_threads";
         private const string GetCallStack = "get_call_stack";
+        private const string StepOver = "step_over";
         private const string InputRequestId = "start_debug_program";
         private static readonly TimeSpan InitializeTimeout = TimeSpan.FromSeconds(10);
         private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
@@ -125,6 +161,7 @@ internal static class Program
 
         private readonly ConcurrentDictionary<string, NetCoreDbgSession> _sessions = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, SessionSlot> _slots = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<RequestId, CancellationTokenSource> _stepOverRequests = new();
         private readonly ConcurrentDictionary<string, NativeSceneSessionBinding> _nativeSceneBindings = new(StringComparer.Ordinal);
         private readonly string? _debuggerPath;
         private readonly string? _bridgePath;
@@ -196,6 +233,7 @@ internal static class Program
                 StopDebug => await StopAsync(request, cancellationToken).ConfigureAwait(false),
                 GetThreads => await GetThreadsAsync(request, cancellationToken).ConfigureAwait(false),
                 GetCallStack => await GetCallStackAsync(request, cancellationToken).ConfigureAwait(false),
+                StepOver => await StepOverAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 _ when IsNativeSceneTool(request.Name) => await NativeSceneToolDispatcher.DispatchAsync(
                     request.Name,
                     request.Arguments,
@@ -553,6 +591,92 @@ internal static class Program
                 }
             }
         }
+        private async ValueTask<CallToolResult> StepOverAsync(
+            CallToolRequestParams request,
+            RequestId requestId,
+            CancellationToken cancellationToken)
+        {
+            if (!TryReadStepOverArguments(request.Arguments, out var arguments))
+            {
+                return InvalidArguments(StepOver);
+            }
+
+            if (!_sessions.TryGetValue(arguments.SessionId, out var session)
+                || !_slots.TryGetValue(arguments.SessionId, out var slot))
+            {
+                await RemoveNativeSceneBindingAsync(arguments.SessionId).ConfigureAwait(false);
+                return NotFound();
+            }
+
+            var lease = slot.TryAcquire();
+            if (lease is null)
+            {
+                return NotFound();
+            }
+
+            var closeAfterLease = false;
+            using var callerCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var operation = CancellationTokenSource.CreateLinkedTokenSource(callerCancellation.Token, lease.AbortToken);
+            _stepOverRequests.TryAdd(requestId, callerCancellation);
+            try
+            {
+                if (!_isUsable(session))
+                {
+                    closeAfterLease = true;
+                    return NotFound();
+                }
+
+                var stepOver = await session.StepOverAsync(arguments.ThreadId, operation.Token).ConfigureAwait(false);
+                if (stepOver.Outcome == DapStepOverOutcome.Refused)
+                {
+                    return Error("dap_step_over_refused", "DAP_STEP_OVER_REFUSED");
+                }
+
+                if (stepOver.Outcome == DapStepOverOutcome.Succeeded)
+                {
+                    return Result(new StepOverSuccessContent("step_over_success", stepOver.ThreadId), isError: false);
+                }
+
+                closeAfterLease = true;
+                if (stepOver.Outcome == DapStepOverOutcome.Terminal)
+                {
+                    return Result(new StepOverTerminalContent("step_over_terminal", stepOver.Terminal!, stepOver.ExitCode), isError: false);
+                }
+
+                if (stepOver.Outcome == DapStepOverOutcome.TimedOut)
+                {
+                    return Result(new StepOverTimedOutContent("step_over_timed_out", stepOver.ThreadId, 30), isError: false);
+                }
+
+                throw new InvalidOperationException("Unknown step-over outcome.");
+            }
+            catch (OperationCanceledException) when (callerCancellation.IsCancellationRequested)
+            {
+                closeAfterLease = session.RequiresStepOverDrain();
+                throw;
+            }
+            catch (Exception)
+            {
+                closeAfterLease = true;
+                return Error("dap_step_over_protocol_error", "DAP_STEP_OVER_PROTOCOL_ERROR");
+            }
+            finally
+            {
+                _stepOverRequests.TryRemove(new KeyValuePair<RequestId, CancellationTokenSource>(requestId, callerCancellation));
+                lease.Dispose();
+                if (closeAfterLease)
+                {
+                    try
+                    {
+                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            }
+        }
+
         private async ValueTask<CallToolResult> StopAsync(
             CallToolRequestParams request,
             CancellationToken cancellationToken)
@@ -628,6 +752,21 @@ internal static class Program
                 _ = ObserveCloseAsync(slot);
             }
         }
+        internal void CancelStepOver(RequestId requestId)
+        {
+            if (_stepOverRequests.TryGetValue(requestId, out var cancellation))
+            {
+                try
+                {
+                    cancellation.Cancel();
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+            }
+        }
+
+
 
         private static async Task ObserveCloseAsync(SessionSlot slot)
         {
@@ -922,6 +1061,28 @@ internal static class Program
 
             return true;
         }
+        private static bool TryReadStepOverArguments(
+            IDictionary<string, JsonElement>? arguments,
+            out StepOverArguments result)
+        {
+            result = null!;
+            if (arguments is null
+                || arguments.Count != 2
+                || arguments.Keys.Any(static name => name is not "debugSessionId" and not "threadId")
+                || !arguments.TryGetValue("debugSessionId", out var sessionIdElement)
+                || sessionIdElement.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(sessionIdElement.GetString())
+                || !arguments.TryGetValue("threadId", out var threadIdElement)
+                || threadIdElement.ValueKind != JsonValueKind.Number
+                || !threadIdElement.TryGetInt32(out var threadId))
+            {
+                return false;
+            }
+
+            result = new StepOverArguments(sessionIdElement.GetString()!, threadId);
+            return true;
+        }
+
         private static bool TryReadCallStackArguments(
             IDictionary<string, JsonElement>? arguments,
             out CallStackArguments result)
@@ -1054,6 +1215,14 @@ internal static class Program
             string kind,
             IReadOnlyList<DapStackFrame> frames,
             [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] uint? totalFrames);
+        private sealed record StepOverArguments(string SessionId, int ThreadId);
+        private sealed record StepOverSuccessContent(string kind, int threadId);
+        private sealed record StepOverTerminalContent(
+            string kind,
+            string terminal,
+            [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? exitCode);
+        private sealed record StepOverTimedOutContent(string kind, int threadId, int timeoutSeconds);
+
     }
 
     private static class ToolCatalog
@@ -1067,6 +1236,7 @@ internal static class Program
                 Tool("stop_debug", "Stop a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("get_threads", "Get threads in a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("get_call_stack", "Get a bounded stack-frame page for one stopped thread.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647},\"startFrame\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295},\"levels\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":256}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
+                Tool("step_over", "Step over one explicitly named stopped thread.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
                 .. NativeSceneToolDispatcher.ListTools(),
             ],
             TimeToLive = CacheLifetime,

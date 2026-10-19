@@ -1159,8 +1159,7 @@ public sealed class ProgressLoggingRelayTests
 
     private sealed class RealProbePython : IAsyncDisposable
     {
-        private static readonly string RepoRoot = Path.GetFullPath(
-            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+        private static readonly string RepoRoot = RootsRelayRealPythonTests.LocateRepoRoot();
 
         private readonly string _packageRoot;
         private readonly string _shutdownMarker;
@@ -1176,10 +1175,7 @@ public sealed class ProgressLoggingRelayTests
 
         public static RealProbePython Start(bool advertiseLogging)
         {
-            var pythonExecutable = Path.Combine(
-                RepoRoot,
-                ".venv",
-                OperatingSystem.IsWindows() ? Path.Combine("Scripts", "python.exe") : Path.Combine("bin", "python"));
+            var pythonExecutable = RootsRelayRealPythonTests.ResolvePythonExecutable();
             Assert.True(File.Exists(pythonExecutable), $"expected the worktree venv interpreter at {pythonExecutable}");
 
             var fixturePath = Path.Combine(RepoRoot, "tests", "fixtures", "fd002_notification_probe_server.py");

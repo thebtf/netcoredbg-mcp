@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The opt-in modern native host adds `step_over(debugSessionId, threadId)` after `get_call_stack`: one explicit Int32 target, correlated DAP `next`, and a bounded wait for a later exact step stop, terminal event, or timeout. Concurrent steps are refused; uncertain post-write outcomes use the existing session close-and-drain owner.
+
+### Changed
+- The unpublished, source-only B3 cancellation contract now retains a session only when cancellation finishes before writer handoff with no initiated or late write. Cancellation after opaque writer entry drains conservatively, even for fixture-proven zero delivery; the original stronger promise and valid RED remain preserved, not passed. The unsafe-drain marker is sticky, so concurrent cancellation cannot propagate ahead of shared stop/dispose cleanup. Admission-invalidated stopped/B2 authority is not restored. The shared 30-second deadline still starts only after complete header/payload/flush commit; the five outcomes, B1/B2, and Python default are unchanged.
+
+### Fixed
+- Native contract fixtures retain the complete B1/B3 catalog expectation, observe actual adapter cleanup before checking cancellation eviction, and establish correlated initialize-response ordering through the existing continuation gate before testing the missing-initialized timeout. Production timeouts and the negative initialization assertions remain unchanged.
+
+### Compatibility
+- The installed Python entry point remains the default and rollback route. This additive native slice does not add other execution controls, change UI/bridge behavior, or authorize publication.
+
 ## [0.23.14] - 2026-10-11
 
 ### Fixed

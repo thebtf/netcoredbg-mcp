@@ -96,7 +96,7 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
-    public async Task ToolsList_ReturnsExactlyTheOrderedElevenToolCatalogWithRuntimeSchemas()
+    public async Task ToolsList_ReturnsExactlyTheOrderedTwelveToolCatalogWithRuntimeSchemas()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync();
 
@@ -319,7 +319,7 @@ public sealed class ModernProtocolContractTests
     private static void AssertCatalog(JsonObject result)
     {
         var tools = Assert.IsType<JsonArray>(result["tools"]);
-        Assert.Equal(11, tools.Count);
+        Assert.Equal(12, tools.Count);
         Assert.Equal(
             [
                 "start_debug",
@@ -327,6 +327,7 @@ public sealed class ModernProtocolContractTests
                 "stop_debug",
                 "get_threads",
                 "get_call_stack",
+                "step_over",
                 "get_ui_probe_capabilities",
                 "capture_visual_evidence",
                 "read_capture_artifact",
@@ -336,8 +337,8 @@ public sealed class ModernProtocolContractTests
             ],
             tools.Select(static tool => tool?["name"]?.GetValue<string>()));
         Assert.Equal(
-            ["start_debug", "get_debug_state", "stop_debug", "get_threads", "get_call_stack"],
-            tools.Take(5).Select(static tool => tool?["name"]?.GetValue<string>()));
+            ["start_debug", "get_debug_state", "stop_debug", "get_threads", "get_call_stack", "step_over"],
+            tools.Take(6).Select(static tool => tool?["name"]?.GetValue<string>()));
 
         var start = Assert.IsType<JsonObject>(tools[0]);
         Assert.Equal("object", start["inputSchema"]?["type"]?.GetValue<string>());
