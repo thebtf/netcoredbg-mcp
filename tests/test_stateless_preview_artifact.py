@@ -8272,6 +8272,102 @@ def test_closeout_cli_completed_publisher_to_independently_retained_program_b_ha
 
 
 @pytest.mark.parametrize(
+    "attempt_created_at",
+    ["2029-01-02T00:00:01Z", "2029-01-01T23:59:59Z"],
+    ids=["listing-one-second-earlier", "listing-one-second-later"],
+)
+def test_closeout_cli_accepts_same_publisher_attempt_with_endpoint_creation_skew(
+    closeout_workflow_cli: _PromotionWorkflowCli, attempt_created_at: str
+) -> None:
+    """Controlled simulated API metadata, not an actual current GitHub job."""
+    cli = closeout_workflow_cli
+    publisher_artifacts, writes = deepcopy(cli.artifacts), deepcopy(cli.mutations)
+    original_proof = cli.records["remote-consumer-proof.json"]
+    # Split the shared default so only the exact-attempt endpoint's timestamp differs.
+    cli.run_attempts[("801", "2")] = {
+        **deepcopy(cli.runs["801"]),
+        "created_at": attempt_created_at,
+    }
+
+    for step in range(len(_CLOSEOUT_UPLOAD_STEPS)):
+        cli.closeout_step(step)
+
+    verification = json.loads(cli.closeout_bytes["verification"]["remote-verification.json"])
+    handoff = json.loads(cli.closeout_bytes["handoff"]["program-b-handoff.json"])
+    assert cli.closeout_bytes["records"]["remote-consumer-proof.json"] == original_proof
+    assert verification["pre_publication_verification"] == json.loads(cli.prepublication_bytes)
+    assert (
+        verification["promotion_attempt_id"]
+        == handoff["promotion_attempt_id"]
+        == cli.publisher_attempt_id
+    )
+    assert handoff["completion_scope"] == "A1_OPT_IN_PREVIEW_COMPLETE"
+
+    shutil.rmtree(cli.runner)
+    cli.runner.mkdir()
+    assert cli.invoke("verify-closeout-retention") == 0
+    outputs = cli.outputs()
+    assert set(outputs) == {"program_b_handoff_reference"}
+    assert json.loads(outputs["program_b_handoff_reference"]) == cli.compact(
+        cli.closeout_retained["handoff"]
+    )
+    assert cli.mutations == writes
+    assert all(cli.artifacts[key] == value for key, value in publisher_artifacts.items())
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        "missing-current",
+        "duplicate-current",
+        "foreign-repository",
+        "foreign-head-repository",
+        "wrong-source",
+        "wrong-workflow",
+        "wrong-event",
+        "wrong-ref",
+    ],
+)
+def test_closeout_cli_requires_unique_source_bound_publisher_history_entry(
+    closeout_workflow_cli: _PromotionWorkflowCli, violation: str
+) -> None:
+    cli = closeout_workflow_cli
+    # Keep the independently admitted exact attempt valid while changing only history.
+    cli.run_attempts[("801", "2")] = deepcopy(cli.runs["801"])
+    if violation == "missing-current":
+        del cli.runs["801"]
+    elif violation == "duplicate-current":
+        cli.runs["duplicate-publisher"] = deepcopy(cli.runs["801"])
+    elif violation in ("foreign-repository", "foreign-head-repository"):
+        field = "repository" if violation == "foreign-repository" else "head_repository"
+        cli.runs["801"][field] = {"id": 4002, "full_name": "other/fork"}
+    elif violation == "wrong-source":
+        cli.runs["801"]["head_sha"] = "a" * 40
+    elif violation == "wrong-workflow":
+        cli.runs["801"]["path"] = ".github/workflows/other.yml"
+    elif violation == "wrong-event":
+        cli.runs["801"]["event"] = "push"
+    else:
+        cli.runs["801"]["head_branch"] = "other"
+
+    cli.assert_closeout_refused()
+
+
+def test_closeout_cli_history_anchor_does_not_replace_exact_attempt_chronology(
+    closeout_workflow_cli: _PromotionWorkflowCli,
+) -> None:
+    cli = closeout_workflow_cli
+    completed_at = cli.attempt_jobs[("801", "2")]["jobs"][0]["completed_at"]
+    assert json.loads(cli.attempt_bytes)["recorded_at"] < completed_at
+    cli.run_attempts[("801", "2")] = {
+        **deepcopy(cli.runs["801"]),
+        "created_at": completed_at,
+    }
+
+    cli.assert_closeout_refused()
+
+
+@pytest.mark.parametrize(
     "violation",
     [
         "missing-handoff",

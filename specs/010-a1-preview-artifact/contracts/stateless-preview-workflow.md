@@ -213,6 +213,8 @@ P is the distinct actual `completed/success` publisher. Its handoff is only a lo
 
 Reconstruct P's run/attempt/job, actors, tracked execution policy and complete predecessor history independently, with discovery anchored before P, not Q. Pass that P context as the existing pure sealers' `current_promotion_context`; never copy trusted context from the records, spoof Q as P, or select a completed publisher as the live current job. Attempt/Observation/Classification and `promotion_attempt_id` retain P; new closeout artifact references name Q. Candidate source/build, Catalog source, P/Q workflow SHAs, checkout, fetched main and fresh GitHub main target all equal S at `refs/heads/main`. This narrow historical readback does not weaken live publisher admission or grant release-write authority. DENIED remains denied; UNKNOWN never triggers resend; closeout performs no release mutations.
 
+History ordering uses the unique P row in the complete workflow-run listing, independently bound to P's repository/head repository IDs and names, run ID, workflow, event, ref and source SHA. Its `(created_at, run_id)` orders discovery against the other listing rows; missing, ambiguous or foreign P rows refuse. The listing's latest attempt does not replace the exact historical P attempt selected through its retained handoff. The exact-attempt API's `created_at` separately bounds P's actual execution and immutable Attempt chronology; it need not equal the listing's timestamp.
+
 ### Fixed CLI, four upload barriers and final readback
 
 All five commands take zero additional arguments and are admitted only for closeout:
