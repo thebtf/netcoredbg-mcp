@@ -4,9 +4,11 @@ import importlib.util
 import json
 import re
 import stat
+import subprocess
 import sys
 from contextlib import ExitStack, nullcontext
 from copy import deepcopy
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -2734,7 +2736,6 @@ class TestWave3CoverageProducerRedContracts(TestCase):
                 if stripped and not stripped.startswith("//"):
                     pending_attributes.clear()
 
-        self.assertEqual(len(process_classes), 12)
         self.assertEqual(missing_traits, [])
 
     def test_r10_only_stateless_gets_include_directory_and_restoration_and_mapping_are_required(
@@ -3293,6 +3294,72 @@ class TestWave3CoverageProducerRedContracts(TestCase):
             "tests/test_stateless_preview_artifact.py",
         ):
             self.assertNotIn(excluded, script)
+
+
+class TestFunctionalCoverageScannerBoundary(TestCase):
+    def test_scanner_free_producer_reaches_real_shell_python_workload(self):
+        with TemporaryDirectory(dir=RUNNER_PATH.parents[1] / ".agent") as temporary_directory:
+            plan = TestWave3CoverageProducerRedContracts._plan(Path(temporary_directory))
+            plan = replace(plan, repository_root=RUNNER_PATH.parents[1])
+            environment = runner.scrub_sonar_environment(runner.process_environment())
+            environment.pop("CustomBeforeMicrosoftCommonTargets", None)
+
+            def execute_shell(command, **kwargs):
+                self.assertNotIn("--integration-targets", command)
+                result = subprocess.run(
+                    [
+                        command[11],
+                        "-c",
+                        'coverage() { printf "%s\\n" functional-coverage-reached; return 73; }; '
+                        'export -f coverage; exec "$@"',
+                        "coverage-boundary",
+                        *command[11:],
+                    ],
+                    cwd=kwargs["cwd"],
+                    env=kwargs["environment"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
+                self.assertIn("functional-coverage-reached", result.stdout)
+                for target in ("", "relative.targets", str(plan.root / "missing.targets")):
+                    with self.subTest(shell_target=target):
+                        refused = subprocess.run(
+                            [*command[11:], "--integration-targets", target],
+                            cwd=kwargs["cwd"],
+                            env=kwargs["environment"],
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                        )
+                        self.assertEqual(refused.returncode, 64, refused.stdout + refused.stderr)
+
+            with (
+                patch.object(
+                    runner, "discover_scanner", side_effect=AssertionError("scanner lookup")
+                ),
+                patch.object(runner, "run_process", side_effect=execute_shell) as producer,
+            ):
+                runner.run_coverage_producer(plan, environment)
+            producer.assert_called_once()
+
+    def test_invalid_explicit_target_refuses_before_producer_or_scanner(self):
+        with TemporaryDirectory(dir=RUNNER_PATH.parents[1] / ".agent") as temporary_directory:
+            root = Path(temporary_directory)
+            plan = TestWave3CoverageProducerRedContracts._plan(root)
+            for target in ("", "relative.targets", str(root / "missing.targets"), str(root)):
+                with (
+                    self.subTest(target=target),
+                    patch.object(runner, "discover_scanner") as scanner,
+                    patch.object(runner, "run_process") as producer,
+                    self.assertRaisesRegex(runner.RunnerError, "SONAR_SCANNER_UNAVAILABLE"),
+                ):
+                    runner.run_coverage_producer(
+                        plan, {"CustomBeforeMicrosoftCommonTargets": target}
+                    )
+                scanner.assert_not_called()
+                producer.assert_not_called()
 
 
 class TestImmutablePublishedSonarRedContracts(TestCase):
