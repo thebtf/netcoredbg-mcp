@@ -15,9 +15,13 @@ stop it deliberately, and inspect the state that explains the behavior.
 
 **Python 3.10+ · Windows GUI automation · 135 tools · 8 prompts · 4 resources · v0.23.14**
 
-The v0.23.14 PATCH retains failed prebuild diagnostics: actual argv, working
-directory, exit code, and captured stdout/stderr remain inspectable without
-substituting a previous result. This PATCH does not change the screenshot backend.
+The prepared v0.23.14 PATCH retains completed failed prebuild diagnostics in the
+first `start_debug` error response and through public `get_build_diagnostics`:
+actual argv, working directory, exit code, and captured stdout/stderr, even when
+no MSBuild errors were parsed. A previous result is not substituted. Process
+ownership safeguards and the screenshot backend are unchanged. See the
+[release notes](RELEASE_NOTES.md) for the bounded maintainer source changes and
+delivery scope; this preparation is not a publication receipt.
 
 ## What it enables
 
@@ -29,8 +33,10 @@ substituting a previous result. This PATCH does not change the screenshot backen
 | Verify a repair | Run a bounded runtime-smoke plan with cleanup, output checkpoints, freshness checks, and recorded evidence. |
 | Search a project | Find C# symbols and references, read source context, or run a bounded `search_source` query. |
 
-The published Python package is the consumer entry point. The experimental .NET
-host and Native Scene Probe are source-only and do not add tools to this wheel.
+The Python package remains the default consumer entry point. Its wheel does not
+bundle the opt-in .NET preview executable. Corrected preview delivery is separate;
+B3 native `step_over` and Native Scene Probe work remain modern-host source-only
+and add no tools to the Python catalog.
 
 ## Quick start
 

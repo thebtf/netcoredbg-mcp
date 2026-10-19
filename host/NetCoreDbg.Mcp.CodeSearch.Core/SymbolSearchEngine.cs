@@ -22,7 +22,7 @@ public sealed class SymbolSearchEngine
     private readonly Func<long>? _timestamp;
     private readonly Func<DirectoryInfo, IEnumerable<DirectoryInfo>> _enumerateDirectories;
     private readonly Func<DirectoryInfo, IEnumerable<FileInfo>> _enumerateFiles;
-    private readonly Func<Regex, string, bool>? _strictRegexMatch;
+    private readonly Func<Regex, ReadOnlyMemory<char>, bool>? _strictRegexMatch;
     private readonly Func<string, Stream> _openRead;
 
     public SymbolSearchEngine(string projectRoot, SearchPolicy policy)
@@ -37,7 +37,7 @@ public sealed class SymbolSearchEngine
         Func<long>? timestamp = null,
         Func<DirectoryInfo, IEnumerable<DirectoryInfo>>? enumerateDirectories = null,
         Func<DirectoryInfo, IEnumerable<FileInfo>>? enumerateFiles = null,
-        Func<Regex, string, bool>? strictRegexMatch = null,
+        Func<Regex, ReadOnlyMemory<char>, bool>? strictRegexMatch = null,
         Func<string, Stream>? openRead = null,
         Func<string, bool>? directoryExists = null)
     {
@@ -77,23 +77,24 @@ public sealed class SymbolSearchEngine
         foreach (var path in SourceFiles("*.cs", rules, operation))
         {
             var relativeFile = RelativePath(path);
-            var lines = ReadLines(path, operation);
-            for (var index = 0; index < lines.Length; index++)
+            var lineNumber = 0;
+            foreach (var line in ReadLines(path, operation))
             {
                 operation.Check();
+                lineNumber++;
                 foreach (var (symbolKind, pattern) in patterns)
                 {
-                    if (!pattern.IsMatch(lines[index], _settings.Strict ? operation : null))
+                    if (!pattern.IsMatch(line, _settings.Strict ? operation : null))
                     {
                         continue;
                     }
 
                     AddSymbolResult(results, new SymbolMatch(
                         relativeFile,
-                        index + 1,
+                        lineNumber,
                         name,
                         symbolKind,
-                        FormatContext(lines[index])), operation);
+                        FormatContext(line.Span)), operation);
                     break;
                 }
             }
@@ -123,11 +124,12 @@ public sealed class SymbolSearchEngine
         foreach (var path in SourceFiles(null, rules, operation))
         {
             var relativeFile = RelativePath(path);
-            var lines = ReadLines(path, operation);
-            for (var index = 0; index < lines.Length; index++)
+            var lineNumber = 0;
+            foreach (var line in ReadLines(path, operation))
             {
                 operation.Check();
-                if (!referencePattern.IsMatch(lines[index], _settings.Strict ? operation : null))
+                lineNumber++;
+                if (!referencePattern.IsMatch(line, _settings.Strict ? operation : null))
                 {
                     continue;
                 }
@@ -137,7 +139,7 @@ public sealed class SymbolSearchEngine
                     ThrowFailure(SearchFailure.PreviewSearchBudgetExceeded(operation.Tool));
                 }
 
-                results.Add(new ReferenceMatch(relativeFile, index + 1, FormatContext(lines[index])));
+                results.Add(new ReferenceMatch(relativeFile, lineNumber, FormatContext(line.Span)));
                 if (!_settings.Strict && results.Count >= limit)
                 {
                     return results;
@@ -169,19 +171,25 @@ public sealed class SymbolSearchEngine
         var rules = LoadGitIgnoreRules(operation);
         var path = ResolveProjectFile(filePath, rules, operation);
         var lines = ReadLines(path, operation);
-        if (line > lines.Length)
-        {
-            ThrowArgumentOrFailure($"line {line} is outside file range 1..{lines.Length}", operation.Tool);
-        }
-
         var startLine = (int)Math.Max(1L, (long)line - radius);
-        var endLine = (int)Math.Min(lines.Length, (long)line + radius);
-        var selectedLines = new List<SourceLine>(endLine - startLine + 1);
-        for (var lineNumber = startLine; lineNumber <= endLine; lineNumber++)
+        var requestedEndLine = (long)line + radius;
+        var selectedLines = new List<SourceLine>();
+        var totalLines = 0;
+        foreach (var sourceLine in lines)
         {
             operation.Check();
-            selectedLines.Add(new SourceLine(lineNumber, FormatContext(lines[lineNumber - 1], trim: false)));
+            totalLines++;
+            if (totalLines >= startLine && totalLines <= requestedEndLine)
+            {
+                selectedLines.Add(new SourceLine(totalLines, FormatContext(sourceLine.Span, trim: false)));
+            }
         }
+        if (line > totalLines)
+        {
+            ThrowArgumentOrFailure($"line {line} is outside file range 1..{totalLines}", operation.Tool);
+        }
+
+        var endLine = (int)Math.Min(totalLines, requestedEndLine);
 
         return new SourceContext(RelativePath(path), startLine, endLine, selectedLines);
     }
@@ -711,7 +719,7 @@ public sealed class SymbolSearchEngine
         }
     }
 
-    private static SearchPattern CreateSymbolPattern(string kind, string name, Func<Regex, string, bool>? strictRegexMatch)
+    private static SearchPattern CreateSymbolPattern(string kind, string name, Func<Regex, ReadOnlyMemory<char>, bool>? strictRegexMatch)
     {
         var escapedName = Regex.Escape(name);
         var pattern = kind switch
@@ -725,7 +733,7 @@ public sealed class SymbolSearchEngine
         return new SearchPattern(pattern, strictRegexMatch);
     }
 
-    private static SearchPattern CreateReferencePattern(string name, Func<Regex, string, bool>? strictRegexMatch)
+    private static SearchPattern CreateReferencePattern(string name, Func<Regex, ReadOnlyMemory<char>, bool>? strictRegexMatch)
     {
         var escaped = Regex.Escape(name);
         var pattern = Regex.IsMatch(name, "^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.CultureInvariant)
@@ -734,7 +742,7 @@ public sealed class SymbolSearchEngine
         return new SearchPattern(pattern, strictRegexMatch);
     }
 
-    private string[] ReadLines(string path, SearchOperation operation)
+    private IEnumerable<ReadOnlyMemory<char>> ReadLines(string path, SearchOperation operation)
     {
         var bytes = ReadBytes(path, operation);
         var strictOperation = _settings.Strict ? operation : null;
@@ -742,7 +750,11 @@ public sealed class SymbolSearchEngine
             encoderShouldEmitUTF8Identifier: false,
             throwOnInvalidBytes: false).GetString(bytes);
         strictOperation?.Check();
-        var lines = new List<string>();
+        return EnumerateLines(text, strictOperation);
+    }
+
+    private static IEnumerable<ReadOnlyMemory<char>> EnumerateLines(string text, SearchOperation? strictOperation)
+    {
         var start = 0;
         for (var index = 0; index < text.Length; index++)
         {
@@ -759,7 +771,7 @@ public sealed class SymbolSearchEngine
                 continue;
             }
 
-            lines.Add(text[start..index]);
+            yield return text.AsMemory(start, index - start);
             if (character == '\r' && index + 1 < text.Length && text[index + 1] == '\n')
             {
                 index++;
@@ -769,9 +781,8 @@ public sealed class SymbolSearchEngine
 
         if (start < text.Length)
         {
-            lines.Add(text[start..]);
+            yield return text.AsMemory(start);
         }
-        return lines.ToArray();
     }
 
     private byte[] ReadBytes(string path, SearchOperation operation)
@@ -924,7 +935,7 @@ public sealed class SymbolSearchEngine
             }
 
             return ReadLines(gitIgnore, operation)
-                .Select(GitIgnoreRule.Parse)
+                .Select(static line => GitIgnoreRule.Parse(line.Span))
                 .Where(static rule => rule is not null)
                 .Select(static rule => rule!)
                 .ToArray();
@@ -939,15 +950,17 @@ public sealed class SymbolSearchEngine
         try
         {
             var rules = new List<GitIgnoreRule>();
-            var lines = ReadLines(gitIgnore, operation);
-            if (lines.Length > 0 && lines[0].StartsWith('\uFEFF'))
-            {
-                lines[0] = lines[0][1..];
-            }
-            foreach (var line in lines)
+            var firstLine = true;
+            foreach (var line in ReadLines(gitIgnore, operation))
             {
                 operation.Check();
-                var rule = GitIgnoreRule.Parse(line);
+                var value = line.Span;
+                if (firstLine && !value.IsEmpty && value[0] == '\uFEFF')
+                {
+                    value = value[1..];
+                }
+                firstLine = false;
+                var rule = GitIgnoreRule.Parse(value);
                 operation.Check();
                 if (rule is null)
                 {
@@ -1049,12 +1062,12 @@ public sealed class SymbolSearchEngine
         return -1;
     }
 
-    private string FormatContext(string text, bool trim = true)
+    private string FormatContext(ReadOnlySpan<char> text, bool trim = true)
     {
         var value = trim ? text.Trim() : text;
         return _settings.MaximumContextScalars is int maximumContextScalars
             ? TruncateToScalars(value, maximumContextScalars)
-            : value;
+            : value.ToString();
     }
 
     private static int CountScalars(string value)
@@ -1068,7 +1081,7 @@ public sealed class SymbolSearchEngine
         return count;
     }
 
-    private static string TruncateToScalars(string value, int maximumScalars)
+    private static string TruncateToScalars(ReadOnlySpan<char> value, int maximumScalars)
     {
         var index = 0;
         var count = 0;
@@ -1076,14 +1089,14 @@ public sealed class SymbolSearchEngine
         {
             if (count == maximumScalars)
             {
-                return value[..index];
+                return value[..index].ToString();
             }
 
             index += rune.Utf16SequenceLength;
             count++;
         }
 
-        return value;
+        return value.ToString();
     }
 
     private sealed class SearchPattern
@@ -1092,22 +1105,22 @@ public sealed class SymbolSearchEngine
 
         private readonly string _pattern;
         private readonly Regex _legacyRegex;
-        private readonly Func<Regex, string, bool>? _strictRegexMatch;
+        private readonly Func<Regex, ReadOnlyMemory<char>, bool>? _strictRegexMatch;
         private Regex? _strictRegex;
         private TimeSpan _strictTimeout;
 
-        internal SearchPattern(string pattern, Func<Regex, string, bool>? strictRegexMatch)
+        internal SearchPattern(string pattern, Func<Regex, ReadOnlyMemory<char>, bool>? strictRegexMatch)
         {
             _pattern = pattern;
             _legacyRegex = new Regex(pattern, RegexOptions.CultureInvariant);
             _strictRegexMatch = strictRegexMatch;
         }
 
-        internal bool IsMatch(string value, SearchOperation? operation)
+        internal bool IsMatch(ReadOnlyMemory<char> value, SearchOperation? operation)
         {
             if (operation is null)
             {
-                return _legacyRegex.IsMatch(value);
+                return _legacyRegex.IsMatch(value.Span);
             }
 
             var timeout = operation.GetMatchTimeout();
@@ -1125,7 +1138,7 @@ public sealed class SymbolSearchEngine
             try
             {
                 var matched = _strictRegexMatch is null
-                    ? _strictRegex.IsMatch(value)
+                    ? _strictRegex.IsMatch(value.Span)
                     : _strictRegexMatch(_strictRegex, value);
                 operation.Check();
                 return matched;
@@ -1146,15 +1159,15 @@ public sealed class SymbolSearchEngine
         bool Anchored,
         bool HasSlash)
     {
-        internal static GitIgnoreRule? Parse(string line)
+        internal static GitIgnoreRule? Parse(ReadOnlySpan<char> line)
         {
             var value = line.Trim();
-            if (value.Length == 0 || value.StartsWith('#'))
+            if (value.Length == 0 || value[0] == '#')
             {
                 return null;
             }
 
-            var negated = value.StartsWith('!');
+            var negated = value[0] == '!';
             if (negated)
             {
                 value = value[1..].Trim();
@@ -1164,17 +1177,17 @@ public sealed class SymbolSearchEngine
                 }
             }
 
-            var anchored = value.StartsWith('/');
+            var anchored = value[0] == '/';
             if (anchored)
             {
                 value = value.TrimStart('/');
             }
 
-            var directoryOnly = value.EndsWith('/');
+            var directoryOnly = !value.IsEmpty && value[^1] == '/';
             value = value.TrimEnd('/');
             return value.Length == 0
                 ? null
-                : new GitIgnoreRule(value, negated, directoryOnly, anchored, value.Contains('/'));
+                : new GitIgnoreRule(value.ToString(), negated, directoryOnly, anchored, value.Contains('/'));
         }
 
         internal void Validate(SearchOperation operation)

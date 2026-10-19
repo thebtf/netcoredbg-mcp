@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
@@ -19,11 +18,15 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import get_default_environment, stdio_client
 from mcp.types import CallToolResult, TextContent
 
+from tests.test_host_proxy import (
+    HOST_DLL,
+    HOST_PROJECT,
+    _build_dotnet_test_project,
+    _test_child_env,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_DIR = REPO_ROOT / "src"
-HOST_PROJECT_DIR = REPO_ROOT / "host" / "NetCoreDbg.Mcp.Host"
-HOST_PROJECT = HOST_PROJECT_DIR / "NetCoreDbg.Mcp.Host.csproj"
-HOST_DLL = HOST_PROJECT_DIR / "bin" / "Release" / "net8.0" / "NetCoreDbg.Mcp.Host.dll"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("dotnet") is None,
@@ -45,25 +48,15 @@ async def test_mux_session_ownership_survives_the_installed_host_process(tmp_pat
     (not direct Python registration), Python's SessionOwnership still arbitrates:
     the same agent may mutate repeatedly, a competing agent is denied by name,
     and a read-only observation is always permitted regardless of ownership."""
-    build = subprocess.run(
-        ["dotnet", "build", str(HOST_PROJECT), "-c", "Release"],
-        capture_output=True,
-        text=True,
-        timeout=300,
-        check=False,
-    )
-    assert build.returncode == 0, (
-        f"dotnet build failed for {HOST_PROJECT}:\nstdout:\n{build.stdout}\nstderr:\n{build.stderr}"
-    )
-    assert HOST_DLL.exists(), f"dotnet build did not produce {HOST_DLL}"
+    host_dll = _build_dotnet_test_project(HOST_PROJECT, "Release", HOST_DLL.name)
 
-    env = get_default_environment()
+    env = _test_child_env(get_default_environment())
     env["PYTHONPATH"] = str(SRC_DIR)
     env["NETCOREDBG_MCP_PYTHON_EXECUTABLE"] = sys.executable
 
     params = StdioServerParameters(
         command="dotnet",
-        args=[str(HOST_DLL), "--project-from-cwd"],
+        args=[str(host_dll), "--project-from-cwd"],
         env=env,
         cwd=str(tmp_path),
     )

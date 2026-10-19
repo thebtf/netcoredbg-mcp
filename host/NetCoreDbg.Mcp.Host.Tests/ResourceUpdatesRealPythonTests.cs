@@ -20,23 +20,17 @@ public sealed class ResourceUpdatesRealPythonTests
     private const string OutputUri = "debug://output";
     private const string ThreadsUri = "debug://threads";
 
-    private static readonly string RepoRoot = Path.GetFullPath(
-        Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+    private static readonly string RepoRoot = RootsRelayRealPythonTests.LocateRepoRoot();
     private static readonly string SmokeProject = Path.Combine(
         RepoRoot,
         "tests",
         "fixtures",
         "SmokeTestApp",
         "SmokeTestApp.csproj");
-    private static readonly string SmokeDll = Path.Combine(
-        RepoRoot,
-        "tests",
-        "fixtures",
-        "SmokeTestApp",
-        "bin",
-        "Debug",
-        "net8.0-windows",
-        "SmokeTestApp.dll");
+    private static readonly string? ArtifactsPath = RootsRelayRealPythonTests.OutputRoot("NETCOREDBG_MCP_TEST_ARTIFACTS_PATH");
+    private static readonly string SmokeDll = ArtifactsPath is { } artifactsPath
+        ? Path.Combine(artifactsPath, "bin", "SmokeTestApp", "debug", "SmokeTestApp.dll")
+        : Path.Combine(RepoRoot, "tests", "fixtures", "SmokeTestApp", "bin", "Debug", "net8.0-windows", "SmokeTestApp.dll");
     private static readonly ImmutableArray<string> TerminalStates = ImmutableArray.Create("idle", "terminated");
 
     private static PythonBackendProcess StartRealPython()
@@ -47,7 +41,7 @@ public sealed class ResourceUpdatesRealPythonTests
 
     private static async Task BuildSmokeAppAsync()
     {
-        using var process = Process.Start(new ProcessStartInfo
+        var start = new ProcessStartInfo
         {
             FileName = "dotnet",
             UseShellExecute = false,
@@ -60,8 +54,24 @@ public sealed class ResourceUpdatesRealPythonTests
                 "-c",
                 "Debug",
                 "--nologo",
+                "-nr:false",
             },
-        }) ?? throw new InvalidOperationException("Could not start dotnet build for SmokeTestApp.");
+        };
+        start.Environment.Remove("ArtifactsPath");
+        if (ArtifactsPath is { } artifactsPath)
+        {
+            start.ArgumentList.Add($"-p:ArtifactsPath={artifactsPath}");
+        }
+        foreach (var property in new[] { "SonarQubeTempPath", "CustomBeforeMicrosoftCommonTargets", "ImportUserLocationsByWildcardBeforeMicrosoftCommonTargets" })
+        {
+            if (Environment.GetEnvironmentVariable(property) is { Length: > 0 } value)
+            {
+                start.ArgumentList.Add($"-p:{property}={value}");
+            }
+        }
+
+        using var process = Process.Start(start)
+            ?? throw new InvalidOperationException("Could not start dotnet build for SmokeTestApp.");
         var stdout = process.StandardOutput.ReadToEndAsync();
         var stderr = process.StandardError.ReadToEndAsync();
         await process.WaitForExitAsync();

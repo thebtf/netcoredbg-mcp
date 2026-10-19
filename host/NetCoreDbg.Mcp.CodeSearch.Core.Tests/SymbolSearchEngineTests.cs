@@ -25,6 +25,113 @@ public sealed class SymbolSearchEngineTests
         Assert.Contains("Symbol name must not be empty", argument.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void BothPoliciesPreserveUnicodeLineSeparatorsBomAndExactResultLineNumbers(bool preview)
+    {
+        using var root = TestRoot.Create();
+        root.Write("Lines.cs", "\uFEFF// source BOM\n  public sealed class LineMarker { }  \r\v LineMarker second; \f"
+            + "gap\u001cLineMarker third;\u001dgap\u001eLineMarker fourth;\u0085"
+            + "gap\u2028LineMarker fifth;\u2029last\r\nLineMarker sixth;");
+        SearchPolicy policy = preview ? PreviewSearchPolicy.Instance : LegacySearchPolicy.Instance;
+        var engine = new SymbolSearchEngine(root.Path, policy);
+
+        var context = engine.GetSourceContext("Lines.cs", 6, 6);
+        var symbol = Assert.Single(engine.FindCodeSymbol("LineMarker", "class"));
+        var references = engine.FindCodeReferences("LineMarker", 100);
+
+        Assert.Equal(1, context.StartLine);
+        Assert.Equal(12, context.EndLine);
+        Assert.Equal(Enumerable.Range(1, 12), context.Lines.Select(static line => line.Line));
+        Assert.Equal(
+            ["\uFEFF// source BOM", "  public sealed class LineMarker { }  ", "", " LineMarker second; ",
+                "gap", "LineMarker third;", "gap", "LineMarker fourth;", "gap", "LineMarker fifth;", "last", "LineMarker sixth;"],
+            context.Lines.Select(static line => line.Text));
+        Assert.Equal(2, symbol.Line);
+        Assert.Equal("public sealed class LineMarker { }", symbol.Context);
+        Assert.Equal([2, 4, 6, 8, 10, 12], references.Select(static match => match.Line));
+        Assert.Equal(
+            ["public sealed class LineMarker { }", "LineMarker second;", "LineMarker third;",
+                "LineMarker fourth;", "LineMarker fifth;", "LineMarker sixth;"],
+            references.Select(static match => match.Context));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void BothPoliciesPreserveEmptyAndTrailingSourceLinesWithoutPhantomLine(bool preview)
+    {
+        using var root = TestRoot.Create();
+        SearchPolicy policy = preview ? PreviewSearchPolicy.Instance : LegacySearchPolicy.Instance;
+        var engine = new SymbolSearchEngine(root.Path, policy);
+        (string Text, string[] Lines)[] cases =
+        [
+            ("", []),
+            ("\n", [""]),
+            ("\r\n", [""]),
+            ("\n\n", ["", ""]),
+            ("a", ["a"]),
+            ("a\n", ["a"]),
+            ("a\r\n", ["a"]),
+            ("a\n\n", ["a", ""]),
+        ];
+
+        foreach (var (text, lines) in cases)
+        {
+            root.Write("Lines.cs", text);
+            if (lines.Length > 0)
+            {
+                var context = engine.GetSourceContext("Lines.cs", 1, 10);
+
+                Assert.Equal(1, context.StartLine);
+                Assert.Equal(lines.Length, context.EndLine);
+                Assert.Equal(Enumerable.Range(1, lines.Length), context.Lines.Select(static line => line.Line));
+                Assert.Equal(lines, context.Lines.Select(static line => line.Text));
+            }
+
+            if (preview)
+            {
+                var failure = Assert.Throws<SearchFailureException>(
+                    () => engine.GetSourceContext("Lines.cs", lines.Length + 1, 0));
+
+                Assert.Equal(
+                    new SearchFailure("invalid_tool_arguments", "INVALID_TOOL_ARGUMENTS", "get_source_context"),
+                    failure.Failure);
+            }
+            else
+            {
+                var failure = Assert.Throws<ArgumentException>(
+                    () => engine.GetSourceContext("Lines.cs", lines.Length + 1, 0));
+
+                Assert.Equal($"line {lines.Length + 1} is outside file range 1..{lines.Length}", failure.Message);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void BothPoliciesPreserveGitIgnoreSeparatorsAndPolicySpecificLeadingBom(bool preview)
+    {
+        using var root = TestRoot.Create();
+        string[] separators = ["\n", "\r", "\v", "\f", "\u001c", "\u001d", "\u001e", "\u0085", "\u2028", "\u2029"];
+        root.Write(".gitignore", "\uFEFF" + string.Concat(separators.Select(
+            static (separator, index) => $"Ignored{index}.cs{separator}")));
+        root.Write("Allowed.cs", "public sealed class IgnoreLineMarker { }\n");
+        for (var index = 0; index < separators.Length; index++)
+        {
+            root.Write($"Ignored{index}.cs", "public sealed class IgnoreLineMarker { }\n");
+        }
+        SearchPolicy policy = preview ? PreviewSearchPolicy.Instance : LegacySearchPolicy.Instance;
+        var engine = new SymbolSearchEngine(root.Path, policy);
+
+        var symbols = engine.FindCodeSymbol("IgnoreLineMarker", "class");
+
+        string[] expectedFiles = preview ? ["Allowed.cs"] : ["Allowed.cs", "Ignored0.cs"];
+        Assert.Equal(expectedFiles, symbols.Select(static match => match.File).OrderBy(static file => file, StringComparer.Ordinal));
+    }
+
     [Fact]
     public void LegacyPolicyClampsSourceContextRadiusWithoutIntegerOverflow()
     {
@@ -703,7 +810,7 @@ public sealed class SymbolSearchEngineTests
             strictRegexMatch: (regex, value) =>
             {
                 strictRegex = regex;
-                throw new System.Text.RegularExpressions.RegexMatchTimeoutException(value, regex.ToString(), regex.MatchTimeout);
+                throw new System.Text.RegularExpressions.RegexMatchTimeoutException(value.ToString(), regex.ToString(), regex.MatchTimeout);
             });
 
         var failure = tool == "find_code_symbol"
@@ -732,7 +839,7 @@ public sealed class SymbolSearchEngineTests
             strictRegexMatch: (regex, value) =>
             {
                 cancellation.Cancel();
-                throw new System.Text.RegularExpressions.RegexMatchTimeoutException(value, regex.ToString(), regex.MatchTimeout);
+                throw new System.Text.RegularExpressions.RegexMatchTimeoutException(value.ToString(), regex.ToString(), regex.MatchTimeout);
             });
 
         Assert.Throws<OperationCanceledException>(

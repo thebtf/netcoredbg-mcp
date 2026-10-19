@@ -51,6 +51,9 @@ from tests.test_host_proxy import (
     _backend_env,
     _cached_direct_catalog,
     _tool_payload,
+    _build_dotnet_test_project,
+    _dotnet_test_output,
+    _test_child_env,
 )
 
 # No module-wide pytestmark skipif for missing dotnet. Section 10
@@ -74,19 +77,7 @@ def _ensure_release_host_dll() -> Path:
     validate tools first and only then build - fixture setup would otherwise race
     ahead of the fail-closed helper when ``dotnet`` is missing.
     """
-    result = subprocess.run(
-        ["dotnet", "build", str(HOST_PROJECT), "-c", "Release"],
-        capture_output=True,
-        text=True,
-        timeout=300,
-        check=False,
-    )
-    assert result.returncode == 0, (
-        f"dotnet build failed for {HOST_PROJECT}:\n"
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
-    assert HOST_DLL.exists(), f"dotnet build did not produce {HOST_DLL}"
-    return HOST_DLL
+    return _build_dotnet_test_project(HOST_PROJECT, "Release", HOST_DLL.name)
 
 
 def _path_without_dotnet() -> str:
@@ -132,7 +123,7 @@ EXPECTED_RESOURCES: dict[str, tuple[str, str]] = {
 METHOD_NOT_FOUND_ERROR_CODE = -32601
 
 SMOKE_PROJECT = REPO_ROOT / "tests" / "fixtures" / "SmokeTestApp"
-SMOKE_DLL = SMOKE_PROJECT / "bin" / "Debug" / "net8.0-windows" / "SmokeTestApp.dll"
+SMOKE_DLL = _dotnet_test_output(SMOKE_PROJECT / "SmokeTestApp.csproj", "Debug", "SmokeTestApp.dll")
 
 
 def require_section10_progress_prerequisites(
@@ -343,7 +334,7 @@ def test_section10_front_door_fails_closed_when_dotnet_absent_from_path() -> Non
     catches both a reintroduced module-wide skipif and a gate that no longer
     calls ``require_section10_progress_prerequisites``.
     """
-    env = os.environ.copy()
+    env = _test_child_env()
     # Satisfy the NETCOREDBG_PATH file check so the nested gate fails on missing
     # *dotnet*, not on an unset debugger path.
     env["NETCOREDBG_PATH"] = str(Path(__file__).resolve())
@@ -572,16 +563,8 @@ async def test_host_proxy_critical_front_door_surfaces(
     # Separate session so project scope matches the accepted SmokeTestApp fixture
     # (tmp_path project correctly rejects paths outside its tree).
     smoke_project = SMOKE_PROJECT
-    build = subprocess.run(
-        ["dotnet", "build", str(smoke_project), "-c", "Debug"],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
-    assert build.returncode == 0, (
-        "SmokeTestApp Debug build is required for mandatory Section 10 progress coverage:\n"
-        f"stdout:\n{build.stdout}\nstderr:\n{build.stderr}"
+    smoke_dll = _build_dotnet_test_project(
+        smoke_project / "SmokeTestApp.csproj", "Debug", smoke_dll.name, timeout=120
     )
     assert smoke_dll.is_file(), (
         "SmokeTestApp Debug DLL is required for mandatory Section 10 progress coverage: "

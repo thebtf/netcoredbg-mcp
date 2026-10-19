@@ -46,12 +46,14 @@ already required by the project.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 from pathlib import Path
 from typing import Any
@@ -68,7 +70,113 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
 HOST_PROJECT_DIR = REPO_ROOT / "host" / "NetCoreDbg.Mcp.Host"
 HOST_PROJECT = HOST_PROJECT_DIR / "NetCoreDbg.Mcp.Host.csproj"
-HOST_DLL = HOST_PROJECT_DIR / "bin" / "Release" / "net8.0" / "NetCoreDbg.Mcp.Host.dll"
+
+
+def _test_output_root() -> Path:
+    git_dir = REPO_ROOT / ".git"
+    if git_dir.is_file():
+        prefix, separator, target = git_dir.read_text(encoding="utf-8").strip().partition(": ")
+        assert prefix == "gitdir" and separator, "test source has invalid Git metadata"
+        git_dir = (REPO_ROOT / target).resolve()
+    common_file = git_dir / "commondir"
+    common_dir = (
+        (git_dir / common_file.read_text(encoding="utf-8").strip()).resolve()
+        if common_file.is_file()
+        else git_dir.resolve()
+    )
+    assert common_dir.is_dir(), "test outputs require the source Git common owner"
+    primary_agent = common_dir.parent / ".agent"
+    source_id = hashlib.sha256(str(REPO_ROOT).encode("utf-8")).hexdigest()[:12]
+    return primary_agent / "tmp" / "python-test-fixtures" / source_id
+
+
+TEST_OUTPUT_ROOT = _test_output_root()
+TEST_ARTIFACTS_PATH = Path(
+    os.environ.get("NETCOREDBG_MCP_TEST_ARTIFACTS_PATH", TEST_OUTPUT_ROOT / "artifacts")
+).resolve()
+assert TEST_ARTIFACTS_PATH.is_relative_to(TEST_OUTPUT_ROOT.parents[2].resolve()), (
+    "test artifacts must stay under the primary Git owner's .agent"
+)
+
+
+def _test_child_env(environment: dict[str, str] | None = None) -> dict[str, str]:
+    removed = {
+        "ARTIFACTSPATH",
+        "MSBUILDARTIFACTSPATH",
+        "ARTIFACTSPIVOTS",
+        "USEARTIFACTSOUTPUT",
+        "BASEOUTPUTPATH",
+        "OUTPUTPATH",
+        "BASEINTERMEDIATEOUTPUTPATH",
+        "INTERMEDIATEOUTPUTPATH",
+        "MSBUILDPROJECTEXTENSIONSPATH",
+        "CUSTOMBEFOREMICROSOFTCOMMONTARGETS",
+        "CUSTOMAFTERMICROSOFTCOMMONTARGETS",
+    }
+    env = {
+        name: value
+        for name, value in (os.environ if environment is None else environment).items()
+        if not name.upper().startswith(("SONAR_", "SONARQUBE")) and name.upper() not in removed
+    }
+    for name, relative in {
+        "DOTNET_CLI_HOME": "dotnet-home",
+        "NUGET_PACKAGES": "nuget/packages",
+        "NUGET_HTTP_CACHE_PATH": "nuget/http-cache",
+        "NUGET_SCRATCH": "nuget/scratch",
+        "UV_CACHE_DIR": "uv-cache",
+        "TMP": "tmp",
+        "TEMP": "tmp",
+        "TMPDIR": "tmp",
+        "PYTHONPYCACHEPREFIX": "python-bytecode",
+    }.items():
+        path = TEST_OUTPUT_ROOT / relative
+        path.mkdir(parents=True, exist_ok=True)
+        env[name] = str(path)
+    env["DOTNET_ADD_GLOBAL_TOOLS_TO_PATH"] = "false"
+    env["DOTNET_GENERATE_ASPNET_CERTIFICATE"] = "false"
+    env["ImportUserLocationsByWildcardBeforeMicrosoftCommonTargets"] = "false"
+    return env
+
+
+def _dotnet_test_args(configuration: str) -> list[str]:
+    return [
+        "--artifacts-path",
+        str(TEST_ARTIFACTS_PATH),
+        f"-p:ArtifactsPivots={configuration.lower()}",
+    ]
+
+
+def _dotnet_test_output(project: Path, configuration: str, filename: str) -> Path:
+    return TEST_ARTIFACTS_PATH / "bin" / project.stem / configuration.lower() / filename
+
+
+def _build_dotnet_test_project(
+    project: Path, configuration: str, filename: str, *, timeout: int = 300
+) -> Path:
+    result = subprocess.run(
+        ["dotnet", "build", str(project), "-c", configuration, *_dotnet_test_args(configuration)],
+        cwd=REPO_ROOT,
+        env=_test_child_env(),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"dotnet build failed for {project}:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    output = _dotnet_test_output(project, configuration, filename)
+    assert output.is_file(), f"dotnet build did not produce {output}"
+    return output
+
+
+def _test_scratch_directory(prefix: str) -> Path:
+    scratch = TEST_OUTPUT_ROOT / "test-scratch"
+    scratch.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=scratch))
+
+
+HOST_DLL = _dotnet_test_output(HOST_PROJECT, "Release", "NetCoreDbg.Mcp.Host.dll")
 
 # Stable fixture already used by tests/test_code_search.py for deterministic
 # find_code_symbol/add_breakpoint targets - real files, not the live repo's own
@@ -153,6 +261,63 @@ BREAKPOINT_TARGET_FILE = "ViewModels/MainViewModel.cs"
 UNKNOWN_TOOL_NAME = "fd004-unknown-tool-does-not-exist"
 
 
+def test_output_root_uses_primary_owner_for_relative_linked_git_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    primary = tmp_path / "primary"
+    git_dir = primary / ".git" / "worktrees" / "lane"
+    git_dir.mkdir(parents=True)
+    (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    (linked / ".git").write_text("gitdir: ../primary/.git/worktrees/lane\n", encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", linked)
+
+    output_root = _test_output_root()
+
+    assert output_root.is_relative_to(primary / ".agent")
+    assert not output_root.is_relative_to(linked / ".agent")
+    assert not output_root.exists()
+
+
+def test_artifacts_override_outside_primary_agent_is_rejected_before_creation(
+    tmp_path: Path,
+) -> None:
+    forbidden = REPO_ROOT / f"fake-forbidden-output-{tmp_path.name}"
+    assert not forbidden.exists()
+    env = os.environ.copy()
+    env.pop("PYTHONPYCACHEPREFIX", None)
+    env.update(
+        NETCOREDBG_MCP_TEST_ARTIFACTS_PATH=str(forbidden),
+        PYTHONDONTWRITEBYTECODE="1",
+        TMP=str(tmp_path),
+        TEMP=str(tmp_path),
+        TMPDIR=str(tmp_path),
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-c",
+            "import runpy, sys; runpy.run_path(sys.argv[1])",
+            str(Path(__file__).resolve()),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode != 0, result.stdout
+    assert "AssertionError: test artifacts must stay under the primary Git owner's .agent" in (
+        result.stderr
+    ), result.stderr
+    assert not forbidden.exists()
+
+
 @pytest.fixture(scope="session")
 def host_dll() -> Path:
     """Build the host exactly once per pytest process via incremental
@@ -160,23 +325,11 @@ def host_dll() -> Path:
     run can never silently satisfy this contract against current
     Program.cs/csproj source. MSBuild's own incremental build keeps repeat
     invocations across pytest processes fast when nothing changed."""
-    result = subprocess.run(
-        ["dotnet", "build", str(HOST_PROJECT), "-c", "Release"],
-        capture_output=True,
-        text=True,
-        timeout=300,
-        check=False,
-    )
-    assert result.returncode == 0, (
-        f"dotnet build failed for {HOST_PROJECT}:\n"
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
-    assert HOST_DLL.exists(), f"dotnet build did not produce {HOST_DLL}"
-    return HOST_DLL
+    return _build_dotnet_test_project(HOST_PROJECT, "Release", HOST_DLL.name)
 
 
 def _backend_env() -> dict[str, str]:
-    env = get_default_environment()
+    env = _test_child_env(get_default_environment())
     env["PYTHONPATH"] = str(SRC_DIR)
     return env
 

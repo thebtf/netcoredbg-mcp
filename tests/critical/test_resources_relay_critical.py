@@ -22,7 +22,6 @@ import asyncio
 import json
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
@@ -33,10 +32,12 @@ from mcp.client.stdio import get_default_environment, stdio_client
 from mcp.shared.exceptions import McpError
 from pydantic import AnyUrl
 
+from tests.test_host_proxy import _build_dotnet_test_project, _dotnet_test_output, _test_child_env
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_DIR = REPO_ROOT / "src"
 SMOKE_PROJECT = REPO_ROOT / "tests" / "fixtures" / "SmokeTestApp"
-SMOKE_DLL = SMOKE_PROJECT / "bin" / "Debug" / "net8.0-windows" / "SmokeTestApp.dll"
+SMOKE_DLL = _dotnet_test_output(SMOKE_PROJECT / "SmokeTestApp.csproj", "Debug", "SmokeTestApp.dll")
 
 # The exact four-resource contract this repository publishes today. Kept here as the single
 # source of truth the .NET-side tests reference in their own doc comments.
@@ -49,7 +50,7 @@ EXPECTED_RESOURCES: dict[str, tuple[str, str]] = {
 
 
 def _backend_env() -> dict[str, str]:
-    env = get_default_environment()
+    env = _test_child_env(get_default_environment())
     env["PYTHONPATH"] = str(SRC_DIR)
     return env
 
@@ -179,17 +180,9 @@ async def test_resources_threads_reads_successfully_during_a_live_debug_session(
     if shutil.which("dotnet") is None:
         pytest.skip("dotnet CLI is required to build the SmokeTestApp fixture")
 
-    build = subprocess.run(
-        ["dotnet", "build", str(SMOKE_PROJECT), "-c", "Debug"],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
+    smoke_dll = _build_dotnet_test_project(
+        SMOKE_PROJECT / "SmokeTestApp.csproj", "Debug", SMOKE_DLL.name, timeout=120
     )
-    assert build.returncode == 0, (
-        f"SmokeTestApp build failed:\nstdout:\n{build.stdout}\nstderr:\n{build.stderr}"
-    )
-    assert SMOKE_DLL.exists(), f"dotnet build did not produce {SMOKE_DLL}"
 
     env = _backend_env()
     env["NETCOREDBG_PATH"] = netcoredbg
@@ -205,7 +198,7 @@ async def test_resources_threads_reads_successfully_during_a_live_debug_session(
 
             start_result = await session.call_tool(
                 "start_debug",
-                {"program": str(SMOKE_DLL), "pre_build": False, "stop_at_entry": True},
+                {"program": str(smoke_dll), "pre_build": False, "stop_at_entry": True},
             )
             assert not start_result.isError, start_result
             await _wait_until_stopped(session)
@@ -286,14 +279,9 @@ async def test_live_dap_mutations_update_state_output_threads_and_termination() 
     if shutil.which("dotnet") is None:
         pytest.skip("dotnet CLI is required to build the SmokeTestApp fixture")
 
-    build = subprocess.run(
-        ["dotnet", "build", str(SMOKE_PROJECT), "-c", "Debug"],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
+    smoke_dll = _build_dotnet_test_project(
+        SMOKE_PROJECT / "SmokeTestApp.csproj", "Debug", SMOKE_DLL.name, timeout=120
     )
-    assert build.returncode == 0, build.stderr
 
     updates: asyncio.Queue[str] = asyncio.Queue()
     env = _backend_env()
@@ -318,7 +306,7 @@ async def test_live_dap_mutations_update_state_output_threads_and_termination() 
             started = await session.call_tool(
                 "start_debug",
                 {
-                    "program": str(SMOKE_DLL),
+                    "program": str(smoke_dll),
                     "args": ["longrun"],
                     "pre_build": False,
                     "stop_at_entry": False,
@@ -368,10 +356,11 @@ async def test_live_dap_mutations_update_state_output_threads_and_termination() 
 
             target = await asyncio.create_subprocess_exec(
                 "dotnet",
-                str(SMOKE_DLL),
+                str(smoke_dll),
                 "longrun",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
+                env=_test_child_env(),
             )
             try:
                 await asyncio.sleep(0.2)

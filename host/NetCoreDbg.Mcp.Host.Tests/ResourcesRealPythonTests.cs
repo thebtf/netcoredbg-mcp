@@ -31,9 +31,7 @@ namespace NetCoreDbg.Mcp.Host.Tests;
 [Collection("SequentialRealPythonProcess")]
 public sealed class ResourcesRealPythonTests
 {
-    // host/NetCoreDbg.Mcp.Host.Tests/bin/Release/net8.0 -> ... -> repo root.
-    private static readonly string RepoRoot = Path.GetFullPath(
-        Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+    private static readonly string RepoRoot = RootsRelayRealPythonTests.LocateRepoRoot();
 
     private static PythonBackendProcess StartRealPython()
     {
