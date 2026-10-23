@@ -33,9 +33,28 @@ public static class SnapshotCommands
         var elements = ResolveElements(selector, automation, mainWindow, maxResults + 1);
         var returned = elements.Take(maxResults).ToList();
         var records = new JsonArray();
+        Dictionary<IntPtr, AutomationElement>? windows = null;
+        if (fields.Contains("window"))
+        {
+            windows = new Dictionary<IntPtr, AutomationElement>();
+            try
+            {
+                foreach (var window in ElementCommands.GetProcessTopLevelWindows(automation))
+                {
+                    var handle = ElementCommands.SafeHandle(window);
+                    if (handle != IntPtr.Zero)
+                        windows.Add(handle, window);
+                }
+            }
+            catch
+            {
+                // Optional metadata must not invent an owner when enumeration is unavailable.
+                windows.Clear();
+            }
+        }
 
         foreach (var element in returned)
-            records.Add(BuildRecord(element, fields, automation, mainWindow));
+            records.Add(BuildRecord(element, fields, automation, windows));
 
         return new JsonObject
         {
@@ -96,7 +115,7 @@ public static class SnapshotCommands
         AutomationElement element,
         List<string> fields,
         UIA3Automation automation,
-        AutomationElement mainWindow)
+        Dictionary<IntPtr, AutomationElement>? windows)
     {
         var record = new JsonObject
         {
@@ -125,7 +144,7 @@ public static class SnapshotCommands
                     record["visible"] = !SafeBool(() => element.Properties.IsOffscreen.ValueOrDefault);
                     break;
                 case "window":
-                    record["window"] = WindowState(mainWindow);
+                    record["window"] = WindowState(element, windows);
                     break;
             }
         }
@@ -211,13 +230,24 @@ public static class SnapshotCommands
         return SafeString(() => element.Name);
     }
 
-    private static JsonObject WindowState(AutomationElement mainWindow)
+    private static JsonObject WindowState(
+        AutomationElement element, Dictionary<IntPtr, AutomationElement>? windows)
     {
-        return new JsonObject
+        var state = new JsonObject
         {
-            ["title"] = SafeString(() => mainWindow.Name),
-            ["automation_id"] = SafeString(() => mainWindow.AutomationId),
+            ["title"] = "",
+            ["automation_id"] = "",
         };
+        if (windows is null ||
+            !ElementCommands.TryResolveOwningTopLevelHwnd(element, windows.Keys, out var handle) ||
+            !windows.TryGetValue(handle, out var window) ||
+            ElementCommands.GetWindowThreadProcessId(handle, out var nativeProcessId) == 0 ||
+            nativeProcessId != (uint)JsonRpcHandler.ProcessId)
+            return state;
+
+        state["title"] = SafeString(() => window.Name);
+        state["automation_id"] = SafeString(() => window.AutomationId);
+        return state;
     }
 
     private static bool IsFocused(AutomationElement element, UIA3Automation automation)

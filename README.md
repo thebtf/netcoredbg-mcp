@@ -224,6 +224,28 @@ ui_click(automation_id="saveButton")
 # Trigger the breakpoint, then inspect state after it reports STOPPED.
 ```
 
+### Selected windows and query ownership
+
+On the Windows FlaUI backend, unrooted element searches stay inside the selected
+window while it remains live. If that window closes, searches can use the sole
+remaining live top-level window of the connected process without reconnecting or
+changing the selected-window pointer. With no live windows, or with multiple live
+windows and a closed selection, unrooted searches fail explicitly; the bridge does
+not guess the first or largest window. Use `ui_switch_window` to select a live
+window, or pass a unique `root_id` (`rootAutomationId` on the bridge wire).
+Explicit roots do not change the selection and still reject ambiguous matches or
+windows outside the connected process.
+Window discovery is bound to the process instance opened at `connect`, not just
+its numeric PID. After that instance exits, a fresh connection is required;
+PID reuse cannot revive the old connection.
+
+For `ui_query(fields=["window"])`, each result's `window` identifies the actual
+owning live top-level window of that resolved element, including explicit
+container roots and queries without an element selector. If ownership cannot be
+proven, `title` and `automation_id` are empty strings rather than the retained
+selected window's metadata.
+
+
 ### Physical numeric keypad input
 
 On the default Python server's Windows FlaUI path,
