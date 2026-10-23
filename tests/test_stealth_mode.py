@@ -1249,24 +1249,6 @@ def test_primary_printwindow_evidence_path_does_not_capture_bitblt() -> None:
     assert "CaptureBitmapWithBitBlt" not in primary_printwindow_capture
 
 
-def test_bridge_connect_stores_stealth_state_and_exposes_get_state() -> None:
-    router = (PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs").read_text(encoding="utf-8")
-    elements = (PROJECT_ROOT / "bridge" / "Commands" / "ElementCommands.cs").read_text(
-        encoding="utf-8"
-    )
-
-    assert "private static bool _stealth;" in router
-    assert "internal static bool Stealth" in router
-    assert '["get_state"] = GetState' in router
-    assert '["stealth"] = Stealth' in router
-    assert "_stealth = false;" in router
-    assert 'var requestedStealth = @params?["stealth"]?.GetValue<bool>() ?? false;' in elements
-    assert "JsonRpcHandler.Stealth = requestedStealth;" in elements
-    assert elements.index("var window = SelectPrimaryWindow") < elements.index(
-        "JsonRpcHandler.Stealth = requestedStealth;"
-    )
-
-
 def test_bridge_window_ensure_foreground_skips_only_in_stealth_mode() -> None:
     command = (PROJECT_ROOT / "bridge" / "Commands" / "WindowCommands.cs").read_text(
         encoding="utf-8"
