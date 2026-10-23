@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json.Nodes;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.WindowsAPI;
@@ -11,6 +12,7 @@ public static class JsonRpcHandler
     private static UIA3Automation? _automation;
     private static AutomationElement? _mainWindow;
     private static int _processId;
+    private static Process? _connectedProcess;
     private static bool _stealth;
     // SendKeys / SendKeysBatch press and release modifiers within a single
     // batch (see InputCommands.cs) and do not read or update this set. If a
@@ -56,6 +58,30 @@ public static class JsonRpcHandler
     {
         get => _stealth;
         set => _stealth = value;
+    }
+
+    internal static Process? BindConnectedProcess(Process process, AutomationElement window, bool stealth)
+    {
+        if (process.HasExited)
+            throw new InvalidOperationException("The target process exited before connection completed.");
+
+        var previous = _connectedProcess;
+        _connectedProcess = process;
+        _processId = process.Id;
+        _mainWindow = window;
+        _stealth = stealth;
+        return previous;
+    }
+
+    internal static int RequireOriginalConnectedProcess()
+    {
+        var process = _connectedProcess;
+        var pid = _processId;
+        if (process is null || process.Id != pid || process.HasExited)
+            throw new InvalidOperationException(
+                "The original connected process has exited or its identity changed; no live search root is available. " +
+                "Call 'connect' again.");
+        return pid;
     }
 
     private static readonly IReadOnlyDictionary<string, Func<JsonNode?, UIA3Automation, AutomationElement?, JsonNode>> Handlers =
@@ -112,17 +138,17 @@ public static class JsonRpcHandler
             ["assert_focus"] = FocusCommands.AssertFocus,
             ["get_focused_element"] = FocusCommands.GetFocusedElement,
             // v0.11.1 — pattern expansion
-            ["close_window"]             = WindowCommands.CloseWindow,
-            ["maximize_window"]          = WindowCommands.MaximizeWindow,
-            ["minimize_window"]          = WindowCommands.MinimizeWindow,
-            ["restore_window"]           = WindowCommands.RestoreWindow,
-            ["move_window"]              = TransformCommands.MoveWindow,
-            ["resize_window"]            = TransformCommands.ResizeWindow,
-            ["expand"]                   = PatternCommands.ExpandElement,
-            ["collapse"]                 = PatternCommands.CollapseElement,
-            ["range_set_value"]          = PatternCommands.SetRangeValue,
-            ["clipboard_read"]           = ClipboardCommands.ReadClipboard,
-            ["clipboard_write"]          = ClipboardCommands.WriteClipboard,
+            ["close_window"] = WindowCommands.CloseWindow,
+            ["maximize_window"] = WindowCommands.MaximizeWindow,
+            ["minimize_window"] = WindowCommands.MinimizeWindow,
+            ["restore_window"] = WindowCommands.RestoreWindow,
+            ["move_window"] = TransformCommands.MoveWindow,
+            ["resize_window"] = TransformCommands.ResizeWindow,
+            ["expand"] = PatternCommands.ExpandElement,
+            ["collapse"] = PatternCommands.CollapseElement,
+            ["range_set_value"] = PatternCommands.SetRangeValue,
+            ["clipboard_read"] = ClipboardCommands.ReadClipboard,
+            ["clipboard_write"] = ClipboardCommands.WriteClipboard,
             ["realize_virtualized_item"] = VirtualizationCommands.RealizeVirtualizedItem,
         };
 
@@ -157,11 +183,20 @@ public static class JsonRpcHandler
 
     public static void Dispose()
     {
-        ModifierCommands.ReleaseAllHeldModifiers();
-        _automation?.Dispose();
-        _automation = null;
-        _mainWindow = null;
-        _processId = 0;
-        _stealth = false;
+        try
+        {
+            ModifierCommands.ReleaseAllHeldModifiers();
+            _automation?.Dispose();
+        }
+        finally
+        {
+            _automation = null;
+            _mainWindow = null;
+            _processId = 0;
+            _stealth = false;
+            var process = _connectedProcess;
+            _connectedProcess = null;
+            process?.Dispose();
+        }
     }
 }

@@ -1017,6 +1017,164 @@ async def test_ui_text_tool_reads_text_without_assertion(capturing_mcp, monkeypa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("concurrent_first_calls", [False, True])
+async def test_server_window_switch_and_query_share_selected_window(
+    capturing_mcp,
+    monkeypatch,
+    concurrent_first_calls: bool,
+) -> None:
+    import asyncio
+
+    from netcoredbg_mcp import server as server_module
+    from netcoredbg_mcp.session import SessionManager
+    from netcoredbg_mcp.tools import ui as ui_tools_module
+    from netcoredbg_mcp.tools import ui_evidence as evidence_tools_module
+
+    class WindowScopedBackend:
+        def __init__(self) -> None:
+            self.process_id: int | None = None
+            self.selected_window = "primary"
+            self.connecting = False
+            self.connection_attempts = 0
+            self.windows = {
+                "primary": {"primaryText": "PRIMARY_VALUE"},
+                "secondary": {"secondaryText": "SECONDARY_VALUE"},
+            }
+
+        async def connect(self, pid: int) -> None:
+            self.connection_attempts += 1
+            if self.connecting:
+                raise RuntimeError("Overlapping connect would replace the active bridge generation")
+            self.connecting = True
+            await asyncio.sleep(0)
+            self.process_id = pid
+            self.selected_window = "primary"
+            self.connecting = False
+
+        async def switch_window(self, *, name=None, automation_id=None) -> dict[str, Any]:
+            window = automation_id or name
+            if window not in self.windows:
+                raise LookupError(f"No top-level window: {window}")
+            self.selected_window = window
+            return {"switched": True, "title": window, "automationId": window}
+
+        async def find_element(self, *, automation_id=None, root_id=None, **_kwargs):
+            scope = self.windows[root_id or self.selected_window]
+            return {"found": automation_id in scope, "automationId": automation_id}
+
+        async def query_ui(self, selector, fields, max_results=20):
+            window = selector.get("root_id") or self.selected_window
+            automation_id = selector["automation_id"]
+            if automation_id not in self.windows[window]:
+                raise LookupError(f"Element not found in selected window {window}: {automation_id}")
+            record = {"element_id": automation_id}
+            for field in fields:
+                record[field] = (
+                    {"title": window, "automation_id": window}
+                    if field == "window"
+                    else self.windows[window][automation_id]
+                )
+            return {"status": "PASS", "element_count": 1, "elements": [record]}
+
+    session = SessionManager(netcoredbg_path="/private/unused-adapter")
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    created_backends: list[WindowScopedBackend] = []
+    active_registry = capturing_mcp
+
+    def create_backend(*, process_registry):
+        assert process_registry is session.process_registry
+        backend = WindowScopedBackend()
+        created_backends.append(backend)
+        return backend
+
+    register_ui = ui_tools_module.register_ui_tools
+    register_evidence = evidence_tools_module.register_ui_evidence_tools
+
+    def capture_ui_registration(*, mcp, **registration):
+        register_ui(mcp=active_registry, **registration)
+
+    def capture_evidence_registration(*, mcp, **registration):
+        register_evidence(mcp=active_registry, **registration)
+
+    monkeypatch.setattr(server_module, "get_session", lambda: session)
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", create_backend)
+    monkeypatch.setattr(ui_tools_module, "register_ui_tools", capture_ui_registration)
+    monkeypatch.setattr(
+        evidence_tools_module, "register_ui_evidence_tools", capture_evidence_registration
+    )
+    create_server()
+
+    if concurrent_first_calls:
+        first_find, first_query = await asyncio.gather(
+            capturing_mcp.tools["ui_find_element"](automation_id="primaryText"),
+            capturing_mcp.tools["ui_query"](
+                ctx=None, fields=["value"], automation_id="primaryText"
+            ),
+        )
+        assert "error" not in first_find and "error" not in first_query, {
+            "find": first_find,
+            "query": first_query,
+            "connection_attempts": [backend.connection_attempts for backend in created_backends],
+        }
+        assert first_find["data"]["found"] is True
+        assert first_query["data"]["elements"][0]["value"] == "PRIMARY_VALUE"
+
+    baseline = await capturing_mcp.tools["ui_query"](
+        ctx=None,
+        fields=["value"],
+        automation_id="primaryText",
+    )
+    assert baseline["data"]["elements"][0]["value"] == "PRIMARY_VALUE"
+    switched = await capturing_mcp.tools["ui_switch_window"](ctx=None, automation_id="secondary")
+    assert switched["data"]["switched"] is True
+    found = await capturing_mcp.tools["ui_find_element"](automation_id="secondaryText")
+    assert found["data"]["found"] is True
+
+    queried = await capturing_mcp.tools["ui_query"](
+        ctx=None,
+        fields=["value", "window"],
+        automation_id="secondaryText",
+    )
+    assert "error" not in queried, {
+        "response": queried,
+        "selected_windows": [backend.selected_window for backend in created_backends],
+    }
+    assert queried["data"]["elements"] == [
+        {
+            "element_id": "secondaryText",
+            "value": "SECONDARY_VALUE",
+            "window": {"title": "secondary", "automation_id": "secondary"},
+        }
+    ]
+
+    second_registry = type(capturing_mcp)()
+    active_registry = second_registry
+    session = SessionManager(netcoredbg_path="/private/unused-second-adapter")
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 84
+    create_server()
+    second_primary = await second_registry.tools["ui_query"](
+        ctx=None,
+        fields=["value"],
+        automation_id="primaryText",
+    )
+    assert second_primary["data"]["elements"][0]["value"] == "PRIMARY_VALUE"
+    second_secondary = await second_registry.tools["ui_query"](
+        ctx=None,
+        fields=["value"],
+        automation_id="secondaryText",
+    )
+    assert "Element not found in selected window primary" in second_secondary["error"]
+    original_secondary = await capturing_mcp.tools["ui_query"](
+        ctx=None,
+        fields=["value"],
+        automation_id="secondaryText",
+    )
+    assert original_secondary["data"]["elements"][0]["value"] == "SECONDARY_VALUE"
+
+
+@pytest.mark.asyncio
 async def test_ui_text_read_waits_for_pending_restore_without_canceling_retry(
     capturing_mcp,
     monkeypatch,

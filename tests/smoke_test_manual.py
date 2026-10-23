@@ -1563,6 +1563,29 @@ async def test_multi_window_envelope():
             await backend.disconnect()
             return
 
+        bridge_pid = backend.client.pid
+
+        async def check_primary_query(phase: str, root_id: str | None) -> None:
+            selector = {"automation_id": "txtOutput"}
+            if root_id is not None:
+                selector["root_id"] = root_id
+            try:
+                query = await backend.query_ui(selector, ["value", "text", "window"], max_results=1)
+                records = query.get("elements", [])
+                record = records[0] if len(records) == 1 else {}
+                check(
+                    f"MultiWindow: {phase} primary query root={root_id!r}",
+                    record.get("value") == "Initial text" or record.get("text") == "Initial text",
+                    repr(query),
+                )
+                check(
+                    f"MultiWindow: {phase} query names actual primary owner root={root_id!r}",
+                    record.get("window", {}).get("title") == primary,
+                    repr(record.get("window")),
+                )
+            except Exception as e:
+                check(f"MultiWindow: {phase} primary query root={root_id!r}", False, str(e))
+
         # 1. Baseline envelope with just the main window present
         primary: str = ""
         try:
@@ -1658,6 +1681,17 @@ async def test_multi_window_envelope():
         except Exception as e:
             check("MultiWindow: find TextBox in second window", False, str(e))
 
+        try:
+            outside = await backend.find_element(automation_id="txtOutput")
+            check(
+                "MultiWindow: live selected secondary excludes primary",
+                outside.get("found") is False,
+            )
+        except Exception as e:
+            check("MultiWindow: live selected secondary excludes primary", False, str(e))
+        for root_id in (primary, "settingsPanel"):
+            await check_primary_query("selected secondary live", root_id)
+
         # 7. Close second window via its Close button
         try:
             await backend.invoke_element(automation_id="dlgClose")
@@ -1665,6 +1699,25 @@ async def test_multi_window_envelope():
             await asyncio.sleep(0.5)
         except Exception as e:
             check("MultiWindow: close second window via button", False, str(e))
+
+        # Recover before any switch/reconnect: the closed selected window is not a search root.
+        try:
+            surviving = await backend.get_window_tree(max_depth=3, max_children=50)
+            check(
+                "MultiWindow: closed secondary leaves one live window",
+                len(surviving["windows"]) == 1,
+            )
+            found = await backend.find_element(automation_id="txtOutput")
+            check(
+                "MultiWindow: unrooted find recovers primary without retarget",
+                found.get("found") is True,
+            )
+        except Exception as e:
+            check("MultiWindow: unrooted find recovers primary without retarget", False, str(e))
+        for root_id in (primary, "settingsPanel"):
+            await check_primary_query("selected secondary closed", root_id)
+        await check_primary_query("selected secondary closed", None)
+        check("MultiWindow: recovery keeps bridge generation", backend.client.pid == bridge_pid)
 
         # 8. Switch back to the main window
         try:

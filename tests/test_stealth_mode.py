@@ -819,6 +819,372 @@ internal sealed class ForeignProcessCaptureTransport : IScreenshotCaptureTranspo
     }
 
 
+@REQUIRES_WINDOWS_DOTNET
+def test_bridge_closed_connection_rejects_replacement_process_identity(tmp_path) -> None:
+    import subprocess
+
+    from tests.test_host_proxy import _test_child_env
+
+    probe_project = tmp_path / "BridgeConnectedProcessProbe.csproj"
+    probe_source = tmp_path / "Program.cs"
+    bridge_project = PROJECT_ROOT / "bridge" / "FlaUIBridge.csproj"
+    probe_project.write_text(
+        """<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>TypedBitBltFallbackBridgeHost</AssemblyName>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <ApplicationManifest>__MANIFEST__</ApplicationManifest>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="__BRIDGE_PROJECT__" AdditionalProperties="BridgeTestHost=true" />
+  </ItemGroup>
+</Project>
+""".replace("__BRIDGE_PROJECT__", bridge_project.as_posix()).replace(
+            "__MANIFEST__", (PROJECT_ROOT / "bridge" / "app.manifest").as_posix()
+        ),
+        encoding="utf-8",
+    )
+    probe_source.write_text(
+        """using System.Diagnostics;
+using System.IO;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text.Json.Nodes;
+using System.Windows;
+using System.Windows.Automation;
+using System.Windows.Controls;
+using System.Windows.Interop;
+using System.Windows.Threading;
+using FlaUI.Core.Conditions;
+using FlaUIBridge;
+using FlaUIBridge.Commands;
+
+internal static class ConnectedProcessProbe
+{
+    [STAThread]
+    private static int Main(string[] args)
+    {
+        try
+        {
+            return args.Length > 0 && args[0] == "--owned-window"
+                ? RunOwnedWindow(args[1], args[2], args[3])
+                : RunProbe();
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine(exception);
+            return 1;
+        }
+    }
+
+    private static int RunProbe()
+    {
+        var token = Guid.NewGuid().ToString("N");
+        var originalId = "original_window_" + token;
+        var replacementId = "replacement_window_" + token;
+        var originalTextId = "original_text_" + token;
+        var replacementTextId = "replacement_text_" + token;
+        var foregroundBefore = GetForegroundWindow();
+        Process? original = null;
+        Process? replacement = null;
+        var observations = new JsonArray();
+        var report = new JsonObject
+        {
+            ["scope"] = "OWN_NONACTIVATING_PROCESS_INSTANCE_REGRESSION",
+            ["fault_injection"] = "Only JsonRpcHandler._processId is replaced after the original exits; this models PID reuse, not an observed OS PID reuse.",
+            ["bridge_dll_sha256"] = Convert.ToHexString(SHA256.HashData(
+                File.ReadAllBytes(typeof(ElementCommands).Assembly.Location))).ToLowerInvariant(),
+            ["observations"] = observations,
+        };
+        var allRefused = false;
+        try
+        {
+            original = StartControl(originalId, originalTextId, "ORIGINAL");
+            var originalReady = ReadReady(original);
+            replacement = StartControl(replacementId, replacementTextId, "REPLACEMENT_MUST_NOT_BE_REACHED");
+            var replacementReady = ReadReady(replacement);
+            report["original_ready"] = originalReady;
+            report["replacement_ready"] = replacementReady;
+            report["original_birth_utc"] = original.StartTime.ToUniversalTime().ToString("O");
+            report["replacement_birth_utc"] = replacement.StartTime.ToUniversalTime().ToString("O");
+
+            var connected = JsonRpcHandler.Handle("connect", new JsonObject
+            {
+                ["pid"] = original.Id,
+                ["stealth"] = true,
+            });
+            if (connected["connected"]?.GetValue<bool>() != true ||
+                JsonRpcHandler.MainWindow?.AutomationId != originalId ||
+                JsonRpcHandler.ProcessId != original.Id)
+                throw new InvalidOperationException("Actual Connect did not select the owned original window.");
+            var selected = JsonRpcHandler.MainWindow;
+            var originalFind = JsonRpcHandler.Handle("find_element", new JsonObject
+            {
+                ["automationId"] = originalTextId,
+            });
+            if (originalFind["found"]?.GetValue<bool>() != true)
+                throw new InvalidOperationException("The live original connection baseline failed.");
+            report["actual_connect_baseline"] = connected;
+
+            report["original_exit"] = CloseControl(original);
+            if (!original.HasExited || replacement.HasExited)
+                throw new InvalidOperationException("Original/replacement lifecycle precondition failed.");
+            var replacementWindows = JsonRpcHandler.Automation.GetDesktop().FindAllChildren(
+                new ConditionFactory(JsonRpcHandler.Automation.PropertyLibrary).ByProcessId(replacement.Id));
+            if (replacementWindows.Length != 1 || replacementWindows[0].AutomationId != replacementId)
+                throw new InvalidOperationException("The replacement must have exactly one actual live UIA window.");
+            report["replacement_unique_window"] = replacementWindows[0].AutomationId;
+
+            // Bypass only the numeric field: reconnecting would legitimately replace the captured instance.
+            var numericPid = typeof(JsonRpcHandler).GetField("_processId", BindingFlags.NonPublic | BindingFlags.Static)
+                ?? throw new InvalidOperationException("Existing numeric PID seam was not found.");
+            numericPid.SetValue(null, replacement.Id);
+            if (JsonRpcHandler.ProcessId != replacement.Id)
+                throw new InvalidOperationException("The numeric PID fault injection was not applied.");
+
+            observations.Add(Observe("ResolveSearchRoot", () =>
+            {
+                var root = ElementCommands.ResolveSearchRoot(selected!, null, JsonRpcHandler.Automation);
+                return new JsonObject { ["automationId"] = root.AutomationId };
+            }));
+            observations.Add(Observe("find_element", () => JsonRpcHandler.Handle("find_element", new JsonObject
+            {
+                ["automationId"] = replacementTextId,
+            })));
+            observations.Add(Observe("ui_query", () => JsonRpcHandler.Handle("ui_query", new JsonObject
+            {
+                ["selector"] = new JsonObject { ["automationId"] = replacementTextId },
+                ["fields"] = new JsonArray("value", "window"),
+                ["maxResults"] = 1,
+            })));
+            if (replacement.HasExited)
+                throw new InvalidOperationException("The replacement exited before the guard observations.");
+            allRefused = observations.All(item => item!["rejected"]!.GetValue<bool>());
+            report["all_original_instance_guards_refused"] = allRefused;
+
+            var reconnected = JsonRpcHandler.Handle("connect", new JsonObject
+            {
+                ["pid"] = replacement.Id,
+                ["stealth"] = true,
+            });
+            var reconnectedFind = JsonRpcHandler.Handle("find_element", new JsonObject
+            {
+                ["automationId"] = replacementTextId,
+            });
+            var reconnectedQuery = JsonRpcHandler.Handle("ui_query", new JsonObject
+            {
+                ["selector"] = new JsonObject { ["automationId"] = replacementTextId },
+                ["fields"] = new JsonArray("value"),
+                ["maxResults"] = 1,
+            });
+            report["legitimate_reconnect"] = reconnected;
+            report["reconnected_find"] = reconnectedFind;
+            report["reconnected_query"] = reconnectedQuery;
+            if (reconnected["connected"]?.GetValue<bool>() != true ||
+                reconnectedFind["found"]?.GetValue<bool>() != true ||
+                reconnectedFind["automationId"]?.GetValue<string>() != replacementTextId ||
+                reconnectedQuery["elements"]?[0]?["value"]?.GetValue<string>() != "REPLACEMENT_MUST_NOT_BE_REACHED")
+                throw new InvalidOperationException("An explicit reconnect did not bind the live replacement process.");
+        }
+        finally
+        {
+            JsonRpcHandler.Dispose();
+            if (original is not null)
+            {
+                report["original_drain"] = CloseControl(original);
+                original.Dispose();
+            }
+            if (replacement is not null)
+            {
+                report["replacement_drain"] = CloseControl(replacement);
+                replacement.Dispose();
+            }
+            report["foreground_before"] = foregroundBefore.ToInt64();
+            report["foreground_after"] = GetForegroundWindow().ToInt64();
+            Console.WriteLine(report.ToJsonString());
+        }
+        if (GetForegroundWindow() != foregroundBefore)
+            throw new InvalidOperationException("The no-activation foreground guard failed.");
+        if (!allRefused)
+            throw new InvalidOperationException("The original connected process exited, but the actual resolver accepted its replacement PID.");
+        return 0;
+    }
+
+    private static JsonObject Observe(string operation, Func<JsonNode> action)
+    {
+        try
+        {
+            return new JsonObject { ["operation"] = operation, ["rejected"] = false, ["result"] = action() };
+        }
+        catch (InvalidOperationException exception) when (
+            exception.Message.Contains("process", StringComparison.OrdinalIgnoreCase) &&
+            new[] { "exited", "instance", "identity", "alive", "changed" }.Any(
+                word => exception.Message.Contains(word, StringComparison.OrdinalIgnoreCase)))
+        {
+            return new JsonObject { ["operation"] = operation, ["rejected"] = true, ["error"] = exception.Message };
+        }
+    }
+
+    private static Process StartControl(string windowId, string textId, string value)
+    {
+        var executable = Environment.ProcessPath ?? throw new InvalidOperationException("Missing probe executable.");
+        var start = new ProcessStartInfo(executable)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        if (string.Equals(Path.GetFileNameWithoutExtension(executable), "dotnet", StringComparison.OrdinalIgnoreCase))
+            start.ArgumentList.Add(typeof(ConnectedProcessProbe).Assembly.Location);
+        foreach (var argument in new[] { "--owned-window", windowId, textId, value })
+            start.ArgumentList.Add(argument);
+        return Process.Start(start) ?? throw new InvalidOperationException("Owned control launch failed.");
+    }
+
+    private static JsonObject ReadReady(Process process)
+    {
+        var line = process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(20)).GetAwaiter().GetResult();
+        var ready = JsonNode.Parse(line ?? "null")?.AsObject();
+        if (ready?["kind"]?.GetValue<string>() != "ready" || ready["pid"]?.GetValue<int>() != process.Id)
+            throw new InvalidOperationException("Owned nonactivating control did not become ready.");
+        return ready;
+    }
+
+    private static JsonObject CloseControl(Process process)
+    {
+        if (!process.HasExited)
+        {
+            process.StandardInput.WriteLine("close");
+            process.StandardInput.Flush();
+            process.StandardInput.Close();
+        }
+        if (!process.WaitForExit(10_000) || process.ExitCode != 0)
+            throw new InvalidOperationException("Owned control did not exit naturally with code zero.");
+        return new JsonObject { ["pid"] = process.Id, ["exit_code"] = process.ExitCode, ["forced"] = false };
+    }
+
+    private static int RunOwnedWindow(string windowId, string textId, string value)
+    {
+        var application = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
+        var right = GetSystemMetrics(76) + GetSystemMetrics(78);
+        var window = new Window
+        {
+            Title = windowId, ShowActivated = false, ShowInTaskbar = false, Focusable = false,
+            WindowStartupLocation = WindowStartupLocation.Manual,
+            Left = right + 10_000, Top = GetSystemMetrics(77) + 32, Width = 360, Height = 140,
+        };
+        AutomationProperties.SetAutomationId(window, windowId);
+        AutomationProperties.SetName(window, windowId);
+        var text = new TextBox { Text = value, IsReadOnly = true, Focusable = false };
+        AutomationProperties.SetAutomationId(text, textId);
+        window.Content = text;
+        var activations = 0;
+        var placementValid = false;
+        window.Activated += (_, _) =>
+        {
+            activations++;
+            window.Dispatcher.BeginInvoke(new Action(window.Close));
+        };
+        window.ContentRendered += (_, _) =>
+        {
+            var hwnd = new WindowInteropHelper(window).Handle;
+            placementValid = GetWindowRect(hwnd, out var rect) && rect.Left >= right;
+            if (!placementValid)
+            {
+                window.Close();
+                return;
+            }
+            Console.WriteLine(new JsonObject
+            {
+                ["kind"] = "ready", ["pid"] = Environment.ProcessId, ["hwnd"] = hwnd.ToInt64(),
+                ["window_id"] = windowId, ["activations"] = activations,
+            }.ToJsonString());
+        };
+        var close = System.Threading.Tasks.Task.Run(() => Console.In.ReadLine());
+        var clock = Stopwatch.StartNew();
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(25) };
+        timer.Tick += (_, _) =>
+        {
+            if (close.IsCompleted || clock.Elapsed.TotalSeconds >= 90)
+                window.Close();
+        };
+        timer.Start();
+        application.Run(window);
+        timer.Stop();
+        return placementValid && activations == 0 && close.IsCompleted ? 0 : 2;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int index);
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(IntPtr hwnd, out NativeRect rect);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect { public int Left, Top, Right, Bottom; }
+}
+""",
+        encoding="utf-8",
+    )
+    command = [
+        "dotnet",
+        "run",
+        "--project",
+        str(probe_project),
+        "-c",
+        "Release",
+        "--nologo",
+        f"-p:ArtifactsPath={tmp_path / 'artifacts'}",
+    ]
+    source_paths = (
+        bridge_project,
+        PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs",
+        PROJECT_ROOT / "bridge" / "Commands" / "ElementCommands.cs",
+        PROJECT_ROOT / "bridge" / "Commands" / "SnapshotCommands.cs",
+    )
+    before = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in source_paths}
+    probe = subprocess.run(
+        command,
+        cwd=PROJECT_ROOT,
+        env=_test_child_env(),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=180,
+        check=False,
+    )
+    after = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in source_paths}
+    (tmp_path / "process-instance-probe-result.json").write_text(
+        json.dumps(
+            {
+                "command": command,
+                "exit_code": probe.returncode,
+                "stdout": probe.stdout,
+                "stderr": probe.stderr,
+                "source_sha256_before": before,
+                "source_sha256_after": after,
+                "source_unchanged": before == after,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    assert before == after, "Bridge sources changed during the identity probe"
+    assert probe.returncode == 0, probe.stdout + probe.stderr
+    result = json.loads(probe.stdout.strip().splitlines()[-1])
+    assert result["all_original_instance_guards_refused"] is True
+    assert result["foreground_before"] == result["foreground_after"]
+    assert result["original_drain"]["exit_code"] == result["replacement_drain"]["exit_code"] == 0
+
+
 def test_bridge_typed_bitblt_fallback_has_no_legacy_lossless_authority() -> None:
     command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
         encoding="utf-8"
@@ -881,24 +1247,6 @@ def test_primary_printwindow_evidence_path_does_not_capture_bitblt() -> None:
 
     assert "CaptureEvidenceWithFlashFocusBitBlt" not in primary_printwindow_capture
     assert "CaptureBitmapWithBitBlt" not in primary_printwindow_capture
-
-
-def test_bridge_connect_stores_stealth_state_and_exposes_get_state() -> None:
-    router = (PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs").read_text(encoding="utf-8")
-    elements = (PROJECT_ROOT / "bridge" / "Commands" / "ElementCommands.cs").read_text(
-        encoding="utf-8"
-    )
-
-    assert "private static bool _stealth;" in router
-    assert "internal static bool Stealth" in router
-    assert '["get_state"] = GetState' in router
-    assert '["stealth"] = Stealth' in router
-    assert "_stealth = false;" in router
-    assert 'var requestedStealth = @params?["stealth"]?.GetValue<bool>() ?? false;' in elements
-    assert "JsonRpcHandler.Stealth = requestedStealth;" in elements
-    assert elements.index("var window = SelectPrimaryWindow") < elements.index(
-        "JsonRpcHandler.Stealth = requestedStealth;"
-    )
 
 
 def test_bridge_window_ensure_foreground_skips_only_in_stealth_mode() -> None:

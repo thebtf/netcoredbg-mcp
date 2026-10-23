@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
@@ -110,8 +111,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
                     (
                         file_path,
                         tuple(
-                            (bp.line, bp.dap_line, bp.condition, bp.verified)
-                            for bp in breakpoints
+                            (bp.line, bp.dap_line, bp.condition, bp.verified) for bp in breakpoints
                         ),
                     )
                     for file_path, breakpoints in sorted(session.breakpoints.get_all().items())
@@ -368,16 +368,19 @@ def create_server(project_path: str | None = None) -> FastMCP:
         resolve_project_root_readonly=resolve_project_root_readonly,
     )
 
+    backend_holder: dict[str, Any] = {"instance": None}
     register_ui_tools(
         mcp=mcp,
         session=session,
         check_session_access=_check_session_access,
+        backend_holder=backend_holder,
     )
 
     register_ui_evidence_tools(
         mcp=mcp,
         session=session,
         check_session_access=_check_session_access,
+        backend_holder=backend_holder,
     )
 
     register_process_tools(
