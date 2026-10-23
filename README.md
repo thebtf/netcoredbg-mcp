@@ -225,6 +225,10 @@ ui_click(automation_id="saveButton")
 
 ### Selected windows and query ownership
 
+All UI and UI-evidence tools registered by one server share the same lazy backend
+and selected-window state. A successful `ui_switch_window` therefore scopes
+subsequent `ui_find_element` and `ui_query` calls to the same live window.
+
 On the Windows FlaUI backend, unrooted element searches stay inside the selected
 window while it remains live. If that window closes, searches can use the sole
 remaining live top-level window of the connected process without reconnecting or

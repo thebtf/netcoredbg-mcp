@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
@@ -107,11 +108,17 @@ def register_ui_evidence_tools(
     mcp: FastMCP,
     session: SessionManager,
     check_session_access: Callable[[Any], str | None],
+    *,
+    backend_holder: dict[str, Any] | None = None,
 ) -> None:
     """Register high-signal UI evidence tools."""
     from mcp.types import ToolAnnotations
 
-    backend_holder: dict[str, Any] = {"instance": None}
+    backend_holder = backend_holder if backend_holder is not None else {"instance": None}
+    connection_lock = backend_holder.get("connection_lock")
+    if connection_lock is None:
+        connection_lock = asyncio.Lock()
+        backend_holder["connection_lock"] = connection_lock
 
     def _get_backend() -> Any:
         if backend_holder["instance"] is None:
@@ -125,44 +132,45 @@ def register_ui_evidence_tools(
     async def _ensure_ui_connected(*, observation: bool = False) -> Any:
         from ..ui import NoActiveSessionError, NoProcessIdError
 
-        if session.state.state == DebugState.IDLE:
-            raise NoActiveSessionError("No debug session is active. Start debugging first.")
+        async with connection_lock:
+            if session.state.state == DebugState.IDLE:
+                raise NoActiveSessionError("No debug session is active. Start debugging first.")
 
-        process_id = session.state.process_id
-        if not process_id:
-            raise NoProcessIdError(
-                "Process ID not available. Debug session may not have started the process yet."
+            process_id = session.state.process_id
+            if not process_id:
+                raise NoProcessIdError(
+                    "Process ID not available. Debug session may not have started the process yet."
+                )
+
+            from ..ui.backend import connect_backend
+
+            backend = _get_backend()
+            if backend.process_id != process_id:
+                await connect_backend(
+                    backend,
+                    process_id,
+                    stealth_mode=getattr(session, "stealth_mode", False),
+                )
+
+            method_name = (
+                "wait_for_pending_stealth_foreground_restore"
+                if observation
+                else "cancel_pending_stealth_foreground_restore"
             )
-
-        from ..ui.backend import connect_backend
-
-        backend = _get_backend()
-        if backend.process_id != process_id:
-            await connect_backend(
-                backend,
-                process_id,
-                stealth_mode=getattr(session, "stealth_mode", False),
+            join = getattr(session, method_name, None)
+            restore_was_pending = (
+                (await cast(Callable[[], Awaitable[Any]], join)()) is True
+                if join is not None
+                else False
             )
+            if restore_was_pending:
+                await connect_backend(
+                    backend,
+                    process_id,
+                    stealth_mode=getattr(session, "stealth_mode", False),
+                )
 
-        method_name = (
-            "wait_for_pending_stealth_foreground_restore"
-            if observation
-            else "cancel_pending_stealth_foreground_restore"
-        )
-        join = getattr(session, method_name, None)
-        restore_was_pending = (
-            (await cast(Callable[[], Awaitable[Any]], join)()) is True
-            if join is not None
-            else False
-        )
-        if restore_was_pending:
-            await connect_backend(
-                backend,
-                process_id,
-                stealth_mode=getattr(session, "stealth_mode", False),
-            )
-
-        return backend
+            return backend
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def ui_key_sequence(
@@ -357,8 +365,7 @@ def register_ui_evidence_tools(
                         "action": action,
                         "accepted_actions": list(_PROPERTY_READ_ACTIONS),
                         "next_step": (
-                            "Use ui_property(action=\"read\") for read-only "
-                            "property evidence."
+                            'Use ui_property(action="read") for read-only property evidence.'
                         ),
                     },
                     state=session.state.state,
@@ -464,7 +471,7 @@ def register_ui_evidence_tools(
                         "reason": "unknown focus action",
                         "action": action,
                         "accepted_actions": list(_FOCUS_READ_ACTIONS),
-                        "next_step": "Use ui_focus(action=\"assert\") for read-only focus proof.",
+                        "next_step": 'Use ui_focus(action="assert") for read-only focus proof.',
                     },
                     state=session.state.state,
                 )
@@ -1215,9 +1222,7 @@ def _bounded_property_backend_result(result: Any) -> dict[str, Any]:
         "source",
     )
     return {
-        key: _strip_unbounded_evidence_value(result[key])
-        for key in allowed_keys
-        if key in result
+        key: _strip_unbounded_evidence_value(result[key]) for key in allowed_keys if key in result
     }
 
 
@@ -1274,9 +1279,7 @@ def _bounded_focus_result(
         "error",
     )
     bounded = {
-        key: _strip_unbounded_evidence_value(result[key])
-        for key in allowed_keys
-        if key in result
+        key: _strip_unbounded_evidence_value(result[key]) for key in allowed_keys if key in result
     }
     bounded.setdefault("status", "PASS")
     if selector is not None:
@@ -1369,11 +1372,7 @@ async def _confirm_grid_selection(
         }
 
     stripped_selection_result = _strip_unbounded_evidence_value(selection_result)
-    result = (
-        stripped_selection_result
-        if isinstance(stripped_selection_result, dict)
-        else {}
-    )
+    result = stripped_selection_result if isinstance(stripped_selection_result, dict) else {}
     result["status"] = "PASS"
     result["confirmed_selection"] = True
     result["selected_range"] = requested_range

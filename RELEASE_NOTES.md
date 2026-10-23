@@ -10,6 +10,10 @@ binding. These notes describe the prepared candidate, not a publication receipt.
 
 ## Fixed behavior
 
+- The Python server's UI automation and UI evidence tools share one lazy backend
+  and selected-window state. Switching to a live secondary window applies to
+  both `ui_find_element` and `ui_query`; concurrent initial connection admission
+  does not start independent bridge generations.
 - A live selected window remains the unrooted search scope. If it closes and
   exactly one live top-level window remains in the connected process, find/query
   can reach that window in the same bridge generation without reconnecting or
