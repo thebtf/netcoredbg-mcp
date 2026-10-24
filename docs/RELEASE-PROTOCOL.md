@@ -129,15 +129,28 @@ Stdout is compact framework/case/status/launch/cleanup evidence with image
 path/digest/dimensions, not base64 images or full UI trees. Missing prerequisites,
 failed assertions and failed cleanup fail closed and stop the normal run.
 
-Run the short GUI entry **once**, serially, without pytest workers:
+The Critical suite command above already includes this short GUI proof. Do
+not run a second pytest process or the manual command after that suite.
+For a smoke-only check, use this command **instead of** the full critical suite:
 
 ```powershell
 uv run --locked --extra dev pytest tests/critical/test_typed_bitblt_fallback_public.py -m critical -s
 ```
 
-`python tests/smoke_test_manual.py` is an alternative to that same short entry,
-not another normal verification step. Its default never enters the historical
+`python tests/smoke_test_manual.py` is another alternative to the same short
+entry, not an additional step. Its default never enters the historical
 `_base_scenarios` loop or requires a prebuilt console fixture.
+
+If that short proof has already passed with the same source and runtime inputs,
+run only the remaining critical tests rather than launching the apps again:
+
+```powershell
+uv run --locked --extra dev pytest tests/critical -m critical -k "not installed_public_core_gui_journey"
+```
+
+Record both original commands and results as partitioned evidence. Their test
+node union must equal the current critical collection, with no missing or
+duplicate nodes; do not describe it as a single full-suite execution.
 
 ### Explicit full GUI regression (not a normal verification step)
 
