@@ -61,11 +61,12 @@ original process exits; it is not an observation of actual OS PID reuse. These
 source checks do not replace fresh built-wheel installation and public CLI/MCP
 consumer proof under the [release protocol](docs/RELEASE-PROTOCOL.md).
 
-The installed public CLI/MCP journey, remaining interactive release checks, and
-final review dispositions are still pending for this candidate. Publication is
-not complete. After publication, verify the public package in a fresh consumer
-process. Retained source checks and earlier candidate artifacts do not prove
-those remaining gates or the original F09 incident.
+The installed candidate passed the declared own-fixture public CLI/MCP
+root/selection journey. Exact-source gate dispositions and residual risks belong
+in the release report; these notes are not a publication receipt. Verify the
+published package in a fresh consumer process after publication. Earlier native
+failures remain retained observations, not proof of the original F09 cause or
+compatibility with every application/provider.
 
 ---
 

@@ -51,12 +51,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Compatibility
 - The installed Python entry point remains the default and rollback route. This additive native slice does not add other execution controls, change UI/bridge behavior, or authorize publication.
 
-## [0.23.15] - 2026-10-23
+## [0.23.15] - 2026-10-24
 
 ### Fixed
 - FlaUI element searches preserve a live selected window, recover from its closure only when exactly one live same-process top-level window remains, and fail explicitly instead of choosing among multiple windows or reusing a closed reference. Explicit roots preserve selection and ambiguity/process guards. `ui_query` window metadata now comes from each resolved element's actual owning live top-level window; unprovable ownership returns empty metadata fields.
 - Fresh FlaUI window discovery is bound to the original process instance opened during `connect`, not a later lookup of its numeric PID. An exited or mismatched instance refuses enumeration and default-root recovery; reconnect and bridge shutdown release the retained process handle.
 - UI automation and UI evidence tools registered by one Python server share one lazy backend and selected-window state. `ui_switch_window`, `ui_find_element`, and `ui_query` no longer diverge into separate bridge connections; concurrent initial connection admission is serialized without changing per-tool access or foreground-restore guards.
+- Live unrooted selection validates the retained original process and selected HWND/PID before desktop discovery, avoiding an unnecessary global UIA enumeration while preserving explicit-root and closed-window checks.
+- The non-shipped capture contract host retains bounded native foreground-transition diagnostics without changing native calls, safety guards, capture assertions, or case selection.
 
 ### Compatibility
 - The Python entry point remains the default; locked dependencies and the public catalog are unchanged. The stable wheel carries FlaUI bridge source, not the opt-in modern .NET preview executable; no preview cutover is included.
