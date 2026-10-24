@@ -1175,6 +1175,174 @@ async def test_server_window_switch_and_query_share_selected_window(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("recovery_tool", ["ui_get_window_tree", "ui_take_screenshot"])
+@pytest.mark.parametrize("recovered_pid", [42, 84, None], ids=["same-pid", "new-pid", "no-pid"])
+async def test_server_ui_recovery_serializes_with_evidence_admission(
+    capturing_mcp, monkeypatch, recovery_tool: str, recovered_pid: int | None
+) -> None:
+    import asyncio
+    import base64
+    import io
+
+    from PIL import Image
+
+    from netcoredbg_mcp import server as server_module
+    from netcoredbg_mcp.session import SessionManager
+    from netcoredbg_mcp.tools import ui as ui_tools_module
+    from netcoredbg_mcp.tools import ui_evidence as evidence_tools_module
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    recovery_ready = asyncio.Event()
+    resume_recovery = asyncio.Event()
+    recovery_resumed = asyncio.Event()
+    evidence_connecting = asyncio.Event()
+    finish_evidence_connect = asyncio.Event()
+    query_entered = asyncio.Event()
+    finish_query = asyncio.Event()
+    png = io.BytesIO()
+    image = Image.new("RGB", (4, 4), "white")
+    image.putpixel((0, 0), (255, 0, 0))
+    image.save(png, format="PNG")
+
+    async def interrupt_connection() -> bool:
+        backend._process_id = None
+        recovery_ready.set()
+        await resume_recovery.wait()
+        recovery_resumed.set()
+        return True
+
+    class RecoveringBackend(FlaUIBackend):
+        def __init__(self) -> None:
+            self._process_id = 42
+            self._element_cache = {"stale": {"runtimeId": "old-generation"}}
+            self._client = SimpleNamespace(is_running=True, call=self.call)
+            self.connection_attempts: list[tuple[int, bool]] = []
+            self.connecting = False
+            self.tree_reads = 0
+            self.captures = 0
+
+        async def connect(self, pid: int, stealth: bool = False) -> None:
+            self.connection_attempts.append((pid, stealth))
+            if self.connecting:
+                raise RuntimeError("Overlapping connect would replace the active bridge generation")
+            self.connecting = True
+            evidence_connecting.set()
+            await finish_evidence_connect.wait()
+            self._process_id = pid
+            self.connecting = False
+
+        def assert_connected(self) -> None:
+            assert not self.connecting
+            assert self._process_id == session.state.process_id
+
+        async def get_window_tree(self, max_depth=3, max_children=50):
+            self.tree_reads += 1
+            if self.tree_reads == 1:
+                await interrupt_connection()
+                raise RuntimeError("Not connected. Call 'connect' first.")
+            self.assert_connected()
+            return {"windows": [{"automationId": "MainWindow"}], "count": 1}
+
+        async def call(self, method, params):
+            assert method == "screenshot"
+            self.assert_connected()
+            self.captures += 1
+            return {"base64": base64.b64encode(png.getvalue()).decode(), "width": 4, "height": 4}
+
+        async def query_ui(self, selector, fields, max_results=20):
+            assert not self.connecting
+            query_entered.set()
+            await finish_query.wait()
+            return {
+                "status": "PASS",
+                "element_count": 1,
+                "elements": [{"element_id": "primaryText", "value": "PRIMARY_VALUE"}],
+            }
+
+    backend = RecoveringBackend()
+    session = SessionManager(netcoredbg_path="/private/unused-adapter")
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    session.stealth_mode = True
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock(return_value=False)
+    session.cancel_pending_stealth_foreground_restore = AsyncMock(side_effect=interrupt_connection)
+    register_ui = ui_tools_module.register_ui_tools
+    register_evidence = evidence_tools_module.register_ui_evidence_tools
+
+    def capture_ui_registration(*, mcp, **registration):
+        register_ui(mcp=capturing_mcp, **registration)
+
+    def capture_evidence_registration(*, mcp, **registration):
+        register_evidence(mcp=capturing_mcp, **registration)
+
+    def forbid_native_capture(*_args, **_kwargs):
+        raise AssertionError("This admission regression must not access a real window")
+
+    monkeypatch.setattr(server_module, "get_session", lambda: session)
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    monkeypatch.setattr(ui_tools_module, "register_ui_tools", capture_ui_registration)
+    monkeypatch.setattr(
+        evidence_tools_module, "register_ui_evidence_tools", capture_evidence_registration
+    )
+    for native_capture in ("get_hwnd_for_pid", "capture_window", "capture_window_evidence"):
+        monkeypatch.setattr(f"netcoredbg_mcp.ui.screenshot.{native_capture}", forbid_native_capture)
+    create_server()
+
+    recovery = asyncio.create_task(
+        capturing_mcp.tools[recovery_tool](
+            **({"ctx": None} if recovery_tool == "ui_take_screenshot" else {})
+        )
+    )
+    tasks = [recovery]
+    try:
+        await asyncio.wait_for(recovery_ready.wait(), timeout=5)
+        query = asyncio.create_task(
+            capturing_mcp.tools["ui_query"](ctx=None, fields=["value"], automation_id="primaryText")
+        )
+        tasks.append(query)
+        await asyncio.wait_for(evidence_connecting.wait(), timeout=5)
+        resume_recovery.set()
+        await asyncio.wait_for(recovery_resumed.wait(), timeout=5)
+        # Recovery is now either waiting for admission or has attempted an overlapping connect.
+        session.state.process_id = recovered_pid
+        finish_evidence_connect.set()
+        await asyncio.wait_for(query_entered.wait(), timeout=5)
+        response = await asyncio.wait_for(recovery, timeout=5)
+        finish_query.set()
+        queried = await asyncio.wait_for(query, timeout=5)
+    finally:
+        resume_recovery.set()
+        finish_evidence_connect.set()
+        finish_query.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    expected_attempts = [(42, True)]
+    if recovered_pid is not None:
+        expected_attempts.append((recovered_pid, True))
+        assert "error" not in response, response
+        assert backend._process_id == recovered_pid
+        assert backend.element_cache == {}
+        if recovery_tool == "ui_get_window_tree":
+            assert response["data"]["count"] == 1
+            assert backend.tree_reads == 2
+        else:
+            assert isinstance(response, list)
+            assert backend.captures == 1
+    else:
+        assert "error" in response
+        assert backend.captures == 0
+        assert backend.tree_reads == (1 if recovery_tool == "ui_get_window_tree" else 0)
+    assert backend.connection_attempts == expected_attempts
+    assert queried["data"]["elements"][0]["value"] == "PRIMARY_VALUE"
+    assert session.cancel_pending_stealth_foreground_restore.await_count == (
+        1 if recovery_tool == "ui_take_screenshot" else 0
+    )
+
+
+@pytest.mark.asyncio
 async def test_ui_text_read_waits_for_pending_restore_without_canceling_retry(
     capturing_mcp,
     monkeypatch,
