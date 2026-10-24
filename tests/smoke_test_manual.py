@@ -1,14 +1,12 @@
-"""Comprehensive smoke test for netcoredbg-mcp.
+"""Short installed GUI smoke; historical exhaustive scenarios are explicit.
 
-The default run covers the broad non-GUI contract plus one WPF and one
-WinForms gallery process. Pass ``--extended-gui`` to add the exhaustive
-per-scenario GUI, startup, raster, and Avalonia checks. Exact ``--scenario``
-selection can address either inventory without enabling the full extended run.
-
-Requires: netcoredbg in PATH or NETCOREDBG_PATH env var.
-Build first: dotnet build tests/fixtures/SmokeTestApp -c Debug
-
-Usage: python tests/smoke_test_manual.py [--extended-gui]
+Default: one WPF and one Avalonia public installed-consumer core journey.
+``--extended-gui`` retains the historical base, GUI/startup/WinForms scenarios
+and installed nine-case capture regression with their original launch semantics.
+Exact ``--scenario`` selection also retains every original diagnostic.
+Requires netcoredbg on PATH or NETCOREDBG_PATH. The normal producer builds its
+own fixtures/bridge; it does not require a prebuilt console fixture.
+Usage: python tests/smoke_test_manual.py [--extended-gui] [--scenario NAME]
 """
 
 import asyncio
@@ -18,6 +16,7 @@ import re
 import sys
 import traceback
 from collections.abc import Callable
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
@@ -7803,8 +7802,30 @@ def _avalonia_extended_scenarios() -> list[tuple[str, Callable[..., Any]]]:
     ]
 
 
+async def test_two_application_gui_verification(*, extended_gui: bool = False):
+    from tests.critical.test_typed_bitblt_fallback_public import run_two_application_verification
+    from tests.test_host_proxy import _test_scratch_directory
+
+    result = await asyncio.to_thread(
+        run_two_application_verification,
+        _test_scratch_directory("installed-gui-"),
+        extended_gui=extended_gui,
+    )
+    check(
+        "Installed GUI capture regression"
+        if extended_gui
+        else "Two-application installed core smoke",
+        result["status"] == "PASS",
+    )
+
+
 def _complete_scenario_catalog() -> list[tuple[str, Callable[..., Any]]]:
     return [
+        ("Two-Application Core Smoke", test_two_application_gui_verification),
+        (
+            "Installed Public Capture Regression",
+            partial(test_two_application_gui_verification, extended_gui=True),
+        ),
         *_base_scenarios(),
         *_winforms_extended_scenarios(),
         *_wpf_extended_scenarios(),
@@ -7813,9 +7834,15 @@ def _complete_scenario_catalog() -> list[tuple[str, Callable[..., Any]]]:
 
 
 def get_scenarios(include_extended_gui: bool = False):
-    scenarios = _base_scenarios()
     if not include_extended_gui:
-        return scenarios
+        return [("Two-Application Core Smoke", test_two_application_gui_verification)]
+    scenarios = _base_scenarios()
+    scenarios.append(
+        (
+            "Installed Public Capture Regression",
+            partial(test_two_application_gui_verification, extended_gui=True),
+        )
+    )
     if GUI_ENABLED:
         scenarios.extend(_winforms_extended_scenarios())
     if WPF_GUI_ENABLED:
@@ -7864,17 +7891,17 @@ async def run_all(
         print(f"ERROR: {exc}")
         return False
 
-    if not os.path.exists(DLL) and selected_names is None:
+    if not os.path.exists(DLL) and selected_names is None and include_extended_gui:
         print("ERROR: Build SmokeTestApp first:")
         print("  dotnet build tests/fixtures/SmokeTestApp -c Debug")
         return False
 
-    print("=== SMOKE TEST: netcoredbg-mcp v0.6.0 ===")
-    print(f"DLL: {DLL}")
-    print(f"Source: {SOURCE}")
-
-    if not GUI_ENABLED:
-        print("\n  [SKIP] GUI scenarios — net8.0-windows build not found")
+    if selected_names is None and not include_extended_gui:
+        print("=== SHORT INSTALLED GUI CORE SMOKE: WPF + Avalonia ===")
+    else:
+        print("=== EXPLICIT SMOKE REGRESSION: netcoredbg-mcp ===")
+        print(f"DLL: {DLL}")
+        print(f"Source: {SOURCE}")
 
     for name, fn in scenarios:
         try:

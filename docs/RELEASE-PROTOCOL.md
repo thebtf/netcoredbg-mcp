@@ -107,13 +107,64 @@ separately and do not reopen approval or invalidate a completed working release.
 | Version parity | Check `pyproject.toml`, `src/netcoredbg_mcp/__init__.py`, `uv.lock`, README release copy, changelog, and release notes | Any public version surface disagrees with `X.Y.Z` / `vX.Y.Z` |
 | Changelog and release notes | `CHANGELOG.md` has a dated `X.Y.Z` section; `RELEASE_NOTES.md` has user-facing notes | Either file missing or contains only generic placeholder text |
 | Documentation refresh | README and README.ru reflect the current tool/test counts and release highlights; docs examples touched since last tag have matching tests | Public docs still describe an older released surface |
-| Critical suite | `uv run --locked --extra dev pytest tests/critical -m critical` | Any `@critical` test fails or the suite cannot run |
-| Runtime-smoke docs/examples | `uv run --locked --extra dev pytest tests/test_runtime_smoke_v2_docs.py tests/test_runtime_smoke_diagnostics_schema.py tests/critical/test_runtime_smoke_v2_critical.py` or a narrower documented equivalent | Docs examples, diagnostic schemas, or v2 critical guards fail |
+| Critical suite | `uv run --locked --extra dev pytest tests/critical -m critical` (serial, once) | Any `@critical` test fails or the suite cannot run |
+| Runtime-smoke docs/examples | `uv run --locked --extra dev pytest tests/test_runtime_smoke_v2_docs.py tests/test_runtime_smoke_diagnostics_schema.py` | Docs examples or diagnostic schemas fail; runtime v2 critical guards are already included in the critical suite above |
 | Package build | `uv build` | Wheel or sdist build fails |
 | Wheel install smoke | Reuse the disposable release-candidate environment created for the primary UXDD consumer-mode release gate; run `netcoredbg-mcp --version` plus an import smoke | Install, import, or CLI version smoke fails |
 | Primary UXDD consumer-mode release gate | Build and install the release candidate; execute `docs/PRODUCTION-TESTING-PLAYBOOK.md` through the public package/CLI/MCP surface; enumerate every user journey claimed by the release | Any claimed journey is not `PRODUCT_WORKS`; `PARTIALLY_WORKS`, `BROKEN`, private-helper-only proof, or unit-test-only proof blocks release |
 | MCP PR review | Release-prep PR summary reports zero unresolved blocking findings, and reviewer status is clean enough for merge | Any `fix_now` or unresolved mandatory review thread remains |
 | Tag collision check | `git ls-remote --tags origin refs/tags/vX.Y.Z` returns empty before tag creation | Target tag already exists on origin |
+
+Normal GUI verification is a **short core smoke**, not the full historical
+capture/gesture regression. One session-scoped `two_application_gui_evidence`
+result builds WPF/Avalonia and the production bridge, installs a fresh wheel,
+and exercises the public installed CLI/MCP surface. It calls `start_debug`
+once for WPF, reads/discovers, invokes `btnInvoke` with UIA, asserts `Invoked 1x`,
+decodes one actual screenshot, then uses existing `stop_debug`/cleanup to prove
+that app, debugger and bridge are gone before starting Avalonia once. The
+same bounded journey runs there: exactly **two normal GUI application starts**.
+There is no external app owner, attach/reset protocol, fixture control timer,
+calibration switching, testhost build, manual base/WinForms loop, or app retry.
+Stdout is compact framework/case/status/launch/cleanup evidence with image
+path/digest/dimensions, not base64 images or full UI trees. Missing prerequisites,
+failed assertions and failed cleanup fail closed and stop the normal run.
+
+Run the short GUI entry **once**, serially, without pytest workers:
+
+```powershell
+uv run --locked --extra dev pytest tests/critical/test_typed_bitblt_fallback_public.py -m critical -s
+```
+
+`python tests/smoke_test_manual.py` is an alternative to that same short entry,
+not another normal verification step. Its default never enters the historical
+`_base_scenarios` loop or requires a prebuilt console fixture.
+
+### Explicit full GUI regression (not a normal verification step)
+
+Default pytest excludes `gui_regression`. An explicit selection retains the
+original nine installed capture cases and original direct WPF runtime tests:
+
+```powershell
+uv run --locked --extra dev pytest tests/critical/test_typed_bitblt_fallback_public.py tests/critical/test_runtime_smoke_v2_critical.py -m gui_regression -s
+```
+
+The historical capture/fixture bodies keep their original per-case app launches,
+focus guards, geometry, traces/identities, no-persistence and fail-closed checks.
+They are not subject to the two-start normal-smoke bound. `--extended-gui`
+preserves the original manual base and exhaustive GUI inventory (including all
+22 formerly reusable WPF/Avalonia scenarios, WinForms and genuine startup)
+and explicitly adds the nine installed capture cases. Exact `--scenario` keeps
+every individual diagnostic available. Only installed capture/core journeys
+are public consumer proof; direct manual helpers remain source-helper proof.
+A short PASS never clears historical full-regression FAIL/UNKNOWN results.
+`Stealth Launch`, delayed readiness and root-lifecycle modes retain actual
+fresh-start meaning; normal short smoke does not claim that broader coverage.
+
+The retained v1 runtime-smoke repair delegates target termination/detach to
+`SessionManager.stop`. Actually used registered UI operations disconnect first;
+their real failure remains a failure and adapter drain still runs. Unused UI
+callbacks are not invoked to create a backend during teardown.
+
 
 ### Post-release SonarQube exact-head audit (not a release gate)
 

@@ -72,7 +72,7 @@ HOST_PROJECT_DIR = REPO_ROOT / "host" / "NetCoreDbg.Mcp.Host"
 HOST_PROJECT = HOST_PROJECT_DIR / "NetCoreDbg.Mcp.Host.csproj"
 
 
-def _test_output_root() -> Path:
+def _primary_agent_root() -> Path:
     git_dir = REPO_ROOT / ".git"
     if git_dir.is_file():
         prefix, separator, target = git_dir.read_text(encoding="utf-8").strip().partition(": ")
@@ -85,8 +85,19 @@ def _test_output_root() -> Path:
         else git_dir.resolve()
     )
     assert common_dir.is_dir(), "test outputs require the source Git common owner"
-    primary_agent = common_dir.parent / ".agent"
+    return common_dir.parent / ".agent"
+
+
+def _test_output_root() -> Path:
+    primary_agent = _primary_agent_root()
     source_id = hashlib.sha256(str(REPO_ROOT).encode("utf-8")).hexdigest()[:12]
+    requested = os.environ.get("NETCOREDBG_MCP_TEST_OUTPUT_ROOT")
+    if requested:
+        output = Path(requested).resolve()
+        assert output.is_relative_to(primary_agent.resolve()), (
+            "test output root must stay under the primary Git owner's .agent"
+        )
+        return output
     return primary_agent / "tmp" / "python-test-fixtures" / source_id
 
 
@@ -94,7 +105,7 @@ TEST_OUTPUT_ROOT = _test_output_root()
 TEST_ARTIFACTS_PATH = Path(
     os.environ.get("NETCOREDBG_MCP_TEST_ARTIFACTS_PATH", TEST_OUTPUT_ROOT / "artifacts")
 ).resolve()
-assert TEST_ARTIFACTS_PATH.is_relative_to(TEST_OUTPUT_ROOT.parents[2].resolve()), (
+assert TEST_ARTIFACTS_PATH.is_relative_to(_primary_agent_root().resolve()), (
     "test artifacts must stay under the primary Git owner's .agent"
 )
 
@@ -272,12 +283,33 @@ def test_output_root_uses_primary_owner_for_relative_linked_git_metadata(
     linked.mkdir()
     (linked / ".git").write_text("gitdir: ../primary/.git/worktrees/lane\n", encoding="utf-8")
     monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", linked)
+    monkeypatch.delenv("NETCOREDBG_MCP_TEST_OUTPUT_ROOT", raising=False)
 
     output_root = _test_output_root()
 
     assert output_root.is_relative_to(primary / ".agent")
     assert not output_root.is_relative_to(linked / ".agent")
     assert not output_root.exists()
+
+
+@pytest.mark.parametrize("inside", [True, False])
+def test_explicit_test_output_root_preserves_primary_agent_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    inside: bool,
+) -> None:
+    primary = tmp_path / "primary"
+    (primary / ".git").mkdir(parents=True)
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", primary)
+    output = primary / ".agent" / "runs" / "gui" if inside else tmp_path / "foreign"
+    monkeypatch.setenv("NETCOREDBG_MCP_TEST_OUTPUT_ROOT", str(output))
+    if inside:
+        assert _test_output_root() == output
+        assert _primary_agent_root() == primary / ".agent"
+    else:
+        with pytest.raises(AssertionError, match="primary Git owner's .agent"):
+            _test_output_root()
+    assert not output.exists()
 
 
 def test_artifacts_override_outside_primary_agent_is_rejected_before_creation(

@@ -151,32 +151,79 @@ Expected result:
 
 ### 4. Supporting Fixture Inventory
 
-Commands:
+The normal installed producer builds its own WPF/Avalonia fixtures and
+production bridge. List its short default without building/launching apps:
 
 ```powershell
-dotnet build tests/fixtures/SmokeTestApp -c Debug
-dotnet build tests/fixtures/WpfSmokeApp -c Debug
-dotnet build tests/fixtures/AvaloniaSmokeApp -c Debug
 uv run --locked --extra dev python tests/smoke_test_manual.py --list
 ```
 
-Expected result:
+The result is only `Two-Application Core Smoke`. `--list --extended-gui` lists
+the historical base checks and full GUI regression. Exact `--scenario` also
+retains standalone WinForms and genuine fresh-start lifecycle checks.
+For those legacy console/WinForms diagnostics, build `SmokeTestApp` separately.
+Unavailable prerequisites are not evidence of an exercised GUI journey.
 
-- The fixture builds exit `0`.
-- The scenario list includes `Runtime Smoke Bounded Runner`, `WPF Shift/DataGrid
-  Evidence`, `WPF One-Call Runtime Smoke Workflow`, and `Avalonia UI Fixture
-  Compatibility`.
-- Missing GUI fixture binaries are treated as reduced coverage, not as proof
-  that the corresponding GUI surface was exercised.
-- Before release, run the WPF and Avalonia GUI scenarios on a Windows GUI
-  workstation and record whether each scenario returned `PASS`, `BLOCKED`, or
-  `FAIL`.
+#### Normal two-application core smoke (run once)
+
+Use one serial invocation; do not append the standalone commands in sections
+5-7 afterward:
+
+```powershell
+if (-not $env:NETCOREDBG_PATH) { throw "Set NETCOREDBG_PATH to netcoredbg.exe before running GUI smoke." }
+if (-not (Test-Path -LiteralPath $env:NETCOREDBG_PATH)) { throw "NETCOREDBG_PATH does not exist: $env:NETCOREDBG_PATH" }
+uv run --locked --extra dev pytest tests/critical/test_typed_bitblt_fallback_public.py -m critical -s
+```
+
+This installs a fresh wheel and runs two short public installed-CLI/MCP
+journeys: `start_debug` once for WPF, then once for Avalonia, sequentially.
+Each discovers/reads `txtOutput`, invokes `btnInvoke` through UIA, asserts
+`Invoked 1x`, decodes one screenshot and retains its digest/path/dimensions.
+The original PID/birth must remain live through those actions. Existing public
+`stop_debug` and cleanup must prove that app, debugger and real production
+bridge exited before the next framework starts. Output is compact; no image
+base64/UI payload dump. There is no external app owner, shared attach/reset
+machinery, control timer, testhost/calibration, historical base/WinForms loop,
+full gesture matrix, or app retry. `python tests/smoke_test_manual.py` is an
+alternative invocation of the same short entry.
+
+#### Explicit full regression (not part of normal smoke)
+
+```powershell
+uv run --locked --extra dev pytest tests/critical/test_typed_bitblt_fallback_public.py tests/critical/test_runtime_smoke_v2_critical.py -m gui_regression -s
+```
+
+Default pytest excludes `gui_regression`; explicit `-m gui_regression`
+overrides it and runs the original installed nine-case capture matrix plus
+the original direct WPF runtime tests, with their original per-case launches.
+The capture cases remain `control`, `fallback`, `primary_malformed`,
+`target_mismatch`, `dimension_mismatch`, `foreign_target`, `final_black`,
+`ordinary_fallback`, `ordinary_final_black`.
+
+`--extended-gui` retains the historical base/WinForms/startup inventory and
+all 22 formerly reusable WPF/Avalonia scenarios, and adds that installed
+capture regression. Exact `--scenario` keeps each standalone case available.
+These explicit full runs are not restricted to two app launches. All original
+focus/geometry, trace/identity, no-persistence, expected-BLOCKED and cleanup
+assertions remain. Direct manual helpers remain source-helper evidence,
+not installed proof. A short PASS never clears full-regression FAIL/UNKNOWN.
+Genuine `Stealth Launch`, delayed-readiness and root-lifecycle startup checks
+retain their separate original meaning. Do not append diagnostics to normal
+smoke or claim the short journey proves that broader matrix.
+
+To retain every output in one primary-owner run directory, set
+`NETCOREDBG_TWO_GUI_RUN_ROOT` there and set `NETCOREDBG_MCP_TEST_OUTPUT_ROOT`
+to its `test-output` child before the invocation. Builds, caches, scratch,
+installed consumer, stdout/stderr and `two-application-evidence.json` then
+stay under that directory. Missing prerequisites or a missing/failed case
+fail closed; fixture availability is never used to skip the normal GUI proof.
+
 
 ### 5. Supporting WPF Fixture Workflows
 
 #### One-Call Runtime-Smoke Workflow
 
-Command:
+Standalone diagnostic command (covered by the explicit full regression, not short smoke):
 
 ```powershell
 if (-not $env:NETCOREDBG_PATH) { throw "Set NETCOREDBG_PATH to netcoredbg.exe before running GUI smoke." }
@@ -238,7 +285,7 @@ Expected result:
 
 ### 6. Supporting Avalonia Fixture Compatibility
 
-Command:
+Standalone diagnostic command (already covered by the normal owner above):
 
 ```powershell
 if (-not $env:NETCOREDBG_PATH) { throw "Set NETCOREDBG_PATH to netcoredbg.exe before running GUI smoke." }
@@ -273,64 +320,19 @@ Customer-mode setup:
    fail closed before side effects if target-side realization hides the drag
    source. This is a bounded CR-075 customer-mode proof contract for broad
    `#270`; it does not close the broad helper family by itself.
-5. Run the supporting fixture-backed WPF v2 drag/drop smoke; this does not substitute for the installed-server customer-mode run above:
+5. When this drag/drop boundary is claimed or changed, explicitly select the
+   existing fixture-backed WPF drag/drop diagnostics through `--scenario`
+   or `--extended-gui`. Their original per-case launches and assertions are
+   retained; normal two-application core smoke does not exercise this matrix.
+   Keep any failed/unknown full-regression outcomes distinct from short PASS.
+   Supporting source-helper results do not substitute for the installed-server
+   customer-mode run in steps 1-4.
+
+6. Run the supporting documentation guards; select direct runtime GUI
+   regressions explicitly when their boundary is in scope:
 
 ```powershell
-if (-not $env:NETCOREDBG_PATH) { throw "Set NETCOREDBG_PATH to netcoredbg.exe before running GUI smoke." }
-if (-not (Test-Path -LiteralPath $env:NETCOREDBG_PATH)) { throw "NETCOREDBG_PATH does not exist: $env:NETCOREDBG_PATH" }
-$script = @'
-import asyncio
-import json
-import sys
-
-import tests.smoke_test_manual as s
-
-async def main():
-    positive = {
-        "visible_row": s.run_wpf_v2_visible_row_drag_runtime_smoke,
-        "offscreen_row_target": s.run_wpf_v2_offscreen_row_target_drag_runtime_smoke,
-        "edge_scroll": s.run_wpf_v2_edge_scroll_drag_runtime_smoke,
-        "multi_row": s.run_wpf_v2_multi_row_drag_runtime_smoke,
-    }
-    summary = {}
-    failed = []
-    for name, runner in positive.items():
-        evidence = await runner()
-        summary[name] = {
-            "status": evidence.get("status"),
-            "reason": evidence.get("reason"),
-        }
-        if evidence.get("status") != "PASS":
-            failed.append(name)
-    negative = await s.run_wpf_v2_negative_drag_runtime_smoke()
-    negative_status = negative.get("status")
-    summary["negative_no_op"] = {
-        "status": negative_status,
-        "reason": negative.get("reason"),
-        "next_step": (negative.get("blocked") or {}).get("next_step"),
-    }
-    if negative_status not in {"PASS", "BLOCKED"}:
-        failed.append("negative_no_op")
-    if negative_status == "BLOCKED" and not (negative.get("blocked") or {}).get("next_step"):
-        failed.append("negative_no_op_missing_next_step")
-    print(json.dumps({"summary": summary, "failed": failed}, indent=2, sort_keys=True))
-    sys.exit(1 if failed else 0)
-
-asyncio.run(main())
-'@
-uv run --locked --extra dev python -c $script
-```
-
-The offscreen row-target function is the minimum proof for the
-`drop.ensure_visible=true` part of this gate; the full command above is the
-release gate because it also exercises visible-row route evidence, edge-scroll,
-multi-row payload identity, and bounded negative no-op handling.
-
-6. Run the supporting release-critical guards:
-
-```powershell
-uv run --locked --extra dev pytest tests/test_runtime_smoke_v2_docs.py
-uv run --locked --extra dev pytest tests/critical/test_runtime_smoke_v2_critical.py -m critical
+uv run --locked --extra dev pytest tests/test_runtime_smoke_v2_docs.py tests/test_runtime_smoke_diagnostics_schema.py
 ```
 
 The primary UXDD verdict for this flow comes from steps 1-4 against the installed release-candidate server and the configured product stand. Steps 5-6 are mandatory supporting checks only.
