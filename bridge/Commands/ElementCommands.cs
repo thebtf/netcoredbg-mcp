@@ -322,6 +322,20 @@ public static class ElementCommands
         AutomationElement mainWindow, JsonNode? @params, UIA3Automation automation)
     {
         var rootId = @params?["rootAutomationId"]?.GetValue<string>();
+        if (string.IsNullOrWhiteSpace(rootId))
+        {
+            var connectedProcessId = JsonRpcHandler.RequireOriginalConnectedProcess();
+            var selectedHandle = SafeHandle(mainWindow);
+            if (selectedHandle != IntPtr.Zero &&
+                GetWindowThreadProcessId(selectedHandle, out var nativeProcessId) != 0 &&
+                nativeProcessId == (uint)connectedProcessId)
+            {
+                // Keep the live selected element without a desktop-wide UIA round trip.
+                JsonRpcHandler.RequireOriginalConnectedProcess();
+                return mainWindow;
+            }
+        }
+
         var topLevel = GetProcessTopLevelWindows(automation);
         if (string.IsNullOrWhiteSpace(rootId))
         {
