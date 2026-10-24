@@ -1,4 +1,4 @@
-using System.Diagnostics;
+using Microsoft.Win32.SafeHandles;
 using System.IO;
 using System.Text.Json.Nodes;
 using FlaUI.Core;
@@ -17,12 +17,11 @@ public static class ElementCommands
             ?? throw new ArgumentException("Missing required parameter: pid");
         var requestedStealth = @params?["stealth"]?.GetValue<bool>() ?? false;
 
-        Process? process = Process.GetProcessById(pid);
+        // Pin the instance before UIA without requiring write/debug access to the target.
+        SafeProcessHandle? process = JsonRpcHandler.CaptureConnectedProcess(pid);
         try
         {
-            // Open now: a lazy Process lookup must not bind a reused PID on the first query.
-            _ = process.SafeHandle;
-            if (process.HasExited)
+            if (JsonRpcHandler.HasProcessExited(process))
                 throw new InvalidOperationException("The target process exited before connection started.");
 
             var desktop = automation.GetDesktop();
@@ -37,11 +36,11 @@ public static class ElementCommands
             var handle = SafeHandle(window);
             if (handle == IntPtr.Zero ||
                 GetWindowThreadProcessId(handle, out var nativeProcessId) == 0 ||
-                nativeProcessId != (uint)pid || process.HasExited)
+                nativeProcessId != (uint)pid || JsonRpcHandler.HasProcessExited(process))
                 throw new InvalidOperationException(
                     "The target process instance exited or its window changed during connection.");
 
-            var previous = JsonRpcHandler.BindConnectedProcess(process, window, requestedStealth);
+            var previous = JsonRpcHandler.BindConnectedProcess(process, pid, window, requestedStealth);
             process = null;
             previous?.Dispose();
             Program.Log($"Connected to window: {SafeString(() => window.Name)} (pid={pid})");
@@ -626,13 +625,18 @@ public static class ElementCommands
         var boundProcessId = JsonRpcHandler.ProcessId;
         if (boundProcessId <= 0)
             return GuardedChildBlocked("IDENTITY_UNAVAILABLE", 0);
+        if (!JsonRpcHandler.IsOriginalConnectedProcess(boundProcessId))
+            return GuardedChildBlocked("PROCESS_MISMATCH", 0);
 
-        if (!TryGetBoundTopLevelWindows(
-                mainWindow,
-                automation,
-                boundProcessId,
-                out var topLevelWindows,
-                out var topLevelHandles))
+        var enumerated = TryGetBoundTopLevelWindows(
+            mainWindow,
+            automation,
+            boundProcessId,
+            out var topLevelWindows,
+            out var topLevelHandles);
+        if (!JsonRpcHandler.IsOriginalConnectedProcess(boundProcessId))
+            return GuardedChildBlocked("PROCESS_MISMATCH", 0);
+        if (!enumerated)
         {
             return GuardedChildBlocked("IDENTITY_UNAVAILABLE", 0);
         }
@@ -693,7 +697,7 @@ public static class ElementCommands
             return GuardedChildBlocked(after.FailureReason, childResolution.MatchCount);
 
         var afterSnapshot = after.Snapshot!.Value;
-        if (JsonRpcHandler.ProcessId != boundProcessId)
+        if (!JsonRpcHandler.IsOriginalConnectedProcess(boundProcessId))
             return GuardedChildBlocked("PROCESS_MISMATCH", childResolution.MatchCount);
         if (beforeSnapshot.Hwnd != afterSnapshot.Hwnd)
             return GuardedChildBlocked("HWND_MISMATCH", childResolution.MatchCount);

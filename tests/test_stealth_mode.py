@@ -820,10 +820,13 @@ internal sealed class ForeignProcessCaptureTransport : IScreenshotCaptureTranspo
 
 
 @REQUIRES_WINDOWS_DOTNET
-def test_bridge_closed_connection_rejects_replacement_process_identity(tmp_path) -> None:
+@pytest.mark.parametrize("limited_access", [False, True], ids=["ordinary", "limited-dacl"])
+def test_bridge_closed_connection_rejects_replacement_process_identity(
+    tmp_path, limited_access
+) -> None:
     import subprocess
 
-    from tests.test_host_proxy import _test_child_env
+    from tests import test_host_proxy
 
     probe_project = tmp_path / "BridgeConnectedProcessProbe.csproj"
     probe_source = tmp_path / "Program.cs"
@@ -853,6 +856,8 @@ def test_bridge_closed_connection_rejects_replacement_process_identity(tmp_path)
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.ComponentModel;
+using Microsoft.Win32.SafeHandles;
 using System.Security.Cryptography;
 using System.Text.Json.Nodes;
 using System.Windows;
@@ -872,8 +877,8 @@ internal static class ConnectedProcessProbe
         try
         {
             return args.Length > 0 && args[0] == "--owned-window"
-                ? RunOwnedWindow(args[1], args[2], args[3])
-                : RunProbe();
+                ? RunOwnedWindow(args[1], args[2], args[3], args.Contains("--limited-access"))
+                : RunProbe(args.Contains("--limited-access"));
         }
         catch (Exception exception)
         {
@@ -882,7 +887,7 @@ internal static class ConnectedProcessProbe
         }
     }
 
-    private static int RunProbe()
+    private static int RunProbe(bool limitedAccess)
     {
         var token = Guid.NewGuid().ToString("N");
         var originalId = "original_window_" + token;
@@ -900,11 +905,13 @@ internal static class ConnectedProcessProbe
             ["bridge_dll_sha256"] = Convert.ToHexString(SHA256.HashData(
                 File.ReadAllBytes(typeof(ElementCommands).Assembly.Location))).ToLowerInvariant(),
             ["observations"] = observations,
+            ["runtime"] = Environment.Version.ToString(),
+            ["limited_access"] = limitedAccess,
         };
         var allRefused = false;
         try
         {
-            original = StartControl(originalId, originalTextId, "ORIGINAL");
+            original = StartControl(originalId, originalTextId, "ORIGINAL", limitedAccess);
             var originalReady = ReadReady(original);
             replacement = StartControl(replacementId, replacementTextId, "REPLACEMENT_MUST_NOT_BE_REACHED");
             var replacementReady = ReadReady(replacement);
@@ -912,6 +919,18 @@ internal static class ConnectedProcessProbe
             report["replacement_ready"] = replacementReady;
             report["original_birth_utc"] = original.StartTime.ToUniversalTime().ToString("O");
             report["replacement_birth_utc"] = replacement.StartTime.ToUniversalTime().ToString("O");
+            if (limitedAccess)
+            {
+                using var allAccess = OpenProcess(0x001FFFFF, false, original.Id);
+                var allAccessError = Marshal.GetLastWin32Error();
+                using var limited = OpenProcess(0x00101000, false, original.Id);
+                if (!allAccess.IsInvalid || allAccessError != 5 || limited.IsInvalid ||
+                    WaitForSingleObject(limited, 0) != 258 ||
+                    !GetExitCodeProcess(limited, out var exitCode) || exitCode != 259)
+                    throw new InvalidOperationException("The owned DACL did not enforce limited query/synchronize access.");
+                report["all_access_denied"] = true;
+                report["limited_query_and_wait_succeeded"] = true;
+            }
 
             var connected = JsonRpcHandler.Handle("connect", new JsonObject
             {
@@ -930,10 +949,37 @@ internal static class ConnectedProcessProbe
             if (originalFind["found"]?.GetValue<bool>() != true)
                 throw new InvalidOperationException("The live original connection baseline failed.");
             report["actual_connect_baseline"] = connected;
+            report["original_guarded"] = ResolveGuarded(originalId, selected!);
+            for (var index = 0; index < 128; index++)
+                _ = JsonRpcHandler.RequireOriginalConnectedProcess();
+            var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+            for (var index = 0; index < 1_024; index++)
+                _ = JsonRpcHandler.RequireOriginalConnectedProcess();
+            report["identity_check_allocated_bytes"] = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+            var captured = RetainedHandle();
+            try
+            {
+                _ = JsonRpcHandler.Handle("connect", new JsonObject
+                {
+                    ["pid"] = Environment.ProcessId,
+                    ["stealth"] = false,
+                });
+                throw new InvalidOperationException("A console-only connect unexpectedly succeeded.");
+            }
+            catch (InvalidOperationException exception) when (exception.Message.StartsWith("No window found"))
+            {
+                if (!ReferenceEquals(captured, RetainedHandle()) || captured.IsClosed ||
+                    JsonRpcHandler.ProcessId != original.Id || JsonRpcHandler.MainWindow != selected ||
+                    !JsonRpcHandler.Stealth || JsonRpcHandler.RequireOriginalConnectedProcess() != original.Id)
+                    throw new InvalidOperationException("Failed connect damaged the previous binding.");
+                report["failed_connect_preserved_binding"] = true;
+            }
 
             report["original_exit"] = CloseControl(original);
             if (!original.HasExited || replacement.HasExited)
                 throw new InvalidOperationException("Original/replacement lifecycle precondition failed.");
+            report["terminated_original"] = Observe("original_exit", () =>
+                new JsonObject { ["pid"] = JsonRpcHandler.RequireOriginalConnectedProcess() });
             var replacementWindows = JsonRpcHandler.Automation.GetDesktop().FindAllChildren(
                 new ConditionFactory(JsonRpcHandler.Automation.PropertyLibrary).ByProcessId(replacement.Id));
             if (replacementWindows.Length != 1 || replacementWindows[0].AutomationId != replacementId)
@@ -962,6 +1008,7 @@ internal static class ConnectedProcessProbe
                 ["fields"] = new JsonArray("value", "window"),
                 ["maxResults"] = 1,
             })));
+            report["guarded_child_replacement_root"] = ResolveGuarded(replacementId, replacementWindows[0]);
             if (replacement.HasExited)
                 throw new InvalidOperationException("The replacement exited before the guard observations.");
             allRefused = observations.All(item => item!["rejected"]!.GetValue<bool>());
@@ -972,6 +1019,9 @@ internal static class ConnectedProcessProbe
                 ["pid"] = replacement.Id,
                 ["stealth"] = true,
             });
+            if (!captured.IsClosed)
+                throw new InvalidOperationException("Reconnect did not close the original retained handle.");
+            var replacementHandle = RetainedHandle();
             var reconnectedFind = JsonRpcHandler.Handle("find_element", new JsonObject
             {
                 ["automationId"] = replacementTextId,
@@ -990,6 +1040,12 @@ internal static class ConnectedProcessProbe
                 reconnectedFind["automationId"]?.GetValue<string>() != replacementTextId ||
                 reconnectedQuery["elements"]?[0]?["value"]?.GetValue<string>() != "REPLACEMENT_MUST_NOT_BE_REACHED")
                 throw new InvalidOperationException("An explicit reconnect did not bind the live replacement process.");
+            report["reconnected_guarded"] = ResolveGuarded(replacementId, JsonRpcHandler.MainWindow!);
+            JsonRpcHandler.Dispose();
+            if (!replacementHandle.IsClosed || JsonRpcHandler.ProcessId != 0 ||
+                JsonRpcHandler.MainWindow is not null || JsonRpcHandler.Stealth)
+                throw new InvalidOperationException("Bridge disposal did not release the replacement binding.");
+            report["reconnect_and_dispose_closed_handles"] = true;
         }
         finally
         {
@@ -1015,6 +1071,26 @@ internal static class ConnectedProcessProbe
         return 0;
     }
 
+    private static JsonNode ResolveGuarded(string windowId, FlaUI.Core.AutomationElements.AutomationElement window) =>
+        ElementCommands.ResolveGuardedChild(new JsonObject
+        {
+            ["parent"] = new JsonObject { ["automationId"] = windowId + "_parent" },
+            ["predicate"] = new JsonObject { ["automationId"] = windowId + "_guard" },
+            ["maximumNodes"] = 32,
+        }, JsonRpcHandler.Automation, window);
+
+    private static SafeHandle RetainedHandle()
+    {
+        var retained = typeof(JsonRpcHandler).GetField("_connectedProcess", BindingFlags.NonPublic | BindingFlags.Static)
+            ?.GetValue(null);
+        return retained switch
+        {
+            Process process => process.SafeHandle,
+            SafeProcessHandle handle => handle,
+            _ => throw new InvalidOperationException("No retained process handle."),
+        };
+    }
+
     private static JsonObject Observe(string operation, Func<JsonNode> action)
     {
         try
@@ -1030,7 +1106,7 @@ internal static class ConnectedProcessProbe
         }
     }
 
-    private static Process StartControl(string windowId, string textId, string value)
+    private static Process StartControl(string windowId, string textId, string value, bool limitedAccess = false)
     {
         var executable = Environment.ProcessPath ?? throw new InvalidOperationException("Missing probe executable.");
         var start = new ProcessStartInfo(executable)
@@ -1045,6 +1121,8 @@ internal static class ConnectedProcessProbe
             start.ArgumentList.Add(typeof(ConnectedProcessProbe).Assembly.Location);
         foreach (var argument in new[] { "--owned-window", windowId, textId, value })
             start.ArgumentList.Add(argument);
+        if (limitedAccess)
+            start.ArgumentList.Add("--limited-access");
         return Process.Start(start) ?? throw new InvalidOperationException("Owned control launch failed.");
     }
 
@@ -1070,7 +1148,7 @@ internal static class ConnectedProcessProbe
         return new JsonObject { ["pid"] = process.Id, ["exit_code"] = process.ExitCode, ["forced"] = false };
     }
 
-    private static int RunOwnedWindow(string windowId, string textId, string value)
+    private static int RunOwnedWindow(string windowId, string textId, string value, bool limitedAccess)
     {
         var application = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
         var right = GetSystemMetrics(76) + GetSystemMetrics(78);
@@ -1084,7 +1162,14 @@ internal static class ConnectedProcessProbe
         AutomationProperties.SetName(window, windowId);
         var text = new TextBox { Text = value, IsReadOnly = true, Focusable = false };
         AutomationProperties.SetAutomationId(text, textId);
-        window.Content = text;
+        var guarded = new Button { Content = "guarded", Focusable = false };
+        AutomationProperties.SetAutomationId(guarded, windowId + "_guard");
+        var parent = new GroupBox { Content = guarded, Focusable = false };
+        AutomationProperties.SetAutomationId(parent, windowId + "_parent");
+        var panel = new StackPanel();
+        panel.Children.Add(text);
+        panel.Children.Add(parent);
+        window.Content = panel;
         var activations = 0;
         var placementValid = false;
         window.Activated += (_, _) =>
@@ -1101,6 +1186,8 @@ internal static class ConnectedProcessProbe
                 window.Close();
                 return;
             }
+            if (limitedAccess)
+                RestrictOwnedProcessAccess();
             Console.WriteLine(new JsonObject
             {
                 ["kind"] = "ready", ["pid"] = Environment.ProcessId, ["hwnd"] = hwnd.ToInt64(),
@@ -1120,6 +1207,41 @@ internal static class ConnectedProcessProbe
         timer.Stop();
         return placementValid && activations == 0 && close.IsCompleted ? 0 : 2;
     }
+
+    private static void RestrictOwnedProcessAccess()
+    {
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptor(
+                "D:(A;;0x00101000;;;WD)", 1, out var descriptor, out _))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        try
+        {
+            if (!SetKernelObjectSecurity(GetCurrentProcess(), 4, descriptor))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        finally
+        {
+            _ = LocalFree(descriptor);
+        }
+    }
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(
+        string descriptor, uint revision, out IntPtr securityDescriptor, out uint size);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetKernelObjectSecurity(IntPtr handle, uint information, IntPtr descriptor);
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeProcessHandle OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, int pid);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(SafeProcessHandle process, uint milliseconds);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetExitCodeProcess(SafeProcessHandle process, out uint exitCode);
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
@@ -1144,6 +1266,8 @@ internal static class ConnectedProcessProbe
         "--nologo",
         f"-p:ArtifactsPath={tmp_path / 'artifacts'}",
     ]
+    if limited_access:
+        command.extend(["--", "--limited-access"])
     source_paths = (
         bridge_project,
         PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs",
@@ -1151,10 +1275,12 @@ internal static class ConnectedProcessProbe
         PROJECT_ROOT / "bridge" / "Commands" / "SnapshotCommands.cs",
     )
     before = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in source_paths}
+    with patch.object(test_host_proxy, "TEST_OUTPUT_ROOT", tmp_path / "child-env"):
+        child_env = test_host_proxy._test_child_env()
     probe = subprocess.run(
         command,
         cwd=PROJECT_ROOT,
-        env=_test_child_env(),
+        env=child_env,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -1183,6 +1309,21 @@ internal static class ConnectedProcessProbe
     assert result["all_original_instance_guards_refused"] is True
     assert result["foreground_before"] == result["foreground_after"]
     assert result["original_drain"]["exit_code"] == result["replacement_drain"]["exit_code"] == 0
+    assert result["failed_connect_preserved_binding"] is True
+    assert result["reconnect_and_dispose_closed_handles"] is True
+    assert result["original_guarded"]["status"] == "ADMITTED"
+    assert result["reconnected_guarded"]["status"] == "ADMITTED"
+    assert result["terminated_original"]["rejected"] is True
+    assert result["identity_check_allocated_bytes"] == 0
+    assert result["guarded_child_replacement_root"] == {
+        "status": "BLOCKED",
+        "reason": "PROCESS_MISMATCH",
+        "match_count": 0,
+    }
+    assert result["runtime"].startswith("8.")
+    if limited_access:
+        assert result["all_access_denied"] is True
+        assert result["limited_query_and_wait_succeeded"] is True
 
 
 def test_bridge_typed_bitblt_fallback_has_no_legacy_lossless_authority() -> None:
