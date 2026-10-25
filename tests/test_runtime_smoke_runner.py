@@ -6316,3 +6316,157 @@ async def test_v1_cleanup_disconnects_used_ui_before_owned_stop_without_hiding_f
     client.terminate.assert_not_awaited()
     client.stop.assert_awaited_once()
     assert manager._active_dap_run is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "use_ui,disconnect_fails,backend_disconnected",
+    [
+        pytest.param(True, False, False, id="connected-ui"),
+        pytest.param(True, True, False, id="disconnect-failure"),
+        pytest.param(False, False, False, id="unused-ui"),
+        pytest.param(True, False, True, id="disconnected-ui"),
+    ],
+)
+async def test_public_v1_plans_disconnect_shared_ui_before_adapter_drain(
+    capturing_mcp,
+    monkeypatch: pytest.MonkeyPatch,
+    use_ui: bool,
+    disconnect_fails: bool,
+    backend_disconnected: bool,
+) -> None:
+    from netcoredbg_mcp.session import SessionManager
+
+    monkeypatch.setattr("netcoredbg_mcp.session.manager.DAPClient", MagicMock())
+    manager = SessionManager()
+    generation = object()
+    client = MagicMock()
+    client.adapter_owner = client.adapter_cleanup_owner = None
+    client.is_running = True
+    client.capabilities = {"supportsTerminateRequest": True}
+    client.terminate = AsyncMock()
+    events: list[str] = []
+
+    class Backend:
+        process_id: int | None = None
+
+        async def find_element(self, **_kwargs: Any) -> dict[str, Any]:
+            assert self.process_id == 1234
+            events.append("ui.find")
+            return {"status": "PASS", "name": "Ready"}
+
+        async def disconnect(self) -> None:
+            assert self.process_id == (None if backend_disconnected else 1234)
+            events.append("ui.disconnect")
+            if disconnect_fails:
+                raise RuntimeError("bridge disconnect failed")
+            self.process_id = None
+
+    backend = Backend()
+    backend_factory = MagicMock(return_value=backend)
+
+    async def connect_backend(backend_arg: Backend, process_id: int, **_kwargs: Any) -> None:
+        assert backend_arg is backend
+        events.append("ui.connect")
+        backend_arg.process_id = process_id
+
+    async def disconnect_dap(*, terminate: bool) -> None:
+        assert terminate is False
+        events.append("dap.disconnect")
+
+    async def drain_adapter() -> None:
+        events.append("adapter.drain")
+
+    client.disconnect = AsyncMock(side_effect=disconnect_dap)
+    client.stop = AsyncMock(side_effect=drain_adapter)
+    manager._client = client
+    manager._active_dap_run = generation
+    manager._bind_debuggee_mode(generation, "attach")
+    manager.state.state = DebugState.STOPPED
+    manager.state.process_id = 1234
+    connect = AsyncMock(side_effect=connect_backend)
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", backend_factory)
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.connect_backend", connect)
+    register_runtime_smoke_tools(
+        mcp=capturing_mcp,
+        session=manager,
+        check_session_access=lambda _ctx: None,
+        resolve_project_root=_noop_resolve_project_root,
+    )
+    run_plan = capturing_mcp.tools["run_runtime_smoke"]
+
+    first = await run_plan(
+        ctx=None,
+        plan={
+            "schema": "netcoredbg.runtime_smoke.v1",
+            "name": "retain UI until later stop",
+            "actions": [
+                {
+                    "name": "ui.get_property",
+                    "args": {
+                        "selector": {"automation_id": "StatusText"},
+                        "property_name": "Name",
+                    },
+                }
+                if use_ui
+                else {"name": "output_checkpoint", "args": {"name": "no_ui"}}
+            ],
+        },
+    )
+
+    assert first["data"]["status"] == "PASS", first
+    assert events == (["ui.connect", "ui.find"] if use_ui else [])
+    assert "ui.disconnect" not in first["data"]["cleanup"]["attempted"]
+    assert backend.process_id == (1234 if use_ui else None)
+    client.stop.assert_not_awaited()
+    if use_ui:
+        assert first["data"]["completed_steps"][0]["result"]["value"] == "Ready"
+    if backend_disconnected:
+        backend.process_id = None
+    wait_restore = AsyncMock(return_value=True)
+    monkeypatch.setattr(manager, "wait_for_pending_stealth_foreground_restore", wait_restore)
+
+    second = await run_plan(
+        ctx=None,
+        plan={
+            "schema": "netcoredbg.runtime_smoke.v1",
+            "name": "stop retained UI and adapter",
+            "cleanup": {"stop_debug": "graceful"},
+        },
+    )
+
+    result = second["data"]
+    assert events == (["ui.connect", "ui.find", "ui.disconnect"] if use_ui else []) + [
+        "dap.disconnect",
+        "adapter.drain",
+    ]
+    assert result["completed_steps"] == []
+    assert result["status"] == ("FAIL" if disconnect_fails else "PASS"), second
+    assert result["cleanup"]["debug_stop"]["status"] == "PASS", second
+    assert ("ui.disconnect" in result["cleanup"]["attempted"]) is use_ui
+    if use_ui:
+        backend_factory.assert_called_once_with(process_registry=manager.process_registry)
+        connect.assert_awaited_once()
+        assert result["cleanup"]["ui_disconnect"]["status"] == (
+            "FAIL" if disconnect_fails else "PASS"
+        )
+        if disconnect_fails:
+            assert result["cleanup"]["status"] == "FAIL"
+            assert any(
+                failure["operation"] == "ui.disconnect"
+                and "bridge disconnect failed" in str(failure)
+                for failure in result["cleanup"]["failures"]
+            ), second
+        else:
+            assert backend.process_id is None
+    else:
+        backend_factory.assert_not_called()
+        connect.assert_not_awaited()
+        assert "ui_disconnect" not in result["cleanup"]
+    wait_restore.assert_not_awaited()
+    client.terminate.assert_not_awaited()
+    client.disconnect.assert_awaited_once_with(terminate=False)
+    client.stop.assert_awaited_once()
+    assert manager._active_dap_run is None
+    assert manager._debuggee_mode is None
+    assert manager.state.state == DebugState.IDLE

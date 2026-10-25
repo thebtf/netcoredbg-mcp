@@ -239,6 +239,15 @@ Expected result:
   honest `BLOCKED` / `FAIL` result that names the failing operation and cleanup
   state.
 
+For v1 plans on the same registered MCP session, UI use without `stop_debug`
+retains the backend for later calls. A later stop-only plan with
+`cleanup: {stop_debug: graceful}` disconnects that existing backend before
+session stop drains the debugger adapter. Cleanup never creates or reconnects a
+backend, including when the retained backend has already disconnected. UI
+disconnect failure remains in the public cleanup result while session stop still
+runs. An unused backend adds no UI cleanup action. The session owner preserves
+launched-versus-attached target disposal.
+
 #### Installed WPF Submenu Consumer Journey
 
 This journey uses the real WPF fixture as its debuggee, but it is consumer

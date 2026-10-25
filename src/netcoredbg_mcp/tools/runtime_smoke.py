@@ -117,6 +117,19 @@ def register_runtime_smoke_tools(
     async def _ensure_observation_ui_connected() -> Any:
         return await _ensure_ui_connected(observation=True)
 
+    async def _disconnect_existing_ui() -> dict[str, Any] | None:
+        backend = backend_holder["instance"]
+        if backend is None:
+            return None
+        await backend.disconnect()
+        if backend_holder["instance"] is backend:
+            backend_holder["instance"] = None
+        return {
+            "status": "PASS",
+            "reason": "ui backend disconnected",
+            "backend": type(backend).__name__,
+        }
+
     def _runner() -> RuntimeSmokeRunner:
         return RuntimeSmokeRunner(
             session,
@@ -125,6 +138,7 @@ def register_runtime_smoke_tools(
                 observation_ui_connected=_ensure_observation_ui_connected,
                 session=session,
             ),
+            disconnect_existing_ui=_disconnect_existing_ui,
         )
 
     @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
