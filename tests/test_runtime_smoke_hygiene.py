@@ -261,7 +261,8 @@ def test_manual_smoke_default_inventory_keeps_only_gallery_gui_scenarios() -> No
         "Typed BitBlt Fallback Native Bridge",
     }
 
-    assert {"WPF Smoke Gallery", "WinForms Smoke Gallery"} <= default_names
+    assert default_names == {"Two-Application Core Smoke"}
+    assert "Installed Public Capture Regression" in available_names
     assert extended_examples.isdisjoint(default_names)
     assert extended_examples <= complete_names
     assert ("UI Invoke + Toggle + Root ID" in available_names) is smoke_test_manual.GUI_ENABLED
@@ -271,24 +272,26 @@ def test_manual_smoke_default_inventory_keeps_only_gallery_gui_scenarios() -> No
     assert ("Avalonia UI Fixture Compatibility" in available_names) is (
         smoke_test_manual.AVALONIA_GUI_ENABLED
     )
-    assert "Runtime Hygiene Preflight" in default_names
+    assert "Runtime Hygiene Preflight" not in default_names
+    assert "Runtime Hygiene Preflight" in available_names
 
 
 def test_manual_smoke_list_respects_extended_gui_flag() -> None:
     default_output = _manual_smoke_list()
     extended_output = _manual_smoke_list("--extended-gui")
 
-    assert "WPF Smoke Gallery" in default_output
-    assert "WinForms Smoke Gallery" in default_output
-    assert "WPF V2 State Oracle Runtime Smoke" not in default_output
-    assert "Avalonia UI Fixture Compatibility" not in default_output
+    assert default_output.strip() == "1. Two-Application Core Smoke"
+    assert "Installed Public Capture Regression" in extended_output
+    assert "WPF Smoke Gallery" not in default_output
+    assert "WinForms Smoke Gallery" not in default_output
     assert ("WPF V2 State Oracle Runtime Smoke" in extended_output) is (
         smoke_test_manual.WPF_GUI_ENABLED
     )
     assert ("Avalonia UI Fixture Compatibility" in extended_output) is (
         smoke_test_manual.AVALONIA_GUI_ENABLED
     )
-    assert "Startup Temp GC Prefix Filter" in default_output
+    assert "Startup Temp GC Prefix Filter" not in default_output
+    assert "Startup Temp GC Prefix Filter" in extended_output
     assert ("Typed BitBlt Fallback Native Bridge" in extended_output) is (
         smoke_test_manual.WPF_GUI_ENABLED
     )
@@ -452,3 +455,25 @@ async def test_gui_smoke_gallery_retries_missing_automation_id_by_name() -> None
         {"automation_id": "btnInvoke"},
         {"name": "btnInvoke"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_manual_short_default_never_requires_console_fixture_or_runs_base_loops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    async def core():
+        calls.append("core")
+
+    monkeypatch.setattr(smoke_test_manual, "test_two_application_gui_verification", core)
+    monkeypatch.setattr(smoke_test_manual, "DLL", "missing-console-fixture.dll")
+    monkeypatch.setattr(smoke_test_manual, "passed", 0)
+    monkeypatch.setattr(smoke_test_manual, "failed", 0)
+    monkeypatch.setattr(
+        smoke_test_manual,
+        "_base_scenarios",
+        lambda: pytest.fail("normal smoke must not resolve the historical base suite"),
+    )
+    assert await smoke_test_manual.run_all() is True
+    assert calls == ["core"]

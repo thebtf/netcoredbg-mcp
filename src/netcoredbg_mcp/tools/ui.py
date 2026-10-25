@@ -74,12 +74,17 @@ def register_ui_tools(
     mcp: FastMCP,
     session: SessionManager,
     check_session_access: Callable[[Any], str | None],
+    *,
+    backend_holder: dict[str, Any] | None = None,
 ) -> None:
     """Register UI automation tools on the MCP server."""
     from mcp.types import ToolAnnotations
 
-    # Lazy-loaded UI backend instance (FlaUI or pywinauto)
-    _backend_holder: dict[str, Any] = {"instance": None}
+    _backend_holder = backend_holder if backend_holder is not None else {"instance": None}
+    connection_lock = _backend_holder.get("connection_lock")
+    if connection_lock is None:
+        connection_lock = asyncio.Lock()
+        _backend_holder["connection_lock"] = connection_lock
 
     # Cache for last annotated screenshot (used by ui_click_annotated)
     _last_annotation: dict[str, Any] | None = None
@@ -108,23 +113,26 @@ def register_ui_tools(
         """
         from ..ui import NoActiveSessionError, NoProcessIdError
 
-        if session.state.state == DebugState.IDLE:
-            raise NoActiveSessionError("No debug session is active. Start debugging first.")
+        async with connection_lock:
+            if session.state.state == DebugState.IDLE:
+                raise NoActiveSessionError("No debug session is active. Start debugging first.")
 
-        process_id = session.state.process_id
-        if not process_id:
-            raise NoProcessIdError(
-                "Process ID not available. Debug session may not have started the process yet."
-            )
+            process_id = session.state.process_id
+            if not process_id:
+                raise NoProcessIdError(
+                    "Process ID not available. Debug session may not have started the process yet."
+                )
 
-        backend = _get_backend()
-        if backend.process_id != process_id:
-            await _reconnect_ui_backend(backend, process_id)
+            backend = _get_backend()
+            if backend.process_id != process_id:
+                await _reconnect_ui_backend(backend, process_id)
 
-        if not restore_joined and await _join_launch_foreground_restore(observation=observation):
-            await _reconnect_ui_backend(backend, process_id)
+            if not restore_joined and await _join_launch_foreground_restore(
+                observation=observation
+            ):
+                await _reconnect_ui_backend(backend, process_id)
 
-        return backend
+            return backend
 
     async def _join_launch_foreground_restore(*, observation: bool = False) -> bool:
         method_name = (
@@ -686,11 +694,12 @@ def register_ui_tools(
                 if not _is_bridge_not_connected_error(e):
                     raise
 
-                process_id = session.state.process_id
-                if not process_id:
-                    raise
+                async with connection_lock:
+                    process_id = session.state.process_id
+                    if not process_id:
+                        raise
 
-                await _reconnect_ui_backend(ui, process_id)
+                    await _reconnect_ui_backend(ui, process_id)
                 try:
                     tree = await _read_window_tree(ui, max_depth, max_children)
                 except (asyncio.TimeoutError, TimeoutError) as retry_timeout:
@@ -1755,6 +1764,18 @@ def register_ui_tools(
                             "Physical target assertions require FlaUI bridge lossless capture"
                         )
                 else:
+                    restore_was_pending = await _join_launch_foreground_restore()
+                    restore_joined = True
+                    if restore_was_pending:
+                        async with connection_lock:
+                            pid = session.state.process_id
+                            if not pid:
+                                return build_error_response(
+                                    "No debug process. Start debugging first.",
+                                    state=session.state.state,
+                                )
+                            await _reconnect_ui_backend(ui, pid)
+
                     bridge_request: dict[str, bool | int] = {"evidence": True} if evidence else {}
                     if strict_target_requested:
                         strict_target_values = cast(dict[str, int | str], strict_target)
@@ -1770,10 +1791,6 @@ def register_ui_tools(
                             }
                         )
 
-                    restore_was_pending = await _join_launch_foreground_restore()
-                    restore_joined = True
-                    if restore_was_pending:
-                        await _reconnect_ui_backend(ui, pid)
                     try:
                         bridge_result = await ui.client.call("screenshot", bridge_request)
                     except RuntimeError as error:

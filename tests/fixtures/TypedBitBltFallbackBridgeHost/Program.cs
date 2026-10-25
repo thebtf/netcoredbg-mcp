@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Reflection;
@@ -79,13 +80,18 @@ internal static class Program
             StringComparison.Ordinal);
         private readonly NativeScreenshotCaptureTransport _native = new();
         private readonly string _traceFile = Path.GetFullPath(traceFile);
+        private int _foregroundSequence;
 
         public CaptureSnapshot ReadSnapshot(IntPtr hwnd)
         {
-            var snapshot = _native.ReadSnapshot(hwnd);
-            return _foreignSnapshotProcess
+            var inputs = new { hwnd = hwnd.ToInt64() };
+            var snapshot = ObserveNative("ReadSnapshot", inputs, () => _native.ReadSnapshot(hwnd));
+            var returned = _foreignSnapshotProcess
                 ? snapshot with { ProcessId = checked((uint)Environment.ProcessId) }
                 : snapshot;
+            if (_foreignSnapshotProcess)
+                RecordForeground("ReadSnapshot", "deliberate_test_override", inputs, returned);
+            return returned;
         }
 
         public Bitmap? CapturePrintWindow(IntPtr hwnd, int width, int height)
@@ -103,12 +109,14 @@ internal static class Program
 
         public Bitmap CaptureBitBlt(IntPtr hwnd, int width, int height)
         {
-            var actual = _native.CaptureBitBlt(hwnd, width, height);
+            var actual = ObserveNative("CaptureBitBlt", new { hwnd = hwnd.ToInt64(), width, height },
+                () => _native.CaptureBitBlt(hwnd, width, height));
             AppendTrace("alternate");
             return actual;
         }
 
-        public IntPtr GetForegroundWindow() => _native.GetForegroundWindow();
+        public IntPtr GetForegroundWindow() =>
+            ObserveNative("GetForegroundWindow", null, _native.GetForegroundWindow);
 
         public bool RestoreWindow(IntPtr hwnd) => _native.RestoreWindow(hwnd);
 
@@ -117,13 +125,57 @@ internal static class Program
             uint expectedProcessId,
             IntPtr requiredForeground,
             uint requiredForegroundProcessId) =>
-            _native.ActivateForegroundVerified(
-                hwnd,
+            ObserveNative("ActivateForegroundVerified", new
+            {
+                hwnd = hwnd.ToInt64(),
                 expectedProcessId,
-                requiredForeground,
-                requiredForegroundProcessId);
+                requiredForeground = requiredForeground.ToInt64(),
+                requiredForegroundProcessId,
+            }, () => _native.ActivateForegroundVerified(
+                hwnd, expectedProcessId, requiredForeground, requiredForegroundProcessId));
 
         public bool SetForegroundWindow(IntPtr hwnd) => _native.SetForegroundWindow(hwnd);
+
+        private T ObserveNative<T>(string operation, object? inputs, Func<T> call)
+        {
+            RecordForeground(operation, "enter", inputs, null);
+            var started = Stopwatch.GetTimestamp();
+            try
+            {
+                var result = call();
+                var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+                object? actual = result is IntPtr handle ? handle.ToInt64()
+                    : result is Bitmap ? "bitmap_returned" : result;
+                RecordForeground(operation, "return", inputs, actual, elapsedMs);
+                return result;
+            }
+            catch (Exception error)
+            {
+                RecordForeground(operation, "exception", inputs,
+                    new { type = error.GetType().FullName, error.Message, error.HResult },
+                    Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+                throw;
+            }
+        }
+
+        private void RecordForeground(
+            string operation, string phase, object? inputs, object? actual, double elapsedMs = 0)
+        {
+            if (_foregroundSequence >= 256) return;
+            var sequence = ++_foregroundSequence;
+            try
+            {
+                var entry = new { sequence, operation, phase, inputs, actual, elapsed_ms = elapsedMs };
+                File.AppendAllText(_traceFile + ".foreground.jsonl",
+                    JsonSerializer.Serialize(entry) + Environment.NewLine);
+            }
+            catch (Exception traceError)
+            {
+                // Diagnostic I/O must not replace the native return value or exception.
+                try { Console.Error.WriteLine($"Foreground trace unavailable: {traceError.GetType().Name}"); }
+                catch { }
+            }
+        }
 
         private void AppendTrace(string operation)
         {

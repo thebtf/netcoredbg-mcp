@@ -1,3 +1,4 @@
+using Microsoft.Win32.SafeHandles;
 using System.IO;
 using System.Text.Json.Nodes;
 using FlaUI.Core;
@@ -16,30 +17,44 @@ public static class ElementCommands
             ?? throw new ArgumentException("Missing required parameter: pid");
         var requestedStealth = @params?["stealth"]?.GetValue<bool>() ?? false;
 
-        var desktop = automation.GetDesktop();
-        var windows = desktop.FindAllChildren(
-            new ConditionFactory(automation.PropertyLibrary)
-                .ByProcessId(pid));
-
-        if (windows.Length == 0)
-            throw new InvalidOperationException($"No window found for process {pid}");
-
-        var window = SelectPrimaryWindow(windows)
-            ?? throw new InvalidOperationException(
-                $"No window found for process {pid}: no usable top-level window yet");
-        JsonRpcHandler.MainWindow = window;
-        // Store pid independently so window enumeration still works after
-        // set_active_window switches MainWindow to a dialog that later closes.
-        JsonRpcHandler.ProcessId = pid;
-        JsonRpcHandler.Stealth = requestedStealth;
-
-        Program.Log($"Connected to window: {SafeString(() => window.Name)} (pid={pid})");
-
-        return new JsonObject
+        // Pin the instance before UIA without requiring write/debug access to the target.
+        SafeProcessHandle? process = JsonRpcHandler.CaptureConnectedProcess(pid);
+        try
         {
-            ["connected"] = true,
-            ["title"] = SafeString(() => window.Name)
-        };
+            if (JsonRpcHandler.HasProcessExited(process))
+                throw new InvalidOperationException("The target process exited before connection started.");
+
+            var desktop = automation.GetDesktop();
+            var windows = desktop.FindAllChildren(
+                new ConditionFactory(automation.PropertyLibrary).ByProcessId(pid));
+            if (windows.Length == 0)
+                throw new InvalidOperationException($"No window found for process {pid}");
+
+            var window = SelectPrimaryWindow(windows)
+                ?? throw new InvalidOperationException(
+                    $"No window found for process {pid}: no usable top-level window yet");
+            var handle = SafeHandle(window);
+            if (handle == IntPtr.Zero ||
+                GetWindowThreadProcessId(handle, out var nativeProcessId) == 0 ||
+                nativeProcessId != (uint)pid || JsonRpcHandler.HasProcessExited(process))
+                throw new InvalidOperationException(
+                    "The target process instance exited or its window changed during connection.");
+
+            var previous = JsonRpcHandler.BindConnectedProcess(process, pid, window, requestedStealth);
+            process = null;
+            previous?.Dispose();
+            Program.Log($"Connected to window: {SafeString(() => window.Name)} (pid={pid})");
+
+            return new JsonObject
+            {
+                ["connected"] = true,
+                ["title"] = SafeString(() => window.Name)
+            };
+        }
+        finally
+        {
+            process?.Dispose();
+        }
     }
 
     private static AutomationElement? SelectPrimaryWindow(AutomationElement[] windows)
@@ -151,7 +166,7 @@ public static class ElementCommands
                 ["searchRootAutomationId"] = SafeString(() => searchRoot.AutomationId),
                 ["searchRootOffscreen"] = SafeIsOffscreen(searchRoot),
                 ["processId"] = JsonRpcHandler.ProcessId,
-                ["topLevelWindowCount"] = GetProcessTopLevelWindows(mainWindow, automation).Count,
+                ["topLevelWindowCount"] = GetProcessTopLevelWindows(automation).Count,
             };
 
         return BuildElementInfo(element);
@@ -210,7 +225,7 @@ public static class ElementCommands
         // Window.ShowDialog() creates a sibling top-level window under the
         // Desktop, not a descendant of the main app window — walking only
         // mainWindow would hide modal dialogs from the caller.
-        var windows = GetProcessTopLevelWindows(mainWindow, automation);
+        var windows = GetProcessTopLevelWindows(automation);
 
         var windowsArray = new JsonArray();
         foreach (var window in windows)
@@ -246,61 +261,42 @@ public static class ElementCommands
     }
 
     /// <summary>
-    /// Enumerate every top-level window owned by the same process as mainWindow.
-    /// Returns mainWindow first, followed by every sibling top-level window,
-    /// deduplicated by native window handle. This is the canonical source for
-    /// multi-window operations (GetTree, ResolveSearchRoot, SetActiveWindow).
+    /// Enumerate live top-level windows of the independently connected process,
+    /// deduplicated by native handle. Never substitute the retained selection.
     /// </summary>
-    internal static List<AutomationElement> GetProcessTopLevelWindows(
-        AutomationElement mainWindow, UIA3Automation automation)
+    internal static List<AutomationElement> GetProcessTopLevelWindows(UIA3Automation automation)
     {
-        // Enumerate from the ProcessId that connect() stored independently
-        // of MainWindow. Relying on mainWindow.Properties.ProcessId would
-        // throw after set_active_window switched to a dialog that later
-        // closed, which would strand the bridge with no discoverable windows.
-        var pid = JsonRpcHandler.ProcessId;
+        var pid = JsonRpcHandler.RequireOriginalConnectedProcess();
+
         var result = new List<AutomationElement>();
         var seen = new HashSet<IntPtr>();
-
-        if (pid == 0)
-        {
-            // Fallback for the unusual case where connect() never ran —
-            // try to use whatever handle mainWindow still exposes.
-            result.Add(mainWindow);
-            var fallbackHandle = SafeHandle(mainWindow);
-            if (fallbackHandle != IntPtr.Zero)
-                seen.Add(fallbackHandle);
-            return result;
-        }
-
         try
         {
             var desktop = automation.GetDesktop();
             var cf = new ConditionFactory(automation.PropertyLibrary);
-            var siblings = desktop.FindAllChildren(cf.ByProcessId(pid));
-            foreach (var sibling in siblings)
+            foreach (var window in desktop.FindAllChildren(cf.ByProcessId(pid)))
             {
-                var handle = SafeHandle(sibling);
-                if (handle == IntPtr.Zero)
+                var handle = SafeHandle(window);
+                if (handle == IntPtr.Zero ||
+                    GetWindowThreadProcessId(handle, out var nativeProcessId) == 0 ||
+                    nativeProcessId != (uint)pid)
                     continue;
                 if (seen.Add(handle))
-                    result.Add(sibling);
+                    result.Add(window);
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // Desktop enumeration is best-effort.
+            throw new InvalidOperationException(
+                $"Unable to enumerate live top-level windows for connected process {pid}.", ex);
         }
 
-        // If live enumeration returned nothing but mainWindow still looks
-        // usable, surface it so callers retain at least one reference.
-        if (result.Count == 0)
-            result.Add(mainWindow);
+        JsonRpcHandler.RequireOriginalConnectedProcess();
 
         return result;
     }
 
-    private static IntPtr SafeHandle(AutomationElement element)
+    internal static IntPtr SafeHandle(AutomationElement element)
     {
         try { return element.Properties.NativeWindowHandle.ValueOrDefault; }
         catch (Exception ex)
@@ -327,10 +323,49 @@ public static class ElementCommands
     {
         var rootId = @params?["rootAutomationId"]?.GetValue<string>();
         if (string.IsNullOrWhiteSpace(rootId))
-            return mainWindow;
+        {
+            var connectedProcessId = JsonRpcHandler.RequireOriginalConnectedProcess();
+            var selectedHandle = SafeHandle(mainWindow);
+            if (selectedHandle != IntPtr.Zero &&
+                GetWindowThreadProcessId(selectedHandle, out var nativeProcessId) != 0 &&
+                nativeProcessId == (uint)connectedProcessId)
+            {
+                // Keep the live selected element without a desktop-wide UIA round trip.
+                JsonRpcHandler.RequireOriginalConnectedProcess();
+                return mainWindow;
+            }
+        }
+
+        var topLevel = GetProcessTopLevelWindows(automation);
+        if (string.IsNullOrWhiteSpace(rootId))
+        {
+            var selectedHandle = SafeHandle(mainWindow);
+            if (selectedHandle != IntPtr.Zero)
+            {
+                foreach (var window in topLevel)
+                {
+                    if (SafeHandle(window) == selectedHandle)
+                    {
+                        JsonRpcHandler.RequireOriginalConnectedProcess();
+                        return window;
+                    }
+                }
+            }
+
+            if (topLevel.Count == 1)
+            {
+                JsonRpcHandler.RequireOriginalConnectedProcess();
+                return topLevel[0];
+            }
+            if (topLevel.Count == 0)
+                throw new InvalidOperationException(
+                    "No live top-level window remains in the connected process.");
+            throw new InvalidOperationException(
+                "The selected window is no longer live and multiple top-level windows remain. " +
+                "Use set_active_window or a unique rootAutomationId to select a live window.");
+        }
 
         var cf = new ConditionFactory(automation.PropertyLibrary);
-        var topLevel = GetProcessTopLevelWindows(mainWindow, automation);
 
         // Pass 1: check whether any top-level window itself matches by identity.
         // Collecting all matches first lets us warn on ambiguous names (common
@@ -436,7 +471,7 @@ public static class ElementCommands
             throw new ArgumentException(
                 "set_active_window requires at least one of: automationId, name");
 
-        var topLevel = GetProcessTopLevelWindows(mainWindow, automation);
+        var topLevel = GetProcessTopLevelWindows(automation);
 
         // Two-pass scan so automationId universally wins over name across
         // the full window list, not just within a single window iteration.
@@ -604,13 +639,18 @@ public static class ElementCommands
         var boundProcessId = JsonRpcHandler.ProcessId;
         if (boundProcessId <= 0)
             return GuardedChildBlocked("IDENTITY_UNAVAILABLE", 0);
+        if (!JsonRpcHandler.IsOriginalConnectedProcess(boundProcessId))
+            return GuardedChildBlocked("PROCESS_MISMATCH", 0);
 
-        if (!TryGetBoundTopLevelWindows(
-                mainWindow,
-                automation,
-                boundProcessId,
-                out var topLevelWindows,
-                out var topLevelHandles))
+        var enumerated = TryGetBoundTopLevelWindows(
+            mainWindow,
+            automation,
+            boundProcessId,
+            out var topLevelWindows,
+            out var topLevelHandles);
+        if (!JsonRpcHandler.IsOriginalConnectedProcess(boundProcessId))
+            return GuardedChildBlocked("PROCESS_MISMATCH", 0);
+        if (!enumerated)
         {
             return GuardedChildBlocked("IDENTITY_UNAVAILABLE", 0);
         }
@@ -671,7 +711,7 @@ public static class ElementCommands
             return GuardedChildBlocked(after.FailureReason, childResolution.MatchCount);
 
         var afterSnapshot = after.Snapshot!.Value;
-        if (JsonRpcHandler.ProcessId != boundProcessId)
+        if (!JsonRpcHandler.IsOriginalConnectedProcess(boundProcessId))
             return GuardedChildBlocked("PROCESS_MISMATCH", childResolution.MatchCount);
         if (beforeSnapshot.Hwnd != afterSnapshot.Hwnd)
             return GuardedChildBlocked("HWND_MISMATCH", childResolution.MatchCount);
@@ -994,9 +1034,9 @@ public static class ElementCommands
             clientRectangle));
     }
 
-    private static bool TryResolveOwningTopLevelHwnd(
+    internal static bool TryResolveOwningTopLevelHwnd(
         AutomationElement element,
-        HashSet<IntPtr> topLevelHandles,
+        ICollection<IntPtr> topLevelHandles,
         out IntPtr hwnd)
     {
         AutomationElement? current = element;
@@ -1111,7 +1151,7 @@ public static class ElementCommands
     };
 
     [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
-    private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+    internal static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
 
     [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetClientRect(IntPtr hwnd, out NativeRect rect);

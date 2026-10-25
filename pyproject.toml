@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "netcoredbg-mcp"
-version = "0.23.14"
+version = "0.23.15"
 description = "MCP server for debugging C#/.NET code using netcoredbg"
 readme = "README.md"
 license = "MIT"
@@ -115,7 +115,9 @@ warn_unused_ignores = false
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+addopts = "-m 'not gui_regression'"
 testpaths = ["tests"]
 markers = [
     "critical: project-wide release gate tests",
+    "gui_regression: explicit full installed capture and reusable GUI regression; excluded from normal runs",
 ]

@@ -2014,9 +2014,7 @@ async def test_ui_text_assert_selector_miss_returns_actionable_blocked() -> None
 
     assert result["status"] == "BLOCKED"
     assert result["blocked"]["reason"] == "selector not found"
-    assert result["blocked"]["requested"] == {
-        "selector": {"automation_id": "missingTxtOutput"}
-    }
+    assert result["blocked"]["requested"] == {"selector": {"automation_id": "missingTxtOutput"}}
     assert result["blocked"]["accepted"]["selector_keys"]
     assert result["blocked"]["next_step"]
     assert result["blocked"]["backend_result"] == {
@@ -2511,7 +2509,7 @@ async def test_ui_operation_adapters_drag_blocks_when_drop_ensure_visible_fails(
         ],
         drop={
             "selector": selector,
-                "row_identity": "Cue target eight",
+            "row_identity": "Cue target eight",
             "ensure_visible": True,
         },
         identity={"column": "Phrase"},
@@ -2767,8 +2765,9 @@ async def test_ui_drag_blocks_when_target_ensure_visible_hides_shorthand_source(
 
 
 @pytest.mark.asyncio
-async def test_ui_operation_adapters_drag_uses_grid_row_to_row_backend_for_offscreen_target(
-) -> None:
+async def test_ui_operation_adapters_drag_uses_grid_row_to_row_backend_for_offscreen_target() -> (
+    None
+):
     class FakeBackend:
         def __init__(self) -> None:
             self.drag_calls: list[tuple[int, int, int, int, int, list[str]]] = []
@@ -3466,9 +3465,7 @@ async def test_ui_operation_adapters_route_held_edge_drag_through_drag_path() ->
         {"x": 70, "y": 212, "hold_ms": 900},
         {"x": 70, "y": 200},
     ]
-    assert result["route_evidence"]["hold_points"] == [
-        {"x": 70, "y": 212, "hold_ms": 900}
-    ]
+    assert result["route_evidence"]["hold_points"] == [{"x": 70, "y": 212, "hold_ms": 900}]
     assert result["route_evidence"]["final_pointer"] == {"x": 70, "y": 200}
 
 
@@ -3809,8 +3806,7 @@ async def test_grid_select_indices_uses_grid_select_range_for_contiguous_indices
                 "status": "PASS",
                 "selected_range": {"start": start_index, "end": end_index},
                 "selected_rows": [
-                    {"row_index": index}
-                    for index in range(start_index, end_index + 1)
+                    {"row_index": index} for index in range(start_index, end_index + 1)
                 ],
             }
 
@@ -4420,9 +4416,7 @@ async def test_ui_operation_adapters_build_grid_viewport_snapshot_with_derived_i
         {"index": 0, "identity": "Cue 001", "derived": False},
         {"index": 1, "identity": "row:1", "derived": True},
     ]
-    assert snapshot["selected_rows"] == [
-        {"index": 0, "identity": "Cue 001", "derived": False}
-    ]
+    assert snapshot["selected_rows"] == [{"index": 0, "identity": "Cue 001", "derived": False}]
     assert snapshot["identity_strategy"] == {
         "kind": "configured_column",
         "column": "PhraseId",
@@ -4478,9 +4472,7 @@ async def test_ui_operation_adapters_prefers_backend_row_index_for_viewport_snap
         {"index": 18, "identity": "Cue 018", "derived": False},
         {"index": 19, "identity": "Cue 019", "derived": False},
     ]
-    assert snapshot["selected_rows"] == [
-        {"index": 19, "identity": "Cue 019", "derived": False}
-    ]
+    assert snapshot["selected_rows"] == [{"index": 19, "identity": "Cue 019", "derived": False}]
 
 
 @pytest.mark.asyncio
@@ -4510,9 +4502,7 @@ async def test_ui_operation_adapters_grid_get_state_combines_visible_and_selecte
         ) -> dict[str, Any]:
             return {
                 "status": "PASS",
-                "selected_rows": [
-                    {"index": 1, "row_index": 19, "cells": {"PhraseId": "Cue 019"}}
-                ],
+                "selected_rows": [{"index": 1, "row_index": 19, "cells": {"PhraseId": "Cue 019"}}],
                 "columns": list(columns or []),
             }
 
@@ -4573,9 +4563,7 @@ async def test_ui_operation_adapters_grid_select_row_resolves_visible_identity()
         ) -> dict[str, Any]:
             return {
                 "status": "PASS",
-                "selected_rows": [
-                    {"index": 1, "row_index": 19, "cells": {"PhraseId": "Cue 019"}}
-                ],
+                "selected_rows": [{"index": 1, "row_index": 19, "cells": {"PhraseId": "Cue 019"}}],
             }
 
     async def backend_provider() -> FakeBackend:
@@ -4620,9 +4608,7 @@ async def test_ui_operation_adapters_grid_select_row_can_opt_in_to_ensure_visibl
                 }
             return {
                 "status": "PASS",
-                "visible_rows": [
-                    {"index": 0, "row_index": 42, "cells": {"PhraseId": "Cue 042"}}
-                ],
+                "visible_rows": [{"index": 0, "row_index": 42, "cells": {"PhraseId": "Cue 042"}}],
             }
 
         async def grid_ensure_visible(
@@ -4651,9 +4637,7 @@ async def test_ui_operation_adapters_grid_select_row_can_opt_in_to_ensure_visibl
         ) -> dict[str, Any]:
             return {
                 "status": "PASS",
-                "selected_rows": [
-                    {"index": 0, "row_index": 42, "cells": {"PhraseId": "Cue 042"}}
-                ],
+                "selected_rows": [{"index": 0, "row_index": 42, "cells": {"PhraseId": "Cue 042"}}],
             }
 
     backend = FakeBackend()
@@ -4890,9 +4874,7 @@ async def test_grid_select_identities_matches_only_stable_identity_column() -> N
     assert result["status"] == "PASS"
     assert backend.start_index == 2
     assert backend.end_index == 2
-    assert result["resolved_rows"] == [
-        {"index": 2, "identity": "Cue 016", "row_index": 2}
-    ]
+    assert result["resolved_rows"] == [{"index": 2, "identity": "Cue 016", "row_index": 2}]
 
 
 @pytest.mark.asyncio
@@ -4982,9 +4964,7 @@ async def test_ui_operation_adapters_grid_click_row_can_opt_in_to_ensure_visible
                 }
             return {
                 "status": "PASS",
-                "visible_rows": [
-                    {"index": 0, "row_index": 42, "cells": {"PhraseId": "Cue 042"}}
-                ],
+                "visible_rows": [{"index": 0, "row_index": 42, "cells": {"PhraseId": "Cue 042"}}],
             }
 
         async def grid_ensure_visible(
@@ -5129,8 +5109,9 @@ async def test_ui_operation_adapters_grid_click_row_requires_backend_click_primi
 
 
 @pytest.mark.asyncio
-async def test_ui_operation_adapters_grid_right_click_row_requires_backend_click_primitive(
-) -> None:
+async def test_ui_operation_adapters_grid_right_click_row_requires_backend_click_primitive() -> (
+    None
+):
     class FakeBackend:
         async def grid_snapshot(
             self,
@@ -5162,8 +5143,9 @@ async def test_ui_operation_adapters_grid_right_click_row_requires_backend_click
 
 
 @pytest.mark.asyncio
-async def test_ui_operation_adapters_grid_double_click_row_requires_backend_click_primitive(
-) -> None:
+async def test_ui_operation_adapters_grid_double_click_row_requires_backend_click_primitive() -> (
+    None
+):
     class FakeBackend:
         async def grid_snapshot(
             self,
@@ -5677,6 +5659,64 @@ async def test_runner_records_graceful_debug_stop_when_requested() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("target_mode", ["attach", "launch"])
+@pytest.mark.parametrize("with_owner", [False, True])
+async def test_v1_graceful_cleanup_respects_current_target_ownership(
+    target_mode: str,
+    with_owner: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from netcoredbg_mcp.session import SessionManager
+    from netcoredbg_mcp.windows_process_owner import DrainStatus, OwnedProcessRef, OwnerDrainReceipt
+
+    monkeypatch.setattr("netcoredbg_mcp.session.manager.DAPClient", MagicMock())
+    manager = SessionManager()
+    generation = object()
+    owner = OwnedProcessRef("runtime-smoke-adapter", generation, 44010) if with_owner else None
+    client = MagicMock()
+    client.adapter_owner = owner
+    client.adapter_pid = 44010
+    client.is_running = True
+    client.capabilities = {"supportsTerminateRequest": True}
+    client.terminate = AsyncMock()
+    client.disconnect = AsyncMock()
+    client.stop = AsyncMock(
+        return_value=OwnerDrainReceipt(
+            owner=owner,
+            status=DrainStatus.DRAINED,
+            forced=False,
+            root_returncode=0,
+            active_processes=0,
+        )
+        if owner
+        else None
+    )
+    manager._client = client
+    manager._active_dap_run = generation
+    manager._bind_debuggee_mode(generation, target_mode)
+    monkeypatch.setattr(
+        manager, "wait_for_stopped", AsyncMock(return_value=SimpleNamespace(timed_out=False))
+    )
+
+    result = await RuntimeSmokeRunner(manager).run(
+        {
+            "name": f"v1-{target_mode}-owned-cleanup",
+            "actions": [{"name": "output_checkpoint", "args": {"name": "before_cleanup"}}],
+            "cleanup": {"stop_debug": "graceful"},
+        }
+    )
+
+    assert result["status"] == "PASS", result
+    assert result["cleanup"]["debug_stop"]["status"] == "PASS", result
+    if target_mode == "attach":
+        client.terminate.assert_not_awaited()
+    client.disconnect.assert_awaited_once_with(terminate=target_mode == "launch")
+    client.stop.assert_awaited_once()
+    assert manager._active_dap_run is None
+    assert manager._debuggee_mode is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("path_kind", ["absolute", "relative", "symlink"])
 async def test_runner_rejects_restore_path_outside_project_before_steps(
     tmp_path: Path,
@@ -6182,3 +6222,97 @@ async def test_runtime_smoke_tools_register_freshness_and_runner(capturing_mcp) 
     ]
     assert lifecycle_stop["data"]["run_id"] == run_id
     assert lifecycle_stop["data"]["status"] == lifecycle_result["data"]["status"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_ui,disconnect_fails", [(True, False), (True, True), (False, False)])
+async def test_v1_cleanup_disconnects_used_ui_before_owned_stop_without_hiding_failure(
+    use_ui: bool,
+    disconnect_fails: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from netcoredbg_mcp.session import SessionManager
+
+    monkeypatch.setattr("netcoredbg_mcp.session.manager.DAPClient", MagicMock())
+    manager = SessionManager()
+    generation = object()
+    client = MagicMock()
+    client.adapter_owner = client.adapter_cleanup_owner = None
+    client.is_running = True
+    client.capabilities = {"supportsTerminateRequest": True}
+    client.terminate = AsyncMock()
+    events = []
+
+    async def invoke(**kwargs):
+        events.append("ui.invoke")
+        return {"status": "PASS"}
+
+    async def disconnect_ui(**kwargs):
+        assert use_ui, "cleanup must not connect an unused UI backend"
+        events.append("ui.disconnect")
+        if disconnect_fails:
+            raise RuntimeError("bridge disconnect failed")
+        return {"status": "PASS", "reason": "fixture bridge disconnected"}
+
+    async def disconnect_dap(*, terminate):
+        assert terminate is False
+        events.append("dap.disconnect")
+
+    async def drain_adapter(**kwargs):
+        events.append("adapter.drain")
+
+    client.disconnect = AsyncMock(side_effect=disconnect_dap)
+    client.stop = AsyncMock(side_effect=drain_adapter)
+    manager._client = client
+    manager._active_dap_run = generation
+    manager._bind_debuggee_mode(generation, "attach")
+    actions = (
+        [{"name": "ui.invoke", "args": {"selector": {"automation_id": "fixtureButton"}}}]
+        if use_ui
+        else [
+            {"name": "output_checkpoint", "args": {"name": "no_ui"}},
+        ]
+    )
+
+    result = await RuntimeSmokeRunner(
+        manager,
+        service_adapters={
+            "ui.invoke": invoke,
+            "ui.disconnect": disconnect_ui,
+        },
+    ).run(
+        {
+            "name": "registered UI cleanup ownership",
+            "actions": actions,
+            "cleanup": {"stop_debug": "graceful"},
+        }
+    )
+
+    assert events == (["ui.invoke", "ui.disconnect"] if use_ui else []) + [
+        "dap.disconnect",
+        "adapter.drain",
+    ]
+    assert result["status"] == ("FAIL" if disconnect_fails else "PASS"), result
+    assert result["cleanup"]["debug_stop"]["status"] == "PASS", result
+    assert ("ui.disconnect" in result["cleanup"]["attempted"]) is use_ui
+    if disconnect_fails:
+        assert any(
+            "bridge disconnect failed" in str(failure) for failure in result["cleanup"]["failures"]
+        ), result
+    if use_ui:
+        assert result["cleanup"]["ui_disconnect"] == (
+            {
+                "status": "FAIL",
+                "reason": "bridge disconnect failed",
+            }
+            if disconnect_fails
+            else {
+                "status": "PASS",
+                "reason": "fixture bridge disconnected",
+            }
+        )
+    else:
+        assert "ui_disconnect" not in result["cleanup"]
+    client.terminate.assert_not_awaited()
+    client.stop.assert_awaited_once()
+    assert manager._active_dap_run is None

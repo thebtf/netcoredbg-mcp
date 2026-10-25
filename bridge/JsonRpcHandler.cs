@@ -1,3 +1,6 @@
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 using System.Text.Json.Nodes;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.WindowsAPI;
@@ -11,6 +14,7 @@ public static class JsonRpcHandler
     private static UIA3Automation? _automation;
     private static AutomationElement? _mainWindow;
     private static int _processId;
+    private static SafeProcessHandle? _connectedProcess;
     private static bool _stealth;
     // SendKeys / SendKeysBatch press and release modifiers within a single
     // batch (see InputCommands.cs) and do not read or update this set. If a
@@ -57,6 +61,73 @@ public static class JsonRpcHandler
         get => _stealth;
         set => _stealth = value;
     }
+
+    internal static SafeProcessHandle CaptureConnectedProcess(int pid)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(pid);
+        const uint queryLimitedInformation = 0x1000;
+        const uint synchronize = 0x00100000;
+        var process = OpenProcess(queryLimitedInformation | synchronize, false, pid);
+        if (!process.IsInvalid)
+            return process;
+
+        var error = Marshal.GetLastWin32Error();
+        process.Dispose();
+        throw new Win32Exception(error);
+    }
+
+    internal static bool HasProcessExited(SafeProcessHandle process)
+    {
+        if (process.IsClosed || process.IsInvalid)
+            return true;
+        return WaitForSingleObject(process, 0) switch
+        {
+            0 => true,
+            258 => false,
+            _ => throw new Win32Exception(Marshal.GetLastWin32Error()),
+        };
+    }
+
+    internal static SafeProcessHandle? BindConnectedProcess(
+        SafeProcessHandle process, int pid, AutomationElement window, bool stealth)
+    {
+        if (HasProcessExited(process) || GetProcessId(process) != (uint)pid)
+            throw new InvalidOperationException("The target process exited before connection completed.");
+
+        var previous = _connectedProcess;
+        _connectedProcess = process;
+        _processId = pid;
+        _mainWindow = window;
+        _stealth = stealth;
+        return previous;
+    }
+
+    internal static bool IsOriginalConnectedProcess(int pid)
+    {
+        var process = _connectedProcess;
+        return process is not null && _processId == pid &&
+            !HasProcessExited(process) && GetProcessId(process) == (uint)pid;
+    }
+
+    internal static int RequireOriginalConnectedProcess()
+    {
+        var pid = _processId;
+        if (!IsOriginalConnectedProcess(pid))
+            throw new InvalidOperationException(
+                "The original connected process has exited or its identity changed; no live search root is available. " +
+                "Call 'connect' again.");
+        return pid;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeProcessHandle OpenProcess(
+        uint desiredAccess, [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, int processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(SafeProcessHandle process, uint milliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint GetProcessId(SafeProcessHandle process);
 
     private static readonly IReadOnlyDictionary<string, Func<JsonNode?, UIA3Automation, AutomationElement?, JsonNode>> Handlers =
         new Dictionary<string, Func<JsonNode?, UIA3Automation, AutomationElement?, JsonNode>>
@@ -112,17 +183,17 @@ public static class JsonRpcHandler
             ["assert_focus"] = FocusCommands.AssertFocus,
             ["get_focused_element"] = FocusCommands.GetFocusedElement,
             // v0.11.1 — pattern expansion
-            ["close_window"]             = WindowCommands.CloseWindow,
-            ["maximize_window"]          = WindowCommands.MaximizeWindow,
-            ["minimize_window"]          = WindowCommands.MinimizeWindow,
-            ["restore_window"]           = WindowCommands.RestoreWindow,
-            ["move_window"]              = TransformCommands.MoveWindow,
-            ["resize_window"]            = TransformCommands.ResizeWindow,
-            ["expand"]                   = PatternCommands.ExpandElement,
-            ["collapse"]                 = PatternCommands.CollapseElement,
-            ["range_set_value"]          = PatternCommands.SetRangeValue,
-            ["clipboard_read"]           = ClipboardCommands.ReadClipboard,
-            ["clipboard_write"]          = ClipboardCommands.WriteClipboard,
+            ["close_window"] = WindowCommands.CloseWindow,
+            ["maximize_window"] = WindowCommands.MaximizeWindow,
+            ["minimize_window"] = WindowCommands.MinimizeWindow,
+            ["restore_window"] = WindowCommands.RestoreWindow,
+            ["move_window"] = TransformCommands.MoveWindow,
+            ["resize_window"] = TransformCommands.ResizeWindow,
+            ["expand"] = PatternCommands.ExpandElement,
+            ["collapse"] = PatternCommands.CollapseElement,
+            ["range_set_value"] = PatternCommands.SetRangeValue,
+            ["clipboard_read"] = ClipboardCommands.ReadClipboard,
+            ["clipboard_write"] = ClipboardCommands.WriteClipboard,
             ["realize_virtualized_item"] = VirtualizationCommands.RealizeVirtualizedItem,
         };
 
@@ -157,11 +228,20 @@ public static class JsonRpcHandler
 
     public static void Dispose()
     {
-        ModifierCommands.ReleaseAllHeldModifiers();
-        _automation?.Dispose();
-        _automation = null;
-        _mainWindow = null;
-        _processId = 0;
-        _stealth = false;
+        try
+        {
+            ModifierCommands.ReleaseAllHeldModifiers();
+            _automation?.Dispose();
+        }
+        finally
+        {
+            _automation = null;
+            _mainWindow = null;
+            _processId = 0;
+            _stealth = false;
+            var process = _connectedProcess;
+            _connectedProcess = null;
+            process?.Dispose();
+        }
     }
 }

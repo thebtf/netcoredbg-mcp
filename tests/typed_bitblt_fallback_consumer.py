@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import ctypes
 import hashlib
 import json
@@ -15,7 +17,7 @@ from typing import Any
 import psutil
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, ImageContent, TextContent
 from PIL import Image
 
 POLL_DEADLINE_SECONDS = 15.0
@@ -187,17 +189,25 @@ def _foreground_hwnd() -> int:
     return hwnd
 
 
-async def _wait_for_ui(session: ClientSession) -> dict[str, Any]:
+async def _wait_for_ui(session: ClientSession, *, compact: bool = False) -> dict[str, Any]:
     deadline = asyncio.get_running_loop().time() + POLL_DEADLINE_SECONDS
     last: dict[str, Any] | None = None
     while True:
-        last = await _call(session, "ui_get_window_tree", {"max_depth": 1, "max_children": 5})
+        if compact:
+            last = _core_payload(
+                await session.call_tool("ui_get_window_tree", {"max_depth": 1, "max_children": 5}),
+                "ui_get_window_tree",
+            )
+        else:
+            last = await _call(session, "ui_get_window_tree", {"max_depth": 1, "max_children": 5})
         data = last.get("data")
         if isinstance(data, dict) and data.get("count", 0) > 0:
             return data
         remaining = deadline - asyncio.get_running_loop().time()
         if remaining <= 0:
-            raise AssertionError(f"fixture discovery deadline: {last}")
+            raise AssertionError(
+                "fixture discovery deadline" if compact else f"fixture discovery deadline: {last}"
+            )
         await asyncio.sleep(min(POLL_INTERVAL_SECONDS, remaining))
 
 
@@ -550,7 +560,226 @@ async def _run_case(
     return evidence
 
 
+def _core_payload(result: CallToolResult, name: str) -> dict[str, Any]:
+    # Keep invalid wire responses out of stdout: ImageContent may contain megabytes.
+    try:
+        payload = _payload(result)
+    except (AssertionError, ValueError):
+        raise AssertionError(f"{name}: invalid installed tools/call response") from None
+    assert "error" not in payload, f"{name}: {str(payload.get('error'))[:400]}"
+    return payload
+
+
+def _core_screenshot(result: CallToolResult, case_root: Path) -> dict[str, Any]:
+    metadata = _core_payload(result, "ui_take_screenshot")
+    images = [part for part in result.content if isinstance(part, ImageContent)]
+    assert len(images) == 1, "ui_take_screenshot must return exactly one image"
+    assert images[0].mimeType == "image/webp", "screenshot preview must be WebP"
+    image_bytes = base64.b64decode(images[0].data, validate=True)
+    with Image.open(io.BytesIO(image_bytes)) as image:
+        image.load()
+        width, height = image.size
+        assert image.format == "WEBP" and width > 0 and height > 0, "invalid screenshot image"
+    assert metadata.get("preview_width") == width, "screenshot width disagrees with metadata"
+    assert metadata.get("width", 0) > 0 and metadata.get("height", 0) > 0, "missing HD dimensions"
+    image_path = case_root / "capture.webp"
+    image_path.write_bytes(image_bytes)
+    return {
+        "path": str(image_path),
+        "sha256": hashlib.sha256(image_bytes).hexdigest(),
+        "width": width,
+        "height": height,
+        "session_hd_path": metadata.get("hd_path"),
+    }
+
+
+def _verify_core_bridge() -> tuple[Path, str]:
+    bridge = Path(_environment("NETCOREDBG_TYPED_BITBLT_PRODUCTION_BRIDGE_PATH"))
+    digest = _environment("NETCOREDBG_TYPED_BITBLT_PRODUCTION_BRIDGE_SHA256")
+    assert hashlib.sha256(bridge.read_bytes()).hexdigest() == digest, (
+        "production bridge digest changed"
+    )
+    return bridge, digest
+
+
+async def _run_core_case(
+    *,
+    framework: str,
+    consumer_cli: str,
+    fixture_program: Path,
+    bridge_path: Path,
+    bridge_sha256: str,
+    case_root: Path,
+    evidence: dict[str, Any],
+) -> None:
+    fixture_name = "WpfSmokeApp" if framework == "WPF" else "AvaloniaSmokeApp"
+    fixture_root = Path(__file__).resolve().parent / "fixtures" / fixture_name
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("NETCOREDBG_TEST_", "NETCOREDBG_TYPED_BITBLT_"))
+    }
+    environment.update(
+        {"FLAUI_BRIDGE_PATH": str(bridge_path), "TEMP": str(case_root), "TMP": str(case_root)}
+    )
+    params = StdioServerParameters(
+        command=consumer_cli,
+        args=["--project-from-cwd"],
+        cwd=str(fixture_root),
+        env=environment,
+    )
+    launched = False
+    spawned: list[dict[str, int | str]] = []
+    application: dict[str, Any] = {"framework": framework, "launches": 0, "terminated": False}
+    evidence["application"] = application
+    async with stdio_client(params) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+
+            async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+                return _data(_core_payload(await session.call_tool(name, arguments), name))
+
+            try:
+                initialized = await session.initialize()
+                assert initialized.protocolVersion == EXPECTED_PROTOCOL_VERSION, (
+                    "unexpected MCP protocol"
+                )
+                assert initialized.serverInfo.name == "netcoredbg-mcp", (
+                    "unexpected installed server"
+                )
+                tools = await session.list_tools()
+                required = {
+                    "start_debug",
+                    "stop_debug",
+                    "cleanup_processes",
+                    "ui_get_window_tree",
+                    "ui_read_text",
+                    "ui_invoke",
+                    "ui_take_screenshot",
+                }
+                assert len(tools.tools) == EXPECTED_TOOL_COUNT and required <= {
+                    tool.name for tool in tools.tools
+                }, "installed core tool inventory changed"
+                launch = await call(
+                    "start_debug",
+                    {
+                        "program": str(fixture_program),
+                        "cwd": str(fixture_root),
+                        "pre_build": False,
+                        "stealth_mode": True,
+                    },
+                )
+                assert launch.get("success") is True, "public start did not succeed"
+                launched = True
+                application["launches"] = 1
+                status = await call("cleanup_processes", {"force": False})
+                spawned = [
+                    {"role": row["role"], "pid": row["pid"]}
+                    for row in status.get("processes", [])
+                    if row.get("alive") is True and row.get("role") in {"debuggee", "netcoredbg"}
+                ]
+                assert sorted(row["role"] for row in spawned) == ["debuggee", "netcoredbg"], (
+                    "start must own one app and one debugger"
+                )
+                process_id = next(row["pid"] for row in spawned if row["role"] == "debuggee")
+                assert type(process_id) is int and process_id > 0, "invalid debuggee PID"
+                birth = psutil.Process(process_id).create_time()
+                application.update({"pid": process_id, "birth": birth})
+                windows = await _wait_for_ui(session, compact=True)
+                assert windows.get("count", 0) > 0, "public discovery returned no target window"
+                before = await call("ui_read_text", {"automation_id": "txtOutput"})
+                before_text = before.get("text")
+                assert isinstance(before_text, str) and before_text, (
+                    "public read returned no initial text"
+                )
+                invoked = await call("ui_invoke", {"automation_id": "btnInvoke"})
+                assert (
+                    invoked.get("invoked") is True and invoked.get("method") == "InvokePattern"
+                ), "public UIA invoke failed or used physical input"
+                after = await call("ui_read_text", {"automation_id": "txtOutput"})
+                assert after.get("text") == "Invoked 1x" and after["text"] != before_text, (
+                    "invoke did not change fixture state exactly once"
+                )
+                evidence.update({"read": before_text, "invoke_state": after["text"]})
+                evidence["screenshot"] = _core_screenshot(
+                    await session.call_tool("ui_take_screenshot", {}), case_root
+                )
+                status = await call("cleanup_processes", {"force": False})
+                bridges = _bridge_processes(status.get("processes", []))
+                assert len(bridges) == 1, "core journey must use one real FlaUI bridge"
+                bridge_pid = bridges[0]["pid"]
+                assert type(bridge_pid) is int and bridge_pid > 0, "invalid bridge PID"
+                actual_bridge = Path(psutil.Process(bridge_pid).exe()).resolve()
+                assert (
+                    actual_bridge == bridge_path.resolve()
+                    and hashlib.sha256(actual_bridge.read_bytes()).hexdigest() == bridge_sha256
+                ), "wrong production bridge bytes"
+                spawned.append({"role": "flaui_bridge", "pid": bridge_pid})
+                target = psutil.Process(process_id)
+                assert target.is_running() and target.create_time() == birth, (
+                    "original app exited or changed before stop"
+                )
+            finally:
+                try:
+                    if launched:
+                        await call("stop_debug", {})
+                finally:
+                    cleanup = await call("cleanup_processes", {"force": True})
+                    evidence["cleanup"] = await _prove_post_cleanup_liveness(cleanup, spawned)
+                    application["terminated"] = any(
+                        row["role"] == "debuggee" and not row["alive"]
+                        for row in evidence["cleanup"]["post_cleanup_liveness"]
+                    )
+    hd_path = evidence["screenshot"]["session_hd_path"]
+    assert hd_path is None or not Path(hd_path).exists(), (
+        "session cleanup retained screenshot output"
+    )
+    evidence["status"] = "PASS"
+
+
+async def _run_core_verification() -> None:
+    consumer_cli = _environment("NETCOREDBG_MCP_CONSUMER_CLI")
+    root = Path(_environment("NETCOREDBG_TYPED_BITBLT_TEMP_ROOT"))
+    root.mkdir(parents=True, exist_ok=True)
+    bridge, digest = _verify_core_bridge()
+    cases: list[dict[str, Any]] = []
+    status = "FAIL"
+    try:
+        for framework, variable in (
+            ("WPF", "NETCOREDBG_MCP_WPF_PROGRAM"),
+            ("Avalonia", "NETCOREDBG_GUI_AVALONIA_PROGRAM"),
+        ):
+            case_root = root / framework.lower()
+            case_root.mkdir()
+            case = {"framework": framework, "case": "installed-core", "status": "FAIL"}
+            cases.append(case)
+            try:
+                await _run_core_case(
+                    framework=framework,
+                    consumer_cli=consumer_cli,
+                    fixture_program=Path(_environment(variable)),
+                    bridge_path=bridge,
+                    bridge_sha256=digest,
+                    case_root=case_root,
+                    evidence=case,
+                )
+            except Exception as error:
+                case["error"] = str(error)[:600]
+                raise
+        status = "PASS"
+    finally:
+        result = {
+            "mode": "core",
+            "status": status,
+            "gui": {"cases": cases},
+            "applications": [case["application"] for case in cases if "application" in case],
+        }
+        print(f"Two-application GUI evidence: {json.dumps(result, sort_keys=True)}")
+
+
 async def main() -> None:
+    if os.environ.get("NETCOREDBG_GUI_SCOPE") == "core":
+        await _run_core_verification()
+        return
     _enable_per_monitor_dpi_coordinates()
     consumer_cli = _environment("NETCOREDBG_MCP_CONSUMER_CLI")
     fixture_root = Path(_environment("NETCOREDBG_MCP_WPF_ROOT"))

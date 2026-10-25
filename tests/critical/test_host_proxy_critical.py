@@ -248,9 +248,9 @@ async def test_host_proxy_critical_initialize_list_call(
     with open(host_errlog_path, "w+", encoding="utf-8") as errlog:
         await asyncio.wait_for(_run_exchange(errlog), timeout=60)
 
-    stderr_text = host_errlog_path.read_text(encoding="utf-8")
-    assert "[DIAGNOSTIC] Startup CWD:" in stderr_text, (
-        f"expected forwarded Python diagnostics on stderr, got:\n{stderr_text}"
+    stderr_bytes = host_errlog_path.read_bytes()
+    assert b"[DIAGNOSTIC] Startup CWD:" in stderr_bytes, (
+        f"expected forwarded Python diagnostics on stderr, got:\n{stderr_bytes!r}"
     )
 
 

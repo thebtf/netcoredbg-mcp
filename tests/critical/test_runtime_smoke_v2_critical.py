@@ -206,7 +206,7 @@ async def test_runtime_smoke_v2_critical_drag_blocks_without_viewport_evidence()
     assert result["cleanup"]["process_registry_after"] == 0
 
 
-@pytest.mark.critical
+@pytest.mark.gui_regression
 @pytest.mark.asyncio
 async def test_runtime_smoke_v2_critical_direct_wpf_mcp_smoke() -> None:
     if sys.platform != "win32":
@@ -225,7 +225,7 @@ async def test_runtime_smoke_v2_critical_direct_wpf_mcp_smoke() -> None:
     assert evidence["blocked"]["cleanup"]["process_registry_after"] == 0, evidence
 
 
-@pytest.mark.critical
+@pytest.mark.gui_regression
 @pytest.mark.asyncio
 async def test_runtime_smoke_v2_critical_direct_wpf_guarded_child_drag_smoke() -> None:
     if sys.platform != "win32":

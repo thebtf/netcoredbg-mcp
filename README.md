@@ -13,15 +13,14 @@ agent workflow. `netcoredbg-mcp` combines `netcoredbg`, the Debug Adapter
 Protocol, and Windows UI Automation so an agent can observe a running app,
 stop it deliberately, and inspect the state that explains the behavior.
 
-**Python 3.10+ · Windows GUI automation · 135 tools · 8 prompts · 4 resources · v0.23.14**
+**Python 3.10+ · Windows GUI automation · 135 tools · 8 prompts · 4 resources · v0.23.15**
 
-The prepared v0.23.14 PATCH retains completed failed prebuild diagnostics in the
-first `start_debug` error response and through public `get_build_diagnostics`:
-actual argv, working directory, exit code, and captured stdout/stderr, even when
-no MSBuild errors were parsed. A previous result is not substituted. Process
-ownership safeguards and the screenshot backend are unchanged. See the
-[release notes](RELEASE_NOTES.md) for the bounded maintainer source changes and
-delivery scope; this preparation is not a publication receipt.
+The prepared v0.23.15 PATCH repairs Windows FlaUI read/search after the selected
+window closes, reports each queried element's actual owning window, and binds
+fresh discovery to the original connected process instance rather than a reused
+PID. Python remains the default; this does not claim a fix for the separate
+original F09 incident. See the [release notes](RELEASE_NOTES.md) for consumer
+actions, scope, and verification boundaries; preparation is not publication.
 
 ## What it enables
 
@@ -223,6 +222,32 @@ ui_find_element(automation_id="saveButton")
 ui_click(automation_id="saveButton")
 # Trigger the breakpoint, then inspect state after it reports STOPPED.
 ```
+
+### Selected windows and query ownership
+
+All UI and UI-evidence tools registered by one server share the same lazy backend
+and selected-window state. A successful `ui_switch_window` therefore scopes
+subsequent `ui_find_element` and `ui_query` calls to the same live window.
+
+On the Windows FlaUI backend, unrooted element searches stay inside the selected
+window while it remains live. If that window closes, searches can use the sole
+remaining live top-level window of the connected process without reconnecting or
+changing the selected-window pointer. With no live windows, or with multiple live
+windows and a closed selection, unrooted searches fail explicitly; the bridge does
+not guess the first or largest window. Use `ui_switch_window` to select a live
+window, or pass a unique `root_id` (`rootAutomationId` on the bridge wire).
+Explicit roots do not change the selection and still reject ambiguous matches or
+windows outside the connected process.
+Window discovery is bound to the process instance opened at `connect`, not just
+its numeric PID. After that instance exits, a fresh connection is required;
+PID reuse cannot revive the old connection.
+
+For `ui_query(fields=["window"])`, each result's `window` identifies the actual
+owning live top-level window of that resolved element, including explicit
+container roots and queries without an element selector. If ownership cannot be
+proven, `title` and `automation_id` are empty strings rather than the retained
+selected window's metadata.
+
 
 ### Physical numeric keypad input
 

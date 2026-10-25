@@ -1,3 +1,75 @@
+# netcoredbg-mcp v0.23.15
+
+Prepared: 2026-10-23
+
+## Summary
+
+`v0.23.15` is a nonbreaking PATCH for Windows FlaUI read/search after a selected
+window closes, truthful query-window ownership, and original-process-instance
+binding. These notes describe the prepared candidate, not a publication receipt.
+
+## Fixed behavior
+
+- The Python server's UI automation and UI evidence tools share one lazy backend
+  and selected-window state. Switching to a live secondary window applies to
+  both `ui_find_element` and `ui_query`; concurrent initial connection admission
+  does not start independent bridge generations.
+- A live selected window remains the unrooted search scope. If it closes and
+  exactly one live top-level window remains in the connected process, find/query
+  can reach that window in the same bridge generation without reconnecting or
+  changing the selected-window pointer.
+- With no live windows, or with multiple survivors and a closed selection,
+  unrooted searches fail explicitly. The bridge does not choose the first or
+  largest window. A unique explicit root remains available; ambiguous roots and
+  windows outside the connected process are still rejected.
+- Each `ui_query` result's `window` describes the resolved element's actual live
+  top-level owner, including container roots and queries without an element
+  selector. Unprovable ownership leaves `title` and `automation_id` empty rather
+  than substituting the retained selection.
+- `connect` opens and retains the original process instance before discovering
+  windows. An exited or mismatched instance cannot authorize fresh discovery
+  through a reused numeric PID. A legitimate fresh connection replaces the old
+  capture; reconnect and shutdown release retained process handles.
+
+## Consumer actions
+
+1. Upgrade through the documented package-installation route and restart the MCP
+   server. Use a FlaUI bridge rebuilt from the updated package source; an explicit
+   `FLAUI_BRIDGE_PATH` must select that updated bridge, not an older cached binary.
+2. When multiple windows remain, use `ui_get_window_tree` and select the intended
+   live window with `ui_switch_window`, or provide a unique `root_id`.
+3. After the original process exits, start or attach to the intended process and
+   establish a fresh connection. Reusing its numeric PID does not revive the old
+   bridge connection.
+
+## Compatibility and limits
+
+The Python entry point remains the default. Public catalog and locked dependency
+versions are unchanged. The stable wheel carries FlaUI bridge source for its
+existing build route; it does not include the opt-in modern .NET preview
+executable. Unreleased preview work is not promoted by this PATCH.
+
+This scoped repair does not establish the cause or resolution of the separate
+original F09 incident, qualify a previously running MCP receiver, change the
+screenshot backend, or claim new physical-input proof.
+
+## Verification boundary
+
+Controlled source-built window-lifecycle checks and the owned-process identity
+regression passed. The latter uses explicit numeric-PID fault injection after an
+original process exits; it is not an observation of actual OS PID reuse. These
+source checks do not replace fresh built-wheel installation and public CLI/MCP
+consumer proof under the [release protocol](docs/RELEASE-PROTOCOL.md).
+
+The installed candidate passed the declared own-fixture public CLI/MCP
+root/selection journey. Exact-source gate dispositions and residual risks belong
+in the release report; these notes are not a publication receipt. Verify the
+published package in a fresh consumer process after publication. Earlier native
+failures remain retained observations, not proof of the original F09 cause or
+compatibility with every application/provider.
+
+---
+
 # netcoredbg-mcp v0.23.14
 
 Prepared: 2026-10-19

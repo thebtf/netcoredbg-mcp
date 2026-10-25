@@ -134,6 +134,7 @@ class RuntimeSmokeRunner:
         self._clock = clock
         self._case_progress_notifier: Callable[[dict[str, Any]], Any] | None = None
         self._app_diagnostics_progress_notifier: Callable[[dict[str, Any]], Any] | None = None
+        self._ui_operation_attempted = False
 
     def attach_case_progress_notifier(
         self,
@@ -148,6 +149,7 @@ class RuntimeSmokeRunner:
         self._app_diagnostics_progress_notifier = notifier
 
     async def run(self, plan: Any) -> dict[str, Any]:
+        self._ui_operation_attempted = False
         started = self._clock()
         completed_steps: list[dict[str, Any]] = []
         failed_assertions: list[dict[str, Any]] = []
@@ -277,7 +279,14 @@ class RuntimeSmokeRunner:
     async def _execute_operation(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         adapter = self._service_adapters.get(name)
         if adapter is not None:
-            return _result_dict(await _call_adapter(adapter, args))
+            if name != "ui.disconnect" and (
+                name in UI_OPERATION_NAMES or name.startswith(UI_OPERATION_PREFIXES)
+            ):
+                self._ui_operation_attempted = True
+            result = _result_dict(await _call_adapter(adapter, args))
+            if name == "ui.disconnect" and _terminal_status(result.get("status", "PASS")) == "PASS":
+                self._ui_operation_attempted = False
+            return result
 
         if name == "debug_hygiene_preflight":
             service = getattr(self._session, "hygiene", None)
@@ -343,6 +352,7 @@ class RuntimeSmokeRunner:
         failures: list[dict[str, Any]] = []
         restored_files: list[dict[str, Any]] = []
         debug_stop: dict[str, Any] | None = None
+        ui_disconnect: dict[str, Any] | None = None
 
         for group_name in group_names:
             attempted.append(f"instrumentation_group_clear:{group_name}")
@@ -372,6 +382,26 @@ class RuntimeSmokeRunner:
 
         if stop_debug_mode:
             mode = "graceful" if stop_debug_mode is True else str(stop_debug_mode)
+            if (
+                mode == "graceful"
+                and self._ui_operation_attempted
+                and "ui.disconnect" in self._service_adapters
+            ):
+                attempted.append("ui.disconnect")
+                try:
+                    disconnect_result = await self._execute_operation("ui.disconnect", {})
+                    ui_disconnect = disconnect_result
+                    if _terminal_status(disconnect_result.get("status", "PASS")) != "PASS":
+                        failures.append(
+                            {
+                                "operation": "ui.disconnect",
+                                "reason": disconnect_result.get("reason", "UI disconnect failed"),
+                                "result": disconnect_result,
+                            }
+                        )
+                except Exception as exc:
+                    ui_disconnect = {"status": "FAIL", "reason": str(exc)}
+                    failures.append({"operation": "ui.disconnect", "reason": str(exc)})
             attempted.append(f"stop_debug:{mode}")
             try:
                 stop_result = await self._stop_debug(mode)
@@ -438,7 +468,7 @@ class RuntimeSmokeRunner:
                 )
         remaining = _remaining_runtime_smoke_state(self._session)
 
-        return {
+        cleanup = {
             "status": "FAIL" if failures else "PASS",
             "attempted": attempted,
             "failures": failures,
@@ -447,6 +477,9 @@ class RuntimeSmokeRunner:
             "reset_failures": [dict(failure) for failure in reset_failures],
             "remaining_runtime_smoke_state": remaining,
         }
+        if ui_disconnect is not None:
+            cleanup["ui_disconnect"] = ui_disconnect
+        return cleanup
 
     async def _restore_file_with_retries(self, entry: Any) -> dict[str, Any]:
         attempts = 0
@@ -586,16 +619,6 @@ class RuntimeSmokeRunner:
         if mode != "graceful":
             raise ValueError(f"Unsupported stop_debug mode: {mode}")
 
-        client = getattr(self._session, "client", None)
-        capabilities = getattr(client, "capabilities", {}) if client is not None else {}
-        if client is not None and capabilities.get("supportsTerminateRequest", False):
-            await client.terminate()
-            wait_for_stopped = getattr(self._session, "wait_for_stopped", None)
-            if wait_for_stopped is not None:
-                snapshot = await wait_for_stopped(timeout=10.0)
-                if getattr(snapshot, "timed_out", False):
-                    raise RuntimeError("Terminate sent but program did not exit within 10s")
-
         stop = getattr(self._session, "stop", None)
         if stop is None:
             raise RuntimeError("debug stop service unavailable")
@@ -679,9 +702,7 @@ class RuntimeSmokeRunRecord:
     def tail(self, after_cursor: int, limit: int) -> dict[str, Any]:
         bounded_limit = max(0, min(limit, self.max_events))
         events = [
-            dict(event)
-            for event in self.events
-            if int(event.get("cursor", 0)) > after_cursor
+            dict(event) for event in self.events if int(event.get("cursor", 0)) > after_cursor
         ][:bounded_limit]
         stale_cursor = bool(self.events) and after_cursor < self.oldest_cursor - 1
         return {
@@ -713,9 +734,7 @@ class RuntimeSmokeRunRecord:
     ) -> dict[str, int] | None:
         if not self.app_diagnostics_source_enabled:
             return None
-        total_entries = self.app_diagnostics_dropped_count + len(
-            self.app_diagnostics_entries
-        )
+        total_entries = self.app_diagnostics_dropped_count + len(self.app_diagnostics_entries)
         if total_entries == 0 and not allow_empty:
             return None
         return {
@@ -730,9 +749,7 @@ class RuntimeSmokeRunRecord:
         entry_count: int,
         limit: int,
     ) -> tuple[dict[str, Any], dict[str, int]]:
-        total_entries = self.app_diagnostics_dropped_count + len(
-            self.app_diagnostics_entries
-        )
+        total_entries = self.app_diagnostics_dropped_count + len(self.app_diagnostics_entries)
         bounded_limit = max(0, int(limit))
         bounded_after_index = max(0, int(after_index))
         start_index = min(
@@ -785,10 +802,7 @@ def _collect_case_app_diagnostics_entries(
             if not isinstance(phase_probes, list):
                 continue
             for probe in phase_probes:
-                if (
-                    not isinstance(probe, dict)
-                    or probe.get("kind") != "app_diagnostics"
-                ):
+                if not isinstance(probe, dict) or probe.get("kind") != "app_diagnostics":
                     continue
                 entry: dict[str, Any] = {
                     "case_id": case_id,
@@ -1012,11 +1026,7 @@ class RuntimeSmokeRunRegistry:
         return [await self.stop(run_id, reason=reason) for run_id in run_ids]
 
     def active_run_ids(self) -> list[str]:
-        return [
-            run_id
-            for run_id, record in self._runs.items()
-            if record.result is None
-        ]
+        return [run_id for run_id, record in self._runs.items() if record.result is None]
 
     def retained_run_ids(self) -> list[str]:
         return list(self._runs)
