@@ -28,7 +28,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retired the former runner-log grant collector, permission-probe job/selector and P0 permission-report dependency after migrating the surviving current-job selector. Removed requests and Attempt 1.0/2.0 fields refuse without aliases or synthetic upgrades. Historical run `38937481596/1` observed the same in-progress job at offsets 0/60 seconds, both UNAVAILABLE; original reports/history remain unchanged and are not relabeled PASS or server denial. The amendment requires a new canonical Candidate/Catalog, complete downloaded proof/reviews and explicit Root S4 before a new noncolliding preview tag; original `5f96014` approval remains original-only. No version bump or live release is claimed.
 
 ### Fixed
-- Runtime-smoke v1 graceful cleanup now delegates launched-versus-attached target disposal to the existing session owner instead of unconditionally issuing DAP `terminate`. Used registered UI backends disconnect before session stop; their actual result/failure is retained, adapter drain still runs after UI failure, and unused UI callbacks do not create a backend during cleanup.
 - Preview closeout orders predecessor discovery from the unique source- and repository-validated publisher row in the complete workflow-run listing, rather than requiring its timestamp to equal the exact-attempt API timestamp. Exact historical attempt/job binding and execution chronology remain independently enforced; schemas, Python default, and publication authority are unchanged.
 - Preview functional artifact fixtures use a shorter unique extraction-directory name to keep executable paths within the Windows launch path budget under deep CI temporary roots; archive/hash validation, consumer assertions, and cleanup remain unchanged.
 - Functional Python coverage uses an explicit pytest temporary root inside the claimed coverage run, avoiding default Windows temporary-directory nesting while retaining the existing host-proxy consumer checks and cleanup owner.
@@ -52,6 +51,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Compatibility
 - The installed Python entry point remains the default and rollback route. This additive native slice does not add other execution controls, change UI/bridge behavior, or authorize publication.
+
+## [0.23.16] - 2026-10-25
+
+### Fixed
+- Runtime-smoke v1 graceful cleanup delegates launched-versus-attached target disposal to the existing session owner instead of unconditionally issuing DAP `terminate` (#354).
+- A registered UI backend is disconnected before a later stop-only plan drains the adapter, including when the earlier plan made the UI connection. Cleanup never constructs or reconnects a backend. A disconnect failure remains reported while adapter drain still runs; unused UI adds no cleanup action (#354).
+
+### Compatibility
+- The Python entry point remains the default; locked dependency versions and the public catalog remain unchanged: 135 tools, 8 prompts, and 4 resources. The normal short smoke is unchanged.
+- This PATCH is limited to #354. Other Unreleased work, the separate F09 and NCD4 incidents, the opt-in modern .NET preview, and physical-input behavior are not claimed as fixed or released here. Preparation notes do not establish installed-consumer or publication proof.
 
 ## [0.23.15] - 2026-10-24
 

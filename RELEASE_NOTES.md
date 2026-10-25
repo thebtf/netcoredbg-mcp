@@ -1,3 +1,51 @@
+# netcoredbg-mcp v0.23.16
+
+Prepared: 2026-10-25
+
+## Summary
+
+`v0.23.16` is a nonbreaking PATCH for runtime-smoke v1 graceful cleanup (#354).
+These notes describe the prepared candidate, not a publication receipt.
+
+## Fixed behavior
+
+- Graceful cleanup uses the existing debug-session owner for launched and
+  attached targets instead of unconditionally issuing DAP `terminate`. An
+  attached target is detached, not terminated by this cleanup path.
+- A UI backend registered by an earlier runtime-smoke plan is disconnected
+  before a later stop-only plan drains the debug adapter. The connection is
+  retained across plan calls until cleanup; cleanup does not create or reconnect
+  a backend when UI was unused.
+- A UI disconnect failure remains a reported cleanup failure. Adapter drain
+  still runs; the failure is not converted into a successful cleanup result.
+
+## Consumer actions
+
+Upgrade through the documented package-installation route and restart the MCP
+server. Existing runtime-smoke v1 plans need no schema change. A later plan with
+`cleanup.stop_debug` set to `graceful` now disconnects an already registered UI
+backend before stopping the debug adapter.
+
+## Compatibility and limits
+
+The Python entry point remains the default. Locked dependency versions and the
+public catalog remain unchanged: 135 tools, 8 prompts, and 4 resources. The normal
+short smoke is unchanged. The stable wheel retains its existing bridge-source
+packaging and does not add the opt-in modern .NET preview executable.
+
+This PATCH is limited to #354. It does not claim a fix for the separate F09 or
+NCD4 incidents, change screenshot or physical-input behavior, or promote other
+Unreleased work into this release.
+
+## Verification boundary
+
+Source regression evidence does not replace fresh built-wheel installation and
+the public installed-consumer cleanup journey required by the
+[release protocol](docs/RELEASE-PROTOCOL.md). Release acceptance and publication
+remain separate from metadata preparation and build/install/version proof.
+
+---
+
 # netcoredbg-mcp v0.23.15
 
 Prepared: 2026-10-23

@@ -8,7 +8,7 @@ import os
 import stat
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -127,10 +127,12 @@ class RuntimeSmokeRunner:
         session: Any,
         *,
         service_adapters: dict[str, OperationAdapter] | None = None,
+        disconnect_existing_ui: Callable[[], Awaitable[dict[str, Any] | None]] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._session = session
         self._service_adapters = dict(service_adapters or {})
+        self._disconnect_existing_ui = disconnect_existing_ui
         self._clock = clock
         self._case_progress_notifier: Callable[[dict[str, Any]], Any] | None = None
         self._app_diagnostics_progress_notifier: Callable[[dict[str, Any]], Any] | None = None
@@ -382,24 +384,31 @@ class RuntimeSmokeRunner:
 
         if stop_debug_mode:
             mode = "graceful" if stop_debug_mode is True else str(stop_debug_mode)
-            if (
-                mode == "graceful"
-                and self._ui_operation_attempted
-                and "ui.disconnect" in self._service_adapters
+            if mode == "graceful" and (
+                self._disconnect_existing_ui is not None
+                or (self._ui_operation_attempted and "ui.disconnect" in self._service_adapters)
             ):
-                attempted.append("ui.disconnect")
                 try:
-                    disconnect_result = await self._execute_operation("ui.disconnect", {})
-                    ui_disconnect = disconnect_result
-                    if _terminal_status(disconnect_result.get("status", "PASS")) != "PASS":
-                        failures.append(
-                            {
-                                "operation": "ui.disconnect",
-                                "reason": disconnect_result.get("reason", "UI disconnect failed"),
-                                "result": disconnect_result,
-                            }
-                        )
+                    disconnect_result = (
+                        await self._disconnect_existing_ui()
+                        if self._disconnect_existing_ui is not None
+                        else await self._execute_operation("ui.disconnect", {})
+                    )
+                    if disconnect_result is not None:
+                        attempted.append("ui.disconnect")
+                        ui_disconnect = disconnect_result
+                        if _terminal_status(disconnect_result.get("status", "PASS")) != "PASS":
+                            failures.append(
+                                {
+                                    "operation": "ui.disconnect",
+                                    "reason": disconnect_result.get(
+                                        "reason", "UI disconnect failed"
+                                    ),
+                                    "result": disconnect_result,
+                                }
+                            )
                 except Exception as exc:
+                    attempted.append("ui.disconnect")
                     ui_disconnect = {"status": "FAIL", "reason": str(exc)}
                     failures.append({"operation": "ui.disconnect", "reason": str(exc)})
             attempted.append(f"stop_debug:{mode}")
