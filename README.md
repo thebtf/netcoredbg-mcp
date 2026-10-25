@@ -13,14 +13,14 @@ agent workflow. `netcoredbg-mcp` combines `netcoredbg`, the Debug Adapter
 Protocol, and Windows UI Automation so an agent can observe a running app,
 stop it deliberately, and inspect the state that explains the behavior.
 
-**Python 3.10+ · Windows GUI automation · 135 tools · 8 prompts · 4 resources · v0.23.15**
+**Python 3.10+ · Windows GUI automation · 135 tools · 8 prompts · 4 resources · v0.23.16**
 
-The prepared v0.23.15 PATCH repairs Windows FlaUI read/search after the selected
-window closes, reports each queried element's actual owning window, and binds
-fresh discovery to the original connected process instance rather than a reused
-PID. Python remains the default; this does not claim a fix for the separate
-original F09 incident. See the [release notes](RELEASE_NOTES.md) for consumer
-actions, scope, and verification boundaries; preparation is not publication.
+The prepared v0.23.16 PATCH fixes runtime-smoke v1 graceful cleanup across
+separate plan calls: disconnect an already registered UI backend before stopping
+the debug adapter, without creating a backend when UI was unused. Cleanup retains
+the existing launched-versus-attached target policy. Python remains the default;
+the normal short smoke is unchanged. See the [release notes](RELEASE_NOTES.md)
+for scope and verification boundaries; preparation is not publication.
 
 ## What it enables
 
