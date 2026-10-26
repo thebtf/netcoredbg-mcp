@@ -637,6 +637,10 @@ def test_coverage_preview_fixture_builder_emits_verified_archive_and_manifest(
         output / "netcoredbg-mcp-stateless-preview-win-x64-0.0.0-preview.1.manifest.json"
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == "2.0"
+    assert manifest["consumer_contract"] == artifact_contract._consumer_contract(
+        "a2-preview-readonly-family-v1"
+    )
     archive_path = output / manifest["archive"]["name"]
     assert _sha256_path(archive_path) == manifest["archive"]["sha256"]
     with zipfile.ZipFile(archive_path) as archive:
@@ -702,6 +706,10 @@ def test_seal_build_records_admits_payload_without_passing_sonar(
     )
 
     candidate = sealed["candidate_identity"]
+    assert candidate["schema_version"] == "2.0"
+    assert candidate["candidate"]["preview_manifest"]["contents"]["consumer_contract"] == (
+        artifact_contract._consumer_contract("a2-preview-readonly-family-v1")
+    )
     assert candidate["candidate"]["build"]["artifact"]["id"] == "501"
     assert candidate["candidate"]["source"] == {
         "repository": REPOSITORY,

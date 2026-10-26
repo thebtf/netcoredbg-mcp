@@ -14,11 +14,14 @@ public sealed class PreviewToolHandlerCancellationTests
         await AssertCancellationBeforeResponseAsync(root.Path, "unknown", new Dictionary<string, JsonElement>());
     }
 
-    [Fact]
-    public async Task InvalidArgumentsCancellationBeforeResponse_ReturnsNoToolResult_AndLaterRequestWorks()
+    [Theory]
+    [InlineData("find_code_symbol")]
+    [InlineData("find_code_references")]
+    [InlineData("get_source_context")]
+    public async Task InvalidArgumentsCancellationBeforeResponse_ReturnsNoToolResult_AndLaterRequestWorks(string tool)
     {
         using var root = TestRoot.Create("FollowupMarker");
-        await AssertCancellationBeforeResponseAsync(root.Path, PreviewToolCatalog.FindCodeSymbol, arguments: null);
+        await AssertCancellationBeforeResponseAsync(root.Path, tool, arguments: null);
     }
 
 
@@ -32,40 +35,51 @@ public sealed class PreviewToolHandlerCancellationTests
         Assert.Equal("invalid_tool_arguments", result.StructuredContent!.Value.GetProperty("kind").GetString());
         Assert.Equal("INVALID_TOOL_ARGUMENTS", result.StructuredContent!.Value.GetProperty("error").GetString());
     }
-    [Fact]
-    public async Task SuccessCancellationBeforeResponse_ReturnsNoToolResult_AndLaterRequestWorks()
+    [Theory]
+    [InlineData("find_code_symbol")]
+    [InlineData("find_code_references")]
+    [InlineData("get_source_context")]
+    public async Task SuccessCancellationBeforeResponse_ReturnsNoToolResult_AndLaterRequestWorks(string tool)
     {
         using var root = TestRoot.Create("SuccessMarker");
-        await AssertCancellationBeforeResponseAsync(
-            root.Path,
-            PreviewToolCatalog.FindCodeSymbol,
-            Arguments("SuccessMarker", "class"));
+        await AssertCancellationBeforeResponseAsync(root.Path, tool, RouteArguments(tool, "SuccessMarker"));
     }
 
-    [Fact]
-    public async Task FrameCapCancellationBeforeResponse_ReturnsNoToolResult_AndLaterRequestWorks()
+    [Theory]
+    [InlineData("find_code_symbol")]
+    [InlineData("find_code_references")]
+    [InlineData("get_source_context")]
+    public async Task FrameCapCancellationBeforeResponse_ReturnsNoToolResult_AndLaterRequestWorks(string tool)
     {
         var source = string.Concat(Enumerable.Repeat(
             "public sealed class FrameLimitMarker { } // " + string.Concat(Enumerable.Repeat(char.ConvertFromUtf32(0x1F600), 500)) + "\n",
             128));
         using var root = TestRoot.Create("FollowupMarker", source);
+        var arguments = RouteArguments(tool, "FrameLimitMarker");
+        if (tool == PreviewToolCatalog.GetSourceContext)
+        {
+            arguments["radius"] = JsonSerializer.SerializeToElement(127);
+        }
         await AssertCancellationBeforeResponseAsync(
             root.Path,
-            PreviewToolCatalog.FindCodeSymbol,
-            Arguments("FrameLimitMarker", "class"),
+            tool,
+            arguments,
             expectedFailure: "preview_search_budget_exceeded");
     }
 
-    [Fact]
-    public async Task SearchFailureCancellationBeforeResponse_ReturnsNoToolResult_AndLaterRequestWorks()
+    [Theory]
+    [InlineData("find_code_symbol")]
+    [InlineData("find_code_references")]
+    [InlineData("get_source_context")]
+    public async Task SearchFailureCancellationBeforeResponse_ReturnsNoToolResult_AndLaterRequestWorks(string tool)
     {
         using var root = TestRoot.Create("FailureMarker");
         File.WriteAllText(Path.Combine(root.Path, ".gitignore"), "[z-a]\n");
 
         await AssertCancellationBeforeResponseAsync(
             root.Path,
-            PreviewToolCatalog.FindCodeSymbol,
-            Arguments("FailureMarker", "class"),
+            tool,
+            RouteArguments(tool, "FailureMarker"),
             expectedFailure: "preview_search_unreadable");
     }
 
@@ -79,6 +93,7 @@ public sealed class PreviewToolHandlerCancellationTests
         {
             var normal = await new PreviewToolHandler(CreateSearch(root)).CallAsync(CreateRequest(name, arguments), NewRequestId(), CancellationToken.None);
             Assert.Equal(expectedFailure, normal.StructuredContent!.Value.GetProperty("kind").GetString());
+            Assert.Equal(name, normal.StructuredContent.Value.GetProperty("tool").GetString());
         }
 
         using var cancellation = new CancellationTokenSource();
@@ -105,6 +120,19 @@ public sealed class PreviewToolHandlerCancellationTests
     {
         ["name"] = JsonSerializer.SerializeToElement(name),
         ["kind"] = JsonSerializer.SerializeToElement(kind),
+    };
+
+    private static Dictionary<string, JsonElement> RouteArguments(string tool, string marker) => tool switch
+    {
+        PreviewToolCatalog.FindCodeSymbol => Arguments(marker, "class"),
+        PreviewToolCatalog.FindCodeReferences => new() { ["name"] = JsonSerializer.SerializeToElement(marker) },
+        PreviewToolCatalog.GetSourceContext => new()
+        {
+            ["file"] = JsonSerializer.SerializeToElement("Marker.cs"),
+            ["line"] = JsonSerializer.SerializeToElement(1),
+            ["radius"] = JsonSerializer.SerializeToElement(0),
+        },
+        _ => throw new ArgumentOutOfRangeException(nameof(tool)),
     };
 
 

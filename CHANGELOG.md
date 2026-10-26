@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The unreleased opt-in stateless preview successor adds native `find_code_references` and `get_source_context` beside `find_code_symbol`, using the same explicit project root, strict read budgets and bounded complete responses. A2 artifact identities bind the three-tool consumer contract; historical A1 evidence keeps its one-tool meaning. Python remains the default; source/process checks are not successor publication proof.
 - The opt-in modern native host adds `step_over(debugSessionId, threadId)` after `get_call_stack`: one explicit Int32 target, correlated DAP `next`, and a bounded wait for a later exact step stop, terminal event, or timeout. Concurrent steps are refused; uncertain post-write outcomes use the existing session close-and-drain owner.
 - Added controlled-loopback downloaded-artifact tests that verify received manifest/archive identities, exercise the extracted preview through MCP discovery/list/call and clean EOF, and reject tampered bytes before launch. This supporting source proof is not a public GitHub release receipt and does not change the Python default.
 - Added internal preview-library validators for exact-candidate seven-lens S2/S3 review, distinct independent PR review, and ordered stage evidence. These source-only validators reject inconsistent evidence claims; they do not perform reviews, publish artifacts, constitute a consumer release, or change the Python default.

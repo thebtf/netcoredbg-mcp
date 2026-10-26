@@ -14,7 +14,10 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "1.0"
+      "enum": [
+        "1.0",
+        "2.0"
+      ]
     },
     "version": {
       "$ref": "#/$defs/version"
@@ -34,8 +37,56 @@
     },
     "executable": {
       "$ref": "#/$defs/executable"
+    },
+    "consumer_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scenario_catalog_id",
+        "scenario_catalog_sha256",
+        "tools"
+      ],
+      "properties": {
+        "scenario_catalog_id": {
+          "const": "a2-preview-readonly-family-v1"
+        },
+        "scenario_catalog_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "tools": {
+          "const": [
+            "find_code_symbol",
+            "find_code_references",
+            "get_source_context"
+          ]
+        }
+      }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": "2.0"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "consumer_contract"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "consumer_contract"
+          ]
+        }
+      }
+    }
+  ],
   "$defs": {
     "version": {
       "type": "string",

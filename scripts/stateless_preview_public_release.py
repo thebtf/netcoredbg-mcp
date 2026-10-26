@@ -1,4 +1,4 @@
-"""Download only the exact public GitHub prerelease assets of a sealed A1 candidate."""
+"""Download only the exact public GitHub prerelease assets of a sealed preview candidate."""
 
 from __future__ import annotations
 
@@ -16,9 +16,7 @@ from scripts import stateless_preview_artifact as _artifact
 
 _JSON_LIMIT = 1024 * 1024
 _ARCHIVE_LIMIT = 256 * 1024 * 1024
-_PUBLIC_HOSTS = frozenset(
-    ("api.github.com", "github.com", "release-assets.githubusercontent.com")
-)
+_PUBLIC_HOSTS = frozenset(("api.github.com", "github.com", "release-assets.githubusercontent.com"))
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -168,8 +166,10 @@ def _snapshot(
     ):
         raise ValueError("public annotated tag does not dereference to the candidate commit")
     assets = release.get("assets")
-    if not isinstance(assets, list) or len(assets) != 2 or any(
-        not isinstance(asset, Mapping) for asset in assets
+    if (
+        not isinstance(assets, list)
+        or len(assets) != 2
+        or any(not isinstance(asset, Mapping) for asset in assets)
     ):
         raise ValueError("public release must contain exactly the candidate asset pair")
     manifest = candidate["preview_manifest"]
@@ -249,9 +249,7 @@ def download_public_release(
     candidate: Mapping[str, Any], release_id: int | str, destination: str | Path
 ) -> tuple[Path, Path, Mapping[str, Any]]:
     """Refuse changed/nonpublic identities; never use credentials or retained payload bytes."""
-    candidate = _artifact.assemble_candidate_identity(
-        {"schema_version": "1.0", "candidate": candidate}
-    )["candidate"]
+    candidate = _artifact._validate_candidate_binding(candidate)
     if isinstance(release_id, str):
         release_id = int(_artifact._expect_identifier(release_id, "public release ID"))
     release_id = _artifact._expect_positive_integer(release_id, "public release ID")
@@ -283,9 +281,13 @@ def download_public_release(
         for field, descriptor in zip(("archive_asset", "manifest_asset"), descriptors, strict=True):
             path = destination / descriptor["name"]
             digest = hashlib.sha256()
-            with _get(opener, f"{api}/releases/assets/{origin[field]['id']}", binary=True) as response:
+            with _get(
+                opener, f"{api}/releases/assets/{origin[field]['id']}", binary=True
+            ) as response:
                 with path.open("xb") as output:
-                    for chunk in _chunks(response, descriptor["size_bytes"], exact_size=descriptor["size_bytes"]):
+                    for chunk in _chunks(
+                        response, descriptor["size_bytes"], exact_size=descriptor["size_bytes"]
+                    ):
                         output.write(chunk)
                         digest.update(chunk)
                         payload_hash.update(chunk)

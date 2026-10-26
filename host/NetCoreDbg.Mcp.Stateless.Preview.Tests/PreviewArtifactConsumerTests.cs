@@ -60,8 +60,8 @@ public sealed class PreviewArtifactConsumerTests
         Assert.Equal(["tools"], discovery["capabilities"]!.AsObject().Select(static property => property.Key));
 
         var catalog = RequireResult(await driver.ListToolsAsync(new RequestId("artifact-list")));
-        var tool = Assert.IsType<JsonObject>(Assert.Single(catalog["tools"]!.AsArray()));
-        Assert.Equal("find_code_symbol", tool["name"]!.GetValue<string>());
+        Assert.Equal(["find_code_symbol", "find_code_references", "get_source_context"],
+            catalog["tools"]!.AsArray().Select(static tool => tool!["name"]!.GetValue<string>()));
 
         var call = RequireResult(await driver.CallToolAsync(
             "find_code_symbol",
@@ -81,6 +81,23 @@ public sealed class PreviewArtifactConsumerTests
         Assert.Equal("PreviewMarker", match["name"]!.GetValue<string>());
         Assert.Equal("class", match["kind"]!.GetValue<string>());
         Assert.Equal("public sealed class PreviewMarker { }", match["context"]!.GetValue<string>());
+        Assert.Equal(structured.ToJsonString(), SingleText(call));
+
+        var references = RequireResult(await driver.CallToolAsync("find_code_references",
+            new JsonObject { ["name"] = "PreviewMarker" }, new RequestId("artifact-references")));
+        Assert.Equal("complete", references["resultType"]!.GetValue<string>());
+        Assert.False(references["isError"]!.GetValue<bool>());
+        Assert.Equal("""{"kind":"find_code_references_success","results":[{"file":"Markers.cs","line":3,"context":"public sealed class PreviewMarker { }"},{"file":"PreviewReferences.cs","line":5,"context":"public PreviewMarker Value { get; } = new PreviewMarker();"}]}""",
+            references["structuredContent"]!.ToJsonString());
+        Assert.Equal(references["structuredContent"]!.ToJsonString(), SingleText(references));
+
+        var context = RequireResult(await driver.CallToolAsync("get_source_context",
+            new JsonObject { ["file"] = "PreviewReferences.cs", ["line"] = 5, ["radius"] = 1 }, new RequestId("artifact-context")));
+        Assert.Equal("complete", context["resultType"]!.GetValue<string>());
+        Assert.False(context["isError"]!.GetValue<bool>());
+        Assert.Equal("""{"kind":"get_source_context_success","file":"PreviewReferences.cs","start_line":4,"end_line":6,"lines":[{"line":4,"text":"{"},{"line":5,"text":"    public PreviewMarker Value { get; } = new PreviewMarker();"},{"line":6,"text":"}"}]}""",
+            context["structuredContent"]!.ToJsonString());
+        Assert.Equal(context["structuredContent"]!.ToJsonString(), SingleText(context));
         Assert.False(
             await driver.WaitForTransportClosureAsync(TransportOpenProbeTimeout),
             "The extracted artifact emitted non-JSON-RPC stdout or terminated its stdio transport during a valid consumer exchange.");
@@ -129,6 +146,13 @@ public sealed class PreviewArtifactConsumerTests
 
     private static JsonObject RequireResult(JsonRpcMessage message) =>
         Assert.IsType<JsonObject>(Assert.IsType<JsonRpcResponse>(message).Result);
+
+    private static string SingleText(JsonObject result)
+    {
+        var content = Assert.IsType<JsonObject>(Assert.Single(result["content"]!.AsArray()));
+        Assert.Equal("text", content["type"]!.GetValue<string>());
+        return content["text"]!.GetValue<string>();
+    }
 
     private static string RequiredString(JsonElement value, string propertyName) =>
         Assert.IsType<string>(value.GetProperty(propertyName).GetString());
@@ -288,7 +312,12 @@ public sealed class PreviewArtifactConsumerTests
             using var manifestDocument = JsonDocument.Parse(File.ReadAllText(manifestPath));
             var manifest = manifestDocument.RootElement;
             var version = RequiredString(manifest, "version");
-            Assert.Equal("1.0", RequiredString(manifest, "schema_version"));
+            Assert.Equal("2.0", RequiredString(manifest, "schema_version"));
+            var consumerContract = manifest.GetProperty("consumer_contract");
+            Assert.Equal("a2-preview-readonly-family-v1", RequiredString(consumerContract, "scenario_catalog_id"));
+            Assert.Matches("^[0-9a-f]{64}$", RequiredString(consumerContract, "scenario_catalog_sha256"));
+            Assert.Equal(["find_code_symbol", "find_code_references", "get_source_context"],
+                consumerContract.GetProperty("tools").EnumerateArray().Select(static tool => tool.GetString()));
             Assert.Equal("win-x64", RequiredString(manifest, "rid"));
             Assert.Equal($"stateless-preview-v{version}", RequiredString(manifest, "tag"));
             Assert.Matches("^[0-9a-f]{40}$", RequiredString(manifest, "commit"));

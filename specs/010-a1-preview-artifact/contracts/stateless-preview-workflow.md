@@ -8,6 +8,41 @@ The workflow uses only the feature-local Candidate Identity, Stage Gate Evidence
 
 All durable records use closed fields only: structural GitHub references, bounded opaque IDs, hashes, timestamps, and declared codes. The seal step rejects raw diagnostics, commands, local paths, URLs outside structural artifact references, credential-shaped strings, control characters, and unapproved values.
 
+## A2 successor proof generation
+
+This existing channel also carries the A2 read-only family; it is not a new publisher or Python/default release. Current source producers `prepare-payload`, `seal-build-records` and `build/prepare_preview_fixture.py` emit manifest/Candidate schema `2.0`. The manifest's closed `consumer_contract` binds `scenario_catalog_id: a2-preview-readonly-family-v1`, the SHA-256 of that fixed canonical scenario catalog, and exactly `[find_code_symbol, find_code_references, get_source_context]`, in that order. `seal-build-records` refuses a schema-1 manifest, even if its hashes were recomputed correctly. There is no build input or environment selector for proof generation.
+
+Schema `1.0` identities and manifests always mean the historical `a1-preview-inherited-matrix-v1` ten-scenario, one-tool contract. Their original bytes and receipts are not rewritten. Manifest and Candidate schema generations must agree; unknown generations, mixed IDs/hashes/tool lists and schema-2 manifests without the fixed contract refuse. The no-argument `consumer_proof_scenario_catalog()` API remains A1 for active historical callers; the current consumer explicitly selects the generation from the verified immutable candidate. That compatibility remains until historical A1 verification is explicitly retired; no A1 proof is valid for a successor identity.
+
+Receipt schema `1.0` and reference-bundle schema `1.0` retain their existing shapes. Both retained and public/remote sealers first verify the raw Candidate identity against its downloaded reference, then derive the only allowed catalog ID/hash, ordered scenario matrix and exact runtime tool list from that Candidate. Receipt fields cannot choose a validator. Public acquisition, stage/review, promotion and closeout preserve their existing exact-byte/provenance paths; they admit the new Candidate generation without reconstructing it as A1.
+
+The A2 catalog inherits the A1 authority, stdout, protocol, containment, EOF/cancellation and unchanged installed-Python rollback obligations. It adds real reference/context value journeys, invalid input, direct excluded/ignored/unsupported/ambiguous/outside/reparse/locked source paths, strict result/file budgets and route-attributed complete-frame refusals. Rollback runs last. The actual discovery catalog has exactly three closed read-only/idempotent tools. `find_code_references` defaults `max_results` to 1000, but strict admission still caps results at 128: a request below 128 can stop early; a request at/above 128 refuses if a 129th match exists. `get_source_context` uses a positive int32 `line` and nonnegative int32 `radius` (default 10), preserves indentation and returns numbered, file-clipped lines. Explicit null, wrong types and unknown properties refuse on their requested route. Success/error text must parse to the exact structured payload; no partial source may accompany a refusal. The raw full JSON-RPC response including the request ID must fit 256 KiB. Route shapes remain owned by [`specs/016`](../../016-a2-native-readonly-family/spec.md#route-contracts).
+
+The downloaded A2 consumer compares every advertised input/output schema with the complete source-frozen `tests/preview/a2-tool-schemas.json` contract before its valid tool calls. It validates all three valid-journey inputs and successful structured values using the advertised schemas; the remaining A2 matrix successes use those same frozen output schemas. This includes nested types, required fields, bounds, enums, defaults and closed-property rules, not only catalog names or top-level flags. Existing text/structured equality and exact value assertions remain independent checks. JSON Schema validation uses the project's existing `jsonschema` dependency (locked through `mcp`); no install or dependency change is performed by the consumer. That import is lazy and A2-only, so standalone help and historical A1 schema semantics do not acquire a new requirement. Schema/dependency refusals remain redacted and cannot create a passing receipt.
+
+### Exact producer and consumer commands
+
+Root runs these only after integrated source checks. The canonical Actions build continues to use `python scripts/stateless_preview_artifact.py admit-build`, the existing self-contained publish/runtime check, `python scripts/stateless_preview_artifact.py prepare-payload`, immutable payload upload and `python scripts/stateless_preview_artifact.py seal-build-records`; all source/build/main checks remain mandatory. The consumer generation is fixed by the helper bytes at that admitted source commit, not preview ordinal or `serverInfo.version`.
+
+For the existing local source-run artifact proof, use fresh publish/artifact directories and the exact source SHA. These are PowerShell commands with caller-owned paths substituted before execution:
+
+```text
+dotnet publish host/NetCoreDbg.Mcp.Stateless.Preview/NetCoreDbg.Mcp.Stateless.Preview.csproj --configuration Release --runtime win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishTrimmed=false --output <fresh-publish>
+Rename-Item -Path <fresh-publish>/NetCoreDbg.Mcp.Stateless.Preview.exe -NewName netcoredbg-mcp-stateless-preview.exe
+python build/prepare_preview_fixture.py --executable <fresh-publish>/netcoredbg-mcp-stateless-preview.exe --output <fresh-source-artifact> --commit <exact-source-sha> --version <noncolliding-preview-version>
+```
+
+Set `NETCOREDBG_PREVIEW_ARTIFACT_ROOT` only in the child environment for the existing `PreviewArtifactConsumerTests` process proof, pointing to that fresh source artifact. Set `DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=false` in the SDK child environment before any SDK invocation. This local fixture is source-run evidence, never retained/published Candidate authority or a release receipt.
+
+After canonical build completion, the real retained and fresh public consumer reentry is unchanged:
+
+```text
+python tests/preview/validate_preview_artifact.py candidate --references <candidate-references.json> --download-root <fresh-existing-download-parent> --fixture-root tests/fixtures/PreviewSearchApp --receipt-output <new-retained-receipt.json> --receipt-id <opaque-id> --recorded-at <UTC-timestamp> --python-rollback-command <installed-unchanged-Python-oracle> [--python-rollback-argument=<argument> ...]
+python tests/preview/validate_preview_artifact.py remote --references <same-exact-candidate-references.json> --release-id <published-release-id> --download-root <fresh-existing-download-parent> --fixture-root tests/fixtures/PreviewSearchApp --receipt-output <new-remote-receipt.json> --receipt-id <new-opaque-id> --recorded-at <UTC-timestamp> --python-rollback-command <installed-unchanged-Python-oracle> [--python-rollback-argument=<argument> ...]
+```
+
+References are the existing closed Actions reference bundle, not caller paths to an executable or payload. The remote command downloads the public archive/raw manifest afresh and cannot fall back to Actions payload bytes. Its rollback executable must emit the existing `PRODUCT_WORKS` oracle marker after the real installed Python journey; a successful exit code alone is not proof. Neither command changes protected public environments, retained refs/data, Python installation/defaults or publication authority. A new exact-candidate promotion decision and fresh remote-byte proof remain required.
+
 ## Dispatch and permissions
 
 `mode` is a choice with `build`, `evidence`, and `promote`, defaulting to `build`. The other six inputs are strings with `required: false` and `default: ""`: `preview_version`, `preview_tag`, `retention_days`, `evidence_operation`, `evidence_request`, and `promote_request`. Conditional requirements belong to the helper's real `GITHUB_EVENT_PATH` admission, not YAML's unconditional input requirement. The closed input combinations are:
