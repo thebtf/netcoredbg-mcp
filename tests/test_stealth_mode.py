@@ -11,6 +11,7 @@ import sys
 import threading
 from itertools import chain, repeat
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -819,10 +820,21 @@ internal sealed class ForeignProcessCaptureTransport : IScreenshotCaptureTranspo
     }
 
 
+@pytest.fixture
+def bridge_identity_probe_output():
+    from tests import test_host_proxy
+
+    # Executable launch paths must stay short even when pytest's basetemp is deep.
+    scratch = test_host_proxy._primary_agent_root() / "tmp"
+    scratch.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(prefix="identity-", dir=scratch) as directory:
+        yield Path(directory)
+
+
 @REQUIRES_WINDOWS_DOTNET
 @pytest.mark.parametrize("limited_access", [False, True], ids=["ordinary", "limited-dacl"])
 def test_bridge_closed_connection_rejects_replacement_process_identity(
-    tmp_path, limited_access
+    tmp_path, limited_access, bridge_identity_probe_output
 ) -> None:
     import subprocess
 
@@ -1264,7 +1276,8 @@ internal static class ConnectedProcessProbe
         "-c",
         "Release",
         "--nologo",
-        f"-p:ArtifactsPath={tmp_path / 'artifacts'}",
+        "--disable-build-servers",
+        f"-p:ArtifactsPath={bridge_identity_probe_output / 'artifacts'}",
     ]
     if limited_access:
         command.extend(["--", "--limited-access"])
@@ -1275,7 +1288,9 @@ internal static class ConnectedProcessProbe
         PROJECT_ROOT / "bridge" / "Commands" / "SnapshotCommands.cs",
     )
     before = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in source_paths}
-    with patch.object(test_host_proxy, "TEST_OUTPUT_ROOT", tmp_path / "child-env"):
+    with patch.object(
+        test_host_proxy, "TEST_OUTPUT_ROOT", bridge_identity_probe_output / "child-env"
+    ):
         child_env = test_host_proxy._test_child_env()
     probe = subprocess.run(
         command,
