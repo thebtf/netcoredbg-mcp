@@ -334,6 +334,78 @@ public sealed class SymbolSearchEngineTests
     }
 
     [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void PreviewPolicyAbsoluteContextRequiresPhysicalRootIdentity(bool distinctPhysicalSibling)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var parent = Path.GetFullPath("physical-root-admission");
+        var projectRoot = Path.Combine(parent, "Project");
+        var requestedRoot = Path.Combine(parent, "project");
+        var physicalRoot = distinctPhysicalSibling ? requestedRoot : projectRoot;
+        var canonicalSource = Path.Combine(projectRoot, "Contained.cs");
+        var requestedSource = Path.Combine(requestedRoot, "Contained.cs");
+        var physicalSource = Path.Combine(physicalRoot, "Contained.cs");
+        // Metadata models distinct physical directories or one directory's case alias; no disk is consulted.
+        var inspector = new MappedPhysicalPathInspector(new Dictionary<string, (string CanonicalPath, bool IsDirectory)>(StringComparer.Ordinal)
+        {
+            [projectRoot] = (projectRoot, true),
+            [requestedRoot] = (physicalRoot, true),
+            [canonicalSource] = (canonicalSource, false),
+            [requestedSource] = (physicalSource, false),
+        });
+        var openedPaths = new List<string>();
+        var engine = new SymbolSearchEngine(projectRoot, PreviewSearchPolicy.Instance, inspector,
+            timestamp: static () => 0,
+            openRead: path =>
+            {
+                openedPaths.Add(path);
+                return new MemoryStream("physical-root-source-control\n"u8.ToArray());
+            });
+        SourceContext? context = null;
+
+        var exception = Record.Exception(() => context = engine.GetSourceContext(requestedSource, 1, 0));
+
+        if (distinctPhysicalSibling)
+        {
+            Assert.Equal(
+                (new SearchFailure("preview_path_refused", "PREVIEW_PATH_REFUSED", "get_source_context"), 0),
+                ((exception as SearchFailureException)?.Failure, openedPaths.Count));
+            return;
+        }
+
+        Assert.Null(exception);
+        Assert.NotNull(context);
+        Assert.Equal([canonicalSource], openedPaths);
+        Assert.Equal("Contained.cs", context.File);
+        Assert.Equal(1, context.StartLine);
+        Assert.Equal(1, context.EndLine);
+        Assert.Equal("physical-root-source-control", Assert.Single(context.Lines).Text);
+    }
+
+    [Fact]
+    public void PreviewPolicyReadsContextWithProjectRootCaseAlias()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var root = TestRoot.Create();
+        root.Write("Contained.cs", "project-root-case-alias-control\n");
+        var engine = new SymbolSearchEngine(root.Path.ToUpperInvariant(), PreviewSearchPolicy.Instance);
+
+        var context = engine.GetSourceContext(Path.Combine(root.Path, "CONTAINED.CS"), 1, 0);
+
+        Assert.Equal("Contained.cs", context.File);
+        Assert.Equal("project-root-case-alias-control", Assert.Single(context.Lines).Text);
+    }
+
+    [Theory]
     [InlineData("IGNORED/Secret.cs", false)]
     [InlineData("IGNORED/Secret.cs", true)]
     [InlineData("private/SECRET.CS", false)]
@@ -1076,6 +1148,16 @@ public sealed class SymbolSearchEngineTests
         Directory,
         DanglingLink,
         Inaccessible,
+    }
+
+    private sealed class MappedPhysicalPathInspector(
+        IReadOnlyDictionary<string, (string CanonicalPath, bool IsDirectory)> entries) : IStrictPathInspector
+    {
+        public StrictPathInfo Inspect(string path, bool expectedDirectory) => entries.TryGetValue(path, out var entry)
+            ? new StrictPathInfo(Exists: true, IsDirectory: entry.IsDirectory, IsReparsePoint: false, FinalTarget: null)
+            : StrictPathInfo.Missing;
+
+        public string ResolveFilePath(string path) => entries[path].CanonicalPath;
     }
 
     private sealed class TestStrictPathInspector : IStrictPathInspector

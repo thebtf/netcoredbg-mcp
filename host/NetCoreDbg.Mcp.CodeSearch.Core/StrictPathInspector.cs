@@ -30,6 +30,7 @@ internal sealed class FileSystemStrictPathInspector : IStrictPathInspector
 
     private const uint OpenExisting = 3;
     private const uint OpenReparsePoint = 0x00200000;
+    private const uint BackupSemantics = 0x02000000;
 
     private readonly Func<string, FileAttributes> _getAttributes;
     private readonly Func<string, bool, string?> _resolveLinkTarget;
@@ -96,9 +97,9 @@ internal sealed class FileSystemStrictPathInspector : IStrictPathInspector
             : path.StartsWith(@"\\", StringComparison.Ordinal)
                 ? @"\\?\UNC\" + path[2..]
                 : @"\\?\" + path;
-        // Zero access queries only metadata; no source-content read handle is requested.
+        // Zero access queries only metadata; BackupSemantics also permits project-directory handles.
         using var handle = CreateFile(nativePath, 0, FileShare.ReadWrite | FileShare.Delete,
-            IntPtr.Zero, OpenExisting, OpenReparsePoint, IntPtr.Zero);
+            IntPtr.Zero, OpenExisting, OpenReparsePoint | BackupSemantics, IntPtr.Zero);
         if (handle.IsInvalid)
         {
             throw new IOException("Source path metadata is unavailable.", new Win32Exception(Marshal.GetLastPInvokeError()));

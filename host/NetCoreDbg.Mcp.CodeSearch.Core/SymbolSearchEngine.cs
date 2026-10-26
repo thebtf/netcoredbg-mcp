@@ -486,6 +486,16 @@ public sealed class SymbolSearchEngine
                 if (OperatingSystem.IsWindows())
                 {
                     candidate = ResolveStrictFilePath(candidate, operation);
+                    var physicalRoot = ResolveStrictFilePath(_projectRoot, operation);
+                    // Resolved paths retain physical case, unlike Windows relative-path comparisons.
+                    if (candidate.Length <= physicalRoot.Length
+                        || !candidate.StartsWith(physicalRoot, StringComparison.Ordinal)
+                        || (!Path.EndsInDirectorySeparator(physicalRoot)
+                            && candidate[physicalRoot.Length] != Path.DirectorySeparatorChar))
+                    {
+                        ThrowFailure(SearchFailure.PreviewPathRefused(operation.Tool));
+                    }
+
                     VerifyStrictParentDirectories(candidate, operation);
                 }
                 if (IsSourceFile(new FileInfo(candidate), rules, operation))
