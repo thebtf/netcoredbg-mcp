@@ -4398,7 +4398,7 @@ def test_manual_smoke_list_includes_focused_ui_evidence_scenario() -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert "UI Focused Evidence" in result.stdout
+    assert result.stdout.strip() == "1. Two-Application Core Smoke"
 
     extended_result = subprocess.run(
         [sys.executable, "tests/smoke_test_manual.py", "--list", "--extended-gui"],
@@ -4407,6 +4407,7 @@ def test_manual_smoke_list_includes_focused_ui_evidence_scenario() -> None:
         text=True,
     )
     assert extended_result.returncode == 0, extended_result.stderr
+    assert "UI Focused Evidence" in extended_result.stdout
     from tests import smoke_test_manual
 
     assert ("WPF UI Grid Rows Alias Fixture Replay" in extended_result.stdout) is (
