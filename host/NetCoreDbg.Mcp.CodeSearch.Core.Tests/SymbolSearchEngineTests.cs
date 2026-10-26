@@ -334,6 +334,116 @@ public sealed class SymbolSearchEngineTests
     }
 
     [Theory]
+    [InlineData("IGNORED/Secret.cs", false)]
+    [InlineData("IGNORED/Secret.cs", true)]
+    [InlineData("private/SECRET.CS", false)]
+    [InlineData("private/SECRET.CS", true)]
+    [InlineData("PRIVATE/secret.cs", false)]
+    [InlineData("PRIVATE/secret.cs", true)]
+    public void PreviewPolicyRejectsPhysicalCaseAliasesOfIgnoredContextBeforeOpeningSource(string relativePath, bool absolute)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var root = TestRoot.Create();
+        root.Write(".gitignore", "ignored/\n!ignored/Allowed.cs\nprivate/Secret.cs\n");
+        root.Write("ignored/Secret.cs", "private-source-sentinel\n");
+        root.Write("private/Secret.cs", "private-source-sentinel\n");
+        root.Write("ignored/Allowed.cs", "  allowed-source-control\n");
+        var source = Path.GetFullPath(Path.Combine(root.Path, relativePath));
+        if (!File.Exists(source))
+        {
+            return;
+        }
+
+        var openedSources = new List<string>();
+        var engine = new SymbolSearchEngine(root.Path, PreviewSearchPolicy.Instance,
+            new TestStrictPathInspector(), timestamp: static () => 0,
+            openRead: path =>
+            {
+                if (string.Equals(Path.GetExtension(path), ".cs", StringComparison.OrdinalIgnoreCase))
+                {
+                    openedSources.Add(path);
+                }
+                return File.OpenRead(path);
+            });
+
+        var exception = Record.Exception(() => engine.GetSourceContext(absolute ? source : relativePath, 1, 0));
+
+        Assert.Empty(openedSources);
+        var failure = Assert.IsType<SearchFailureException>(exception);
+        Assert.Equal(new SearchFailure("preview_search_unreadable", "PREVIEW_SEARCH_UNREADABLE", "get_source_context"), failure.Failure);
+        Assert.DoesNotContain(root.Path, failure.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("private-source-sentinel", failure.ToString(), StringComparison.Ordinal);
+
+        const string allowedAlias = "IGNORED/ALLOWED.CS";
+        var allowed = engine.GetSourceContext(absolute ? Path.Combine(root.Path, allowedAlias) : allowedAlias, 1, 0);
+        Assert.Single(openedSources);
+        Assert.Equal("ignored/Allowed.cs", allowed.File);
+        Assert.Equal("  allowed-source-control", Assert.Single(allowed.Lines).Text);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void LegacyPolicyRetainsDirectContextCaseAliasIgnoreMatching(bool absolute)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var root = TestRoot.Create();
+        root.Write(".gitignore", "ignored/\n");
+        root.Write("ignored/Secret.cs", "legacy-case-alias-control\n");
+        const string relativePath = "IGNORED/Secret.cs";
+        var source = Path.Combine(root.Path, relativePath);
+        if (!File.Exists(source))
+        {
+            return;
+        }
+
+        var context = new SymbolSearchEngine(root.Path, LegacySearchPolicy.Instance)
+            .GetSourceContext(absolute ? source : relativePath, 1, 0);
+
+        Assert.Equal(relativePath, context.File);
+        Assert.Equal("legacy-case-alias-control", Assert.Single(context.Lines).Text);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BothPoliciesPreserveDistinctCaseSensitiveIgnorePathsWhenFilesystemSupportsThem(bool preview)
+    {
+        using var root = TestRoot.Create();
+        root.Write(".gitignore", "ignored/\n");
+        root.Write("ignored/Secret.cs", "ignored-lowercase-source\n");
+        if (File.Exists(Path.Combine(root.Path, "IGNORED/Secret.cs")))
+        {
+            return;
+        }
+        root.Write("IGNORED/Secret.cs", "allowed-uppercase-source\n");
+        SearchPolicy policy = preview ? PreviewSearchPolicy.Instance : LegacySearchPolicy.Instance;
+        var engine = new SymbolSearchEngine(root.Path, policy);
+
+        var context = engine.GetSourceContext("IGNORED/Secret.cs", 1, 0);
+
+        Assert.Equal("IGNORED/Secret.cs", context.File);
+        Assert.Equal("allowed-uppercase-source", Assert.Single(context.Lines).Text);
+        if (preview)
+        {
+            var failure = Assert.Throws<SearchFailureException>(() => engine.GetSourceContext("ignored/Secret.cs", 1, 0));
+            Assert.Equal(new SearchFailure("preview_search_unreadable", "PREVIEW_SEARCH_UNREADABLE", "get_source_context"), failure.Failure);
+        }
+        else
+        {
+            Assert.Throws<FileNotFoundException>(() => engine.GetSourceContext("ignored/Secret.cs", 1, 0));
+        }
+    }
+
+    [Theory]
     [InlineData("bin/Generated.cs", false)]
     [InlineData("bin/Generated.cs", true)]
     [InlineData("obj/Generated.cs", false)]
@@ -987,6 +1097,8 @@ public sealed class SymbolSearchEngineTests
             _inaccessiblePath = inaccessiblePath;
             _onInspect = onInspect;
         }
+
+        public string ResolveFilePath(string path) => FileSystemStrictPathInspector.Instance.ResolveFilePath(path);
 
         public StrictPathInfo Inspect(string path, bool expectedDirectory)
         {

@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Strict preview source-context reads now reject direct relative and absolute paths beneath `bin`, `obj`, and VCS metadata directories before opening file content, matching traversal exclusions. Legacy code-search policy and Python defaults remain unchanged.
+- Strict Windows preview context reads use the physical filename for ignore-policy matching, preventing case aliases from reading ignored files. The existing path inspector uses metadata-only handles; legacy and non-Windows matching remain unchanged.
 - Preview closeout orders predecessor discovery from the unique source- and repository-validated publisher row in the complete workflow-run listing, rather than requiring its timestamp to equal the exact-attempt API timestamp. Exact historical attempt/job binding and execution chronology remain independently enforced; schemas, Python default, and publication authority are unchanged.
 - Preview functional artifact fixtures use a shorter unique extraction-directory name to keep executable paths within the Windows launch path budget under deep CI temporary roots; archive/hash validation, consumer assertions, and cleanup remain unchanged.
 - Functional Python coverage uses an explicit pytest temporary root inside the claimed coverage run, avoiding default Windows temporary-directory nesting while retaining the existing host-proxy consumer checks and cleanup owner.
