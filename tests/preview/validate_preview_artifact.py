@@ -553,7 +553,7 @@ def _run_family_values(executable_path: Path, scratch: Path) -> None:
             (
                 ({"file": "Family.cs", "line": 4}, 1, 6),
                 ({"file": "Family.cs", "line": 4, "radius": 0}, 4, 4),
-                ({"file": "Family.cs", "line": 1, "radius": 2147483647}, 1, 6),
+                ({"file": "Family.cs", "line": 1, "radius": 2147483646}, 1, 6),
                 ({"file": str(root / "Family.cs"), "line": 6, "radius": 1}, 5, 6),
             )
         ):
@@ -593,6 +593,16 @@ def _run_family_values(executable_path: Path, scratch: Path) -> None:
                 "end_line": 25,
                 "lines": [{"line": line, "text": window_lines[line - 1]} for line in range(5, 26)],
             },
+        )
+        _expect_failure(
+            _call(
+                process,
+                127,
+                "get_source_context",
+                {"file": "Family.cs", "line": 1, "radius": 2147483647},
+            ),
+            "get_source_context",
+            "INVALID_TOOL_ARGUMENTS",
         )
         process.close_eof()
     finally:
