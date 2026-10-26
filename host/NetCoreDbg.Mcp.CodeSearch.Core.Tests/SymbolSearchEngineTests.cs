@@ -245,6 +245,121 @@ public sealed class SymbolSearchEngineTests
         Assert.Contains("obj/Debug/net8.0/Generated.cs", legacy.Select(static match => match.File));
     }
 
+    [Theory]
+    [InlineData("bin/Generated.cs", false)]
+    [InlineData("bin/Generated.cs", true)]
+    [InlineData("obj/Generated.cs", false)]
+    [InlineData("obj/Generated.cs", true)]
+    [InlineData(".git/Generated.cs", false)]
+    [InlineData(".git/Generated.cs", true)]
+    [InlineData(".hg/Generated.cs", false)]
+    [InlineData(".hg/Generated.cs", true)]
+    [InlineData(".svn/Generated.cs", false)]
+    [InlineData(".svn/Generated.cs", true)]
+    [InlineData("src/bin/Debug/Generated.cs", false)]
+    [InlineData("src/bin/Debug/Generated.cs", true)]
+    [InlineData("src/obj/Debug/Generated.cs", false)]
+    [InlineData("src/obj/Debug/Generated.cs", true)]
+    [InlineData("src/.git/metadata/Generated.cs", false)]
+    [InlineData("src/.git/metadata/Generated.cs", true)]
+    [InlineData("src/.hg/metadata/Generated.cs", false)]
+    [InlineData("src/.hg/metadata/Generated.cs", true)]
+    [InlineData("src/.svn/metadata/Generated.cs", false)]
+    [InlineData("src/.svn/metadata/Generated.cs", true)]
+    public void PreviewPolicyRejectsDirectContextInExcludedDirectoriesBeforeOpeningContent(
+        string relativePath,
+        bool absolute)
+    {
+        using var root = TestRoot.Create();
+        root.Write(relativePath, "public sealed class ExcludedContextMarker { }\n");
+        var source = Path.GetFullPath(Path.Combine(root.Path, relativePath));
+        var openedPaths = new List<string>();
+        var engine = new SymbolSearchEngine(
+            root.Path,
+            PreviewSearchPolicy.Instance,
+            new TestStrictPathInspector(),
+            timestamp: static () => 0,
+            openRead: path =>
+            {
+                openedPaths.Add(path);
+                return File.OpenRead(path);
+            });
+        Assert.True(File.Exists(source));
+        Assert.False(File.Exists(Path.Combine(root.Path, ".gitignore")));
+
+        var exception = Record.Exception(
+            () => engine.GetSourceContext(absolute ? source : relativePath, 1, 0));
+
+        Assert.Empty(openedPaths);
+        var failure = Assert.IsType<SearchFailureException>(exception);
+        Assert.Equal(
+            new SearchFailure("preview_search_unreadable", "PREVIEW_SEARCH_UNREADABLE", "get_source_context"),
+            failure.Failure);
+        Assert.DoesNotContain(root.Path, failure.ToString(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("src/Allowed.cs", false)]
+    [InlineData("src/Allowed.cs", true)]
+    [InlineData("src/binocular/objects/.github/Allowed.cs", false)]
+    [InlineData("src/binocular/objects/.github/Allowed.cs", true)]
+    public void PreviewPolicyReadsDirectContextOutsideExcludedDirectories(string relativePath, bool absolute)
+    {
+        using var root = TestRoot.Create();
+        const string text = "  public sealed class AllowedContextMarker { }";
+        root.Write(relativePath, text + "\n");
+        var source = Path.GetFullPath(Path.Combine(root.Path, relativePath));
+        var openedPaths = new List<string>();
+        var engine = new SymbolSearchEngine(
+            root.Path,
+            PreviewSearchPolicy.Instance,
+            new TestStrictPathInspector(),
+            timestamp: static () => 0,
+            openRead: path =>
+            {
+                openedPaths.Add(path);
+                return File.OpenRead(path);
+            });
+
+        var context = engine.GetSourceContext(absolute ? source : relativePath, 1, 0);
+
+        Assert.Equal([source], openedPaths);
+        Assert.Equal(relativePath, context.File);
+        Assert.Equal(1, context.StartLine);
+        Assert.Equal(1, context.EndLine);
+        var line = Assert.Single(context.Lines);
+        Assert.Equal(1, line.Line);
+        Assert.Equal(text, line.Text);
+        Assert.DoesNotContain(root.Path, context.File, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("bin/Generated.cs", false)]
+    [InlineData("bin/Generated.cs", true)]
+    [InlineData("obj/Generated.cs", false)]
+    [InlineData("obj/Generated.cs", true)]
+    [InlineData("src/bin/Debug/Generated.cs", false)]
+    [InlineData("src/bin/Debug/Generated.cs", true)]
+    [InlineData("src/obj/Debug/Generated.cs", false)]
+    [InlineData("src/obj/Debug/Generated.cs", true)]
+    public void LegacyPolicyKeepsDirectContextInBuildOutputDirectories(string relativePath, bool absolute)
+    {
+        using var root = TestRoot.Create();
+        const string text = "public sealed class LegacyBuildContextMarker { }";
+        root.Write(relativePath, text + "\n");
+        var source = Path.GetFullPath(Path.Combine(root.Path, relativePath));
+        var engine = new SymbolSearchEngine(root.Path, LegacySearchPolicy.Instance);
+
+        var context = engine.GetSourceContext(absolute ? source : relativePath, 1, 0);
+
+        Assert.Equal(relativePath, context.File);
+        Assert.Equal(1, context.StartLine);
+        Assert.Equal(1, context.EndLine);
+        var line = Assert.Single(context.Lines);
+        Assert.Equal(1, line.Line);
+        Assert.Equal(text, line.Text);
+    }
+
     [Fact]
     public void PreviewPolicySkipsExcludedReparseDirectoriesBeforeStrictInspection()
     {

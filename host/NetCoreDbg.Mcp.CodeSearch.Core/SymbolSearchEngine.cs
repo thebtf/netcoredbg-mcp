@@ -669,6 +669,11 @@ public sealed class SymbolSearchEngine
             {
                 return;
             }
+
+            if (_settings.ExcludedDirectoryNames.Contains(Path.GetFileName(parent)) || IsAlwaysIgnoredDirectory(parent))
+            {
+                ThrowFailure(SearchFailure.PreviewSearchUnreadable(operation.Tool));
+            }
         }
 
         ThrowFailure(SearchFailure.PreviewPathRefused(operation.Tool));
