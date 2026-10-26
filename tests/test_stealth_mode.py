@@ -921,6 +921,7 @@ internal static class ConnectedProcessProbe
             ["limited_access"] = limitedAccess,
         };
         var allRefused = false;
+        var restoreDebugPrivilege = false;
         try
         {
             original = StartControl(originalId, originalTextId, "ORIGINAL", limitedAccess);
@@ -933,12 +934,41 @@ internal static class ConnectedProcessProbe
             report["replacement_birth_utc"] = replacement.StartTime.ToUniversalTime().ToString("O");
             if (limitedAccess)
             {
+                using var currentProcess = Process.GetProcessById(Environment.ProcessId);
+                var debugPrivilegeBefore = IsDebugPrivilegeEnabled();
+                report["debug_privilege_enabled_before"] = debugPrivilegeBefore;
+                // ProcessManager may enable this privilege; the DACL fixture must not bypass it.
+                if (debugPrivilegeBefore)
+                {
+                    Process.LeaveDebugMode();
+                    restoreDebugPrivilege = true;
+                }
+                var debugPrivilegeAfter = IsDebugPrivilegeEnabled();
+                report["debug_privilege_enabled_during_dacl_probe"] = debugPrivilegeAfter;
+                if (debugPrivilegeAfter)
+                    throw new InvalidOperationException("The owned probe still has enabled SeDebugPrivilege.");
                 using var allAccess = OpenProcess(0x001FFFFF, false, original.Id);
                 var allAccessError = Marshal.GetLastWin32Error();
                 using var limited = OpenProcess(0x00101000, false, original.Id);
+                var limitedError = Marshal.GetLastWin32Error();
+                var waitResult = WaitForSingleObject(limited, 0);
+                var waitError = Marshal.GetLastWin32Error();
+                var exitCodeSucceeded = GetExitCodeProcess(limited, out var exitCode);
+                var exitCodeError = Marshal.GetLastWin32Error();
+                report["limited_access_precondition"] = new JsonObject
+                {
+                    ["all_access_invalid"] = allAccess.IsInvalid,
+                    ["all_access_error"] = allAccessError,
+                    ["limited_access_invalid"] = limited.IsInvalid,
+                    ["limited_access_error"] = limitedError,
+                    ["wait_result"] = waitResult,
+                    ["wait_error"] = waitError,
+                    ["exit_code_succeeded"] = exitCodeSucceeded,
+                    ["exit_code_error"] = exitCodeError,
+                    ["exit_code"] = exitCode,
+                };
                 if (!allAccess.IsInvalid || allAccessError != 5 || limited.IsInvalid ||
-                    WaitForSingleObject(limited, 0) != 258 ||
-                    !GetExitCodeProcess(limited, out var exitCode) || exitCode != 259)
+                    waitResult != 258 || !exitCodeSucceeded || exitCode != 259)
                     throw new InvalidOperationException("The owned DACL did not enforce limited query/synchronize access.");
                 report["all_access_denied"] = true;
                 report["limited_query_and_wait_succeeded"] = true;
@@ -1074,6 +1104,11 @@ internal static class ConnectedProcessProbe
             }
             report["foreground_before"] = foregroundBefore.ToInt64();
             report["foreground_after"] = GetForegroundWindow().ToInt64();
+            if (restoreDebugPrivilege)
+            {
+                Process.EnterDebugMode();
+                report["debug_privilege_restored"] = IsDebugPrivilegeEnabled();
+            }
             Console.WriteLine(report.ToJsonString());
         }
         if (GetForegroundWindow() != foregroundBefore)
@@ -1220,6 +1255,34 @@ internal static class ConnectedProcessProbe
         return placementValid && activations == 0 && close.IsCompleted ? 0 : 2;
     }
 
+    private static bool IsDebugPrivilegeEnabled()
+    {
+        using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+        if (!LookupPrivilegeValue(null, "SeDebugPrivilege", out var debugLuid))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        _ = GetTokenInformation(identity.AccessToken, 3, IntPtr.Zero, 0, out var length);
+        if (length <= 0)
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        var buffer = Marshal.AllocHGlobal(length);
+        try
+        {
+            if (!GetTokenInformation(identity.AccessToken, 3, buffer, length, out _))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            var count = Marshal.ReadInt32(buffer);
+            for (var index = 0; index < count; index++)
+            {
+                var offset = 4 + index * 12;
+                if (Marshal.ReadInt64(buffer, offset) == debugLuid)
+                    return (Marshal.ReadInt32(buffer, offset + 8) & 2) != 0;
+            }
+            return false;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
     private static void RestrictOwnedProcessAccess()
     {
         if (!ConvertStringSecurityDescriptorToSecurityDescriptor(
@@ -1236,6 +1299,13 @@ internal static class ConnectedProcessProbe
         }
     }
 
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool LookupPrivilegeValue(string? system, string name, out long luid);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetTokenInformation(
+        SafeAccessTokenHandle token, int informationClass, IntPtr buffer, int length, out int required);
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(
@@ -1337,6 +1407,9 @@ internal static class ConnectedProcessProbe
     }
     assert result["runtime"].startswith("8.")
     if limited_access:
+        assert result["debug_privilege_enabled_during_dacl_probe"] is False
+        if result["debug_privilege_enabled_before"]:
+            assert result["debug_privilege_restored"] is True
         assert result["all_access_denied"] is True
         assert result["limited_query_and_wait_succeeded"] is True
 

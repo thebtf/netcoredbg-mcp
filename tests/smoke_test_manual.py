@@ -60,10 +60,6 @@ AVALONIA_DLL = os.path.join(
 GUI_ENABLED = os.path.exists(DLL)
 WPF_GUI_ENABLED = os.path.exists(WPF_DLL)
 AVALONIA_GUI_ENABLED = os.path.exists(AVALONIA_DLL)
-if not GUI_ENABLED:
-    # net8.0-windows build required for GUI scenarios; skip GUI tests if missing
-    print(f"WARNING: {DLL} not found. GUI scenarios will be skipped.")
-    print("Build with: dotnet build tests/fixtures/SmokeTestApp")
 SOURCE = os.path.join(BASE, "tests", "fixtures", "SmokeTestApp", "Program.cs")
 
 passed = 0
@@ -7890,6 +7886,10 @@ async def run_all(
     except ValueError as exc:
         print(f"ERROR: {exc}")
         return False
+
+    if not GUI_ENABLED:
+        print(f"WARNING: {DLL} not found. GUI scenarios will be skipped.")
+        print("Build with: dotnet build tests/fixtures/SmokeTestApp")
 
     if not os.path.exists(DLL) and selected_names is None and include_extended_gui:
         print("ERROR: Build SmokeTestApp first:")

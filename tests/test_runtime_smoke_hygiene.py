@@ -297,6 +297,57 @@ def test_manual_smoke_list_respects_extended_gui_flag() -> None:
     )
 
 
+@pytest.mark.parametrize("mode", ["default", "extended", "import"])
+def test_manual_smoke_inventory_is_quiet_without_built_fixtures(mode: str) -> None:
+    arguments = ["tests/smoke_test_manual.py", "--list"]
+    if mode == "extended":
+        arguments.append("--extended-gui")
+    run_name = "smoke_inventory_import" if mode == "import" else "__main__"
+    script = f"""import os, runpy, sys
+from unittest.mock import patch
+real_exists = os.path.exists
+fixture_names = {{'SmokeTestApp.dll', 'WpfSmokeApp.dll', 'AvaloniaSmokeApp.dll'}}
+sys.argv = {arguments!r}
+with patch('os.path.exists', side_effect=lambda path: False if os.path.basename(os.fspath(path)) in fixture_names else real_exists(path)):
+    module = runpy.run_path('tests/smoke_test_manual.py', run_name={run_name!r})
+    assert not module['GUI_ENABLED'] and not module['WPF_GUI_ENABLED'] and not module['AVALONIA_GUI_ENABLED']
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "WARNING:" not in result.stdout
+    assert "Build with:" not in result.stdout
+    if mode == "import":
+        assert result.stdout == ""
+    elif mode == "default":
+        assert result.stdout.strip() == "1. Two-Application Core Smoke"
+    else:
+        assert result.stdout.strip()
+        assert all(line.partition(". ")[0].isdigit() for line in result.stdout.splitlines())
+        assert "UI Focused Evidence" in result.stdout
+        assert "Installed Public Capture Regression" in result.stdout
+        assert "WPF UI Grid Rows Alias Fixture Replay" not in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_manual_smoke_execution_retains_missing_fixture_diagnostic(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(smoke_test_manual, "GUI_ENABLED", False)
+    monkeypatch.setattr(smoke_test_manual, "_resolve_scenarios", lambda *args, **kwargs: [])
+
+    assert await smoke_test_manual.run_all() is True
+
+    output = capsys.readouterr().out
+    assert f"WARNING: {smoke_test_manual.DLL} not found. GUI scenarios will be skipped." in output
+    assert "Build with: dotnet build tests/fixtures/SmokeTestApp" in output
+
+
 def test_manual_smoke_exact_selection_resolves_extended_inventory() -> None:
     selected = smoke_test_manual._resolve_scenarios({"WPF V2 State Oracle Runtime Smoke"})
 
