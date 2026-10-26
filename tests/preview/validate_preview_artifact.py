@@ -1,4 +1,4 @@
-"""Seal A1 retained-artifact or fresh public-release consumer proof.
+"""Seal candidate-bound A1 or A2 retained/public artifact consumer proof.
 
 Both modes resolve Candidate Identity and Release Gate Catalog metadata from a
 closed Actions reference bundle. Candidate mode downloads the retained payload;
@@ -147,7 +147,7 @@ def _require_candidate_file_reference(
         _refuse(f"{name} reference does not bind the downloaded candidate")
 
 
-def _fixture_identity(fixture_root: Path) -> dict[str, str]:
+def _fixture_identity(fixture_root: Path, contract_id: str) -> dict[str, str]:
     files = sorted(
         path for path in fixture_root.rglob("*") if path.is_file() and not path.is_symlink()
     )
@@ -161,7 +161,7 @@ def _fixture_identity(fixture_root: Path) -> dict[str, str]:
         digest.update(relative)
         digest.update(len(contents).to_bytes(8, "big"))
         digest.update(contents)
-    catalog = consumer_proof_scenario_catalog()
+    catalog = consumer_proof_scenario_catalog(contract_id)
     return {
         "fixture_id": "preview-search-fixture-v1",
         "fixture_sha256": digest.hexdigest(),
@@ -212,7 +212,9 @@ class JsonRpcProcess:
         except OSError:
             _refuse("verified retained executable did not start")
 
-    def request(self, request_id: int, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
+    def request(
+        self, request_id: int | str, method: str, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
         if self._process.stdin is None or self._process.stdout is None:
             _refuse("preview process stdio is unavailable")
         request = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
@@ -224,6 +226,8 @@ class JsonRpcProcess:
         line = _readline_with_timeout(self._process.stdout, 5)
         if not line:
             _refuse("preview process ended before a JSON-RPC response")
+        if len(line.rstrip(b"\r\n")) > 256 * 1024:
+            _refuse("preview process emitted an oversized complete response frame")
         try:
             response = json.loads(line.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -274,16 +278,60 @@ def _result(response: Mapping[str, Any]) -> Mapping[str, Any]:
     return result
 
 
-def _closed_error(result: Mapping[str, Any], kind: str, error: str) -> bool:
+def _closed_error(
+    result: Mapping[str, Any], kind: str, error: str, tool: str = "find_code_symbol"
+) -> bool:
     return (
         result.get("resultType") == "complete"
         and result.get("isError") is True
-        and result.get("structuredContent")
-        == {"kind": kind, "error": error, "tool": "find_code_symbol"}
+        and result.get("structuredContent") == {"kind": kind, "error": error, "tool": tool}
     )
 
 
-def _run_valid_journey(executable_path: Path, fixture_root: Path) -> None:
+def _load_a2_tool_schemas() -> Mapping[str, Any]:
+    frozen = _artifact._load_json_object(
+        _read_regular_bytes(
+            Path(__file__).with_name("a2-tool-schemas.json"), "frozen A2 tool schemas"
+        ),
+        "frozen A2 tool schemas",
+    )
+    _artifact._expect_mapping(frozen, "frozen A2 tool schemas", _artifact._A2_TOOLS)
+    return frozen
+
+
+def _validate_a2_catalog_schemas(tools: Sequence[Mapping[str, Any]]) -> None:
+    frozen = _load_a2_tool_schemas()
+    for tool in tools:
+        annotations = tool.get("annotations")
+        if (
+            not isinstance(annotations, Mapping)
+            or annotations.get("readOnlyHint") is not True
+            or annotations.get("idempotentHint") is not True
+            or annotations.get("openWorldHint") is not False
+        ):
+            _refuse("read-only-family catalog is not closed and read-only")
+        for field in ("inputSchema", "outputSchema"):
+            if _canonical_json_bytes(tool.get(field)) != _canonical_json_bytes(
+                frozen[tool["name"]][field]
+            ):
+                _refuse("A2 advertised tool schema differs from the frozen consumer contract")
+
+
+def _validate_schema_value(value: Any, schema: Mapping[str, Any]) -> None:
+    try:
+        from jsonschema import Draft202012Validator, SchemaError, ValidationError
+    except ImportError:
+        _refuse("A2 consumer proof requires jsonschema from the installed project dependencies")
+    try:
+        Draft202012Validator.check_schema(schema)
+        Draft202012Validator(schema).validate(value)
+    except (SchemaError, ValidationError):
+        _refuse("native read-only value violates the advertised tool schema")
+
+
+def _run_valid_journey(
+    executable_path: Path, fixture_root: Path, expected_tools: Sequence[str] = _artifact._A1_TOOLS
+) -> None:
     process = JsonRpcProcess(executable_path, fixture_root)
     try:
         discovery = _result(process.request(1, "server/discover", {"_meta": _REQUEST_META}))
@@ -294,10 +342,16 @@ def _run_valid_journey(executable_path: Path, fixture_root: Path) -> None:
         tools = catalog.get("tools")
         if (
             not isinstance(tools, list)
-            or len(tools) != 1
-            or tools[0].get("name") != "find_code_symbol"
+            or any(not isinstance(tool, Mapping) for tool in tools)
+            or [tool.get("name") for tool in tools] != list(expected_tools)
         ):
-            _refuse("tools/list did not expose exactly find_code_symbol")
+            _refuse("tools/list did not expose the candidate's exact tool catalog")
+        a2_journey = tuple(expected_tools) == _artifact._A2_TOOLS
+        if a2_journey:
+            _validate_a2_catalog_schemas(tools)
+            _validate_schema_value(
+                {"name": "PreviewMarker", "kind": "class"}, tools[0]["inputSchema"]
+            )
         call = _result(
             process.request(
                 3,
@@ -326,9 +380,424 @@ def _run_valid_journey(executable_path: Path, fixture_root: Path) -> None:
             or first.get("kind") != "class"
         ):
             _refuse("valid find_code_symbol journey did not return the fixture marker")
+        if a2_journey:
+            _expect_success(
+                call,
+                {
+                    "kind": "find_code_symbol_success",
+                    "results": [
+                        {
+                            "file": "Markers.cs",
+                            "line": 3,
+                            "name": "PreviewMarker",
+                            "kind": "class",
+                            "context": "public sealed class PreviewMarker { }",
+                        }
+                    ],
+                },
+                output_schema=tools[0]["outputSchema"],
+            )
+            reference_arguments = {"name": "PreviewMarker"}
+            _validate_schema_value(reference_arguments, tools[1]["inputSchema"])
+            _expect_success(
+                _call(process, 4, "find_code_references", reference_arguments),
+                {
+                    "kind": "find_code_references_success",
+                    "results": [
+                        {
+                            "file": "Markers.cs",
+                            "line": 3,
+                            "context": "public sealed class PreviewMarker { }",
+                        },
+                        {
+                            "file": "PreviewReferences.cs",
+                            "line": 5,
+                            "context": "public PreviewMarker Value { get; } = new PreviewMarker();",
+                        },
+                    ],
+                },
+                output_schema=tools[1]["outputSchema"],
+            )
+            context_arguments = {"file": "PreviewReferences.cs", "line": 5, "radius": 1}
+            _validate_schema_value(context_arguments, tools[2]["inputSchema"])
+            _expect_success(
+                _call(
+                    process,
+                    5,
+                    "get_source_context",
+                    context_arguments,
+                ),
+                {
+                    "kind": "get_source_context_success",
+                    "file": "PreviewReferences.cs",
+                    "start_line": 4,
+                    "end_line": 6,
+                    "lines": [
+                        {"line": 4, "text": "{"},
+                        {
+                            "line": 5,
+                            "text": (
+                                "    public PreviewMarker Value { get; } = new PreviewMarker();"
+                            ),
+                        },
+                        {"line": 6, "text": "}"},
+                    ],
+                },
+                output_schema=tools[2]["outputSchema"],
+            )
         process.close_eof()
     finally:
         process.abort()
+
+
+def _call(
+    process: JsonRpcProcess, request_id: int | str, tool: str, arguments: Any
+) -> Mapping[str, Any]:
+    return _result(
+        process.request(
+            request_id,
+            "tools/call",
+            {
+                "name": tool,
+                "arguments": arguments,
+                "_meta": _REQUEST_META,
+            },
+        )
+    )
+
+
+def _expect_success(
+    result: Mapping[str, Any],
+    expected: Mapping[str, Any],
+    *,
+    output_schema: Mapping[str, Any] | None = None,
+) -> None:
+    content = result.get("content")
+    if (
+        result.get("resultType") != "complete"
+        or result.get("isError") is not False
+        or result.get("structuredContent") != expected
+        or not isinstance(content, list)
+        or len(content) != 1
+        or content[0].get("type") != "text"
+        or json.loads(content[0].get("text", "null")) != expected
+    ):
+        _refuse("native read-only result values or text/structured parity are incorrect")
+    if output_schema is None:
+        tool = expected.get("kind", "").removesuffix("_success")
+        if tool not in _artifact._A2_TOOLS:
+            _refuse("native read-only success has no frozen output schema")
+        output_schema = _load_a2_tool_schemas()[tool]["outputSchema"]
+    if not isinstance(output_schema, Mapping):
+        _refuse("native read-only output schema must be an object")
+    _validate_schema_value(result["structuredContent"], output_schema)
+
+
+def _expect_failure(result: Mapping[str, Any], tool: str, error: str) -> None:
+    content = result.get("content")
+    if (
+        not _closed_error(result, error.lower(), error, tool)
+        or not isinstance(content, list)
+        or len(content) != 1
+        or content[0].get("type") != "text"
+        or json.loads(content[0].get("text", "null")) != result["structuredContent"]
+    ):
+        _refuse("native read-only refusal leaked partial output or named the wrong route")
+
+
+def _run_family_values(executable_path: Path, scratch: Path) -> None:
+    root = scratch / "family-values"
+    root.mkdir()
+    lines = [
+        "namespace Family;",
+        "public sealed class PreviewMarker { }",
+        "public sealed class Consumer {",
+        "    private PreviewMarker _marker = new();",
+        "    // PreviewMarkerSuffix is not an identifier match.",
+        "}",
+    ]
+    (root / "Family.cs").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (root / "nested").mkdir()
+    (root / "nested" / "Only.cs").write_text("    // unique basename\n", encoding="utf-8")
+    window_lines = [f"    // window {line:02}" for line in range(1, 31)]
+    (root / "Window.cs").write_text("\n".join(window_lines) + "\n", encoding="utf-8")
+    process = JsonRpcProcess(executable_path, root)
+    try:
+        reference_rows = [
+            {"file": "Family.cs", "line": line, "context": lines[line - 1].strip()}
+            for line in (2, 4)
+        ]
+        for index, arguments in enumerate(
+            (
+                {"name": "PreviewMarker"},
+                {"name": "PreviewMarker", "max_results": 1000},
+                {"name": "PreviewMarker", "max_results": 1},
+                {"name": "private PreviewMarker"},
+            )
+        ):
+            expected = (
+                reference_rows[:1]
+                if index == 2
+                else reference_rows[1:]
+                if index == 3
+                else reference_rows
+            )
+            _expect_success(
+                _call(process, 110 + index, "find_code_references", arguments),
+                {
+                    "kind": "find_code_references_success",
+                    "results": expected,
+                },
+            )
+        for index, (arguments, start, end) in enumerate(
+            (
+                ({"file": "Family.cs", "line": 4}, 1, 6),
+                ({"file": "Family.cs", "line": 4, "radius": 0}, 4, 4),
+                ({"file": "Family.cs", "line": 1, "radius": 2147483646}, 1, 6),
+                ({"file": str(root / "Family.cs"), "line": 6, "radius": 1}, 5, 6),
+            )
+        ):
+            _expect_success(
+                _call(process, 120 + index, "get_source_context", arguments),
+                {
+                    "kind": "get_source_context_success",
+                    "file": "Family.cs",
+                    "start_line": start,
+                    "end_line": end,
+                    "lines": [
+                        {"line": line, "text": lines[line - 1]} for line in range(start, end + 1)
+                    ],
+                },
+            )
+        _expect_success(
+            _call(process, 124, "get_source_context", {"file": "Only.cs", "line": 1}),
+            {
+                "kind": "get_source_context_success",
+                "file": "nested/Only.cs",
+                "start_line": 1,
+                "end_line": 1,
+                "lines": [{"line": 1, "text": "    // unique basename"}],
+            },
+        )
+        _expect_failure(
+            _call(process, 125, "get_source_context", {"file": "Family.cs", "line": 7}),
+            "get_source_context",
+            "INVALID_TOOL_ARGUMENTS",
+        )
+        _expect_success(
+            _call(process, 126, "get_source_context", {"file": "Window.cs", "line": 15}),
+            {
+                "kind": "get_source_context_success",
+                "file": "Window.cs",
+                "start_line": 5,
+                "end_line": 25,
+                "lines": [{"line": line, "text": window_lines[line - 1]} for line in range(5, 26)],
+            },
+        )
+        _expect_failure(
+            _call(
+                process,
+                127,
+                "get_source_context",
+                {"file": "Family.cs", "line": 1, "radius": 2147483647},
+            ),
+            "get_source_context",
+            "INVALID_TOOL_ARGUMENTS",
+        )
+        process.close_eof()
+    finally:
+        process.abort()
+
+
+def _run_family_invalid_inputs(executable_path: Path, fixture_root: Path) -> None:
+    cases = {
+        "find_code_references": [
+            None,
+            [],
+            {},
+            {"name": None},
+            {"name": True},
+            {"name": " "},
+            {"name": "x" * 257},
+            {"name": "😀" * 129},
+            {"name": "PreviewMarker", "extra": True},
+            *(
+                {"name": "PreviewMarker", "max_results": value}
+                for value in (None, False, 0, -1, 1.5, "2", 2147483648)
+            ),
+        ],
+        "get_source_context": [
+            None,
+            [],
+            {},
+            {"file": None, "line": 1},
+            {"file": " ", "line": 1},
+            {"file": True, "line": 1},
+            {"file": "Markers.cs"},
+            *(
+                {"file": "Markers.cs", "line": value}
+                for value in (None, True, 0, -1, 1.5, "1", 2147483648)
+            ),
+            *(
+                {"file": "Markers.cs", "line": 1, "radius": value}
+                for value in (None, False, -1, 1.5, "1", 2147483648)
+            ),
+            {"file": "Markers.cs", "line": 1, "extra": True},
+        ],
+    }
+    process = JsonRpcProcess(executable_path, fixture_root)
+    try:
+        request_id = 140
+        for tool, invalid_arguments in cases.items():
+            for arguments in invalid_arguments:
+                _expect_failure(
+                    _call(process, request_id, tool, arguments), tool, "INVALID_TOOL_ARGUMENTS"
+                )
+                request_id += 1
+        _expect_success(
+            _call(process, request_id, "find_code_references", {"name": "NotPresent"}),
+            {
+                "kind": "find_code_references_success",
+                "results": [],
+            },
+        )
+        process.close_eof()
+    finally:
+        process.abort()
+
+
+def _run_family_path_refusals(executable_path: Path, scratch: Path) -> None:
+    root = scratch / "family-paths"
+    root.mkdir()
+    (root / "Allowed.cs").write_text("// allowed\n", encoding="utf-8")
+    (root / "Unsupported.txt").write_text("// not source\n", encoding="utf-8")
+    (root / ".gitignore").write_text("Ignored.cs\n", encoding="utf-8")
+    (root / "Ignored.cs").write_text("// ignored\n", encoding="utf-8")
+    for directory in ("bin", "obj", ".git", ".hg", ".svn", "left", "right"):
+        (root / directory).mkdir()
+        (root / directory / "Hidden.cs").write_text("// must not leak\n", encoding="utf-8")
+    process = JsonRpcProcess(executable_path, root)
+    try:
+        paths = ["Unsupported.txt", "Ignored.cs", "Missing.cs"]
+        for directory in ("bin", "obj", ".git", ".hg", ".svn"):
+            paths.extend((f"{directory}/Hidden.cs", str(root / directory / "Hidden.cs")))
+        for index, path in enumerate(paths):
+            _expect_failure(
+                _call(process, 200 + index, "get_source_context", {"file": path, "line": 1}),
+                "get_source_context",
+                "PREVIEW_SEARCH_UNREADABLE",
+            )
+        _expect_failure(
+            _call(process, 220, "get_source_context", {"file": "Hidden.cs", "line": 1}),
+            "get_source_context",
+            "INVALID_TOOL_ARGUMENTS",
+        )
+        outside = scratch / "Outside.cs"
+        outside.write_text("// private outside marker\n", encoding="utf-8")
+        for index, path in enumerate(("../Outside.cs", str(outside))):
+            _expect_failure(
+                _call(process, 221 + index, "get_source_context", {"file": path, "line": 1}),
+                "get_source_context",
+                "PREVIEW_PATH_REFUSED",
+            )
+        process.close_eof()
+    finally:
+        process.abort()
+    try:
+        (root / "Escape.cs").symlink_to(outside)
+    except OSError:
+        _refuse("required read-only-family reparse fixture is unavailable")
+    process = JsonRpcProcess(executable_path, root)
+    try:
+        for index, (tool, arguments) in enumerate(
+            (
+                ("find_code_references", {"name": "allowed"}),
+                ("get_source_context", {"file": "Escape.cs", "line": 1}),
+            )
+        ):
+            _expect_failure(
+                _call(process, 225 + index, tool, arguments), tool, "PREVIEW_PATH_REFUSED"
+            )
+        process.close_eof()
+    finally:
+        process.abort()
+    _run_locked_file_matrix(executable_path, scratch, tools=_artifact._A2_TOOLS)
+
+
+def _run_family_budgets(executable_path: Path, scratch: Path) -> None:
+    for count in (128, 129):
+        root = scratch / f"family-budget-{count}"
+        root.mkdir()
+        (root / "Matches.cs").write_text("// BudgetMarker\n" * count, encoding="utf-8")
+        rows = [
+            {"file": "Matches.cs", "line": line, "context": "// BudgetMarker"}
+            for line in range(1, count + 1)
+        ]
+        process = JsonRpcProcess(executable_path, root)
+        try:
+            for index, limit in enumerate((None, 128, 1000, 2147483647, 127)):
+                arguments: dict[str, Any] = {"name": "BudgetMarker"}
+                if limit is not None:
+                    arguments["max_results"] = limit
+                result = _call(process, 240 + index, "find_code_references", arguments)
+                if count == 129 and limit != 127:
+                    _expect_failure(
+                        result, "find_code_references", "PREVIEW_SEARCH_BUDGET_EXCEEDED"
+                    )
+                else:
+                    _expect_success(
+                        result,
+                        {
+                            "kind": "find_code_references_success",
+                            "results": rows[:127] if limit == 127 else rows,
+                        },
+                    )
+            process.close_eof()
+        finally:
+            process.abort()
+    root = scratch / "family-context-budget"
+    root.mkdir()
+    (root / "Oversized.cs").write_text("//" + "x" * (1024 * 1024), encoding="utf-8")
+    process = JsonRpcProcess(executable_path, root)
+    try:
+        for index, (tool, arguments) in enumerate(
+            (
+                ("find_code_references", {"name": "NoMatch"}),
+                ("get_source_context", {"file": "Oversized.cs", "line": 1}),
+            )
+        ):
+            _expect_failure(
+                _call(process, 250 + index, tool, arguments), tool, "PREVIEW_SEARCH_BUDGET_EXCEEDED"
+            )
+        process.close_eof()
+    finally:
+        process.abort()
+
+
+def _run_family_frames(executable_path: Path, scratch: Path) -> None:
+    for tool, count, line, arguments in (
+        ("find_code_references", 128, "// FrameMarker " + "\x01" * 490, {"name": "FrameMarker"}),
+        (
+            "get_source_context",
+            400,
+            "//" + "x" * 510,
+            {"file": "Frame.cs", "line": 1, "radius": 399},
+        ),
+    ):
+        root = scratch / f"family-frame-{tool}"
+        root.mkdir()
+        (root / "Frame.cs").write_text((line + "\n") * count, encoding="utf-8")
+        process = JsonRpcProcess(executable_path, root)
+        try:
+            _expect_failure(
+                _call(process, "frame-" + "i" * 8192, tool, arguments),
+                tool,
+                "PREVIEW_SEARCH_BUDGET_EXCEEDED",
+            )
+            _expect_failure(_call(process, 260, tool, {}), tool, "INVALID_TOOL_ARGUMENTS")
+            process.close_eof()
+        finally:
+            process.abort()
 
 
 def _run_launch_refusal(executable_path: Path, arguments: Sequence[str]) -> None:
@@ -463,10 +932,14 @@ def _run_tool_input_matrix(executable_path: Path, fixture_root: Path) -> None:
         process.abort()
 
 
-def _run_locked_file_matrix(executable_path: Path, scratch: Path) -> None:
+def _run_locked_file_matrix(
+    executable_path: Path, scratch: Path, *, tools: Sequence[str] = _artifact._A1_TOOLS
+) -> None:
     if os.name != "nt":
         _refuse("file-system denial proof requires Windows")
-    root = scratch / "locked-file"
+    root = scratch / (
+        "locked-file" if tuple(tools) == _artifact._A1_TOOLS else "family-locked-file"
+    )
     root.mkdir()
     (root / "Marker.cs").write_text("public sealed class PartialMarker { }\n", encoding="utf-8")
     locked = root / "ZLocked.cs"
@@ -478,19 +951,17 @@ def _run_locked_file_matrix(executable_path: Path, scratch: Path) -> None:
     try:
         process = JsonRpcProcess(executable_path, root)
         try:
-            result = _result(
-                process.request(
-                    60,
-                    "tools/call",
-                    {
-                        "name": "find_code_symbol",
-                        "arguments": {"name": "PartialMarker", "kind": "class"},
-                        "_meta": _REQUEST_META,
-                    },
+            for index, tool in enumerate(tools):
+                arguments = (
+                    {"file": "ZLocked.cs", "line": 1}
+                    if tool == "get_source_context"
+                    else {
+                        "name": "PartialMarker",
+                        **({"kind": "class"} if tool == "find_code_symbol" else {}),
+                    }
                 )
-            )
-            if not _closed_error(result, "preview_search_unreadable", "PREVIEW_SEARCH_UNREADABLE"):
-                _refuse("locked source did not produce PREVIEW_SEARCH_UNREADABLE")
+                result = _call(process, 60 + index, tool, arguments)
+                _expect_failure(result, tool, "PREVIEW_SEARCH_UNREADABLE")
             process.close_eof()
         finally:
             process.abort()
@@ -667,6 +1138,7 @@ def _run_matrix(
     fixture_root: Path,
     scratch: Path,
     rollback: Callable[[], None],
+    contract_id: str = _artifact._A1_CONSUMER_CONTRACT_ID,
 ) -> list[dict[str, Any]]:
     handlers: dict[str, Callable[[], None]] = {
         "launch-cli-invalid-root": lambda: _run_launch_matrix(
@@ -683,11 +1155,22 @@ def _run_matrix(
         "transport-eof-cancellation": lambda: _run_transport_matrix(
             executable_path, fixture_root, scratch
         ),
-        "valid-discovery-list-call": lambda: _run_valid_journey(executable_path, fixture_root),
+        "valid-discovery-list-call": lambda: _run_valid_journey(
+            executable_path, fixture_root, _artifact._consumer_contract(contract_id)["tools"]
+        ),
+        "readonly-family-values": lambda: _run_family_values(executable_path, scratch),
+        "readonly-family-invalid-input": lambda: _run_family_invalid_inputs(
+            executable_path, fixture_root
+        ),
+        "readonly-family-path-read-refusals": lambda: _run_family_path_refusals(
+            executable_path, scratch
+        ),
+        "readonly-family-result-budgets": lambda: _run_family_budgets(executable_path, scratch),
+        "readonly-family-frame-refusals": lambda: _run_family_frames(executable_path, scratch),
         "rollback-python-default": rollback,
     }
     results: list[dict[str, Any]] = []
-    for scenario in consumer_proof_scenario_catalog()["scenarios"]:
+    for scenario in consumer_proof_scenario_catalog(contract_id)["scenarios"]:
         handler = handlers.get(scenario["scenario_id"])
         if handler is None:
             _refuse("closed consumer matrix has no runner")
@@ -739,6 +1222,8 @@ def run_candidate(arguments: argparse.Namespace) -> Mapping[str, Any]:
         )
         validated_identity = assemble_candidate_identity(identity)
         candidate = validated_identity["candidate"]
+        consumer_contract = _artifact._candidate_consumer_contract(candidate)
+        contract_id = consumer_contract["scenario_catalog_id"]
         manifest_binding = candidate["preview_manifest"]
         _require_candidate_file_reference(
             references.archive, manifest_binding["archive_reference"], "archive"
@@ -749,12 +1234,6 @@ def run_candidate(arguments: argparse.Namespace) -> Mapping[str, Any]:
         if remote:
             _artifact._verified_raw_candidate(
                 validated_identity, identity_bytes, references.candidate_identity.as_mapping()
-            )
-        else:
-            archive_path, manifest_path = downloader.download_payload(
-                references.archive,
-                references.manifest,
-                candidate["build"]["artifact"]["sha256"],
             )
         catalog_path = downloader.download_file(references.release_gate_catalog)
         catalog_bytes = _read_regular_bytes(catalog_path, "downloaded release gate catalog")
@@ -769,6 +1248,11 @@ def run_candidate(arguments: argparse.Namespace) -> Mapping[str, Any]:
                 candidate, arguments.release_id, fresh / "public-assets"
             )
         else:
+            archive_path, manifest_path = downloader.download_payload(
+                references.archive,
+                references.manifest,
+                candidate["build"]["artifact"]["sha256"],
+            )
             download_origin = {
                 "repository": candidate["build"]["repository"],
                 "workflow_path": ".github/workflows/stateless-preview.yml",
@@ -806,10 +1290,11 @@ def run_candidate(arguments: argparse.Namespace) -> Mapping[str, Any]:
             fixture_root,
             matrix_root,
             run_rollback,
+            contract_id,
         )
         if rollback_result is None:
             _refuse("consumer matrix did not run the unchanged Python rollback oracle")
-        catalog_definition = consumer_proof_scenario_catalog()
+        catalog_definition = consumer_proof_scenario_catalog(contract_id)
         scenario_ids = [scenario["scenario_id"] for scenario in catalog_definition["scenarios"]]
         receipt = {
             "receipt_schema_version": "1.0",
@@ -827,7 +1312,7 @@ def run_candidate(arguments: argparse.Namespace) -> Mapping[str, Any]:
                 "executable_matches_manifest": True,
                 "inherited_verifier_equations_pass": True,
             },
-            "fixture_identity": _fixture_identity(fixture_root),
+            "fixture_identity": _fixture_identity(fixture_root, contract_id),
             "scenario_matrix": {
                 "required_scenario_ids": scenario_ids,
                 "executed_scenario_ids": scenario_ids,
@@ -840,7 +1325,7 @@ def run_candidate(arguments: argparse.Namespace) -> Mapping[str, Any]:
             },
             "runtime_results": {
                 "explicit_project_argument": True,
-                "catalog": ["find_code_symbol"],
+                "catalog": consumer_contract["tools"],
                 "catalog_is_closed": True,
                 "valid_journey_passed": True,
                 "stdout_jsonrpc_only": True,

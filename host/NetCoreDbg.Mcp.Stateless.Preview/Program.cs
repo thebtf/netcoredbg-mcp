@@ -82,14 +82,15 @@ internal static class Program
                         && (HasInvalidToolCallName(invalidToolArgumentsRequest)
                             || HasInvalidKnownToolArguments(invalidToolArgumentsRequest)))
                     {
-                        if (!BoundedResponseFrameSerializer.FitsInvalidToolArgumentsResponseWithinLimit(invalidToolArgumentsRequest.Id))
+                        var tool = KnownToolOrDefault(invalidToolArgumentsRequest);
+                        if (!BoundedResponseFrameSerializer.FitsInvalidToolArgumentsResponseWithinLimit(invalidToolArgumentsRequest.Id, tool))
                         {
                             _ = context.Server.DisposeAsync().AsTask();
                             return;
                         }
 
                         await context.Server.SendMessageAsync(
-                            InvalidToolArgumentsResponse(invalidToolArgumentsRequest.Id),
+                            InvalidToolArgumentsResponse(invalidToolArgumentsRequest.Id, tool),
                             cancellationToken).ConfigureAwait(false);
                         return;
                     }
@@ -168,11 +169,11 @@ internal static class Program
         await host.RunAsync().ConfigureAwait(false);
     }
 
-    private static JsonRpcResponse InvalidToolArgumentsResponse(RequestId id) => new()
+    private static JsonRpcResponse InvalidToolArgumentsResponse(RequestId id, string tool = PreviewToolCatalog.FindCodeSymbol) => new()
     {
         Id = id,
         Result = JsonSerializer.SerializeToNode(
-            PreviewToolHandler.InvalidToolArguments(),
+            PreviewToolHandler.InvalidToolArguments(tool),
             McpJsonUtilities.DefaultOptions),
     };
 
@@ -195,31 +196,61 @@ internal static class Program
             || request.Params is not JsonObject parameters
             || parameters["name"] is not JsonValue toolName
             || !toolName.TryGetValue<string>(out var tool)
-            || !string.Equals(tool, PreviewToolCatalog.FindCodeSymbol, StringComparison.Ordinal))
+            || !PreviewToolCatalog.IsKnownTool(tool))
         {
             return false;
         }
 
-        if (parameters["arguments"] is not JsonObject arguments
-            || arguments.Count is < 1 or > 2
-            || arguments.Any(static entry => entry.Key is not "name" and not "kind")
-            || arguments["name"] is not JsonValue name
-            || !name.TryGetValue<string>(out var value)
-            || string.IsNullOrWhiteSpace(value)
-            || value.Length > 256)
+        if (parameters["arguments"] is not JsonObject arguments)
         {
             return true;
         }
 
-        if (arguments["kind"] is null)
+        switch (tool)
         {
-            return false;
+            case PreviewToolCatalog.FindCodeSymbol:
+                if (arguments.Count is < 1 or > 2
+                    || arguments.Any(static entry => entry.Key is not "name" and not "kind")
+                    || !HasSearchName(arguments))
+                {
+                    return true;
+                }
+                return arguments["kind"] is not null
+                    && (arguments["kind"] is not JsonValue kind
+                        || !kind.TryGetValue<string>(out var kindValue)
+                        || kindValue is not "class" and not "method" and not "property" and not "field");
+            case PreviewToolCatalog.FindCodeReferences:
+                return arguments.Count is < 1 or > 2
+                    || arguments.Any(static entry => entry.Key is not "name" and not "max_results")
+                    || !HasSearchName(arguments)
+                    || (arguments.ContainsKey("max_results") && !HasInteger(arguments, "max_results", 1));
+            case PreviewToolCatalog.GetSourceContext:
+                return arguments.Count is < 2 or > 3
+                    || arguments.Any(static entry => entry.Key is not "file" and not "line" and not "radius")
+                    || !HasNonBlankString(arguments, "file")
+                    || !HasInteger(arguments, "line", 1)
+                    || (arguments.ContainsKey("radius") && !HasInteger(arguments, "radius", 0));
+            default:
+                return false;
         }
-
-        return arguments["kind"] is not JsonValue kind
-            || !kind.TryGetValue<string>(out var kindValue)
-            || kindValue is not "class" and not "method" and not "property" and not "field";
     }
+
+    private static bool HasSearchName(JsonObject arguments) =>
+        arguments["name"] is JsonValue name
+        && name.TryGetValue<string>(out var value)
+        && !string.IsNullOrWhiteSpace(value)
+        && value.Length <= 256;
+
+    private static bool HasInteger(JsonObject arguments, string name, int minimum) =>
+        arguments[name] is JsonValue value && value.TryGetValue<int>(out var number) && number >= minimum;
+
+    private static string KnownToolOrDefault(JsonRpcRequest request) =>
+        request.Params is JsonObject parameters
+        && parameters["name"] is JsonValue name
+        && name.TryGetValue<string>(out var tool)
+        && PreviewToolCatalog.IsKnownTool(tool)
+            ? tool!
+            : PreviewToolCatalog.FindCodeSymbol;
 
     private static bool IsExcludedMethod(JsonRpcRequest request) =>
         request.Method != "server/discover"
@@ -265,7 +296,7 @@ internal static class Program
             return BoundedResponseFrameSerializer.FitsUnknownToolResponseWithinLimit(request.Id, tool, out _);
         }
 
-        return BoundedResponseFrameSerializer.FitsFrameBudgetExceededResponseWithinLimit(request.Id);
+        return BoundedResponseFrameSerializer.FitsFrameBudgetExceededResponseWithinLimit(request.Id, KnownToolOrDefault(request));
     }
 
     private static bool TryGetUnknownToolCall(JsonRpcRequest request, out string tool)
@@ -276,7 +307,7 @@ internal static class Program
             || parameters["name"] is not JsonValue name
             || !name.TryGetValue<string>(out var candidate)
             || candidate is null
-            || string.Equals(candidate, PreviewToolCatalog.FindCodeSymbol, StringComparison.Ordinal))
+            || PreviewToolCatalog.IsKnownTool(candidate))
         {
             return false;
         }
@@ -330,7 +361,7 @@ internal static class Program
         {
             case JsonRpcResponse response:
                 response.Result = JsonSerializer.SerializeToNode(
-                    PreviewToolHandler.FrameBudgetExceeded(),
+                    PreviewToolHandler.FrameBudgetExceeded(ResponseToolOrDefault(response.Result)),
                     McpJsonUtilities.DefaultOptions);
                 break;
             case JsonRpcError error:
@@ -341,6 +372,28 @@ internal static class Program
                 };
                 break;
         }
+    }
+
+    private static string ResponseToolOrDefault(JsonNode? result)
+    {
+        if (result is not JsonObject envelope || envelope["structuredContent"] is not JsonObject payload)
+        {
+            return PreviewToolCatalog.FindCodeSymbol;
+        }
+
+        if (payload["tool"] is JsonValue toolName
+            && toolName.TryGetValue<string>(out var tool)
+            && PreviewToolCatalog.IsKnownTool(tool))
+        {
+            return tool!;
+        }
+
+        return payload["kind"]?.GetValue<string>() switch
+        {
+            "find_code_references_success" => PreviewToolCatalog.FindCodeReferences,
+            "get_source_context_success" => PreviewToolCatalog.GetSourceContext,
+            _ => PreviewToolCatalog.FindCodeSymbol,
+        };
     }
 
 }

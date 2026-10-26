@@ -471,6 +471,8 @@ public sealed class PreviewSearchPolicyBoundaryTests
 
         internal IReadOnlyList<string> InspectedPaths => _inspectedPaths;
 
+        public string ResolveFilePath(string path) => path;
+
         public StrictPathInfo Inspect(string path, bool expectedDirectory)
         {
             _inspectedPaths.Add(path);

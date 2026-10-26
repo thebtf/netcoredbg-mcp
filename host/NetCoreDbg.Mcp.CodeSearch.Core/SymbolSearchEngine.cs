@@ -483,6 +483,11 @@ public sealed class SymbolSearchEngine
                 }
 
                 VerifyStrictFile(new FileInfo(candidate), operation);
+                if (OperatingSystem.IsWindows())
+                {
+                    candidate = ResolveStrictFilePath(candidate, operation);
+                    VerifyStrictParentDirectories(candidate, operation);
+                }
                 if (IsSourceFile(new FileInfo(candidate), rules, operation))
                 {
                     return candidate;
@@ -669,6 +674,11 @@ public sealed class SymbolSearchEngine
             {
                 return;
             }
+
+            if (_settings.ExcludedDirectoryNames.Contains(Path.GetFileName(parent)) || IsAlwaysIgnoredDirectory(parent))
+            {
+                ThrowFailure(SearchFailure.PreviewSearchUnreadable(operation.Tool));
+            }
         }
 
         ThrowFailure(SearchFailure.PreviewPathRefused(operation.Tool));
@@ -680,6 +690,22 @@ public sealed class SymbolSearchEngine
         {
             operation.Check();
             return _strictPathInspector.Inspect(path, expectedDirectory);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            ThrowFailure(SearchFailure.PreviewSearchUnreadable(operation.Tool));
+            throw;
+        }
+    }
+
+    private string ResolveStrictFilePath(string path, SearchOperation operation)
+    {
+        try
+        {
+            operation.Check();
+            var resolved = _strictPathInspector.ResolveFilePath(path);
+            operation.Check();
+            return resolved;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

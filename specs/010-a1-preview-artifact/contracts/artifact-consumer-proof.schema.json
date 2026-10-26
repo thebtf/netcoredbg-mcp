@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "A1 preview Artifact Consumer Proof Receipt",
+  "title": "Native preview Artifact Consumer Proof Receipt",
   "description": "Immutable receipt for a retained-artifact or post-publication remote-release consumer proof. It records only downloaded-byte evidence: an extracted executable is disposable verification material, never candidate authority. The consumer harness resolves every structured GitHub reference and rejects a local rebuild, source-tree executable, replacement artifact, or later run.",
   "$comment": "Semantic sealing rule: before persistence, the consumer harness MUST admit only this closed receipt shape and values accepted by their declared schemas. It MUST reject raw diagnostics and all unsupported values, control characters, absolute paths, URIs, credential-shaped strings, and unredacted diagnostic text. The only path-bearing fields are the explicitly typed GitHub artifact-relative path fields; they are structural locators, not diagnostic evidence.",
   "type": "object",
@@ -64,6 +64,70 @@
     }
   },
   "allOf": [
+    {
+      "$comment": "The immutable candidate selects proof semantics. Semantic sealing also requires the fixed generation-specific scenario hash and complete ordered matrix. Historical schema-1 candidates remain A1 only.",
+      "if": {
+        "properties": {
+          "candidate": {
+            "properties": {
+              "preview_manifest": {
+                "properties": {
+                  "contents": {
+                    "properties": {
+                      "schema_version": {
+                        "const": "2.0"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fixture_identity": {
+            "properties": {
+              "scenario_catalog_id": {
+                "const": "a2-preview-readonly-family-v1"
+              }
+            }
+          },
+          "runtime_results": {
+            "properties": {
+              "catalog": {
+                "const": [
+                  "find_code_symbol",
+                  "find_code_references",
+                  "get_source_context"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "fixture_identity": {
+            "properties": {
+              "scenario_catalog_id": {
+                "const": "a1-preview-inherited-matrix-v1"
+              }
+            }
+          },
+          "runtime_results": {
+            "properties": {
+              "catalog": {
+                "const": [
+                  "find_code_symbol"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
     {
       "oneOf": [
         {
@@ -623,12 +687,20 @@
           "type": "boolean"
         },
         "catalog": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 1,
-          "items": {
-            "const": "find_code_symbol"
-          }
+          "oneOf": [
+            {
+              "const": [
+                "find_code_symbol"
+              ]
+            },
+            {
+              "const": [
+                "find_code_symbol",
+                "find_code_references",
+                "get_source_context"
+              ]
+            }
+          ]
         },
         "catalog_is_closed": {
           "type": "boolean"

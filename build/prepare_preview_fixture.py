@@ -7,9 +7,13 @@ import argparse
 import hashlib
 import json
 import re
+import sys
 import zipfile
 from collections.abc import Sequence
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts import stateless_preview_artifact as _artifact
 
 _EXECUTABLE_NAME = "netcoredbg-mcp-stateless-preview.exe"
 _VERSION_PATTERN = re.compile(
@@ -44,7 +48,8 @@ def build_fixture(executable: Path, output: Path, commit: str, version: str) -> 
     archive_bytes = archive_path.read_bytes()
 
     manifest = {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
+        "consumer_contract": _artifact._consumer_contract(_artifact._A2_CONSUMER_CONTRACT_ID),
         "version": version,
         "tag": f"stateless-preview-v{version}",
         "commit": commit,

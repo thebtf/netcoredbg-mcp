@@ -1,4 +1,4 @@
-"""Fail-closed identity, shared transport, and retained-byte helpers for the A1 preview artifact."""
+"""Fail-closed identity, shared transport, and retained-byte helpers for the native preview."""
 
 from __future__ import annotations
 
@@ -32,6 +32,10 @@ _TRUSTED_WORKFLOW_PATH = ".github/workflows/stateless-preview.yml"
 _TRUSTED_BUILD_MODE = "build"
 _TRUSTED_BUILD_EVENT = "workflow_dispatch"
 _PREVIEW_EXECUTABLE = "netcoredbg-mcp-stateless-preview.exe"
+_A1_CONSUMER_CONTRACT_ID = "a1-preview-inherited-matrix-v1"
+_A2_CONSUMER_CONTRACT_ID = "a2-preview-readonly-family-v1"
+_A1_TOOLS = ("find_code_symbol",)
+_A2_TOOLS = (*_A1_TOOLS, "find_code_references", "get_source_context")
 
 _POLICY_AUTHORITY_PATHS = (
     "AGENTS.md",
@@ -233,13 +237,13 @@ def _validate_actions_artifact(value: Any) -> Mapping[str, Any]:
 
 
 def _validate_preview_manifest(value: Any, expected_commit: str) -> Mapping[str, Any]:
-    manifest = _expect_mapping(
-        value,
-        "candidate.preview_manifest.contents",
-        ("schema_version", "version", "tag", "commit", "rid", "archive", "executable"),
-    )
-    if manifest["schema_version"] != "1.0":
+    if not isinstance(value, Mapping) or value.get("schema_version") not in ("1.0", "2.0"):
         _refuse("candidate.preview_manifest.contents.schema_version is unsupported")
+    keys = ("schema_version", "version", "tag", "commit", "rid", "archive", "executable")
+    if value["schema_version"] == "2.0":
+        keys += ("consumer_contract",)
+    manifest = _expect_mapping(value, "candidate.preview_manifest.contents", keys)
+    _candidate_consumer_contract({"preview_manifest": {"contents": manifest}})
     version = _expect_pattern(
         manifest["version"], "candidate.preview_manifest.contents.version", _PREVIEW_VERSION_PATTERN
     )
@@ -288,7 +292,7 @@ def _validate_exact_reference(
 def _validate_candidate_identity(value: Any) -> dict[str, Any]:
     identity = _thaw(value)
     root = _expect_mapping(identity, "candidate identity", ("schema_version", "candidate"))
-    if root["schema_version"] != "1.0":
+    if root["schema_version"] not in ("1.0", "2.0"):
         _refuse("candidate identity schema_version is unsupported")
 
     candidate = _expect_mapping(
@@ -345,6 +349,8 @@ def _validate_candidate_identity(value: Any) -> dict[str, Any]:
         ("file", "manifest_reference", "archive_reference", "contents"),
     )
     manifest_contents = _validate_preview_manifest(preview_manifest["contents"], source_commit)
+    if root["schema_version"] != manifest_contents["schema_version"]:
+        _refuse("candidate identity and manifest schema generations disagree")
     version = manifest_contents["version"]
     manifest_file_name = f"netcoredbg-mcp-stateless-preview-win-x64-{version}.manifest.json"
     manifest_file = _validate_file_descriptor(
@@ -903,7 +909,8 @@ def prepare_preview_payload(
         _refuse("preview archive executable does not match publish output")
 
     manifest_contents = {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
+        "consumer_contract": _consumer_contract(_A2_CONSUMER_CONTRACT_ID),
         "version": version,
         "tag": preview["tag"],
         "commit": source["commit"],
@@ -1209,6 +1216,8 @@ def seal_build_records(
     manifest_bytes = _read_regular_bytes(manifest_path, "preview manifest")
     manifest_contents = _load_manifest(manifest_bytes)
     _validate_preview_manifest(manifest_contents, source["commit"])
+    if manifest_contents["schema_version"] != "2.0":
+        _refuse("current source producer requires the A2 manifest generation")
     if (
         manifest_contents["version"] != preview["version"]
         or manifest_contents["tag"] != preview["tag"]
@@ -1238,7 +1247,7 @@ def seal_build_records(
         "expires_at": payload_artifact["expires_at"],
     }
     candidate_input = {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "candidate": {
             "source": {
                 "repository": source["repository"],
@@ -1312,7 +1321,6 @@ def seal_build_records(
 
 
 _CONSUMER_PROOF_SCHEMA_VERSION = "1.0"
-_CONSUMER_PROOF_CATALOG_ID = "a1-preview-inherited-matrix-v1"
 _SAFE_OPAQUE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CREDENTIAL_SHAPED_ID_PATTERN = re.compile(
     r"^(?:gh[pousr]_|github_pat_|glpat-|AKIA|ASIA|xox[baprs]-|sk-[A-Za-z0-9]|Bearer[._-])",
@@ -1329,6 +1337,15 @@ _CONSUMER_PROOF_SCENARIOS: tuple[tuple[str, str, str], ...] = (
     ("transport-eof-cancellation", "transport", "EXPECT_SUCCESS"),
     ("valid-discovery-list-call", "valid_journey", "EXPECT_SUCCESS"),
     ("rollback-python-default", "rollback", "EXPECT_SUCCESS"),
+)
+_A2_CONSUMER_PROOF_SCENARIOS = (
+    *_CONSUMER_PROOF_SCENARIOS[:-1],
+    ("readonly-family-values", "valid_journey", "EXPECT_SUCCESS"),
+    ("readonly-family-invalid-input", "tool_input", "EXPECT_REFUSAL"),
+    ("readonly-family-path-read-refusals", "file_system", "EXPECT_REFUSAL"),
+    ("readonly-family-result-budgets", "resources", "EXPECT_REFUSAL"),
+    ("readonly-family-frame-refusals", "transport", "EXPECT_REFUSAL"),
+    _CONSUMER_PROOF_SCENARIOS[-1],
 )
 _EXPECTED_OBSERVED_OUTCOMES = {
     "EXPECT_SUCCESS": "SUCCESS",
@@ -1364,30 +1381,73 @@ def _expect_safe_opaque_id(value: Any, name: str) -> str:
     return identifier
 
 
-def _consumer_proof_scenarios() -> list[dict[str, str]]:
+def _consumer_proof_scenarios(contract_id: str = _A1_CONSUMER_CONTRACT_ID) -> list[dict[str, str]]:
+    if contract_id == _A1_CONSUMER_CONTRACT_ID:
+        definitions = _CONSUMER_PROOF_SCENARIOS
+    elif contract_id == _A2_CONSUMER_CONTRACT_ID:
+        definitions = _A2_CONSUMER_PROOF_SCENARIOS
+    else:
+        _refuse("consumer contract generation is unsupported")
     return [
         {
             "scenario_id": scenario_id,
             "surface": surface,
             "documented_outcome": documented_outcome,
         }
-        for scenario_id, surface, documented_outcome in _CONSUMER_PROOF_SCENARIOS
+        for scenario_id, surface, documented_outcome in definitions
     ]
 
 
-def consumer_proof_scenario_catalog() -> Mapping[str, Any]:
-    """Return the closed inherited denial matrix used by retained-byte proof."""
+def consumer_proof_scenario_catalog(
+    contract_id: str = _A1_CONSUMER_CONTRACT_ID,
+) -> Mapping[str, Any]:
+    """Return one fixed generation; the no-argument API preserves historical A1 callers."""
 
-    scenarios = _consumer_proof_scenarios()
+    scenarios = _consumer_proof_scenarios(contract_id)
     return _freeze(
         {
-            "scenario_catalog_id": _CONSUMER_PROOF_CATALOG_ID,
+            "scenario_catalog_id": contract_id,
             "scenario_catalog_sha256": _sha256_bytes(
                 _canonical_json_bytes(scenarios, "consumer proof scenario catalog")
             ),
             "scenarios": scenarios,
         }
     )
+
+
+def _consumer_contract(contract_id: str) -> dict[str, Any]:
+    catalog = consumer_proof_scenario_catalog(contract_id)
+    return {
+        "scenario_catalog_id": catalog["scenario_catalog_id"],
+        "scenario_catalog_sha256": catalog["scenario_catalog_sha256"],
+        "tools": list(_A1_TOOLS if contract_id == _A1_CONSUMER_CONTRACT_ID else _A2_TOOLS),
+    }
+
+
+def _candidate_consumer_contract(candidate: Mapping[str, Any]) -> Mapping[str, Any]:
+    manifest = candidate["preview_manifest"]["contents"]
+    generation = manifest.get("schema_version")
+    if generation == "1.0":
+        if "consumer_contract" in manifest:
+            _refuse("historical A1 manifests cannot select another consumer contract")
+        return _consumer_contract(_A1_CONSUMER_CONTRACT_ID)
+    if generation != "2.0":
+        _refuse("candidate consumer generation is unsupported")
+    expected = _consumer_contract(_A2_CONSUMER_CONTRACT_ID)
+    if manifest.get("consumer_contract") != expected:
+        _refuse("candidate consumer contract does not match the A2 catalog and exact tools")
+    return expected
+
+
+def _validate_candidate_binding(candidate: Any) -> Mapping[str, Any]:
+    if not isinstance(candidate, Mapping):
+        _refuse("candidate binding must be an object")
+    manifest = candidate.get("preview_manifest")
+    contents = manifest.get("contents") if isinstance(manifest, Mapping) else None
+    generation = contents.get("schema_version") if isinstance(contents, Mapping) else None
+    return _validate_candidate_identity({"schema_version": generation, "candidate": candidate})[
+        "candidate"
+    ]
 
 
 def _validate_consumer_proof_reference(value: Any, name: str) -> Mapping[str, Any]:
@@ -1786,24 +1846,25 @@ def _validate_input_identity_results(value: Any, candidate: Mapping[str, Any]) -
     return results
 
 
-def _validate_fixture_identity(value: Any) -> Mapping[str, Any]:
+def _validate_fixture_identity(value: Any, candidate: Mapping[str, Any]) -> Mapping[str, Any]:
     fixture = _expect_mapping(
         value,
         "consumer proof fixture identity",
         ("fixture_id", "fixture_sha256", "scenario_catalog_id", "scenario_catalog_sha256"),
     )
-    catalog = consumer_proof_scenario_catalog()
+    contract = _candidate_consumer_contract(candidate)
+    catalog = consumer_proof_scenario_catalog(contract["scenario_catalog_id"])
     _expect_safe_opaque_id(fixture["fixture_id"], "consumer proof fixture ID")
     _expect_sha256(fixture["fixture_sha256"], "consumer proof fixture hash")
     if (
         fixture["scenario_catalog_id"] != catalog["scenario_catalog_id"]
         or fixture["scenario_catalog_sha256"] != catalog["scenario_catalog_sha256"]
     ):
-        _refuse("consumer proof fixture scenario catalog is not the inherited matrix")
+        _refuse("consumer proof fixture scenario catalog does not match the candidate generation")
     return fixture
 
 
-def _validate_scenario_matrix(value: Any) -> Mapping[str, Any]:
+def _validate_scenario_matrix(value: Any, candidate: Mapping[str, Any]) -> Mapping[str, Any]:
     matrix = _expect_mapping(
         value,
         "consumer proof scenario matrix",
@@ -1818,7 +1879,8 @@ def _validate_scenario_matrix(value: Any) -> Mapping[str, Any]:
             "outcome",
         ),
     )
-    scenarios = _consumer_proof_scenarios()
+    contract = _candidate_consumer_contract(candidate)
+    scenarios = _consumer_proof_scenarios(contract["scenario_catalog_id"])
     required_ids = [scenario["scenario_id"] for scenario in scenarios]
     expected_by_id = {scenario["scenario_id"]: scenario for scenario in scenarios}
     declared_required = _expect_list(
@@ -1881,7 +1943,7 @@ def _validate_scenario_matrix(value: Any) -> Mapping[str, Any]:
     return matrix
 
 
-def _validate_runtime_results(value: Any) -> Mapping[str, Any]:
+def _validate_runtime_results(value: Any, candidate: Mapping[str, Any]) -> Mapping[str, Any]:
     runtime = _expect_mapping(
         value,
         "consumer proof runtime results",
@@ -1896,12 +1958,13 @@ def _validate_runtime_results(value: Any) -> Mapping[str, Any]:
     )
     if (
         not _expect_boolean(runtime["explicit_project_argument"], "consumer proof explicit project")
-        or _expect_list(runtime["catalog"], "consumer proof catalog") != ["find_code_symbol"]
+        or _expect_list(runtime["catalog"], "consumer proof catalog")
+        != _candidate_consumer_contract(candidate)["tools"]
         or not _expect_boolean(runtime["catalog_is_closed"], "consumer proof closed catalog")
         or not _expect_boolean(runtime["valid_journey_passed"], "consumer proof valid journey")
         or not _expect_boolean(runtime["stdout_jsonrpc_only"], "consumer proof stdout purity")
     ):
-        _refuse("consumer proof runtime results are not a passing one-tool journey")
+        _refuse("consumer proof runtime catalog does not match the candidate journey")
     eof = _expect_mapping(
         runtime["clean_eof"],
         "consumer proof clean EOF",
@@ -2013,9 +2076,9 @@ def seal_artifact_consumer_proof(
     _validate_release_gate_catalog_for_consumer_proof(release_gate_catalog, candidate)
     _validate_retained_download_origin(record["download_origin"], candidate)
     _validate_input_identity_results(record["input_identity_results"], candidate)
-    _validate_fixture_identity(record["fixture_identity"])
-    _validate_scenario_matrix(record["scenario_matrix"])
-    _validate_runtime_results(record["runtime_results"])
+    _validate_fixture_identity(record["fixture_identity"], candidate)
+    _validate_scenario_matrix(record["scenario_matrix"], candidate)
+    _validate_runtime_results(record["runtime_results"], candidate)
     _validate_python_rollback(record["python_rollback_result"])
     return _freeze(value)
 
@@ -2442,12 +2505,16 @@ def _validate_stage_consumer_proof(
             "recorded_at",
         ),
     )
+    validated_identity, _ = _verified_raw_candidate(
+        candidate_identity, candidate_identity_bytes, candidate_identity_reference
+    )
+    candidate = validated_identity["candidate"]
+    _validate_release_gate_catalog_for_consumer_proof(release_gate_catalog, candidate)
     _expect_safe_opaque_id(record["receipt_id"], "remote consumer proof ID")
     _review_timestamp(record["recorded_at"], "remote consumer proof recorded_at")
     identity_reference = _validate_consumer_proof_reference(
         record["candidate_identity_record"], "remote consumer proof identity reference"
     )
-    candidate = candidate_identity["candidate"]
     if (
         record["receipt_schema_version"] != _CONSUMER_PROOF_SCHEMA_VERSION
         or record["proof_stage"] != "remote_release"
@@ -2484,9 +2551,9 @@ def _validate_stage_consumer_proof(
     if origin["archive_asset"]["id"] == origin["manifest_asset"]["id"]:
         _refuse("remote consumer proof asset identities are not distinct")
     _validate_input_identity_results(record["input_identity_results"], candidate)
-    _validate_fixture_identity(record["fixture_identity"])
-    _validate_scenario_matrix(record["scenario_matrix"])
-    _validate_runtime_results(record["runtime_results"])
+    _validate_fixture_identity(record["fixture_identity"], candidate)
+    _validate_scenario_matrix(record["scenario_matrix"], candidate)
+    _validate_runtime_results(record["runtime_results"], candidate)
     _validate_python_rollback(record["python_rollback_result"])
     return record
 
@@ -3163,9 +3230,7 @@ def _validate_remote_observation(
         != attempt_id
     ):
         _refuse("remote observation belongs to another promotion attempt")
-    observed_candidate = _validate_candidate_identity(
-        {"schema_version": "1.0", "candidate": record["candidate"]}
-    )["candidate"]
+    observed_candidate = _validate_candidate_binding(record["candidate"])
     if (
         _review_record_reference(
             record["candidate_identity_record"], "remote candidate identity reference"
@@ -3545,7 +3610,7 @@ def seal_promotion_attempt(
         record["workflow_run"], "recorded promote workflow run", tuple(workflow)
     )
     _expect_positive_integer(recorded_workflow["run_attempt"], "recorded workflow run attempt")
-    _validate_candidate_identity({"schema_version": "1.0", "candidate": record["candidate"]})
+    _validate_candidate_binding(record["candidate"])
     _validate_review_candidate_binding(record, candidate, identity_reference)
     recorded_at = _review_timestamp(record["recorded_at"], "promotion attempt recorded_at")
     for artifact in (candidate_identity_reference["artifact"], candidate["build"]["artifact"]):
@@ -3693,9 +3758,7 @@ def seal_promotion_attempt(
     if observation["operation_results"] != expected_results:
         _refuse("admission observation changed independent predecessor outcome history")
     classification = _resolve_stage_record(record["remote_classification"], record_resolver)
-    _validate_candidate_identity(
-        {"schema_version": "1.0", "candidate": classification.get("candidate")}
-    )
+    _validate_candidate_binding(classification.get("candidate"))
     # Re-derive the complete closed record; a self-asserted ADMITTED is not authority.
     derived = classify_remote_observation(
         record["remote_observation"],
@@ -3760,7 +3823,7 @@ def seal_remote_verification(
         candidate_identity, candidate_identity_bytes, candidate_identity_reference
     )
     candidate = identity["candidate"]
-    _validate_candidate_identity({"schema_version": "1.0", "candidate": record["candidate"]})
+    _validate_candidate_binding(record["candidate"])
     if (
         _review_record_reference(record["candidate_identity_record"], "verification candidate")
         != identity_reference
@@ -3820,9 +3883,7 @@ def seal_remote_verification(
         **remote_binding,
     )
     classification = _resolve_stage_record(record["remote_classification"], record_resolver)
-    _validate_candidate_identity(
-        {"schema_version": "1.0", "candidate": classification.get("candidate")}
-    )
+    _validate_candidate_binding(classification.get("candidate"))
     derived = classify_remote_observation(
         record["remote_observation"],
         classification_id=classification.get("classification_id"),
@@ -3845,7 +3906,7 @@ def seal_remote_verification(
         candidate_identity_reference=candidate_identity_reference,
         release_gate_catalog=release_gate_catalog,
     )
-    _validate_candidate_identity({"schema_version": "1.0", "candidate": consumer["candidate"]})
+    _validate_candidate_binding(consumer["candidate"])
     # Expected identities are comparisons only; both actual fragments must already be present.
     expected = _promotion_fragment({"candidate": candidate}, observation)
     if consumer["download_origin"] != expected["release"]:
@@ -3973,7 +4034,7 @@ def seal_program_b_handoff(
         **stage_binding,
     )
     candidate = verification["candidate"]
-    _validate_candidate_identity({"schema_version": "1.0", "candidate": record["candidate"]})
+    _validate_candidate_binding(record["candidate"])
     for handoff_field, verification_field in (
         ("candidate_identity_record", "candidate_identity_record"),
         ("approved_promotion_decision", "promotion_decision"),

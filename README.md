@@ -37,6 +37,14 @@ bundle the opt-in .NET preview executable. Corrected preview delivery is separat
 B3 native `step_over` and Native Scene Probe work remain modern-host source-only
 and add no tools to the Python catalog.
 
+The separate [A2 native preview contract](specs/016-a2-native-readonly-family/spec.md)
+adds `find_code_references` and `get_source_context` beside `find_code_symbol`.
+A schema-2 preview manifest binds that exact three-tool consumer contract;
+historical schema-1 A1 assets keep their one-tool meaning. Use the
+[generation-bound artifact proof instructions](specs/010-a1-preview-artifact/contracts/stateless-preview-workflow.md#a2-successor-proof-generation)
+for the selected asset. Source availability and local checks do not establish
+public preview delivery or change the Python default.
+
 ## Quick start
 
 Install the package, let the setup wizard provision or discover the debugger,

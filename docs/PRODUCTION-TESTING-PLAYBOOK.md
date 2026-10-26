@@ -775,6 +775,17 @@ flows 1–9's installed Python/PyPI product. A1 exposes only read-only
 Source availability, a local publish, a unit PASS or controlled loopback download
 is not evidence that an A1 GitHub prerelease exists or works for a consumer.
 
+**A2 successor:** the [native read-only family](../specs/016-a2-native-readonly-family/spec.md)
+uses the same retained/public acquisition and rollback entry points below, but
+its immutable schema-2 Candidate/manifest selects the complete A2 matrix and
+exactly `find_code_symbol`, `find_code_references`, and `get_source_context`.
+The consumer checks all three advertised input/output schemas, exact reference
+locations and numbered source context, route-specific refusals and clean EOF.
+Follow the [A2 generation contract](../specs/010-a1-preview-artifact/contracts/stateless-preview-workflow.md#a2-successor-proof-generation);
+do not apply A1's one-tool denominator to successor bytes or select a proof
+generation from receipt fields. The A1 description below remains the historical
+schema-1 contract; source/built-process PASS alone does not complete A2 delivery.
+
 #### 11.1 Exact Inputs and Two Consumer Modes
 
 Follow the [A1 artifact quickstart](../specs/010-a1-preview-artifact/quickstart.md#inputs)

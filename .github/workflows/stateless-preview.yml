@@ -196,7 +196,9 @@ jobs:
             throw "Published preview runtime verification failed."
           }
 
-      - name: Archive and manifest the preview payload
+      # This exact-source producer fixes schema 2.0 and the A2 catalog/hash/tools;
+      # version/tag inputs cannot select the historical one-tool proof generation.
+      - name: Archive and manifest the A2 three-tool preview payload
         shell: pwsh
         run: python scripts/stateless_preview_artifact.py prepare-payload
 
@@ -210,7 +212,7 @@ jobs:
           overwrite: false
           retention-days: ${{ steps.admit.outputs.retention_days }}
 
-      - name: Seal candidate identity and release-gate catalog
+      - name: Seal A2 candidate identity and release-gate catalog
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
