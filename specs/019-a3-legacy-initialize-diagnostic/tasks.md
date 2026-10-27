@@ -1,6 +1,6 @@
 # A3 Legacy Initialize Diagnostic Tasks
 
-Status: initial modern-only diagnostic slice delivered as `stateless-preview-v0.23.17-preview.3`; all tasks below complete. Broader A3 and runtime servicing remain open.
+Status: initial modern-only diagnostic slice delivered as `stateless-preview-v0.23.17-preview.3`; all tasks below complete. Parent A3 acceptance is limited to the modern-only policy in the current README; deferred full protocol conformance and runtime servicing remain open.
 
 - [x] T01 Root read current primary versioning policy, traced SDK filter ordering and independently exercised published preview2. Initial legacy diagnostic omits supported version; established-modern SDK diagnostic already names it. Corrected modern tool call and clean EOF passed. Native CSharp definition/references work after scoped reload; no profile mutation or root restart.
 - [x] T02 Regression commit `ca8074223376487893461de89fd7583e2ca7c5ba` changed tests only. Root observed two meaningful runtime assertion failures (generic initial message instead of the required diagnostic) and two artifact failures (old17 producer and accepted historical17) before product edits. Actual TRX/JUnit and product source hashes are retained in `.agent/runs/a3-legacy-initialize-diagnostic-20261027/red-acceptance.json`; no harness failure was counted as RED.

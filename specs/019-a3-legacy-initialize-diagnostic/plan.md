@@ -1,6 +1,6 @@
 # A3 Legacy Initialize Diagnostic Plan
 
-Status: implemented, independently reviewed and delivered as `stateless-preview-v0.23.17-preview.3`. Original RED/PARTIAL and local disjoint171/semantic129 evidence remain retained; exact canonical retained and fresh public consumers each passed all 18 scenarios plus unchanged installed-Python rollback. Existing S4, same-byte publication and closeout completed. Broader A3 and runtime servicing remain open.
+Status: implemented, independently reviewed and delivered as `stateless-preview-v0.23.17-preview.3`. Original RED/PARTIAL and local disjoint171/semantic129 evidence remain retained; exact canonical retained and fresh public consumers each passed all 18 scenarios plus unchanged installed-Python rollback. Existing S4, same-byte publication and closeout completed. The parent modern-only A3 policy is documented in the current README; deferred full protocol conformance and runtime servicing remain open.
 
 ## Integration points
 
