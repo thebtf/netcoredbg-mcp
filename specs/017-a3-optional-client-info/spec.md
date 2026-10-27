@@ -1,7 +1,7 @@
 # A3 — Optional Client Info in the Stateless Preview
 
-Status: implementation in progress. Root verified meaningful pre-fix process RED and 7/7 focused runtime checks; artifact-generation, full integration and public delivery remain pending.
-Baseline: `0532ba3b77daf7b1604d86d54c91b7a05a0d7e50`; branch `work/a3-optional-client-info`.
+Status: delivered as `stateless-preview-v0.23.17-preview.1` on 2026-10-27. Canonical retained and fresh public consumers passed 16/16 with installed Python rollback; candidate-bound review, explicit S4, same-byte promotion and retained closeout completed. See [task evidence](tasks.md). Broader A3 remains open.
+Baseline: `0532ba3b77daf7b1604d86d54c91b7a05a0d7e50`; implementation PR #365 merged at `c74344132a8ba2e0549d3e2607b473ade4af7981`.
 Parent: Stateless Front-Door Convergence Program A, bounded A3 slice (`.agent/runs/python-removal-strangler-program-v1/stateless-convergence-program-v4.md:85-98`). Work proceeds under the accepted original strangler program. A2 is delivered; this slice does not complete A3 or Programs B/C.
 
 ## Outcome
