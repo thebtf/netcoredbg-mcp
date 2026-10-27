@@ -191,6 +191,10 @@ def _readline_with_timeout(stream: Any, timeout: float) -> bytes:
     return value
 
 
+class _JsonRpcEofError(ValueError):
+    """The process returned EOF instead of a correlated response."""
+
+
 class JsonRpcProcess:
     def __init__(
         self,
@@ -213,11 +217,13 @@ class JsonRpcProcess:
             _refuse("verified retained executable did not start")
 
     def request(
-        self, request_id: int | str, method: str, params: Mapping[str, Any]
+        self, request_id: int | str, method: str, params: Mapping[str, Any] | None = None
     ) -> dict[str, Any]:
         if self._process.stdin is None or self._process.stdout is None:
             _refuse("preview process stdio is unavailable")
-        request = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+        request: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "method": method}
+        if params is not None:
+            request["params"] = params
         try:
             self._process.stdin.write(_canonical_json_bytes(request))
             self._process.stdin.flush()
@@ -225,7 +231,7 @@ class JsonRpcProcess:
             _refuse("preview process rejected a JSON-RPC request")
         line = _readline_with_timeout(self._process.stdout, 5)
         if not line:
-            _refuse("preview process ended before a JSON-RPC response")
+            raise _JsonRpcEofError("preview process ended before a JSON-RPC response")
         if len(line.rstrip(b"\r\n")) > 256 * 1024:
             _refuse("preview process emitted an oversized complete response frame")
         try:
@@ -236,6 +242,7 @@ class JsonRpcProcess:
             not isinstance(response, dict)
             or response.get("jsonrpc") != "2.0"
             or response.get("id") != request_id
+            or type(response.get("id")) is not type(request_id)
         ):
             _refuse("preview process emitted an unexpected JSON-RPC response")
         return response
@@ -642,6 +649,167 @@ def _run_optional_client_info(executable_path: Path, fixture_root: Path) -> None
         process.close_eof()
     finally:
         process.abort()
+
+
+def _run_required_metadata_version_recovery(executable_path: Path, fixture_root: Path) -> None:
+    version_key = "io.modelcontextprotocol/protocolVersion"
+    capabilities_key = "io.modelcontextprotocol/clientCapabilities"
+    client_info_key = "io.modelcontextprotocol/clientInfo"
+    metadata = {version_key: _PROTOCOL_VERSION, capabilities_key: {}}
+    arguments = {"name": "PreviewMarker", "kind": "class"}
+    parameters = {"name": "find_code_symbol", "arguments": arguments}
+    expected = {
+        "kind": "find_code_symbol_success",
+        "results": [
+            {
+                "file": "Markers.cs",
+                "line": 3,
+                "name": "PreviewMarker",
+                "kind": "class",
+                "context": "public sealed class PreviewMarker { }",
+            }
+        ],
+    }
+
+    def marker(
+        process: JsonRpcProcess, request_id: int | str, meta: Mapping[str, Any] = metadata
+    ) -> None:
+        response = process.request(request_id, "tools/call", {**parameters, "_meta": meta})
+        if "error" in response:
+            _refuse("required metadata correction returned an error instead of exact success")
+        result = _result(response)
+        _expect_success(result, expected)
+
+    def error(
+        process: JsonRpcProcess,
+        request_id: int | str,
+        params: Mapping[str, Any] | None,
+        code: int,
+        requested_version: str | None = None,
+    ) -> None:
+        response = process.request(request_id, "tools/call", params)
+        failure = response.get("error")
+        if (
+            "result" in response
+            or not isinstance(failure, Mapping)
+            or type(failure.get("code")) is not int
+            or failure["code"] != code
+            or not isinstance(failure.get("message"), str)
+            or not failure["message"].strip()
+        ):
+            _refuse("required metadata did not return the exact correlated error code")
+        if code == -32022 and failure != {
+            "code": -32022,
+            "message": "Unsupported protocol version",
+            "data": {"requested": requested_version, "supported": [_PROTOCOL_VERSION]},
+        }:
+            _refuse("required metadata unsupported-version error data changed")
+
+    invalid: list[tuple[str, Mapping[str, Any] | None]] = [
+        ("absent-params", None),
+        ("empty-params", {}),
+        ("absent-meta", parameters),
+    ]
+    for index, value in enumerate((None, True, 7, "invalid", [])):
+        invalid.append((f"meta-type-{index}", {**parameters, "_meta": value}))
+    for key, label in ((version_key, "version"), (capabilities_key, "capabilities")):
+        missing = {name: value for name, value in metadata.items() if name != key}
+        invalid.append((f"absent-{label}", {**parameters, "_meta": missing}))
+        values = (None, True, 7, {}, []) if key == version_key else (None, True, 7, "invalid", [])
+        for index, value in enumerate(values):
+            invalid.append(
+                (f"{label}-type-{index}", {**parameters, "_meta": {**metadata, key: value}})
+            )
+
+    for index, (label, params) in enumerate(invalid):
+        process = JsonRpcProcess(executable_path, fixture_root)
+        try:
+            error(process, 1000 + index, params, -32602)
+            marker(process, f"{label}-corrected", _REQUEST_META)
+            error(process, f"{label}-after-success", params, -32602)
+            marker(process, 2000 + index)
+            process.close_eof()
+        finally:
+            process.abort()
+
+    process = JsonRpcProcess(executable_path, fixture_root)
+    try:
+        invalid_arguments = {"name": "find_code_symbol", "arguments": {}}
+        error(process, "metadata-before-arguments", invalid_arguments, -32602)
+        error(
+            process,
+            "malformed-metadata-before-arguments",
+            {**invalid_arguments, "_meta": {**metadata, version_key: None}},
+            -32602,
+        )
+        invalid_result = _result(
+            process.request(3000, "tools/call", {**invalid_arguments, "_meta": metadata})
+        )
+        _expect_failure(invalid_result, "find_code_symbol", "INVALID_TOOL_ARGUMENTS")
+        marker(process, "arguments-corrected")
+        error(process, "escaped-" + "\x01" * 8192, parameters, -32602)
+        marker(process, 3001)
+        process.close_eof()
+    finally:
+        process.abort()
+
+    for index, version in enumerate(("1900-01-01", "", " ", " 2026-07-28 ")):
+        process = JsonRpcProcess(executable_path, fixture_root)
+        try:
+            unsupported = {**metadata, version_key: version}
+            error(
+                process,
+                f"unsupported-first-{index}",
+                {"name": "find_code_symbol", "arguments": {}, "_meta": unsupported},
+                -32022,
+                version,
+            )
+            marker(process, 4000 + index)
+            error(
+                process,
+                5000 + index,
+                {**parameters, "_meta": unsupported},
+                -32022,
+                version,
+            )
+            marker(process, f"version-corrected-{index}")
+            process.close_eof()
+        finally:
+            process.abort()
+
+    # Optional invalid presence may refuse by error or EOF; required cases above may not.
+    invalid_client_info = [None, True, 7, "invalid", [], {}]
+    for field in ("name", "version"):
+        valid_info = {"name": "preview-consumer", "version": "1.0"}
+        invalid_client_info.append(
+            {key: value for key, value in valid_info.items() if key != field}
+        )
+        invalid_client_info.extend({**valid_info, field: value} for value in (None, 7, "", " "))
+    for index, client_info in enumerate(invalid_client_info):
+        process = JsonRpcProcess(executable_path, fixture_root)
+        try:
+            try:
+                response = process.request(
+                    f"invalid-client-info-{index}",
+                    "tools/call",
+                    {**parameters, "_meta": {**metadata, client_info_key: client_info}},
+                )
+            except _JsonRpcEofError:
+                pass
+            else:
+                failure = response.get("error")
+                if (
+                    "result" in response
+                    or not isinstance(failure, Mapping)
+                    or type(failure.get("code")) is not int
+                    or failure["code"] not in (-32600, -32602)
+                    or not isinstance(failure.get("message"), str)
+                    or not failure["message"].strip()
+                ):
+                    _refuse("present invalid client information was not refused")
+            process.close_eof()
+        finally:
+            process.abort()
 
 
 def _run_family_values(executable_path: Path, scratch: Path) -> None:
@@ -1307,6 +1475,9 @@ def _run_matrix(
         "readonly-family-result-budgets": lambda: _run_family_budgets(executable_path, scratch),
         "readonly-family-frame-refusals": lambda: _run_family_frames(executable_path, scratch),
         "optional-client-info-request-local": lambda: _run_optional_client_info(
+            executable_path, fixture_root
+        ),
+        "required-metadata-version-recovery": lambda: _run_required_metadata_version_recovery(
             executable_path, fixture_root
         ),
         "rollback-python-default": rollback,

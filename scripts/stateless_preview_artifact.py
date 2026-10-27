@@ -35,6 +35,7 @@ _PREVIEW_EXECUTABLE = "netcoredbg-mcp-stateless-preview.exe"
 _A1_CONSUMER_CONTRACT_ID = "a1-preview-inherited-matrix-v1"
 _A2_CONSUMER_CONTRACT_ID = "a2-preview-readonly-family-v1"
 _A3_CONSUMER_CONTRACT_ID = "a3-preview-optional-client-info-v1"
+_A3_REQUIRED_METADATA_VERSION_CONTRACT_ID = "a3-preview-required-metadata-version-v1"
 _A1_TOOLS = ("find_code_symbol",)
 _A2_TOOLS = (*_A1_TOOLS, "find_code_references", "get_source_context")
 
@@ -911,7 +912,7 @@ def prepare_preview_payload(
 
     manifest_contents = {
         "schema_version": "2.0",
-        "consumer_contract": _consumer_contract(_A3_CONSUMER_CONTRACT_ID),
+        "consumer_contract": _consumer_contract(_A3_REQUIRED_METADATA_VERSION_CONTRACT_ID),
         "version": version,
         "tag": preview["tag"],
         "commit": source["commit"],
@@ -1219,8 +1220,8 @@ def seal_build_records(
     _validate_preview_manifest(manifest_contents, source["commit"])
     if manifest_contents["schema_version"] != "2.0" or manifest_contents[
         "consumer_contract"
-    ] != _consumer_contract(_A3_CONSUMER_CONTRACT_ID):
-        _refuse("current source producer requires the exact A3 consumer contract")
+    ] != _consumer_contract(_A3_REQUIRED_METADATA_VERSION_CONTRACT_ID):
+        _refuse("current source producer requires the exact A3 required-metadata-version contract")
     if (
         manifest_contents["version"] != preview["version"]
         or manifest_contents["tag"] != preview["tag"]
@@ -1355,6 +1356,11 @@ _A3_CONSUMER_PROOF_SCENARIOS = (
     ("optional-client-info-request-local", "protocol_catalog", "EXPECT_SUCCESS"),
     _A2_CONSUMER_PROOF_SCENARIOS[-1],
 )
+_A3_REQUIRED_METADATA_VERSION_SCENARIOS = (
+    *_A3_CONSUMER_PROOF_SCENARIOS[:-1],
+    ("required-metadata-version-recovery", "protocol_catalog", "EXPECT_SUCCESS"),
+    _A3_CONSUMER_PROOF_SCENARIOS[-1],
+)
 _EXPECTED_OBSERVED_OUTCOMES = {
     "EXPECT_SUCCESS": "SUCCESS",
     "EXPECT_FAILURE": "FAILURE",
@@ -1396,6 +1402,8 @@ def _consumer_proof_scenarios(contract_id: str = _A1_CONSUMER_CONTRACT_ID) -> li
         definitions = _A2_CONSUMER_PROOF_SCENARIOS
     elif contract_id == _A3_CONSUMER_CONTRACT_ID:
         definitions = _A3_CONSUMER_PROOF_SCENARIOS
+    elif contract_id == _A3_REQUIRED_METADATA_VERSION_CONTRACT_ID:
+        definitions = _A3_REQUIRED_METADATA_VERSION_SCENARIOS
     else:
         _refuse("consumer contract generation is unsupported")
     return [
@@ -1449,7 +1457,11 @@ def _candidate_consumer_contract(candidate: Mapping[str, Any]) -> Mapping[str, A
         ("scenario_catalog_id", "scenario_catalog_sha256", "tools"),
     )
     contract_id = contract["scenario_catalog_id"]
-    if contract_id not in (_A2_CONSUMER_CONTRACT_ID, _A3_CONSUMER_CONTRACT_ID):
+    if contract_id not in (
+        _A2_CONSUMER_CONTRACT_ID,
+        _A3_CONSUMER_CONTRACT_ID,
+        _A3_REQUIRED_METADATA_VERSION_CONTRACT_ID,
+    ):
         _refuse("candidate consumer contract generation is unsupported")
     expected = _consumer_contract(contract_id)
     if contract != expected:
