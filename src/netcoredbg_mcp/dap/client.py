@@ -511,6 +511,7 @@ class DAPClient:
             overrides = (
                 {name.upper(): value for name, value in env.items()} if os.name == "nt" else env
             )
+            removals: dict[str, str | None]
             removals = {name: None for name, value in overrides.items() if value is None}
             if removals:
                 # Samsung merges DAP env into its own inherited environment.
