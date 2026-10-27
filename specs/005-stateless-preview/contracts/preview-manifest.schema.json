@@ -51,7 +51,8 @@
           "enum": [
             "a2-preview-readonly-family-v1",
             "a3-preview-optional-client-info-v1",
-            "a3-preview-required-metadata-version-v1"
+            "a3-preview-required-metadata-version-v1",
+            "a3-preview-legacy-diagnostic-v1"
           ]
         },
         "scenario_catalog_sha256": {
@@ -79,6 +80,22 @@
             "properties": {
               "scenario_catalog_sha256": {
                 "const": "1e737db53dda4557b04616f6fc114c71fa0136c7c11693143772d7b642f5947a"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "scenario_catalog_id": {
+                "const": "a3-preview-legacy-diagnostic-v1"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "scenario_catalog_sha256": {
+                "const": "31589f89efc7c0453357bd3cee7216448ec1332e57d135d555b2c897a0bc855d"
               }
             }
           }

@@ -182,11 +182,36 @@
             }
           },
           "else": {
-            "properties": {
-              "fixture_identity": {
-                "properties": {
-                  "scenario_catalog_id": {
-                    "const": "a2-preview-readonly-family-v1"
+            "if": {
+              "properties": {
+                "candidate": {
+                  "properties": {
+                    "preview_manifest": {
+                      "properties": {
+                        "contents": {
+                          "properties": {
+                            "consumer_contract": {
+                              "properties": {
+                                "scenario_catalog_id": {
+                                  "const": "a2-preview-readonly-family-v1"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "fixture_identity": {
+                  "properties": {
+                    "scenario_catalog_id": {
+                      "const": "a2-preview-readonly-family-v1"
+                    }
                   }
                 }
               }
@@ -209,6 +234,58 @@
                 "const": [
                   "find_code_symbol"
                 ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "candidate": {
+            "properties": {
+              "preview_manifest": {
+                "properties": {
+                  "contents": {
+                    "required": [
+                      "consumer_contract"
+                    ],
+                    "properties": {
+                      "consumer_contract": {
+                        "properties": {
+                          "scenario_catalog_id": {
+                            "const": "a3-preview-legacy-diagnostic-v1"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fixture_identity": {
+            "properties": {
+              "scenario_catalog_id": {
+                "const": "a3-preview-legacy-diagnostic-v1"
+              },
+              "scenario_catalog_sha256": {
+                "const": "31589f89efc7c0453357bd3cee7216448ec1332e57d135d555b2c897a0bc855d"
+              }
+            }
+          },
+          "scenario_matrix": {
+            "properties": {
+              "required_count": {
+                "const": 18
+              },
+              "executed_count": {
+                "const": 18
               }
             }
           }

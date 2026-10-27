@@ -651,6 +651,90 @@ def _run_optional_client_info(executable_path: Path, fixture_root: Path) -> None
         process.abort()
 
 
+def _run_legacy_initialize_diagnostic(executable_path: Path, fixture_root: Path) -> None:
+    arguments = {"name": "PreviewMarker", "kind": "class"}
+    expected = {
+        "kind": "find_code_symbol_success",
+        "results": [
+            {
+                "file": "Markers.cs",
+                "line": 3,
+                "name": "PreviewMarker",
+                "kind": "class",
+                "context": "public sealed class PreviewMarker { }",
+            }
+        ],
+    }
+    for legacy_id in (101, "legacy-initialize"):
+        process = JsonRpcProcess(executable_path, fixture_root)
+        try:
+            initial = process.request(legacy_id, "initialize", {})
+            if "result" in initial or initial.get("error") != {
+                "code": -32601,
+                "message": (
+                    "Only MCP 2026-07-28 is supported. "
+                    "Use server/discover and per-request metadata instead."
+                ),
+            }:
+                _refuse("initial legacy initialize did not return the supported-version diagnostic")
+
+            discovery = _result(process.request(102, "server/discover", {"_meta": _REQUEST_META}))
+            capabilities = _artifact._expect_mapping(
+                discovery.get("capabilities"),
+                "legacy diagnostic discovery capabilities",
+                ("tools",),
+            )
+            tools_capability = _artifact._expect_mapping(
+                capabilities["tools"], "legacy diagnostic tools capability", ("listChanged",)
+            )
+            if (
+                discovery.get("supportedVersions") != [_PROTOCOL_VERSION]
+                or tools_capability["listChanged"] is not False
+                or type(discovery.get("ttlMs")) is not int
+                or discovery["ttlMs"] != 300_000
+                or discovery.get("cacheScope") != "public"
+            ):
+                _refuse("legacy diagnostic recovery changed the discovery contract")
+            catalog = _result(process.request(103, "tools/list", {"_meta": _REQUEST_META}))
+            tools = catalog.get("tools")
+            if (
+                not isinstance(tools, list)
+                or any(not isinstance(tool, Mapping) for tool in tools)
+                or [tool.get("name") for tool in tools] != list(_artifact._A2_TOOLS)
+            ):
+                _refuse("legacy diagnostic recovery changed the exact tool catalog")
+            _validate_a2_catalog_schemas(tools)
+            _validate_schema_value(arguments, tools[0]["inputSchema"])
+
+            for request_id in (104, 106):
+                response = process.request(
+                    request_id,
+                    "tools/call",
+                    {"name": "find_code_symbol", "arguments": arguments, "_meta": _REQUEST_META},
+                )
+                if "error" in response:
+                    _refuse(
+                        "legacy initialize correction returned an error instead of exact success"
+                    )
+                _expect_success(_result(response), expected, output_schema=tools[0]["outputSchema"])
+                if request_id == 104:
+                    modern = process.request(
+                        "modern-initialize", "initialize", {"_meta": _REQUEST_META}
+                    )
+                    if "result" in modern or modern.get("error") != {
+                        "code": -32601,
+                        "message": (
+                            "Method 'initialize' is not available on protocol version "
+                            "'2026-07-28'. "
+                            "Use 'server/discover' and per-request metadata instead."
+                        ),
+                    }:
+                        _refuse("established modern initialize did not preserve the SDK diagnostic")
+            process.close_eof()
+        finally:
+            process.abort()
+
+
 def _run_required_metadata_version_recovery(executable_path: Path, fixture_root: Path) -> None:
     version_key = "io.modelcontextprotocol/protocolVersion"
     capabilities_key = "io.modelcontextprotocol/clientCapabilities"
@@ -1478,6 +1562,9 @@ def _run_matrix(
             executable_path, fixture_root
         ),
         "required-metadata-version-recovery": lambda: _run_required_metadata_version_recovery(
+            executable_path, fixture_root
+        ),
+        "legacy-initialize-supported-version-diagnostic": lambda: _run_legacy_initialize_diagnostic(
             executable_path, fixture_root
         ),
         "rollback-python-default": rollback,

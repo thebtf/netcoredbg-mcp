@@ -77,11 +77,13 @@ internal static class BoundedResponseFrameSerializer
         return counter.Fits;
     }
 
-    internal static bool FitsLegacyInitializeMethodNotFoundErrorWithinLimit(RequestId id)
+    internal static bool FitsLegacyInitializeMethodNotFoundErrorWithinLimit(RequestId id, string message = "Method not found")
     {
         var counter = new BoundedJsonByteCounter(PreviewToolCatalog.MaximumCompleteResponseFrameBytes);
         WriteResponsePrefix(ref counter, id);
-        WriteAscii(ref counter, ",\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}"u8);
+        WriteAscii(ref counter, ",\"error\":{\"code\":-32601,\"message\":"u8);
+        WriteJsonString(ref counter, message, nestedInText: false, trackToken: false);
+        WriteAscii(ref counter, "}}"u8);
         return counter.Fits;
     }
 

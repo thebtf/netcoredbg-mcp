@@ -127,6 +127,12 @@ public sealed class PreviewArtifactConsumerTests
         var standardError = process.StandardError.ReadToEndAsync();
         try
         {
+            var legacyId = new RequestId("artifact-legacy-initialize");
+            var legacy = Assert.IsType<JsonRpcError>(await SendAsync(legacyId, "initialize", new JsonObject()));
+            Assert.Equal(legacyId, legacy.Id);
+            Assert.Equal(-32601, legacy.Error.Code);
+            Assert.Equal("Only MCP 2026-07-28 is supported. Use server/discover and per-request metadata instead.", legacy.Error.Message);
+
             var missingId = new RequestId(51);
             var missing = Assert.IsType<JsonRpcError>(await CallAsync(missingId, metadata: null));
             Assert.Equal(missingId, missing.Id);
@@ -137,10 +143,30 @@ public sealed class PreviewArtifactConsumerTests
                 [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion,
                 [MetaKeys.ClientCapabilities] = new JsonObject(),
             };
+            var discovery = RequireResult(await SendAsync(new RequestId("artifact-legacy-discover"), "server/discover",
+                new JsonObject { ["_meta"] = metadata.DeepClone() }));
+            Assert.Equal(["2026-07-28"], discovery["supportedVersions"]!.AsArray().Select(static value => value!.GetValue<string>()));
+            var capabilities = discovery["capabilities"]!.AsObject();
+            Assert.Equal(["tools"], capabilities.Select(static property => property.Key));
+            Assert.Equal(["listChanged"], capabilities["tools"]!.AsObject().Select(static property => property.Key));
+            Assert.False(capabilities["tools"]!["listChanged"]!.GetValue<bool>());
+            Assert.Equal(300_000L, discovery["ttlMs"]!.GetValue<long>());
+            Assert.Equal("public", discovery["cacheScope"]!.GetValue<string>());
+            var catalog = RequireResult(await SendAsync(new RequestId("artifact-legacy-list"), "tools/list",
+                new JsonObject { ["_meta"] = metadata.DeepClone() }));
+            Assert.Equal(["find_code_symbol", "find_code_references", "get_source_context"],
+                catalog["tools"]!.AsArray().Select(static tool => tool!["name"]!.GetValue<string>()));
             var recoveredId = new RequestId("artifact-required-metadata-recovered");
             var recovered = await CallAsync(recoveredId, metadata);
             Assert.Equal(recoveredId, Assert.IsType<JsonRpcResponse>(recovered).Id);
             AssertMarkerResult(RequireResult(recovered));
+
+            var modernId = new RequestId(53);
+            var modern = Assert.IsType<JsonRpcError>(await SendAsync(modernId, "initialize",
+                new JsonObject { ["_meta"] = metadata.DeepClone() }));
+            Assert.Equal(modernId, modern.Id);
+            Assert.Equal(-32601, modern.Error.Code);
+            Assert.Equal("Method 'initialize' is not available on protocol version '2026-07-28'. Use 'server/discover' and per-request metadata instead.", modern.Error.Message);
 
             const string requestedVersion = "1900-01-01";
             var unsupportedMetadata = metadata.DeepClone().AsObject();
@@ -187,12 +213,20 @@ public sealed class PreviewArtifactConsumerTests
             {
                 parameters["_meta"] = metadata.DeepClone();
             }
-            var request = new JsonRpcRequest { Id = id, Method = "tools/call", Params = parameters };
+            return await SendAsync(id, "tools/call", parameters);
+        }
+
+        async Task<JsonRpcMessage> SendAsync(RequestId id, string method, JsonObject parameters)
+        {
+            var request = new JsonRpcRequest { Id = id, Method = method, Params = parameters };
             await process.StandardInput.WriteLineAsync(JsonSerializer.Serialize<JsonRpcMessage>(request, McpJsonUtilities.DefaultOptions));
             await process.StandardInput.FlushAsync();
             var line = await process.StandardOutput.ReadLineAsync().WaitAsync(RequestTimeout);
             Assert.True(line is not null, $"Extracted preview reached EOF before the correlated response for '{id}'.");
-            return Assert.IsAssignableFrom<JsonRpcMessage>(JsonSerializer.Deserialize<JsonRpcMessage>(line!, McpJsonUtilities.DefaultOptions));
+            Assert.InRange(Encoding.UTF8.GetByteCount(line!), 1, 256 * 1024);
+            var response = Assert.IsAssignableFrom<JsonRpcMessageWithId>(JsonSerializer.Deserialize<JsonRpcMessage>(line!, McpJsonUtilities.DefaultOptions));
+            Assert.Equal(id, response.Id);
+            return response;
         }
     }
 
@@ -400,8 +434,8 @@ public sealed class PreviewArtifactConsumerTests
             var consumerContract = manifest.GetProperty("consumer_contract");
             Assert.Equal(["scenario_catalog_id", "scenario_catalog_sha256", "tools"],
                 consumerContract.EnumerateObject().Select(static property => property.Name).Order());
-            Assert.Equal("a3-preview-required-metadata-version-v1", RequiredString(consumerContract, "scenario_catalog_id"));
-            Assert.Equal("1e737db53dda4557b04616f6fc114c71fa0136c7c11693143772d7b642f5947a",
+            Assert.Equal("a3-preview-legacy-diagnostic-v1", RequiredString(consumerContract, "scenario_catalog_id"));
+            Assert.Equal("31589f89efc7c0453357bd3cee7216448ec1332e57d135d555b2c897a0bc855d",
                 RequiredString(consumerContract, "scenario_catalog_sha256"));
             Assert.Equal(["find_code_symbol", "find_code_references", "get_source_context"],
                 consumerContract.GetProperty("tools").EnumerateArray().Select(static tool => tool.GetString()));

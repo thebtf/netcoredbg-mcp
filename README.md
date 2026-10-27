@@ -54,6 +54,21 @@ Use the [generation-bound instructions](specs/010-a1-preview-artifact/contracts/
 for the selected asset. Python remains the default; broader A3 and runtime
 security servicing remain open.
 
+### Preview client compatibility
+
+| Client | Preview policy |
+| --- | --- |
+| Modern `2026-07-28` | Direct discovery/list/call or a literal-first tool call with per-request metadata. |
+| Dual-era using modern requests | Uses the same modern path; the preview does not implement a legacy handshake. |
+| Legacy-only `initialize` | Refused with `-32601`; it cannot establish a legacy session. |
+
+The [current source successor](specs/019-a3-legacy-initialize-diagnostic/spec.md)
+adds the supported version and modern request guidance to the initial legacy
+refusal. Its fixed 18-case public delivery is still pending; the linked preview.2
+release retains its original 17-case meaning. Discovery remains tools-only with
+`listChanged:false`; client capabilities or roots cannot expand the explicit
+launch-pinned project root. Broader capability-schema/parser policy remains open.
+
 ## Quick start
 
 Install the package, let the setup wizard provision or discover the debugger,

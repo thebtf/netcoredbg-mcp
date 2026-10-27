@@ -12,6 +12,7 @@ namespace NetCoreDbg.Mcp.Stateless.Preview;
 internal static class Program
 {
     private const string ProtocolVersion = "2026-07-28";
+    private const string LegacyInitializeDiagnostic = "Only MCP 2026-07-28 is supported. Use server/discover and per-request metadata instead.";
 
     private static async Task Main(string[] arguments)
     {
@@ -66,14 +67,14 @@ internal static class Program
 
                     if (context.JsonRpcMessage is JsonRpcRequest { Method: RequestMethods.Initialize } initializeRequest)
                     {
-                        if (!BoundedResponseFrameSerializer.FitsLegacyInitializeMethodNotFoundErrorWithinLimit(initializeRequest.Id))
+                        if (!BoundedResponseFrameSerializer.FitsLegacyInitializeMethodNotFoundErrorWithinLimit(initializeRequest.Id, LegacyInitializeDiagnostic))
                         {
                             _ = context.Server.DisposeAsync().AsTask();
                             return;
                         }
 
                         await context.Server.SendMessageAsync(
-                            MethodNotFoundResponse(initializeRequest.Id),
+                            MethodNotFoundResponse(initializeRequest.Id, LegacyInitializeDiagnostic),
                             cancellationToken).ConfigureAwait(false);
                         return;
                     }
@@ -227,13 +228,13 @@ internal static class Program
         && request.Method != "tools/list"
         && request.Method != RequestMethods.ToolsCall;
 
-    private static JsonRpcError MethodNotFoundResponse(RequestId id) => new()
+    private static JsonRpcError MethodNotFoundResponse(RequestId id, string message = "Method not found") => new()
     {
         Id = id,
         Error = new JsonRpcErrorDetail
         {
             Code = -32601,
-            Message = "Method not found",
+            Message = message,
         },
     };
 
