@@ -1,6 +1,6 @@
 # A3 Legacy Initialize Diagnostic Plan
 
-Status: implementation and local proof accepted. Runtime/artifact RED preceded product edits; original preview 170/170 plus the focused replacement boundary pair gives disjoint current coverage of 171, not a full rerun. Artifact semantics 129/129, extracted runner and installed-Python rollback passed. Independent assurance verified 8/8 after its sole test-coverage F1 was repaired and proved. Canonical/public delivery remains pending. Scope is one actionable refusal, not full A3 closure.
+Status: implemented, independently reviewed and delivered as `stateless-preview-v0.23.17-preview.3`. Original RED/PARTIAL and local disjoint171/semantic129 evidence remain retained; exact canonical retained and fresh public consumers each passed all 18 scenarios plus unchanged installed-Python rollback. Existing S4, same-byte publication and closeout completed. Broader A3 and runtime servicing remain open.
 
 ## Integration points
 
