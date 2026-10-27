@@ -2041,8 +2041,10 @@ class SessionManager:
 
         # Configuration done
         logger.info("[launch] phase 9/9: configuration done")
-        await self._client.configuration_done()
+        response = await self._client.configuration_done()
         self._require_live_dap_generation(dap_generation, "launch")
+        if not response.success:
+            raise RuntimeError(f"Configuration failed: {response.message}")
         self._set_state(DebugState.RUNNING)
 
         if stealth_mode:
@@ -2107,8 +2109,10 @@ class SessionManager:
             raise RuntimeError(f"Attach failed: {response.message}")
         self._require_live_dap_generation(dap_generation, "attach")
 
-        await self._client.configuration_done()
+        response = await self._client.configuration_done()
         self._require_live_dap_generation(dap_generation, "attach")
+        if not response.success:
+            raise RuntimeError(f"Configuration failed: {response.message}")
         self._state.process_id = process_id
         self._set_state(DebugState.RUNNING)
 

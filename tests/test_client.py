@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -318,6 +319,88 @@ class TestDAPClientRequestBuilding:
         assert captured_args["arguments"]["cwd"] == "/test"
         assert captured_args["arguments"]["args"] == ["--arg1"]
         assert captured_args["arguments"]["stopAtEntry"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("overrides", "resolve_host", "explicit_cwd"),
+        [
+            ({"APP_MODE": "debug"}, False, False),
+            ({"PATH": None, "APP_MODE": "debug"}, True, False),
+            ({"PATH": None, "APP_MODE": "debug"}, True, True),
+            pytest.param(
+                {"pAtH": None, "APP_MODE": "debug"},
+                True,
+                False,
+                marks=pytest.mark.skipif(os.name != "nt", reason="Windows env name aliases"),
+            ),
+            pytest.param(
+                {"PATH": None, "pAtH": "target-path", "APP_MODE": "debug"},
+                False,
+                False,
+                marks=pytest.mark.skipif(os.name != "nt", reason="Windows env name aliases"),
+            ),
+        ],
+        ids=("inherited-path", "remove-path", "remove-path-cwd", "remove-alias", "restore-alias"),
+    )
+    async def test_dll_launch_resolves_host_before_effective_path_removal(
+        self, tmp_path, overrides, resolve_host, explicit_cwd
+    ):
+        """Resolve the host from server PATH without putting PATH back in the target env."""
+        server_bin = tmp_path / "server-bin"
+        server_bin.mkdir()
+        dotnet = server_bin / ("dotnet.exe" if os.name == "nt" else "dotnet")
+        dotnet.touch()
+        dotnet.chmod(0o700)
+        target = tmp_path / "target" / "App.dll"
+        target.parent.mkdir()
+        target.touch()
+        program = str(target)
+        caller_args = ["variables", "--flag"]
+        original_args = list(caller_args)
+        original_overrides = dict(overrides)
+        cwd = str(tmp_path / "working-directory") if explicit_cwd else None
+        parent = {"PATH": str(server_bin), "PATHEXT": ".EXE", "SERVER_NEIGHBOR": "server-only"}
+        captured_args = {}
+        client = DAPClient("/path")
+
+        async def mock_send(command, arguments=None, timeout=30.0):
+            captured_args["command"] = command
+            captured_args["arguments"] = arguments
+            return DAPResponse(seq=1, request_seq=1, success=True, command=command)
+
+        client.send_request = mock_send
+        with patch.dict(os.environ, parent, clear=True):
+            await client.launch(
+                program=program,
+                cwd=cwd,
+                args=caller_args,
+                env=overrides,
+                stop_at_entry=True,
+                just_my_code=True,
+            )
+            parent_unchanged = dict(os.environ) == parent
+        assert parent_unchanged
+        assert caller_args == original_args
+        assert overrides == original_overrides
+        assert captured_args["command"] == "launch"
+        arguments = captured_args["arguments"]
+        if resolve_host:
+            assert os.path.isabs(arguments["program"])
+            assert os.path.samefile(arguments["program"], dotnet)
+            assert arguments["args"] == [program, *original_args]
+            assert arguments["args"] is not caller_args
+            assert not any(name.upper() == "PATH" for name in arguments["env"])
+        else:
+            assert arguments["program"] == program
+            assert arguments["args"] == original_args
+            expected_path = "target-path" if "pAtH" in overrides else str(server_bin)
+            assert arguments["env"]["PATH"] == expected_path
+        assert arguments["cwd"] == (cwd or os.path.dirname(program))
+        assert arguments["stopAtEntry"] is True
+        assert arguments["justMyCode"] is True
+        assert arguments["env"]["APP_MODE"] == "debug"
+        assert arguments["env"]["SERVER_NEIGHBOR"] == "server-only"
+        assert all(isinstance(value, str) for value in arguments["env"].values())
 
     @pytest.mark.asyncio
     async def test_launch_request_keeps_mixed_overrides_string_only(self):

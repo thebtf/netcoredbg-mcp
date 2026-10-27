@@ -906,6 +906,69 @@ class TestSessionManagerTransportFences:
         assert manager.state.state is DebugState.TERMINATED
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("operation", ("launch", "attach"))
+    async def test_launch_and_attach_reject_negative_configuration_done(self, operation: str):
+        """A native configuration failure cannot become a successful RUNNING session."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+
+        generation = object()
+        owner = OwnedProcessRef("configuration-failure-owner", generation, 46022)
+        registry_token = object()
+        client = MagicMock()
+        client.is_running = True
+        client.adapter_owner = owner
+        client.stop = AsyncMock()
+        client.disconnect = AsyncMock()
+        client.set_exception_breakpoints = AsyncMock()
+        client.launch = AsyncMock(
+            return_value=DAPResponse(seq=1, request_seq=1, success=True, command="launch")
+        )
+        client.attach = AsyncMock(
+            return_value=DAPResponse(seq=1, request_seq=1, success=True, command="attach")
+        )
+        native_error = "Failed command 'configurationDone' : 0x80070002"
+        client.configuration_done = AsyncMock(
+            return_value=DAPResponse(
+                seq=2,
+                request_seq=2,
+                success=False,
+                command="configurationDone",
+                message=native_error,
+            )
+        )
+        manager._client = client
+        manager._active_dap_run = generation
+        manager._registry_owner_tokens[generation] = registry_token
+        manager._state.state = DebugState.INITIALIZING
+        manager._initialized_event.set()
+        manager._enable_hot_reload_if_supported = AsyncMock()
+        manager._sync_all_breakpoints = AsyncMock()
+        manager.check_dbgshim_compatibility = MagicMock(return_value=None)
+
+        try:
+            with patch("netcoredbg_mcp.setup.dbgshim.select_and_swap_dbgshim", return_value=False):
+                with pytest.raises(RuntimeError) as failure:
+                    if operation == "launch":
+                        await manager.launch(program="program.dll", pre_build=False)
+                    else:
+                        await manager.attach(process_id=1234)
+
+            assert native_error in str(failure.value)
+            client.configuration_done.assert_awaited_once_with()
+            assert manager.state.state is DebugState.INITIALIZING
+            assert manager._client is client
+            assert manager._active_dap_run is generation
+            assert client.adapter_owner is owner
+            assert manager._registry_owner_tokens[generation] is registry_token
+            assert manager._debuggee_mode == (generation, operation)
+            assert manager._terminate_on_disconnect(generation) is (operation == "launch")
+            client.stop.assert_not_awaited()
+            client.disconnect.assert_not_awaited()
+        finally:
+            await manager.close_resource_update_notifications()
+
+    @pytest.mark.asyncio
     async def test_attach_serializes_start_and_completion_against_prebuild(self, tmp_path):
         """Pre-build cannot interleave after attach starts its adapter generation."""
         project = tmp_path / "App.csproj"

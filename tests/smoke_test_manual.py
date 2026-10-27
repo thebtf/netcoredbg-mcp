@@ -7720,7 +7720,7 @@ async def test_nullable_launch_environment() -> None:
             args=["variables"],
             pre_build=False,
             stop_at_entry=True,
-            env={"NCD362_MODE": "debug-mode", "ncd362_remove": None},
+            env={"NCD362_MODE": "debug-mode", "ncd362_remove": None, "PATH": None},
         )
         stopped = await session.wait_for_stopped(timeout=10)
         check("Nullable env reaches entry stop", stopped.stop_reason == "entry")
@@ -7729,7 +7729,11 @@ async def test_nullable_launch_environment() -> None:
         frames = await session.get_stack_trace(levels=1)
         if not frames:
             raise AssertionError("Nullable env regression has no stopped frame")
-        for name, expected in (("NCD362_MODE", '"debug-mode"'), ("NCD362_REMOVE", "null")):
+        for name, expected in (
+            ("NCD362_MODE", '"debug-mode"'),
+            ("NCD362_REMOVE", "null"),
+            ("PATH", "null"),
+        ):
             evaluated = await session.evaluate(
                 f'System.Environment.GetEnvironmentVariable("{name}")', frames[0].id
             )

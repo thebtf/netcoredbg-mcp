@@ -476,7 +476,7 @@ async def test_debuggee_activity_rejects_terminated_to_new_session_overlap(
     manager._client.set_exception_breakpoints = AsyncMock()
     manager._client.launch = AsyncMock(return_value=SimpleNamespace(success=True))
     manager._client.attach = AsyncMock(return_value=SimpleNamespace(success=True))
-    manager._client.configuration_done = AsyncMock()
+    manager._client.configuration_done = AsyncMock(return_value=SimpleNamespace(success=True))
     manager.check_dbgshim_compatibility = MagicMock(return_value=None)  # type: ignore[method-assign]
     monkeypatch.setattr(
         "netcoredbg_mcp.setup.dbgshim.select_and_swap_dbgshim",

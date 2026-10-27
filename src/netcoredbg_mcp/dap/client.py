@@ -1059,10 +1059,21 @@ class DAPClient:
         just_my_code: bool = False,
     ) -> DAPResponse:
         """Launch program for debugging."""
+        launch_cwd = cwd or os.path.dirname(program)
+        launch_args = args or []
+        if env and program.lower().endswith(".dll"):
+            overrides = (
+                {name.upper(): value for name, value in env.items()} if os.name == "nt" else env
+            )
+            if "PATH" in overrides and overrides["PATH"] is None:
+                resolved = shutil.which("dotnet")
+                if resolved is not None:
+                    launch_args = [program, *launch_args]
+                    program = os.path.abspath(resolved)
         arguments = {
             "program": program,
-            "cwd": cwd or os.path.dirname(program),
-            "args": args or [],
+            "cwd": launch_cwd,
+            "args": launch_args,
             "env": build_launch_environment(env),
             "stopAtEntry": stop_at_entry,
             "justMyCode": just_my_code,
