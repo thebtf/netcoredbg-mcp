@@ -940,6 +940,74 @@ class TestDAPClientDisconnect:
         assert captured_args["arguments"]["terminateDebuggee"] is False
 
 
+class TestDAPClientStartEnvironment:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("remove_path", [False, True])
+    async def test_bare_adapter_lookup_uses_server_path_before_child_removal(self, remove_path):
+        """Resolve an installed executable only; the admission seam never executes it."""
+        import os
+        import sys
+        from pathlib import Path
+
+        from netcoredbg_mcp.windows_process_owner import _resolve_application_name
+
+        if os.name != "nt":
+            pytest.skip("Windows owner executable resolution")
+        executable = Path(sys.executable).resolve()
+        assert executable.is_file()
+        server_environment = {
+            "PATH": str(executable.parent),
+            "PATHEXT": ".EXE",
+            "NCD362_NEIGHBOR": "parent-only",
+        }
+        with patch.dict(os.environ, server_environment, clear=True):
+            parent = dict(os.environ)
+            bare_name = executable.name
+            assert os.path.samefile(_resolve_application_name(bare_name, None), executable)
+            overrides: dict[str, str | None] = {"NCD362_NEIGHBOR": "launch-only"}
+            if remove_path:
+                overrides["PATH"] = None
+            original_overrides = dict(overrides)
+            stdout, stderr = BlockingStream(), BlockingStream()
+            process = TreeProcess(pid=46031, stdout=stdout, stderr=stderr)
+            client = DAPClient(bare_name)
+            observed = {}
+
+            async def admit(**kwargs):
+                parent_unchanged = dict(os.environ) == parent
+                assert parent_unchanged
+                resolved = _resolve_application_name(kwargs["argv"][0], kwargs["env"])
+                child = dict(os.environ if kwargs["env"] is None else kwargs["env"])
+                observed.update(
+                    resolved_same_file=os.path.samefile(resolved, executable),
+                    argv_is_absolute=os.path.isabs(kwargs["argv"][0]),
+                    child_has_path=any(name.casefold() == "path" for name in child),
+                    child_neighbor=child["NCD362_NEIGHBOR"],
+                )
+                return OwnedTestProcess(process, kwargs["generation"])
+
+            try:
+                with patch(
+                    "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch", side_effect=admit
+                ):
+                    await client.start(generation="nullable-path", env=overrides)
+                assert observed == {
+                    "resolved_same_file": True,
+                    "argv_is_absolute": remove_path,
+                    "child_has_path": not remove_path,
+                    "child_neighbor": "parent-only",
+                }
+                assert client.netcoredbg_path == bare_name
+                assert overrides == original_overrides
+                parent_unchanged = dict(os.environ) == parent
+                assert parent_unchanged
+            finally:
+                process.terminate()
+                stdout.release.set()
+                stderr.release.set()
+                await client.stop()
+
+
 class TestDAPClientTransportDeath:
     """Regression coverage for adapter transport loss without DAP termination."""
 

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -506,6 +507,7 @@ class DAPClient:
             self._generation_counter += 1
             generation = self._generation_counter
 
+        adapter_argv0 = self.netcoredbg_path
         adapter_env = None
         if env:
             overrides = (
@@ -514,6 +516,10 @@ class DAPClient:
             removals: dict[str, str | None]
             removals = {name: None for name, value in overrides.items() if value is None}
             if removals:
+                if not os.path.dirname(adapter_argv0):
+                    resolved = shutil.which(adapter_argv0)
+                    if resolved is not None:
+                        adapter_argv0 = os.path.abspath(resolved)
                 # Samsung merges DAP env into its own inherited environment.
                 adapter_env = build_launch_environment(removals)
 
@@ -525,7 +531,7 @@ class DAPClient:
             # to admit it. The private boundary returns only after admission.
             owner = await WindowsOwnedProcess.launch(
                 generation=generation,
-                argv=(self.netcoredbg_path, "--interpreter=vscode"),
+                argv=(adapter_argv0, "--interpreter=vscode"),
                 cwd=None,
                 env=adapter_env,
                 stdin_mode="pipe",
@@ -534,7 +540,7 @@ class DAPClient:
         else:
             posix_owner = await PosixOwnedProcess.launch(
                 generation=generation,
-                argv=(self.netcoredbg_path, "--interpreter=vscode"),
+                argv=(adapter_argv0, "--interpreter=vscode"),
                 cwd=None,
                 env=adapter_env,
                 stdin_mode="pipe",
