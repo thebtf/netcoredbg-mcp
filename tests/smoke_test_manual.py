@@ -7700,6 +7700,54 @@ async def test_process_owner_cleanup() -> None:
             await asyncio.to_thread(sentinel.wait, 5)
 
 
+async def test_nullable_launch_environment() -> None:
+    """Issue #362: read mixed overrides and real inherited removal in the debuggee.
+
+    Set NCD362_REMOVE=parent-only in the smoke consumer's child environment.
+    This scenario never changes the smoke process environment itself.
+    """
+    if os.environ.get("NCD362_REMOVE") != "parent-only":
+        raise RuntimeError(
+            "Set NCD362_REMOVE=parent-only in this smoke consumer's child environment"
+        )
+    parent = dict(os.environ)
+    session = await new_session()
+    try:
+        await session.start()
+        await session.launch(
+            program=DLL,
+            cwd=os.path.dirname(DLL),
+            args=["variables"],
+            pre_build=False,
+            stop_at_entry=True,
+            env={"NCD362_MODE": "debug-mode", "ncd362_remove": None, "PATH": None},
+        )
+        stopped = await session.wait_for_stopped(timeout=10)
+        check("Nullable env reaches entry stop", stopped.stop_reason == "entry")
+        if stopped.stop_reason != "entry":
+            return
+        frames = await session.get_stack_trace(levels=1)
+        if not frames:
+            raise AssertionError("Nullable env regression has no stopped frame")
+        for name, expected in (
+            ("NCD362_MODE", '"debug-mode"'),
+            ("NCD362_REMOVE", "null"),
+            ("PATH", "null"),
+        ):
+            evaluated = await session.evaluate(
+                f'System.Environment.GetEnvironmentVariable("{name}")', frames[0].id
+            )
+            check(
+                f"Nullable env debuggee {name}", evaluated.get("result") == expected, str(evaluated)
+            )
+    finally:
+        try:
+            await session.stop()
+        finally:
+            parent_unchanged = dict(os.environ) == parent
+            check("Nullable env leaves parent unchanged", parent_unchanged)
+
+
 def _base_scenarios() -> list[tuple[str, Callable[..., Any]]]:
     return [
         ("Hit Counting", test_hit_counting),
@@ -7822,6 +7870,7 @@ def _complete_scenario_catalog() -> list[tuple[str, Callable[..., Any]]]:
             "Installed Public Capture Regression",
             partial(test_two_application_gui_verification, extended_gui=True),
         ),
+        ("Nullable Launch Environment", test_nullable_launch_environment),
         *_base_scenarios(),
         *_winforms_extended_scenarios(),
         *_wpf_extended_scenarios(),

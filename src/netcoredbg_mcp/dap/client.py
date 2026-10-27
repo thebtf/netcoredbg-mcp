@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -94,16 +95,16 @@ def format_request_arguments_for_log(
 
 def build_launch_environment(
     overrides: dict[str, str | None] | None = None,
-) -> dict[str, str | None]:
-    """Build the DAP launch environment from the server process environment."""
+) -> dict[str, str]:
+    """Build Samsung's string-only launch map without changing inherited state."""
 
     if os.name == "nt":
-        return build_windows_launch_environment(os.environ, overrides)
-
-    launch_env: dict[str, str | None] = dict(os.environ)
-    if overrides:
-        launch_env.update(overrides)
-    return launch_env
+        launch_env = build_windows_launch_environment(os.environ, overrides)
+    else:
+        launch_env = dict(os.environ)
+        if overrides:
+            launch_env.update(overrides)
+    return {name: value for name, value in launch_env.items() if value is not None}
 
 
 def build_windows_launch_environment(
@@ -480,13 +481,20 @@ class DAPClient:
 
         self._transport_terminal_handler = handler
 
-    async def start(self, *, generation: object | None = None) -> object:
+    async def start(
+        self,
+        *,
+        generation: object | None = None,
+        env: dict[str, str | None] | None = None,
+    ) -> object:
         """Start one netcoredbg generation and its three lifecycle observers.
 
         Args:
             generation: Manager-issued identity used to reject terminal facts
                 from an older adapter run. Direct client callers may omit it;
                 the client then creates a process-local monotonic identity.
+            env: Launch overrides whose null entries are removed from the new
+                adapter child's environment. String overrides stay debuggee-only.
 
         Returns:
             The exact identity bound to the new adapter run.
@@ -499,6 +507,22 @@ class DAPClient:
             self._generation_counter += 1
             generation = self._generation_counter
 
+        adapter_argv0 = self.netcoredbg_path
+        adapter_env = None
+        if env:
+            overrides = (
+                {name.upper(): value for name, value in env.items()} if os.name == "nt" else env
+            )
+            removals: dict[str, str | None]
+            removals = {name: None for name, value in overrides.items() if value is None}
+            if removals:
+                if not os.path.dirname(adapter_argv0):
+                    resolved = shutil.which(adapter_argv0)
+                    if resolved is not None:
+                        adapter_argv0 = os.path.abspath(resolved)
+                # Samsung merges DAP env into its own inherited environment.
+                adapter_env = build_launch_environment(removals)
+
         logger.info("Starting netcoredbg: %s", self.netcoredbg_path)
         owner: WindowsOwnedProcess | None = None
         posix_owner: PosixOwnedProcess | None = None
@@ -507,18 +531,18 @@ class DAPClient:
             # to admit it. The private boundary returns only after admission.
             owner = await WindowsOwnedProcess.launch(
                 generation=generation,
-                argv=(self.netcoredbg_path, "--interpreter=vscode"),
+                argv=(adapter_argv0, "--interpreter=vscode"),
                 cwd=None,
-                env=None,
+                env=adapter_env,
                 stdin_mode="pipe",
             )
             process: asyncio.subprocess.Process | WindowsOwnedProcess | PosixOwnedProcess = owner
         else:
             posix_owner = await PosixOwnedProcess.launch(
                 generation=generation,
-                argv=(self.netcoredbg_path, "--interpreter=vscode"),
+                argv=(adapter_argv0, "--interpreter=vscode"),
                 cwd=None,
-                env=None,
+                env=adapter_env,
                 stdin_mode="pipe",
             )
             process = posix_owner
@@ -1035,10 +1059,21 @@ class DAPClient:
         just_my_code: bool = False,
     ) -> DAPResponse:
         """Launch program for debugging."""
+        launch_cwd = cwd or os.path.dirname(program)
+        launch_args = args or []
+        if env and program.lower().endswith(".dll"):
+            overrides = (
+                {name.upper(): value for name, value in env.items()} if os.name == "nt" else env
+            )
+            if "PATH" in overrides and overrides["PATH"] is None:
+                resolved = shutil.which("dotnet")
+                if resolved is not None:
+                    launch_args = [program, *launch_args]
+                    program = os.path.abspath(resolved)
         arguments = {
             "program": program,
-            "cwd": cwd or os.path.dirname(program),
-            "args": args or [],
+            "cwd": launch_cwd,
+            "args": launch_args,
             "env": build_launch_environment(env),
             "stopAtEntry": stop_at_entry,
             "justMyCode": just_my_code,

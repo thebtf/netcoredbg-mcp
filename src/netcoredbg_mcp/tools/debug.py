@@ -125,6 +125,13 @@ def register_debug_tools(
         debugging the latest code. Provide build_project path to .csproj file.
         Set pre_build=False to skip building (e.g., for pre-built binaries).
 
+        ENVIRONMENT: String values override the debuggee environment; null removes
+        inherited variables (case-insensitive on Windows). Launch overrides do not
+        change the server or pre-build environment. Removals may drain and restart
+        an idle adapter. With pre_build=False, a removal request is refused while
+        a debuggee is active; stop it explicitly first. The existing pre-build
+        stop/build sequence is unchanged.
+
         BUILD FAILURE: A completed failed restore/build is included in the first
         error response's data: failed stage, executed argv, working directory,
         exit code, stdout/stderr, and parsed diagnostics. No debugger is launched.
@@ -142,7 +149,7 @@ def register_debug_tools(
             program: Path to the .NET executable or DLL to debug (auto-resolved)
             cwd: Working directory for the program
             args: Command line arguments
-            env: Environment variables
+            env: Debuggee environment overrides; null removes an inherited variable
             launch_profile: Optional project launch profile name
             stop_at_entry: Stop at entry point
             pre_build: Build project before launching (default: True). Requires build_project.

@@ -13,14 +13,16 @@ agent workflow. `netcoredbg-mcp` combines `netcoredbg`, the Debug Adapter
 Protocol, and Windows UI Automation so an agent can observe a running app,
 stop it deliberately, and inspect the state that explains the behavior.
 
-**Python 3.10+ · Windows GUI automation · 135 tools · 8 prompts · 4 resources · v0.23.16**
+**Python 3.10+ · Windows GUI automation · 135 tools · 8 prompts · 4 resources · v0.23.17**
 
-The prepared v0.23.16 PATCH fixes runtime-smoke v1 graceful cleanup across
-separate plan calls: disconnect an already registered UI backend before stopping
-the debug adapter, without creating a backend when UI was unused. Cleanup retains
-the existing launched-versus-attached target policy. Python remains the default;
-the normal short smoke is unchanged. See the [release notes](RELEASE_NOTES.md)
-for scope and verification boundaries; preparation is not publication.
+The prepared v0.23.17 PATCH fixes nullable launch environments (#362): string
+overrides survive beside `null`, and `null` removes inherited variables, including
+Windows case variants. An idle adapter uses guarded drain/restart; with
+`pre_build=False`, removal requests refuse an active debuggee without stopping it.
+The parent and pre-build environments stay unchanged. Python remains the default.
+Upgrade and restart the MCP server; this does not hot-reload shared receivers.
+See the [release notes](RELEASE_NOTES.md) for scope and verification boundaries;
+preparation is not publication.
 
 ## What it enables
 

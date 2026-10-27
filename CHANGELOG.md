@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retired the former runner-log grant collector, permission-probe job/selector and P0 permission-report dependency after migrating the surviving current-job selector. Removed requests and Attempt 1.0/2.0 fields refuse without aliases or synthetic upgrades. Historical run `38937481596/1` observed the same in-progress job at offsets 0/60 seconds, both UNAVAILABLE; original reports/history remain unchanged and are not relabeled PASS or server denial. The amendment requires a new canonical Candidate/Catalog, complete downloaded proof/reviews and explicit Root S4 before a new noncolliding preview tag; original `5f96014` approval remains original-only. No version bump or live release is claimed.
 
 ### Fixed
+- Classified the installed native-input WPF submenu regression as explicit `gui_regression`, preserving normal verification's two short WPF/Avalonia journeys. Its body and assertions are unchanged; the observed popup-discovery timeout and incomplete cleanup remain open under #363, not repaired or relabeled PASS.
 - Manual smoke imports and scenario listings defer missing-fixture diagnostics until execution without changing fixture gating or the short default inventory. The process-identity test fixture verifies that its own token has no enabled debug privilege before exercising its strict DACL checks and retains individual native access/wait/exit diagnostics; product access policy and Python defaults are unchanged.
 - Process-identity bridge probes keep generated executables in a short, scoped temporary output directory so deep coverage paths do not prevent Windows child-process launch; diagnostics, source hashes, both process/DACL cases and identity guards remain intact. The smoke inventory test now requires the accepted short default and checks focused UI evidence only in the extended list. Product behavior and Python defaults are unchanged.
 - The A2 artifact consumer checks source-context success at the largest nonoverflowing radius for line 1 and explicitly requires `INVALID_TOOL_ARGUMENTS` for the overflowing radius. Runtime validation, exact values, text/structured parity, and schema checks remain unchanged.
@@ -58,6 +59,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Compatibility
 - The installed Python entry point remains the default and rollback route. This additive native slice does not add other execution controls, change UI/bridge behavior, or authorize publication.
+
+## [0.23.17] - 2026-10-27
+
+### Fixed
+- Nullable launch environments no longer make Samsung netcoredbg discard neighboring string overrides (#362). Requested removals are applied to a private adapter child environment before creation, including Windows case variants; DAP launch receives only strings. An idle adapter uses the existing guarded drain/restart path, and failed drain retains its owner. With `pre_build=False`, removal requests refuse an active debuggee without changing its state or generation. Parent/session isolation and existing pre-build environment behavior are preserved.
+- Bare adapter names and DLL runtime hosts are resolved from the original server environment before `PATH` removal, preserving the original target, cwd, caller arguments, and actual target PATH absence. A negative native `configurationDone` is reported for both launch and attach instead of false `RUNNING` success; live cleanup ownership is retained (#362).
+
+### Compatibility
+- The Python entry point remains the default. Locked dependencies, bridge-source packaging, and the public catalog remain unchanged: 135 tools, 8 prompts, and 4 resources. The existing pre-build stop/build sequence is unchanged.
+- This PATCH is limited to #362. Upgrade and restart the MCP server; preparation does not hot-reload shared receivers or establish installed-consumer acceptance or publication. Other Unreleased rows and A2 identities/history remain separate.
 
 ## [0.23.16] - 2026-10-25
 

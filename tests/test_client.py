@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -320,8 +321,90 @@ class TestDAPClientRequestBuilding:
         assert captured_args["arguments"]["stopAtEntry"] is True
 
     @pytest.mark.asyncio
-    async def test_launch_request_preserves_env_null_values(self):
-        """Test launch env preserves DAP null removal semantics."""
+    @pytest.mark.parametrize(
+        ("overrides", "resolve_host", "explicit_cwd"),
+        [
+            ({"APP_MODE": "debug"}, False, False),
+            ({"PATH": None, "APP_MODE": "debug"}, True, False),
+            ({"PATH": None, "APP_MODE": "debug"}, True, True),
+            pytest.param(
+                {"pAtH": None, "APP_MODE": "debug"},
+                True,
+                False,
+                marks=pytest.mark.skipif(os.name != "nt", reason="Windows env name aliases"),
+            ),
+            pytest.param(
+                {"PATH": None, "pAtH": "target-path", "APP_MODE": "debug"},
+                False,
+                False,
+                marks=pytest.mark.skipif(os.name != "nt", reason="Windows env name aliases"),
+            ),
+        ],
+        ids=("inherited-path", "remove-path", "remove-path-cwd", "remove-alias", "restore-alias"),
+    )
+    async def test_dll_launch_resolves_host_before_effective_path_removal(
+        self, tmp_path, overrides, resolve_host, explicit_cwd
+    ):
+        """Resolve the host from server PATH without putting PATH back in the target env."""
+        server_bin = tmp_path / "server-bin"
+        server_bin.mkdir()
+        dotnet = server_bin / ("dotnet.exe" if os.name == "nt" else "dotnet")
+        dotnet.touch()
+        dotnet.chmod(0o700)
+        target = tmp_path / "target" / "App.dll"
+        target.parent.mkdir()
+        target.touch()
+        program = str(target)
+        caller_args = ["variables", "--flag"]
+        original_args = list(caller_args)
+        original_overrides = dict(overrides)
+        cwd = str(tmp_path / "working-directory") if explicit_cwd else None
+        parent = {"PATH": str(server_bin), "PATHEXT": ".EXE", "SERVER_NEIGHBOR": "server-only"}
+        captured_args = {}
+        client = DAPClient("/path")
+
+        async def mock_send(command, arguments=None, timeout=30.0):
+            captured_args["command"] = command
+            captured_args["arguments"] = arguments
+            return DAPResponse(seq=1, request_seq=1, success=True, command=command)
+
+        client.send_request = mock_send
+        with patch.dict(os.environ, parent, clear=True):
+            await client.launch(
+                program=program,
+                cwd=cwd,
+                args=caller_args,
+                env=overrides,
+                stop_at_entry=True,
+                just_my_code=True,
+            )
+            parent_unchanged = dict(os.environ) == parent
+        assert parent_unchanged
+        assert caller_args == original_args
+        assert overrides == original_overrides
+        assert captured_args["command"] == "launch"
+        arguments = captured_args["arguments"]
+        if resolve_host:
+            assert os.path.isabs(arguments["program"])
+            assert os.path.samefile(arguments["program"], dotnet)
+            assert arguments["args"] == [program, *original_args]
+            assert arguments["args"] is not caller_args
+            assert not any(name.upper() == "PATH" for name in arguments["env"])
+        else:
+            assert arguments["program"] == program
+            assert arguments["args"] == original_args
+            expected_path = "target-path" if "pAtH" in overrides else str(server_bin)
+            assert arguments["env"]["PATH"] == expected_path
+        assert arguments["cwd"] == (cwd or os.path.dirname(program))
+        assert arguments["stopAtEntry"] is True
+        assert arguments["justMyCode"] is True
+        assert arguments["env"]["APP_MODE"] == "debug"
+        assert arguments["env"]["SERVER_NEIGHBOR"] == "server-only"
+        assert all(isinstance(value, str) for value in arguments["env"].values())
+
+    @pytest.mark.asyncio
+    async def test_launch_request_keeps_mixed_overrides_string_only(self):
+        """Samsung accepts string values, not generic DAP null-removal values."""
         client = DAPClient("/path")
 
         captured_args = {}
@@ -341,7 +424,8 @@ class TestDAPClientRequestBuilding:
         assert captured_args["command"] == "launch"
         assert captured_args["arguments"]["env"]["PATH"] == "base-path"
         assert captured_args["arguments"]["env"]["APP_MODE"] == "debug"
-        assert captured_args["arguments"]["env"]["REMOVE_ME"] is None
+        assert "REMOVE_ME" not in captured_args["arguments"]["env"]
+        assert all(isinstance(value, str) for value in captured_args["arguments"]["env"].values())
 
     @pytest.mark.asyncio
     async def test_launch_inherits_process_environment_by_default(self):
@@ -459,7 +543,7 @@ class TestDAPClientRequestBuilding:
 
     @pytest.mark.asyncio
     async def test_windows_launch_env_preserves_alias_unset_overrides(self):
-        """Windows env alias repair must preserve explicit DAP null removals."""
+        """Removal intent must not put nulls into Samsung's string-only map."""
         client = DAPClient("/path")
 
         captured_args = {}
@@ -484,8 +568,8 @@ class TestDAPClientRequestBuilding:
                 )
 
         env = captured_args["arguments"]["env"]
-        assert env["WINDIR"] is None
-        assert env["SYSTEMROOT"] is None
+        assert "WINDIR" not in env
+        assert "SYSTEMROOT" not in env
 
     @pytest.mark.asyncio
     async def test_windows_launch_env_preserves_empty_string_alias_overrides(self):
@@ -937,6 +1021,74 @@ class TestDAPClientDisconnect:
         await client.disconnect(terminate=False)
 
         assert captured_args["arguments"]["terminateDebuggee"] is False
+
+
+class TestDAPClientStartEnvironment:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("remove_path", [False, True])
+    async def test_bare_adapter_lookup_uses_server_path_before_child_removal(self, remove_path):
+        """Resolve an installed executable only; the admission seam never executes it."""
+        import os
+        import sys
+        from pathlib import Path
+
+        from netcoredbg_mcp.windows_process_owner import _resolve_application_name
+
+        if os.name != "nt":
+            pytest.skip("Windows owner executable resolution")
+        executable = Path(sys.executable).resolve()
+        assert executable.is_file()
+        server_environment = {
+            "PATH": str(executable.parent),
+            "PATHEXT": ".EXE",
+            "NCD362_NEIGHBOR": "parent-only",
+        }
+        with patch.dict(os.environ, server_environment, clear=True):
+            parent = dict(os.environ)
+            bare_name = executable.name
+            assert os.path.samefile(_resolve_application_name(bare_name, None), executable)
+            overrides: dict[str, str | None] = {"NCD362_NEIGHBOR": "launch-only"}
+            if remove_path:
+                overrides["PATH"] = None
+            original_overrides = dict(overrides)
+            stdout, stderr = BlockingStream(), BlockingStream()
+            process = TreeProcess(pid=46031, stdout=stdout, stderr=stderr)
+            client = DAPClient(bare_name)
+            observed = {}
+
+            async def admit(**kwargs):
+                parent_unchanged = dict(os.environ) == parent
+                assert parent_unchanged
+                resolved = _resolve_application_name(kwargs["argv"][0], kwargs["env"])
+                child = dict(os.environ if kwargs["env"] is None else kwargs["env"])
+                observed.update(
+                    resolved_same_file=os.path.samefile(resolved, executable),
+                    argv_is_absolute=os.path.isabs(kwargs["argv"][0]),
+                    child_has_path=any(name.casefold() == "path" for name in child),
+                    child_neighbor=child["NCD362_NEIGHBOR"],
+                )
+                return OwnedTestProcess(process, kwargs["generation"])
+
+            try:
+                with patch(
+                    "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch", side_effect=admit
+                ):
+                    await client.start(generation="nullable-path", env=overrides)
+                assert observed == {
+                    "resolved_same_file": True,
+                    "argv_is_absolute": remove_path,
+                    "child_has_path": not remove_path,
+                    "child_neighbor": "parent-only",
+                }
+                assert client.netcoredbg_path == bare_name
+                assert overrides == original_overrides
+                parent_unchanged = dict(os.environ) == parent
+                assert parent_unchanged
+            finally:
+                process.terminate()
+                stdout.release.set()
+                stderr.release.set()
+                await client.stop()
 
 
 class TestDAPClientTransportDeath:

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -905,6 +906,69 @@ class TestSessionManagerTransportFences:
         assert manager.state.state is DebugState.TERMINATED
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("operation", ("launch", "attach"))
+    async def test_launch_and_attach_reject_negative_configuration_done(self, operation: str):
+        """A native configuration failure cannot become a successful RUNNING session."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+
+        generation = object()
+        owner = OwnedProcessRef("configuration-failure-owner", generation, 46022)
+        registry_token = object()
+        client = MagicMock()
+        client.is_running = True
+        client.adapter_owner = owner
+        client.stop = AsyncMock()
+        client.disconnect = AsyncMock()
+        client.set_exception_breakpoints = AsyncMock()
+        client.launch = AsyncMock(
+            return_value=DAPResponse(seq=1, request_seq=1, success=True, command="launch")
+        )
+        client.attach = AsyncMock(
+            return_value=DAPResponse(seq=1, request_seq=1, success=True, command="attach")
+        )
+        native_error = "Failed command 'configurationDone' : 0x80070002"
+        client.configuration_done = AsyncMock(
+            return_value=DAPResponse(
+                seq=2,
+                request_seq=2,
+                success=False,
+                command="configurationDone",
+                message=native_error,
+            )
+        )
+        manager._client = client
+        manager._active_dap_run = generation
+        manager._registry_owner_tokens[generation] = registry_token
+        manager._state.state = DebugState.INITIALIZING
+        manager._initialized_event.set()
+        manager._enable_hot_reload_if_supported = AsyncMock()
+        manager._sync_all_breakpoints = AsyncMock()
+        manager.check_dbgshim_compatibility = MagicMock(return_value=None)
+
+        try:
+            with patch("netcoredbg_mcp.setup.dbgshim.select_and_swap_dbgshim", return_value=False):
+                with pytest.raises(RuntimeError) as failure:
+                    if operation == "launch":
+                        await manager.launch(program="program.dll", pre_build=False)
+                    else:
+                        await manager.attach(process_id=1234)
+
+            assert native_error in str(failure.value)
+            client.configuration_done.assert_awaited_once_with()
+            assert manager.state.state is DebugState.INITIALIZING
+            assert manager._client is client
+            assert manager._active_dap_run is generation
+            assert client.adapter_owner is owner
+            assert manager._registry_owner_tokens[generation] is registry_token
+            assert manager._debuggee_mode == (generation, operation)
+            assert manager._terminate_on_disconnect(generation) is (operation == "launch")
+            client.stop.assert_not_awaited()
+            client.disconnect.assert_not_awaited()
+        finally:
+            await manager.close_resource_update_notifications()
+
+    @pytest.mark.asyncio
     async def test_attach_serializes_start_and_completion_against_prebuild(self, tmp_path):
         """Pre-build cannot interleave after attach starts its adapter generation."""
         project = tmp_path / "App.csproj"
@@ -1548,6 +1612,270 @@ class FakeLaunchClient:
     async def configuration_done(self) -> DAPResponse:
         self.events.append("configuration_done")
         return DAPResponse(1, 1, True, "configurationDone")
+
+
+class _NullableEnvironmentAdapter:
+    """Use the real client wire with Samsung's string-map and inheritance rules."""
+
+    def __init__(self, manager: SessionManager) -> None:
+        self.manager = manager
+        self.owners: list[OwnedCommandProcess] = []
+        self.environments: list[dict[str, str]] = []
+        self.requests: list[dict] = []
+        self.parent_environment = dict(os.environ)
+
+    async def admit(self, **kwargs):
+        parent_unchanged = dict(os.environ) == self.parent_environment
+        assert parent_unchanged
+        assert all(
+            owner.receipt is not None and owner.receipt.active_processes == 0
+            for owner in self.owners
+        )
+        inherited = dict(os.environ if kwargs["env"] is None else kwargs["env"])
+        assert all(isinstance(value, str) for value in inherited.values())
+        process = TreeProcess(
+            pid=46000 + len(self.owners), stdout=BlockingStream(), stderr=BlockingStream()
+        )
+
+        def write(data: bytes) -> None:
+            header, body = data.split(b"\r\n\r\n", 1)
+            assert int(header.split(b":", 1)[1]) == len(body)
+            request = json.loads(body)
+            self.requests.append(request)
+            command = request["command"]
+            if command == "launch":
+                # Samsung clears the entire map when any value is not a string.
+                overrides = request["arguments"].get("env", {})
+                if not isinstance(overrides, dict) or any(
+                    not isinstance(value, str) for value in overrides.values()
+                ):
+                    overrides = {}
+                effective = {name.upper(): value for name, value in inherited.items()}
+                effective.update({name.upper(): value for name, value in overrides.items()})
+                self.environments.append(effective)
+            self.manager.client._handle_message(
+                {
+                    "seq": request["seq"],
+                    "type": "response",
+                    "request_seq": request["seq"],
+                    "command": command,
+                    "success": True,
+                    "body": {},
+                }
+            )
+            if command == "initialize":
+                self.manager.client._handle_message(
+                    {"seq": 0, "type": "event", "event": "initialized", "body": {}}
+                )
+            if command == "disconnect":
+                process.terminate()
+                process.stdout.release.set()
+                process.stderr.release.set()
+
+        owner = OwnedCommandProcess(process, kwargs["generation"])
+        owner.stdin = SimpleNamespace(write=write, drain=AsyncMock())
+        self.owners.append(owner)
+        return owner
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows adapter environment and case aliases")
+class TestNullableLaunchEnvironment:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("already_initialized", [False, True])
+    @pytest.mark.parametrize("removed_name", ["NCD362_REMOVE", "ncd362_remove"])
+    async def test_removes_inherited_values_without_losing_neighboring_override(
+        self, tmp_path, monkeypatch, already_initialized, removed_name
+    ):
+        monkeypatch.setenv("NCD362_REMOVE", "parent-only")
+        monkeypatch.setenv("NCD362_MODE", "parent-mode")
+        parent = dict(os.environ)
+        manager = SessionManager(netcoredbg_path="netcoredbg.exe", project_path=str(tmp_path))
+        manager.check_dbgshim_compatibility = MagicMock(return_value=None)
+        manager._enable_hot_reload_if_supported = AsyncMock()
+        adapter = _NullableEnvironmentAdapter(manager)
+        overrides = {
+            "NCD362_MODE": "debug-mode",
+            removed_name: None,
+            "windir": None,
+            "SystemRoot": None,
+        }
+        original_overrides = dict(overrides)
+        with (
+            patch(
+                "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch", side_effect=adapter.admit
+            ),
+            patch("netcoredbg_mcp.setup.dbgshim.select_and_swap_dbgshim", return_value=False),
+        ):
+            try:
+                if already_initialized:
+                    await manager.start()
+                    previous_owner = adapter.owners[-1]
+                    previous_generation = manager._active_dap_run
+                result = await manager.launch(program="App.dll", env=overrides, pre_build=False)
+                effective = adapter.environments[-1]
+                observed = {
+                    name: effective.get(name)
+                    for name in ("NCD362_MODE", "NCD362_REMOVE", "WINDIR", "SYSTEMROOT")
+                }
+                parent_unchanged = dict(os.environ) == parent
+                assert result["success"] is True
+                assert observed == {
+                    "NCD362_MODE": "debug-mode",
+                    "NCD362_REMOVE": None,
+                    "WINDIR": None,
+                    "SYSTEMROOT": None,
+                }
+                assert parent_unchanged
+                assert overrides == original_overrides
+                if already_initialized:
+                    assert previous_owner.receipt is not None
+                    assert previous_owner.receipt.active_processes == 0
+                    assert manager._active_dap_run != previous_generation
+            finally:
+                await manager.stop()
+                await manager.close_resource_update_notifications()
+        assert all(
+            owner.receipt is not None and owner.receipt.active_processes == 0
+            for owner in adapter.owners
+        )
+
+    @pytest.mark.asyncio
+    async def test_removal_does_not_change_another_session_inheritance(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("NCD362_REMOVE", "parent-only")
+        monkeypatch.setenv("NCD362_MODE", "parent-mode")
+        parent = dict(os.environ)
+        effective = []
+        for overrides in ({"NCD362_MODE": "debug-mode", "NCD362_REMOVE": None}, None):
+            manager = SessionManager(netcoredbg_path="netcoredbg.exe", project_path=str(tmp_path))
+            manager.check_dbgshim_compatibility = MagicMock(return_value=None)
+            manager._enable_hot_reload_if_supported = AsyncMock()
+            adapter = _NullableEnvironmentAdapter(manager)
+            with (
+                patch(
+                    "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch",
+                    side_effect=adapter.admit,
+                ),
+                patch("netcoredbg_mcp.setup.dbgshim.select_and_swap_dbgshim", return_value=False),
+            ):
+                try:
+                    await manager.launch(program="App.dll", env=overrides, pre_build=False)
+                    values = adapter.environments[-1]
+                    effective.append(
+                        {name: values.get(name) for name in ("NCD362_REMOVE", "NCD362_MODE")}
+                    )
+                finally:
+                    await manager.stop()
+                    await manager.close_resource_update_notifications()
+        assert effective == [
+            {"NCD362_REMOVE": None, "NCD362_MODE": "debug-mode"},
+            {"NCD362_REMOVE": "parent-only", "NCD362_MODE": "parent-mode"},
+        ]
+        parent_unchanged = dict(os.environ) == parent
+        assert parent_unchanged
+
+    @pytest.mark.asyncio
+    async def test_launch_removals_do_not_change_prebuild_environment(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("NCD362_REMOVE", "parent-only")
+        parent = dict(os.environ)
+        build_observations = []
+        manager = SessionManager(netcoredbg_path="netcoredbg.exe", project_path=str(tmp_path))
+        manager.check_dbgshim_compatibility = MagicMock(return_value=None)
+        manager._enable_hot_reload_if_supported = AsyncMock()
+
+        async def prebuild(**kwargs):
+            build_observations.append(("env" in kwargs, dict(os.environ) == parent))
+            return "App.dll"
+
+        manager._prebuild_for_launch_locked = AsyncMock(side_effect=prebuild)
+        adapter = _NullableEnvironmentAdapter(manager)
+        with (
+            patch(
+                "netcoredbg_mcp.dap.client.WindowsOwnedProcess.launch", side_effect=adapter.admit
+            ),
+            patch("netcoredbg_mcp.setup.dbgshim.select_and_swap_dbgshim", return_value=False),
+        ):
+            try:
+                await manager.launch(
+                    program="App.dll",
+                    env={"NCD362_REMOVE": None},
+                    pre_build=True,
+                    build_project="App.csproj",
+                )
+                assert build_observations == [(False, True)]
+                parent_unchanged = dict(os.environ) == parent
+                assert parent_unchanged
+            finally:
+                await manager.stop()
+                await manager.close_resource_update_notifications()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", [DebugState.RUNNING, DebugState.STOPPED])
+    async def test_removal_request_preserves_active_debuggee_and_generation(self, tmp_path, state):
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+        client = FakeLaunchClient()
+        client.stop = AsyncMock()
+        client.disconnect = AsyncMock()
+        manager._client = client
+        generation = object()
+        manager._active_dap_run = generation
+        manager._state.state = state
+        manager._state.process_id = 46020
+        original_state = manager.state
+        manager._initialized_event.set()
+        manager.check_dbgshim_compatibility = MagicMock(return_value=None)
+        manager._enable_hot_reload_if_supported = AsyncMock()
+        with patch("netcoredbg_mcp.setup.dbgshim.select_and_swap_dbgshim", return_value=False):
+            try:
+                with pytest.raises(RuntimeError):
+                    await manager.launch(
+                        program="Another.dll", env={"NCD362_REMOVE": None}, pre_build=False
+                    )
+                assert manager.state is original_state
+                assert manager.state.state is state
+                assert manager.state.process_id == 46020
+                assert manager._active_dap_run is generation
+                assert client.events == []
+                client.stop.assert_not_awaited()
+                client.disconnect.assert_not_awaited()
+            finally:
+                await manager.close_resource_update_notifications()
+
+    @pytest.mark.asyncio
+    async def test_failed_idle_adapter_drain_keeps_owner_and_blocks_removal_launch(self, tmp_path):
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+        client = FakeLaunchClient()
+        generation = object()
+        owner = OwnedProcessRef("nullable-env-owner", generation, 46021)
+        client.adapter_owner = owner
+        client.stop = AsyncMock(
+            return_value=OwnerDrainReceipt(
+                owner=owner,
+                status=DrainStatus.FAILED,
+                forced=False,
+                root_returncode=None,
+                active_processes=1,
+            )
+        )
+        client.disconnect = AsyncMock(return_value=DAPResponse(1, 1, True, "disconnect"))
+        manager._client = client
+        manager._active_dap_run = generation
+        manager._state.state = DebugState.INITIALIZING
+        manager._initialized_event.set()
+        manager.check_dbgshim_compatibility = MagicMock(return_value=None)
+        manager._enable_hot_reload_if_supported = AsyncMock()
+        with patch("netcoredbg_mcp.setup.dbgshim.select_and_swap_dbgshim", return_value=False):
+            try:
+                with pytest.raises(RuntimeError):
+                    await manager.launch(
+                        program="App.dll", env={"NCD362_REMOVE": None}, pre_build=False
+                    )
+                assert manager._active_dap_run is generation
+                assert client.adapter_owner is owner
+                assert "launch" not in client.events
+            finally:
+                await manager.close_resource_update_notifications()
 
 
 class TestOwnerScopedPublicRouteRedMatrix:

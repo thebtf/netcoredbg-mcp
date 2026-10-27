@@ -1,3 +1,88 @@
+# netcoredbg-mcp v0.23.17
+
+Prepared: 2026-10-27
+
+## Summary
+
+`v0.23.17` is a nonbreaking PATCH for nullable launch environments (#362).
+These notes describe the prepared candidate, not a publication receipt.
+
+## Fixed behavior
+
+- A mixed `env` map preserves neighboring string overrides. `null` removes an
+  inherited debuggee variable, including case variants on Windows, instead of
+  making Samsung netcoredbg discard all supplied overrides.
+- Requested removals are applied before the private debug adapter child starts.
+  The DAP launch map contains only strings; ordinary string launch overrides
+  remain debuggee-only. The server and other sessions' environments do not change.
+- Bare adapter names are resolved using the original server environment before
+  removing `PATH`. DLL targets use a resolved runtime host when `PATH` is removed;
+  the original target, working directory, caller arguments, and actual target
+  environment are preserved.
+- An already initialized adapter with no active debuggee uses the existing
+  guarded drain/restart path. Failed drain retains its owner and blocks the next
+  admission rather than losing cleanup authority.
+- With `pre_build=False`, a removal request refuses an active debuggee before
+  changing its state or generation. It does not silently stop or replace it.
+  The existing pre-build stop/build sequence and pre-build environment are unchanged.
+- A failed DAP `configurationDone` now raises the native error for launch and
+  attach instead of announcing a successful `RUNNING` session. It does not clear
+  a live owner/generation or implicitly stop an attached application; existing
+  guarded cleanup still owns recovery.
+
+## Consumer actions
+
+Upgrade through the documented package-installation route and restart the MCP
+server. An installation does not hot-reload an already running shared receiver.
+For a removal request with `pre_build=False`, stop an active debuggee explicitly
+before starting the new target. Existing string-only overrides retain their route.
+
+## Compatibility and limits
+
+The Python entry point remains the default. Locked dependencies, bridge-source
+packaging, and the public catalog remain unchanged: 135 tools, 8 prompts, and
+4 resources. No new framework, dependency, or public tool is added.
+
+This PATCH is limited to #362. Other Unreleased changes, the separate F09/NCD4
+incidents, and A2 preview identities/history are not promoted by these notes.
+There is no shared-server restart or hot-reload claim.
+
+## Verification and known residual risks
+
+- Fresh noneditable wheel consumers with MCP 1.25.0 and 1.30.0 passed the
+  mixed-map journey: the neighboring string arrived, the inherited variable was
+  absent, public stop succeeded, and natural CLI exit closed all six observed
+  owned process identities. The initialized-adapter source smoke passed 5/5,
+  including actual `PATH` absence after DLL bootstrap.
+- The 28 critical cases are covered by 27 suite passes and one isolated
+  host-proxy initialize/list/call pass with unchanged assertions and a 60-second
+  budget. Both short WPF/Avalonia journeys passed with invoke/state, screenshot,
+  and cleanup evidence. The original user-Temp startup timeout remains unexplained;
+  the isolated pass used repository-owned scratch and the same built host.
+  A matching user-Temp diagnostic was scope-guard refused, not run or bypassed.
+  No product fix or deadline increase is claimed for that timeout. Runtime-smoke
+  documentation and diagnostic-schema checks passed 45/45.
+- Normal-suite evidence combines disjoint current partitions and 1,326 preserved
+  named artifact-owner passes whose relevant inputs were checked unchanged.
+  This is not one fresh full-suite execution. Eleven native POSIX process/session
+  checks were skipped on Windows; the earlier 1,800-second broad timeout remains
+  INCOMPLETE.
+- Full-source mypy remains red with the same 41 baseline errors in 11 files;
+  the newly introduced removal-map typing error was corrected without suppression.
+- The additional explicit native-input WPF submenu regression remains open in
+  [#363](https://github.com/thebtf/netcoredbg-mcp/issues/363): popup discovery
+  timed out and cleanup reported an unfinished owner. Its test body/assertions
+  are unchanged; explicit classification does not repair it or make it PASS.
+
+The independently reported bare-adapter-name edge when removing `PATH` is repaired.
+The installed consumer resolved the private adapter and runtime host, observed the
+requested `PATH` absence and neighboring override, and closed all six observed
+owned process identities. These verification records do not establish publication;
+independent review, immutable tagging, and fresh public-package delivery remain
+separate release obligations.
+
+---
+
 # netcoredbg-mcp v0.23.16
 
 Prepared: 2026-10-25
