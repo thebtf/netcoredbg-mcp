@@ -44,13 +44,92 @@ public sealed class PreviewProcessContractTests
             new JsonObject { ["name"] = "PreviewMarker", ["kind"] = "class" },
             new RequestId("call-first")));
 
-        Assert.Equal("complete", result["resultType"]!.GetValue<string>());
-        Assert.False(result["isError"]!.GetValue<bool>());
-        var structured = Assert.IsType<JsonObject>(result["structuredContent"]);
-        Assert.Equal(
-            "{\"kind\":\"find_code_symbol_success\",\"results\":[{\"file\":\"Markers.cs\",\"line\":3,\"name\":\"PreviewMarker\",\"kind\":\"class\",\"context\":\"public sealed class PreviewMarker { }\"}]}",
-            structured.ToJsonString());
-        Assert.Equal(structured.ToJsonString(), SingleText(result));
+        AssertPreviewMarkerResult(result);
+    }
+
+    [Fact]
+    public async Task OmittedClientInfo_ValidCallIsSupportedAsLiteralFirstFreshProcessRequest()
+    {
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+
+        var result = RequireResult(await driver.CallToolAsync(
+            ToolName,
+            FixtureArguments(ToolName),
+            new RequestId("call-first-without-client-info"),
+            MetadataWithoutClientInfo()));
+
+        AssertPreviewMarkerResult(result);
+    }
+
+    [Fact]
+    public async Task OmittedClientInfo_DiscoveryAndCallsRemainRequestLocal()
+    {
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+
+        var discovery = RequireResult(await driver.SendAsync(
+            "server/discover",
+            new JsonObject { ["_meta"] = MetadataWithoutClientInfo() },
+            new RequestId("discover-without-client-info")));
+
+        Assert.Equal(["2026-07-28"], discovery["supportedVersions"]!.AsArray().Select(static value => value!.GetValue<string>()));
+        var capabilities = discovery["capabilities"]!.AsObject();
+        Assert.Equal(["tools"], capabilities.Select(static property => property.Key));
+        Assert.Equal(["listChanged"], capabilities["tools"]!.AsObject().Select(static property => property.Key));
+        Assert.False(capabilities["tools"]!["listChanged"]!.GetValue<bool>());
+        Assert.Equal(300_000L, discovery["ttlMs"]!.GetValue<long>());
+        Assert.Equal("public", discovery["cacheScope"]!.GetValue<string>());
+        AssertCatalog(RequireResult(await driver.ListToolsAsync(
+            new RequestId("list-without-client-info"), MetadataWithoutClientInfo())));
+
+        AssertPreviewMarkerResult(RequireResult(await driver.CallToolAsync(
+            ToolName, FixtureArguments(ToolName), new RequestId("call-without-client-info"), MetadataWithoutClientInfo())));
+        AssertPreviewMarkerResult(RequireResult(await driver.CallToolAsync(
+            ToolName, FixtureArguments(ToolName), new RequestId("call-with-client-info"))));
+        AssertPreviewMarkerResult(RequireResult(await driver.CallToolAsync(
+            ToolName, FixtureArguments(ToolName), new RequestId("call-without-client-info-again"), MetadataWithoutClientInfo())));
+    }
+
+    [Fact]
+    public async Task OmittedClientInfo_UnsupportedVersionReturnsExactErrorAndValidCallRecovers()
+    {
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+        var unsupported = MetadataWithoutClientInfo();
+        unsupported[MetaKeys.ProtocolVersion] = "1900-01-01";
+
+        var error = Assert.IsType<JsonRpcError>(await driver.CallToolAsync(
+            ToolName, FixtureArguments(ToolName), new RequestId("unsupported-without-client-info"), unsupported));
+
+        Assert.Equal(-32022, error.Error.Code);
+        Assert.Equal("Unsupported protocol version", error.Error.Message);
+        var data = Assert.IsType<JsonElement>(error.Error.Data);
+        Assert.Equal(["requested", "supported"], data.EnumerateObject().Select(static property => property.Name).Order());
+        Assert.Equal("1900-01-01", data.GetProperty("requested").GetString());
+        Assert.Equal(["2026-07-28"], data.GetProperty("supported").EnumerateArray().Select(static value => value.GetString()));
+        AssertPreviewMarkerResult(RequireResult(await driver.CallToolAsync(
+            ToolName, FixtureArguments(ToolName), new RequestId("supported-without-client-info"), MetadataWithoutClientInfo())));
+    }
+
+    [Fact]
+    public async Task OmittedClientInfo_InvalidArgumentsUnknownToolAndExcludedMethodRetainRefusals()
+    {
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+
+        var invalid = RequireResult(await driver.CallToolAsync(
+            ToolName, new JsonObject(), new RequestId("invalid-arguments-without-client-info"), MetadataWithoutClientInfo()));
+        AssertClosedError(invalid, "invalid_tool_arguments", "INVALID_TOOL_ARGUMENTS");
+
+        var unknown = RequireResult(await driver.CallToolAsync(
+            "start_debug", new JsonObject(), new RequestId("unknown-tool-without-client-info"), MetadataWithoutClientInfo()));
+        Assert.Equal("complete", unknown["resultType"]!.GetValue<string>());
+        Assert.True(unknown["isError"]!.GetValue<bool>());
+        Assert.False(unknown.ContainsKey("structuredContent"));
+        Assert.Equal("Unknown tool: start_debug", SingleText(unknown));
+
+        var excluded = await driver.SendAsync(
+            "resources/list",
+            new JsonObject { ["_meta"] = MetadataWithoutClientInfo() },
+            new RequestId("excluded-method-without-client-info"));
+        Assert.Equal(-32601, Assert.IsType<JsonRpcError>(excluded).Error.Code);
     }
 
     [Fact]
@@ -111,8 +190,9 @@ public sealed class PreviewProcessContractTests
             new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = 1, [MetaKeys.ClientInfo] = new JsonObject { ["name"] = "client", ["version"] = "1.0" }, [MetaKeys.ClientCapabilities] = new JsonObject() } },
             new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = "malformed", [MetaKeys.ClientCapabilities] = new JsonObject() } },
             new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = new JsonObject { ["name"] = "client", ["version"] = "1.0" }, [MetaKeys.ClientCapabilities] = "malformed" } },
-            new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientCapabilities] = new JsonObject() } },
+            new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = null, [MetaKeys.ClientCapabilities] = new JsonObject() } },
             new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = new JsonObject { ["name"] = "client", ["version"] = "1.0" } } },
+            new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ClientInfo] = new JsonObject { ["name"] = "client", ["version"] = "1.0" }, [MetaKeys.ClientCapabilities] = new JsonObject() } },
             new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = new JsonObject { ["name"] = " ", ["version"] = "1.0" }, [MetaKeys.ClientCapabilities] = new JsonObject() } },
             new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = new JsonObject { ["name"] = "client", ["version"] = " " }, [MetaKeys.ClientCapabilities] = new JsonObject() } },
         };
@@ -1273,6 +1353,23 @@ public sealed class PreviewProcessContractTests
         AssertClosedError(RequireResult(response), "preview_search_budget_exceeded", "PREVIEW_SEARCH_BUDGET_EXCEEDED", tool);
         Assert.DoesNotContain("FrameLimitMarker", SingleText(RequireResult(response)), StringComparison.Ordinal);
         Assert.True(FrameByteCount(response) <= PreviewToolCatalog.MaximumCompleteResponseFrameBytes);
+    }
+
+    private static JsonObject MetadataWithoutClientInfo() => new()
+    {
+        [MetaKeys.ProtocolVersion] = "2026-07-28",
+        [MetaKeys.ClientCapabilities] = new JsonObject(),
+    };
+
+    private static void AssertPreviewMarkerResult(JsonObject result)
+    {
+        Assert.Equal("complete", result["resultType"]!.GetValue<string>());
+        Assert.False(result["isError"]!.GetValue<bool>());
+        var structured = Assert.IsType<JsonObject>(result["structuredContent"]);
+        Assert.Equal(
+            "{\"kind\":\"find_code_symbol_success\",\"results\":[{\"file\":\"Markers.cs\",\"line\":3,\"name\":\"PreviewMarker\",\"kind\":\"class\",\"context\":\"public sealed class PreviewMarker { }\"}]}",
+            structured.ToJsonString());
+        Assert.Equal(structured.ToJsonString(), SingleText(result));
     }
 
     private static JsonObject FixtureArguments(string tool) => tool switch

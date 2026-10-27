@@ -1,4 +1,4 @@
-"""Seal candidate-bound A1 or A2 retained/public artifact consumer proof.
+"""Seal candidate-bound A1, A2 or A3 retained/public artifact consumer proof.
 
 Both modes resolve Candidate Identity and Release Gate Catalog metadata from a
 closed Actions reference bundle. Candidate mode downloads the retained payload;
@@ -503,6 +503,145 @@ def _expect_failure(result: Mapping[str, Any], tool: str, error: str) -> None:
         or json.loads(content[0].get("text", "null")) != result["structuredContent"]
     ):
         _refuse("native read-only refusal leaked partial output or named the wrong route")
+
+
+def _run_optional_client_info(executable_path: Path, fixture_root: Path) -> None:
+    metadata = {
+        "io.modelcontextprotocol/protocolVersion": _PROTOCOL_VERSION,
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
+    arguments = {"name": "PreviewMarker", "kind": "class"}
+    expected = {
+        "kind": "find_code_symbol_success",
+        "results": [
+            {
+                "file": "Markers.cs",
+                "line": 3,
+                "name": "PreviewMarker",
+                "kind": "class",
+                "context": "public sealed class PreviewMarker { }",
+            }
+        ],
+    }
+    output_schema = _load_a2_tool_schemas()["find_code_symbol"]["outputSchema"]
+
+    def marker(process: JsonRpcProcess, request_id: int, meta: Mapping[str, Any]) -> None:
+        result = _result(
+            process.request(
+                request_id,
+                "tools/call",
+                {
+                    "name": "find_code_symbol",
+                    "arguments": arguments,
+                    "_meta": meta,
+                },
+            )
+        )
+        _expect_success(result, expected, output_schema=output_schema)
+        _validate_schema_value(json.loads(result["content"][0]["text"]), output_schema)
+
+    process = JsonRpcProcess(executable_path, fixture_root)
+    try:
+        marker(process, 1, metadata)
+        process.close_eof()
+    finally:
+        process.abort()
+
+    process = JsonRpcProcess(executable_path, fixture_root)
+    try:
+        discovery = _result(process.request(1, "server/discover", {"_meta": metadata}))
+        capabilities = _artifact._expect_mapping(
+            discovery.get("capabilities"), "optional-client-info discovery capabilities", ("tools",)
+        )
+        tools_capability = _artifact._expect_mapping(
+            capabilities["tools"], "optional-client-info tools capability", ("listChanged",)
+        )
+        if (
+            discovery.get("supportedVersions") != [_PROTOCOL_VERSION]
+            or tools_capability["listChanged"] is not False
+            or type(discovery.get("ttlMs")) is not int
+            or discovery["ttlMs"] != 300_000
+            or discovery.get("cacheScope") != "public"
+        ):
+            _refuse("optional-client-info discovery changed the version or cache contract")
+
+        catalog = _result(process.request(2, "tools/list", {"_meta": metadata}))
+        tools = catalog.get("tools")
+        if (
+            not isinstance(tools, list)
+            or any(not isinstance(tool, Mapping) for tool in tools)
+            or [tool.get("name") for tool in tools] != list(_artifact._A2_TOOLS)
+            or type(catalog.get("ttlMs")) is not int
+            or catalog["ttlMs"] != 300_000
+            or catalog.get("cacheScope") != "public"
+        ):
+            _refuse("optional-client-info catalog changed the exact tools or cache contract")
+        _validate_a2_catalog_schemas(tools)
+        _validate_schema_value(arguments, tools[0]["inputSchema"])
+        marker(process, 3, metadata)
+        marker(process, 4, _REQUEST_META)
+        marker(process, 5, metadata)
+
+        invalid = _result(
+            process.request(
+                8,
+                "tools/call",
+                {
+                    "name": "find_code_symbol",
+                    "arguments": {},
+                    "_meta": metadata,
+                },
+            )
+        )
+        _expect_failure(invalid, "find_code_symbol", "INVALID_TOOL_ARGUMENTS")
+        unknown = _result(
+            process.request(
+                9,
+                "tools/call",
+                {
+                    "name": "start_debug",
+                    "arguments": {},
+                    "_meta": metadata,
+                },
+            )
+        )
+        if (
+            unknown.get("resultType") != "complete"
+            or unknown.get("isError") is not True
+            or "structuredContent" in unknown
+            or unknown.get("content") != [{"type": "text", "text": "Unknown tool: start_debug"}]
+        ):
+            _refuse("optional-client-info forbidden tool did not retain its text-only refusal")
+        excluded = process.request(10, "resources/list", {"_meta": metadata}).get("error")
+        if not isinstance(excluded, Mapping) or excluded.get("code") != -32601:
+            _refuse("optional-client-info excluded method did not retain method-not-found")
+        process.close_eof()
+    finally:
+        process.abort()
+
+    # The pinned SDK rejects version changes after a supported request.
+    process = JsonRpcProcess(executable_path, fixture_root)
+    try:
+        unsupported = {**metadata, "io.modelcontextprotocol/protocolVersion": "1900-01-01"}
+        response = process.request(
+            6,
+            "tools/call",
+            {
+                "name": "find_code_symbol",
+                "arguments": arguments,
+                "_meta": unsupported,
+            },
+        )
+        if response.get("error") != {
+            "code": -32022,
+            "message": "Unsupported protocol version",
+            "data": {"requested": "1900-01-01", "supported": [_PROTOCOL_VERSION]},
+        }:
+            _refuse("optional-client-info unsupported-version refusal changed")
+        marker(process, 7, metadata)
+        process.close_eof()
+    finally:
+        process.abort()
 
 
 def _run_family_values(executable_path: Path, scratch: Path) -> None:
@@ -1167,6 +1306,9 @@ def _run_matrix(
         ),
         "readonly-family-result-budgets": lambda: _run_family_budgets(executable_path, scratch),
         "readonly-family-frame-refusals": lambda: _run_family_frames(executable_path, scratch),
+        "optional-client-info-request-local": lambda: _run_optional_client_info(
+            executable_path, fixture_root
+        ),
         "rollback-python-default": rollback,
     }
     results: list[dict[str, Any]] = []

@@ -87,13 +87,6 @@
       },
       "then": {
         "properties": {
-          "fixture_identity": {
-            "properties": {
-              "scenario_catalog_id": {
-                "const": "a2-preview-readonly-family-v1"
-              }
-            }
-          },
           "runtime_results": {
             "properties": {
               "catalog": {
@@ -102,6 +95,51 @@
                   "find_code_references",
                   "get_source_context"
                 ]
+              }
+            }
+          }
+        },
+        "if": {
+          "properties": {
+            "candidate": {
+              "properties": {
+                "preview_manifest": {
+                  "properties": {
+                    "contents": {
+                      "properties": {
+                        "consumer_contract": {
+                          "properties": {
+                            "scenario_catalog_id": {
+                              "const": "a3-preview-optional-client-info-v1"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "fixture_identity": {
+              "properties": {
+                "scenario_catalog_id": {
+                  "const": "a3-preview-optional-client-info-v1"
+                }
+              }
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "fixture_identity": {
+              "properties": {
+                "scenario_catalog_id": {
+                  "const": "a2-preview-readonly-family-v1"
+                }
               }
             }
           }

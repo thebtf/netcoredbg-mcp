@@ -48,7 +48,10 @@
       ],
       "properties": {
         "scenario_catalog_id": {
-          "const": "a2-preview-readonly-family-v1"
+          "enum": [
+            "a2-preview-readonly-family-v1",
+            "a3-preview-optional-client-info-v1"
+          ]
         },
         "scenario_catalog_sha256": {
           "type": "string",

@@ -10,7 +10,7 @@ All durable records use closed fields only: structural GitHub references, bounde
 
 ## A2 successor proof generation
 
-This existing channel also carries the A2 read-only family; it is not a new publisher or Python/default release. Current source producers `prepare-payload`, `seal-build-records` and `build/prepare_preview_fixture.py` emit manifest/Candidate schema `2.0`. The manifest's closed `consumer_contract` binds `scenario_catalog_id: a2-preview-readonly-family-v1`, the SHA-256 of that fixed canonical scenario catalog, and exactly `[find_code_symbol, find_code_references, get_source_context]`, in that order. `seal-build-records` refuses a schema-1 manifest, even if its hashes were recomputed correctly. There is no build input or environment selector for proof generation.
+This existing channel also carries the A2 read-only family; it is not a new publisher or Python/default release. A2 introduced manifest/Candidate schema `2.0`, whose closed `consumer_contract` binds `scenario_catalog_id: a2-preview-readonly-family-v1`, the SHA-256 of that fixed canonical scenario catalog, and exactly `[find_code_symbol, find_code_references, get_source_context]`, in that order. Historical A2 identities retain these obligations. Current source producers follow the A3 successor below; there is no build input or environment selector for proof generation.
 
 Schema `1.0` identities and manifests always mean the historical `a1-preview-inherited-matrix-v1` ten-scenario, one-tool contract. Their original bytes and receipts are not rewritten. Manifest and Candidate schema generations must agree; unknown generations, mixed IDs/hashes/tool lists and schema-2 manifests without the fixed contract refuse. The no-argument `consumer_proof_scenario_catalog()` API remains A1 for active historical callers; the current consumer explicitly selects the generation from the verified immutable candidate. That compatibility remains until historical A1 verification is explicitly retired; no A1 proof is valid for a successor identity.
 
@@ -42,6 +42,17 @@ python tests/preview/validate_preview_artifact.py remote --references <same-exac
 ```
 
 References are the existing closed Actions reference bundle, not caller paths to an executable or payload. The remote command downloads the public archive/raw manifest afresh and cannot fall back to Actions payload bytes. Its rollback executable must emit the existing `PRODUCT_WORKS` oracle marker after the real installed Python journey; a successful exit code alone is not proof. Neither command changes protected public environments, retained refs/data, Python installation/defaults or publication authority. A new exact-candidate promotion decision and fresh remote-byte proof remain required.
+
+## A3 optional client information successor
+
+The source successor specified in [A3 optional client info](../../017-a3-optional-client-info/spec.md) keeps manifest/Candidate schema `2.0`, receipt/reference schema `1.0` and the same three tools. Its exact closed contract is `a3-preview-optional-client-info-v1`, the canonical hash of its fixed 16 scenarios, and the ordered tool list. Current `prepare-payload`, `seal-build-records` and `build/prepare_preview_fixture.py` require that complete A3 contract; current-source sealing refuses both historical A1 and A2 payloads even when their hashes are valid.
+
+Historical schema-1 A1 and schema-2 A2 definitions, hashes and receipts retain their original meaning. Candidate metadata, not receipt fields or preview ordinal, chooses the exact known A1/A2/A3 proof obligations. Retained and remote sealers refuse cross-generation substitution, missing/extra/reordered cases, incorrect counts/outcomes and mixed ID/hash/tool fields. Old A2 proof never establishes optional-clientInfo support. The default no-argument catalog API still selects A1 for historical callers.
+
+The new scenario is inserted immediately before rollback. It exercises a literal-first symbol call without `clientInfo`; another fresh process performs discovery/list/call, with-then-without metadata and existing negative boundaries; a third fresh process sends an unsupported version first, requires exact `-32022`, recovers with a valid call and closes cleanly. All three processes must complete clean EOF before PASS. Required version/capability fields and root/argument/frame checks remain independent of optional client information. The unchanged installed Python journey still runs last.
+
+The pinned SDK's supported-then-unsupported session-version guard and existing missing-required-metadata errors remain explicit A3 protocol debt, not validated conformance or a fix in this slice. The initial composed-runner failure remains evidence; `-32600` is not accepted in place of `-32022`. Source/local success is not public delivery: the existing canonical build, retained proof, exact-candidate S4 decision, immutable same-byte promotion and fresh public 16-scenario/Python-rollback proof still apply. No unknown candidate is preapproved, and Python/default or Program B/C selection is unchanged.
+
 
 ## Dispatch and permissions
 

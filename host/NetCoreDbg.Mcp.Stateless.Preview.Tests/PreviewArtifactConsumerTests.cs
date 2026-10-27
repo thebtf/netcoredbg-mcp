@@ -52,14 +52,34 @@ public sealed class PreviewArtifactConsumerTests
 
     private static async Task AssertMcpConsumerContractAsync(string executablePath)
     {
+        var metadata = new JsonObject
+        {
+            [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion,
+            [MetaKeys.ClientCapabilities] = new JsonObject(),
+        };
+        await using (var first = await PreviewMcpProcessDriver.StartVerifiedExtractedExecutableAsync(
+            executablePath, PreviewRepositoryLayout.FixtureRoot))
+        {
+            AssertMarkerResult(RequireResult(await first.CallToolAsync(
+                "find_code_symbol",
+                new JsonObject { ["name"] = "PreviewMarker", ["kind"] = "class" },
+                new RequestId("artifact-first-without-client-info"), metadata)));
+        }
+
         await using var driver = await PreviewMcpProcessDriver.StartVerifiedExtractedExecutableAsync(
             executablePath,
             PreviewRepositoryLayout.FixtureRoot);
 
-        var discovery = RequireResult(await driver.DiscoverAsync(new RequestId("artifact-discover")));
+        var discovery = RequireResult(await driver.SendAsync(
+            "server/discover", new JsonObject { ["_meta"] = metadata.DeepClone() },
+            new RequestId("artifact-discover")));
         Assert.Equal(["tools"], discovery["capabilities"]!.AsObject().Select(static property => property.Key));
+        Assert.Equal(["2026-07-28"], discovery["supportedVersions"]!.AsArray().Select(static value => value!.GetValue<string>()));
+        Assert.False(discovery["capabilities"]!["tools"]!["listChanged"]!.GetValue<bool>());
+        Assert.Equal(300_000L, discovery["ttlMs"]!.GetValue<long>());
+        Assert.Equal("public", discovery["cacheScope"]!.GetValue<string>());
 
-        var catalog = RequireResult(await driver.ListToolsAsync(new RequestId("artifact-list")));
+        var catalog = RequireResult(await driver.ListToolsAsync(new RequestId("artifact-list"), metadata));
         Assert.Equal(["find_code_symbol", "find_code_references", "get_source_context"],
             catalog["tools"]!.AsArray().Select(static tool => tool!["name"]!.GetValue<string>()));
 
@@ -70,18 +90,16 @@ public sealed class PreviewArtifactConsumerTests
                 ["name"] = "PreviewMarker",
                 ["kind"] = "class",
             },
-            new RequestId("artifact-call")));
-        Assert.Equal("complete", call["resultType"]!.GetValue<string>());
-        Assert.False(call["isError"]!.GetValue<bool>());
-        var structured = Assert.IsType<JsonObject>(call["structuredContent"]);
-        Assert.Equal("find_code_symbol_success", structured["kind"]!.GetValue<string>());
-        var match = Assert.IsType<JsonObject>(Assert.Single(structured["results"]!.AsArray()));
-        Assert.Equal("Markers.cs", match["file"]!.GetValue<string>());
-        Assert.Equal(3, match["line"]!.GetValue<int>());
-        Assert.Equal("PreviewMarker", match["name"]!.GetValue<string>());
-        Assert.Equal("class", match["kind"]!.GetValue<string>());
-        Assert.Equal("public sealed class PreviewMarker { }", match["context"]!.GetValue<string>());
-        Assert.Equal(structured.ToJsonString(), SingleText(call));
+            new RequestId("artifact-call"), metadata));
+        AssertMarkerResult(call);
+        AssertMarkerResult(RequireResult(await driver.CallToolAsync(
+            "find_code_symbol",
+            new JsonObject { ["name"] = "PreviewMarker", ["kind"] = "class" },
+            new RequestId("artifact-with-client-info"))));
+        AssertMarkerResult(RequireResult(await driver.CallToolAsync(
+            "find_code_symbol",
+            new JsonObject { ["name"] = "PreviewMarker", ["kind"] = "class" },
+            new RequestId("artifact-without-client-info-again"), metadata)));
 
         var references = RequireResult(await driver.CallToolAsync("find_code_references",
             new JsonObject { ["name"] = "PreviewMarker" }, new RequestId("artifact-references")));
@@ -142,6 +160,21 @@ public sealed class PreviewArtifactConsumerTests
         start.ArgumentList.Add("--project");
         start.ArgumentList.Add(PreviewRepositoryLayout.FixtureRoot);
         return Process.Start(start) ?? throw new InvalidOperationException("Extracted preview artifact did not start.");
+    }
+
+    private static void AssertMarkerResult(JsonObject call)
+    {
+        Assert.Equal("complete", call["resultType"]!.GetValue<string>());
+        Assert.False(call["isError"]!.GetValue<bool>());
+        var structured = Assert.IsType<JsonObject>(call["structuredContent"]);
+        Assert.Equal("find_code_symbol_success", structured["kind"]!.GetValue<string>());
+        var match = Assert.IsType<JsonObject>(Assert.Single(structured["results"]!.AsArray()));
+        Assert.Equal("Markers.cs", match["file"]!.GetValue<string>());
+        Assert.Equal(3, match["line"]!.GetValue<int>());
+        Assert.Equal("PreviewMarker", match["name"]!.GetValue<string>());
+        Assert.Equal("class", match["kind"]!.GetValue<string>());
+        Assert.Equal("public sealed class PreviewMarker { }", match["context"]!.GetValue<string>());
+        Assert.Equal(structured.ToJsonString(), SingleText(call));
     }
 
     private static JsonObject RequireResult(JsonRpcMessage message) =>
@@ -314,8 +347,11 @@ public sealed class PreviewArtifactConsumerTests
             var version = RequiredString(manifest, "version");
             Assert.Equal("2.0", RequiredString(manifest, "schema_version"));
             var consumerContract = manifest.GetProperty("consumer_contract");
-            Assert.Equal("a2-preview-readonly-family-v1", RequiredString(consumerContract, "scenario_catalog_id"));
-            Assert.Matches("^[0-9a-f]{64}$", RequiredString(consumerContract, "scenario_catalog_sha256"));
+            Assert.Equal(["scenario_catalog_id", "scenario_catalog_sha256", "tools"],
+                consumerContract.EnumerateObject().Select(static property => property.Name).Order());
+            Assert.Equal("a3-preview-optional-client-info-v1", RequiredString(consumerContract, "scenario_catalog_id"));
+            Assert.Equal("4f8061885b73462b5cc8e910b7cb6f67d87230d217e3af7881b4f6cdbed9fd6f",
+                RequiredString(consumerContract, "scenario_catalog_sha256"));
             Assert.Equal(["find_code_symbol", "find_code_references", "get_source_context"],
                 consumerContract.GetProperty("tools").EnumerateArray().Select(static tool => tool.GetString()));
             Assert.Equal("win-x64", RequiredString(manifest, "rid"));

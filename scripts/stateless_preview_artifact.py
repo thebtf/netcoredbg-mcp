@@ -34,6 +34,7 @@ _TRUSTED_BUILD_EVENT = "workflow_dispatch"
 _PREVIEW_EXECUTABLE = "netcoredbg-mcp-stateless-preview.exe"
 _A1_CONSUMER_CONTRACT_ID = "a1-preview-inherited-matrix-v1"
 _A2_CONSUMER_CONTRACT_ID = "a2-preview-readonly-family-v1"
+_A3_CONSUMER_CONTRACT_ID = "a3-preview-optional-client-info-v1"
 _A1_TOOLS = ("find_code_symbol",)
 _A2_TOOLS = (*_A1_TOOLS, "find_code_references", "get_source_context")
 
@@ -910,7 +911,7 @@ def prepare_preview_payload(
 
     manifest_contents = {
         "schema_version": "2.0",
-        "consumer_contract": _consumer_contract(_A2_CONSUMER_CONTRACT_ID),
+        "consumer_contract": _consumer_contract(_A3_CONSUMER_CONTRACT_ID),
         "version": version,
         "tag": preview["tag"],
         "commit": source["commit"],
@@ -1216,8 +1217,10 @@ def seal_build_records(
     manifest_bytes = _read_regular_bytes(manifest_path, "preview manifest")
     manifest_contents = _load_manifest(manifest_bytes)
     _validate_preview_manifest(manifest_contents, source["commit"])
-    if manifest_contents["schema_version"] != "2.0":
-        _refuse("current source producer requires the A2 manifest generation")
+    if manifest_contents["schema_version"] != "2.0" or manifest_contents[
+        "consumer_contract"
+    ] != _consumer_contract(_A3_CONSUMER_CONTRACT_ID):
+        _refuse("current source producer requires the exact A3 consumer contract")
     if (
         manifest_contents["version"] != preview["version"]
         or manifest_contents["tag"] != preview["tag"]
@@ -1347,6 +1350,11 @@ _A2_CONSUMER_PROOF_SCENARIOS = (
     ("readonly-family-frame-refusals", "transport", "EXPECT_REFUSAL"),
     _CONSUMER_PROOF_SCENARIOS[-1],
 )
+_A3_CONSUMER_PROOF_SCENARIOS = (
+    *_A2_CONSUMER_PROOF_SCENARIOS[:-1],
+    ("optional-client-info-request-local", "protocol_catalog", "EXPECT_SUCCESS"),
+    _A2_CONSUMER_PROOF_SCENARIOS[-1],
+)
 _EXPECTED_OBSERVED_OUTCOMES = {
     "EXPECT_SUCCESS": "SUCCESS",
     "EXPECT_FAILURE": "FAILURE",
@@ -1386,6 +1394,8 @@ def _consumer_proof_scenarios(contract_id: str = _A1_CONSUMER_CONTRACT_ID) -> li
         definitions = _CONSUMER_PROOF_SCENARIOS
     elif contract_id == _A2_CONSUMER_CONTRACT_ID:
         definitions = _A2_CONSUMER_PROOF_SCENARIOS
+    elif contract_id == _A3_CONSUMER_CONTRACT_ID:
+        definitions = _A3_CONSUMER_PROOF_SCENARIOS
     else:
         _refuse("consumer contract generation is unsupported")
     return [
@@ -1433,9 +1443,17 @@ def _candidate_consumer_contract(candidate: Mapping[str, Any]) -> Mapping[str, A
         return _consumer_contract(_A1_CONSUMER_CONTRACT_ID)
     if generation != "2.0":
         _refuse("candidate consumer generation is unsupported")
-    expected = _consumer_contract(_A2_CONSUMER_CONTRACT_ID)
-    if manifest.get("consumer_contract") != expected:
-        _refuse("candidate consumer contract does not match the A2 catalog and exact tools")
+    contract = _expect_mapping(
+        manifest.get("consumer_contract"),
+        "candidate consumer contract",
+        ("scenario_catalog_id", "scenario_catalog_sha256", "tools"),
+    )
+    contract_id = contract["scenario_catalog_id"]
+    if contract_id not in (_A2_CONSUMER_CONTRACT_ID, _A3_CONSUMER_CONTRACT_ID):
+        _refuse("candidate consumer contract generation is unsupported")
+    expected = _consumer_contract(contract_id)
+    if contract != expected:
+        _refuse("candidate consumer contract does not match its fixed catalog and exact tools")
     return expected
 
 

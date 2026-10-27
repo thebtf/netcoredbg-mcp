@@ -1,4 +1,4 @@
-"""Behavioral A2 generation/sealing regressions; simulated receipts are not release proof."""
+"""Behavioral preview generation/sealing regressions; simulated receipts are not release proof."""
 
 from __future__ import annotations
 
@@ -17,15 +17,18 @@ from tests import test_stateless_preview_artifact as existing
 validator = existing.preview_validator
 A1 = "a1-preview-inherited-matrix-v1"
 A2 = "a2-preview-readonly-family-v1"
+A3 = "a3-preview-optional-client-info-v1"
 TOOLS = ["find_code_symbol", "find_code_references", "get_source_context"]
 
 
-def _upgrade_candidate(identity: dict[str, Any], archive: Path, manifest: Path) -> None:
+def _upgrade_candidate(
+    identity: dict[str, Any], archive: Path, manifest: Path, generation: str = A2
+) -> None:
     identity["schema_version"] = "2.0"
     candidate = identity["candidate"]
     binding = candidate["preview_manifest"]
     binding["contents"].update(
-        schema_version="2.0", consumer_contract=artifact._consumer_contract(A2)
+        schema_version="2.0", consumer_contract=artifact._consumer_contract(generation)
     )
     raw = existing._canonical_json_bytes(binding["contents"])
     manifest.write_bytes(raw)
@@ -64,19 +67,19 @@ def _set_proof_generation(receipt: dict[str, Any], contract_id: str) -> None:
         "outcome": "PASS",
     }
     receipt["runtime_results"]["catalog"] = list(
-        TOOLS if contract_id == A2 else ["find_code_symbol"]
+        ["find_code_symbol"] if contract_id == A1 else TOOLS
     )
 
 
 def _proof(tmp_path: Path, generation: str, remote: bool) -> tuple[dict[str, Any], dict[str, Any]]:
     receipt, identity, _, reference, catalog = existing._valid_retained_consumer_proof(tmp_path)
-    if generation == A2:
+    if generation != A1:
         candidate = identity["candidate"]
         archive = (
             tmp_path / "retained" / candidate["preview_manifest"]["contents"]["archive"]["name"]
         )
         manifest = tmp_path / "retained" / candidate["preview_manifest"]["file"]["name"]
-        _upgrade_candidate(identity, archive, manifest)
+        _upgrade_candidate(identity, archive, manifest, generation)
         candidate = identity["candidate"]
         receipt["candidate"] = deepcopy(candidate)
         receipt["input_identity_results"]["manifest"] = deepcopy(
@@ -106,6 +109,90 @@ def _proof(tmp_path: Path, generation: str, remote: bool) -> tuple[dict[str, Any
     }
 
 
+def test_a3_catalog_adds_only_optional_client_info_before_rollback() -> None:
+    historical = artifact.consumer_proof_scenario_catalog(A2)
+    current = artifact.consumer_proof_scenario_catalog(A3)
+
+    assert current["scenario_catalog_id"] == A3
+    assert len(current["scenarios"]) == 16
+    assert current["scenarios"] == [
+        *historical["scenarios"][:-1],
+        {
+            "scenario_id": "optional-client-info-request-local",
+            "surface": "protocol_catalog",
+            "documented_outcome": "EXPECT_SUCCESS",
+        },
+        historical["scenarios"][-1],
+    ]
+    assert (
+        current["scenario_catalog_sha256"]
+        == (existing._expected_a3_consumer_contract()["scenario_catalog_sha256"])
+    )
+    assert artifact.consumer_proof_scenario_catalog() == artifact.consumer_proof_scenario_catalog(
+        A1
+    )
+
+
+@pytest.mark.parametrize("remote", [False, True], ids=["retained", "remote"])
+def test_a3_sealers_accept_complete_candidate_bound_proof(tmp_path: Path, remote: bool) -> None:
+    receipt, binding = _proof(tmp_path, A3, remote)
+
+    assert artifact._validate_stage_consumer_proof(receipt, remote=remote, **binding) == receipt
+    assert receipt["scenario_matrix"]["required_count"] == 16
+    assert receipt["runtime_results"]["catalog"] == TOOLS
+    existing._validate_review_schema(
+        binding["candidate_identity"], "candidate-identity.schema.json"
+    )
+    existing._validate_review_schema(receipt, "artifact-consumer-proof.schema.json")
+
+
+@pytest.mark.parametrize("remote", [False, True], ids=["retained", "remote"])
+@pytest.mark.parametrize("violation", ["unknown-id", "a2-hash", "missing-optional-case"])
+def test_a3_sealers_reject_unknown_mixed_or_incomplete_proof(
+    tmp_path: Path, remote: bool, violation: str
+) -> None:
+    receipt, binding = _proof(tmp_path, A3, remote)
+    if violation == "unknown-id":
+        receipt["fixture_identity"]["scenario_catalog_id"] = "unknown-generation"
+    elif violation == "a2-hash":
+        receipt["fixture_identity"]["scenario_catalog_sha256"] = (
+            artifact.consumer_proof_scenario_catalog(A2)["scenario_catalog_sha256"]
+        )
+    else:
+        matrix = receipt["scenario_matrix"]
+        index = matrix["required_scenario_ids"].index("optional-client-info-request-local")
+        matrix["required_scenario_ids"].pop(index)
+        matrix["executed_scenario_ids"].pop(index)
+        matrix["results"].pop(index)
+        matrix["required_count"] -= 1
+        matrix["executed_count"] -= 1
+
+    with pytest.raises(ValueError, match="candidate generation|scenario matrix"):
+        artifact._validate_stage_consumer_proof(receipt, remote=remote, **binding)
+
+
+@pytest.mark.parametrize("violation", ["unknown-id", "a2-hash", "missing-hash", "extra-field"])
+def test_a3_candidate_requires_exact_closed_consumer_contract(
+    tmp_path: Path, violation: str
+) -> None:
+    _, binding = _proof(tmp_path, A3, False)
+    identity = binding["candidate_identity"]
+    contract = identity["candidate"]["preview_manifest"]["contents"]["consumer_contract"]
+    if violation == "unknown-id":
+        contract["scenario_catalog_id"] = "unknown-generation"
+    elif violation == "a2-hash":
+        contract["scenario_catalog_sha256"] = artifact.consumer_proof_scenario_catalog(A2)[
+            "scenario_catalog_sha256"
+        ]
+    elif violation == "missing-hash":
+        del contract["scenario_catalog_sha256"]
+    else:
+        contract["receipt_selects_validator"] = True
+
+    with pytest.raises(ValueError):
+        artifact.assemble_candidate_identity(identity)
+
+
 @pytest.mark.parametrize("remote", [False, True], ids=["retained", "remote"])
 @pytest.mark.parametrize("generation", [A1, A2])
 def test_original_a1_and_successor_a2_keep_distinct_passing_semantics(
@@ -124,7 +211,9 @@ def test_original_a1_and_successor_a2_keep_distinct_passing_semantics(
 
 
 @pytest.mark.parametrize("remote", [False, True], ids=["retained", "remote"])
-@pytest.mark.parametrize("candidate_generation,receipt_generation", [(A2, A1), (A1, A2)])
+@pytest.mark.parametrize(
+    "candidate_generation,receipt_generation", [(A2, A1), (A1, A2), (A3, A2), (A2, A3)]
+)
 def test_receipt_cannot_select_a_weaker_or_cross_generation_validator(
     tmp_path: Path, remote: bool, candidate_generation: str, receipt_generation: str
 ) -> None:
@@ -239,7 +328,10 @@ def test_preview_version_is_not_the_generation_selector(tmp_path: Path) -> None:
         artifact.consumer_proof_scenario_catalog("unknown-generation")
 
 
-def test_current_source_producer_cannot_seal_relabelled_a1_payload(tmp_path: Path) -> None:
+@pytest.mark.parametrize("generation", [A1, A2], ids=["a1", "a2"])
+def test_current_source_producer_cannot_seal_historical_payload(
+    tmp_path: Path, generation: str
+) -> None:
     root, commit, _ = existing._create_authority_repository(tmp_path)
     existing._create_publish_output(root)
     environment = existing._build_environment(commit)
@@ -248,9 +340,11 @@ def test_current_source_producer_cannot_seal_relabelled_a1_payload(tmp_path: Pat
     manifest_path = root / "artifacts/stateless-preview/payload" / payload["manifest"]["name"]
     manifest = json.loads(manifest_path.read_bytes())
     assert manifest["schema_version"] == "2.0"
-    assert manifest["consumer_contract"] == artifact._consumer_contract(A2)
-    manifest["schema_version"] = "1.0"
-    del manifest["consumer_contract"]
+    if generation == A1:
+        manifest["schema_version"] = "1.0"
+        del manifest["consumer_contract"]
+    else:
+        manifest["consumer_contract"] = artifact._consumer_contract(generation)
     manifest_path.write_bytes(existing._canonical_json_bytes(manifest))
     environment.update(A1_PAYLOAD_ARTIFACT_ID="501", GITHUB_TOKEN="SIMULATED-token")
 
@@ -263,8 +357,55 @@ def test_current_source_producer_cannot_seal_relabelled_a1_payload(tmp_path: Pat
             "workflow_run": {"id": 101},
         }
 
-    with pytest.raises(ValueError, match="requires the A2"):
+    with pytest.raises(ValueError, match="current source producer"):
         artifact.seal_build_records(root, environment, artifact_reader=reader)
+
+
+@pytest.mark.parametrize("failure", ["premature-eof", "wrong-marker"])
+def test_optional_client_info_runner_rejects_early_failure_and_wrong_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    processes: list[Any] = []
+
+    class RejectedProcess:
+        def __init__(self, *_: Any) -> None:
+            self.aborted = False
+            processes.append(self)
+
+        def request(self, *_: Any) -> dict[str, Any]:
+            if failure == "premature-eof":
+                raise ValueError("SIMULATED process ended before a JSON-RPC response")
+            wrong_marker = {
+                "kind": "find_code_symbol_success",
+                "results": [
+                    {
+                        "file": "Markers.cs",
+                        "line": 4,
+                        "name": "PreviewMarker",
+                        "kind": "class",
+                        "context": "public sealed class PreviewMarker { }",
+                    }
+                ],
+            }
+            return {
+                "result": {
+                    "resultType": "complete",
+                    "isError": False,
+                    "structuredContent": wrong_marker,
+                    "content": [{"type": "text", "text": json.dumps(wrong_marker)}],
+                }
+            }
+
+        def close_eof(self) -> None:
+            raise AssertionError("An invalid first call must not reach clean EOF acceptance")
+
+        def abort(self) -> None:
+            self.aborted = True
+
+    monkeypatch.setattr(validator, "JsonRpcProcess", RejectedProcess)
+    with pytest.raises(ValueError, match="ended before a JSON-RPC response|result values"):
+        validator._run_optional_client_info(tmp_path / "preview.exe", tmp_path)
+    assert processes and all(process.aborted for process in processes)
 
 
 @pytest.mark.parametrize("tool", ["find_code_references", "get_source_context"])

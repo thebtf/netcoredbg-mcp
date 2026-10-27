@@ -638,9 +638,7 @@ def test_coverage_preview_fixture_builder_emits_verified_archive_and_manifest(
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["schema_version"] == "2.0"
-    assert manifest["consumer_contract"] == artifact_contract._consumer_contract(
-        "a2-preview-readonly-family-v1"
-    )
+    assert manifest["consumer_contract"] == _expected_a3_consumer_contract()
     archive_path = output / manifest["archive"]["name"]
     assert _sha256_path(archive_path) == manifest["archive"]["sha256"]
     with zipfile.ZipFile(archive_path) as archive:
@@ -661,6 +659,9 @@ def test_prepare_preview_payload_seals_the_inherited_manifest_equations(tmp_path
         authority_root / "artifacts" / "stateless-preview" / "payload" / payload["manifest"]["name"]
     )
     assert payload["manifest"]["sha256"] == _sha256_path(manifest_path)
+    manifest = json.loads(manifest_path.read_bytes())
+    assert manifest["schema_version"] == "2.0"
+    assert manifest["consumer_contract"] == _expected_a3_consumer_contract()
     with zipfile.ZipFile(archive_path) as archive:
         assert archive.namelist() == [EXECUTABLE_NAME]
         assert archive.read(EXECUTABLE_NAME) == executable.read_bytes()
@@ -708,7 +709,7 @@ def test_seal_build_records_admits_payload_without_passing_sonar(
     candidate = sealed["candidate_identity"]
     assert candidate["schema_version"] == "2.0"
     assert candidate["candidate"]["preview_manifest"]["contents"]["consumer_contract"] == (
-        artifact_contract._consumer_contract("a2-preview-readonly-family-v1")
+        _expected_a3_consumer_contract()
     )
     assert candidate["candidate"]["build"]["artifact"]["id"] == "501"
     assert candidate["candidate"]["source"] == {
@@ -780,6 +781,28 @@ def _canonical_json_bytes(value: Any) -> bytes:
         ).encode("utf-8")
         + b"\n"
     )
+
+
+def _expected_a3_consumer_contract() -> dict[str, Any]:
+    scenarios = [
+        dict(scenario)
+        for scenario in consumer_proof_scenario_catalog("a2-preview-readonly-family-v1")[
+            "scenarios"
+        ]
+    ]
+    scenarios.insert(
+        -1,
+        {
+            "scenario_id": "optional-client-info-request-local",
+            "surface": "protocol_catalog",
+            "documented_outcome": "EXPECT_SUCCESS",
+        },
+    )
+    return {
+        "scenario_catalog_id": "a3-preview-optional-client-info-v1",
+        "scenario_catalog_sha256": _sha256_bytes(_canonical_json_bytes(scenarios)),
+        "tools": ["find_code_symbol", "find_code_references", "get_source_context"],
+    }
 
 
 def _consumer_proof_reference(
