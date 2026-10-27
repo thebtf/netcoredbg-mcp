@@ -49,7 +49,7 @@ The A3 list is the unchanged A2 list with `optional-client-info-request-local` i
 | Runner cannot claim work it did not complete | Meaningful failed-result/early-failure checks prevent PASS/sealing; real extracted executable satisfies every new scenario obligation |
 | Consumer delivery | Exact candidate, manifest/executable binding, retained proof, S4 decision, verified public bytes, fresh full consumer proof and installed Python rollback |
 
-Keep required-metadata `-32602` behavior and legacy compatibility policy open as remaining A3 work. SDK filter ordering prevents deriving every wire error from the local predicate alone. No full protocol-compliance claim follows from this slice.
+Keep required-metadata `-32602`, the inherited SDK session-version guard versus independent per-request version rejection, and legacy compatibility policy open as remaining A3 work before Program B. The selected `-32022` recovery check uses unsupported-first in its own fresh process; the original supported-then-unsupported failure is retained, not accepted as conformance. SDK filter ordering prevents deriving every wire error from the local predicate alone. No full protocol-compliance claim follows from this slice.
 
 ## Migration, rollback and lifecycle
 

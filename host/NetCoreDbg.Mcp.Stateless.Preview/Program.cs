@@ -323,8 +323,8 @@ internal static class Program
             || metadata[MetaKeys.ProtocolVersion] is not JsonValue protocolVersion
             || !protocolVersion.TryGetValue<string>(out var version)
             || string.IsNullOrWhiteSpace(version)
-            || (metadata.ContainsKey(MetaKeys.ClientInfo)
-                && (metadata[MetaKeys.ClientInfo] is not JsonObject clientInfo
+            || (metadata.TryGetPropertyValue(MetaKeys.ClientInfo, out var clientInfoValue)
+                && (clientInfoValue is not JsonObject clientInfo
                     || !HasNonBlankString(clientInfo, "name")
                     || !HasNonBlankString(clientInfo, "version")))
             || metadata[MetaKeys.ClientCapabilities] is not JsonObject)
