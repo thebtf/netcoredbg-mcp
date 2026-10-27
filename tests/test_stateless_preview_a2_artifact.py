@@ -19,7 +19,37 @@ A1 = "a1-preview-inherited-matrix-v1"
 A2 = "a2-preview-readonly-family-v1"
 A3 = "a3-preview-optional-client-info-v1"
 REQUIRED_METADATA_VERSION = "a3-preview-required-metadata-version-v1"
+LEGACY_INITIALIZE = "a3-preview-legacy-diagnostic-v1"
 TOOLS = ["find_code_symbol", "find_code_references", "get_source_context"]
+
+
+def _expected_legacy_initialize_catalog() -> dict[str, Any]:
+    historical = existing._expected_required_metadata_version_catalog()
+    scenarios = deepcopy(historical["scenarios"])
+    scenarios.insert(
+        -1,
+        {
+            "scenario_id": "legacy-initialize-supported-version-diagnostic",
+            "surface": "protocol_catalog",
+            "documented_outcome": "EXPECT_SUCCESS",
+        },
+    )
+    return {
+        "scenario_catalog_id": LEGACY_INITIALIZE,
+        "scenario_catalog_sha256": existing._sha256_bytes(
+            existing._canonical_json_bytes(scenarios)
+        ),
+        "scenarios": scenarios,
+    }
+
+
+def _expected_legacy_initialize_consumer_contract() -> dict[str, Any]:
+    catalog = _expected_legacy_initialize_catalog()
+    return {
+        "scenario_catalog_id": catalog["scenario_catalog_id"],
+        "scenario_catalog_sha256": catalog["scenario_catalog_sha256"],
+        "tools": TOOLS.copy(),
+    }
 
 
 def _upgrade_candidate(
@@ -28,11 +58,12 @@ def _upgrade_candidate(
     identity["schema_version"] = "2.0"
     candidate = identity["candidate"]
     binding = candidate["preview_manifest"]
-    contract = (
-        existing._expected_required_metadata_version_consumer_contract()
-        if generation == REQUIRED_METADATA_VERSION
-        else artifact._consumer_contract(generation)
-    )
+    if generation == LEGACY_INITIALIZE:
+        contract = _expected_legacy_initialize_consumer_contract()
+    elif generation == REQUIRED_METADATA_VERSION:
+        contract = existing._expected_required_metadata_version_consumer_contract()
+    else:
+        contract = artifact._consumer_contract(generation)
     binding["contents"].update(schema_version="2.0", consumer_contract=contract)
     raw = existing._canonical_json_bytes(binding["contents"])
     manifest.write_bytes(raw)
@@ -42,11 +73,12 @@ def _upgrade_candidate(
 
 
 def _set_proof_generation(receipt: dict[str, Any], contract_id: str) -> None:
-    catalog = (
-        existing._expected_required_metadata_version_catalog()
-        if contract_id == REQUIRED_METADATA_VERSION
-        else artifact.consumer_proof_scenario_catalog(contract_id)
-    )
+    if contract_id == LEGACY_INITIALIZE:
+        catalog = _expected_legacy_initialize_catalog()
+    elif contract_id == REQUIRED_METADATA_VERSION:
+        catalog = existing._expected_required_metadata_version_catalog()
+    else:
+        catalog = artifact.consumer_proof_scenario_catalog(contract_id)
     receipt["fixture_identity"].update(
         scenario_catalog_id=catalog["scenario_catalog_id"],
         scenario_catalog_sha256=catalog["scenario_catalog_sha256"],
@@ -163,6 +195,70 @@ def test_required_metadata_version_catalog_preserves_all_sixteen_predecessor_cas
     assert artifact.consumer_proof_scenario_catalog() == artifact.consumer_proof_scenario_catalog(
         A1
     )
+
+
+def test_legacy_initialize_catalog_preserves_required17_and_adds_diagnostic() -> None:
+    historical = artifact.consumer_proof_scenario_catalog(REQUIRED_METADATA_VERSION)
+    expected = _expected_legacy_initialize_catalog()
+
+    current = artifact.consumer_proof_scenario_catalog(LEGACY_INITIALIZE)
+
+    assert current == expected
+    assert current["scenario_catalog_sha256"] == (
+        "31589f89efc7c0453357bd3cee7216448ec1332e57d135d555b2c897a0bc855d"
+    )
+    assert len(current["scenarios"]) == 18
+    assert current["scenarios"][-3]["scenario_id"] == "required-metadata-version-recovery"
+    assert current["scenarios"][-2] == {
+        "scenario_id": "legacy-initialize-supported-version-diagnostic",
+        "surface": "protocol_catalog",
+        "documented_outcome": "EXPECT_SUCCESS",
+    }
+    assert current["scenarios"][-1]["scenario_id"] == "rollback-python-default"
+    assert [*current["scenarios"][:-2], current["scenarios"][-1]] == historical["scenarios"]
+    assert historical == existing._expected_required_metadata_version_catalog()
+    assert historical["scenario_catalog_sha256"] == (
+        "1e737db53dda4557b04616f6fc114c71fa0136c7c11693143772d7b642f5947a"
+    )
+    assert artifact.consumer_proof_scenario_catalog() == artifact.consumer_proof_scenario_catalog(
+        A1
+    )
+
+
+@pytest.mark.parametrize("remote", [False, True], ids=["retained", "remote"])
+def test_legacy_initialize_sealer_accepts_complete_eighteen_scenario_candidate_bound_proof(
+    tmp_path: Path, remote: bool
+) -> None:
+    receipt, binding = _proof(tmp_path, LEGACY_INITIALIZE, remote)
+
+    sealed = artifact._validate_stage_consumer_proof(receipt, remote=remote, **binding)
+
+    assert sealed == receipt
+    assert sealed["scenario_matrix"]["required_count"] == 18
+    assert sealed["scenario_matrix"]["executed_count"] == 18
+    assert sealed["scenario_matrix"]["results"][-2]["scenario_id"] == (
+        "legacy-initialize-supported-version-diagnostic"
+    )
+    assert sealed["runtime_results"]["catalog"] == TOOLS
+    existing._validate_review_schema(
+        binding["candidate_identity"], "candidate-identity.schema.json"
+    )
+    existing._validate_review_schema(receipt, "artifact-consumer-proof.schema.json")
+
+
+def test_current_source_producer_requires_legacy_initialize_eighteen_scenario_manifest(
+    tmp_path: Path,
+) -> None:
+    root, commit, _ = existing._create_authority_repository(tmp_path)
+    existing._create_publish_output(root)
+
+    payload = artifact.prepare_preview_payload(root, existing._build_environment(commit))
+
+    manifest_path = root / "artifacts/stateless-preview/payload" / payload["manifest"]["name"]
+    manifest = json.loads(manifest_path.read_bytes())
+    assert manifest["schema_version"] == "2.0"
+    assert manifest["consumer_contract"] == _expected_legacy_initialize_consumer_contract()
+    assert payload["manifest"]["sha256"] == existing._sha256_bytes(manifest_path.read_bytes())
 
 
 @pytest.mark.parametrize("remote", [False, True], ids=["retained", "remote"])
@@ -316,7 +412,15 @@ def test_original_a1_and_successor_a2_keep_distinct_passing_semantics(
 
 @pytest.mark.parametrize("remote", [False, True], ids=["retained", "remote"])
 @pytest.mark.parametrize(
-    "candidate_generation,receipt_generation", [(A2, A1), (A1, A2), (A3, A2), (A2, A3)]
+    "candidate_generation,receipt_generation",
+    [
+        (A2, A1),
+        (A1, A2),
+        (A3, A2),
+        (A2, A3),
+        (LEGACY_INITIALIZE, REQUIRED_METADATA_VERSION),
+        (REQUIRED_METADATA_VERSION, LEGACY_INITIALIZE),
+    ],
 )
 def test_receipt_cannot_select_a_weaker_or_cross_generation_validator(
     tmp_path: Path, remote: bool, candidate_generation: str, receipt_generation: str
@@ -432,7 +536,11 @@ def test_preview_version_is_not_the_generation_selector(tmp_path: Path) -> None:
         artifact.consumer_proof_scenario_catalog("unknown-generation")
 
 
-@pytest.mark.parametrize("generation", [A1, A2, A3], ids=["a1", "a2", "optional-a3"])
+@pytest.mark.parametrize(
+    "generation",
+    [A1, A2, A3, REQUIRED_METADATA_VERSION],
+    ids=["a1", "a2", "optional-a3", "required17"],
+)
 def test_current_source_producer_cannot_seal_historical_payload(
     tmp_path: Path, generation: str
 ) -> None:
@@ -449,6 +557,10 @@ def test_current_source_producer_cannot_seal_historical_payload(
         del manifest["consumer_contract"]
     else:
         manifest["consumer_contract"] = artifact._consumer_contract(generation)
+    if generation == REQUIRED_METADATA_VERSION:
+        assert manifest["consumer_contract"] == (
+            existing._expected_required_metadata_version_consumer_contract()
+        )
     manifest_path.write_bytes(existing._canonical_json_bytes(manifest))
     environment.update(A1_PAYLOAD_ARTIFACT_ID="501", GITHUB_TOKEN="SIMULATED-token")
 

@@ -11,6 +11,8 @@ namespace NetCoreDbg.Mcp.Stateless.Preview.Tests;
 public sealed class PreviewProcessContractTests
 {
     private const string ToolName = "find_code_symbol";
+    private const string LegacyInitializeDiagnostic = "Only MCP 2026-07-28 is supported. Use server/discover and per-request metadata instead.";
+    private const string ModernInitializeDiagnostic = "Method 'initialize' is not available on protocol version '2026-07-28'. Use 'server/discover' and per-request metadata instead.";
 
     [Fact]
     public async Task Discover_IsSupportedAsTheLiteralFirstFreshProcessRequest()
@@ -208,13 +210,57 @@ public sealed class PreviewProcessContractTests
         }
     }
 
-    [Fact]
-    public async Task MissingMetadata_ValidArgumentsReturnCorrelatedInvalidParamsAndRecoverBeforeCleanEof()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MissingMetadata_ValidArgumentsReturnCorrelatedInvalidParamsAndRecoverBeforeCleanEof(bool legacyInitializeFirst)
     {
         using var process = PreviewOutputPathResolver.StartDirect("--project", PreviewRepositoryLayout.FixtureRoot);
         var standardError = process.StandardError.ReadToEndAsync();
         try
         {
+            if (legacyInitializeFirst)
+            {
+                var legacyId = new RequestId("legacy-before-clean-eof");
+                var legacy = Assert.IsType<JsonRpcError>(await SendAsync(new JsonRpcRequest
+                {
+                    Id = legacyId,
+                    Method = "initialize",
+                    Params = new JsonObject(),
+                }));
+                Assert.Equal(legacyId, legacy.Id);
+                Assert.Equal(-32601, legacy.Error.Code);
+                Assert.Equal(LegacyInitializeDiagnostic, legacy.Error.Message);
+                var discovery = RequireResult(await SendAsync(new JsonRpcRequest
+                {
+                    Id = new RequestId("discovery-before-clean-eof"),
+                    Method = "server/discover",
+                    Params = new JsonObject { ["_meta"] = MetadataWithoutClientInfo() },
+                }));
+                Assert.Equal(["2026-07-28"], discovery["supportedVersions"]!.AsArray().Select(static value => value!.GetValue<string>()));
+                AssertPreviewMarkerResult(RequireResult(await SendAsync(new JsonRpcRequest
+                {
+                    Id = new RequestId("marker-before-clean-eof"),
+                    Method = "tools/call",
+                    Params = new JsonObject
+                    {
+                        ["name"] = ToolName,
+                        ["arguments"] = FixtureArguments(ToolName),
+                        ["_meta"] = MetadataWithoutClientInfo(),
+                    },
+                })));
+                var modernId = new RequestId(42);
+                var modern = Assert.IsType<JsonRpcError>(await SendAsync(new JsonRpcRequest
+                {
+                    Id = modernId,
+                    Method = "initialize",
+                    Params = new JsonObject { ["_meta"] = MetadataWithoutClientInfo() },
+                }));
+                Assert.Equal(modernId, modern.Id);
+                Assert.Equal(-32601, modern.Error.Code);
+                Assert.Equal(ModernInitializeDiagnostic, modern.Error.Message);
+            }
+
             var id = new RequestId("missing-meta-valid-arguments");
             AssertInvalidParams(await SendAsync(new JsonRpcRequest
             {
@@ -509,25 +555,36 @@ public sealed class PreviewProcessContractTests
         Assert.Equal(FrameByteCount(response), expected.BytesWritten);
         Assert.True(FrameByteCount(response) <= maximumFrameBytes);
     }
-    [Fact]
-    public async Task NearCapIdBeyondFallbackLimitDeliversLegacyMethodNotFound()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InitialLegacyInitializeDiagnosticAtExactCapIsDeliveredAndCapPlusOneCloses(bool beyondCap)
     {
         const int maximumFrameBytes = 256 * 1024;
-        var fallbackIdLength = maximumFrameBytes - FrameByteCount(FrameBudgetFallback(new RequestId("base"))) + "base".Length;
-        var requestId = new RequestId(new string('i', fallbackIdLength + 1));
-        var expected = LegacyInitializeMethodNotFound(requestId);
+        var detail = new JsonRpcErrorDetail { Code = -32601, Message = LegacyInitializeDiagnostic };
+        var frameBytes = maximumFrameBytes + (beyondCap ? 1 : 0);
+        var requestId = EscapedIdAtErrorFrameSize(detail, frameBytes);
+        var expected = new JsonRpcError { Id = requestId, Error = detail };
 
         Assert.False(BoundedResponseFrameSerializer.FitsFrameBudgetExceededResponseWithinLimit(requestId));
-        Assert.True(FrameByteCount(expected) <= maximumFrameBytes);
+        Assert.Equal(frameBytes, FrameByteCount(expected));
 
         await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
-        var response = await driver.SendAsync("initialize", new JsonObject(), requestId);
+        if (beyondCap)
+        {
+            await driver.SendRequestAsync("initialize", new JsonObject(), requestId);
+            Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2)));
+            Assert.True(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
+            return;
+        }
 
-        var error = Assert.IsType<JsonRpcError>(response);
+        var error = Assert.IsType<JsonRpcError>(await driver.SendAsync("initialize", new JsonObject(), requestId));
         Assert.Equal(requestId, error.Id);
         Assert.Equal(-32601, error.Error.Code);
-        Assert.Equal("Method not found", error.Error.Message);
-        Assert.Equal(FrameByteCount(expected), FrameByteCount(error));
+        Assert.Equal(LegacyInitializeDiagnostic, error.Error.Message);
+        Assert.Equal(maximumFrameBytes, FrameByteCount(error));
+        AssertPreviewMarkerResult(RequireResult(await driver.CallToolAsync(
+            ToolName, FixtureArguments(ToolName), new RequestId("valid-after-bounded-initialize"))));
     }
 
 
@@ -991,14 +1048,41 @@ public sealed class PreviewProcessContractTests
         AssertCatalog(RequireResult(await fresh.ListToolsAsync(new RequestId("fresh-after-oversized-id"))));
     }
 
-    [Fact]
-    public async Task LegacyInitializeIsMethodNotFound()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LegacyInitializeDiagnosticPreservesIdAndModernDiscoveryCallRecovery(bool numericId)
     {
         await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+        var initialId = numericId ? new RequestId(41) : new RequestId("legacy-initialize");
 
-        var response = await driver.SendAsync("initialize", new JsonObject(), new RequestId("legacy-initialize"));
+        var initial = Assert.IsType<JsonRpcError>(await driver.SendAsync("initialize", new JsonObject(), initialId));
 
-        Assert.Equal(-32601, Assert.IsType<JsonRpcError>(response).Error.Code);
+        Assert.Equal(initialId, initial.Id);
+        Assert.Equal(-32601, initial.Error.Code);
+        Assert.Equal(LegacyInitializeDiagnostic, initial.Error.Message);
+        Assert.InRange(FrameByteCount(initial), 1, PreviewToolCatalog.MaximumCompleteResponseFrameBytes);
+        var discovery = RequireResult(await driver.DiscoverAsync(new RequestId("modern-after-legacy")));
+        Assert.Equal(["2026-07-28"], discovery["supportedVersions"]!.AsArray().Select(static value => value!.GetValue<string>()));
+        var capabilities = discovery["capabilities"]!.AsObject();
+        Assert.Equal(["tools"], capabilities.Select(static property => property.Key));
+        Assert.Equal(["listChanged"], capabilities["tools"]!.AsObject().Select(static property => property.Key));
+        Assert.False(capabilities["tools"]!["listChanged"]!.GetValue<bool>());
+        AssertCatalog(RequireResult(await driver.ListToolsAsync(new RequestId("catalog-after-legacy"))));
+        AssertPreviewMarkerResult(RequireResult(await driver.CallToolAsync(
+            ToolName, FixtureArguments(ToolName), new RequestId("marker-before-modern-initialize"))));
+
+        var modernId = numericId ? new RequestId(42) : new RequestId("modern-initialize");
+        var modern = Assert.IsType<JsonRpcError>(await driver.SendAsync("initialize", new JsonObject
+        {
+            ["_meta"] = PreviewMcpProcessDriver.CurrentMeta(),
+        }, modernId));
+        Assert.Equal(modernId, modern.Id);
+        Assert.Equal(-32601, modern.Error.Code);
+        Assert.Equal(ModernInitializeDiagnostic, modern.Error.Message);
+        Assert.InRange(FrameByteCount(modern), 1, PreviewToolCatalog.MaximumCompleteResponseFrameBytes);
+        AssertPreviewMarkerResult(RequireResult(await driver.CallToolAsync(
+            ToolName, FixtureArguments(ToolName), new RequestId("corrected-after-modern-initialize"))));
     }
 
     [Theory]
