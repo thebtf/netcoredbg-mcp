@@ -94,16 +94,16 @@ def format_request_arguments_for_log(
 
 def build_launch_environment(
     overrides: dict[str, str | None] | None = None,
-) -> dict[str, str | None]:
-    """Build the DAP launch environment from the server process environment."""
+) -> dict[str, str]:
+    """Build Samsung's string-only launch map without changing inherited state."""
 
     if os.name == "nt":
-        return build_windows_launch_environment(os.environ, overrides)
-
-    launch_env: dict[str, str | None] = dict(os.environ)
-    if overrides:
-        launch_env.update(overrides)
-    return launch_env
+        launch_env = build_windows_launch_environment(os.environ, overrides)
+    else:
+        launch_env = dict(os.environ)
+        if overrides:
+            launch_env.update(overrides)
+    return {name: value for name, value in launch_env.items() if value is not None}
 
 
 def build_windows_launch_environment(
@@ -480,13 +480,20 @@ class DAPClient:
 
         self._transport_terminal_handler = handler
 
-    async def start(self, *, generation: object | None = None) -> object:
+    async def start(
+        self,
+        *,
+        generation: object | None = None,
+        env: dict[str, str | None] | None = None,
+    ) -> object:
         """Start one netcoredbg generation and its three lifecycle observers.
 
         Args:
             generation: Manager-issued identity used to reject terminal facts
                 from an older adapter run. Direct client callers may omit it;
                 the client then creates a process-local monotonic identity.
+            env: Launch overrides whose null entries are removed from the new
+                adapter child's environment. String overrides stay debuggee-only.
 
         Returns:
             The exact identity bound to the new adapter run.
@@ -499,6 +506,16 @@ class DAPClient:
             self._generation_counter += 1
             generation = self._generation_counter
 
+        adapter_env = None
+        if env:
+            overrides = (
+                {name.upper(): value for name, value in env.items()} if os.name == "nt" else env
+            )
+            removals = {name: None for name, value in overrides.items() if value is None}
+            if removals:
+                # Samsung merges DAP env into its own inherited environment.
+                adapter_env = build_launch_environment(removals)
+
         logger.info("Starting netcoredbg: %s", self.netcoredbg_path)
         owner: WindowsOwnedProcess | None = None
         posix_owner: PosixOwnedProcess | None = None
@@ -509,7 +526,7 @@ class DAPClient:
                 generation=generation,
                 argv=(self.netcoredbg_path, "--interpreter=vscode"),
                 cwd=None,
-                env=None,
+                env=adapter_env,
                 stdin_mode="pipe",
             )
             process: asyncio.subprocess.Process | WindowsOwnedProcess | PosixOwnedProcess = owner
@@ -518,7 +535,7 @@ class DAPClient:
                 generation=generation,
                 argv=(self.netcoredbg_path, "--interpreter=vscode"),
                 cwd=None,
-                env=None,
+                env=adapter_env,
                 stdin_mode="pipe",
             )
             process = posix_owner

@@ -705,7 +705,7 @@ class SessionManager:
         async with self._lifecycle_lock:
             await self._start_locked()
 
-    async def _start_locked(self) -> None:
+    async def _start_locked(self, *, env: dict[str, str | None] | None = None) -> None:
         """Start one adapter generation while the lifecycle gate excludes pre-build work.
 
         The manager binds the generation and terminal sink before awaiting
@@ -732,7 +732,10 @@ class SessionManager:
         if os.name == "nt":
             self._windows_adapter_admission_generation = generation
         try:
-            returned_generation = await self._client.start(generation=generation)
+            if env is None:
+                returned_generation = await self._client.start(generation=generation)
+            else:
+                returned_generation = await self._client.start(generation=generation, env=env)
         except Exception:
             if self._active_dap_run == generation:
                 self._active_dap_run = None
@@ -1923,6 +1926,23 @@ class SessionManager:
             RuntimeError: If launch fails
             BuildError: If pre-build fails
         """
+        has_removals = env is not None and any(value is None for value in env.values())
+        if has_removals and not pre_build:
+            selected_debuggee = (
+                self._debuggee_mode is not None and self._debuggee_mode[0] == self._active_dap_run
+            )
+            if self._state.state in (
+                DebugState.RUNNING,
+                DebugState.STOPPED,
+                DebugState.APPLYING_CHANGES,
+            ) or (
+                self._state.state != DebugState.TERMINATED
+                and (self._state.process_id is not None or selected_debuggee)
+            ):
+                raise RuntimeError(
+                    "Stop the active debuggee before launching with environment removals "
+                    "and pre_build=False"
+                )
 
         if pre_build and _prebuilt_program is None:
             self._last_build_result = None
@@ -1957,6 +1977,9 @@ class SessionManager:
         else:
             await report(0, 100, "Starting debugger...")
 
+        if has_removals and self._client.is_running:
+            await self._stop_locked()
+
         # Try dynamic dbgshim swap before version check (eliminates mismatch)
         logger.info("[launch] phase 4/9: dbgshim version management")
         try:
@@ -1973,7 +1996,7 @@ class SessionManager:
 
         if not self._client.is_running:
             logger.info("[launch] phase 5/9: starting netcoredbg process")
-            await self._start_locked()
+            await self._start_locked(env=env if has_removals else None)
 
         dap_generation = self._active_dap_run
         self._bind_debuggee_mode(dap_generation, "launch")

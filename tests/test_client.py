@@ -320,8 +320,8 @@ class TestDAPClientRequestBuilding:
         assert captured_args["arguments"]["stopAtEntry"] is True
 
     @pytest.mark.asyncio
-    async def test_launch_request_preserves_env_null_values(self):
-        """Test launch env preserves DAP null removal semantics."""
+    async def test_launch_request_keeps_mixed_overrides_string_only(self):
+        """Samsung accepts string values, not generic DAP null-removal values."""
         client = DAPClient("/path")
 
         captured_args = {}
@@ -341,7 +341,8 @@ class TestDAPClientRequestBuilding:
         assert captured_args["command"] == "launch"
         assert captured_args["arguments"]["env"]["PATH"] == "base-path"
         assert captured_args["arguments"]["env"]["APP_MODE"] == "debug"
-        assert captured_args["arguments"]["env"]["REMOVE_ME"] is None
+        assert "REMOVE_ME" not in captured_args["arguments"]["env"]
+        assert all(isinstance(value, str) for value in captured_args["arguments"]["env"].values())
 
     @pytest.mark.asyncio
     async def test_launch_inherits_process_environment_by_default(self):
@@ -459,7 +460,7 @@ class TestDAPClientRequestBuilding:
 
     @pytest.mark.asyncio
     async def test_windows_launch_env_preserves_alias_unset_overrides(self):
-        """Windows env alias repair must preserve explicit DAP null removals."""
+        """Removal intent must not put nulls into Samsung's string-only map."""
         client = DAPClient("/path")
 
         captured_args = {}
@@ -484,8 +485,8 @@ class TestDAPClientRequestBuilding:
                 )
 
         env = captured_args["arguments"]["env"]
-        assert env["WINDIR"] is None
-        assert env["SYSTEMROOT"] is None
+        assert "WINDIR" not in env
+        assert "SYSTEMROOT" not in env
 
     @pytest.mark.asyncio
     async def test_windows_launch_env_preserves_empty_string_alias_overrides(self):
