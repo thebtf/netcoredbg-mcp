@@ -43,13 +43,16 @@ The separate [native read-only preview](specs/016-a2-native-readonly-family/spec
 exposes `find_code_symbol`, `find_code_references` and `get_source_context`.
 Each schema-2 manifest binds its exact proof generation; historical schema-1
 A1 assets retain their one-tool meaning. The
-[required-metadata source successor](specs/018-a3-required-metadata-version/spec.md)
+[required-metadata preview](specs/018-a3-required-metadata-version/spec.md), published as
+[stateless-preview-v0.23.17-preview.2](https://github.com/thebtf/netcoredbg-mcp/releases/tag/stateless-preview-v0.23.17-preview.2),
 uses preview-only MCP 2.3.0: missing/malformed required metadata returns correlated
 `-32602`, and unsupported versions return exact `-32022`; an ordinary corrected
 request continues in the same process. `clientInfo` remains optional.
+The retained candidate and freshly downloaded public package each passed all 17
+generation-bound scenarios, including unchanged installed-Python rollback.
 Use the [generation-bound instructions](specs/010-a1-preview-artifact/contracts/stateless-preview-workflow.md)
-for the selected asset: source/local proof does not establish the new 17-case
-public delivery or change the Python default.
+for the selected asset. Python remains the default; broader A3 and runtime
+security servicing remain open.
 
 ## Quick start
 

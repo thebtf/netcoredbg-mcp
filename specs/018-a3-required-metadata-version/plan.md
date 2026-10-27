@@ -1,6 +1,6 @@
 # A3 Required Metadata / Version Plan
 
-Status: accepted D1; no code or runtime proof yet.
+Status: implemented, independently reviewed and delivered as `stateless-preview-v0.23.17-preview.2`. Original RED, pin-only discriminator, 167/167 combined preview tests and 112 semantic artifact checks are retained; canonical retained and fresh public consumers each passed all 17 scenarios plus unchanged installed-Python rollback. Existing same-byte publication and closeout completed; broader A3 and runtime servicing remain open.
 Baseline: `cbc306de36c162930bd83b2bd0424ca06e82eba9`.
 
 ## Existing owners and affected consumers

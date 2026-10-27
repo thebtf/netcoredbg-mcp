@@ -1,6 +1,6 @@
 # A3 — Recoverable Required Metadata and Version Errors
 
-Status: source implemented and locally verified: 167/167 preview tests, the real new scenario on verified extracted self-contained bytes, installed Python rollback and one independent error-to-wire trace. Canonical immutable candidate and public 17-case delivery remain pending.
+Status: delivered as `stateless-preview-v0.23.17-preview.2` from canonical source `cf39c85cfd99cc2a51f67b7d2686f29e3e8080c0`. Retained and fresh public consumers each passed all 17 scenarios plus unchanged installed-Python rollback. Exact-candidate review, explicit Root S4, same-byte publication and retained closeout completed. This closes only this slice, not broader A3.
 Baseline: `cbc306de36c162930bd83b2bd0424ca06e82eba9`.
 Parent: Stateless Front-Door Convergence Program A3. The optional-clientInfo predecessor is delivered as `stateless-preview-v0.23.17-preview.1`; its source, evidence and tag remain immutable.
 
