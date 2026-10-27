@@ -238,6 +238,7 @@ def test_wpf_submenu_fixture_uses_native_menu_keyboard_behavior() -> None:
     assert "SubmenuParent_PreviewKeyDown" not in code
 
 
+@pytest.mark.gui_regression
 def test_wpf_submenu_parent_native_enter_rediscovers_popup_child_and_invokes_it(
     tmp_path: Path,
 ) -> None:
