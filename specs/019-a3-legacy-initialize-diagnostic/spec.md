@@ -1,6 +1,6 @@
 # A3 — Actionable Modern-Only Initialize Diagnostic
 
-Status: source implemented and locally verified. Original preview run passed 170/170; one near-cap case was replaced by two focused exact-boundary passes, giving a disjoint 171-case coverage set, not a full 171 rerun. All 129 artifact semantic cases, the real new runner on verified extracted bytes and installed-Python rollback passed. Independent error-to-wire assurance verified 8/8 clauses after its test-only F1 correction. Canonical/public 18-case delivery remains pending.
+Status: delivered as `stateless-preview-v0.23.17-preview.3` from canonical source `973648067cbcc2ad0b0bdf810cfc1cf5725e0de4`. Retained and fresh public consumers each passed all 18 ordered scenarios plus unchanged installed-Python rollback. Exact-candidate review, explicit Root S4, same-byte publication and R0-R3 closeout completed. This closes only this diagnostic slice, not broader A3 or runtime servicing.
 Baseline: `371b58201cad388eab79586dc40ac6c389d4fdac` (documentation-only successor to delivered preview.2 source `cf39c85cfd99cc2a51f67b7d2686f29e3e8080c0`).
 Parent: Program A/A3 modern compatibility policy. Python remains default and rollback.
 
