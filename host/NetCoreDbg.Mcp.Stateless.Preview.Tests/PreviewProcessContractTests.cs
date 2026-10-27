@@ -611,25 +611,37 @@ public sealed class PreviewProcessContractTests
         Assert.Equal(maximumFrameBytes, FrameByteCount(response));
     }
 
-    [Fact]
-    public async Task NearCapIdBeyondFallbackLimitDeliversExcludedMethodNotFound()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ExcludedMethodNotFoundAtExactCapIsDeliveredAndCapPlusOneCloses(bool beyondCap)
     {
         const int maximumFrameBytes = 256 * 1024;
-        var fallbackIdLength = maximumFrameBytes - FrameByteCount(FrameBudgetFallback(new RequestId("base"))) + "base".Length;
-        var requestId = new RequestId(new string('i', fallbackIdLength + 1));
-        var expected = LegacyInitializeMethodNotFound(requestId);
+        var detail = new JsonRpcErrorDetail { Code = -32601, Message = "Method not found" };
+        var frameBytes = maximumFrameBytes + (beyondCap ? 1 : 0);
+        var requestId = EscapedIdAtErrorFrameSize(detail, frameBytes);
+        var expected = new JsonRpcError { Id = requestId, Error = detail };
+        var parameters = new JsonObject { ["_meta"] = PreviewMcpProcessDriver.CurrentMeta() };
 
         Assert.False(BoundedResponseFrameSerializer.FitsFrameBudgetExceededResponseWithinLimit(requestId));
-        Assert.True(FrameByteCount(expected) <= maximumFrameBytes);
+        Assert.Equal(frameBytes, FrameByteCount(expected));
 
         await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
-        var response = await driver.SendAsync("resources/list", new JsonObject { ["_meta"] = PreviewMcpProcessDriver.CurrentMeta() }, requestId);
+        if (beyondCap)
+        {
+            await driver.SendRequestAsync("resources/list", parameters, requestId);
+            Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2)));
+            Assert.True(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
+            return;
+        }
 
-        var error = Assert.IsType<JsonRpcError>(response);
+        var error = Assert.IsType<JsonRpcError>(await driver.SendAsync("resources/list", parameters, requestId));
         Assert.Equal(requestId, error.Id);
         Assert.Equal(-32601, error.Error.Code);
         Assert.Equal("Method not found", error.Error.Message);
-        Assert.Equal(FrameByteCount(expected), FrameByteCount(error));
+        Assert.Equal(maximumFrameBytes, FrameByteCount(error));
+        AssertPreviewMarkerResult(RequireResult(await driver.CallToolAsync(
+            ToolName, FixtureArguments(ToolName), new RequestId("valid-after-bounded-excluded-method"))));
     }
 
     [Fact]
@@ -1833,15 +1845,6 @@ public sealed class PreviewProcessContractTests
         Result = ResultWithServerInfo(PreviewToolHandler.InvalidToolArguments(tool)),
     };
 
-    private static JsonRpcError LegacyInitializeMethodNotFound(RequestId id) => new()
-    {
-        Id = id,
-        Error = new JsonRpcErrorDetail
-        {
-            Code = -32601,
-            Message = "Method not found",
-        },
-    };
 
 
     private static async Task AssertInvalidLaunchAsync(string workingDirectory, params string[] arguments)

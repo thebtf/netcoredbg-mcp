@@ -1,6 +1,6 @@
 # A3 — Actionable Modern-Only Initialize Diagnostic
 
-Status: accepted D1 contract; published-baseline qualification observed, implementation not started.
+Status: source implemented and locally verified. Original preview run passed 170/170; one near-cap case was replaced by two focused exact-boundary passes, giving a disjoint 171-case coverage set, not a full 171 rerun. All 129 artifact semantic cases, the real new runner on verified extracted bytes and installed-Python rollback passed. Independent error-to-wire assurance verified 8/8 clauses after its test-only F1 correction. Canonical/public 18-case delivery remains pending.
 Baseline: `371b58201cad388eab79586dc40ac6c389d4fdac` (documentation-only successor to delivered preview.2 source `cf39c85cfd99cc2a51f67b7d2686f29e3e8080c0`).
 Parent: Program A/A3 modern compatibility policy. Python remains default and rollback.
 

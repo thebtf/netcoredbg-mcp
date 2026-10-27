@@ -1,6 +1,6 @@
 # A3 Legacy Initialize Diagnostic Plan
 
-Status: accepted D1; implementation pending. Scope is one actionable refusal, not full A3 closure.
+Status: implementation and local proof accepted. Runtime/artifact RED preceded product edits; original preview 170/170 plus the focused replacement boundary pair gives disjoint current coverage of 171, not a full rerun. Artifact semantics 129/129, extracted runner and installed-Python rollback passed. Independent assurance verified 8/8 after its sole test-coverage F1 was repaired and proved. Canonical/public delivery remains pending. Scope is one actionable refusal, not full A3 closure.
 
 ## Integration points
 

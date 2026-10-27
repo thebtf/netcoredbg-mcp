@@ -50,7 +50,7 @@ def build_fixture(executable: Path, output: Path, commit: str, version: str) -> 
     manifest = {
         "schema_version": "2.0",
         "consumer_contract": _artifact._consumer_contract(
-            _artifact._A3_REQUIRED_METADATA_VERSION_CONTRACT_ID
+            _artifact._A3_LEGACY_DIAGNOSTIC_CONTRACT_ID
         ),
         "version": version,
         "tag": f"stateless-preview-v{version}",

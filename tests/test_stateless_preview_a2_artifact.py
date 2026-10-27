@@ -577,6 +577,137 @@ def test_current_source_producer_cannot_seal_historical_payload(
         artifact.seal_build_records(root, environment, artifact_reader=reader)
 
 
+@pytest.mark.parametrize(
+    "violation,error_match",
+    [
+        (None, None),
+        ("initial-message", "initial legacy initialize"),
+        ("initial-result", "initial legacy initialize"),
+        ("modern-message", "SDK diagnostic"),
+        ("wrong-marker", "result values"),
+        ("text-mismatch", "text/structured parity"),
+        ("early-eof", "ended before a JSON-RPC response"),
+        ("dirty-eof", "did not close cleanly"),
+    ],
+)
+def test_legacy_initialize_runner_checks_diagnostics_values_and_clean_eof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, violation: str | None, error_match: str | None
+) -> None:
+    schemas = json.loads(
+        existing.PREVIEW_ARTIFACT_VALIDATOR_PATH.with_name("a2-tool-schemas.json").read_bytes()
+    )
+    tools = [
+        {
+            "name": name,
+            "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False},
+            **schemas[name],
+        }
+        for name in TOOLS
+    ]
+    marker = {
+        "kind": "find_code_symbol_success",
+        "results": [
+            {
+                "file": "Markers.cs",
+                "line": 3,
+                "name": "PreviewMarker",
+                "kind": "class",
+                "context": "public sealed class PreviewMarker { }",
+            }
+        ],
+    }
+    processes: list[Any] = []
+
+    class Process:
+        def __init__(self, *_: Any) -> None:
+            self.requests: list[tuple[Any, str, Any]] = []
+            self.closed = False
+            self.aborted = False
+            processes.append(self)
+
+        def request(
+            self, request_id: int | str, method: str, params: dict[str, Any]
+        ) -> dict[str, Any]:
+            first = not self.requests
+            self.requests.append((request_id, method, deepcopy(params)))
+            if first and violation == "early-eof":
+                raise validator._JsonRpcEofError("process ended before a JSON-RPC response")
+            response: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id}
+            if method == "initialize":
+                message = (
+                    "Only MCP 2026-07-28 is supported. "
+                    "Use server/discover and per-request metadata instead."
+                    if first
+                    else "Method 'initialize' is not available on protocol version '2026-07-28'. "
+                    "Use 'server/discover' and per-request metadata instead."
+                )
+                if (first and violation == "initial-message") or (
+                    not first and violation == "modern-message"
+                ):
+                    message = "Method not found"
+                response["error"] = {"code": -32601, "message": message}
+                if first and violation == "initial-result":
+                    response["result"] = {}
+            elif method == "server/discover":
+                response["result"] = {
+                    "supportedVersions": ["2026-07-28"],
+                    "capabilities": {"tools": {"listChanged": False}},
+                    "ttlMs": 300_000,
+                    "cacheScope": "public",
+                }
+            elif method == "tools/list":
+                response["result"] = {"tools": tools}
+            else:
+                assert method == "tools/call"
+                payload = deepcopy(marker)
+                if violation == "wrong-marker":
+                    payload["results"][0]["line"] = 4
+                response["result"] = {
+                    "resultType": "complete",
+                    "isError": False,
+                    "structuredContent": payload,
+                    "content": [{"type": "text", "text": json.dumps(payload)}],
+                }
+                if violation == "text-mismatch":
+                    response["result"]["content"][0]["text"] = "{}"
+            return response
+
+        def close_eof(self) -> None:
+            if violation == "dirty-eof":
+                raise ValueError("process did not close cleanly after stdin EOF")
+            self.closed = True
+
+        def abort(self) -> None:
+            self.aborted = True
+
+    monkeypatch.setattr(validator, "JsonRpcProcess", Process)
+    if error_match is None:
+        validator._run_legacy_initialize_diagnostic(tmp_path / "preview.exe", tmp_path)
+        assert len(processes) == 2
+        assert [process.requests[0] for process in processes] == [
+            (101, "initialize", {}),
+            ("legacy-initialize", "initialize", {}),
+        ]
+        assert all(process.closed for process in processes)
+        assert all(
+            [method for _, method, _ in process.requests]
+            == [
+                "initialize",
+                "server/discover",
+                "tools/list",
+                "tools/call",
+                "initialize",
+                "tools/call",
+            ]
+            for process in processes
+        )
+    else:
+        with pytest.raises(ValueError, match=error_match):
+            validator._run_legacy_initialize_diagnostic(tmp_path / "preview.exe", tmp_path)
+        assert not any(process.closed for process in processes)
+    assert processes and all(process.aborted for process in processes)
+
+
 @pytest.mark.parametrize("failure", ["premature-eof", "wrong-marker"])
 def test_optional_client_info_runner_rejects_early_failure_and_wrong_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
