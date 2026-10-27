@@ -1,7 +1,7 @@
 # A3 Optional Client Info Implementation Plan
 
-Status: contract accepted for implementation by Root; runtime and delivery proof pending.
-Baseline: `0532ba3b77daf7b1604d86d54c91b7a05a0d7e50`; branch `work/a3-optional-client-info`.
+Status: implemented and delivered as `stateless-preview-v0.23.17-preview.1` on 2026-10-27; [task evidence](tasks.md) records the exact canonical build, retained/public consumer proof and closeout. Broader A3 remains open.
+Baseline: `0532ba3b77daf7b1604d86d54c91b7a05a0d7e50`; implementation PR #365 merged at `c74344132a8ba2e0549d3e2607b473ade4af7981`.
 
 D1: remove one unnecessary request-admission requirement and bind its real consumer proof to a successor of the existing preview. Reuse existing owners; no new host, compatibility layer, schema generation or release manager. Root owns contract verification, integration and release decisions under the accepted original strangler program.
 
