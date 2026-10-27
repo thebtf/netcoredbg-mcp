@@ -1,6 +1,6 @@
 # A3 — Optional Client Info in the Stateless Preview
 
-Status: contract accepted for implementation by Root under the original strangler program. No implementation, acceptance-test or delivery claim.
+Status: implementation in progress. Root verified meaningful pre-fix process RED and 7/7 focused runtime checks; artifact-generation, full integration and public delivery remain pending.
 Baseline: `0532ba3b77daf7b1604d86d54c91b7a05a0d7e50`; branch `work/a3-optional-client-info`.
 Parent: Stateless Front-Door Convergence Program A, bounded A3 slice (`.agent/runs/python-removal-strangler-program-v1/stateless-convergence-program-v4.md:85-98`). Work proceeds under the accepted original strangler program. A2 is delivered; this slice does not complete A3 or Programs B/C.
 
