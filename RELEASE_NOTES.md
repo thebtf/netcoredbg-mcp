@@ -54,10 +54,13 @@ There is no shared-server restart or hot-reload claim.
   absent, public stop succeeded, and natural CLI exit closed all six observed
   owned process identities. The initialized-adapter source smoke passed 5/5,
   including actual `PATH` absence after DLL bootstrap.
-- After the bootstrap repair, 27 critical checks passed, including one short WPF
-  and one Avalonia journey with invoke/state, screenshot, and cleanup evidence.
-  The remaining host-proxy initialization check timed out and is under diagnosis;
-  the earlier 28/28 result does not cover this source revision. Runtime-smoke
+- The 28 critical cases are covered by 27 suite passes and one isolated
+  host-proxy initialize/list/call pass with unchanged assertions and a 60-second
+  budget. Both short WPF/Avalonia journeys passed with invoke/state, screenshot,
+  and cleanup evidence. The original user-Temp startup timeout remains unexplained;
+  the isolated pass used repository-owned scratch and the same built host.
+  A matching user-Temp diagnostic was scope-guard refused, not run or bypassed.
+  No product fix or deadline increase is claimed for that timeout. Runtime-smoke
   documentation and diagnostic-schema checks passed 45/45.
 - Normal-suite evidence combines disjoint current partitions and 1,326 preserved
   named artifact-owner passes whose relevant inputs were checked unchanged.
@@ -75,8 +78,8 @@ The independently reported bare-adapter-name edge when removing `PATH` is repair
 The installed consumer resolved the private adapter and runtime host, observed the
 requested `PATH` absence and neighboring override, and closed all six observed
 owned process identities. These verification records do not establish publication;
-the remaining critical startup check, independent review, immutable tagging, and
-fresh public-package delivery remain separate release obligations.
+independent review, immutable tagging, and fresh public-package delivery remain
+separate release obligations.
 
 ---
 
