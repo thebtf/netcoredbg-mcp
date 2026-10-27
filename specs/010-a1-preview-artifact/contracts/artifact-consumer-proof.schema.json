@@ -110,7 +110,7 @@
                         "consumer_contract": {
                           "properties": {
                             "scenario_catalog_id": {
-                              "const": "a3-preview-optional-client-info-v1"
+                              "const": "a3-preview-required-metadata-version-v1"
                             }
                           }
                         }
@@ -127,18 +127,67 @@
             "fixture_identity": {
               "properties": {
                 "scenario_catalog_id": {
-                  "const": "a3-preview-optional-client-info-v1"
+                  "const": "a3-preview-required-metadata-version-v1"
+                },
+                "scenario_catalog_sha256": {
+                  "const": "1e737db53dda4557b04616f6fc114c71fa0136c7c11693143772d7b642f5947a"
+                }
+              }
+            },
+            "scenario_matrix": {
+              "properties": {
+                "required_count": {
+                  "const": 17
+                },
+                "executed_count": {
+                  "const": 17
                 }
               }
             }
           }
         },
         "else": {
-          "properties": {
-            "fixture_identity": {
-              "properties": {
-                "scenario_catalog_id": {
-                  "const": "a2-preview-readonly-family-v1"
+          "if": {
+            "properties": {
+              "candidate": {
+                "properties": {
+                  "preview_manifest": {
+                    "properties": {
+                      "contents": {
+                        "properties": {
+                          "consumer_contract": {
+                            "properties": {
+                              "scenario_catalog_id": {
+                                "const": "a3-preview-optional-client-info-v1"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "fixture_identity": {
+                "properties": {
+                  "scenario_catalog_id": {
+                    "const": "a3-preview-optional-client-info-v1"
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "fixture_identity": {
+                "properties": {
+                  "scenario_catalog_id": {
+                    "const": "a2-preview-readonly-family-v1"
+                  }
                 }
               }
             }

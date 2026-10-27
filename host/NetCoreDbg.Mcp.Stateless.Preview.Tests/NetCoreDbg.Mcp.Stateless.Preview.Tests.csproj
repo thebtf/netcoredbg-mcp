@@ -11,8 +11,8 @@
     <PackageReference Include="coverlet.msbuild" Version="10.1.0" PrivateAssets="all" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
-    <PackageReference Include="ModelContextProtocol" Version="2.1.0" />
-    <PackageReference Include="ModelContextProtocol.Core" Version="2.1.0" />
+    <PackageReference Include="ModelContextProtocol" Version="2.3.0" />
+    <PackageReference Include="ModelContextProtocol.Core" Version="2.3.0" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\NetCoreDbg.Mcp.Stateless.Preview\NetCoreDbg.Mcp.Stateless.Preview.csproj" />

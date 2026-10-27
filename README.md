@@ -39,13 +39,17 @@ bundle the opt-in .NET preview executable. Corrected preview delivery is separat
 B3 native `step_over` and Native Scene Probe work remain modern-host source-only
 and add no tools to the Python catalog.
 
-The separate [A2 native preview contract](specs/016-a2-native-readonly-family/spec.md)
-adds `find_code_references` and `get_source_context` beside `find_code_symbol`.
-A schema-2 preview manifest binds that exact three-tool consumer contract;
-historical schema-1 A1 assets keep their one-tool meaning. Use the
-[generation-bound artifact proof instructions](specs/010-a1-preview-artifact/contracts/stateless-preview-workflow.md#a2-successor-proof-generation)
-for the selected asset. Source availability and local checks do not establish
-public preview delivery or change the Python default.
+The separate [native read-only preview](specs/016-a2-native-readonly-family/spec.md)
+exposes `find_code_symbol`, `find_code_references` and `get_source_context`.
+Each schema-2 manifest binds its exact proof generation; historical schema-1
+A1 assets retain their one-tool meaning. The
+[required-metadata source successor](specs/018-a3-required-metadata-version/spec.md)
+uses preview-only MCP 2.3.0: missing/malformed required metadata returns correlated
+`-32602`, and unsupported versions return exact `-32022`; an ordinary corrected
+request continues in the same process. `clientInfo` remains optional.
+Use the [generation-bound instructions](specs/010-a1-preview-artifact/contracts/stateless-preview-workflow.md)
+for the selected asset: source/local proof does not establish the new 17-case
+public delivery or change the Python default.
 
 ## Quick start
 

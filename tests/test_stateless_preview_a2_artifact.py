@@ -18,6 +18,7 @@ validator = existing.preview_validator
 A1 = "a1-preview-inherited-matrix-v1"
 A2 = "a2-preview-readonly-family-v1"
 A3 = "a3-preview-optional-client-info-v1"
+REQUIRED_METADATA_VERSION = "a3-preview-required-metadata-version-v1"
 TOOLS = ["find_code_symbol", "find_code_references", "get_source_context"]
 
 
@@ -27,9 +28,12 @@ def _upgrade_candidate(
     identity["schema_version"] = "2.0"
     candidate = identity["candidate"]
     binding = candidate["preview_manifest"]
-    binding["contents"].update(
-        schema_version="2.0", consumer_contract=artifact._consumer_contract(generation)
+    contract = (
+        existing._expected_required_metadata_version_consumer_contract()
+        if generation == REQUIRED_METADATA_VERSION
+        else artifact._consumer_contract(generation)
     )
+    binding["contents"].update(schema_version="2.0", consumer_contract=contract)
     raw = existing._canonical_json_bytes(binding["contents"])
     manifest.write_bytes(raw)
     binding["file"].update(size_bytes=len(raw), sha256=existing._sha256_bytes(raw))
@@ -38,7 +42,11 @@ def _upgrade_candidate(
 
 
 def _set_proof_generation(receipt: dict[str, Any], contract_id: str) -> None:
-    catalog = artifact.consumer_proof_scenario_catalog(contract_id)
+    catalog = (
+        existing._expected_required_metadata_version_catalog()
+        if contract_id == REQUIRED_METADATA_VERSION
+        else artifact.consumer_proof_scenario_catalog(contract_id)
+    )
     receipt["fixture_identity"].update(
         scenario_catalog_id=catalog["scenario_catalog_id"],
         scenario_catalog_sha256=catalog["scenario_catalog_sha256"],
@@ -131,6 +139,102 @@ def test_a3_catalog_adds_only_optional_client_info_before_rollback() -> None:
     assert artifact.consumer_proof_scenario_catalog() == artifact.consumer_proof_scenario_catalog(
         A1
     )
+
+
+def test_required_metadata_version_catalog_preserves_all_sixteen_predecessor_cases() -> None:
+    historical = artifact.consumer_proof_scenario_catalog(A3)
+    expected = existing._expected_required_metadata_version_catalog()
+
+    current = artifact.consumer_proof_scenario_catalog(REQUIRED_METADATA_VERSION)
+
+    assert current == expected
+    assert current["scenario_catalog_sha256"] == (
+        "1e737db53dda4557b04616f6fc114c71fa0136c7c11693143772d7b642f5947a"
+    )
+    assert len(current["scenarios"]) == 17
+    assert current["scenarios"][-3]["scenario_id"] == "optional-client-info-request-local"
+    assert current["scenarios"][-2]["scenario_id"] == "required-metadata-version-recovery"
+    assert current["scenarios"][-1]["scenario_id"] == "rollback-python-default"
+    assert [*current["scenarios"][:-2], current["scenarios"][-1]] == historical["scenarios"]
+    assert (
+        historical["scenario_catalog_sha256"]
+        == (existing._expected_a3_consumer_contract()["scenario_catalog_sha256"])
+    )
+    assert artifact.consumer_proof_scenario_catalog() == artifact.consumer_proof_scenario_catalog(
+        A1
+    )
+
+
+@pytest.mark.parametrize("remote", [False, True], ids=["retained", "remote"])
+def test_required_metadata_version_sealer_accepts_complete_candidate_bound_proof(
+    tmp_path: Path,
+    remote: bool,
+) -> None:
+    receipt, binding = _proof(tmp_path, REQUIRED_METADATA_VERSION, remote)
+    source = deepcopy(binding["candidate_identity"]["candidate"]["source"])
+    snapshots = deepcopy(binding["release_gate_catalog"]["catalog"]["policy_authority_snapshots"])
+
+    sealed = artifact._validate_stage_consumer_proof(receipt, remote=remote, **binding)
+
+    assert sealed == receipt
+    assert sealed["scenario_matrix"]["required_count"] == 17
+    assert sealed["runtime_results"]["catalog"] == TOOLS
+    assert sealed["candidate"]["source"] == source
+    assert binding["release_gate_catalog"]["catalog"]["policy_authority_snapshots"] == snapshots
+    existing._validate_review_schema(
+        binding["candidate_identity"], "candidate-identity.schema.json"
+    )
+    existing._validate_review_schema(receipt, "artifact-consumer-proof.schema.json")
+
+
+@pytest.mark.parametrize(
+    ("violation", "remote"),
+    [
+        ("old-proof", False),
+        ("old-hash", True),
+        ("missing-recovery", False),
+        ("reordered-proof", True),
+    ],
+)
+def test_required_metadata_version_sealer_rejects_substituted_or_incomplete_proof(
+    tmp_path: Path, violation: str, remote: bool
+) -> None:
+    receipt, binding = _proof(tmp_path, REQUIRED_METADATA_VERSION, remote)
+    artifact._validate_stage_consumer_proof(receipt, remote=remote, **binding)
+    if violation == "old-proof":
+        _set_proof_generation(receipt, A3)
+    elif violation == "old-hash":
+        receipt["fixture_identity"]["scenario_catalog_sha256"] = (
+            artifact.consumer_proof_scenario_catalog(A3)["scenario_catalog_sha256"]
+        )
+    else:
+        matrix = receipt["scenario_matrix"]
+        if violation == "missing-recovery":
+            index = matrix["required_scenario_ids"].index("required-metadata-version-recovery")
+            for field in ("required_scenario_ids", "executed_scenario_ids", "results"):
+                matrix[field].pop(index)
+            matrix["required_count"] -= 1
+            matrix["executed_count"] -= 1
+        else:
+            for field in ("required_scenario_ids", "executed_scenario_ids", "results"):
+                matrix[field][-2:] = reversed(matrix[field][-2:])
+
+    with pytest.raises(ValueError, match="candidate generation|scenario matrix"):
+        artifact._validate_stage_consumer_proof(receipt, remote=remote, **binding)
+
+
+def test_required_metadata_version_candidate_rejects_predecessor_hash(tmp_path: Path) -> None:
+    _, binding = _proof(tmp_path, REQUIRED_METADATA_VERSION, False)
+    identity = binding["candidate_identity"]
+    contract = identity["candidate"]["preview_manifest"]["contents"]["consumer_contract"]
+    contract["scenario_catalog_sha256"] = artifact.consumer_proof_scenario_catalog(A3)[
+        "scenario_catalog_sha256"
+    ]
+
+    with pytest.raises(ValueError, match="consumer contract"):
+        artifact.assemble_candidate_identity(identity)
+    with pytest.raises(ValidationError):
+        existing._validate_review_schema(identity, "candidate-identity.schema.json")
 
 
 @pytest.mark.parametrize("remote", [False, True], ids=["retained", "remote"])
@@ -328,7 +432,7 @@ def test_preview_version_is_not_the_generation_selector(tmp_path: Path) -> None:
         artifact.consumer_proof_scenario_catalog("unknown-generation")
 
 
-@pytest.mark.parametrize("generation", [A1, A2], ids=["a1", "a2"])
+@pytest.mark.parametrize("generation", [A1, A2, A3], ids=["a1", "a2", "optional-a3"])
 def test_current_source_producer_cannot_seal_historical_payload(
     tmp_path: Path, generation: str
 ) -> None:
@@ -453,6 +557,80 @@ def test_consumer_bounds_the_actual_jsonrpc_frame_including_request_id(oversized
             process.request(request_id, "tools/call", {})
     else:
         assert process.request(request_id, "tools/call", {})["id"] == request_id
+
+
+@pytest.mark.parametrize("params", [None, {}], ids=["absent-params", "empty-object-params"])
+def test_consumer_request_preserves_absent_or_object_params(params: dict[str, Any] | None) -> None:
+    class Wire:
+        stdin = io.BytesIO()
+        stdout = io.BytesIO(
+            b'{"jsonrpc":"2.0","id":7,"error":{"code":-32602,"message":"invalid"}}\n'
+        )
+
+    process = validator.JsonRpcProcess.__new__(validator.JsonRpcProcess)
+    process._process = Wire()
+    assert process.request(7, "tools/call", params)["error"]["code"] == -32602
+    expected: dict[str, Any] = {"jsonrpc": "2.0", "id": 7, "method": "tools/call"}
+    if params is not None:
+        expected["params"] = params
+    assert json.loads(process._process.stdin.getvalue()) == expected
+
+
+@pytest.mark.parametrize("response_id", [True, 1.0, "1"], ids=["boolean", "float", "string"])
+def test_consumer_request_requires_exact_numeric_id_type(response_id: Any) -> None:
+    class Wire:
+        stdin = io.BytesIO()
+        stdout = io.BytesIO(
+            existing._canonical_json_bytes({"jsonrpc": "2.0", "id": response_id, "result": {}})
+        )
+
+    process = validator.JsonRpcProcess.__new__(validator.JsonRpcProcess)
+    process._process = Wire()
+    with pytest.raises(ValueError, match="unexpected JSON-RPC response"):
+        process.request(1, "tools/call", {})
+
+
+@pytest.mark.parametrize("violation", ["eof", "wrong-code", "wrong-id", "result-and-error"])
+def test_required_metadata_runner_rejects_nonconforming_first_wire_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, violation: str
+) -> None:
+    response: dict[str, Any] = {
+        "jsonrpc": "2.0",
+        "id": 1000,
+        "error": {"code": -32602, "message": "invalid metadata"},
+    }
+    if violation == "wrong-code":
+        response["error"]["code"] = -32600
+    elif violation == "wrong-id":
+        response["id"] = "1000"
+    elif violation == "result-and-error":
+        response["result"] = {}
+    raw = b"" if violation == "eof" else existing._canonical_json_bytes(response)
+    process_class = validator.JsonRpcProcess
+
+    class Wire:
+        stdin = io.BytesIO()
+        stdout = io.BytesIO(raw)
+
+        def poll(self) -> int:
+            return 0
+
+    def controlled_wire(*_: Any) -> Any:
+        process = process_class.__new__(process_class)
+        process._process = Wire()
+        return process
+
+    monkeypatch.setattr(validator, "JsonRpcProcess", controlled_wire)
+    expected_error = {
+        "eof": "ended before a JSON-RPC response",
+        "wrong-code": "exact correlated error code",
+        "wrong-id": "unexpected JSON-RPC response",
+        "result-and-error": "exact correlated error code",
+    }[violation]
+    with pytest.raises(ValueError, match=expected_error) as failure:
+        validator._run_required_metadata_version_recovery(tmp_path / "preview.exe", tmp_path)
+    if violation == "eof":
+        assert type(failure.value) is validator._JsonRpcEofError
 
 
 def test_public_acquisition_verifies_the_a2_schema_without_a1_reconstruction(
