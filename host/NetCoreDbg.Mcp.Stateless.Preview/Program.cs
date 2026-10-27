@@ -41,40 +41,9 @@ internal static class Program
                 filters.AddIncomingFilter(next => async (context, cancellationToken) =>
                 {
                     if (context.JsonRpcMessage is JsonRpcRequest { Method: not RequestMethods.Initialize } metadataRequest
-                        && !HasRequiredRequestMetadata(metadataRequest))
+                        && HasInvalidPresentClientInfo(metadataRequest))
                     {
                         _ = context.Server.DisposeAsync().AsTask();
-                        return;
-                    }
-
-                    if (context.JsonRpcMessage is JsonRpcRequest versionRequest
-                        && TryGetUnsupportedProtocolVersion(versionRequest, out var requestedVersion))
-                    {
-                        if (!BoundedResponseFrameSerializer.FitsUnsupportedVersionErrorWithinLimit(
-                                versionRequest.Id,
-                                requestedVersion,
-                                ProtocolVersion,
-                                out _))
-                        {
-                            _ = context.Server.DisposeAsync().AsTask();
-                            return;
-                        }
-
-                        await next(context, cancellationToken).ConfigureAwait(false);
-                        return;
-                    }
-
-                    if (context.JsonRpcMessage is JsonRpcRequest { Method: RequestMethods.ToolsCall, Params: null } nullParametersRequest)
-                    {
-                        if (!BoundedResponseFrameSerializer.FitsInvalidToolArgumentsResponseWithinLimit(nullParametersRequest.Id))
-                        {
-                            _ = context.Server.DisposeAsync().AsTask();
-                            return;
-                        }
-
-                        await context.Server.SendMessageAsync(
-                            InvalidToolArgumentsResponse(nullParametersRequest.Id),
-                            cancellationToken).ConfigureAwait(false);
                         return;
                     }
 
@@ -157,6 +126,7 @@ internal static class Program
                         ReplaceOversizedResponse(context.JsonRpcMessage);
                         if (!IsCompleteResponseFrameWithinLimit(context.JsonRpcMessage))
                         {
+                            _ = context.Server.DisposeAsync().AsTask();
                             return;
                         }
                     }
@@ -282,15 +252,6 @@ internal static class Program
 
     private static bool IsRequestResponseWithinFrameLimit(JsonRpcRequest request)
     {
-        if (TryGetUnsupportedProtocolVersion(request, out var requestedVersion))
-        {
-            return BoundedResponseFrameSerializer.FitsUnsupportedVersionErrorWithinLimit(
-                request.Id,
-                requestedVersion,
-                ProtocolVersion,
-                out _);
-        }
-
         if (TryGetUnknownToolCall(request, out var tool))
         {
             return BoundedResponseFrameSerializer.FitsUnknownToolResponseWithinLimit(request.Id, tool, out _);
@@ -316,45 +277,18 @@ internal static class Program
         return true;
     }
 
-    private static bool HasRequiredRequestMetadata(JsonRpcRequest request)
-    {
-        if (request.Params is not JsonObject parameters
-            || parameters["_meta"] is not JsonObject metadata
-            || metadata[MetaKeys.ProtocolVersion] is not JsonValue protocolVersion
-            || !protocolVersion.TryGetValue<string>(out var version)
-            || string.IsNullOrWhiteSpace(version)
-            || (metadata.TryGetPropertyValue(MetaKeys.ClientInfo, out var clientInfoValue)
-                && (clientInfoValue is not JsonObject clientInfo
-                    || !HasNonBlankString(clientInfo, "name")
-                    || !HasNonBlankString(clientInfo, "version")))
-            || metadata[MetaKeys.ClientCapabilities] is not JsonObject)
-        {
-            return false;
-        }
-
-        return true;
-    }
+    private static bool HasInvalidPresentClientInfo(JsonRpcRequest request) =>
+        request.Params is JsonObject parameters
+        && parameters["_meta"] is JsonObject metadata
+        && metadata.TryGetPropertyValue(MetaKeys.ClientInfo, out var clientInfoValue)
+        && (clientInfoValue is not JsonObject clientInfo
+            || !HasNonBlankString(clientInfo, "name")
+            || !HasNonBlankString(clientInfo, "version"));
 
     private static bool HasNonBlankString(JsonObject value, string property) =>
         value[property] is JsonValue candidate
         && candidate.TryGetValue<string>(out var text)
         && !string.IsNullOrWhiteSpace(text);
-
-    private static bool TryGetUnsupportedProtocolVersion(JsonRpcRequest request, out string requestedVersion)
-    {
-        requestedVersion = string.Empty;
-        if (request.Params is not JsonObject parameters
-            || parameters["_meta"] is not JsonObject metadata
-            || metadata[MetaKeys.ProtocolVersion] is not JsonValue version
-            || !version.TryGetValue<string>(out var candidate)
-            || candidate is null)
-        {
-            return false;
-        }
-
-        requestedVersion = candidate;
-        return !string.Equals(requestedVersion, ProtocolVersion, StringComparison.Ordinal);
-    }
 
     private static void ReplaceOversizedResponse(JsonRpcMessage message)
     {
@@ -364,6 +298,10 @@ internal static class Program
                 response.Result = JsonSerializer.SerializeToNode(
                     PreviewToolHandler.FrameBudgetExceeded(ResponseToolOrDefault(response.Result)),
                     McpJsonUtilities.DefaultOptions);
+                break;
+            case JsonRpcError { Error.Code: -32602 } invalidParams:
+                invalidParams.Error.Message = string.Empty;
+                invalidParams.Error.Data = null;
                 break;
             case JsonRpcError error:
                 error.Error = new JsonRpcErrorDetail

@@ -1,6 +1,6 @@
 # A3 — Recoverable Required Metadata and Version Errors
 
-Status: bounded D1 contract accepted by Root; no implementation or new delivery claim.
+Status: source implemented and locally verified: 167/167 preview tests, the real new scenario on verified extracted self-contained bytes, installed Python rollback and one independent error-to-wire trace. Canonical immutable candidate and public 17-case delivery remain pending.
 Baseline: `cbc306de36c162930bd83b2bd0424ca06e82eba9`.
 Parent: Stateless Front-Door Convergence Program A3. The optional-clientInfo predecessor is delivered as `stateless-preview-v0.23.17-preview.1`; its source, evidence and tag remain immutable.
 
@@ -14,7 +14,7 @@ A modern client calls `find_code_symbol(name=PreviewMarker, kind=class)` directl
 - Exactly one version is supported: `2026-07-28`. Any other string, including empty or whitespace, with otherwise valid metadata returns `-32022`, message `Unsupported protocol version`, and exact `data.requested` / `data.supported:["2026-07-28"]`. Prove both unsupported-first → valid and valid → unsupported → valid. Do not normalize the requested version or promise switching among multiple supported versions.
 - Metadata validation precedes tool-argument validation. With valid metadata, existing typed argument failures remain unchanged.
 - Omitted `clientInfo` remains valid. Present malformed/null/blank-name/version values still refuse; do not turn invalid presence into omission or self-reported information into identity/read authority. This slice does not promise one universal error/EOF policy for every optional metadata error.
-- SDK-thrown errors must traverse the existing outgoing size owner. Preserve the complete serialized 256 KiB response limit, original ID and exact error code. An oversized `-32602` may shorten optional details/message, then must be remeasured. If even the minimal correlated error cannot fit, close through the existing fail-closed owner without sending an oversized response. For `-32022`, retain exact requested/supported data or fail closed.
+- SDK-thrown errors must traverse the existing outgoing size owner. Preserve the complete serialized 256 KiB JSON response limit (excluding the transport LF), original ID and exact error code. An oversized `-32602` may shorten optional details/message, then must be remeasured; the mandatory message field remains a string, including `""` in the minimal envelope. If even the minimal correlated error cannot fit, close through the existing fail-closed owner without sending an oversized response. For `-32022`, retain exact requested/supported data or fail closed.
 - Keep the explicit launch-pinned root, three ordered read-only tools and schemas, source/read/result/traversal budgets, text/structured parity, cancellation and EOF ownership. No new authority, dependency framework, transport or session manager.
 
 ## Selected supported mechanism

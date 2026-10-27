@@ -89,22 +89,30 @@ public sealed class PreviewProcessContractTests
             ToolName, FixtureArguments(ToolName), new RequestId("call-without-client-info-again"), MetadataWithoutClientInfo())));
     }
 
-    [Fact]
-    public async Task OmittedClientInfo_UnsupportedVersionReturnsExactErrorAndValidCallRecovers()
+    [Theory]
+    [InlineData("1900-01-01", false)]
+    [InlineData("1900-01-01", true)]
+    [InlineData("", false)]
+    [InlineData("", true)]
+    [InlineData(" \t", false)]
+    [InlineData(" \t", true)]
+    [InlineData(" 2026-07-28 ", false)]
+    [InlineData(" 2026-07-28 ", true)]
+    public async Task OmittedClientInfo_UnsupportedVersionReturnsExactErrorAndValidCallRecovers(
+        string requestedVersion, bool afterSuccess)
     {
         await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+        if (afterSuccess)
+        {
+            AssertPreviewMarkerResult(RequireResult(await driver.CallToolAsync(
+                ToolName, FixtureArguments(ToolName), new RequestId("valid-before-unsupported"), MetadataWithoutClientInfo())));
+        }
         var unsupported = MetadataWithoutClientInfo();
-        unsupported[MetaKeys.ProtocolVersion] = "1900-01-01";
+        unsupported[MetaKeys.ProtocolVersion] = requestedVersion;
+        var id = afterSuccess ? new RequestId(42) : new RequestId("unsupported-without-client-info");
 
-        var error = Assert.IsType<JsonRpcError>(await driver.CallToolAsync(
-            ToolName, FixtureArguments(ToolName), new RequestId("unsupported-without-client-info"), unsupported));
-
-        Assert.Equal(-32022, error.Error.Code);
-        Assert.Equal("Unsupported protocol version", error.Error.Message);
-        var data = Assert.IsType<JsonElement>(error.Error.Data);
-        Assert.Equal(["requested", "supported"], data.EnumerateObject().Select(static property => property.Name).Order());
-        Assert.Equal("1900-01-01", data.GetProperty("requested").GetString());
-        Assert.Equal(["2026-07-28"], data.GetProperty("supported").EnumerateArray().Select(static value => value.GetString()));
+        AssertUnsupportedVersion(await driver.CallToolAsync(
+            ToolName, FixtureArguments(ToolName), id, unsupported), id, requestedVersion);
         AssertPreviewMarkerResult(RequireResult(await driver.CallToolAsync(
             ToolName, FixtureArguments(ToolName), new RequestId("supported-without-client-info"), MetadataWithoutClientInfo())));
     }
@@ -169,30 +177,17 @@ public sealed class PreviewProcessContractTests
         var rejected = await driver.ListToolsAsync(new RequestId("unsupported"), unsupported);
         var accepted = RequireResult(await driver.ListToolsAsync(new RequestId("supported")));
 
-        var error = Assert.IsType<JsonRpcError>(rejected);
-        Assert.Equal(-32022, error.Error.Code);
-        Assert.Equal("Unsupported protocol version", error.Error.Message);
-        var data = Assert.IsType<JsonElement>(error.Error.Data);
-        Assert.Equal(["requested", "supported"], data.EnumerateObject().Select(static property => property.Name).Order());
-        Assert.Equal("1900-01-01", data.GetProperty("requested").GetString());
-        Assert.Equal([PreviewMcpProcessDriver.CurrentProtocolVersion], data.GetProperty("supported").EnumerateArray().Select(static value => value.GetString()));
+        AssertUnsupportedVersion(rejected, new RequestId("unsupported"), "1900-01-01");
         AssertCatalog(accepted);
     }
 
     [Fact]
-    public async Task MissingOrMalformedRequestLocalMetadataIsNeverDispatched()
+    public async Task PresentMalformedClientInfoIsNeverDispatched()
     {
         var malformedRequests = new JsonNode?[]
         {
-            null,
-            new JsonObject(),
-            new JsonObject { ["_meta"] = "malformed" },
-            new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = 1, [MetaKeys.ClientInfo] = new JsonObject { ["name"] = "client", ["version"] = "1.0" }, [MetaKeys.ClientCapabilities] = new JsonObject() } },
             new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = "malformed", [MetaKeys.ClientCapabilities] = new JsonObject() } },
-            new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = new JsonObject { ["name"] = "client", ["version"] = "1.0" }, [MetaKeys.ClientCapabilities] = "malformed" } },
             new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = null, [MetaKeys.ClientCapabilities] = new JsonObject() } },
-            new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = new JsonObject { ["name"] = "client", ["version"] = "1.0" } } },
-            new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ClientInfo] = new JsonObject { ["name"] = "client", ["version"] = "1.0" }, [MetaKeys.ClientCapabilities] = new JsonObject() } },
             new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = new JsonObject { ["name"] = " ", ["version"] = "1.0" }, [MetaKeys.ClientCapabilities] = new JsonObject() } },
             new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = new JsonObject { ["name"] = "client", ["version"] = " " }, [MetaKeys.ClientCapabilities] = new JsonObject() } },
         };
@@ -214,16 +209,129 @@ public sealed class PreviewProcessContractTests
     }
 
     [Fact]
+    public async Task MissingMetadata_ValidArgumentsReturnCorrelatedInvalidParamsAndRecoverBeforeCleanEof()
+    {
+        using var process = PreviewOutputPathResolver.StartDirect("--project", PreviewRepositoryLayout.FixtureRoot);
+        var standardError = process.StandardError.ReadToEndAsync();
+        try
+        {
+            var id = new RequestId("missing-meta-valid-arguments");
+            AssertInvalidParams(await SendAsync(new JsonRpcRequest
+            {
+                Id = id,
+                Method = "tools/call",
+                Params = new JsonObject { ["name"] = ToolName, ["arguments"] = FixtureArguments(ToolName) },
+            }), id);
+
+            var correctedId = new RequestId(43);
+            var corrected = await SendAsync(new JsonRpcRequest
+            {
+                Id = correctedId,
+                Method = "tools/call",
+                Params = new JsonObject
+                {
+                    ["name"] = ToolName,
+                    ["arguments"] = FixtureArguments(ToolName),
+                    ["_meta"] = MetadataWithoutClientInfo(),
+                },
+            });
+            Assert.Equal(correctedId, Assert.IsType<JsonRpcResponse>(corrected).Id);
+            AssertPreviewMarkerResult(RequireResult(corrected));
+
+            process.StandardInput.Close();
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(0, process.ExitCode);
+            Assert.Equal("", await process.StandardOutput.ReadToEndAsync().WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.Equal("", await standardError.WaitAsync(TimeSpan.FromSeconds(2)));
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(2));
+            }
+        }
+
+        async Task<JsonRpcMessage> SendAsync(JsonRpcRequest request)
+        {
+            await process.StandardInput.WriteLineAsync(JsonSerializer.Serialize<JsonRpcMessage>(request, McpJsonUtilities.DefaultOptions));
+            await process.StandardInput.FlushAsync();
+            var line = await process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True(line is not null, $"EOF before the correlated JSON-RPC response for '{request.Id}'.");
+            return Assert.IsAssignableFrom<JsonRpcMessage>(JsonSerializer.Deserialize<JsonRpcMessage>(line!, McpJsonUtilities.DefaultOptions));
+        }
+    }
+
+    [Theory]
+    [InlineData("_meta", null)]
+    [InlineData("_meta", "null")]
+    [InlineData("_meta", "42")]
+    [InlineData("_meta", "true")]
+    [InlineData("_meta", "\"malformed\"")]
+    [InlineData("_meta", "[]")]
+    [InlineData("_meta", "{}")]
+    [InlineData("version", null)]
+    [InlineData("version", "null")]
+    [InlineData("version", "42")]
+    [InlineData("version", "true")]
+    [InlineData("version", "[]")]
+    [InlineData("version", "{}")]
+    [InlineData("capabilities", null)]
+    [InlineData("capabilities", "null")]
+    [InlineData("capabilities", "42")]
+    [InlineData("capabilities", "true")]
+    [InlineData("capabilities", "\"malformed\"")]
+    [InlineData("capabilities", "[]")]
+    public async Task RequiredMetadataErrorsAreCorrelatedBeforeAndAfterSuccessAndRecover(string field, string? json)
+    {
+        var metadata = MetadataWithoutClientInfo();
+        var parameters = new JsonObject
+        {
+            ["name"] = ToolName,
+            ["arguments"] = FixtureArguments(ToolName),
+            ["_meta"] = metadata,
+        };
+        var owner = field == "_meta" ? parameters : metadata;
+        var key = field switch
+        {
+            "version" => MetaKeys.ProtocolVersion,
+            "capabilities" => MetaKeys.ClientCapabilities,
+            _ => field,
+        };
+        if (json is null)
+        {
+            owner.Remove(key);
+        }
+        else
+        {
+            owner[key] = JsonNode.Parse(json);
+        }
+
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+        var beforeId = new RequestId(41);
+        AssertInvalidParams(await driver.SendAsync("tools/call", parameters, beforeId), beforeId);
+        AssertPreviewMarkerResult(RequireResult(await driver.CallToolAsync(
+            ToolName, FixtureArguments(ToolName), new RequestId("valid-between-errors"), MetadataWithoutClientInfo())));
+        var afterId = new RequestId("required-metadata-after-success");
+        AssertInvalidParams(await driver.SendAsync("tools/call", parameters, afterId), afterId);
+        AssertPreviewMarkerResult(RequireResult(await driver.CallToolAsync(
+            ToolName, FixtureArguments(ToolName), new RequestId(44), MetadataWithoutClientInfo())));
+    }
+
+    [Fact]
     public async Task MissingMetadataPrecedesMalformedToolArguments()
     {
         await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
-        await driver.SendRequestAsync(
+        var id = new RequestId("missing-meta-invalid-arguments");
+        AssertInvalidParams(await driver.SendAsync(
             "tools/call",
             new JsonObject { ["name"] = ToolName, ["arguments"] = new JsonObject() },
-            new RequestId("missing-meta-invalid-arguments"));
+            id), id);
 
-        Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2)));
-        Assert.True(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
+        var validMetadata = RequireResult(await driver.CallToolAsync(
+            ToolName, new JsonObject(), new RequestId("metadata-corrected-invalid-arguments"), MetadataWithoutClientInfo()));
+        AssertClosedError(validMetadata, "invalid_tool_arguments", "INVALID_TOOL_ARGUMENTS");
     }
 
     [Fact]
@@ -243,9 +351,7 @@ public sealed class PreviewProcessContractTests
             },
             new RequestId("unsupported-invalid-arguments"));
 
-        var error = Assert.IsType<JsonRpcError>(response);
-        Assert.Equal(-32022, error.Error.Code);
-        Assert.Equal("Unsupported protocol version", error.Error.Message);
+        AssertUnsupportedVersion(response, new RequestId("unsupported-invalid-arguments"), "1900-01-01");
     }
 
     [Fact]
@@ -278,13 +384,13 @@ public sealed class PreviewProcessContractTests
 
 
     [Fact]
-    public async Task OmittedToolCallParamsWithMissingMetadataClosesBeforeDispatch()
+    public async Task OmittedToolCallParamsReturnCorrelatedInvalidParamsAndRecover()
     {
         await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
-        await driver.SendRequestAsync("tools/call", parameters: null, new RequestId("omitted-tool-call-params"));
-
-        Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2)));
-        Assert.True(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
+        var id = new RequestId("omitted-tool-call-params");
+        AssertInvalidParams(await driver.SendAsync("tools/call", parameters: null, id), id);
+        AssertPreviewMarkerResult(RequireResult(await driver.CallToolAsync(
+            ToolName, FixtureArguments(ToolName), new RequestId("valid-after-omitted-params"), MetadataWithoutClientInfo())));
     }
     [Fact]
     public async Task UnknownAndExcludedRoutes_AreNotRegisteredOrDispatched()
@@ -347,13 +453,7 @@ public sealed class PreviewProcessContractTests
         await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
         var response = await driver.ListToolsAsync(requestId, metadata);
 
-        var error = Assert.IsType<JsonRpcError>(response);
-        Assert.Equal(requestId, error.Id);
-        Assert.Equal(-32022, error.Error.Code);
-        Assert.Equal("Unsupported protocol version", error.Error.Message);
-        var data = Assert.IsType<JsonElement>(error.Error.Data);
-        Assert.Equal(requestedVersion, data.GetProperty("requested").GetString());
-        Assert.Equal([PreviewMcpProcessDriver.CurrentProtocolVersion], data.GetProperty("supported").EnumerateArray().Select(static value => value.GetString()));
+        AssertUnsupportedVersion(response, requestId, requestedVersion);
         Assert.True(BoundedResponseFrameSerializer.FitsUnsupportedVersionErrorWithinLimit(
             requestId,
             requestedVersion,
@@ -405,11 +505,7 @@ public sealed class PreviewProcessContractTests
             requestId,
             metadata);
 
-        var error = Assert.IsType<JsonRpcError>(response);
-        Assert.Equal(requestId, error.Id);
-        Assert.Equal(-32022, error.Error.Code);
-        var data = Assert.IsType<JsonElement>(error.Error.Data);
-        Assert.Equal(requestedVersion, data.GetProperty("requested").GetString());
+        AssertUnsupportedVersion(response, requestId, requestedVersion);
         Assert.Equal(FrameByteCount(response), expected.BytesWritten);
         Assert.True(FrameByteCount(response) <= maximumFrameBytes);
     }
@@ -634,6 +730,115 @@ public sealed class PreviewProcessContractTests
 
         Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2)));
         Assert.True(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public async Task RequiredMetadataErrorWithEscapedIdRetainsCodeAndCorrelationAtMinimalFrameCapAndRecovers()
+    {
+        var detail = new JsonRpcErrorDetail { Code = -32602, Message = "" };
+        var id = EscapedIdAtErrorFrameSize(detail, PreviewToolCatalog.MaximumCompleteResponseFrameBytes);
+        var minimal = new JsonRpcError { Id = id, Error = detail };
+        Assert.Equal(PreviewToolCatalog.MaximumCompleteResponseFrameBytes, FrameByteCount(minimal));
+        Assert.True(BoundedResponseFrameSerializer.FitsWithinLimit(minimal));
+
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+        var response = await driver.SendAsync("tools/call", new JsonObject
+        {
+            ["name"] = ToolName,
+            ["arguments"] = FixtureArguments(ToolName),
+        }, id);
+
+        AssertInvalidParams(response, id);
+        Assert.InRange(FrameByteCount(response), 1, PreviewToolCatalog.MaximumCompleteResponseFrameBytes);
+        AssertPreviewMarkerResult(RequireResult(await driver.CallToolAsync(
+            ToolName, FixtureArguments(ToolName), new RequestId("valid-after-bounded-metadata-error"), MetadataWithoutClientInfo())));
+    }
+
+    [Fact]
+    public async Task RequiredMetadataErrorWithUnrepresentableEscapedIdClosesWithoutResponse()
+    {
+        var detail = new JsonRpcErrorDetail { Code = -32602, Message = "" };
+        var id = EscapedIdAtErrorFrameSize(detail, PreviewToolCatalog.MaximumCompleteResponseFrameBytes + 1);
+        var minimal = new JsonRpcError { Id = id, Error = detail };
+        Assert.Equal(PreviewToolCatalog.MaximumCompleteResponseFrameBytes + 1, FrameByteCount(minimal));
+        Assert.False(BoundedResponseFrameSerializer.FitsWithinLimit(minimal));
+
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+        await driver.SendRequestAsync("tools/call", new JsonObject
+        {
+            ["name"] = ToolName,
+            ["arguments"] = FixtureArguments(ToolName),
+        }, id);
+
+        Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2)));
+        Assert.True(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task UnsupportedVersionWithEscapedIdPreservesExactFrameOrClosesWhenUnrepresentable(bool beyondCap)
+    {
+        const string requestedVersion = "unsupported-\"\\\u0001😀";
+        var detail = UnsupportedVersionErrorDetail(requestedVersion);
+        var frameBytes = PreviewToolCatalog.MaximumCompleteResponseFrameBytes + (beyondCap ? 1 : 0);
+        var id = EscapedIdAtErrorFrameSize(detail, frameBytes);
+        Assert.Equal(frameBytes, FrameByteCount(new JsonRpcError { Id = id, Error = detail }));
+        var metadata = MetadataWithoutClientInfo();
+        metadata[MetaKeys.ProtocolVersion] = requestedVersion;
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+
+        if (beyondCap)
+        {
+            await driver.SendRequestAsync("tools/call", new JsonObject
+            {
+                ["name"] = ToolName,
+                ["arguments"] = FixtureArguments(ToolName),
+                ["_meta"] = metadata,
+            }, id);
+            Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2)));
+            Assert.True(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
+            return;
+        }
+
+        var response = await driver.CallToolAsync(ToolName, FixtureArguments(ToolName), id, metadata);
+        AssertUnsupportedVersion(response, id, requestedVersion);
+        Assert.Equal(frameBytes, FrameByteCount(response));
+        AssertPreviewMarkerResult(RequireResult(await driver.CallToolAsync(
+            ToolName, FixtureArguments(ToolName), new RequestId("valid-after-bounded-version-error"), MetadataWithoutClientInfo())));
+    }
+
+    [Theory]
+    [InlineData(-32602)]
+    [InlineData(-32022)]
+    public void CorrelatedErrorFramePreflightMatchesEscapedWireBytesAtCapAndRejectsCapPlusOne(int code)
+    {
+        var detail = code == -32602
+            ? new JsonRpcErrorDetail
+            {
+                Code = code,
+                Message = "diagnostic-\"\\\u0001😀",
+                Data = JsonSerializer.SerializeToElement(new { detail = "\"\\\u0001😀" }),
+            }
+            : UnsupportedVersionErrorDetail("unsupported-\"\\\u0001😀");
+        var exact = new JsonRpcError
+        {
+            Id = EscapedIdAtErrorFrameSize(detail, PreviewToolCatalog.MaximumCompleteResponseFrameBytes),
+            Error = detail,
+        };
+        Assert.Equal(PreviewToolCatalog.MaximumCompleteResponseFrameBytes, FrameByteCount(exact));
+        Assert.True(BoundedResponseFrameSerializer.FitsWithinLimit(exact, out var state));
+        Assert.Equal(FrameByteCount(exact), state.BytesWritten);
+
+        var beyond = new JsonRpcError
+        {
+            Id = EscapedIdAtErrorFrameSize(detail, PreviewToolCatalog.MaximumCompleteResponseFrameBytes + 1),
+            Error = detail,
+        };
+        Assert.Equal(PreviewToolCatalog.MaximumCompleteResponseFrameBytes + 1, FrameByteCount(beyond));
+        Assert.False(BoundedResponseFrameSerializer.FitsWithinLimit(beyond, out var beyondState));
+        Assert.Equal(PreviewToolCatalog.MaximumCompleteResponseFrameBytes, beyondState.BytesWritten);
+        Assert.InRange(beyondState.MaximumTokenUtf16CodeUnits, 1, 128);
     }
 
     [Fact]
@@ -1361,6 +1566,25 @@ public sealed class PreviewProcessContractTests
         [MetaKeys.ClientCapabilities] = new JsonObject(),
     };
 
+    private static void AssertInvalidParams(JsonRpcMessage response, RequestId id)
+    {
+        var error = Assert.IsType<JsonRpcError>(response);
+        Assert.Equal(id, error.Id);
+        Assert.Equal(-32602, error.Error.Code);
+    }
+
+    private static void AssertUnsupportedVersion(JsonRpcMessage response, RequestId id, string requestedVersion)
+    {
+        var error = Assert.IsType<JsonRpcError>(response);
+        Assert.Equal(id, error.Id);
+        Assert.Equal(-32022, error.Error.Code);
+        Assert.Equal("Unsupported protocol version", error.Error.Message);
+        var data = Assert.IsType<JsonElement>(error.Error.Data);
+        Assert.Equal(["requested", "supported"], data.EnumerateObject().Select(static property => property.Name).Order());
+        Assert.Equal(requestedVersion, data.GetProperty("requested").GetString());
+        Assert.Equal(["2026-07-28"], data.GetProperty("supported").EnumerateArray().Select(static value => value.GetString()));
+    }
+
     private static void AssertPreviewMarkerResult(JsonObject result)
     {
         Assert.Equal("complete", result["resultType"]!.GetValue<string>());
@@ -1496,6 +1720,23 @@ public sealed class PreviewProcessContractTests
 
     private static int FrameByteCount(JsonRpcMessage message) =>
         JsonSerializer.SerializeToUtf8Bytes(message, McpJsonUtilities.DefaultOptions).Length;
+
+    private static RequestId EscapedIdAtErrorFrameSize(JsonRpcErrorDetail detail, int frameBytes)
+    {
+        const string prefix = "escaped-\"\\\u0001😀";
+        var baseline = FrameByteCount(new JsonRpcError { Id = new RequestId(prefix), Error = detail });
+        var unitBytes = FrameByteCount(new JsonRpcError { Id = new RequestId(prefix + "\u0001"), Error = detail }) - baseline;
+        var paddingBytes = frameBytes - baseline;
+        Assert.True(paddingBytes >= 0);
+        return new RequestId(prefix + new string('\u0001', paddingBytes / unitBytes) + new string('i', paddingBytes % unitBytes));
+    }
+
+    private static JsonRpcErrorDetail UnsupportedVersionErrorDetail(string requestedVersion) => new()
+    {
+        Code = -32022,
+        Message = "Unsupported protocol version",
+        Data = JsonSerializer.SerializeToElement(new { requested = requestedVersion, supported = new[] { "2026-07-28" } }),
+    };
     private static JsonRpcResponse FrameBudgetFallback(RequestId id, string tool = ToolName) => new()
     {
         Id = id,

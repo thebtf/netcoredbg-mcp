@@ -18,12 +18,14 @@ Baseline: `cbc306de36c162930bd83b2bd0424ca06e82eba9`.
 
 ## Execution and ownership
 
-Root owns the contract, baseline, RED/GREEN admission, integration, commits and release. Runtime/process and artifact-generation work may use disjoint short repository-local worktrees from this committed contract. Each worker writes only its leased surfaces, uses primary `.agent` outputs, and does not mutate linked-worktree `.agent`, continuity, profiles or publication.
+Root owns the contract, baseline, RED/GREEN admission, integration, commits and release. Artifact work uses the isolated `a3ma` source tree. C# work uses the sole-writer primary feature branch after actual native semantic readiness there; the unused clean C# worktree was retired when its native language-server coverage could not be established. The attempted typed LSP configuration correction was restored; no profile patch or readiness waiver remains. Each worker writes only its leased surfaces, uses primary `.agent` outputs, and does not mutate linked-worktree `.agent`, continuity, profiles or publication.
 
 1. Test/reproducer-only stages return their exact focused check and intended failure. No production/pin edits or mid-flight build/lint/test/formatter runs.
 2. Root reviews both scoped diffs and unchanged production/pins. A bounded finite verification child runs each focused RED with exact source/cwd/output/exit; fix a wrong-reason harness failure before product edits.
 3. Before runtime logic edits, verify restored 2.3.0 identity and the pin-only process discriminator. Then implement the smallest filter/frame correction and observe focused GREEN and actual recovery.
-4. Integrate runtime and artifact commits. Run affected owning checks and one actual new scenario against the extracted combined executable; then the existing canonical functional producers and full retained/public release path.
+4. Combine runtime and artifact changes without losing their distinct source/evidence identities; commit each focused-proven contribution. Run affected owning checks and one actual new scenario against the extracted combined executable; then the existing canonical functional producers and full retained/public release path.
+
+For preview process checks using `--artifacts-path`, the existing driver requires **both** `NETCOREDBG_MCP_TEST_ARTIFACTS_PATH=<absolute primary-owned output>` and `NETCOREDBG_MCP_TEST_SOURCE_ROOT=<actual compiled checkout root>`. Artifact consumers additionally require `NETCOREDBG_PREVIEW_ARTIFACT_ROOT=<verified successor fixture>`. A directory argument alone does not select the test launcher output. Keep original wrong-routing failures and rerun the same compiled check with the supported environment; do not patch the resolver or weaken its source/root guards.
 
 ## Proof portfolio
 

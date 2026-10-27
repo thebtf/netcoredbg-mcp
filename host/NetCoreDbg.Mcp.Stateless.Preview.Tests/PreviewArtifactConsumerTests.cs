@@ -24,7 +24,7 @@ public sealed class PreviewArtifactConsumerTests
         using var artifact = VerifiedPreviewArtifact.Extract();
 
         await AssertMcpConsumerContractAsync(artifact.ExecutablePath);
-        await AssertCleanEofAsync(artifact.ExecutablePath);
+        await AssertRequiredMetadataVersionRecoveryAndCleanEofAsync(artifact.ExecutablePath);
     }
 
     [Fact]
@@ -35,7 +35,7 @@ public sealed class PreviewArtifactConsumerTests
         using var artifact = VerifiedPreviewArtifact.Extract(server.DownloadDirectory);
 
         await AssertMcpConsumerContractAsync(artifact.ExecutablePath);
-        await AssertCleanEofAsync(artifact.ExecutablePath);
+        await AssertRequiredMetadataVersionRecoveryAndCleanEofAsync(artifact.ExecutablePath);
     }
 
     [Fact]
@@ -121,18 +121,50 @@ public sealed class PreviewArtifactConsumerTests
             "The extracted artifact emitted non-JSON-RPC stdout or terminated its stdio transport during a valid consumer exchange.");
     }
 
-    private static async Task AssertCleanEofAsync(string executablePath)
+    private static async Task AssertRequiredMetadataVersionRecoveryAndCleanEofAsync(string executablePath)
     {
         using var process = StartProcess(executablePath);
-        var standardOutput = process.StandardOutput.ReadToEndAsync();
         var standardError = process.StandardError.ReadToEndAsync();
         try
         {
+            var missingId = new RequestId(51);
+            var missing = Assert.IsType<JsonRpcError>(await CallAsync(missingId, metadata: null));
+            Assert.Equal(missingId, missing.Id);
+            Assert.Equal(-32602, missing.Error.Code);
+
+            var metadata = new JsonObject
+            {
+                [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion,
+                [MetaKeys.ClientCapabilities] = new JsonObject(),
+            };
+            var recoveredId = new RequestId("artifact-required-metadata-recovered");
+            var recovered = await CallAsync(recoveredId, metadata);
+            Assert.Equal(recoveredId, Assert.IsType<JsonRpcResponse>(recovered).Id);
+            AssertMarkerResult(RequireResult(recovered));
+
+            const string requestedVersion = "1900-01-01";
+            var unsupportedMetadata = metadata.DeepClone().AsObject();
+            unsupportedMetadata[MetaKeys.ProtocolVersion] = requestedVersion;
+            var unsupportedId = new RequestId(52);
+            var unsupported = Assert.IsType<JsonRpcError>(await CallAsync(unsupportedId, unsupportedMetadata));
+            Assert.Equal(unsupportedId, unsupported.Id);
+            Assert.Equal(-32022, unsupported.Error.Code);
+            Assert.Equal("Unsupported protocol version", unsupported.Error.Message);
+            var data = Assert.IsType<JsonElement>(unsupported.Error.Data);
+            Assert.Equal(["requested", "supported"], data.EnumerateObject().Select(static property => property.Name).Order());
+            Assert.Equal(requestedVersion, data.GetProperty("requested").GetString());
+            Assert.Equal(["2026-07-28"], data.GetProperty("supported").EnumerateArray().Select(static value => value.GetString()));
+
+            var correctedId = new RequestId("artifact-version-recovered");
+            var corrected = await CallAsync(correctedId, metadata);
+            Assert.Equal(correctedId, Assert.IsType<JsonRpcResponse>(corrected).Id);
+            AssertMarkerResult(RequireResult(corrected));
+
             process.StandardInput.Close();
             await process.WaitForExitAsync().WaitAsync(RequestTimeout);
 
             Assert.Equal(0, process.ExitCode);
-            Assert.Equal(string.Empty, await standardOutput);
+            Assert.Equal(string.Empty, await process.StandardOutput.ReadToEndAsync().WaitAsync(RequestTimeout));
             Assert.Equal(string.Empty, await standardError);
         }
         finally
@@ -142,6 +174,25 @@ public sealed class PreviewArtifactConsumerTests
                 process.Kill(entireProcessTree: true);
                 await process.WaitForExitAsync();
             }
+        }
+
+        async Task<JsonRpcMessage> CallAsync(RequestId id, JsonObject? metadata)
+        {
+            var parameters = new JsonObject
+            {
+                ["name"] = "find_code_symbol",
+                ["arguments"] = new JsonObject { ["name"] = "PreviewMarker", ["kind"] = "class" },
+            };
+            if (metadata is not null)
+            {
+                parameters["_meta"] = metadata.DeepClone();
+            }
+            var request = new JsonRpcRequest { Id = id, Method = "tools/call", Params = parameters };
+            await process.StandardInput.WriteLineAsync(JsonSerializer.Serialize<JsonRpcMessage>(request, McpJsonUtilities.DefaultOptions));
+            await process.StandardInput.FlushAsync();
+            var line = await process.StandardOutput.ReadLineAsync().WaitAsync(RequestTimeout);
+            Assert.True(line is not null, $"Extracted preview reached EOF before the correlated response for '{id}'.");
+            return Assert.IsAssignableFrom<JsonRpcMessage>(JsonSerializer.Deserialize<JsonRpcMessage>(line!, McpJsonUtilities.DefaultOptions));
         }
     }
 
@@ -349,8 +400,8 @@ public sealed class PreviewArtifactConsumerTests
             var consumerContract = manifest.GetProperty("consumer_contract");
             Assert.Equal(["scenario_catalog_id", "scenario_catalog_sha256", "tools"],
                 consumerContract.EnumerateObject().Select(static property => property.Name).Order());
-            Assert.Equal("a3-preview-optional-client-info-v1", RequiredString(consumerContract, "scenario_catalog_id"));
-            Assert.Equal("4f8061885b73462b5cc8e910b7cb6f67d87230d217e3af7881b4f6cdbed9fd6f",
+            Assert.Equal("a3-preview-required-metadata-version-v1", RequiredString(consumerContract, "scenario_catalog_id"));
+            Assert.Equal("1e737db53dda4557b04616f6fc114c71fa0136c7c11693143772d7b642f5947a",
                 RequiredString(consumerContract, "scenario_catalog_sha256"));
             Assert.Equal(["find_code_symbol", "find_code_references", "get_source_context"],
                 consumerContract.GetProperty("tools").EnumerateArray().Select(static tool => tool.GetString()));
