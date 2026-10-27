@@ -25,7 +25,7 @@ D1: one reversible error-diagnostic boundary inside the existing modern-only pro
 
 ## Artifact and delivery
 
-Add `legacy-initialize-supported-version-diagnostic` immediately before `rollback-python-default` to the immutable required-metadata successor's 17 ordered scenarios. The new fixed generation is `a3-preview-legacy-diagnostic-v1` with 18 scenarios; compute its hash using the existing canonical serializer. Preserve every historical A1/A2/optional-A3/required-metadata-A3 definition/hash and the default historical A1 catalog API. Current producers require the new complete generation; a valid old17 proof cannot satisfy a new candidate.
+Add `legacy-initialize-supported-version-diagnostic` immediately before `rollback-python-default` to the immutable required-metadata successor's 17 ordered scenarios. The new fixed generation is `a3-preview-legacy-diagnostic-v1` with 18 scenarios and canonical SHA-256 `31589f89efc7c0453357bd3cee7216448ec1332e57d135d555b2c897a0bc855d`, computed through the existing serializer over the ordered descriptors including final LF. Preserve every historical A1/A2/optional-A3/required-metadata-A3 definition/hash and the default historical A1 catalog API. Current producers require the new complete generation; a valid old17 proof cannot satisfy a new candidate.
 
 Use the existing publisher and schema versions, canonical exact-source build, retained18/Python rollback, candidate-bound review, explicit Root S4, same-byte publication, fresh public18/Python rollback and R0-R3 closeout. No unknown candidate/tag is preapproved. Prior preview.2 remains delivered and immutable.
 
