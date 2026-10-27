@@ -64,6 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Nullable launch environments no longer make Samsung netcoredbg discard neighboring string overrides (#362). Requested removals are applied to a private adapter child environment before creation, including Windows case variants; DAP launch receives only strings. An idle adapter uses the existing guarded drain/restart path, and failed drain retains its owner. With `pre_build=False`, removal requests refuse an active debuggee without changing its state or generation. Parent/session isolation and existing pre-build environment behavior are preserved.
+- Bare adapter names and DLL runtime hosts are resolved from the original server environment before `PATH` removal, preserving the original target, cwd, caller arguments, and actual target PATH absence. A negative native `configurationDone` is reported for both launch and attach instead of false `RUNNING` success; live cleanup ownership is retained (#362).
 
 ### Compatibility
 - The Python entry point remains the default. Locked dependencies, bridge-source packaging, and the public catalog remain unchanged: 135 tools, 8 prompts, and 4 resources. The existing pre-build stop/build sequence is unchanged.
