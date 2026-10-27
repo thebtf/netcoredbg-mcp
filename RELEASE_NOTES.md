@@ -1,3 +1,53 @@
+# netcoredbg-mcp v0.23.17
+
+Prepared: 2026-10-27
+
+## Summary
+
+`v0.23.17` is a nonbreaking PATCH for nullable launch environments (#362).
+These notes describe the prepared candidate, not a publication receipt.
+
+## Fixed behavior
+
+- A mixed `env` map preserves neighboring string overrides. `null` removes an
+  inherited debuggee variable, including case variants on Windows, instead of
+  making Samsung netcoredbg discard all supplied overrides.
+- Requested removals are applied before the private debug adapter child starts.
+  The DAP launch map contains only strings; ordinary string launch overrides
+  remain debuggee-only. The server and other sessions' environments do not change.
+- An already initialized adapter with no active debuggee uses the existing
+  guarded drain/restart path. Failed drain retains its owner and blocks the next
+  admission rather than losing cleanup authority.
+- With `pre_build=False`, a removal request refuses an active debuggee before
+  changing its state or generation. It does not silently stop or replace it.
+  The existing pre-build stop/build sequence and pre-build environment are unchanged.
+
+## Consumer actions
+
+Upgrade through the documented package-installation route and restart the MCP
+server. An installation does not hot-reload an already running shared receiver.
+For a removal request with `pre_build=False`, stop an active debuggee explicitly
+before starting the new target. Existing string-only overrides retain their route.
+
+## Compatibility and limits
+
+The Python entry point remains the default. Locked dependencies, bridge-source
+packaging, and the public catalog remain unchanged: 135 tools, 8 prompts, and
+4 resources. No new framework, dependency, or public tool is added.
+
+This PATCH is limited to #362. Other Unreleased changes, the separate F09/NCD4
+incidents, and A2 preview identities/history are not promoted by these notes.
+There is no shared-server restart or hot-reload claim.
+
+## Verification boundary
+
+Source regressions and the explicit source smoke do not replace fresh built-wheel
+installation and the public mixed-map consumer journey required by the
+[release protocol](docs/RELEASE-PROTOCOL.md). Build/install/version preparation is
+not installed-consumer acceptance, release completion, or publication.
+
+---
+
 # netcoredbg-mcp v0.23.16
 
 Prepared: 2026-10-25
