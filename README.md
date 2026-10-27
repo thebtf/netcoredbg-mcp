@@ -51,22 +51,32 @@ request continues in the same process. `clientInfo` remains optional.
 The retained candidate and freshly downloaded public package each passed all 18
 generation-bound scenarios, including unchanged installed-Python rollback.
 Use the [generation-bound instructions](specs/010-a1-preview-artifact/contracts/stateless-preview-workflow.md)
-for the selected asset. Python remains the default; broader A3 and runtime
-security servicing remain open.
+for the selected asset. Python remains the default. The accepted modern-only
+Program A/A3 boundary is below; deferred conformance and runtime servicing are not closed.
 
-### Preview client compatibility
+### Preview control-plane policy
 
-| Client | Preview policy |
-| --- | --- |
-| Modern `2026-07-28` | Direct discovery/list/call or a literal-first tool call with per-request metadata. |
-| Dual-era using modern requests | Uses the same modern path; the preview does not implement a legacy handshake. |
-| Legacy-only `initialize` | Refused with `-32601`; it cannot establish a legacy session. |
+Program A/A3 establishes this opt-in, local, read-only front door on published
+preview.3. It does not establish full MCP conformance or complete the stateful
+.NET migration. The existing public 18-scenario consumer proves the supported
+journeys; source evidence and untested limits are distinguished below.
 
-The initial legacy refusal names the supported version and directs the client
-to `server/discover` plus per-request metadata. Earlier preview.2 assets retain
-their original 17-case meaning. Discovery remains tools-only with
-`listChanged:false`; client capabilities or roots cannot expand the explicit
-launch-pinned project root. Broader capability-schema/parser policy remains open.
+| Boundary | Supported policy | Evidence and limits |
+| --- | --- | --- |
+| Version and client | Only `2026-07-28`. Discovery is optional, not a handshake. Modern and dual-era clients use modern requests. Legacy-only `initialize` is refused with actionable `-32601`; no fallback or legacy session. | `valid-discovery-list-call`, `optional-client-info-request-local`, `legacy-initialize-supported-version-diagnostic`. |
+| Request errors | Within the valid JSON-RPC request boundary in [specs018](specs/018-a3-required-metadata-version/spec.md), required metadata errors retain the original ID and `-32602`; unsupported string versions return exact `-32022` requested/supported data. Corrected calls recover in the same process. | `required-metadata-version-recovery`; arbitrary malformed input is not covered by this guarantee. |
+| Capabilities and tools | Tools-only with `listChanged:false`, no logging or other advertised services; exactly `find_code_symbol`, `find_code_references`, `get_source_context`. Empty `clientCapabilities` is valid. | Discovery/catalog/value scenarios and the fixed advertised schemas; full nested client-capability conformance is not claimed. |
+| Filesystem authority | Only launch-pinned `--project` selects the root. CWD, environment, `clientInfo`, client capabilities/roots and excluded methods cannot expand that authority. | Runtime hostile-CWD/environment, containment and path-refusal scenarios; immutable search-engine-root source trace for client metadata, not a separate hostile-client-roots replay. |
+| Output, lifecycle and rollback | Declared tool/request responses retain the complete 256 KiB JSON-byte limit excluding LF, bounded reads, existing cancellation/EOF ownership and unchanged installed-Python rollback. | Frame-refusal, transport and rollback scenarios plus source error-frame regressions; not atomicity under arbitrary transport I/O failure. |
+| Deferred protocol limits | Full malformed-envelope/ID/`params` policy, parse-error recovery and full capability-schema conformance remain unverified outside this accepted result. | SDK whole-line intake and parse-error responses that may bypass application outgoing filters are real open limits, not certified safe by exclusion. |
+
+Earlier assets retain their own proof generations, including preview.2's 17
+scenarios. Self-contained runtime 8.0.32 still contains the reviewed affected
+Brotli/socket components; no supported trigger was found on the inspected
+stdio route. `runtime8-security-servicing` remains open; replacing the system
+runtime does not repair this executable. Reassess these limits before expanding
+transport, trust, plugins or stateful behavior. Program B/C, default selection
+and Python retirement still require their own acceptance and authority.
 
 ## Quick start
 

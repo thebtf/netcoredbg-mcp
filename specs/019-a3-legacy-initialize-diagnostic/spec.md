@@ -31,6 +31,6 @@ Use the existing publisher and schema versions, canonical exact-source build, re
 
 ## Explicit non-goals
 
-No legacy handshake support, version normalization, multi-version negotiation, full capability-schema or malformed-envelope/parse-error policy, new methods/tools, HTTP/mux/session manager, runtime servicing, Python/default switch, Program B/C or Python retirement. `runtime8-security-servicing` and broader A3 remain open.
+No legacy handshake support, version normalization, multi-version negotiation, full capability-schema or malformed-envelope/parse-error policy, new methods/tools, HTTP/mux/session manager, runtime servicing, Python/default switch, Program B/C or Python retirement. Those exclusions remain unchanged. The parent modern-only A3 policy is documented in the current README; deferred full protocol conformance and `runtime8-security-servicing` remain open.
 
 Primary source, read 2026-10-27: [modern-only compatibility and initialize diagnostics](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning.md). Exact selected SDK source: `modelcontextprotocol/csharp-sdk@9a327829ef066c44a0d737c58bf3c7617d7c701c`, `McpServerImpl.cs` metadata-filter ordering and `ValidateInitializeRequestBoundary`.
