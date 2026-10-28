@@ -273,6 +273,41 @@ class TestSonarqubeExactHeadRunner(TestCase):
         verified_reader.assert_called_once_with(primary_root / ".env")
         self.assertEqual(credentials, self.credentials())
 
+    def test_load_credentials_accepts_http_and_https_and_canonicalizes_root_slash(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            primary_root = root / "primary"
+            scanner_root = root / "scanner"
+            primary_root.mkdir()
+            scanner_root.mkdir()
+            scanner_context = self.context(primary_root, scanner_root)
+
+            for supplied, expected in (
+                ("http://192.168.1.50:9000", "http://192.168.1.50:9000"),
+                ("http://192.168.1.50:9000/", "http://192.168.1.50:9000"),
+                ("http://sonar.example.test:9000", "http://sonar.example.test:9000"),
+                ("http://sonar.example.test:9000/", "http://sonar.example.test:9000"),
+                ("https://192.168.1.50:9000", "https://192.168.1.50:9000"),
+                ("https://192.168.1.50:9000/", "https://192.168.1.50:9000"),
+                ("https://sonar.example.test:9000", "https://sonar.example.test:9000"),
+                ("https://sonar.example.test:9000/", "https://sonar.example.test:9000"),
+            ):
+                with self.subTest(supplied=supplied):
+                    with patch.object(
+                        runner,
+                        "read_verified_primary_dotenv",
+                        return_value=(
+                            f"SONAR_HOST_URL={supplied}\n"
+                            "SONAR_TOKEN=scan-token\n"
+                            "SONAR_READ_TOKEN=read-token\n"
+                        ),
+                    ):
+                        credentials = runner.load_credentials(scanner_context, {})
+
+                    self.assertEqual(
+                        credentials, {**self.credentials(), "SONAR_HOST_URL": expected}
+                    )
+
     def test_load_credentials_uses_verified_dotenv_reader_and_preserves_failure(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

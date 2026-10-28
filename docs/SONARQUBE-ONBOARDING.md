@@ -24,11 +24,15 @@ Missing or ambiguous installed targets refuse before scanner begin.
 The maintainer performing this one-time onboarding creates two **project-scoped**
 SonarQube tokens for `thebtf_netcoredbg_mcp`: an analysis token with Execute
 Analysis access and a separate non-admin Browse token. The maintainer writes
-them, together with a declared credential-free **HTTPS** SonarQube origin, to the
-primary repository-root `.env`. `SONAR_HOST_URL` is authoritative: the runner
-accepts a pathless HTTPS origin or a root `/` suffix and canonicalizes both to
+them, together with the declared credential-free SonarQube origin, to the primary
+repository-root `.env`. `SONAR_HOST_URL` is authoritative: the runner accepts a
+pathless HTTP or HTTPS origin or a root `/` suffix and canonicalizes both to
 `scheme://netloc`; it does not upgrade or rewrite the configured authority.
-Certificate verification remains enabled. HTTP is not a credential-bearing route.
+The operator's local Sonar uses HTTP only (decision of 2026-10-27); neither
+HTTPS provisioning nor a localhost-only address is an audit prerequisite.
+HTTP does not encrypt tokens in transit, so use the operator-designated trusted
+endpoint/network. HTTPS certificate verification remains enabled when HTTPS is
+configured. API redirects and mismatched response origins remain rejected.
 
 The runner derives that root instead of trusting its current working directory:
 
@@ -43,7 +47,7 @@ the linked worktree. The runner loads no other dotenv file.
 `<coordination-root>/.env` may contain exactly these three keys:
 
 ```text
-SONAR_HOST_URL=https://sonarqube.example.invalid
+SONAR_HOST_URL=http://sonarqube.example.invalid:9000
 SONAR_TOKEN=<project-analysis-token>
 SONAR_READ_TOKEN=<project-browse-token>
 ```
