@@ -756,8 +756,6 @@ def load_credentials(
     if missing:
         raise CredentialsUnavailable(*missing)
     credentials["SONAR_HOST_URL"] = credential_free_host(credentials["SONAR_HOST_URL"])
-    if urllib.parse.urlsplit(credentials["SONAR_HOST_URL"]).scheme != "https":
-        raise CredentialsUnavailable("SONAR_HOST_URL")
     return credentials
 
 
