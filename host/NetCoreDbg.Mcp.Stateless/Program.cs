@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -31,6 +32,18 @@ internal static class Program
             && !string.IsNullOrWhiteSpace(arguments[2]))
         {
             await RunUnixProcessGroupProxyAsync(arguments[1], arguments[2]).ConfigureAwait(false);
+            return;
+        }
+
+        try
+        {
+            // Validate the existing limits before serving requests, without adding a dependency to the Unix proxy.
+            RuntimeHelpers.RunClassConstructor(typeof(DapOutputBuffer).TypeHandle);
+        }
+        catch (TypeInitializationException exception) when (exception.InnerException is FormatException)
+        {
+            await Console.Error.WriteLineAsync(exception.InnerException.Message).ConfigureAwait(false);
+            Environment.ExitCode = 1;
             return;
         }
 
@@ -155,6 +168,7 @@ internal static class Program
         private const string GetCallStack = "get_call_stack";
         private const string GetScopes = "get_scopes";
         private const string GetVariables = "get_variables";
+        private const string GetOutput = "get_output";
         private const string StepOver = "step_over";
         private const string ContinueExecution = "continue_execution";
         private const string AddBreakpoint = "add_breakpoint";
@@ -245,6 +259,7 @@ internal static class Program
                 GetCallStack => await GetCallStackAsync(request, cancellationToken).ConfigureAwait(false),
                 GetScopes => await GetScopesAsync(request, cancellationToken).ConfigureAwait(false),
                 GetVariables => await GetVariablesAsync(request, cancellationToken).ConfigureAwait(false),
+                GetOutput => await GetOutputAsync(request, cancellationToken).ConfigureAwait(false),
                 StepOver => await StepOverAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 ContinueExecution => await ContinueAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 AddBreakpoint => await AddBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
@@ -474,6 +489,58 @@ internal static class Program
             }
 
             return Success("debug_state_success", sessionId!, session.State);
+        }
+
+        private async ValueTask<CallToolResult> GetOutputAsync(
+            CallToolRequestParams request,
+            CancellationToken cancellationToken)
+        {
+            if (!TryReadOutputArguments(request.Arguments, out var sessionId, out var clear, out var category))
+            {
+                return InvalidArguments(GetOutput);
+            }
+
+            if (!_sessions.TryGetValue(sessionId, out var session)
+                || !_slots.TryGetValue(sessionId, out var slot))
+            {
+                await RemoveNativeSceneBindingAsync(sessionId).ConfigureAwait(false);
+                return NotFound();
+            }
+
+            var lease = slot.TryAcquire();
+            if (lease is null)
+            {
+                return NotFound();
+            }
+
+            var closeAfterLease = false;
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                lease.AbortToken.ThrowIfCancellationRequested();
+                if (!_isUsable(session))
+                {
+                    closeAfterLease = true;
+                    return NotFound();
+                }
+
+                var output = session.GetOutput(clear, category);
+                return SerializedResult(JsonSerializer.Serialize(new { kind = "output_success", output }), isError: false);
+            }
+            finally
+            {
+                lease.Dispose();
+                if (closeAfterLease)
+                {
+                    try
+                    {
+                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            }
         }
 
         private async ValueTask<CallToolResult> GetThreadsAsync(
@@ -1547,6 +1614,49 @@ internal static class Program
             return true;
         }
 
+        private static bool TryReadOutputArguments(
+            IDictionary<string, JsonElement>? arguments,
+            out string sessionId,
+            out bool clear,
+            out string? category)
+        {
+            sessionId = string.Empty;
+            clear = false;
+            category = null;
+            if (arguments is null
+                || arguments.Count is < 1 or > 3
+                || arguments.Keys.Any(static name => name is not "debugSessionId" and not "clear" and not "category")
+                || !arguments.TryGetValue("debugSessionId", out var sessionIdElement)
+                || sessionIdElement.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(sessionIdElement.GetString()))
+            {
+                return false;
+            }
+
+            if (arguments.TryGetValue("clear", out var clearElement))
+            {
+                if (clearElement.ValueKind is not JsonValueKind.True and not JsonValueKind.False)
+                {
+                    return false;
+                }
+
+                clear = clearElement.GetBoolean();
+            }
+
+            if (arguments.TryGetValue("category", out var categoryElement))
+            {
+                if (categoryElement.ValueKind is not JsonValueKind.String and not JsonValueKind.Null)
+                {
+                    return false;
+                }
+
+                category = categoryElement.GetString();
+            }
+
+            sessionId = sessionIdElement.GetString()!;
+            return true;
+        }
+
         private static bool TryReadSessionId(
             IDictionary<string, JsonElement>? arguments,
             out string? sessionId,
@@ -1823,6 +1933,7 @@ internal static class Program
                 Tool("continue_execution", "Continue execution using an explicitly named stopped thread; the request resumes all threads. Observe the next stop or terminal event for up to 30 seconds. An acknowledged timeout does not itself close the session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
                 Tool("add_breakpoint", "Add a source breakpoint to a live debug session while preserving its requested source breakpoint sets. Verification is an adapter observation, not proof of a hit. Conditions and hit counts are not supported.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"file\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"line\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"file\",\"line\"],\"additionalProperties\":false}"),
                 Tool("ui_invoke", "Invoke one uniquely resolved exact AutomationId in this session's bound debuggee main window using InvokePattern only. No physical input fallback. Success confirms the UIA call returned, not business completion; an unknown outcome must not be automatically retried.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"automationId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"pattern\":\"\\\\S\"}},\"required\":[\"debugSessionId\",\"automationId\"],\"additionalProperties\":false}"),
+                Tool("get_output", "Read retained debuggee output in DAP reader order. Category matching is case-sensitive. Clear consumes the snapshot only when category is omitted, null or empty; a nonempty category never clears the buffer.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"clear\":{\"type\":\"boolean\",\"default\":false},\"category\":{\"type\":[\"string\",\"null\"],\"default\":null}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 .. NativeSceneToolDispatcher.ListTools(),
             ],
             TimeToLive = CacheLifetime,

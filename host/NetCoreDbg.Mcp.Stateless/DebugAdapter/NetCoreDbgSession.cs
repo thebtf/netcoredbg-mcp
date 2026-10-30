@@ -51,6 +51,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private readonly ConcurrentDictionary<int, PendingRequest> _pending = new();
     private readonly TaskCompletionSource<bool> _initialized = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly object _stateGate = new();
+    private readonly DapOutputBuffer _outputBuffer = new();
     private readonly object _cleanupGate = new();
     private readonly Task _readerTask;
     private readonly CancellationTokenSource _forceCleanup = new();
@@ -127,6 +128,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     }
     internal bool IsUsable => !_readerTask.IsCompleted && !HasExited();
     internal IReadOnlyList<DapInitialBreakpoint> InitialBreakpoints { get; private set; } = Array.Empty<DapInitialBreakpoint>();
+
+    internal string GetOutput(bool clear, string? category) => _outputBuffer.Snapshot(clear, category);
 
     internal event Action<NetCoreDbgSession>? ReaderFailed;
     internal event Action<NetCoreDbgSession>? NativeUiInvokeAuthorityRevoked;
@@ -1590,6 +1593,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             case "process":
                 CaptureNativeSceneTargetIdentity(body);
                 break;
+            case "output":
+                HandleOutputEvent(body);
+                break;
             case "initialized":
                 if (_initializeResponseObserved)
                 {
@@ -1632,6 +1638,57 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 HandleTerminalEvent(message, eventName, body);
                 break;
         }
+    }
+
+    private void HandleOutputEvent(JsonElement body)
+    {
+        if (body.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        var category = "console";
+        if (body.TryGetProperty("category", out var categoryElement))
+        {
+            if (!TryDecodeOutputString(categoryElement, out category))
+            {
+                return;
+            }
+
+            if (category is not "console" and not "stdout" and not "stderr" and not "telemetry")
+            {
+                return;
+            }
+        }
+
+        var text = string.Empty;
+        if (body.TryGetProperty("output", out var outputElement) && !TryDecodeOutputString(outputElement, out text))
+        {
+            return;
+        }
+
+        _outputBuffer.Append(text, category);
+    }
+
+    private static bool TryDecodeOutputString(JsonElement element, out string text)
+    {
+        text = string.Empty;
+        if (element.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        try
+        {
+            text = element.GetString()!;
+        }
+        catch (InvalidOperationException)
+        {
+            // Invalid Unicode in one output event must not retire the DAP session.
+            return false;
+        }
+
+        return true;
     }
 
     private void CaptureNativeSceneTargetIdentity(JsonElement body)

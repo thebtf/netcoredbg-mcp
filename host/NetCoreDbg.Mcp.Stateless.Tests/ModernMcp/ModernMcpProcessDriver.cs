@@ -84,7 +84,8 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                 Arguments = candidate.Arguments,
                 Name = "netcoredbg-mcp-stateless-modern-contract",
                 WorkingDirectory = RepositoryLayout.Root,
-                EnvironmentVariables = CandidateEnvironment(fixture, inertProgramPath, options.AdditionalEnvironment),
+                InheritEnvironmentVariables = options.InheritEnvironmentVariables,
+                EnvironmentVariables = CandidateEnvironment(fixture, inertProgramPath, options.AdditionalEnvironment, options.InheritEnvironmentVariables),
                 ShutdownTimeout = TimeSpan.FromSeconds(2),
                 StandardErrorLines = line => driver?.AddStandardErrorLine(line),
             });
@@ -431,18 +432,44 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
     private static Dictionary<string, string?> CandidateEnvironment(
         FixtureProcess fixture,
         string inertProgramPath,
-        IReadOnlyDictionary<string, string?>? additionalEnvironment = null)
+        IReadOnlyDictionary<string, string?>? additionalEnvironment = null,
+        bool inheritEnvironmentVariables = true)
     {
-        var environment = new Dictionary<string, string?>
+        var environment = inheritEnvironmentVariables
+            ? new Dictionary<string, string?>()
+            : StdioClientTransportOptions.GetDefaultEnvironmentVariables();
+        if (!inheritEnvironmentVariables)
         {
-            ["NETCOREDBG_PATH"] = fixture.ExecutablePath,
-            ["NETCOREDBG_PROGRAM_PATH"] = inertProgramPath,
-        };
+            foreach (var name in new[]
+            {
+                "DOTNET_ROOT", "DOTNET_ROOT_X64", "DOTNET_ROOT_X86", "DOTNET_ROOT_ARM64", "DOTNET_HOST_PATH",
+                "CONTROLLED_DAP_TRANSCRIPT", "CONTROLLED_DAP_OPTIONS", "CONTROLLED_DAP_GRACEFUL_RELEASE",
+                "CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE", "CONTROLLED_DAP_SECOND_WINDOWED_DESCENDANT_RELEASE",
+                "CONTROLLED_DAP_THREADS_RESPONSE_RELEASE", "CONTROLLED_DAP_STACK_TRACE_RESPONSE_RELEASE", "CONTROLLED_DAP_NEXT_RESPONSE_RELEASE",
+                "CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE", "CONTROLLED_DAP_WINDOWED_DESCENDANT_ARGUMENTS",
+            })
+            {
+                if (Environment.GetEnvironmentVariable(name) is { Length: > 0 } value)
+                {
+                    environment[name] = value;
+                }
+            }
+        }
+
+        environment["NETCOREDBG_PATH"] = fixture.ExecutablePath;
+        environment["NETCOREDBG_PROGRAM_PATH"] = inertProgramPath;
         if (additionalEnvironment is not null)
         {
             foreach (var (name, value) in additionalEnvironment)
             {
-                environment[name] = value;
+                if (!inheritEnvironmentVariables && value is null)
+                {
+                    environment.Remove(name);
+                }
+                else
+                {
+                    environment[name] = value;
+                }
             }
         }
 
@@ -623,7 +650,8 @@ internal sealed record ModernMcpStartOptions(
     bool DisableFormElicitation = false,
     string? PriorProcessToken = null,
     FixtureConfiguration? FixtureConfiguration = null,
-    IReadOnlyDictionary<string, string?>? AdditionalEnvironment = null);
+    IReadOnlyDictionary<string, string?>? AdditionalEnvironment = null,
+    bool InheritEnvironmentVariables = true);
 
 /// <summary>Kind is the controlled transcript kind: <c>startup</c> or <c>request</c>.</summary>
 internal sealed record ModernNativeAction(string Kind, string? Command, string? Detail);

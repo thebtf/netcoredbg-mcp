@@ -343,6 +343,8 @@ internal sealed class ControlledDapAdapter
     private static readonly byte[] MalformedDapFrame = HeaderEncoding.GetBytes("Content-Length: 1\r\n\r\n{");
 
     private readonly AdapterOptions _options;
+    private readonly JsonElement _outputScript;
+    private int _outputBatchIndex;
     private readonly string _transcriptPath;
     private readonly Mutex _transcriptWriteMutex;
     private readonly string[] _processArguments;
@@ -393,6 +395,12 @@ internal sealed class ControlledDapAdapter
         _transcriptWriteMutex = new Mutex(
             initiallyOwned: false,
             $"Local\\NetCoreDbgMcpControlledDap-{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(transcriptPath)))}");
+        var outputScript = Environment.GetEnvironmentVariable("CONTROLLED_DAP_OUTPUT_SCRIPT");
+        if (!string.IsNullOrWhiteSpace(outputScript))
+        {
+            using var document = JsonDocument.Parse(outputScript);
+            _outputScript = document.RootElement.Clone();
+        }
     }
 
     public async Task RunAsync(CancellationToken cancellationToken)
@@ -765,6 +773,11 @@ internal sealed class ControlledDapAdapter
         {
             await WriteEventAsync("breakpoint", new { reason = "changed", breakpoint = new { id, verified = true, line } }, cancellationToken);
             await RecordAsync(new { kind = "breakpoint-verified-event" }, cancellationToken);
+        }
+
+        if (_outputScript.ValueKind == JsonValueKind.Object && _outputScript.TryGetProperty("launch", out var launchOutput))
+        {
+            await WriteOutputEntriesAsync(launchOutput, cancellationToken);
         }
 
         _launchCompleted = true;
@@ -1480,6 +1493,23 @@ internal sealed class ControlledDapAdapter
     }
     private async Task<bool> HandleThreadsRequestAsync(int sequence, CancellationToken cancellationToken)
     {
+        if (_outputScript.ValueKind == JsonValueKind.Object && _outputScript.TryGetProperty("threads", out var batches))
+        {
+            var index = _outputBatchIndex++;
+            if (index < batches.GetArrayLength())
+            {
+                var batch = batches[index];
+                if (batch.TryGetProperty("waitForRelease", out var waitForRelease) && waitForRelease.GetBoolean())
+                {
+                    await RecordAsync(new { kind = "output-batch-gated", index }, cancellationToken);
+                    _heldThreadsResponse = CompleteHeldOutputBatchAsync(sequence, batch, _lifecycleEventsCancellation.Token);
+                    return false;
+                }
+
+                await WriteOutputBatchAsync(batch, cancellationToken);
+            }
+        }
+
         switch (_options.ThreadsResponseMode)
         {
             case "success":
@@ -1536,6 +1566,64 @@ internal sealed class ControlledDapAdapter
                 throw new InvalidOperationException($"Unknown threads response mode '{_options.ThreadsResponseMode}'.");
         }
     }
+    private async Task WriteOutputEntriesAsync(JsonElement entries, CancellationToken cancellationToken)
+    {
+        foreach (var entry in entries.EnumerateArray())
+        {
+            var isRaw = entry.TryGetProperty("rawBody", out var rawBody);
+            object body = entry;
+            if (entry.TryGetProperty("prefixLength", out var prefixLength))
+            {
+                // Keep large boundary payloads out of the child-process environment block.
+                var generated = new Dictionary<string, object?>
+                {
+                    ["output"] = new string('x', prefixLength.GetInt32()) + entry.GetProperty("output").GetString(),
+                };
+                if (entry.TryGetProperty("category", out var category))
+                {
+                    generated["category"] = category;
+                }
+
+                body = generated;
+            }
+
+            if (isRaw)
+            {
+                await WriteRawOutputEventAsync(rawBody.GetString() ?? throw new InvalidDataException("Raw output body must be a JSON string."), cancellationToken);
+            }
+            else
+            {
+                await WriteEventAsync("output", body, cancellationToken);
+            }
+        }
+    }
+
+    private async Task WriteOutputBatchAsync(JsonElement batch, CancellationToken cancellationToken)
+    {
+        await WriteOutputEntriesAsync(batch.GetProperty("entries"), cancellationToken);
+        if (batch.TryGetProperty("terminal", out var terminal))
+        {
+            switch (terminal.GetString())
+            {
+                case "exited":
+                    await WriteEventAsync("exited", new { exitCode = _options.ExitCode }, cancellationToken);
+                    break;
+                case "terminated":
+                    await WriteEventAsync("terminated", body: null, cancellationToken);
+                    break;
+                default:
+                    throw new InvalidOperationException("Output batch terminal must be exited or terminated.");
+            }
+        }
+    }
+
+    private async Task CompleteHeldOutputBatchAsync(int sequence, JsonElement batch, CancellationToken cancellationToken)
+    {
+        await WaitForThreadsResponseReleaseAsync(cancellationToken);
+        await WriteOutputBatchAsync(batch, cancellationToken);
+        await WriteResponseAsync(sequence, "threads", new { threads = Threads(2, "worker") }, cancellationToken);
+    }
+
 
     private async Task HandleInspectionRequestAsync(int sequence, string command, JsonElement root, CancellationToken cancellationToken)
     {
@@ -1947,9 +2035,22 @@ internal sealed class ControlledDapAdapter
         await RecordAsync(new { kind = "event", @event = eventName }, cancellationToken);
     }
 
-    private async Task WriteMessageAsync(object message, CancellationToken cancellationToken)
+    private async Task WriteRawOutputEventAsync(string rawBody, CancellationToken cancellationToken)
     {
-        var payload = JsonSerializer.SerializeToUtf8Bytes(message, MessageSerializerOptions);
+        var sequence = _outgoingSequence++;
+        // rawBody contains literal JSON escape bytes. Never deserialize/reserialize its string values.
+        var message = "{\"seq\":" + sequence.ToString(CultureInfo.InvariantCulture)
+            + ",\"type\":\"event\",\"event\":\"output\",\"body\":" + rawBody + "}";
+        var payload = BodyEncoding.GetBytes(message);
+        await WritePayloadAsync(payload, cancellationToken);
+        await RecordAsync(new { kind = "event", @event = "output" }, cancellationToken);
+    }
+
+    private Task WriteMessageAsync(object message, CancellationToken cancellationToken) =>
+        WritePayloadAsync(JsonSerializer.SerializeToUtf8Bytes(message, MessageSerializerOptions), cancellationToken);
+
+    private async Task WritePayloadAsync(byte[] payload, CancellationToken cancellationToken)
+    {
         var header = HeaderEncoding.GetBytes($"Content-Length: {payload.Length}\r\n\r\n");
         await _writeGate.WaitAsync(cancellationToken);
         try
