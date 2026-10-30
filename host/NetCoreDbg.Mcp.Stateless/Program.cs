@@ -186,6 +186,17 @@ internal static class Program
 
         private readonly ConcurrentDictionary<string, NetCoreDbgSession> _sessions = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, SessionSlot> _slots = new(StringComparer.Ordinal);
+        private readonly object _lifetimeGate = new();
+        private readonly Dictionary<string, OutputLifetime> _outputs = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, (SessionSlot Slot, OutputLifetime Output)> _ownedSlots = new(StringComparer.Ordinal);
+        private int _starts;
+        private TaskCompletionSource<bool>? _startsDrained;
+        private Exception? _startCleanupFailure;
+        private readonly CancellationTokenSource _startShutdown = new();
+        private List<(CancellationToken Token, CancellationTokenRegistration Registration)>? _startShutdownRegistrations;
+        private bool _startShutdownDisposed;
+        private Task? _shutdownTask;
+        private bool _shutdownRequested;
         private readonly ConcurrentDictionary<RequestId, CancellationTokenSource> _stepOverRequests = new();
         private readonly ConcurrentDictionary<RequestId, CancellationTokenSource> _uiInvokeRequests = new();
         private readonly ConcurrentDictionary<string, NativeSceneSessionBinding> _nativeSceneBindings = new(StringComparer.Ordinal);
@@ -194,6 +205,7 @@ internal static class Program
         private readonly string? _artifactRoot;
         private readonly Func<NetCoreDbgSession, bool> _isUsable;
         private readonly Func<NetCoreDbgSession, ValueTask> _dispose;
+        private readonly Action? _failedStartCleanupCompleted;
         private readonly bool _supportsNativeSceneCapture = !StringComparer.OrdinalIgnoreCase.Equals(
             Environment.GetEnvironmentVariable("NETCOREDBG_MCP_NATIVE_SCENE_CAPTURE"),
             "unsupported");
@@ -208,6 +220,12 @@ internal static class Program
 
         internal DebugSessionRegistry(string? debuggerPath, string? bridgePath, string? artifactRoot)
             : this(debuggerPath, bridgePath, artifactRoot, static session => session.IsUsable)
+        {
+        }
+
+        private DebugSessionRegistry(string? debuggerPath, Action? failedStartCleanupCompleted)
+            : this(debuggerPath, bridgePath: null, artifactRoot: null,
+                static session => session.IsUsable, static session => session.DisposeAsync(), failedStartCleanupCompleted)
         {
         }
 
@@ -239,12 +257,24 @@ internal static class Program
             string? artifactRoot,
             Func<NetCoreDbgSession, bool> isUsable,
             Func<NetCoreDbgSession, ValueTask> dispose)
+            : this(debuggerPath, bridgePath, artifactRoot, isUsable, dispose, failedStartCleanupCompleted: null)
+        {
+        }
+
+        private DebugSessionRegistry(
+            string? debuggerPath,
+            string? bridgePath,
+            string? artifactRoot,
+            Func<NetCoreDbgSession, bool> isUsable,
+            Func<NetCoreDbgSession, ValueTask> dispose,
+            Action? failedStartCleanupCompleted)
         {
             _debuggerPath = debuggerPath;
             _bridgePath = bridgePath;
             _artifactRoot = artifactRoot;
             _isUsable = isUsable;
             _dispose = dispose;
+            _failedStartCleanupCompleted = failedStartCleanupCompleted;
         }
 
         internal async ValueTask<CallToolResult> CallAsync(
@@ -330,11 +360,25 @@ internal static class Program
                 return Error("debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
             }
 
+            lock (_lifetimeGate)
+            {
+                if (_shutdownRequested)
+                {
+                    return NotFound();
+                }
+
+                _starts++;
+            }
+
             NetCoreDbgSession? session = null;
             NativeSceneSessionBinding? binding = null;
             SessionSlot? registeredSlot = null;
+            string? registeredToken = null;
+            CancellationTokenSource? startupCancellation = null;
             try
             {
+                startupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _startShutdown.Token);
+                startupCancellation.Token.ThrowIfCancellationRequested();
                 var token = CreateToken();
                 binding = new NativeSceneSessionBinding(token, _bridgePath, _artifactRoot, _supportsNativeSceneCapture);
                 session = await NetCoreDbgSession.StartAsync(
@@ -345,33 +389,44 @@ internal static class Program
                     StopTimeout,
                     binding.ProbeLaunchEnvironment,
                     breakpoints,
-                    cancellationToken).ConfigureAwait(false);
+                    _failedStartCleanupCompleted,
+                    startupCancellation.Token).ConfigureAwait(false);
                 binding.AttachSession(session);
+                var output = new OutputLifetime(session.OutputBuffer);
                 SessionSlot? slot = null;
                 slot = new SessionSlot(
                     StopTimeout,
                     session.StopForOwnerAsync,
                     () => DisposeSlotResourcesAsync(session, binding),
-                    () => RemoveSlot(token, session, binding, slot!));
-                if (!_sessions.TryAdd(token, session)
-                    || !_slots.TryAdd(token, slot)
-                    || !_nativeSceneBindings.TryAdd(token, binding))
+                    () => RemoveSlot(token, session, binding, slot!, output));
+                lock (_lifetimeGate)
                 {
-                    _slots.TryRemove(new KeyValuePair<string, SessionSlot>(token, slot));
-                    _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(token, session));
-                    _nativeSceneBindings.TryRemove(new KeyValuePair<string, NativeSceneSessionBinding>(token, binding));
-                    await binding.DisposeAsync().ConfigureAwait(false);
-                    binding = null;
-                    await _dispose(session).ConfigureAwait(false);
-                    session = null;
-                    return Error("debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
+                    if (_shutdownRequested)
+                    {
+                        throw new InvalidOperationException("The debug-session registry is shutting down.");
+                    }
+
+                    if (_outputs.ContainsKey(token) || _ownedSlots.ContainsKey(token)
+                        || !_sessions.TryAdd(token, session)
+                        || !_slots.TryAdd(token, slot)
+                        || !_nativeSceneBindings.TryAdd(token, binding))
+                    {
+                        _slots.TryRemove(new KeyValuePair<string, SessionSlot>(token, slot));
+                        _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(token, session));
+                        _nativeSceneBindings.TryRemove(new KeyValuePair<string, NativeSceneSessionBinding>(token, binding));
+                        throw new InvalidOperationException("The debug-session token is already registered.");
+                    }
+
+                    _outputs.Add(token, output);
+                    _ownedSlots.Add(token, (slot, output));
+                    registeredSlot = slot;
+                    registeredToken = token;
+                    session.RetirementRequested += retiringSession => OnRetirementRequested(token, retiringSession);
                 }
 
-                registeredSlot = slot;
-                session.ReaderFailed += failedSession => OnReaderFailed(token, failedSession);
-                if (!_isUsable(session))
+                if (session.IsRetirementRequested || !_isUsable(session))
                 {
-                    OnReaderFailed(token, session);
+                    OnRetirementRequested(token, session);
                 }
 
                 return breakpoints.Length == 0
@@ -388,58 +443,64 @@ internal static class Program
             {
                 if (registeredSlot is not null)
                 {
+                    lock (_lifetimeGate)
+                    {
+                        _outputs.Remove(registeredToken!);
+                    }
+
                     try
                     {
                         await registeredSlot.CloseAndDrainAsync().ConfigureAwait(false);
                     }
-                    catch (Exception)
+                    catch (Exception cleanupFailure)
                     {
+                        RecordStartCleanupFailure(cleanupFailure);
                     }
                 }
                 else
                 {
-                    if (binding is not null)
-                    {
-                        await binding.DisposeAsync().ConfigureAwait(false);
-                    }
-
-                    if (session is not null)
-                    {
-                        await _dispose(session).ConfigureAwait(false);
-                    }
+                    await DisposeUnpublishedResourcesAsync(session, binding, startupCancellation?.Token ?? cancellationToken).ConfigureAwait(false);
                 }
 
                 throw;
             }
-            catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+            catch (Exception exception)
             {
+                if (exception is DapStartupCleanupException)
+                {
+                    RecordStartCleanupFailure(exception);
+                }
+
                 if (registeredSlot is not null)
                 {
+                    lock (_lifetimeGate)
+                    {
+                        _outputs.Remove(registeredToken!);
+                    }
+
                     try
                     {
                         await registeredSlot.CloseAndDrainAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception cleanupFailure)
+                    {
+                        RecordStartCleanupFailure(cleanupFailure);
+                    }
+                }
+                else
+                {
+                    try
+                    {
+                        await DisposeUnpublishedResourcesAsync(session, binding, startupCancellation?.Token ?? cancellationToken).ConfigureAwait(false);
                     }
                     catch (Exception)
                     {
                     }
                 }
-                else
-                {
-                    if (binding is not null)
-                    {
-                        await binding.DisposeAsync().ConfigureAwait(false);
-                    }
 
-                    if (session is not null)
-                    {
-                        try
-                        {
-                            await _dispose(session).ConfigureAwait(false);
-                        }
-                        catch (Exception)
-                        {
-                        }
-                    }
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
                 }
 
                 return exception is DapBreakpointsException breakpointFailure
@@ -447,6 +508,23 @@ internal static class Program
                         ? Error("dap_breakpoints_refused", "DAP_BREAKPOINTS_REFUSED")
                         : Error("dap_breakpoints_protocol_error", "DAP_BREAKPOINTS_PROTOCOL_ERROR")
                     : Error("debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
+            }
+            finally
+            {
+                try
+                {
+                    startupCancellation?.Dispose();
+                }
+                finally
+                {
+                    lock (_lifetimeGate)
+                    {
+                        if (--_starts == 0)
+                        {
+                            _startsDrained?.TrySetResult(true);
+                        }
+                    }
+                }
             }
         }
 
@@ -483,7 +561,7 @@ internal static class Program
                     {
                     }
                 }
-                else if (_sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(sessionId!, session)))
+                else if (TryRemoveUnownedSession(sessionId!, session))
                 {
                     await RemoveNativeSceneBindingAsync(sessionId!).ConfigureAwait(false);
                     await DisposeRemovedSessionAsync(session).ConfigureAwait(false);
@@ -495,7 +573,7 @@ internal static class Program
             return Success("debug_state_success", sessionId!, session.State);
         }
 
-        private async ValueTask<CallToolResult> GetOutputAsync(
+        private ValueTask<CallToolResult> GetOutputAsync(
             CallToolRequestParams request,
             CancellationToken cancellationToken,
             bool tail = false)
@@ -509,62 +587,35 @@ internal static class Program
                 : TryReadOutputArguments(request.Arguments, out sessionId, out clear, out category);
             if (!valid)
             {
-                return InvalidArguments(tail ? GetOutputTail : GetOutput);
+                return new(InvalidArguments(tail ? GetOutputTail : GetOutput));
             }
 
-            if (!_sessions.TryGetValue(sessionId, out var session)
-                || !_slots.TryGetValue(sessionId, out var slot))
+            OutputLifetime output;
+            lock (_lifetimeGate)
             {
-                await RemoveNativeSceneBindingAsync(sessionId).ConfigureAwait(false);
-                return NotFound();
-            }
-
-            var lease = slot.TryAcquire();
-            if (lease is null)
-            {
-                return NotFound();
-            }
-
-            var closeAfterLease = false;
-            try
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                lease.AbortToken.ThrowIfCancellationRequested();
-                if (!_isUsable(session))
+                if (!_outputs.TryGetValue(sessionId, out output!))
                 {
-                    closeAfterLease = true;
-                    return NotFound();
-                }
-
-                if (tail)
-                {
-                    var result = session.GetOutputTail(lines, category);
-                    return SerializedResult(JsonSerializer.Serialize(new
-                    {
-                        kind = "output_tail_success",
-                        totalLines = result.TotalLines,
-                        returnedLines = result.ReturnedLines,
-                        output = result.Output,
-                    }), isError: false);
-                }
-
-                var output = session.GetOutput(clear, category);
-                return SerializedResult(JsonSerializer.Serialize(new { kind = "output_success", output }), isError: false);
-            }
-            finally
-            {
-                lease.Dispose();
-                if (closeAfterLease)
-                {
-                    try
-                    {
-                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
-                    }
-                    catch (Exception)
-                    {
-                    }
+                    return new(NotFound());
                 }
             }
+
+            // Admission ends at explicit release, not native retirement. The admitted
+            // buffer reference needs no native lease and cannot delay debugger cleanup.
+            cancellationToken.ThrowIfCancellationRequested();
+            if (tail)
+            {
+                var result = output.Buffer.Tail(lines, category);
+                return new(SerializedResult(JsonSerializer.Serialize(new
+                {
+                    kind = "output_tail_success",
+                    totalLines = result.TotalLines,
+                    returnedLines = result.ReturnedLines,
+                    output = result.Output,
+                }), isError: false));
+            }
+
+            var snapshot = output.Buffer.Snapshot(clear, category);
+            return new(SerializedResult(JsonSerializer.Serialize(new { kind = "output_success", output = snapshot }), isError: false));
         }
 
         private async ValueTask<CallToolResult> GetThreadsAsync(
@@ -1157,6 +1208,41 @@ internal static class Program
                 return NotFound();
             }
 
+            OutputLifetime? retainedOutput;
+            lock (_lifetimeGate)
+            {
+                if (_shutdownRequested)
+                {
+                    return NotFound();
+                }
+
+                _outputs.Remove(sessionId!, out retainedOutput);
+                if (retainedOutput is null && _ownedSlots.ContainsKey(sessionId!))
+                {
+                    return NotFound();
+                }
+
+                if (retainedOutput is not null && _ownedSlots.TryGetValue(sessionId!, out var ownership))
+                {
+                    // Revocation and control closure share the publication/admission gate.
+                    // Close publishes its completion before calling back into this registry.
+                    _ = ownership.Slot.CloseAndDrainAsync();
+                }
+            }
+
+            if (retainedOutput is not null)
+            {
+                try
+                {
+                    var state = await retainedOutput.Cleanup.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    return StopSuccess(state);
+                }
+                catch (Exception) when (!cancellationToken.IsCancellationRequested)
+                {
+                    return NotFound();
+                }
+            }
+
             if (!_sessions.TryRemove(sessionId!, out var session))
             {
                 await RemoveNativeSceneBindingAsync(sessionId!).ConfigureAwait(false);
@@ -1191,25 +1277,165 @@ internal static class Program
 
         public ValueTask DisposeAsync() => DisposeAsync(CancellationToken.None);
 
-        public async ValueTask DisposeAsync(CancellationToken cancellationToken)
+        public ValueTask DisposeAsync(CancellationToken cancellationToken)
         {
-            var slots = _slots.Values.ToArray();
+            SessionSlot[] slots;
+            Task<DapSessionState>[] outputCleanup;
+            Task startsDrained;
+            TaskCompletionSource<bool> completion;
+            lock (_lifetimeGate)
+            {
+                _shutdownRequested = true;
+                RegisterStartShutdownCancellation(cancellationToken);
+                if (_shutdownTask is not null)
+                {
+                    return new ValueTask(_shutdownTask);
+                }
+
+                slots = _ownedSlots.Values.Select(static ownership => ownership.Slot)
+                    .Concat(_slots.Values).Distinct().ToArray();
+                outputCleanup = _ownedSlots.Values.Select(static ownership => ownership.Output)
+                    .Concat(_outputs.Values).Distinct().Select(static output => output.Cleanup.Task).ToArray();
+                _outputs.Clear();
+                startsDrained = _starts == 0
+                    ? Task.CompletedTask
+                    : (_startsDrained ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
+                completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _shutdownTask = completion.Task;
+            }
+
+            _ = DisposeCoreAsync(slots, outputCleanup, startsDrained, _startShutdown.Token, completion);
+            return new ValueTask(completion.Task);
+        }
+
+        private async Task DisposeCoreAsync(
+            SessionSlot[] slots,
+            Task<DapSessionState>[] outputCleanup,
+            Task startsDrained,
+            CancellationToken cancellationToken,
+            TaskCompletionSource<bool> completion)
+        {
+            Exception? failure = null;
             try
             {
-                await Task.WhenAll(slots.Select(slot => slot.CloseAndDrainAsync(cancellationToken))).ConfigureAwait(false);
+                try
+                {
+                    await Task.WhenAll(slots.Select(slot => slot.CloseAndDrainAsync(cancellationToken))
+                        .Concat(outputCleanup).Append(startsDrained)).ConfigureAwait(false);
+                }
+                finally
+                {
+                    // Starts admitted before shutdown finish their own unpublished cleanup.
+                    await startsDrained.ConfigureAwait(false);
+                    var sessions = _sessions.ToArray();
+                    _sessions.Clear();
+                    var bindings = _nativeSceneBindings.ToArray();
+                    _nativeSceneBindings.Clear();
+                    try
+                    {
+                        await Task.WhenAll(bindings.Select(static binding => binding.Value.DisposeAsync().AsTask())).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        await Task.WhenAll(sessions.Select(session => DisposeRemovedSessionAsync(session.Value, cancellationToken))).ConfigureAwait(false);
+                    }
+                }
             }
-            finally
+            catch (Exception exception)
             {
-                var sessions = _sessions.ToArray();
-                _sessions.Clear();
-                var bindings = _nativeSceneBindings.ToArray();
-                _nativeSceneBindings.Clear();
-                await Task.WhenAll(bindings.Select(static binding => binding.Value.DisposeAsync().AsTask())).ConfigureAwait(false);
-                await Task.WhenAll(sessions.Select(session => DisposeRemovedSessionAsync(session.Value, cancellationToken))).ConfigureAwait(false);
+                failure = exception;
+            }
+
+            DisposeStartShutdownCancellation(out var startCleanupFailure, out var shutdownCancellation);
+            if (failure is null or OperationCanceledException)
+            {
+                // Cleanup failure must not be hidden by the shutdown cancellation
+                // that requested it. All owners have finished before publishing either.
+                failure = startCleanupFailure ?? failure;
+            }
+
+            if (failure is OperationCanceledException cancelled)
+            {
+                completion.TrySetCanceled(shutdownCancellation.IsCancellationRequested ? shutdownCancellation : cancelled.CancellationToken);
+            }
+            else if (failure is not null)
+            {
+                completion.TrySetException(failure);
+            }
+            else if (shutdownCancellation.IsCancellationRequested)
+            {
+                completion.TrySetCanceled(shutdownCancellation);
+            }
+            else
+            {
+                completion.TrySetResult(true);
             }
         }
 
-        private void OnReaderFailed(string token, NetCoreDbgSession session)
+        private void RegisterStartShutdownCancellation(CancellationToken cancellationToken)
+        {
+            // The caller holds _lifetimeGate, as for publication and start admission.
+            if (_startShutdownDisposed || !cancellationToken.CanBeCanceled)
+            {
+                return;
+            }
+
+            var registrations = _startShutdownRegistrations ??= new();
+            foreach (var existing in registrations)
+            {
+                if (existing.Token == cancellationToken)
+                {
+                    return;
+                }
+            }
+
+            var registration = cancellationToken.Register(
+                static source => ((CancellationTokenSource)source!).Cancel(), _startShutdown);
+            registrations.Add((cancellationToken, registration));
+        }
+
+        private void DisposeStartShutdownCancellation(out Exception? startCleanupFailure, out CancellationToken shutdownCancellation)
+        {
+            List<(CancellationToken Token, CancellationTokenRegistration Registration)>? registrations;
+            lock (_lifetimeGate)
+            {
+                _startShutdownDisposed = true;
+                startCleanupFailure = _startCleanupFailure;
+                registrations = _startShutdownRegistrations;
+                _startShutdownRegistrations = null;
+            }
+
+            try
+            {
+                // Callbacks can finish starts and re-enter _lifetimeGate.
+                if (registrations is not null)
+                {
+                    foreach (var registration in registrations)
+                    {
+                        registration.Registration.Dispose();
+                    }
+                }
+            }
+            finally
+            {
+                _startShutdown.Dispose();
+            }
+
+            shutdownCancellation = default;
+            if (registrations is not null)
+            {
+                foreach (var registration in registrations)
+                {
+                    if (registration.Token.IsCancellationRequested)
+                    {
+                        shutdownCancellation = registration.Token;
+                        break;
+                    }
+                }
+            }
+        }
+
+        private void OnRetirementRequested(string token, NetCoreDbgSession session)
         {
             if (_sessions.TryGetValue(token, out var registeredSession)
                 && ReferenceEquals(session, registeredSession)
@@ -1263,12 +1489,66 @@ internal static class Program
             string token,
             NetCoreDbgSession session,
             NativeSceneSessionBinding binding,
-            SessionSlot slot)
+            SessionSlot slot,
+            OutputLifetime output)
         {
+            lock (_lifetimeGate)
+            {
+                _slots.TryRemove(new KeyValuePair<string, SessionSlot>(token, slot));
+                _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(token, session));
+                _nativeSceneBindings.TryRemove(new KeyValuePair<string, NativeSceneSessionBinding>(token, binding));
+            }
+
+            _ = CompleteRetirementAsync(token, session, slot, output);
             binding.RetireUiInvoke();
-            _slots.TryRemove(new KeyValuePair<string, SessionSlot>(token, slot));
-            _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(token, session));
-            _nativeSceneBindings.TryRemove(new KeyValuePair<string, NativeSceneSessionBinding>(token, binding));
+        }
+
+        private async Task CompleteRetirementAsync(
+            string token,
+            NetCoreDbgSession session,
+            SessionSlot slot,
+            OutputLifetime output)
+        {
+            DapSessionState? state = null;
+            Exception? failure = null;
+            try
+            {
+                await slot.CloseAndDrainAsync().ConfigureAwait(false);
+                state = session.State;
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+            finally
+            {
+                lock (_lifetimeGate)
+                {
+                    _ownedSlots.Remove(token);
+                }
+            }
+
+            // The retained task carries only a value snapshot or the cleanup failure,
+            // never the slot's resource-owning delegates or an async cleanup state machine.
+            if (failure is OperationCanceledException cancellation)
+            {
+                output.Cleanup.TrySetCanceled(cancellation.CancellationToken);
+            }
+            else if (failure is not null)
+            {
+                output.Cleanup.TrySetException(failure);
+                _ = output.Cleanup.Task.Exception;
+            }
+            else
+            {
+                output.Cleanup.TrySetResult(state!);
+            }
+        }
+
+        private sealed class OutputLifetime(DapOutputBuffer buffer)
+        {
+            internal DapOutputBuffer Buffer { get; } = buffer;
+            internal TaskCompletionSource<DapSessionState> Cleanup { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         }
 
         private async ValueTask DisposeSlotResourcesAsync(
@@ -1282,6 +1562,55 @@ internal static class Program
             finally
             {
                 await _dispose(session).ConfigureAwait(false);
+            }
+        }
+
+        private async ValueTask DisposeUnpublishedResourcesAsync(
+            NetCoreDbgSession? session,
+            NativeSceneSessionBinding? binding,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                try
+                {
+                    if (session is not null)
+                    {
+                        // The startup token remains live through rollback so shutdown
+                        // can force a cleanup already waiting for a graceful response.
+                        await session.StopForOwnerAsync(cancellationToken).ConfigureAwait(false);
+                    }
+                }
+                finally
+                {
+                    try
+                    {
+                        if (binding is not null)
+                        {
+                            await binding.DisposeAsync().ConfigureAwait(false);
+                        }
+                    }
+                    finally
+                    {
+                        if (session is not null)
+                        {
+                            await _dispose(session).ConfigureAwait(false);
+                        }
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                RecordStartCleanupFailure(exception);
+                throw;
+            }
+        }
+
+        private void RecordStartCleanupFailure(Exception exception)
+        {
+            lock (_lifetimeGate)
+            {
+                _startCleanupFailure ??= exception;
             }
         }
 
@@ -1329,6 +1658,8 @@ internal static class Program
 
             internal Task CloseAndDrainAsync(CancellationToken cancellationToken = default)
             {
+                Task drained;
+                TaskCompletionSource<bool> completion;
                 lock (_gate)
                 {
                     if (_closeTask is not null)
@@ -1338,12 +1669,34 @@ internal static class Program
                     }
 
                     _closed = true;
-                    var drained = _leases == 0
+                    drained = _leases == 0
                         ? Task.CompletedTask
                         : (_drained ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
-                    _remove();
+                    completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    _closeTask = completion.Task;
                     RegisterCancellation(cancellationToken);
-                    return _closeTask = CloseAndDrainCoreAsync(drained);
+                }
+
+                // Removal can re-enter close to observe this same completion. Never call
+                // the registry while holding the lease gate or before publishing the task.
+                _ = CompleteCloseAsync(drained, completion);
+                return completion.Task;
+            }
+
+            private async Task CompleteCloseAsync(Task drained, TaskCompletionSource<bool> completion)
+            {
+                try
+                {
+                    await CloseAndDrainCoreAsync(drained).ConfigureAwait(false);
+                    completion.TrySetResult(true);
+                }
+                catch (OperationCanceledException exception)
+                {
+                    completion.TrySetCanceled(exception.CancellationToken);
+                }
+                catch (Exception exception)
+                {
+                    completion.TrySetException(exception);
                 }
             }
 
@@ -1351,6 +1704,7 @@ internal static class Program
             {
                 try
                 {
+                    _remove();
                     var drainExpired = await Task.WhenAny(drained, Task.Delay(_drainTimeout)).ConfigureAwait(false) != drained;
                     if (drainExpired)
                     {
@@ -1372,11 +1726,23 @@ internal static class Program
                     }
                     finally
                     {
+                        CancellationTokenRegistration? registration;
                         lock (_gate)
                         {
-                            _cancellationRegistration?.Dispose();
-                            _abort.Dispose();
                             _abortDisposed = true;
+                            registration = _cancellationRegistration;
+                            _cancellationRegistration = null;
+                        }
+
+                        try
+                        {
+                            // A running cancellation callback may release a lease. Do
+                            // not wait for it while holding the lease gate.
+                            registration?.Dispose();
+                        }
+                        finally
+                        {
+                            _abort.Dispose();
                         }
                     }
                 }
@@ -1441,7 +1807,7 @@ internal static class Program
                     {
                     }
                 }
-                else if (_sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(sessionId, session)))
+                else if (TryRemoveUnownedSession(sessionId, session))
                 {
                     await RemoveNativeSceneBindingAsync(sessionId).ConfigureAwait(false);
                     await DisposeRemovedSessionAsync(session).ConfigureAwait(false);
@@ -1455,9 +1821,29 @@ internal static class Program
 
         private async ValueTask RemoveNativeSceneBindingAsync(string sessionId)
         {
-            if (_nativeSceneBindings.TryRemove(sessionId, out var binding))
+            NativeSceneSessionBinding? binding;
+            lock (_lifetimeGate)
+            {
+                if (_ownedSlots.ContainsKey(sessionId))
+                {
+                    return;
+                }
+
+                _nativeSceneBindings.TryRemove(sessionId, out binding);
+            }
+
+            if (binding is not null)
             {
                 await binding.DisposeAsync().ConfigureAwait(false);
+            }
+        }
+
+        private bool TryRemoveUnownedSession(string sessionId, NetCoreDbgSession session)
+        {
+            lock (_lifetimeGate)
+            {
+                return !_ownedSlots.ContainsKey(sessionId)
+                    && _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(sessionId, session));
             }
         }
 

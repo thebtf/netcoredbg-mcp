@@ -7,8 +7,9 @@ Exact ``--scenario`` selection also retains every original diagnostic.
 Requires netcoredbg on PATH or NETCOREDBG_PATH. The normal producer builds its
 own fixtures/bridge; it does not require a prebuilt console fixture.
 Usage: python tests/smoke_test_manual.py [--extended-gui] [--scenario NAME]
-The opt-in ``Native WPF Concurrent Continue Stop`` scenario uses prebuilt source
-native-host/WPF outputs and real netcoredbg; it never builds or selects the Python backend.
+The opt-in ``Native WPF Concurrent Continue Stop`` and ``Native Terminal Output Retention``
+scenarios use prebuilt source native-host/fixture outputs and real netcoredbg;
+they never build or select the Python backend.
 """
 
 import asyncio
@@ -7750,6 +7751,30 @@ async def test_nullable_launch_environment() -> None:
             check("Nullable env leaves parent unchanged", parent_unchanged)
 
 
+async def _call_native_tool(
+    client: Any, metadata: dict[str, Any], tool: str, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    from mcp import types
+
+    request = types.CallToolRequest(
+        params=types.CallToolRequestParams(
+            name=tool,
+            arguments=arguments,
+            _meta=types.RequestParams.Meta(**metadata),
+        )
+    )
+    result = await client.send_request(types.ClientRequest(request), types.CallToolResult)
+    return result.model_dump(mode="json", by_alias=True)
+
+
+def _native_content(result: dict[str, Any], *, error: bool = False) -> dict[str, Any]:
+    assert result.get("resultType") == "complete", "Native tool result is not complete"
+    assert result.get("isError", False) is error, "Native tool returned an unexpected error status"
+    data = result.get("structuredContent")
+    assert isinstance(data, dict), "Native tool omitted structured content"
+    return data
+
+
 async def test_native_wpf_concurrent_continue_stop() -> None:
     """Exercise explicit stop of a real WPF continuation through the native host."""
     import shutil
@@ -7757,7 +7782,7 @@ async def test_native_wpf_concurrent_continue_stop() -> None:
     from pathlib import Path
 
     import psutil
-    from mcp import ClientSession, StdioServerParameters, types
+    from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
 
     print("\nSOURCE-NATIVE WPF CONCURRENT CONTINUE / STOP")
@@ -7826,28 +7851,9 @@ async def test_native_wpf_concurrent_continue_stop() -> None:
                 ) as client:
 
                     async def call(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-                        request = types.CallToolRequest(
-                            params=types.CallToolRequestParams(
-                                name=tool,
-                                arguments=arguments,
-                                _meta=types.RequestParams.Meta(**metadata),
-                            )
-                        )
-                        result = await client.send_request(
-                            types.ClientRequest(request), types.CallToolResult
-                        )
-                        return result.model_dump(mode="json", by_alias=True)
+                        return await _call_native_tool(client, metadata, tool, arguments)
 
-                    def content(result: dict[str, Any], *, error: bool = False) -> dict[str, Any]:
-                        assert result.get("resultType") == "complete", (
-                            "Native tool result is not complete"
-                        )
-                        assert result.get("isError", False) is error, (
-                            "Native tool returned an unexpected error status"
-                        )
-                        data = result.get("structuredContent")
-                        assert isinstance(data, dict), "Native tool omitted structured content"
-                        return data
+                    content = _native_content
 
                     session_id = None
                     continuation = None
@@ -7994,6 +8000,249 @@ async def test_native_wpf_concurrent_continue_stop() -> None:
             )
 
 
+async def test_native_terminal_output_retention() -> None:
+    """Read the real console's final output after native continue observes termination."""
+    import shutil
+    from datetime import timedelta
+    from pathlib import Path
+
+    import psutil
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    print("\nSOURCE-NATIVE POST-TERMINAL OUTPUT RETENTION")
+    if os.name != "nt":
+        raise RuntimeError("The source-native console scenario requires Windows")
+    root = Path(BASE)
+    host = root / "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0/NetCoreDbg.Mcp.Stateless.exe"
+    program = Path(DLL)
+    source = Path(SOURCE)
+    for prerequisite in (
+        host,
+        host.with_suffix(".dll"),
+        host.with_suffix(".runtimeconfig.json"),
+        program,
+        program.with_suffix(".pdb"),
+        program.with_suffix(".runtimeconfig.json"),
+        source,
+    ):
+        if not prerequisite.is_file():
+            raise RuntimeError(
+                f"Required source-native smoke prerequisite is absent: {prerequisite}"
+            )
+    configured = os.environ.get("NETCOREDBG_PATH")
+    debugger = (root / configured).resolve() if configured else shutil.which("netcoredbg")
+    if debugger is None or not Path(debugger).is_file():
+        raise RuntimeError("Real netcoredbg is required through NETCOREDBG_PATH or PATH")
+    marker = "=== SmokeTestApp finished ==="
+    marker_lines = [
+        index
+        for index, line in enumerate(source.read_text(encoding="utf-8-sig").splitlines(), 1)
+        if f'Console.WriteLine("{marker}");' in line
+    ]
+    assert len(marker_lines) == 1, "The console fixture must have one final marker statement"
+    breakpoint_line = marker_lines[0]
+    metadata = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {
+            "name": "native-terminal-output-smoke",
+            "version": "1",
+        },
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
+    environment = {
+        "NETCOREDBG_PATH": str(Path(debugger).resolve()),
+        "DOTNET_ADD_GLOBAL_TOOLS_TO_PATH": "false",
+        "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
+    }
+    windows_directory = os.environ.get("WINDIR") or os.environ.get("SystemRoot")
+    if windows_directory:
+        environment["WINDIR"] = windows_directory
+    parameters = StdioServerParameters(command=str(host), cwd=str(root), env=environment)
+    owned_host: Any = None
+    owned_processes: dict[tuple[int, float], Any] = {}
+
+    def remember_owned_processes() -> None:
+        if owned_host is None or not owned_host.is_running():
+            return
+        try:
+            descendants = owned_host.children(recursive=True)
+        except psutil.NoSuchProcess:
+            return
+        for process in [owned_host, *descendants]:
+            try:
+                owned_processes[(process.pid, process.create_time())] = process
+            except psutil.NoSuchProcess:
+                pass
+
+    try:
+        with open(os.devnull, "w", encoding="utf-8") as errlog:
+            async with stdio_client(parameters, errlog=errlog) as (read_stream, write_stream):
+                hosts = [
+                    process
+                    for process in psutil.Process().children()
+                    if os.path.normcase(process.exe()) == os.path.normcase(str(host.resolve()))
+                ]
+                assert len(hosts) == 1, "The SDK's owned native host process is not unique"
+                owned_host = hosts[0]
+                remember_owned_processes()
+                async with ClientSession(
+                    read_stream,
+                    write_stream,
+                    read_timeout_seconds=timedelta(seconds=20),
+                ) as client:
+
+                    async def call(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+                        return await _call_native_tool(client, metadata, tool, arguments)
+
+                    session_id = None
+                    stopped_successfully = False
+
+                    async def wait_for_breakpoint() -> dict[str, Any]:
+                        while True:
+                            state = _native_content(
+                                await call("get_debug_state", {"debugSessionId": session_id})
+                            )["state"]
+                            if state.get("event") == "stopped":
+                                return state
+                            assert state.get("event") not in ("exited", "terminated"), (
+                                "The console exited before its final marker breakpoint"
+                            )
+                            await asyncio.sleep(0.05)
+
+                    try:
+                        started = _native_content(
+                            await call(
+                                "start_debug",
+                                {
+                                    "program": str(program),
+                                    "breakpoints": [{"file": str(source), "line": breakpoint_line}],
+                                },
+                            )
+                        )
+                        assert started.get("kind") == "start_debug_success", (
+                            "Native console debugger did not start"
+                        )
+                        session_id = started.get("debugSessionId")
+                        assert isinstance(session_id, str) and session_id, (
+                            "Native console session ID is absent"
+                        )
+                        remember_owned_processes()
+                        state = await asyncio.wait_for(wait_for_breakpoint(), timeout=15)
+                        assert state.get("stopReason") == "breakpoint", (
+                            "The final console marker breakpoint was not reached"
+                        )
+                        thread_id = state.get("currentThreadId")
+                        assert type(thread_id) is int, "The breakpoint has no real thread ID"
+                        stack = _native_content(
+                            await call(
+                                "get_call_stack",
+                                {"debugSessionId": session_id, "threadId": thread_id},
+                            )
+                        )
+                        frames = stack.get("frames", [])
+                        assert frames and "SmokeTestApp.Program.Main" in frames[0].get(
+                            "name", ""
+                        ), "The console stop is not in Main"
+                        assert frames[0].get("line") == breakpoint_line, (
+                            "The console stop is not at the dynamically located final marker"
+                        )
+                        assert Path(frames[0].get("source", "")).resolve() == source.resolve(), (
+                            "The console stop does not identify the expected fixture source"
+                        )
+                        check(
+                            "Native console reaches its final marker with an observed thread ID",
+                            True,
+                        )
+                        terminal = _native_content(
+                            await asyncio.wait_for(
+                                call(
+                                    "continue_execution",
+                                    {"debugSessionId": session_id, "threadId": thread_id},
+                                ),
+                                timeout=20,
+                            )
+                        )
+                        assert terminal.get("kind") == "continue_terminal" and terminal.get(
+                            "terminal"
+                        ) in ("exited", "terminated"), "Native continue did not observe termination"
+                        check("Native console continue reports an observed terminal event", True)
+                        output = _native_content(
+                            await call("get_output", {"debugSessionId": session_id})
+                        )
+                        assert output.get("kind") == "output_success", (
+                            "Native terminal session did not return output"
+                        )
+                        assert marker in output.get("output", ""), (
+                            "Native get_output lost the console's final marker after termination"
+                        )
+                        check(
+                            "Native get_output retains the final console marker after termination",
+                            True,
+                        )
+                        stopped = _native_content(
+                            await call("stop_debug", {"debugSessionId": session_id})
+                        )
+                        assert stopped.get("kind") == "stop_debug_success", (
+                            "The terminal native session did not permit one explicit stop"
+                        )
+                        stopped_successfully = True
+                        unavailable = _native_content(
+                            await call("get_output", {"debugSessionId": session_id}), error=True
+                        )
+                        assert unavailable == {
+                            "kind": "debug_session_not_found",
+                            "error": "DEBUG_SESSION_NOT_FOUND",
+                        }, "Output remains readable after explicit native stop"
+                        check(
+                            "Native explicit stop retires retained output with uniform not-found",
+                            True,
+                        )
+                    finally:
+                        try:
+                            remember_owned_processes()
+                            if session_id is not None and not stopped_successfully:
+                                await asyncio.wait_for(
+                                    call("stop_debug", {"debugSessionId": session_id}), timeout=10
+                                )
+                        finally:
+                            remember_owned_processes()
+    finally:
+        observation_error = ""
+        try:
+            _, alive = await asyncio.to_thread(
+                psutil.wait_procs, list(owned_processes.values()), timeout=5
+            )
+        except Exception as exc:
+            alive = list(owned_processes.values())
+            observation_error = f"Normal teardown observation failed: {type(exc).__name__}"
+        check(
+            "Native console normal teardown leaves no owned host, adapter or debuggee",
+            not alive and not observation_error,
+            observation_error or f"Surviving owned PIDs: {[process.pid for process in alive]}",
+        )
+        emergency_errors: list[str] = []
+        for process in alive:
+            try:
+                process.kill()
+            except psutil.NoSuchProcess:
+                pass
+            except Exception as exc:
+                emergency_errors.append(f"PID {process.pid} kill failed: {type(exc).__name__}")
+        try:
+            _, remaining = await asyncio.to_thread(psutil.wait_procs, alive, timeout=5)
+        except Exception as exc:
+            remaining = alive
+            emergency_errors.append(f"Emergency cleanup observation failed: {type(exc).__name__}")
+        if alive or emergency_errors:
+            check(
+                "Native console emergency cleanup releases every captured owned process",
+                not remaining and not emergency_errors,
+                "; ".join(emergency_errors)
+                or f"Remaining owned PIDs: {[process.pid for process in remaining]}",
+            )
+
+
 def _base_scenarios() -> list[tuple[str, Callable[..., Any]]]:
     return [
         ("Hit Counting", test_hit_counting),
@@ -8118,6 +8367,7 @@ def _complete_scenario_catalog() -> list[tuple[str, Callable[..., Any]]]:
         ),
         ("Nullable Launch Environment", test_nullable_launch_environment),
         ("Native WPF Concurrent Continue Stop", test_native_wpf_concurrent_continue_stop),
+        ("Native Terminal Output Retention", test_native_terminal_output_retention),
         *_base_scenarios(),
         *_winforms_extended_scenarios(),
         *_wpf_extended_scenarios(),
