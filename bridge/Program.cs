@@ -28,6 +28,16 @@ public static class Program
                 return;
             }
 
+            if (args.Length > 0 && string.Equals(args[0], "--native-ui-invoke-pipe", StringComparison.Ordinal))
+            {
+                if (TryParseNativeScenePipeArguments(args, out var pipeName, out var nonce, out var processId))
+                {
+                    await RunNativeUiInvokePipeAsync(pipeName, nonce, processId);
+                }
+
+                return;
+            }
+
             RunStdin();
         }
         finally
@@ -115,6 +125,55 @@ public static class Program
             // Closing the private pipe is the only failure signal; the host maps it to OBSERVER_UNAVAILABLE.
         }
     }
+
+    private static async Task RunNativeUiInvokePipeAsync(string pipeName, string nonce, int processId)
+    {
+        const int maximumInvokeFrameBytes = 8_192;
+        using var pipe = new NamedPipeServerStream(
+            pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
+            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        try
+        {
+            await pipe.WaitForConnectionAsync();
+            var payload = await ReadFrameAsync(pipe, maximumInvokeFrameBytes);
+            if (payload is null || JsonNode.Parse(payload) is not JsonObject envelope || envelope.Count != 3 ||
+                !string.Equals(envelope["nonce"]?.GetValue<string>(), nonce, StringComparison.Ordinal) ||
+                string.IsNullOrWhiteSpace(envelope["correlationId"]?.GetValue<string>()) ||
+                envelope["request"] is not JsonObject request)
+            {
+                return;
+            }
+
+            var correlationId = envelope["correlationId"]!.GetValue<string>();
+            var prepared = NativeUiInvokeCommand.Prepare(request, processId, JsonRpcHandler.Automation, out var command);
+            using (command)
+            {
+                await WriteInvokeResponseAsync(pipe, nonce, correlationId, prepared);
+                if (command is null)
+                    return;
+
+                // The observation pipe cannot reach this commit, even with an action-shaped request.
+                payload = await ReadFrameAsync(pipe, maximumInvokeFrameBytes);
+                if (payload is null || JsonNode.Parse(payload) is not JsonObject commit || commit.Count != 3 ||
+                    !string.Equals(commit["nonce"]?.GetValue<string>(), nonce, StringComparison.Ordinal) ||
+                    !string.Equals(commit["correlationId"]?.GetValue<string>(), correlationId, StringComparison.Ordinal) ||
+                    commit["request"] is not JsonObject action || action.Count != 1 ||
+                    !string.Equals(action["operation"]?.GetValue<string>(), "invoke", StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                await WriteInvokeResponseAsync(pipe, nonce, correlationId, command.Invoke());
+            }
+        }
+        catch (Exception)
+        {
+            // The host distinguishes pre-commit refusal from a lost post-commit outcome; never retry here.
+        }
+    }
+
+    private static Task WriteInvokeResponseAsync(Stream pipe, string nonce, string correlationId, JsonObject response) =>
+        WriteFrameAsync(pipe, JsonSerializer.SerializeToUtf8Bytes(new { nonce, correlationId, response }));
 
     private static async Task<byte[]?> ReadFrameAsync(Stream stream, int maximumPayloadBytes)
     {

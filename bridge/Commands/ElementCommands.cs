@@ -1,5 +1,6 @@
 using Microsoft.Win32.SafeHandles;
 using System.IO;
+using System.Text;
 using System.Text.Json.Nodes;
 using FlaUI.Core;
 using FlaUI.Core.AutomationElements;
@@ -1244,7 +1245,8 @@ public static class ElementCommands
         AutomationElement root,
         JsonObject selector,
         int boundProcessId,
-        int maximumNodes)
+        int maximumNodes,
+        bool requireReadableAutomationId = false)
     {
         if (maximumNodes is < 1 or > 4_096)
             throw new ArgumentOutOfRangeException(nameof(maximumNodes));
@@ -1274,9 +1276,43 @@ public static class ElementCommands
                     "UIA process identity is unavailable while resolving the selector.");
             }
 
+            if (requireReadableAutomationId && processId != boundProcessId)
+            {
+                return new GuardedSelectorResolution(
+                    GuardedSelectorOutcome.Unobservable, null, matches.Count,
+                    "The action selector encountered an element outside the bound process.");
+            }
+
             if (processId == boundProcessId)
             {
-                if (MatchesGuardedSelector(element, automationId, name, controlType))
+                bool isMatch;
+                if (requireReadableAutomationId)
+                {
+                    try
+                    {
+                        if (automationId is null || name is not null || controlType is not null)
+                        {
+                            return new GuardedSelectorResolution(
+                                GuardedSelectorOutcome.Unobservable, null, matches.Count,
+                                "The action requires an exact AutomationId-only selector.");
+                        }
+
+                        isMatch = element.Properties.AutomationId.IsSupported &&
+                            string.Equals(element.Properties.AutomationId.Value, automationId, StringComparison.Ordinal);
+                    }
+                    catch (Exception)
+                    {
+                        return new GuardedSelectorResolution(
+                            GuardedSelectorOutcome.Unobservable, null, matches.Count,
+                            "An AutomationId could not be read while resolving the action selector.");
+                    }
+                }
+                else
+                {
+                    isMatch = MatchesGuardedSelector(element, automationId, name, controlType);
+                }
+
+                if (isMatch)
                 {
                     matches.Add(element);
                     if (matches.Count == 2)
@@ -1330,6 +1366,22 @@ public static class ElementCommands
         };
     }
 
+    internal static bool IsValidGuardedSelectorText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+        if (text.Length <= 256)
+            return true;
+
+        var length = 0;
+        foreach (var _ in text.EnumerateRunes())
+        {
+            if (++length > 256)
+                return false;
+        }
+        return true;
+    }
+
     private static string? ReadGuardedSelectorText(JsonObject selector, string key)
     {
         foreach (var property in selector)
@@ -1341,7 +1393,7 @@ public static class ElementCommands
         if (!selector.TryGetPropertyValue(key, out var node) || node is null)
             return null;
         if (node is not JsonValue value || !value.TryGetValue<string>(out var text) ||
-            string.IsNullOrWhiteSpace(text) || text.Length > 256)
+            !IsValidGuardedSelectorText(text))
         {
             throw new InvalidDataException($"Guarded selector property '{key}' must be a non-empty string of at most 256 characters.");
         }

@@ -16,6 +16,7 @@ public partial class ProbeFixtureWindow : Window, IWpfProbeSnapshotSource
     private readonly ProbeFixtureMode _mode;
     private long _revision = InitialRevision;
     private int _materializationCount;
+    private int _invocationCount;
 
     internal ProbeFixtureWindow(ProbeFixtureMode mode)
     {
@@ -99,6 +100,13 @@ public partial class ProbeFixtureWindow : Window, IWpfProbeSnapshotSource
             materialization.RequiredFactsComplete,
             nodes,
             materialization.Stability);
+    }
+
+    private void RecordFixtureAction(object sender, RoutedEventArgs e)
+    {
+        _invocationCount = checked(_invocationCount + 1);
+        SaveButton.Content = $"Invoked {_invocationCount}x";
+        AdvanceRevision();
     }
 
     private void AdvanceRevision()

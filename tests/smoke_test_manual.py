@@ -7,6 +7,8 @@ Exact ``--scenario`` selection also retains every original diagnostic.
 Requires netcoredbg on PATH or NETCOREDBG_PATH. The normal producer builds its
 own fixtures/bridge; it does not require a prebuilt console fixture.
 Usage: python tests/smoke_test_manual.py [--extended-gui] [--scenario NAME]
+The opt-in ``Native WPF Concurrent Continue Stop`` scenario uses prebuilt source
+native-host/WPF outputs and real netcoredbg; it never builds or selects the Python backend.
 """
 
 import asyncio
@@ -7748,6 +7750,250 @@ async def test_nullable_launch_environment() -> None:
             check("Nullable env leaves parent unchanged", parent_unchanged)
 
 
+async def test_native_wpf_concurrent_continue_stop() -> None:
+    """Exercise explicit stop of a real WPF continuation through the native host."""
+    import shutil
+    from datetime import timedelta
+    from pathlib import Path
+
+    import psutil
+    from mcp import ClientSession, StdioServerParameters, types
+    from mcp.client.stdio import stdio_client
+
+    print("\nSOURCE-NATIVE WPF CONCURRENT CONTINUE / STOP")
+    if os.name != "nt":
+        raise RuntimeError("The source-native WPF scenario requires Windows")
+    windows_directory = os.environ.get("WINDIR") or os.environ.get("SystemRoot")
+    if (
+        not windows_directory
+        or not os.path.isabs(windows_directory)
+        or not os.path.isdir(windows_directory)
+    ):
+        raise RuntimeError(
+            "WPF requires an existing absolute Windows directory from the parent's WINDIR or SystemRoot"
+        )
+    root = Path(BASE)
+    host = root / "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0/NetCoreDbg.Mcp.Stateless.exe"
+    program = Path(WPF_DLL)
+    source = root / "tests/fixtures/WpfSmokeApp/MainWindow.xaml.cs"
+    for prerequisite in (
+        host,
+        host.with_suffix(".dll"),
+        host.with_suffix(".runtimeconfig.json"),
+        program,
+        program.with_suffix(".pdb"),
+        program.with_suffix(".runtimeconfig.json"),
+        source,
+    ):
+        if not prerequisite.is_file():
+            raise RuntimeError(
+                f"Required source-native smoke prerequisite is absent: {prerequisite}"
+            )
+    configured = os.environ.get("NETCOREDBG_PATH")
+    debugger = (root / configured).resolve() if configured else shutil.which("netcoredbg")
+    if debugger is None or not Path(debugger).is_file():
+        raise RuntimeError("Real netcoredbg is required through NETCOREDBG_PATH or PATH")
+    lines = source.read_text(encoding="utf-8-sig").splitlines()
+    constructor = next(
+        (index for index, line in enumerate(lines) if "public MainWindow()" in line), None
+    )
+    if constructor is None or lines[constructor + 2].strip() != "InitializeComponent();":
+        raise RuntimeError("The WPF MainWindow constructor breakpoint location is unavailable")
+    breakpoint_line = constructor + 3
+    metadata = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "native-wpf-stop-smoke", "version": "1"},
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
+    parameters = StdioServerParameters(
+        command=str(host),
+        cwd=str(root),
+        env={
+            "NETCOREDBG_PATH": str(Path(debugger).resolve()),
+            "WINDIR": windows_directory,
+            "DOTNET_ADD_GLOBAL_TOOLS_TO_PATH": "false",
+            "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
+        },
+    )
+    debuggee: Any = None
+    try:
+        with open(os.devnull, "w", encoding="utf-8") as errlog:
+            async with stdio_client(parameters, errlog=errlog) as (read_stream, write_stream):
+                async with ClientSession(
+                    read_stream,
+                    write_stream,
+                    read_timeout_seconds=timedelta(seconds=10),
+                ) as client:
+
+                    async def call(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+                        request = types.CallToolRequest(
+                            params=types.CallToolRequestParams(
+                                name=tool,
+                                arguments=arguments,
+                                _meta=types.RequestParams.Meta(**metadata),
+                            )
+                        )
+                        result = await client.send_request(
+                            types.ClientRequest(request), types.CallToolResult
+                        )
+                        return result.model_dump(mode="json", by_alias=True)
+
+                    def content(result: dict[str, Any], *, error: bool = False) -> dict[str, Any]:
+                        assert result.get("resultType") == "complete", (
+                            "Native tool result is not complete"
+                        )
+                        assert result.get("isError", False) is error, (
+                            "Native tool returned an unexpected error status"
+                        )
+                        data = result.get("structuredContent")
+                        assert isinstance(data, dict), "Native tool omitted structured content"
+                        return data
+
+                    session_id = None
+                    continuation = None
+                    stopped_successfully = False
+
+                    async def wait_for_state(event: str) -> dict[str, Any]:
+                        while True:
+                            state = content(
+                                await call("get_debug_state", {"debugSessionId": session_id})
+                            )["state"]
+                            if state.get("event") == event and (
+                                event != "stopped" or type(state.get("currentThreadId")) is int
+                            ):
+                                return state
+                            assert continuation is None or not continuation.done(), (
+                                "Continue settled before the expected state"
+                            )
+                            await asyncio.sleep(0.05)
+
+                    try:
+                        started = content(
+                            await call(
+                                "start_debug",
+                                {
+                                    "program": str(program),
+                                    "breakpoints": [{"file": str(source), "line": breakpoint_line}],
+                                },
+                            )
+                        )
+                        assert started.get("kind") == "start_debug_success", (
+                            "Native debugger did not start"
+                        )
+                        session_id = started.get("debugSessionId")
+                        assert isinstance(session_id, str) and session_id, (
+                            "Native session ID is absent"
+                        )
+                        state = await asyncio.wait_for(wait_for_state("stopped"), timeout=10)
+                        assert state.get("stopReason") == "breakpoint", (
+                            "The constructor breakpoint was not reached"
+                        )
+                        thread_id = state["currentThreadId"]
+                        stack = content(
+                            await call(
+                                "get_call_stack",
+                                {"debugSessionId": session_id, "threadId": thread_id},
+                            )
+                        )
+                        frames = stack.get("frames", [])
+                        assert frames and "WpfSmokeApp.MainWindow" in frames[0].get("name", ""), (
+                            "The stop is not in MainWindow"
+                        )
+                        assert frames[0].get("line") == breakpoint_line, (
+                            "The stop is not at the constructor breakpoint"
+                        )
+                        capabilities = content(
+                            await call(
+                                "get_ui_probe_capabilities",
+                                {
+                                    "debugSessionId": session_id,
+                                    "protocolVersion": "native-scene-probe/1",
+                                    "schemaVersion": "native-scene-probe.schema/1",
+                                },
+                            )
+                        )
+                        process_id = capabilities.get("candidate", {}).get("processId")
+                        assert type(process_id) is int and process_id > 0, (
+                            "Native capability candidate has no debuggee PID"
+                        )
+                        debuggee = psutil.Process(process_id)
+                        debuggee.create_time()
+                        assert debuggee.is_running(), (
+                            "The bound WPF debuggee exited before continue"
+                        )
+                        check("Native source MCP stops in the real WPF constructor", True)
+
+                        continuation = asyncio.create_task(
+                            call(
+                                "continue_execution",
+                                {
+                                    "debugSessionId": session_id,
+                                    "threadId": thread_id,
+                                },
+                            )
+                        )
+                        await asyncio.wait_for(wait_for_state("continued"), timeout=10)
+                        assert not continuation.done(), (
+                            "Explicit stop must overlap the acknowledged continuation"
+                        )
+                        check("Native continue is observed before concurrent stop", True)
+                        stopped = content(await call("stop_debug", {"debugSessionId": session_id}))
+                        assert stopped.get("kind") == "stop_debug_success", (
+                            "Explicit native stop did not succeed"
+                        )
+                        stopped_successfully = True
+                        assert not debuggee.is_running(), (
+                            "stop_debug succeeded before owned WPF cleanup"
+                        )
+                        check("Native explicit stop succeeds after owned WPF cleanup", True)
+                        continued = await asyncio.wait_for(continuation, timeout=5)
+                        if continued.get("isError", False):
+                            assert content(continued, error=True) == {
+                                "kind": "debug_session_not_found",
+                                "error": "DEBUG_SESSION_NOT_FOUND",
+                            }, "Interrupted native continue did not report intentional retirement"
+                        else:
+                            terminal = content(continued)
+                            assert terminal.get("kind") == "continue_terminal" and terminal.get(
+                                "terminal"
+                            ) in (
+                                "exited",
+                                "terminated",
+                            ), (
+                                "Interrupted native continue did not report an observed terminal event"
+                            )
+                        check(
+                            "Native interrupted continue reports retirement or observed termination",
+                            True,
+                        )
+                        unavailable = content(
+                            await call("get_debug_state", {"debugSessionId": session_id}),
+                            error=True,
+                        )
+                        assert unavailable == {
+                            "kind": "debug_session_not_found",
+                            "error": "DEBUG_SESSION_NOT_FOUND",
+                        }, "The stopped native session remains available"
+                        check("Native stopped session is unavailable", True)
+                    finally:
+                        try:
+                            if session_id is not None and not stopped_successfully:
+                                await asyncio.wait_for(
+                                    call("stop_debug", {"debugSessionId": session_id}), timeout=10
+                                )
+                        finally:
+                            if continuation is not None:
+                                if not continuation.done():
+                                    continuation.cancel()
+                                await asyncio.gather(continuation, return_exceptions=True)
+    finally:
+        if debuggee is not None:
+            check(
+                "Native source smoke leaves its bound WPF debuggee exited",
+                not debuggee.is_running(),
+            )
+
+
 def _base_scenarios() -> list[tuple[str, Callable[..., Any]]]:
     return [
         ("Hit Counting", test_hit_counting),
@@ -7871,6 +8117,7 @@ def _complete_scenario_catalog() -> list[tuple[str, Callable[..., Any]]]:
             partial(test_two_application_gui_verification, extended_gui=True),
         ),
         ("Nullable Launch Environment", test_nullable_launch_environment),
+        ("Native WPF Concurrent Continue Stop", test_native_wpf_concurrent_continue_stop),
         *_base_scenarios(),
         *_winforms_extended_scenarios(),
         *_wpf_extended_scenarios(),

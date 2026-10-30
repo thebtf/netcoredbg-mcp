@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using NetCoreDbg.Mcp.Stateless.DebugAdapter;
+using NetCoreDbg.Mcp.Stateless.NativeUi;
 
 namespace NetCoreDbg.Mcp.Stateless.NativeScene;
 
@@ -33,6 +34,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
     private readonly bool _supportsSceneCapture;
     private readonly SemaphoreSlim _gate = new(initialCount: 1, maxCount: 1);
     private readonly NativeSceneProbeChannel _probeChannel = new();
+    private readonly NativeUiInvokeSession _uiInvoke = new();
 
     private NativeSceneBridgeClient? _bridgeClient;
     private Process? _bridgeProcess;
@@ -78,6 +80,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
         {
             throw new InvalidOperationException("The native-scene binding is already attached to a debug session.");
         }
+        session.NativeUiInvokeAuthorityRevoked += OnUiInvokeAuthorityRevoked;
     }
 
 
@@ -87,6 +90,31 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
         TryGetBridgePath(out _);
 
     internal bool SupportsSceneCapture => _supportsSceneCapture && Volatile.Read(ref _disposed) == 0;
+
+    internal void RetireUiInvoke() => _uiInvoke.Retire();
+
+    private void OnUiInvokeAuthorityRevoked(NetCoreDbgSession _) => _uiInvoke.Retire();
+
+    internal Task<JsonObject> InvokeAsync(string automationId, Func<bool> isSessionCurrent, CancellationToken cancellationToken)
+    {
+        if (Volatile.Read(ref _disposed) != 0 || !isSessionCurrent())
+            return Task.FromResult(NativeUiInvokeResult.Refused("DEBUG_SESSION_NOT_FOUND"));
+        if (!OperatingSystem.IsWindows() || !TryGetBridgePath(out var bridgePath))
+            return Task.FromResult(NativeUiInvokeResult.Refused("UI_INVOKE_UNAVAILABLE"));
+        if (_session is not { } session ||
+            !session.TryGetNativeUiInvokeTargetIdentity(out var target) || !TryGetBoundWindowHandle(out var hwnd))
+        {
+            return Task.FromResult(NativeUiInvokeResult.Refused("UI_INVOKE_TARGET_UNAVAILABLE"));
+        }
+
+        // No observation gate or DAP lease spans this separately bounded UIA operation.
+        return _uiInvoke.InvokeAsync(
+            bridgePath, target, hwnd, automationId,
+            () => Volatile.Read(ref _disposed) == 0 && isSessionCurrent() &&
+                  session.TryGetNativeUiInvokeTargetIdentity(out var current) && target.Equals(current) &&
+                  TryGetBoundWindowHandle(out var currentHwnd) && currentHwnd == hwnd,
+            cancellationToken);
+    }
 
     internal bool TryGetCandidate(out JsonElement candidate)
     {
@@ -327,6 +355,11 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
         {
             return;
         }
+
+        if (_session is { } session)
+            session.NativeUiInvokeAuthorityRevoked -= OnUiInvokeAuthorityRevoked;
+
+        await _uiInvoke.DisposeAsync().ConfigureAwait(false);
 
         await _gate.WaitAsync().ConfigureAwait(false);
         try
