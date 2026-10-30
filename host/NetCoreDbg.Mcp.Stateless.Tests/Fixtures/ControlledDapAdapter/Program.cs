@@ -367,6 +367,9 @@ internal sealed class ControlledDapAdapter
     private Task? _heldThreadsResponse;
     private Task? _heldNextResponse;
     private Task? _heldInspectionResponse;
+    private Task? _heldBreakpointsResponse;
+    private bool _launchCompleted;
+    private int _runtimeBreakpointRequests;
     private bool _inspectionResponseHeld;
     private bool _inspectionStepped;
     private int _continueRequests;
@@ -458,6 +461,18 @@ internal sealed class ControlledDapAdapter
                 catch (OperationCanceledException) when (_lifecycleEventsCancellation.IsCancellationRequested)
                 {
                     // The existing stack-response release also gates inspection responses.
+                }
+            }
+
+            if (_heldBreakpointsResponse is { } heldBreakpointsResponse)
+            {
+                try
+                {
+                    await heldBreakpointsResponse.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (_lifecycleEventsCancellation.IsCancellationRequested)
+                {
+                    // Teardown cancels an unreleased runtime breakpoint response.
                 }
             }
 
@@ -651,6 +666,13 @@ internal sealed class ControlledDapAdapter
             return;
         }
 
+        var runtimeOrdinal = _launchCompleted ? ++_runtimeBreakpointRequests : 0;
+        var responseMode = _options.SetBreakpointsResponseMode switch
+        {
+            "hold-first-runtime" => "success",
+            "refuse-first-runtime" => runtimeOrdinal == 1 ? "refused" : "success",
+            _ => _options.SetBreakpointsResponseMode,
+        };
         var requested = root.GetProperty("arguments").GetProperty("breakpoints").EnumerateArray();
         var breakpoints = requested.Select((entry, index) =>
         {
@@ -663,7 +685,7 @@ internal sealed class ControlledDapAdapter
                 ["line"] = line,
                 ["message"] = privatePayload,
             };
-            if (_options.SetBreakpointsResponseMode == "mixed")
+            if (responseMode == "mixed")
             {
                 breakpoint["verified"] = index != 0;
                 if (index == 0)
@@ -681,7 +703,7 @@ internal sealed class ControlledDapAdapter
 
         object? body = new { breakpoints };
         var success = true;
-        switch (_options.SetBreakpointsResponseMode)
+        switch (responseMode)
         {
             case "success":
             case "mixed":
@@ -696,11 +718,28 @@ internal sealed class ControlledDapAdapter
             case "too-few-results":
                 breakpoints.RemoveAt(breakpoints.Count - 1);
                 break;
+            case "reader-failure":
+                await WriteMalformedDapFrameAsync(cancellationToken);
+                return;
             default:
                 throw new InvalidOperationException($"Unknown setBreakpoints response mode '{_options.SetBreakpointsResponseMode}'.");
         }
 
+        if (_options.SetBreakpointsResponseMode == "hold-first-runtime" && runtimeOrdinal == 1)
+        {
+            await RecordAsync(new { kind = "runtime-breakpoints-response-gated", sequence }, cancellationToken);
+            _heldBreakpointsResponse = CompleteHeldBreakpointsResponseAsync(sequence, body, _lifecycleEventsCancellation.Token);
+            return;
+        }
+
         await WriteResponseAsync(sequence, "setBreakpoints", body, cancellationToken, success: success);
+    }
+
+    private async Task CompleteHeldBreakpointsResponseAsync(int sequence, object? body, CancellationToken cancellationToken)
+    {
+        await WaitForNextResponseReleaseAsync(cancellationToken);
+        await RecordAsync(new { kind = "runtime-breakpoints-response-releasing", sequence }, cancellationToken);
+        await WriteResponseAsync(sequence, "setBreakpoints", body, cancellationToken);
     }
 
     private async Task CompleteLaunchAsync(CancellationToken cancellationToken)
@@ -728,6 +767,7 @@ internal sealed class ControlledDapAdapter
             await RecordAsync(new { kind = "breakpoint-verified-event" }, cancellationToken);
         }
 
+        _launchCompleted = true;
         await WriteResponseAsync(launch.Document.RootElement.GetProperty("seq").GetInt32(), "launch", body: null, cancellationToken);
         await RecordAsync(new { kind = "launch-released" }, cancellationToken);
         if (_options.ExitAfterLaunchResponse)

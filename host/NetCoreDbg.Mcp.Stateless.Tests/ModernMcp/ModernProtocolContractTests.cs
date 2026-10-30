@@ -98,7 +98,7 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
-    public async Task ToolsList_ReturnsExactlyTheOrderedFifteenToolCatalogWithRuntimeSchemas()
+    public async Task ToolsList_ReturnsExactlyTheOrderedNativeCatalogWithRuntimeSchemas()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync();
 
@@ -459,6 +459,355 @@ public sealed class ModernProtocolContractTests
         Assert.Equal(6, Assert.Single(Assert.IsType<JsonArray>(second["structuredContent"]?["initialBreakpoints"]))?["actualLine"]?.GetValue<int>());
     }
 
+    [Fact]
+    public async Task ToolsList_AddBreakpointPublishesClosedSourceAndPositiveInt32Input()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync();
+        var catalog = ModernMcpProcessDriver.RequireResult(await driver.ListToolsRawAsync(
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("add-breakpoint-catalog")));
+        var tool = Assert.IsType<JsonObject>(Assert.IsType<JsonArray>(catalog["tools"])[9]);
+        Assert.Equal("add_breakpoint", tool["name"]?.GetValue<string>());
+        var schema = Assert.IsType<JsonObject>(tool["inputSchema"]);
+        Assert.Equal("object", schema["type"]?.GetValue<string>());
+        Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
+        Assert.Equal(["debugSessionId", "file", "line"], Assert.IsType<JsonArray>(schema["required"]).Select(static value => value?.GetValue<string>()));
+        var properties = Assert.IsType<JsonObject>(schema["properties"]);
+        Assert.Equal(3, properties.Count);
+        foreach (var field in new[] { "debugSessionId", "file" })
+        {
+            Assert.Equal("string", properties[field]?["type"]?.GetValue<string>());
+            Assert.Equal(1, properties[field]?["minLength"]?.GetValue<int>());
+        }
+        Assert.Equal("integer", properties["line"]?["type"]?.GetValue<string>());
+        Assert.Equal(1, properties["line"]?["minimum"]?.GetValue<int>());
+        Assert.Equal(int.MaxValue, properties["line"]?["maximum"]?.GetValue<int>());
+    }
+
+    [Theory]
+    [InlineData("success", true)]
+    [InlineData("success", false)]
+    [InlineData("mixed", true)]
+    public async Task AddBreakpoint_InitialAndTwoRuntimeAdditions_PreserveRequestedLinesAndInitialDuplicates(string responseMode, bool stopped)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            FixtureConfiguration: new FixtureConfiguration(SetBreakpointsResponseMode: responseMode,
+                LifecycleMode: stopped ? "all-stop" : "all-stop-continued-true")));
+        var session = await StartBreakpointSessionAsync(driver, $"add-preserve-{responseMode}-{stopped}",
+            (BreakpointSourcePath, 2), (BreakpointSourcePath, 6), (BreakpointSourcePath, 2));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await driver.WaitForFixtureEventAsync(stopped ? "stopped" : "continued", observation.Token);
+        await BreakpointReaderBarrierAsync(driver, session, "add-preserve-reader-barrier", observation.Token);
+        var state = AssertBreakpointEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("add-preserve-state")), isError: false);
+        Assert.Equal(stopped ? "stopped" : "continued", state["state"]?["event"]?.GetValue<string>());
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+
+        var first = AssertBreakpointEnvelope(await driver.CallToolRawAsync("add_breakpoint",
+            AddBreakpointArguments(session, Path.GetRelativePath(RepositoryLayout.Root, BreakpointSourcePath), 8),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("add-preserve-first")), isError: false);
+        AssertAddedBreakpoint(first, BreakpointSourcePath, 8, true, responseMode == "mixed" ? 9 : 8);
+        var second = AssertBreakpointEnvelope(await driver.CallToolRawAsync("add_breakpoint", AddBreakpointArguments(session, BreakpointSourcePath, 10),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("add-preserve-second")), isError: false);
+        AssertAddedBreakpoint(second, BreakpointSourcePath, 10, true, responseMode == "mixed" ? 11 : 10);
+        var writes = (await driver.ReadNativeActionsAsync()).Skip(before).Where(static action => action.Command == "setBreakpoints").ToArray();
+        Assert.Equal(2, writes.Length);
+        AssertBreakpointRequest(writes[0], BreakpointSourcePath, [2, 6, 2, 8]);
+        AssertBreakpointRequest(writes[1], BreakpointSourcePath, [2, 6, 2, 8, 10]);
+
+        var beforeDuplicate = (await driver.ReadNativeActionsAsync()).Count;
+        var duplicate = AssertBreakpointEnvelope(await driver.CallToolRawAsync("add_breakpoint", AddBreakpointArguments(session, BreakpointSourcePath, 8),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("add-preserve-duplicate")), isError: false);
+        AssertAddedBreakpoint(duplicate, BreakpointSourcePath, 8, true, responseMode == "mixed" ? 9 : 8);
+        var duplicateWrites = (await driver.ReadNativeActionsAsync()).Skip(beforeDuplicate).Where(static action => action.Command == "setBreakpoints").ToArray();
+        Assert.InRange(duplicateWrites.Length, 0, 1);
+        foreach (var write in duplicateWrites)
+        {
+            AssertBreakpointRequest(write, BreakpointSourcePath, [2, 6, 2, 8, 10]);
+        }
+    }
+
+    [Fact]
+    public async Task AddBreakpoint_UnverifiedResult_PreservesFalseAndOmittedActualLine()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(BreakpointLaunchOptions("mixed"));
+        var session = await StartBreakpointSessionAsync(driver, "add-unverified-start");
+        var content = AssertBreakpointEnvelope(await driver.CallToolRawAsync("add_breakpoint", AddBreakpointArguments(session, BreakpointSourcePath, 2),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("add-unverified")), isError: false);
+        AssertAddedBreakpoint(content, BreakpointSourcePath, 2, false, null);
+        var second = AssertBreakpointEnvelope(await driver.CallToolRawAsync("add_breakpoint", AddBreakpointArguments(session, BreakpointSourcePath, 6),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("add-after-unverified")), isError: false);
+        AssertAddedBreakpoint(second, BreakpointSourcePath, 6, true, 7);
+        AssertBreakpointRequest((await driver.ReadNativeActionsAsync()).Last(static action => action.Command == "setBreakpoints"), BreakpointSourcePath, [2, 6]);
+    }
+
+    [Fact]
+    public async Task AddBreakpoint_ConcurrentSameSourceUpdates_SerializeWithoutLostLines()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(BreakpointLaunchOptions("hold-first-runtime"));
+        var session = await StartBreakpointSessionAsync(driver, "add-concurrent-start", (BreakpointSourcePath, 2));
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+        var first = driver.CallToolRawAsync("add_breakpoint", AddBreakpointArguments(session, BreakpointSourcePath, 6),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("add-concurrent-first"), timeout: TimeSpan.FromSeconds(10));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        try
+        {
+            await driver.WaitForFixtureRecordAsync("runtime-breakpoints-response-gated", observation.Token);
+            var second = driver.CallToolRawAsync("add_breakpoint", AddBreakpointArguments(session, BreakpointSourcePath, 8),
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("add-concurrent-second"), timeout: TimeSpan.FromSeconds(10));
+            await BreakpointReaderBarrierAsync(driver, session, "add-concurrent-reader-barrier", observation.Token);
+            Assert.False(first.IsCompleted);
+            Assert.False(second.IsCompleted);
+            Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "setBreakpoints");
+            driver.ReleaseNextResponse();
+            var results = await Task.WhenAll(first, second).WaitAsync(observation.Token);
+            AssertAddedBreakpoint(AssertBreakpointEnvelope(results[0], isError: false), BreakpointSourcePath, 6, true, 6);
+            AssertAddedBreakpoint(AssertBreakpointEnvelope(results[1], isError: false), BreakpointSourcePath, 8, true, 8);
+            var writes = (await driver.ReadNativeActionsAsync()).Skip(before).Where(static action => action.Command == "setBreakpoints").ToArray();
+            Assert.Equal(2, writes.Length);
+            AssertBreakpointRequest(writes[0], BreakpointSourcePath, [2, 6]);
+            AssertBreakpointRequest(writes[1], BreakpointSourcePath, [2, 6, 8]);
+        }
+        finally
+        {
+            driver.ReleaseNextResponse();
+        }
+    }
+
+    [Fact]
+    public async Task AddBreakpoint_InvalidArgumentsUnavailableTokenOrSource_PerformsNoDapIo()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(BreakpointLaunchOptions());
+        var session = await StartBreakpointSessionAsync(driver, "add-invalid-start", (BreakpointSourcePath, 2));
+        var invalid = new List<JsonObject?> { null };
+        foreach (var field in new[] { "debugSessionId", "file", "line" })
+        {
+            var arguments = AddBreakpointArguments(session, BreakpointSourcePath, 6);
+            arguments.Remove(field);
+            invalid.Add(arguments);
+        }
+        foreach (var field in new[] { "debugSessionId", "file" })
+        {
+            foreach (var value in new JsonNode?[] { JsonValue.Create(""), JsonValue.Create(" \t "), JsonValue.Create(1), null })
+            {
+                var arguments = AddBreakpointArguments(session, BreakpointSourcePath, 6);
+                arguments[field] = value?.DeepClone();
+                invalid.Add(arguments);
+            }
+        }
+        foreach (var value in new JsonNode?[] { JsonValue.Create(0), JsonValue.Create(-1), JsonValue.Create(1.5), JsonValue.Create(2_147_483_648L), JsonValue.Create("6"), null })
+        {
+            var arguments = AddBreakpointArguments(session, BreakpointSourcePath, 6);
+            arguments["line"] = value;
+            invalid.Add(arguments);
+        }
+        foreach (var field in new[] { "condition", "hitCondition", "unexpected" })
+        {
+            var arguments = AddBreakpointArguments(session, BreakpointSourcePath, 6);
+            arguments[field] = "true";
+            invalid.Add(arguments);
+        }
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+        for (var index = 0; index < invalid.Count; index++)
+        {
+            var content = AssertBreakpointEnvelope(await driver.CallToolRawAsync("add_breakpoint", invalid[index],
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId($"add-invalid-{index}")), isError: true);
+            Assert.Equal("invalid_tool_arguments", content["kind"]?.GetValue<string>());
+            Assert.Equal("INVALID_TOOL_ARGUMENTS", content["error"]?.GetValue<string>());
+            Assert.Equal("add_breakpoint", content["tool"]?.GetValue<string>());
+        }
+        AssertFixedBreakpointError(AssertBreakpointEnvelope(await driver.CallToolRawAsync("add_breakpoint",
+            AddBreakpointArguments("unavailable-opaque-token", BreakpointSourcePath, 6), ModernMcpProcessDriver.CurrentMeta(), new RequestId("add-unavailable-token")), isError: true),
+            "debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
+        AssertFixedBreakpointError(AssertBreakpointEnvelope(await driver.CallToolRawAsync("add_breakpoint",
+            AddBreakpointArguments(session, driver.InertProgramPath + ".missing.cs", 6), ModernMcpProcessDriver.CurrentMeta(), new RequestId("add-unavailable-source")), isError: true),
+            "breakpoint_source_unavailable", "BREAKPOINT_SOURCE_UNAVAILABLE");
+        Assert.Equal(before, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Fact]
+    public async Task AddBreakpoint_RefusedUpdate_DoesNotContaminateLaterReplacement()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(BreakpointLaunchOptions("refuse-first-runtime"));
+        var session = await StartBreakpointSessionAsync(driver, "add-refused-start", (BreakpointSourcePath, 2));
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+        var refused = AssertBreakpointEnvelope(await driver.CallToolRawAsync("add_breakpoint", AddBreakpointArguments(session, BreakpointSourcePath, 6),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("add-refused")), isError: true);
+        AssertFixedBreakpointError(refused, "dap_set_breakpoints_refused", "DAP_SET_BREAKPOINTS_REFUSED");
+        var state = AssertBreakpointEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("add-refused-retained")), isError: false);
+        Assert.Equal("debug_state_success", state["kind"]?.GetValue<string>());
+        var added = AssertBreakpointEnvelope(await driver.CallToolRawAsync("add_breakpoint", AddBreakpointArguments(session, BreakpointSourcePath, 8),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("add-after-refusal")), isError: false);
+        AssertAddedBreakpoint(added, BreakpointSourcePath, 8, true, 8);
+        var writes = (await driver.ReadNativeActionsAsync()).Skip(before).Where(static action => action.Command == "setBreakpoints").ToArray();
+        Assert.Equal(2, writes.Length);
+        AssertBreakpointRequest(writes[0], BreakpointSourcePath, [2, 6]);
+        AssertBreakpointRequest(writes[1], BreakpointSourcePath, [2, 8]);
+    }
+
+    [Theory]
+    [InlineData("missing-verified")]
+    [InlineData("too-few-results")]
+    [InlineData("reader-failure")]
+    public async Task AddBreakpoint_MalformedOrUncertainResponse_ReturnsRedactedProtocolErrorAndDrains(string responseMode)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(BreakpointLaunchOptions(responseMode));
+        var session = await StartBreakpointSessionAsync(driver, $"add-malformed-{responseMode}-start");
+        var content = AssertBreakpointEnvelope(await driver.CallToolRawAsync("add_breakpoint", AddBreakpointArguments(session, BreakpointSourcePath, 2),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId($"add-malformed-{responseMode}")), isError: true);
+        AssertFixedBreakpointError(content, "dap_set_breakpoints_protocol_error", "DAP_SET_BREAKPOINTS_PROTOCOL_ERROR");
+        await AssertBreakpointSessionNotFoundAsync(driver, session, $"add-malformed-{responseMode}-state");
+    }
+
+    [Fact]
+    public async Task AddBreakpoint_PostWriteCallerCancellation_DrainsBeforeReuse()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(BreakpointLaunchOptions("hold-first-runtime"));
+        var session = await StartBreakpointSessionAsync(driver, "add-cancel-start", (BreakpointSourcePath, 2));
+        using var cancellation = new CancellationTokenSource();
+        var operation = driver.CallToolRawAsync("add_breakpoint", AddBreakpointArguments(session, BreakpointSourcePath, 6),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("add-cancel"), cancellation.Token, timeout: TimeSpan.FromSeconds(10));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await driver.WaitForFixtureRecordAsync("runtime-breakpoints-response-gated", observation.Token);
+        await BreakpointReaderBarrierAsync(driver, session, "add-cancel-reader-barrier", observation.Token);
+        Assert.False(operation.IsCompleted);
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
+        await driver.WaitForFixtureRecordAsync("disconnect-response", observation.Token);
+        await AssertBreakpointSessionNotFoundAsync(driver, session, "add-cancel-state");
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+        AssertFixedBreakpointError(AssertBreakpointEnvelope(await driver.CallToolRawAsync("add_breakpoint", AddBreakpointArguments(session, BreakpointSourcePath, 8),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("add-cancel-reuse")), isError: true), "debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
+        Assert.Equal(before, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Fact]
+    public async Task AddBreakpoint_SeparateSessions_DoNotShareRuntimeConfiguration()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(BreakpointLaunchOptions());
+        var first = await StartBreakpointSessionAsync(driver, "add-isolation-first", (BreakpointSourcePath, 2));
+        var second = await StartBreakpointSessionAsync(driver, "add-isolation-second", (BreakpointSourcePath, 4));
+        Assert.NotEqual(first, second);
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+        foreach (var (session, line) in new[] { (first, 6), (second, 8), (first, 10), (second, 12) })
+        {
+            AssertAddedBreakpoint(AssertBreakpointEnvelope(await driver.CallToolRawAsync("add_breakpoint", AddBreakpointArguments(session, BreakpointSourcePath, line),
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId($"add-isolation-{line}")), isError: false), BreakpointSourcePath, line, true, line);
+        }
+        var writes = (await driver.ReadNativeActionsAsync()).Skip(before).Where(static action => action.Command == "setBreakpoints").ToArray();
+        Assert.Equal(4, writes.Length);
+        AssertBreakpointRequest(writes[0], BreakpointSourcePath, [2, 6]);
+        AssertBreakpointRequest(writes[1], BreakpointSourcePath, [4, 8]);
+        AssertBreakpointRequest(writes[2], BreakpointSourcePath, [2, 6, 10]);
+        AssertBreakpointRequest(writes[3], BreakpointSourcePath, [4, 8, 12]);
+    }
+
+    [Fact]
+    public async Task AddBreakpoint_TotalSessionLimit_RejectsNewLineWithoutIoButAllowsExistingLine()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(BreakpointLaunchOptions());
+        var otherSource = Path.Combine(RepositoryLayout.Root, "host/NetCoreDbg.Mcp.Stateless.Tests/Fixtures/ControlledDapAdapter/Program.cs");
+        var seeds = Enumerable.Range(1, 128).Select(line => (BreakpointSourcePath, line))
+            .Concat(Enumerable.Range(1, 128).Select(line => (otherSource, line))).ToArray();
+        var session = await StartBreakpointSessionAsync(driver, "add-limit-start", seeds);
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+        AssertFixedBreakpointError(AssertBreakpointEnvelope(await driver.CallToolRawAsync("add_breakpoint", AddBreakpointArguments(session, BreakpointSourcePath, 129),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("add-limit-new-line")), isError: true), "breakpoint_limit_reached", "BREAKPOINT_LIMIT_REACHED");
+        Assert.Equal(before, (await driver.ReadNativeActionsAsync()).Count);
+        AssertAddedBreakpoint(AssertBreakpointEnvelope(await driver.CallToolRawAsync("add_breakpoint", AddBreakpointArguments(session, BreakpointSourcePath, 2),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("add-limit-existing-line")), isError: false), BreakpointSourcePath, 2, true, 2);
+        var writes = (await driver.ReadNativeActionsAsync()).Skip(before).Where(static action => action.Command == "setBreakpoints").ToArray();
+        Assert.InRange(writes.Length, 0, 1);
+        foreach (var write in writes)
+        {
+            AssertBreakpointRequest(write, BreakpointSourcePath, Enumerable.Range(1, 128).ToArray());
+        }
+    }
+
+    [Theory]
+    [InlineData("all-stop-exited", "exited")]
+    [InlineData("all-stop-terminated", "terminated")]
+    public async Task AddBreakpoint_AlreadyObservedTerminalSession_RefusesWithoutDapIo(string lifecycleMode, string terminal)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: lifecycleMode)));
+        var session = await StartBreakpointSessionAsync(driver, $"add-terminal-{terminal}-start");
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await driver.WaitForFixtureEventAsync(terminal, observation.Token);
+        await BreakpointReaderBarrierAsync(driver, session, $"add-terminal-{terminal}-reader-barrier", observation.Token);
+        var state = AssertBreakpointEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId($"add-terminal-{terminal}-state")), isError: false);
+        Assert.Equal(terminal, state["state"]?["event"]?.GetValue<string>());
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+        var refused = AssertBreakpointEnvelope(await driver.CallToolRawAsync("add_breakpoint", AddBreakpointArguments(session, BreakpointSourcePath, 2),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId($"add-terminal-{terminal}")), isError: true);
+        Assert.NotEqual("breakpoint_added", refused["kind"]?.GetValue<string>());
+        Assert.Equal(before, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    private static JsonObject AddBreakpointArguments(string session, string file, int line) => new()
+    {
+        ["debugSessionId"] = session,
+        ["file"] = file,
+        ["line"] = line,
+    };
+
+    private static async Task<string> StartBreakpointSessionAsync(ModernMcpProcessDriver driver, string requestId, params (string File, int Line)[] breakpoints)
+    {
+        var result = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync("start_debug", BreakpointArguments(driver, breakpoints),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId(requestId)));
+        AssertCompleteStartEnvelope(result);
+        return Assert.IsType<string>(result["structuredContent"]?["debugSessionId"]?.GetValue<string>());
+    }
+
+    private static async Task BreakpointReaderBarrierAsync(ModernMcpProcessDriver driver, string session, string requestId, CancellationToken cancellationToken)
+    {
+        var content = AssertBreakpointEnvelope(await driver.CallToolRawAsync("get_threads", new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId(requestId), cancellationToken), isError: false);
+        Assert.Equal("threads_success", content["kind"]?.GetValue<string>());
+    }
+
+    private static async Task AssertBreakpointSessionNotFoundAsync(ModernMcpProcessDriver driver, string session, string requestId)
+    {
+        var content = AssertBreakpointEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId(requestId)), isError: true);
+        AssertFixedBreakpointError(content, "debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
+    }
+
+    private static JsonObject AssertBreakpointEnvelope(JsonRpcResponse response, bool isError)
+    {
+        var result = ModernMcpProcessDriver.RequireResult(response);
+        Assert.Equal("complete", result["resultType"]?.GetValue<string>());
+        Assert.Equal(isError, result["isError"]?.GetValue<bool>() == true);
+        var content = Assert.IsType<JsonObject>(result["structuredContent"]);
+        var text = Assert.IsType<JsonObject>(Assert.Single(Assert.IsType<JsonArray>(result["content"])));
+        Assert.Equal("text", text["type"]?.GetValue<string>());
+        Assert.Equal(content.ToJsonString(), text["text"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        return content;
+    }
+
+    private static void AssertAddedBreakpoint(JsonObject content, string file, int line, bool verified, int? actualLine)
+    {
+        Assert.Equal("breakpoint_added", content["kind"]?.GetValue<string>());
+        Assert.Equal(Path.GetFullPath(file), content["file"]?.GetValue<string>());
+        Assert.Equal(line, content["line"]?.GetValue<int>());
+        Assert.Equal(verified, content["verified"]?.GetValue<bool>());
+        Assert.Equal(actualLine.HasValue, content.ContainsKey("actualLine"));
+        if (actualLine is { } actual)
+        {
+            Assert.Equal(actual, content["actualLine"]?.GetValue<int>());
+        }
+        Assert.Equal(actualLine.HasValue ? 5 : 4, content.Count);
+    }
+
+    private static void AssertFixedBreakpointError(JsonObject content, string kind, string error)
+    {
+        Assert.Equal(kind, content["kind"]?.GetValue<string>());
+        Assert.Equal(error, content["error"]?.GetValue<string>());
+        Assert.Equal(2, content.Count);
+    }
+
     private static string BreakpointSourcePath => Path.Combine(RepositoryLayout.Root,
         "host/NetCoreDbg.Mcp.Stateless.Tests/ModernMcp/ModernProtocolContractTests.cs");
 
@@ -488,7 +837,7 @@ public sealed class ModernProtocolContractTests
     private static void AssertCatalog(JsonObject result)
     {
         var tools = Assert.IsType<JsonArray>(result["tools"]);
-        Assert.Equal(15, tools.Count);
+        Assert.Equal(16, tools.Count);
         Assert.Equal(
             [
                 "start_debug",
@@ -500,6 +849,7 @@ public sealed class ModernProtocolContractTests
                 "get_scopes",
                 "get_variables",
                 "continue_execution",
+                "add_breakpoint",
                 "get_ui_probe_capabilities",
                 "capture_visual_evidence",
                 "read_capture_artifact",
@@ -509,8 +859,8 @@ public sealed class ModernProtocolContractTests
             ],
             tools.Select(static tool => tool?["name"]?.GetValue<string>()));
         Assert.Equal(
-            ["start_debug", "get_debug_state", "stop_debug", "get_threads", "get_call_stack", "step_over", "get_scopes", "get_variables", "continue_execution"],
-            tools.Take(9).Select(static tool => tool?["name"]?.GetValue<string>()));
+            ["start_debug", "get_debug_state", "stop_debug", "get_threads", "get_call_stack", "step_over", "get_scopes", "get_variables", "continue_execution", "add_breakpoint"],
+            tools.Take(10).Select(static tool => tool?["name"]?.GetValue<string>()));
 
         var start = Assert.IsType<JsonObject>(tools[0]);
         Assert.Equal("object", start["inputSchema"]?["type"]?.GetValue<string>());

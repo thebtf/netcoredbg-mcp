@@ -254,6 +254,66 @@
       },
       "additionalProperties": false
     },
+    "addBreakpointArguments": {
+      "type": "object",
+      "required": [
+        "debugSessionId",
+        "file",
+        "line"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
+    "breakpointAdded": {
+      "type": "object",
+      "required": [
+        "kind",
+        "file",
+        "line",
+        "verified"
+      ],
+      "properties": {
+        "kind": {
+          "const": "breakpoint_added"
+        },
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Normalized absolute source path."
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647,
+          "description": "Requested source line, not an adapter adjustment."
+        },
+        "verified": {
+          "type": "boolean"
+        },
+        "actualLine": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
     "startDebugSuccess": {
       "type": "object",
       "required": [
@@ -883,6 +943,70 @@
       },
       "additionalProperties": false
     },
+    "breakpointSourceUnavailable": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "breakpoint_source_unavailable"
+        },
+        "error": {
+          "const": "BREAKPOINT_SOURCE_UNAVAILABLE"
+        }
+      },
+      "additionalProperties": false
+    },
+    "breakpointLimitReached": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "breakpoint_limit_reached"
+        },
+        "error": {
+          "const": "BREAKPOINT_LIMIT_REACHED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapSetBreakpointsRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_set_breakpoints_refused"
+        },
+        "error": {
+          "const": "DAP_SET_BREAKPOINTS_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapSetBreakpointsProtocolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_set_breakpoints_protocol_error"
+        },
+        "error": {
+          "const": "DAP_SET_BREAKPOINTS_PROTOCOL_ERROR"
+        }
+      },
+      "additionalProperties": false
+    },
     "startDebugSourceUnavailable": {
       "type": "object",
       "required": [
@@ -971,7 +1095,8 @@
             "get_scopes",
             "get_variables",
             "step_over",
-            "continue_execution"
+            "continue_execution",
+            "add_breakpoint"
           ]
         }
       },
@@ -1017,6 +1142,9 @@
         },
         {
           "$ref": "#/$defs/continueTimedOut"
+        },
+        {
+          "$ref": "#/$defs/breakpointAdded"
         },
         {
           "$ref": "#/$defs/debugSessionNotFound"
@@ -1068,6 +1196,18 @@
         },
         {
           "$ref": "#/$defs/dapBreakpointsProtocolError"
+        },
+        {
+          "$ref": "#/$defs/breakpointSourceUnavailable"
+        },
+        {
+          "$ref": "#/$defs/breakpointLimitReached"
+        },
+        {
+          "$ref": "#/$defs/dapSetBreakpointsRefused"
+        },
+        {
+          "$ref": "#/$defs/dapSetBreakpointsProtocolError"
         },
         {
           "$ref": "#/$defs/invalidToolArguments"

@@ -48,6 +48,21 @@ Use the returned `debugSessionId` and, when available, the observed
 `state.currentThreadId` to inspect or step a stopped thread. This input is not
 part of the published read-only preview or the Python tool contract.
 
+After launch, `add_breakpoint(debugSessionId, file, line)` adds an
+unconditional source breakpoint while the session is running or stopped. Each
+update sends the full requested set for that source, preserving earlier initial
+and runtime entries. A session holds at most 256 requested entries. Paths are
+normalized lexically; use the same path for a source rather than relying on
+symlink or hard-link aliases to identify it. The returned `verified` and optional
+`actualLine` are the adapter's current response, not proof of a hit. A refused
+update leaves the host's last confirmed requested set intact, but the adapter's
+applied set is not guaranteed; a later successful update resends the full set.
+A cancelled update with a possibly sent but unconfirmed request closes the
+session; cancellation after a fully written and confirmed response does not
+itself close it.
+Conditions, hit counts, and runtime removal/listing are not yet supported by
+this native path.
+
 To inspect a stopped frame, call `get_call_stack` with
 `includeInspectionContext: true`, then pass its `inspectionContextId` with the
 frame ID to `get_scopes` and with each returned reference to `get_variables`.
