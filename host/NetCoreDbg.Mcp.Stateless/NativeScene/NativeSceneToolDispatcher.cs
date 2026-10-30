@@ -34,7 +34,7 @@ internal static class NativeSceneToolDispatcher
         }
 
         var requestJson = SerializeArguments(arguments);
-        var validation = NativeSceneContractCatalog.ValidateRequest(tool, requestJson);
+        var validation = NativeSceneContractCatalog.ValidateRequest(tool, requestJson, out var selectedContract);
         if (!validation.IsValid)
         {
             return ToolError(tool, validation.Code!, validation.Message!);
@@ -42,37 +42,46 @@ internal static class NativeSceneToolDispatcher
 
         using var requestDocument = JsonDocument.Parse(requestJson);
         var request = requestDocument.RootElement;
+        var contract = selectedContract ?? throw new InvalidOperationException("Validated native scene request has no contract context.");
         var debugSessionId = request.GetProperty("debugSessionId").GetString()!;
         var binding = await resolveBinding(debugSessionId).ConfigureAwait(false);
         if (binding is null)
         {
-            return ToolError(tool, DebugSessionNotFound, "Debug session is not available.");
+            return ToolError(tool, DebugSessionNotFound, "Debug session is not available.", contract);
         }
 
         if (tool is "capture_element_snapshot" or "capture_native_scene" && !binding.SupportsSceneCapture)
         {
-            return ToolError(tool, UnsupportedCapability, "Native scene capability is unsupported.");
+            return ToolError(tool, UnsupportedCapability, "Native scene capability is unsupported.", contract);
         }
 
-        if (!binding.TryGetCandidate(out var candidate))
+        if (!binding.TryGetCandidate(contract, out var candidate))
         {
-            return ToolError(tool, UnsupportedCapability, "Native scene capability is unsupported because debuggee identity is unavailable.");
+            if (tool == "get_ui_probe_capabilities" && ReferenceEquals(contract, NativeSceneContractCatalog.LegacyContract))
+            {
+                return LegacyCapabilityIdentityUnavailable();
+            }
+
+            return ToolError(tool, UnsupportedCapability,
+                tool == "get_ui_probe_capabilities"
+                    ? "Native scene capability is unavailable because debuggee identity is unavailable."
+                    : "Native scene capability is unsupported because debuggee identity is unavailable.", contract);
         }
 
         if (request.TryGetProperty("sceneRequest", out var sceneRequest) &&
             !binding.MatchesExpectedCandidateIdentity(sceneRequest.GetProperty("expectedCandidateIdentity")))
         {
-            return ToolError(tool, CandidateMismatch, "Candidate identity does not match.");
+            return ToolError(tool, CandidateMismatch, "Candidate identity does not match.", contract);
         }
 
         return tool switch
         {
-            "get_ui_probe_capabilities" => Success(tool, CapabilityDeclaration(candidate, binding.SupportsVisualEvidence, binding.SupportsSceneCapture)),
-            "capture_visual_evidence" => await CaptureVisualEvidenceAsync(binding, request, candidate, cancellationToken).ConfigureAwait(false),
-            "read_capture_artifact" => await ReadCaptureArtifactAsync(binding, request, cancellationToken).ConfigureAwait(false),
-            "wait_for_ui_stable" => await WaitForUiStableAsync(binding, request, candidate, cancellationToken).ConfigureAwait(false),
-            "capture_element_snapshot" => await CaptureElementAsync(binding, request, cancellationToken).ConfigureAwait(false),
-            "capture_native_scene" => await CaptureNativeSceneAsync(binding, request, cancellationToken).ConfigureAwait(false),
+            "get_ui_probe_capabilities" => Success(tool, CapabilityDeclaration(candidate, binding.SupportsVisualEvidence, binding.SupportsSceneCapture, contract), contract),
+            "capture_visual_evidence" => await CaptureVisualEvidenceAsync(binding, request, candidate, contract, cancellationToken).ConfigureAwait(false),
+            "read_capture_artifact" => await ReadCaptureArtifactAsync(binding, request, contract, cancellationToken).ConfigureAwait(false),
+            "wait_for_ui_stable" => await WaitForUiStableAsync(binding, request, candidate, contract, cancellationToken).ConfigureAwait(false),
+            "capture_element_snapshot" => await CaptureElementAsync(binding, request, contract, cancellationToken).ConfigureAwait(false),
+            "capture_native_scene" => await CaptureNativeSceneAsync(binding, request, contract, cancellationToken).ConfigureAwait(false),
             _ => throw new InvalidOperationException("Known native scene tool has no dispatch branch."),
         };
     }
@@ -148,16 +157,16 @@ internal static class NativeSceneToolDispatcher
         }
     }
 
-    private static JsonObject CapabilityDeclaration(JsonElement candidate, bool supportsVisualEvidence, bool supportsSceneCapture) => new()
+    private static JsonObject CapabilityDeclaration(JsonElement candidate, bool supportsVisualEvidence, bool supportsSceneCapture, NativeSceneContractContext contract) => new()
     {
         ["kind"] = "ui_probe_capabilities",
-        ["protocolVersion"] = Contract.ProtocolVersion,
-        ["schemaVersion"] = Contract.SchemaVersion,
+        ["protocolVersion"] = contract.ProtocolVersion,
+        ["schemaVersion"] = contract.SchemaVersion,
         ["candidate"] = CloneCandidate(candidate),
         ["capabilities"] = new JsonObject
         {
-            ["supportedProtocolVersions"] = new JsonArray(JsonValue.Create(Contract.ProtocolVersion)),
-            ["supportedSchemaVersions"] = new JsonArray(JsonValue.Create(Contract.SchemaVersion)),
+            ["supportedProtocolVersions"] = new JsonArray(JsonValue.Create(contract.ProtocolVersion)),
+            ["supportedSchemaVersions"] = new JsonArray(JsonValue.Create(contract.SchemaVersion)),
             ["primitives"] = PrimitiveCapabilities(supportsVisualEvidence, supportsSceneCapture),
             ["context"] = CapabilityStates(Contract.ContextNames),
             ["settleConditions"] = CapabilityStates(Contract.SettleConditionNames, "unobservable"),
@@ -221,58 +230,63 @@ internal static class NativeSceneToolDispatcher
     private static async Task<CallToolResult> CaptureElementAsync(
         NativeSceneSessionBinding binding,
         JsonElement request,
+        NativeSceneContractContext contract,
         CancellationToken cancellationToken)
     {
         if (!binding.SupportsSceneCapture)
         {
-            return ToolError("capture_element_snapshot", UnsupportedCapability, "Native scene capability is unsupported.");
+            return ToolError("capture_element_snapshot", UnsupportedCapability, "Native scene capability is unsupported.", contract);
         }
 
-        return CaptureResult("capture_element_snapshot", await binding.CaptureElementAsync(request, cancellationToken).ConfigureAwait(false));
+        return CaptureResult("capture_element_snapshot", await binding.CaptureElementAsync(request, contract, cancellationToken).ConfigureAwait(false), contract);
     }
 
     private static async Task<CallToolResult> CaptureNativeSceneAsync(
         NativeSceneSessionBinding binding,
         JsonElement request,
+        NativeSceneContractContext contract,
         CancellationToken cancellationToken)
     {
         if (!binding.SupportsSceneCapture)
         {
-            return ToolError("capture_native_scene", UnsupportedCapability, "Native scene capability is unsupported.");
+            return ToolError("capture_native_scene", UnsupportedCapability, "Native scene capability is unsupported.", contract);
         }
 
-        return CaptureResult("capture_native_scene", await binding.CaptureNativeSceneAsync(request, cancellationToken).ConfigureAwait(false));
+        return CaptureResult("capture_native_scene", await binding.CaptureNativeSceneAsync(request, contract, cancellationToken).ConfigureAwait(false), contract);
     }
 
-    private static CallToolResult CaptureResult(string tool, JsonObject result) =>
+    private static CallToolResult CaptureResult(string tool, JsonObject result, NativeSceneContractContext contract) =>
         StringComparer.Ordinal.Equals(result["kind"]?.GetValue<string>(), "tool_error")
-            ? ToolError(tool, result["code"]!.GetValue<string>(), result["message"]!.GetValue<string>())
-            : Success(tool, result);
+            ? ToolError(tool, result["code"]!.GetValue<string>(), result["message"]!.GetValue<string>(), contract)
+            : Success(tool, result, contract);
 
     private static async Task<CallToolResult> CaptureVisualEvidenceAsync(
         NativeSceneSessionBinding binding,
         JsonElement request,
         JsonElement candidate,
+        NativeSceneContractContext contract,
         CancellationToken cancellationToken)
     {
         if (!binding.SupportsVisualEvidence)
         {
-            return ToolError("capture_visual_evidence", UnsupportedCapability, "Native scene capability is unsupported.");
+            return ToolError("capture_visual_evidence", UnsupportedCapability, "Native scene capability is unsupported.", contract);
         }
 
         var result = await binding.CaptureVisualEvidenceAsync(
             request.GetProperty("sceneRequest"),
             request.GetProperty("evidenceScope"),
             candidate,
+            contract,
             cancellationToken).ConfigureAwait(false);
         return result.Manifest is { } manifest
-            ? Success("capture_visual_evidence", manifest)
-            : ToolError("capture_visual_evidence", result.Code!, result.Message!);
+            ? Success("capture_visual_evidence", manifest, contract)
+            : ToolError("capture_visual_evidence", result.Code!, result.Message!, contract);
     }
     private static async Task<CallToolResult> WaitForUiStableAsync(
         NativeSceneSessionBinding binding,
         JsonElement request,
         JsonElement candidate,
+        NativeSceneContractContext contract,
         CancellationToken cancellationToken)
     {
         var stability = await binding.WaitForStableAsync(
@@ -281,17 +295,18 @@ internal static class NativeSceneToolDispatcher
         return Success("wait_for_ui_stable", new JsonObject
         {
             ["kind"] = "ui_stability_receipt",
-            ["protocolVersion"] = Contract.ProtocolVersion,
-            ["schemaVersion"] = Contract.SchemaVersion,
+            ["protocolVersion"] = contract.ProtocolVersion,
+            ["schemaVersion"] = contract.SchemaVersion,
             ["candidate"] = CloneCandidate(candidate),
             ["stability"] = stability,
-        });
+        }, contract);
     }
 
 
     private static async Task<CallToolResult> ReadCaptureArtifactAsync(
         NativeSceneSessionBinding binding,
         JsonElement request,
+        NativeSceneContractContext contract,
         CancellationToken cancellationToken)
     {
 
@@ -314,13 +329,25 @@ internal static class NativeSceneToolDispatcher
                 ["byteLength"] = chunk.ByteLength,
                 ["sha256"] = chunk.Sha256,
                 ["artifactSchemaVersion"] = chunk.ArtifactSchemaVersion,
-            }),
-            NativeSceneArtifactReadError error => ToolError("read_capture_artifact", error.Code, error.Message),
+            }, contract),
+            NativeSceneArtifactReadError error => ToolError("read_capture_artifact", error.Code, error.Message, contract),
             _ => throw new InvalidOperationException("Native scene artifact store returned an unknown result."),
         };
     }
 
-    private static CallToolResult ToolError(string tool, string code, string message) => Emit(
+    private static CallToolResult LegacyCapabilityIdentityUnavailable() => new()
+    {
+        ResultType = "complete",
+        IsError = true,
+        Content = [new TextContentBlock
+        {
+            Text = "Native scene capability is unavailable because debuggee identity is unavailable. " +
+                   "native-scene-probe.schema/1 cannot represent this state as a typed application result; " +
+                   "native-scene-probe.schema/2 provides a typed UNSUPPORTED_CAPABILITY result.",
+        }],
+    };
+
+    private static CallToolResult ToolError(string tool, string code, string message, NativeSceneContractContext? contract = null) => Emit(
         tool,
         new JsonObject
         {
@@ -329,14 +356,15 @@ internal static class NativeSceneToolDispatcher
             ["code"] = code,
             ["message"] = message,
         },
-        isError: true);
+        isError: true,
+        contract ?? NativeSceneContractCatalog.LegacyContract);
 
-    private static CallToolResult Success(string tool, JsonObject payload) => Emit(tool, payload, isError: false);
+    private static CallToolResult Success(string tool, JsonObject payload, NativeSceneContractContext contract) => Emit(tool, payload, isError: false, contract);
 
-    private static CallToolResult Emit(string tool, JsonObject payload, bool isError)
+    private static CallToolResult Emit(string tool, JsonObject payload, bool isError, NativeSceneContractContext contract)
     {
         var json = payload.ToJsonString();
-        if (!NativeSceneContractCatalog.ValidateResult(tool, json).IsValid)
+        if (!NativeSceneContractCatalog.ValidateResult(tool, json, contract).IsValid)
         {
             throw new InvalidOperationException("Native scene result construction drift was detected.");
         }
@@ -354,8 +382,6 @@ internal static class NativeSceneToolDispatcher
     {
         private FrozenContract(
             byte[] probeSchemaBytes,
-            string protocolVersion,
-            string schemaVersion,
             IReadOnlyList<Primitive> primitives,
             IReadOnlyList<ToolSchema> toolSchemas,
             IReadOnlyList<string> contextNames,
@@ -363,8 +389,6 @@ internal static class NativeSceneToolDispatcher
             IReadOnlyDictionary<string, int> limits)
         {
             ProbeSchemaBytes = probeSchemaBytes;
-            ProtocolVersion = protocolVersion;
-            SchemaVersion = schemaVersion;
             Primitives = primitives;
             ToolSchemas = toolSchemas;
             ContextNames = contextNames;
@@ -373,8 +397,6 @@ internal static class NativeSceneToolDispatcher
         }
 
         internal byte[] ProbeSchemaBytes { get; }
-        internal string ProtocolVersion { get; }
-        internal string SchemaVersion { get; }
         internal IReadOnlyList<Primitive> Primitives { get; }
         internal IReadOnlyList<ToolSchema> ToolSchemas { get; }
         internal IReadOnlyList<string> ContextNames { get; }
@@ -416,8 +438,6 @@ internal static class NativeSceneToolDispatcher
 
             return new FrozenContract(
                 bytes,
-                ReadSingleEnum(definitions.GetProperty("currentProtocolVersion")),
-                ReadSingleEnum(definitions.GetProperty("currentSchemaVersion")),
                 primitives,
                 Array.AsReadOnly(toolSchemas),
                 ReadRequiredNames(definitions.GetProperty("contextCapabilities")),

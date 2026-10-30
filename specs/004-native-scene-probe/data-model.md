@@ -7,6 +7,13 @@ not an implementation authorization. Recorded operator approval of the frozen
 schemas and parity corpus authorizes only M0-G0 tasks T002–T007; the first M0
 primitive task, T008, remains prohibited until T007 is GREEN.
 
+The initial approval and M0-G0 gate in this document apply to the frozen `/1`
+contract. The later source-built `/2` compatibility amendment is a separate
+technical change under the autonomous .NET replacement mandate. It neither
+inherits nor changes the operator's exact-byte `/1` approval; no separate
+operator approval of `/2` bytes is recorded. Implementation, verification,
+and delivery evidence for `/2` must be stated independently.
+
 The contract exposes exactly six additive primitives:
 
 | Milestone | Primitive | Role |
@@ -118,6 +125,17 @@ A version that does not match the version syntax is invalid input. A
 syntactically valid version which the declaration does not support is
 `UNSUPPORTED_PROTOCOL`. A structurally valid request for a declared-unavailable
 context, settle condition, or primitive capability is `UNSUPPORTED_CAPABILITY`.
+
+The compatibility amendment accepts `native-scene-probe/1` with either
+`native-scene-probe.schema/1` or `native-scene-probe.schema/2`. Validation,
+candidate contract hash, and result projection use the revision selected by
+each request. A successful `/1` declaration continues to advertise `/1`.
+For a live session without a positively identified candidate, `/2`
+`get_ui_probe_capabilities` returns the schema-valid `UNSUPPORTED_CAPABILITY`
+tool error. The frozen `/1` capability error cannot express that state: the
+host returns a deliberate MCP-level error without `structuredContent`, rather
+than fabricating an identity or emitting an invalid `/1` application payload.
+Neither path starts observation or capture work.
 
 ### Scene Request Context
 
@@ -242,7 +260,7 @@ Every `toolError` has the common boundary codes `INVALID_TOOL_ARGUMENTS`, `DEBUG
 
 | Primitive | Additional permitted `toolError.code` values |
 |---|---|
-| `get_ui_probe_capabilities` | None. |
+| `get_ui_probe_capabilities` | `/1`: none; `/2`: `UNSUPPORTED_CAPABILITY` when candidate identity is unavailable. |
 | `capture_visual_evidence` | `UNSUPPORTED_CAPABILITY`, `SCENE_NOT_FOUND`, `SCENE_AMBIGUOUS`, `ELEMENT_NOT_FOUND`, `ELEMENT_AMBIGUOUS`, `OBSERVER_UNAVAILABLE`, `ARTIFACT_WRITE_FAILED`. |
 | `read_capture_artifact` | `UNSUPPORTED_CAPABILITY`, `ARTIFACT_INTEGRITY_FAILED`; `ARTIFACT_NOT_FOUND` is instead the fixed special envelope. |
 | `wait_for_ui_stable` | `UNSUPPORTED_CAPABILITY`, `SCENE_NOT_FOUND`, `SCENE_AMBIGUOUS`, `OBSERVER_UNAVAILABLE`. |

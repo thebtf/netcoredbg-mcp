@@ -12,7 +12,9 @@
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="../../specs/004-native-scene-probe/contracts/native-scene-probe.schema.json" Link="NativeScene/native-scene-probe.schema.json" LogicalName="NetCoreDbg.Mcp.Stateless.NativeScene.native-scene-probe.schema.json" />
+    <EmbeddedResource Include="../../specs/004-native-scene-probe/contracts/native-scene-probe-v2.schema.json" Link="NativeScene/native-scene-probe-v2.schema.json" LogicalName="NetCoreDbg.Mcp.Stateless.NativeScene.native-scene-probe-v2.schema.json" />
     <EmbeddedResource Include="../../specs/004-native-scene-probe/contracts/native-scene-artifact.schema.json" Link="NativeScene/native-scene-artifact.schema.json" LogicalName="NetCoreDbg.Mcp.Stateless.NativeScene.native-scene-artifact.schema.json" />
     <EmbeddedResource Include="../../specs/004-native-scene-probe/contracts/parity-corpus.json" Link="NativeScene/parity-corpus.json" LogicalName="NetCoreDbg.Mcp.Stateless.NativeScene.parity-corpus.json" />
+    <EmbeddedResource Include="../../specs/004-native-scene-probe/contracts/parity-corpus-v2.json" Link="NativeScene/parity-corpus-v2.json" LogicalName="NetCoreDbg.Mcp.Stateless.NativeScene.parity-corpus-v2.json" />
   </ItemGroup>
 </Project>

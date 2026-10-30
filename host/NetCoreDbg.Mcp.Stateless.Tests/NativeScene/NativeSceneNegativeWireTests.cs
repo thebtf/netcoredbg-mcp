@@ -27,7 +27,7 @@ public sealed class NativeSceneNegativeWireTests
 
     [Theory]
     [InlineData("native-scene-probe/2", ActiveSchemaVersion)]
-    [InlineData(ActiveProtocolVersion, "native-scene-probe.schema/2")]
+    [InlineData(ActiveProtocolVersion, "native-scene-probe.schema/3")]
     [InlineData("native-scene-probe/2", "native-scene-probe.schema/2")]
     public void RecognizedButInactiveVersions_AreUnsupported(string protocolVersion, string schemaVersion)
     {
