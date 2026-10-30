@@ -158,6 +158,7 @@ internal static class Program
         private static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(1);
         private const int MaximumSerializedThreadsBytes = 256 * 1024;
         private const int MaximumSerializedCallStackBytes = 256 * 1024;
+        private const int MaximumBreakpointCount = 256;
 
         private readonly ConcurrentDictionary<string, NetCoreDbgSession> _sessions = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, SessionSlot> _slots = new(StringComparer.Ordinal);
@@ -247,7 +248,8 @@ internal static class Program
             RequestContext<CallToolRequestParams> context,
             CancellationToken cancellationToken)
         {
-            if (!TryReadProgram(context.Params.Arguments, out var program, out var hasProgram))
+            if (!TryReadProgram(context.Params.Arguments, out var program, out var hasProgram)
+                || !TryReadBreakpoints(context.Params.Arguments, out var breakpoints))
             {
                 return InvalidArguments(StartDebug);
             }
@@ -285,6 +287,11 @@ internal static class Program
                 }
             }
 
+            if (!TryNormalizeBreakpointSources(breakpoints))
+            {
+                return Error("start_debug_source_unavailable", "START_DEBUG_SOURCE_UNAVAILABLE");
+            }
+
             if (string.IsNullOrWhiteSpace(_debuggerPath))
             {
                 return Error("debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
@@ -304,6 +311,7 @@ internal static class Program
                     RequestTimeout,
                     StopTimeout,
                     binding.ProbeLaunchEnvironment,
+                    breakpoints,
                     cancellationToken).ConfigureAwait(false);
                 binding.AttachSession(session);
                 SessionSlot? slot = null;
@@ -333,7 +341,15 @@ internal static class Program
                     OnReaderFailed(token, session);
                 }
 
-                return Success("start_debug_success", token, session.State);
+                return breakpoints.Length == 0
+                    ? Success("start_debug_success", token, session.State)
+                    : Result(new
+                    {
+                        kind = "start_debug_success",
+                        debugSessionId = token,
+                        state = LifecycleState(session.State),
+                        initialBreakpoints = session.InitialBreakpoints,
+                    }, isError: false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -362,7 +378,7 @@ internal static class Program
 
                 throw;
             }
-            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
             {
                 if (registeredSlot is not null)
                 {
@@ -393,7 +409,11 @@ internal static class Program
                     }
                 }
 
-                return Error("debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
+                return exception is DapBreakpointsException breakpointFailure
+                    ? breakpointFailure.IsRefused
+                        ? Error("dap_breakpoints_refused", "DAP_BREAKPOINTS_REFUSED")
+                        : Error("dap_breakpoints_protocol_error", "DAP_BREAKPOINTS_PROTOCOL_ERROR")
+                    : Error("debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
             }
         }
 
@@ -1012,7 +1032,7 @@ internal static class Program
                 return true;
             }
 
-            if (arguments.Count > 1 || arguments.Keys.Any(static name => name != "program"))
+            if (arguments.Count > 2 || arguments.Keys.Any(static name => name is not "program" and not "breakpoints"))
             {
                 return false;
             }
@@ -1029,6 +1049,96 @@ internal static class Program
             }
 
             return true;
+        }
+
+        private static bool TryReadBreakpoints(
+            IDictionary<string, JsonElement>? arguments,
+            out DapSourceBreakpoint[] breakpoints)
+        {
+            breakpoints = Array.Empty<DapSourceBreakpoint>();
+            if (arguments is null || !arguments.TryGetValue("breakpoints", out var element))
+            {
+                return true;
+            }
+
+            if (element.ValueKind != JsonValueKind.Array || element.GetArrayLength() > MaximumBreakpointCount)
+            {
+                return false;
+            }
+
+            if (element.GetArrayLength() == 0)
+            {
+                return true;
+            }
+
+            breakpoints = new DapSourceBreakpoint[element.GetArrayLength()];
+            var index = 0;
+            foreach (var breakpoint in element.EnumerateArray())
+            {
+                if (breakpoint.ValueKind != JsonValueKind.Object
+                    || !breakpoint.TryGetProperty("file", out var file)
+                    || file.ValueKind != JsonValueKind.String
+                    || string.IsNullOrWhiteSpace(file.GetString())
+                    || !breakpoint.TryGetProperty("line", out var line)
+                    || line.ValueKind != JsonValueKind.Number
+                    || !line.TryGetInt32(out var lineNumber)
+                    || lineNumber <= 0)
+                {
+                    return false;
+                }
+
+                var propertyCount = 0;
+                foreach (var property in breakpoint.EnumerateObject())
+                {
+                    if (property.Name is not "file" and not "line")
+                    {
+                        return false;
+                    }
+
+                    propertyCount++;
+                }
+
+                if (propertyCount != 2)
+                {
+                    return false;
+                }
+
+                breakpoints[index] = new DapSourceBreakpoint(index, file.GetString()!, lineNumber);
+                index++;
+            }
+
+            return true;
+        }
+
+        private static bool TryNormalizeBreakpointSources(DapSourceBreakpoint[] breakpoints)
+        {
+            if (breakpoints.Length == 0)
+            {
+                return true;
+            }
+
+            try
+            {
+                var workingDirectory = Environment.CurrentDirectory;
+                for (var index = 0; index < breakpoints.Length; index++)
+                {
+                    var breakpoint = breakpoints[index];
+                    var path = Path.GetFullPath(breakpoint.File, workingDirectory);
+                    if (!File.Exists(path))
+                    {
+                        return false;
+                    }
+
+                    breakpoints[index] = breakpoint with { File = path };
+                }
+
+                return true;
+            }
+            catch (Exception exception) when (exception is ArgumentException
+                or IOException or NotSupportedException or UnauthorizedAccessException or System.Security.SecurityException)
+            {
+                return false;
+            }
         }
 
         private static bool TryReadSessionId(
@@ -1160,15 +1270,14 @@ internal static class Program
         private static CallToolResult StopSuccess(DapSessionState state) => Result(new
         {
             kind = "stop_debug_success",
-            state = LifecycleState(state),
+            state = new LifecycleStateContent(state.Event, state.StopReason, state.ExitCode),
         }, isError: false);
 
-        private static object LifecycleState(DapSessionState state) => new
-        {
-            @event = state.Event,
-            stopReason = state.StopReason,
-            exitCode = state.ExitCode,
-        };
+        private static LifecycleStateContent LifecycleState(DapSessionState state) => new(
+            state.Event,
+            state.StopReason,
+            state.ExitCode,
+            state.CurrentThreadId);
 
         private static CallToolResult NotFound() => Error("debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
 
@@ -1208,6 +1317,12 @@ internal static class Program
             };
         }
 
+        private sealed record LifecycleStateContent(
+            string? @event,
+            string? stopReason,
+            int? exitCode,
+            [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? currentThreadId = null);
+
         private sealed record ThreadsSuccessContent(string kind, IReadOnlyList<DapThread> threads);
         private sealed record CallStackArguments(string SessionId, int ThreadId, uint StartFrame, uint Levels);
 
@@ -1231,7 +1346,7 @@ internal static class Program
         {
             Tools =
             [
-                Tool("start_debug", "Start debugging a program.", "{\"type\":\"object\",\"properties\":{\"program\":{\"type\":\"string\",\"minLength\":1}},\"additionalProperties\":false}"),
+                Tool("start_debug", "Start debugging a program with optional request-local source breakpoints. Initial breakpoint verification is not a breakpoint-hit report.", "{\"type\":\"object\",\"properties\":{\"program\":{\"type\":\"string\",\"minLength\":1},\"breakpoints\":{\"type\":\"array\",\"maxItems\":256,\"items\":{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\",\"minLength\":1},\"line\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647}},\"required\":[\"file\",\"line\"],\"additionalProperties\":false}}},\"additionalProperties\":false}"),
                 Tool("get_debug_state", "Get the state of a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("stop_debug", "Stop a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("get_threads", "Get threads in a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),

@@ -71,6 +71,47 @@ public sealed class StructuredContentSchemaParityTests
     }
 
     [Fact]
+    public async Task LiveHost_BreakpointLaunchStructuredContentMatchesFrozenSchemaVariants()
+    {
+        var schema = LoadSchema();
+        var scenarios = new[]
+        {
+            ("success", false, "start_debug_success", (string?)null),
+            ("refused", false, "dap_breakpoints_refused", "DAP_BREAKPOINTS_REFUSED"),
+            ("missing-verified", false, "dap_breakpoints_protocol_error", "DAP_BREAKPOINTS_PROTOCOL_ERROR"),
+            ("too-few-results", false, "dap_breakpoints_protocol_error", "DAP_BREAKPOINTS_PROTOCOL_ERROR"),
+            ("success", true, "start_debug_source_unavailable", "START_DEBUG_SOURCE_UNAVAILABLE"),
+        };
+        foreach (var (responseMode, missingSource, expectedKind, expectedError) in scenarios)
+        {
+            await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+                FixtureConfiguration: new FixtureConfiguration(
+                    SuppressLifecycleEvents: true,
+                    SetBreakpointsResponseMode: responseMode)));
+            var source = missingSource
+                ? driver.InertProgramPath + ".missing.cs"
+                : Path.Combine(RepositoryLayout.Root,
+                    "host/NetCoreDbg.Mcp.Stateless.Tests/ModernMcp/StructuredContentSchemaParityTests.cs");
+            var content = Structured(await driver.CallToolRawAsync("start_debug",
+                new JsonObject
+                {
+                    ["program"] = driver.InertProgramPath,
+                    ["breakpoints"] = new JsonArray(new JsonObject { ["file"] = source, ["line"] = 2 }),
+                },
+                ModernMcpProcessDriver.CurrentMeta(),
+                new RequestId($"breakpoints-schema-{responseMode}-{missingSource}")));
+
+            Assert.Equal(expectedKind, content["kind"]?.GetValue<string>());
+            Assert.Equal(expectedError, content["error"]?.GetValue<string>());
+            if (expectedError is null)
+            {
+                Assert.Single(Assert.IsType<JsonArray>(content["initialBreakpoints"]));
+            }
+            ValidateVariant(schema, content);
+        }
+    }
+
+    [Fact]
     public async Task LiveHost_StructuredContentMatchesEveryFrozenThreadSchemaVariant()
     {
         // Arrange
@@ -330,6 +371,7 @@ public sealed class StructuredContentSchemaParityTests
         "null" => value is null,
         "string" => value is JsonValue json && json.TryGetValue<string>(out _),
         "integer" => value is JsonValue json && json.TryGetValue<long>(out _),
+        "boolean" => value is JsonValue json && json.TryGetValue<bool>(out _),
         "array" => value is JsonArray,
         _ => false,
     };

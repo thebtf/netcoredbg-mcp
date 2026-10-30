@@ -154,6 +154,58 @@ public sealed class StepOverContractTests
         Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before.Count), static action => action.Command == "next");
     }
 
+    [Theory]
+    [InlineData(int.MinValue)]
+    [InlineData(int.MaxValue)]
+    public async Task StepOver_AdmittedNext_ClearsCurrentThreadIdBeforeHeldResponseAndPublishesActualNewStepThread(int nextThreadId)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(StepOver(nextResponseMode: "hold"));
+        var debugSessionId = await StartStoppedSessionAsync(driver, $"current-thread-step-{nextThreadId}-start");
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await driver.WaitForFixtureRecordAsync("stopped-event", observation.Token);
+        var threads = AssertApplicationEnvelope(await driver.CallToolRawAsync(
+            "get_threads",
+            new JsonObject { ["debugSessionId"] = debugSessionId },
+            ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId($"current-thread-step-{nextThreadId}-reader-barrier"),
+            observation.Token), isError: false);
+        Assert.Equal("threads_success", threads["kind"]?.GetValue<string>());
+        var initialState = await ReadDebugStateAsync(driver, debugSessionId, $"current-thread-step-{nextThreadId}-initial");
+        Assert.Equal("stopped", initialState["event"]?.GetValue<string>());
+        Assert.Equal(1, initialState["currentThreadId"]?.GetValue<int>());
+
+        var step = driver.CallToolRawAsync(
+            Tool,
+            Arguments(debugSessionId, nextThreadId),
+            ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId($"current-thread-step-{nextThreadId}"),
+            timeout: TimeSpan.FromSeconds(35));
+        try
+        {
+            await driver.WaitForNextRequestAsync(observation.Token);
+            await driver.WaitForFixtureRecordAsync("next-response-gated", observation.Token);
+
+            var heldState = await ReadDebugStateAsync(driver, debugSessionId, $"current-thread-step-{nextThreadId}-held");
+
+            Assert.False(step.IsCompleted, "The next acknowledgement and step stop are still held by the fixture.");
+            Assert.False(heldState.ContainsKey("currentThreadId"));
+            driver.ReleaseNextResponse();
+            var result = AssertApplicationEnvelope(await step, isError: false);
+            Assert.Equal("step_over_success", result["kind"]?.GetValue<string>());
+            Assert.Equal(nextThreadId, result["threadId"]?.GetValue<int>());
+
+            var stoppedState = await ReadDebugStateAsync(driver, debugSessionId, $"current-thread-step-{nextThreadId}-stopped");
+
+            Assert.Equal("stopped", stoppedState["event"]?.GetValue<string>());
+            Assert.Equal("step", stoppedState["stopReason"]?.GetValue<string>());
+            Assert.Equal(nextThreadId, stoppedState["currentThreadId"]?.GetValue<int>());
+        }
+        finally
+        {
+            driver.ReleaseNextResponse();
+        }
+    }
+
     [Fact]
     public async Task StepOver_ConcurrentCallDuringHeldActiveRecord_RefusesWithoutSecondNextWrite()
     {
@@ -458,6 +510,18 @@ public sealed class StepOverContractTests
         Assert.Equal(1, content["threadId"]?.GetValue<int>());
         Assert.Equal(30, content["timeoutSeconds"]?.GetValue<int>());
         await AssertEventuallyNotFoundAsync(driver, debugSessionId, "step-over-timeout-state");
+    }
+
+    private static async Task<JsonObject> ReadDebugStateAsync(ModernMcpProcessDriver driver, string debugSessionId, string requestId)
+    {
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(
+            "get_debug_state",
+            new JsonObject { ["debugSessionId"] = debugSessionId },
+            ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId(requestId)), isError: false);
+        Assert.Equal("debug_state_success", content["kind"]?.GetValue<string>());
+        Assert.Equal(debugSessionId, content["debugSessionId"]?.GetValue<string>());
+        return Assert.IsType<JsonObject>(content["state"]);
     }
 
     private static ModernMcpStartOptions StepOver(

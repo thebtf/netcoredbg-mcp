@@ -109,6 +109,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
     internal bool IsUsable => !_readerTask.IsCompleted && !HasExited();
+    internal IReadOnlyList<DapInitialBreakpoint> InitialBreakpoints { get; private set; } = Array.Empty<DapInitialBreakpoint>();
 
     internal event Action<NetCoreDbgSession>? ReaderFailed;
     internal bool TryGetNativeSceneTargetIdentity(out NativeSceneTargetIdentity targetIdentity)
@@ -145,6 +146,24 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             launchEnvironment: null,
             cancellationToken: cancellationToken);
 
+    internal static Task<NetCoreDbgSession> StartAsync(
+        string debuggerPath,
+        string programPath,
+        TimeSpan initializeTimeout,
+        TimeSpan requestTimeout,
+        TimeSpan stopTimeout,
+        IReadOnlyDictionary<string, string>? launchEnvironment,
+        CancellationToken cancellationToken) =>
+        StartAsync(
+            debuggerPath,
+            programPath,
+            initializeTimeout,
+            requestTimeout,
+            stopTimeout,
+            launchEnvironment,
+            Array.Empty<DapSourceBreakpoint>(),
+            cancellationToken);
+
     internal static async Task<NetCoreDbgSession> StartAsync(
         string debuggerPath,
         string programPath,
@@ -152,6 +171,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         TimeSpan requestTimeout,
         TimeSpan stopTimeout,
         IReadOnlyDictionary<string, string>? launchEnvironment,
+        IReadOnlyList<DapSourceBreakpoint> breakpoints,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(debuggerPath);
@@ -195,7 +215,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     processTreeOwnership);
             }
 
-            await session.StartProtocolAsync(programPath, initializeTimeout, launchEnvironment, cancellationToken).ConfigureAwait(false);
+            await session.StartProtocolAsync(programPath, initializeTimeout, launchEnvironment, breakpoints, cancellationToken).ConfigureAwait(false);
             return session;
         }
         catch
@@ -347,6 +367,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
                 active = new StepOverRecord(threadId, cancellationToken);
                 _activeStepOver = active;
+                _state = _state with { CurrentThreadId = null };
                 ClearCallStackEligibility();
             }
 
@@ -420,10 +441,18 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private Task StartProtocolAsync(string programPath, TimeSpan initializeTimeout, CancellationToken cancellationToken) =>
         StartProtocolAsync(programPath, initializeTimeout, launchEnvironment: null, cancellationToken: cancellationToken);
 
+    private Task StartProtocolAsync(
+        string programPath,
+        TimeSpan initializeTimeout,
+        IReadOnlyDictionary<string, string>? launchEnvironment,
+        CancellationToken cancellationToken) =>
+        StartProtocolAsync(programPath, initializeTimeout, launchEnvironment, Array.Empty<DapSourceBreakpoint>(), cancellationToken);
+
     private async Task StartProtocolAsync(
         string programPath,
         TimeSpan initializeTimeout,
         IReadOnlyDictionary<string, string>? launchEnvironment,
+        IReadOnlyList<DapSourceBreakpoint> breakpoints,
         CancellationToken cancellationToken)
     {
         _ = await SendRequestAsync(
@@ -442,6 +471,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             cancellationToken).ConfigureAwait(false);
 
         await _initialized.Task.WaitAsync(initializeTimeout, cancellationToken).ConfigureAwait(false);
+        await ConfigureBreakpointsAsync(breakpoints, cancellationToken).ConfigureAwait(false);
 
         object launchArguments = launchEnvironment is { Count: > 0 }
             ? new { program = programPath, env = launchEnvironment }
@@ -467,6 +497,98 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         finally
         {
             RemovePending(launch);
+        }
+    }
+
+    private async Task ConfigureBreakpointsAsync(
+        IReadOnlyList<DapSourceBreakpoint> breakpoints,
+        CancellationToken cancellationToken)
+    {
+        if (breakpoints.Count == 0)
+        {
+            return;
+        }
+
+        using var deadline = CreateDeadline(_requestTimeout, cancellationToken);
+        try
+        {
+            var files = new Dictionary<string, List<DapSourceBreakpoint>>(
+                OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            foreach (var breakpoint in breakpoints)
+            {
+                if (!files.TryGetValue(breakpoint.File, out var fileBreakpoints))
+                {
+                    fileBreakpoints = [];
+                    files.Add(breakpoint.File, fileBreakpoints);
+                }
+
+                fileBreakpoints.Add(breakpoint);
+            }
+
+            var initial = new DapInitialBreakpoint[breakpoints.Count];
+            foreach (var (file, fileBreakpoints) in files)
+            {
+                deadline.Token.ThrowIfCancellationRequested();
+                var requested = new DapRequestedBreakpoint[fileBreakpoints.Count];
+                for (var index = 0; index < requested.Length; index++)
+                {
+                    requested[index] = new DapRequestedBreakpoint(fileBreakpoints[index].Line);
+                }
+
+                var response = await SendRequestAcceptingRefusalAsync(
+                    "setBreakpoints",
+                    new DapSetBreakpointsArguments(new DapBreakpointSource(file), requested),
+                    _requestTimeout,
+                    deadline.Token).ConfigureAwait(false);
+                if (!response.Success)
+                {
+                    throw new DapBreakpointsException(isRefused: true);
+                }
+
+                if (response.Body.ValueKind != JsonValueKind.Object
+                    || !response.Body.TryGetProperty("breakpoints", out var results)
+                    || results.ValueKind != JsonValueKind.Array
+                    || results.GetArrayLength() != fileBreakpoints.Count)
+                {
+                    throw new DapBreakpointsException(isRefused: false);
+                }
+
+                var resultIndex = 0;
+                foreach (var result in results.EnumerateArray())
+                {
+                    if (result.ValueKind != JsonValueKind.Object
+                        || !result.TryGetProperty("verified", out var verified)
+                        || verified.ValueKind is not JsonValueKind.True and not JsonValueKind.False)
+                    {
+                        throw new DapBreakpointsException(isRefused: false);
+                    }
+
+                    int? actualLine = null;
+                    if (result.TryGetProperty("line", out var line))
+                    {
+                        if (line.ValueKind != JsonValueKind.Number || !line.TryGetInt32(out var number) || number <= 0)
+                        {
+                            throw new DapBreakpointsException(isRefused: false);
+                        }
+
+                        actualLine = number;
+                    }
+
+                    var originalIndex = fileBreakpoints[resultIndex++].Index;
+                    initial[originalIndex] = new DapInitialBreakpoint(originalIndex, verified.GetBoolean(), actualLine);
+                }
+            }
+
+            deadline.Token.ThrowIfCancellationRequested();
+            InitialBreakpoints = initial;
+        }
+        catch (DapBreakpointsException)
+        {
+            throw;
+        }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new DapBreakpointsException(isRefused: false);
         }
     }
 
@@ -968,6 +1090,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 {
                     Event = "stopped",
                     StopReason = reason,
+                    CurrentThreadId = threadId,
                 };
                 ClearCallStackEligibility();
                 if (allThreadsStopped)
@@ -998,7 +1121,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             lock (_stateGate)
             {
-                _state = _state with { Event = "continued" };
+                _state = _state with { Event = "continued", CurrentThreadId = null };
                 if (!hasAllThreadsContinued || allThreadsContinued || threadId is null)
                 {
                     ClearCallStackEligibility();
@@ -1035,8 +1158,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     {
                         Event = eventName,
                         ExitCode = _activeStepOver is null ? TryGetInt32(body, "exitCode") : RequireInt32(body, "exitCode"),
+                        CurrentThreadId = null,
                     }
-                    : _state with { Event = eventName };
+                    : _state with { Event = eventName, CurrentThreadId = null };
                 ClearCallStackEligibility();
                 _activeStepOver?.ObserveTerminal(eventName, _state.ExitCode);
             }
@@ -2241,6 +2365,28 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         bool SupportsPaging);
 
     private sealed record DapResponse(JsonElement Body, bool Success, bool TargetCurrent = true);
+
+    private sealed record DapSetBreakpointsArguments(
+        [property: JsonPropertyName("source")] DapBreakpointSource Source,
+        [property: JsonPropertyName("breakpoints")] IReadOnlyList<DapRequestedBreakpoint> Breakpoints);
+
+    private sealed record DapBreakpointSource([property: JsonPropertyName("path")] string Path);
+
+    private readonly record struct DapRequestedBreakpoint([property: JsonPropertyName("line")] int Line);
+}
+
+internal readonly record struct DapSourceBreakpoint(int Index, string File, int Line);
+
+internal readonly record struct DapInitialBreakpoint(
+    [property: JsonPropertyName("index")] int Index,
+    [property: JsonPropertyName("verified")] bool Verified,
+    [property: JsonPropertyName("actualLine")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? ActualLine);
+
+internal sealed class DapBreakpointsException(bool isRefused) : Exception(
+    isRefused ? "DAP refused source breakpoint configuration." : "DAP source breakpoint configuration failed.")
+{
+    internal bool IsRefused { get; } = isRefused;
 }
 
 internal enum DapStepOverOutcome

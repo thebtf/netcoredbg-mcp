@@ -35,6 +35,11 @@
             "integer",
             "null"
           ]
+        },
+        "currentThreadId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
         }
       },
       "additionalProperties": false
@@ -45,6 +50,56 @@
         "program": {
           "type": "string",
           "minLength": 1
+        },
+        "breakpoints": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/sourceBreakpoint"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "sourceBreakpoint": {
+      "type": "object",
+      "required": [
+        "file",
+        "line"
+      ],
+      "properties": {
+        "file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
+    "initialBreakpoint": {
+      "type": "object",
+      "description": "Initial setBreakpoints response only; not a breakpoint-hit or later verification report.",
+      "required": [
+        "index",
+        "verified"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "verified": {
+          "type": "boolean"
+        },
+        "actualLine": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
         }
       },
       "additionalProperties": false
@@ -138,6 +193,14 @@
         },
         "state": {
           "$ref": "#/$defs/lifecycleState"
+        },
+        "initialBreakpoints": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/initialBreakpoint"
+          }
         }
       },
       "additionalProperties": false
@@ -456,6 +519,54 @@
       },
       "additionalProperties": false
     },
+    "startDebugSourceUnavailable": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_source_unavailable"
+        },
+        "error": {
+          "const": "START_DEBUG_SOURCE_UNAVAILABLE"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapBreakpointsRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_breakpoints_refused"
+        },
+        "error": {
+          "const": "DAP_BREAKPOINTS_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapBreakpointsProtocolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_breakpoints_protocol_error"
+        },
+        "error": {
+          "const": "DAP_BREAKPOINTS_PROTOCOL_ERROR"
+        }
+      },
+      "additionalProperties": false
+    },
     "missingProgramCapability": {
       "type": "object",
       "required": [
@@ -548,6 +659,15 @@
         },
         {
           "$ref": "#/$defs/dapStepOverProtocolError"
+        },
+        {
+          "$ref": "#/$defs/startDebugSourceUnavailable"
+        },
+        {
+          "$ref": "#/$defs/dapBreakpointsRefused"
+        },
+        {
+          "$ref": "#/$defs/dapBreakpointsProtocolError"
         },
         {
           "$ref": "#/$defs/invalidToolArguments"
