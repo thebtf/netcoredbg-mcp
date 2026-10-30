@@ -71,6 +71,21 @@ variable reference is a leaf. After a step, continuation, or other invalidation,
 fetch a new stack and context: the debugger may reuse numeric references. This
 source-built path does not yet support variable paging or filtering.
 
+The source-built stateful host exposes `get_output(debugSessionId, clear?,
+category?)` for retained DAP output. It concatenates events in reader order;
+categories `console`, `stdout`, `stderr`, and `telemetry` are retained, and an
+omitted event category means `console`. Filtering is case-sensitive. A clear
+returns the current snapshot and empties the buffer only when `category` is
+omitted, null, or empty; a nonempty filter never clears it. Output remains
+available after a terminal event while the session is retained.
+
+By default, each event retains at most 100,000 Unicode code points before the
+`... [truncated]` suffix, and the session retains at most 10,000,000 code points,
+evicting whole oldest events. `NETCOREDBG_MAX_OUTPUT_ENTRY` and
+`NETCOREDBG_MAX_OUTPUT_BYTES` override those limits at host startup; despite the
+latter name, the unit is code points, not encoded bytes. Native `get_output_tail`
+and `search_output` remain unavailable; Python remains the default.
+
 For a stopped session, `continue_execution(debugSessionId, threadId)` sends a
 DAP `continue` request without `singleThread`, so it resumes all threads. It
 waits up to 30 seconds after the write for the next observed stop or terminal
