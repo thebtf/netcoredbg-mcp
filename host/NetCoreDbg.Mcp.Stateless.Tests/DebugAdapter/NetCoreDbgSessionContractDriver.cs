@@ -145,6 +145,14 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         InvokeThroughRegistryAsync(threadId, cancellationToken, inspectCancellation, beforeCancellationInspection,
             invokeSteps, beforeStop, beforeDispose, afterUsabilityObservation);
 
+    public Task<StepOverRegistryProbe> ContinueThroughRegistryAsync(
+        int threadId,
+        CancellationToken cancellationToken,
+        Func<Task>? beforeCancellationInspection = null,
+        Func<Func<string, CancellationToken, Task<ModelContextProtocol.Protocol.CallToolResult>>, Task<ModelContextProtocol.Protocol.CallToolResult>>? invokeContinue = null) =>
+        InvokeThroughRegistryAsync(threadId, cancellationToken, inspectCancellation: true,
+            beforeCancellationInspection: beforeCancellationInspection, invokeSteps: invokeContinue, continueExecution: true);
+
     public Task<StepOverRegistryProbe> GetCallStackThroughRegistryAsync(
         int threadId,
         CancellationToken cancellationToken,
@@ -161,7 +169,8 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         Func<Task>? beforeStop = null,
         Func<Task>? beforeDispose = null,
         Action<string?, bool>? afterUsabilityObservation = null,
-        bool inspectCallStack = false)
+        bool inspectCallStack = false,
+        bool continueExecution = false)
     {
         const string sessionId = "step-over-clock-session";
         var registryType = RequireType(_session.GetType().Assembly, "NetCoreDbg.Mcp.Stateless.Program+DebugSessionRegistry");
@@ -227,12 +236,12 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             var operationMethod = inspectCallStack
                 ? registryType.GetMethod("GetCallStackAsync", BindingFlags.Instance | BindingFlags.NonPublic,
                     binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(CancellationToken)], modifiers: null)
-                : registryType.GetMethod("StepOverAsync", BindingFlags.Instance | BindingFlags.NonPublic,
+                : registryType.GetMethod(continueExecution ? "ContinueAsync" : "StepOverAsync", BindingFlags.Instance | BindingFlags.NonPublic,
                     binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(ModelContextProtocol.Protocol.RequestId), typeof(CancellationToken)], modifiers: null);
             Assert.NotNull(operationMethod);
             var request = new ModelContextProtocol.Protocol.CallToolRequestParams
             {
-                Name = inspectCallStack ? "get_call_stack" : "step_over",
+                Name = inspectCallStack ? "get_call_stack" : continueExecution ? "continue_execution" : "step_over",
                 Arguments = new Dictionary<string, JsonElement>
                 {
                     ["debugSessionId"] = JsonSerializer.SerializeToElement(sessionId),
@@ -347,6 +356,91 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         }
     }
 
+    public Task DispatchContinueStopThenContinuedAsync(int requestSequence, bool stoppedBeforeAcknowledgement, CancellationToken cancellationToken)
+    {
+        var acknowledgement = JsonSerializer.SerializeToElement(new
+        {
+            seq = stoppedBeforeAcknowledgement ? 1_000_002 : 1_000_001,
+            type = "response",
+            request_seq = requestSequence,
+            success = true,
+            command = "continue",
+            body = new { allThreadsContinued = true },
+        });
+        var stopped = JsonSerializer.SerializeToElement(new
+        {
+            seq = stoppedBeforeAcknowledgement ? 1_000_001 : 1_000_002,
+            type = "event",
+            @event = "stopped",
+            body = new { reason = "obsolete-breakpoint", threadId = 2, allThreadsStopped = false },
+        });
+        var continued = JsonSerializer.SerializeToElement(new
+        {
+            seq = 1_000_003,
+            type = "event",
+            @event = "continued",
+            body = new { threadId = 2, allThreadsContinued = true },
+        });
+        return DispatchContinueMessagesUnderStateGateAsync(
+            [stoppedBeforeAcknowledgement ? stopped : acknowledgement,
+                stoppedBeforeAcknowledgement ? acknowledgement : stopped, continued],
+            releaseWriter: false, cancellationToken);
+    }
+
+    public Task DispatchContinueResponseFaultAndTerminalAsync(int requestSequence, bool terminalFirst, bool invalidSuccess, CancellationToken cancellationToken)
+    {
+        var fault = JsonSerializer.SerializeToElement(new
+        {
+            seq = terminalFirst ? 1_000_002 : 1_000_001,
+            type = "response",
+            request_seq = requestSequence,
+            success = invalidSuccess ? (object)"invalid" : true,
+            command = invalidSuccess ? "continue" : "next",
+            body = new { message = "private controlled continue protocol detail" },
+        });
+        var terminal = JsonSerializer.SerializeToElement(new
+        {
+            seq = terminalFirst ? 1_000_001 : 1_000_002,
+            type = "event",
+            @event = "terminated",
+        });
+        return DispatchContinueMessagesUnderStateGateAsync(
+            terminalFirst ? [terminal, fault] : [fault, terminal], releaseWriter: true, cancellationToken);
+    }
+
+    private Task DispatchContinueMessagesUnderStateGateAsync(JsonElement[] messages, bool releaseWriter, CancellationToken cancellationToken)
+    {
+        var stateGate = RequirePrivateField(_session.GetType(), "_stateGate").GetValue(_session)
+            ?? throw new InvalidOperationException("NetCoreDbgSession._stateGate returned null.");
+        var dispatch = _session.GetType().GetMethod("DispatchMessage", BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null, types: [typeof(JsonElement)], modifiers: null);
+        Assert.NotNull(dispatch);
+        return Task.Factory.StartNew(() =>
+        {
+            if (!Monitor.TryEnter(stateGate, TimeSpan.FromSeconds(2)))
+            {
+                throw new TimeoutException("The continue regression could not acquire NetCoreDbgSession._stateGate.");
+            }
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (releaseWriter)
+                {
+                    // Commit and admission release do not require this monitor; the first outcome check does.
+                    ReleaseDapWriteBarrier();
+                }
+                foreach (var message in messages)
+                {
+                    _ = dispatch!.Invoke(_session, [message]);
+                }
+            }
+            finally
+            {
+                Monitor.Exit(stateGate);
+            }
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+    }
+
     public Task HoldStateGateAsync(TaskCompletionSource<bool> entered, ManualResetEventSlim release, CancellationToken cancellationToken)
     {
         var stateGate = RequirePrivateField(_session.GetType(), "_stateGate").GetValue(_session)
@@ -383,6 +477,12 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
 
     public Task WaitForDapHeaderWriteAsync(CancellationToken cancellationToken) => (_dapWriteBarrier
         ?? throw new InvalidOperationException("This session has no deterministic DAP write barrier.")).WaitForHeaderWriteAsync(cancellationToken);
+
+    public void ArmDapWriteAfterFlushBarrier() => (_dapWriteBarrier
+        ?? throw new InvalidOperationException("This session has no deterministic DAP write barrier.")).ArmAfterFlush();
+
+    public Task WaitForDapFlushAsync(CancellationToken cancellationToken) => (_dapWriteBarrier
+        ?? throw new InvalidOperationException("This session has no deterministic DAP write barrier.")).WaitForFlushAsync(cancellationToken);
 
     public void ArmDapWriteAtHeaderEntryBarrier(int prefixBytes = 0, bool opaqueCancellation = false, Action? cancelOnEntry = null) => (_dapWriteBarrier
         ?? throw new InvalidOperationException("This session has no deterministic DAP write barrier.")).ArmBeforeUnderlyingHeader(prefixBytes, opaqueCancellation, cancelOnEntry);
@@ -1228,6 +1328,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
     {
         private readonly TaskCompletionSource<bool> _headerWritten = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<bool> _headerEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _flushed = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<bool> _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _armed;
         private int _underlyingHeaderWriteCalls;
@@ -1263,9 +1364,19 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         public void ArmAfterHeader() => Volatile.Write(ref _armed, 1);
         public void Release() => _release.TrySetResult(true);
         public Task WaitForHeaderWriteAsync(CancellationToken cancellationToken) => _headerWritten.Task.WaitAsync(cancellationToken);
+        public void ArmAfterFlush() => Volatile.Write(ref _armed, 4);
+        public Task WaitForFlushAsync(CancellationToken cancellationToken) => _flushed.Task.WaitAsync(cancellationToken);
 
         public override void Flush() => inner.Flush();
-        public override Task FlushAsync(CancellationToken cancellationToken) => inner.FlushAsync(cancellationToken);
+        public override async Task FlushAsync(CancellationToken cancellationToken)
+        {
+            await inner.FlushAsync(cancellationToken).ConfigureAwait(false);
+            if (Interlocked.CompareExchange(ref _armed, 0, 4) == 4)
+            {
+                _flushed.TrySetResult(true);
+                await _release.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
         public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
         public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
         public override void SetLength(long value) => inner.SetLength(value);

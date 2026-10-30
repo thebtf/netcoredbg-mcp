@@ -27,6 +27,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private const int MaximumInspectionEntryCount = 256;
     private const int MaximumInspectionNameBytes = 1024;
     private const long MaximumSafeDapInteger = 9_007_199_254_740_991L;
+    private const int MaximumContinueReasonBytes = 1024;
+    private static readonly TimeSpan ContinueTimeout = TimeSpan.FromSeconds(30);
     private static readonly Encoding HeaderEncoding = Encoding.ASCII;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -69,6 +71,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private int _inspectionWriteDrainRequired;
     private StepOverRecord? _activeStepOver;
     private int _stepOverDrainRequired;
+    private ContinueRecord? _activeContinue;
+    private ExecutionAdmission _executionAdmission;
     private bool _initializeResponseObserved;
     private bool CapabilitiesObserved { get; set; }
     private readonly TaskCompletionSource<bool>? _initializeResponseContinuationReached;
@@ -456,42 +460,83 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     internal async Task<DapStepOverResult> StepOverAsync(int threadId, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (Volatile.Read(ref _activeStepOver) is not null)
+        if (!TryAdmitExecution())
         {
             return DapStepOverResult.Refused;
         }
 
         StepOverRecord? active = null;
         PendingRequest? request = null;
-        await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var closeAdmission = false;
         try
         {
-            lock (_stateGate)
+            await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
             {
-                if (_activeStepOver is not null || !HasStepOverAuthority(threadId))
+                lock (_stateGate)
                 {
-                    return DapStepOverResult.Refused;
+                    if (_inspectionClosed || !HasStepOverAuthority(threadId))
+                    {
+                        return DapStepOverResult.Refused;
+                    }
+
+                    active = new StepOverRecord(threadId, cancellationToken);
+                    _activeStepOver = active;
+                    _state = _state with { CurrentThreadId = null };
+                    ClearCallStackEligibility();
+                    _inspectionContextId = null;
                 }
 
-                active = new StepOverRecord(threadId, cancellationToken);
-                _activeStepOver = active;
-                _state = _state with { CurrentThreadId = null };
-                ClearCallStackEligibility();
-                _inspectionContextId = null;
+                request = await BeginRequestAsync(
+                    "next",
+                    new { threadId },
+                    _requestTimeout,
+                    cancellationToken,
+                    stepOver: active).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                closeAdmission = exception is not OperationCanceledException || active?.WriteStarted == true;
+                if (active?.WriteStarted == true)
+                {
+                    Interlocked.Exchange(ref _stepOverDrainRequired, 1);
+                }
+
+                throw;
+            }
+            finally
+            {
+                _callStackAdmissionGate.Release();
             }
 
-            request = await BeginRequestAsync(
-                "next",
-                new { threadId },
-                _requestTimeout,
-                cancellationToken,
-                stepOver: active).ConfigureAwait(false);
-        }
-        catch
-        {
-            if (active?.WriteStarted == true)
+            try
+            {
+                var result = await WaitForStepOverOutcomeAsync(request!, active!, active!.DeadlineToken).ConfigureAwait(false);
+                closeAdmission = result.Outcome is DapStepOverOutcome.Terminal or DapStepOverOutcome.TimedOut;
+                return result;
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
                 Interlocked.Exchange(ref _stepOverDrainRequired, 1);
+                closeAdmission = true;
+                return DapStepOverResult.TimedOut(threadId);
+            }
+            catch (Exception exception)
+            {
+                closeAdmission = true;
+                if (exception is OperationCanceledException && active!.CommittedWrite)
+                {
+                    Interlocked.Exchange(ref _stepOverDrainRequired, 1);
+                }
+
+                throw;
+            }
+        }
+        finally
+        {
+            if (request is not null)
+            {
+                RemovePending(request);
             }
 
             lock (_stateGate)
@@ -500,49 +545,170 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 {
                     _activeStepOver = null;
                 }
+
+                _executionAdmission = closeAdmission || RequiresStepOverDrain()
+                    ? ExecutionAdmission.Closing
+                    : ExecutionAdmission.Available;
             }
 
             active?.Dispose();
-            throw;
-        }
-        finally
-        {
-            _callStackAdmissionGate.Release();
-        }
-
-        try
-        {
-            return await WaitForStepOverOutcomeAsync(request!, active!, active!.DeadlineToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            Interlocked.Exchange(ref _stepOverDrainRequired, 1);
-            return DapStepOverResult.TimedOut(threadId);
-        }
-        catch (OperationCanceledException)
-        {
-            if (active!.CommittedWrite)
-            {
-                Interlocked.Exchange(ref _stepOverDrainRequired, 1);
-            }
-
-            throw;
-        }
-        finally
-        {
-            RemovePending(request!);
-            lock (_stateGate)
-            {
-                if (ReferenceEquals(_activeStepOver, active))
-                {
-                    _activeStepOver = null;
-                }
-            }
-            active!.Dispose();
         }
     }
 
     internal bool RequiresStepOverDrain() => Volatile.Read(ref _stepOverDrainRequired) != 0;
+
+    private bool TryAdmitExecution()
+    {
+        lock (_stateGate)
+        {
+            if (_executionAdmission != ExecutionAdmission.Available || _inspectionClosed)
+            {
+                return false;
+            }
+
+            _executionAdmission = ExecutionAdmission.Active;
+            return true;
+        }
+    }
+
+    internal async Task<DapContinueResult> ContinueAsync(int threadId, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!TryAdmitExecution())
+        {
+            return DapContinueResult.Refused;
+        }
+
+        ContinueRecord? active = null;
+        PendingRequest? request = null;
+        try
+        {
+            await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                lock (_stateGate)
+                {
+                    if (_inspectionClosed || !HasStepOverAuthority(threadId))
+                    {
+                        return DapContinueResult.Refused;
+                    }
+
+                    active = new ContinueRecord(threadId, cancellationToken);
+                    _activeContinue = active;
+                    _state = new DapSessionState(null, null, null);
+                    ClearCallStackEligibility();
+                    _inspectionContextId = null;
+                }
+
+                request = await BeginRequestAsync(
+                    "continue",
+                    new DapContinueArguments(threadId),
+                    ContinueTimeout,
+                    cancellationToken,
+                    continueExecution: active).ConfigureAwait(false);
+            }
+            finally
+            {
+                _callStackAdmissionGate.Release();
+            }
+
+            return await WaitForContinueOutcomeAsync(
+                active!, active!.DeadlineToken, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException exception)
+        {
+            if (active is null)
+            {
+                throw;
+            }
+
+            DapContinueResult result;
+            Exception? protocolFailure;
+            lock (_stateGate)
+            {
+                protocolFailure = active.ProtocolFailure;
+                result = FinalizeContinue(active, interrupted: true);
+            }
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                throw new DapContinueCanceledException(result.RequiresDrain, exception, cancellationToken);
+            }
+
+            if (protocolFailure is not null)
+            {
+                throw new InvalidDataException("DAP continue exchange failed.", protocolFailure);
+            }
+
+            return result;
+        }
+        catch
+        {
+            if (active is not null)
+            {
+                lock (_stateGate)
+                {
+                    active.Finalized = true;
+                    _executionAdmission = ExecutionAdmission.Closing;
+                    _inspectionClosed = true;
+                    ClearCallStackEligibility();
+                    _inspectionContextId = null;
+                }
+            }
+
+            throw;
+        }
+        finally
+        {
+            if (request is not null)
+            {
+                RemovePending(request);
+            }
+
+            lock (_stateGate)
+            {
+                if (ReferenceEquals(_activeContinue, active))
+                {
+                    _activeContinue = null;
+                }
+
+                if (active is null || _executionAdmission == ExecutionAdmission.Active)
+                {
+                    _executionAdmission = ExecutionAdmission.Available;
+                }
+            }
+
+            active?.Dispose();
+        }
+    }
+
+    private DapContinueResult FinalizeContinue(ContinueRecord active, bool interrupted)
+    {
+        var acknowledged = active.Acknowledged;
+        var result = active.Outcome;
+        if (result is null)
+        {
+            if (!interrupted)
+            {
+                throw new InvalidOperationException("Continue completed without an observed outcome.");
+            }
+
+            result = new DapContinueResult(DapContinueOutcome.TimedOut, active.ThreadId);
+        }
+
+        var requiresDrain = active.ProtocolFailure is not null || result.Outcome == DapContinueOutcome.Terminal
+            || (interrupted && active.WriteStarted && !(active.CommittedWrite && acknowledged));
+        active.Finalized = true;
+        _executionAdmission = requiresDrain ? ExecutionAdmission.Closing : ExecutionAdmission.Active;
+        if (requiresDrain)
+        {
+            _inspectionClosed = true;
+            ClearCallStackEligibility();
+            _inspectionContextId = null;
+        }
+
+        return result with { Acknowledged = acknowledged, RequiresDrain = requiresDrain };
+    }
 
 
     public ValueTask DisposeAsync() => new(EnsureCleanupAsync());
@@ -835,7 +1001,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         CancellationToken cancellationToken,
         CapturedCallStackTarget? stackTraceTarget = null,
         StepOverRecord? stepOver = null,
-        string? inspectionContextId = null)
+        string? inspectionContextId = null,
+        ContinueRecord? continueExecution = null)
     {
         if (Volatile.Read(ref _readerFailure) is { } readerFailure)
         {
@@ -844,8 +1011,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         var sequence = Interlocked.Increment(ref _outgoingSequence);
         stepOver?.SetRequestSequence(sequence);
+        continueExecution?.SetRequestSequence(sequence);
         var request = new PendingRequest(sequence, command, stackTraceTarget, stepOver,
-            inspectionContextId ?? stackTraceTarget?.InspectionContextId);
+            inspectionContextId ?? stackTraceTarget?.InspectionContextId, continueExecution);
         if (!_pending.TryAdd(sequence, request))
         {
             throw new InvalidOperationException($"DAP request sequence '{sequence}' was reused.");
@@ -853,7 +1021,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         try
         {
-            using var deadline = stepOver is null ? CreateDeadline(timeout, cancellationToken) : null;
+            using var deadline = stepOver is null && continueExecution is null ? CreateDeadline(timeout, cancellationToken) : null;
             await WriteMessageAsync(new
             {
                 seq = sequence,
@@ -861,7 +1029,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 command,
                 arguments,
             }, deadline?.Token ?? cancellationToken, stepOver,
-                request.InspectionContextId is null ? null : request).ConfigureAwait(false);
+                request.InspectionContextId is null ? null : request, continueExecution).ConfigureAwait(false);
             return request;
         }
         catch (Exception exception)
@@ -902,12 +1070,42 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         return await active.Completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    private async Task<DapContinueResult> WaitForContinueOutcomeAsync(
+        ContinueRecord active,
+        CancellationToken deadlineToken,
+        CancellationToken callerCancellation)
+    {
+        while (true)
+        {
+            Task<bool> signal;
+            lock (_stateGate)
+            {
+                callerCancellation.ThrowIfCancellationRequested();
+                if (active.ProtocolFailure is { } failure)
+                {
+                    throw new InvalidDataException("DAP continue exchange failed.", failure);
+                }
+
+                // A wake-up does not prove that its stopped observation is still current.
+                if (active.Outcome is not null)
+                {
+                    return FinalizeContinue(active, interrupted: false);
+                }
+
+                signal = active.Completion.Task;
+            }
+
+            await signal.WaitAsync(deadlineToken).ConfigureAwait(false);
+        }
+    }
+
 
     private async Task WriteMessageAsync(
         object message,
         CancellationToken cancellationToken,
         StepOverRecord? stepOver = null,
-        PendingRequest? inspectionRequest = null)
+        PendingRequest? inspectionRequest = null,
+        ContinueRecord? continueExecution = null)
     {
         var payload = JsonSerializer.SerializeToUtf8Bytes(message, JsonOptions);
         var header = HeaderEncoding.GetBytes($"Content-Length: {payload.Length}\r\n\r\n");
@@ -917,11 +1115,13 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             await (_preHeaderWriteGate?.Invoke(cancellationToken) ?? Task.CompletedTask).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             stepOver?.MarkWriteStarted();
+            continueExecution?.MarkWriteStarted();
             inspectionRequest?.MarkWriteStarted();
             await _input.WriteAsync(header, cancellationToken).ConfigureAwait(false);
             await _input.WriteAsync(payload, cancellationToken).ConfigureAwait(false);
             await _input.FlushAsync(cancellationToken).ConfigureAwait(false);
             stepOver?.Commit(_requestTimeout, _stepOverTimeProvider);
+            continueExecution?.Commit(_stepOverTimeProvider);
         }
         finally
         {
@@ -1006,10 +1206,30 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
+    private bool FailActiveContinueForWrongCorrelation(int requestSequence, string? command)
+    {
+        if (!string.Equals(command, "continue", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        lock (_stateGate)
+        {
+            if (_activeContinue is not { Finalized: false } active || active.RequestSequence == requestSequence)
+            {
+                return false;
+            }
+
+            active.ObserveProtocolFailure(new InvalidDataException("DAP continue response correlation is invalid."));
+            return true;
+        }
+    }
+
     private void HandleResponse(JsonElement message)
     {
         var requestSequence = RequireInt32(message, "request_seq");
-        if (FailActiveStepOverForWrongCorrelation(requestSequence, TryGetString(message, "command")))
+        if (FailActiveStepOverForWrongCorrelation(requestSequence, TryGetString(message, "command"))
+            || FailActiveContinueForWrongCorrelation(requestSequence, TryGetString(message, "command")))
         {
             return;
         }
@@ -1022,7 +1242,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         var command = RequireString(message, "command");
         if (!string.Equals(command, request.Command, StringComparison.Ordinal))
         {
-            request.Completion.TrySetException(new InvalidDataException(
+            FailRequest(request, new InvalidDataException(
                 $"DAP response for request '{requestSequence}' named '{command}' instead of '{request.Command}'."));
             return;
         }
@@ -1030,7 +1250,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         if (!message.TryGetProperty("success", out var success)
             || (success.ValueKind != JsonValueKind.True && success.ValueKind != JsonValueKind.False))
         {
-            request.Completion.TrySetException(new InvalidDataException(
+            FailRequest(request, new InvalidDataException(
                 $"DAP request '{request.Command}' failed or returned an invalid success flag."));
             return;
         }
@@ -1062,6 +1282,29 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         lock (_stateGate)
         {
+            if (request.ContinueExecution is { Finalized: false } continued
+                && ReferenceEquals(_activeContinue, continued))
+            {
+                var acknowledged = success.ValueKind == JsonValueKind.True;
+                if (RequireInt32(message, "seq") <= 0
+                    || (acknowledged && body.ValueKind != JsonValueKind.Undefined && body.ValueKind != JsonValueKind.Object))
+                {
+                    throw new InvalidDataException("DAP continue acknowledgement is invalid.");
+                }
+
+                if (acknowledged && body.ValueKind == JsonValueKind.Object)
+                {
+                    _ = ReadOptionalBoolean(body, "allThreadsContinued");
+                }
+
+                if (acknowledged && !continued.HasObservedLifecycle)
+                {
+                    _state = _state with { Event = "continued", StopReason = null, CurrentThreadId = null };
+                }
+
+                continued.ObserveAcknowledgement(acknowledged);
+            }
+
             var targetCurrent = (request.StackTraceTarget is not { } target || IsCallStackTargetCurrent(target))
                 && (request.InspectionContextId is null
                     || (!_inspectionClosed && StringComparer.Ordinal.Equals(_inspectionContextId, request.InspectionContextId)));
@@ -1262,6 +1505,24 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             lock (_stateGate)
             {
+                if (_activeContinue is { Finalized: false } continued)
+                {
+                    if (RequireInt32(message, "seq") <= 0
+                        || reason is null
+                        || Encoding.UTF8.GetByteCount(reason) > MaximumContinueReasonBytes)
+                    {
+                        throw new InvalidDataException("DAP continue stop reason or sequence is invalid.");
+                    }
+
+                    if (body.TryGetProperty("threadId", out _))
+                    {
+                        threadId = RequireInt32(body, "threadId");
+                    }
+
+                    continued.ObserveStopped(reason, threadId,
+                        body.TryGetProperty("allThreadsStopped", out _) ? allThreadsStopped : null);
+                }
+
                 _state = _state with
                 {
                     Event = "stopped",
@@ -1298,6 +1559,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             lock (_stateGate)
             {
+                _activeContinue?.ObserveContinued();
                 _state = _state with { Event = "continued", CurrentThreadId = null };
                 _inspectionContextId = null;
                 if (!hasAllThreadsContinued || allThreadsContinued || threadId is null)
@@ -1331,6 +1593,19 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     throw new InvalidDataException("DAP step terminal event sequence must be positive.");
                 }
 
+                if (_activeContinue is { Finalized: false })
+                {
+                    if (RequireInt32(message, "seq") <= 0)
+                    {
+                        throw new InvalidDataException("DAP continue terminal event sequence is invalid.");
+                    }
+
+                    if (body.ValueKind == JsonValueKind.Object && body.TryGetProperty("exitCode", out _))
+                    {
+                        _state = _state with { ExitCode = RequireInt32(body, "exitCode") };
+                    }
+                }
+
                 _state = eventName == "exited"
                     ? _state with
                     {
@@ -1342,6 +1617,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 ClearCallStackEligibility();
                 _inspectionContextId = null;
                 _activeStepOver?.ObserveTerminal(eventName, _state.ExitCode);
+                _activeContinue?.ObserveTerminal(eventName, _state.ExitCode);
             }
         }
         finally
@@ -1359,7 +1635,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     {
         lock (_stateGate)
         {
-            if (includeInspectionContext && _inspectionClosed)
+            if (_executionAdmission == ExecutionAdmission.Closing || (includeInspectionContext && _inspectionClosed))
             {
                 return null;
             }
@@ -1813,13 +2089,33 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private void RemovePending(PendingRequest request) =>
         _pending.TryRemove(new KeyValuePair<int, PendingRequest>(request.Sequence, request));
 
+    private void FailRequest(PendingRequest request, Exception failure)
+    {
+        if (request.ContinueExecution is not { } continued)
+        {
+            request.Completion.TrySetException(failure);
+            return;
+        }
+
+        lock (_stateGate)
+        {
+            if (ReferenceEquals(_activeContinue, continued))
+            {
+                continued.ObserveProtocolFailure(failure);
+            }
+
+            request.Completion.TrySetException(failure);
+            _ = request.Completion.Task.Exception;
+        }
+    }
+
     private void FailPending(Exception failure)
     {
         foreach (var pending in _pending)
         {
             if (_pending.TryRemove(pending.Key, out var request))
             {
-                request.Completion.TrySetException(failure);
+                FailRequest(request, failure);
             }
         }
     }
@@ -2496,12 +2792,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         string command,
         CapturedCallStackTarget? stackTraceTarget = null,
         StepOverRecord? stepOver = null,
-        string? inspectionContextId = null)
+        string? inspectionContextId = null,
+        ContinueRecord? continueExecution = null)
     {
         public int Sequence { get; } = sequence;
         public string Command { get; } = command;
         public CapturedCallStackTarget? StackTraceTarget { get; } = stackTraceTarget;
         public StepOverRecord? StepOver { get; } = stepOver;
+        public ContinueRecord? ContinueExecution { get; } = continueExecution;
         public string? InspectionContextId { get; } = inspectionContextId;
         public bool WriteStarted { get; private set; }
         public void MarkWriteStarted() => WriteStarted = true;
@@ -2589,6 +2887,141 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
+    private enum ExecutionAdmission
+    {
+        Available,
+        Active,
+        Closing,
+    }
+
+    private sealed class ContinueRecord(int threadId, CancellationToken callerCancellation) : IDisposable
+    {
+        private int _writeStarted;
+        private int _committedWrite;
+        private int _requestSequence;
+        private CancellationTokenSource? _deadline;
+        private CancellationTokenRegistration _callerCancellationRegistration;
+        private DapContinueResult? _stoppedCandidate;
+
+        public int ThreadId { get; } = threadId;
+        public int RequestSequence => Volatile.Read(ref _requestSequence);
+        public bool WriteStarted => Volatile.Read(ref _writeStarted) != 0;
+        public bool CommittedWrite => Volatile.Read(ref _committedWrite) != 0;
+        public bool Acknowledged { get; private set; }
+        public bool HasObservedLifecycle { get; private set; }
+        public bool Finalized { get; set; }
+        public DapContinueResult? Outcome { get; private set; }
+        public Exception? ProtocolFailure { get; private set; }
+        public CancellationToken DeadlineToken => (_deadline
+            ?? throw new InvalidOperationException("The continue write has not committed.")).Token;
+        public TaskCompletionSource<bool> Completion { get; private set; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void SetRequestSequence(int sequence) => Volatile.Write(ref _requestSequence, sequence);
+        public void MarkWriteStarted() => Volatile.Write(ref _writeStarted, 1);
+
+        public void Commit(TimeProvider timeProvider)
+        {
+            _deadline = new CancellationTokenSource(ContinueTimeout, timeProvider);
+            _callerCancellationRegistration = callerCancellation.Register(
+                static state => ((CancellationTokenSource)state!).Cancel(), _deadline);
+            Volatile.Write(ref _committedWrite, 1);
+        }
+
+        public void ObserveProtocolFailure(Exception failure)
+        {
+            if (!Finalized && ProtocolFailure is null && Outcome?.Outcome != DapContinueOutcome.Terminal)
+            {
+                ProtocolFailure = failure;
+                _stoppedCandidate = null;
+                Outcome = null;
+                Completion.TrySetResult(true);
+            }
+        }
+
+        public void ObserveAcknowledgement(bool success)
+        {
+            if (Finalized)
+            {
+                return;
+            }
+
+            if (success)
+            {
+                Acknowledged = true;
+                if (ProtocolFailure is null && Outcome?.Outcome != DapContinueOutcome.Terminal && _stoppedCandidate is not null)
+                {
+                    Outcome = _stoppedCandidate;
+                    Completion.TrySetResult(true);
+                }
+            }
+            else if (ProtocolFailure is null && Outcome?.Outcome != DapContinueOutcome.Terminal)
+            {
+                Outcome = DapContinueResult.Refused;
+                Completion.TrySetResult(true);
+            }
+        }
+
+        public void ObserveStopped(string reason, int? stoppedThreadId, bool? allThreadsStopped)
+        {
+            if (Finalized || Outcome?.Outcome == DapContinueOutcome.Terminal)
+            {
+                return;
+            }
+
+            HasObservedLifecycle = true;
+            if (ProtocolFailure is not null)
+            {
+                return;
+            }
+
+            _stoppedCandidate = new DapContinueResult(DapContinueOutcome.Stopped, stoppedThreadId, reason, allThreadsStopped);
+            if (Acknowledged)
+            {
+                Outcome = _stoppedCandidate;
+                Completion.TrySetResult(true);
+            }
+        }
+
+        public void ObserveContinued()
+        {
+            if (!Finalized)
+            {
+                HasObservedLifecycle = true;
+                _stoppedCandidate = null;
+                if (Outcome?.Outcome == DapContinueOutcome.Stopped)
+                {
+                    Outcome = null;
+                    if (Completion.Task.IsCompletedSuccessfully)
+                    {
+                        Completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                    }
+                }
+            }
+        }
+
+        public void ObserveTerminal(string terminal, int? exitCode)
+        {
+            if (!Finalized)
+            {
+                HasObservedLifecycle = true;
+                _stoppedCandidate = null;
+                if (ProtocolFailure is null)
+                {
+                    Outcome = new DapContinueResult(DapContinueOutcome.Terminal, Terminal: terminal, ExitCode: exitCode);
+                    Completion.TrySetResult(true);
+                }
+            }
+        }
+
+        public void Dispose()
+        {
+            _callerCancellationRegistration.Dispose();
+            _deadline?.Dispose();
+        }
+    }
+
+    private sealed record DapContinueArguments([property: JsonPropertyName("threadId")] int ThreadId);
+
     private sealed class CallStackEligibility;
 
     private readonly record struct DapStackTraceCapabilities(bool SupportsDelayedStackTraceLoading);
@@ -2642,6 +3075,33 @@ internal sealed record DapStepOverResult(
     internal static DapStepOverResult Succeeded(int threadId) => new(DapStepOverOutcome.Succeeded, threadId);
     internal static DapStepOverResult ForTerminal(string terminal, int? exitCode) => new(DapStepOverOutcome.Terminal, 0, terminal, exitCode);
     internal static DapStepOverResult TimedOut(int threadId) => new(DapStepOverOutcome.TimedOut, threadId);
+}
+
+internal enum DapContinueOutcome
+{
+    Refused,
+    Stopped,
+    Terminal,
+    TimedOut,
+}
+
+internal sealed record DapContinueResult(
+    DapContinueOutcome Outcome,
+    int? ThreadId = null,
+    string? Reason = null,
+    bool? AllThreadsStopped = null,
+    string? Terminal = null,
+    int? ExitCode = null,
+    bool Acknowledged = false,
+    bool RequiresDrain = false)
+{
+    internal static DapContinueResult Refused { get; } = new(DapContinueOutcome.Refused);
+}
+
+internal sealed class DapContinueCanceledException(bool requiresDrain, Exception innerException, CancellationToken cancellationToken)
+    : OperationCanceledException("Continue observation was cancelled.", innerException, cancellationToken)
+{
+    internal bool RequiresDrain { get; } = requiresDrain;
 }
 
 internal sealed record DapThread(

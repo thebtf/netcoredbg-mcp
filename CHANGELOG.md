@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The opt-in modern native host adds `step_over(debugSessionId, threadId)` after `get_call_stack`: one explicit Int32 target, correlated DAP `next`, and a bounded wait for a later exact step stop, terminal event, or timeout. Concurrent steps are refused; uncertain post-write outcomes use the existing session close-and-drain owner.
 - The source-built native stateful host accepts request-local source breakpoints in `start_debug` before launch and returns the debugger's initial verification results. An initially unverified breakpoint may bind later; the published read-only preview and Python default are unchanged.
 - The source-built native stateful host adds `get_scopes` and `get_variables` with an opt-in stopped-epoch context from `get_call_stack`. A stale context is refused after a step even if DAP reuses a numeric reference; callers must keep IDs paired with their context. Paging and filtering remain open. Python remains the default.
+- The source-built native stateful host adds `continue_execution` with an explicit stopped thread ID. DAP resumes all threads; the result reports the next observed stop, terminal event, or timeout. An acknowledged timeout does not itself close the session, while an unacknowledged possible write is drained without retry.
 - Added controlled-loopback downloaded-artifact tests that verify received manifest/archive identities, exercise the extracted preview through MCP discovery/list/call and clean EOF, and reject tampered bytes before launch. This supporting source proof is not a public GitHub release receipt and does not change the Python default.
 - Added internal preview-library validators for exact-candidate seven-lens S2/S3 review, distinct independent PR review, and ordered stage evidence. These source-only validators reject inconsistent evidence claims; they do not perform reviews, publish artifacts, constitute a consumer release, or change the Python default.
 - Added `seal_promotion_decision`: immutable exact-candidate Decision 1.0 `APPROVE`/`DECLINE` records revalidate raw pre-decision Stage and nested evidence, closed author/dispatcher identities, and time order. Decisions alone grant no live promotion authority; the Python default is unchanged.
@@ -64,7 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The retained-preview validator resolves the selected rollback executable and prepends its directory only to the child PATH, preserving inherited entries and the parent environment. Its separate total-journey budget is 120 seconds to admit an observed 74.9-second retained-Python replay; per-call deadlines, the driver, package, and Python default remain unchanged. This controller correction is not a startup-performance fix or evidence that T014 passed.
 
 ### Compatibility
-- The installed Python entry point remains the default and rollback route. This additive native slice does not add other execution controls, change UI/bridge behavior, or authorize publication.
+- The installed Python entry point remains the default and rollback route. This additive native slice does not add pause, step-in or step-out, change UI/bridge behavior, or authorize publication.
 
 ## [stateless-preview-v0.23.17-preview.3] - 2026-10-27
 

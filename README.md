@@ -56,6 +56,13 @@ variable reference is a leaf. After a step, continuation, or other invalidation,
 fetch a new stack and context: the debugger may reuse numeric references. This
 source-built path does not yet support variable paging or filtering.
 
+For a stopped session, `continue_execution(debugSessionId, threadId)` sends a
+DAP `continue` request without `singleThread`, so it resumes all threads. It
+waits up to 30 seconds after the write for the next observed stop or terminal
+event. An acknowledged timeout does not itself close the session; check state
+again before further inspection. An unacknowledged possible write closes the
+session rather than retrying an uncertain execution request.
+
 The separate [native read-only preview](specs/016-a2-native-readonly-family/spec.md)
 exposes `find_code_symbol`, `find_code_references` and `get_source_context`.
 Each schema-2 manifest binds its exact proof generation; historical schema-1

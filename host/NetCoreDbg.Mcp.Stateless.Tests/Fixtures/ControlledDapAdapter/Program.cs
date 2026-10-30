@@ -234,7 +234,11 @@ internal sealed record AdapterOptions(
     private static IEnumerable<string> SplitOptions(string? options) =>
         string.IsNullOrWhiteSpace(options)
             ? []
-            : options.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            : options.Split(';', StringSplitOptions.RemoveEmptyEntries).Select(static option =>
+            {
+                var argument = option.TrimStart();
+                return argument.StartsWith("--stop-reason=", StringComparison.Ordinal) ? argument : argument.TrimEnd();
+            });
 }
 
 internal static class ControlledEvidenceWindow
@@ -365,6 +369,7 @@ internal sealed class ControlledDapAdapter
     private Task? _heldInspectionResponse;
     private bool _inspectionResponseHeld;
     private bool _inspectionStepped;
+    private int _continueRequests;
     private static readonly TimeSpan InitializeGateWindow = TimeSpan.FromMilliseconds(75);
     private static readonly TimeSpan GracefulReleaseTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ConfigurationDoneCapabilityDeltaReleaseTimeout = TimeSpan.FromSeconds(2);
@@ -626,6 +631,8 @@ internal sealed class ControlledDapAdapter
                 return false;
             case "next":
                 return await HandleNextRequestAsync(sequence, root, cancellationToken);
+            case "continue":
+                return await HandleContinueRequestAsync(sequence, root, cancellationToken);
             case "setBreakpoints":
                 await HandleSetBreakpointsRequestAsync(sequence, root, cancellationToken);
                 return false;
@@ -1205,6 +1212,96 @@ internal sealed class ControlledDapAdapter
             }
         }
     }
+    private async Task<bool> HandleContinueRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)
+    {
+        var threadId = ReadRequiredNextThreadId(root);
+        _continueRequests++;
+        await RecordAsync(new { kind = "continue-request", sequence }, cancellationToken);
+        switch (_options.NextResponseMode)
+        {
+            case "continue-breakpoint-terminal":
+            case "continue-optional-stop":
+                await WriteResponseAsync(sequence, "continue", new { allThreadsContinued = true }, cancellationToken);
+                if (_continueRequests == 1)
+                {
+                    await WriteStoppedEventAsync(
+                        _options.NextResponseMode == "continue-optional-stop" ? null : 2,
+                        _options.NextResponseMode == "continue-optional-stop" ? null : false,
+                        cancellationToken, reason: _options.StopReason);
+                }
+                else
+                {
+                    await WriteEventAsync("exited", new { exitCode = 0 }, cancellationToken);
+                }
+                return false;
+            case "continue-negative":
+                await WriteResponseAsync(sequence, "continue", new { message = "private controlled continue refusal" }, cancellationToken, success: false);
+                return false;
+            case "continue-wrong-command":
+                await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+                return false;
+            case "continue-eof":
+                return true;
+            case "continue-missing-reason":
+                await WriteResponseAsync(sequence, "continue", new { allThreadsContinued = true }, cancellationToken);
+                await WriteEventAsync("stopped", new { threadId, allThreadsStopped = true }, cancellationToken);
+                return false;
+            case "continue-terminal-before-ack":
+                await WriteStoppedEventAsync(2, allThreadsStopped: true, cancellationToken, reason: "breakpoint");
+                await WriteEventAsync("terminated", body: null, cancellationToken);
+                await WriteResponseAsync(sequence, "continue", new { allThreadsContinued = true }, cancellationToken);
+                await RecordAsync(new { kind = "continue-terminal-acknowledged", sequence }, cancellationToken);
+                return false;
+            case "continue-pre-ack":
+            case "continue-pre-ack-replaced":
+            case "continue-pre-ack-continued":
+                await WriteStoppedEventAsync(2, allThreadsStopped: false, cancellationToken, reason: "breakpoint");
+                if (_options.NextResponseMode == "continue-pre-ack-replaced")
+                {
+                    await WriteStoppedEventAsync(3, allThreadsStopped: true, cancellationToken, reason: "adapter-specific-stop");
+                }
+                else if (_options.NextResponseMode == "continue-pre-ack-continued")
+                {
+                    await WriteContinuedEventAsync(2, allThreadsContinued: true, cancellationToken);
+                }
+                await RecordAsync(new { kind = "continue-pre-ack-gated", sequence }, cancellationToken);
+                _heldNextResponse = CompleteHeldContinueAsync(sequence, threadId, _lifecycleEventsCancellation.Token);
+                return false;
+            case "continue-ack-held-stop":
+                await WriteResponseAsync(sequence, "continue", new { allThreadsContinued = true }, cancellationToken);
+                await RecordAsync(new { kind = "continue-acknowledged", sequence }, cancellationToken);
+                _heldNextResponse = CompleteHeldContinueAsync(sequence, threadId, _lifecycleEventsCancellation.Token);
+                return false;
+            case "continue-hold":
+            case "continue-stop-after-injected-ack":
+                await RecordAsync(new { kind = "continue-ack-gated", sequence }, cancellationToken);
+                _heldNextResponse = CompleteHeldContinueAsync(sequence, threadId, _lifecycleEventsCancellation.Token);
+                return false;
+            default:
+                throw new InvalidOperationException($"Unknown continue response mode '{_options.NextResponseMode}'.");
+        }
+    }
+
+    private async Task CompleteHeldContinueAsync(int sequence, int threadId, CancellationToken cancellationToken)
+    {
+        await WaitForNextResponseReleaseAsync(cancellationToken);
+        if (_options.NextResponseMode is not ("continue-ack-held-stop" or "continue-stop-after-injected-ack"))
+        {
+            await WriteResponseAsync(sequence, "continue", new { allThreadsContinued = true }, cancellationToken);
+            await RecordAsync(new { kind = "continue-acknowledged", sequence }, cancellationToken);
+        }
+        if (_options.NextResponseMode == "continue-pre-ack-continued")
+        {
+            await RecordAsync(new { kind = "continue-later-stop-gated", sequence }, cancellationToken);
+            await WaitForThreadsResponseReleaseAsync(cancellationToken);
+        }
+        if (_options.NextResponseMode is "continue-ack-held-stop" or "continue-hold" or "continue-pre-ack-continued" or "continue-stop-after-injected-ack")
+        {
+            _inspectionStepped = true;
+            await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, "continue-later-stop", reason: "breakpoint");
+        }
+    }
+
     private async Task<bool> HandleNextRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)
     {
         var threadId = ReadRequiredNextThreadId(root);
