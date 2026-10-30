@@ -131,6 +131,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     internal string GetOutput(bool clear, string? category) => _outputBuffer.Snapshot(clear, category);
 
+    internal (long TotalLines, long ReturnedLines, string Output) GetOutputTail(long lines, string? category) => _outputBuffer.Tail(lines, category);
+
     internal event Action<NetCoreDbgSession>? ReaderFailed;
     internal event Action<NetCoreDbgSession>? NativeUiInvokeAuthorityRevoked;
     internal bool TryGetNativeSceneTargetIdentity(out NativeSceneTargetIdentity targetIdentity)

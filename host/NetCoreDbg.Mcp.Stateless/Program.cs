@@ -156,6 +156,7 @@ internal static class Program
         private const string GetScopes = "get_scopes";
         private const string GetVariables = "get_variables";
         private const string GetOutput = "get_output";
+        private const string GetOutputTail = "get_output_tail";
         private const string StepOver = "step_over";
         private const string ContinueExecution = "continue_execution";
         private const string AddBreakpoint = "add_breakpoint";
@@ -247,6 +248,7 @@ internal static class Program
                 GetScopes => await GetScopesAsync(request, cancellationToken).ConfigureAwait(false),
                 GetVariables => await GetVariablesAsync(request, cancellationToken).ConfigureAwait(false),
                 GetOutput => await GetOutputAsync(request, cancellationToken).ConfigureAwait(false),
+                GetOutputTail => await GetOutputAsync(request, cancellationToken, tail: true).ConfigureAwait(false),
                 StepOver => await StepOverAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 ContinueExecution => await ContinueAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 AddBreakpoint => await AddBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
@@ -480,11 +482,19 @@ internal static class Program
 
         private async ValueTask<CallToolResult> GetOutputAsync(
             CallToolRequestParams request,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            bool tail = false)
         {
-            if (!TryReadOutputArguments(request.Arguments, out var sessionId, out var clear, out var category))
+            var clear = false;
+            var lines = 50L;
+            string sessionId;
+            string? category;
+            var valid = tail
+                ? TryReadOutputTailArguments(request.Arguments, out sessionId, out lines, out category)
+                : TryReadOutputArguments(request.Arguments, out sessionId, out clear, out category);
+            if (!valid)
             {
-                return InvalidArguments(GetOutput);
+                return InvalidArguments(tail ? GetOutputTail : GetOutput);
             }
 
             if (!_sessions.TryGetValue(sessionId, out var session)
@@ -509,6 +519,18 @@ internal static class Program
                 {
                     closeAfterLease = true;
                     return NotFound();
+                }
+
+                if (tail)
+                {
+                    var result = session.GetOutputTail(lines, category);
+                    return SerializedResult(JsonSerializer.Serialize(new
+                    {
+                        kind = "output_tail_success",
+                        totalLines = result.TotalLines,
+                        returnedLines = result.ReturnedLines,
+                        output = result.Output,
+                    }), isError: false);
                 }
 
                 var output = session.GetOutput(clear, category);
@@ -1644,6 +1666,143 @@ internal static class Program
             return true;
         }
 
+        private static bool TryReadOutputTailArguments(
+            IDictionary<string, JsonElement>? arguments,
+            out string sessionId,
+            out long lines,
+            out string? category)
+        {
+            sessionId = string.Empty;
+            lines = 50;
+            category = null;
+            if (arguments is null
+                || arguments.Count is < 1 or > 3
+                || arguments.Keys.Any(static name => name is not "debugSessionId" and not "lines" and not "category")
+                || !arguments.TryGetValue("debugSessionId", out var sessionIdElement)
+                || sessionIdElement.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(sessionIdElement.GetString()))
+            {
+                return false;
+            }
+
+            if (arguments.TryGetValue("lines", out var linesElement) && !TryReadOutputLineCount(linesElement, out lines))
+            {
+                return false;
+            }
+
+            if (arguments.TryGetValue("category", out var categoryElement))
+            {
+                if (categoryElement.ValueKind is not JsonValueKind.String and not JsonValueKind.Null)
+                {
+                    return false;
+                }
+
+                category = categoryElement.GetString();
+            }
+
+            sessionId = sessionIdElement.GetString()!;
+            return true;
+        }
+
+        private static bool TryReadOutputLineCount(JsonElement element, out long lines)
+        {
+            lines = 0;
+            if (element.ValueKind != JsonValueKind.Number)
+            {
+                return false;
+            }
+
+            if (element.TryGetInt64(out lines))
+            {
+                return true;
+            }
+
+            // JSON Schema integers include exact decimal/exponent forms; do not round through double or decimal.
+            var number = element.GetRawText().AsSpan();
+            var negative = number[0] == '-';
+            if (negative)
+            {
+                number = number[1..];
+            }
+
+            var exponentOffset = number.IndexOfAny('e', 'E');
+            var significand = exponentOffset < 0 ? number : number[..exponentOffset];
+            var decimalOffset = significand.IndexOf('.');
+            var fractionalDigits = decimalOffset < 0 ? 0 : significand.Length - decimalOffset - 1;
+            var digits = 0;
+            var trailingZeros = 0;
+            foreach (var character in significand)
+            {
+                if (character != '.')
+                {
+                    digits++;
+                    trailingZeros = character == '0' ? trailingZeros + 1 : 0;
+                }
+            }
+
+            if (digits == trailingZeros)
+            {
+                lines = 0;
+                return true;
+            }
+
+            long exponent = 0;
+            if (exponentOffset >= 0)
+            {
+                var exponentText = number[(exponentOffset + 1)..];
+                var negativeExponent = exponentText[0] == '-';
+                if (exponentText[0] is '+' or '-')
+                {
+                    exponentText = exponentText[1..];
+                }
+
+                // Beyond this magnitude, the exponent already determines integral overflow or a nonzero fraction.
+                var exponentLimit = number.Length + 20L;
+                foreach (var character in exponentText)
+                {
+                    exponent = Math.Min(exponentLimit, exponent * 10 + character - '0');
+                }
+
+                if (negativeExponent)
+                {
+                    exponent = -exponent;
+                }
+            }
+
+            var shift = exponent - fractionalDigits;
+            if (shift < -trailingZeros)
+            {
+                return false;
+            }
+
+            var digitsToKeep = digits + Math.Min(shift, 0);
+            long magnitude = 0;
+            foreach (var character in significand)
+            {
+                if (character == '.')
+                {
+                    continue;
+                }
+
+                if (digitsToKeep-- == 0)
+                {
+                    break;
+                }
+
+                var digit = character - '0';
+                magnitude = magnitude > (long.MaxValue - digit) / 10 ? long.MaxValue : magnitude * 10 + digit;
+            }
+
+            while (shift-- > 0 && magnitude < long.MaxValue)
+            {
+                magnitude = magnitude > long.MaxValue / 10 ? long.MaxValue : magnitude * 10;
+            }
+
+            // Saturation preserves slicing against every representable retained-line count without bounding JSON integers.
+            lines = negative ? -magnitude : magnitude;
+            return true;
+        }
+
         private static bool TryReadSessionId(
             IDictionary<string, JsonElement>? arguments,
             out string? sessionId,
@@ -1921,6 +2080,7 @@ internal static class Program
                 Tool("add_breakpoint", "Add a source breakpoint to a live debug session while preserving its requested source breakpoint sets. Verification is an adapter observation, not proof of a hit. Conditions and hit counts are not supported.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"file\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"line\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"file\",\"line\"],\"additionalProperties\":false}"),
                 Tool("ui_invoke", "Invoke one uniquely resolved exact AutomationId in this session's bound debuggee main window using InvokePattern only. No physical input fallback. Success confirms the UIA call returned, not business completion; an unknown outcome must not be automatically retried.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"automationId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"pattern\":\"\\\\S\"}},\"required\":[\"debugSessionId\",\"automationId\"],\"additionalProperties\":false}"),
                 Tool("get_output", "Read retained debuggee output in DAP reader order. Category matching is case-sensitive. Clear consumes the snapshot only when category is omitted, null or empty; a nonempty category never clears the buffer.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"clear\":{\"type\":\"boolean\",\"default\":false},\"category\":{\"type\":[\"string\",\"null\"],\"default\":null}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
+                Tool("get_output_tail", "Read retained output without clearing it. Filter categories before joining event fragments and splitting Python-style logical lines. Positive lines selects the last N, zero selects all, and negative lines skips the first N.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"lines\":{\"type\":\"integer\",\"default\":50},\"category\":{\"type\":[\"string\",\"null\"],\"default\":null}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 .. NativeSceneToolDispatcher.ListTools(),
             ],
             TimeToLive = CacheLifetime,

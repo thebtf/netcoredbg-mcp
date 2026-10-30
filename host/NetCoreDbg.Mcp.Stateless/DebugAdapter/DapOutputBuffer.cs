@@ -68,6 +68,138 @@ internal sealed class DapOutputBuffer
         }
     }
 
+    internal (long TotalLines, long ReturnedLines, string Output) Tail(long lines, string? category)
+    {
+        lock (_gate)
+        {
+            var cursor = new OutputCursor(_entries, category);
+            long totalLines = 0;
+            long contentLength = 0;
+            var unterminatedLine = false;
+            while (cursor.MoveNext(out var character))
+            {
+                if (IsLineBreak(character))
+                {
+                    totalLines++;
+                    unterminatedLine = false;
+                }
+                else
+                {
+                    contentLength++;
+                    unterminatedLine = true;
+                }
+            }
+
+            if (unterminatedLine)
+            {
+                totalLines++;
+            }
+
+            var skippedLines = lines > 0
+                ? Math.Max(0, totalLines - lines)
+                : lines == long.MinValue ? totalLines : Math.Min(totalLines, -lines);
+            var returnedLines = totalLines - skippedLines;
+            if (returnedLines == 0)
+            {
+                return (totalLines, 0, string.Empty);
+            }
+
+            // Count first, then skip and copy only the selected suffix; no whole-buffer snapshot or line array.
+            cursor = new OutputCursor(_entries, category);
+            while (skippedLines > 0 && cursor.MoveNext(out var character))
+            {
+                if (IsLineBreak(character))
+                {
+                    skippedLines--;
+                }
+                else
+                {
+                    contentLength--;
+                }
+            }
+
+            var length = checked((int)(contentLength + returnedLines - 1));
+            var output = string.Create(length, cursor, static (destination, state) =>
+            {
+                var remaining = state;
+                var offset = 0;
+                var pendingSeparator = false;
+                while (remaining.MoveNext(out var character))
+                {
+                    // Defer LF until another line starts: a final separator does not create an extra line.
+                    if (pendingSeparator)
+                    {
+                        destination[offset++] = '\n';
+                    }
+
+                    pendingSeparator = IsLineBreak(character);
+                    if (!pendingSeparator)
+                    {
+                        destination[offset++] = character;
+                    }
+                }
+            });
+            return (totalLines, returnedLines, output);
+        }
+    }
+
+    private static bool IsLineBreak(char value) => value is
+        '\n' or '\r' or '\v' or '\f' or '\u001c' or '\u001d' or '\u001e' or '\u0085' or '\u2028' or '\u2029';
+
+    private struct OutputCursor
+    {
+        private Queue<(string Text, string Category, int Scalars)>.Enumerator _entries;
+        private readonly string? _category;
+        private string _text;
+        private int _offset;
+        private bool _skipLf;
+
+        internal OutputCursor(Queue<(string Text, string Category, int Scalars)> entries, string? category)
+        {
+            _entries = entries.GetEnumerator();
+            _category = category;
+            _text = string.Empty;
+            _offset = 0;
+            _skipLf = false;
+        }
+
+        internal bool MoveNext(out char character)
+        {
+            while (true)
+            {
+                while (_offset == _text.Length)
+                {
+                    if (!_entries.MoveNext())
+                    {
+                        character = default;
+                        return false;
+                    }
+
+                    var entry = _entries.Current;
+                    if (!string.IsNullOrEmpty(_category) && !string.Equals(entry.Category, _category, StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    _text = entry.Text;
+                    _offset = 0;
+                }
+
+                var next = _text[_offset++];
+                // CRLF is one separator even across events, including fragments made adjacent by filtering.
+                if (_skipLf && next == '\n')
+                {
+                    _skipLf = false;
+                    continue;
+                }
+
+                _skipLf = next == '\r';
+                character = next;
+                return true;
+            }
+        }
+    }
+
     private static (string Text, int Scalars) BoundEntry(string text)
     {
         var limit = MaximumEntryScalars;
