@@ -52,7 +52,8 @@ internal sealed record AdapterOptions(
     string LifecycleMode,
     bool SuppressContinuedAfterStopped,
     string StackTraceResponseMode,
-    string NextResponseMode)
+    string NextResponseMode,
+    string SetBreakpointsResponseMode)
 {
     public static AdapterOptions Parse(string[] args, string? environmentOptions)
     {
@@ -84,6 +85,7 @@ internal sealed record AdapterOptions(
         var suppressContinuedAfterStopped = false;
         var stackTraceResponseMode = "success";
         var nextResponseMode = "success";
+        var setBreakpointsResponseMode = "success";
 
         foreach (var argument in args.Concat(SplitOptions(environmentOptions)))
         {
@@ -177,6 +179,9 @@ internal sealed record AdapterOptions(
                 case var _ when argument.StartsWith("--next-response=", StringComparison.Ordinal):
                     nextResponseMode = argument["--next-response=".Length..];
                     break;
+                case var _ when argument.StartsWith("--set-breakpoints-response=", StringComparison.Ordinal):
+                    setBreakpointsResponseMode = argument["--set-breakpoints-response=".Length..];
+                    break;
                 default:
                     throw new ArgumentException($"Unknown fixture option '{argument}'.", nameof(args));
             }
@@ -210,7 +215,8 @@ internal sealed record AdapterOptions(
             lifecycleMode,
             suppressContinuedAfterStopped,
             stackTraceResponseMode,
-            nextResponseMode);
+            nextResponseMode,
+            setBreakpointsResponseMode);
     }
 
     private static IEnumerable<string> SplitOptions(string? options) =>
@@ -352,6 +358,9 @@ internal sealed class ControlledDapAdapter
     private static readonly TimeSpan LifecycleEventsCompletionTimeout = TimeSpan.FromSeconds(1);
     private Task<DapFrame?>? _nextRequest;
     private int _outgoingSequence = 1;
+    private bool _initializedEventSent;
+    private int _nextBreakpointId = 1;
+    private readonly List<(int Id, int Line)> _initiallyUnverifiedBreakpoints = [];
 
     public ControlledDapAdapter(AdapterOptions options, string transcriptPath, string[] processArguments)
     {
@@ -494,6 +503,7 @@ internal sealed class ControlledDapAdapter
                 if (_options.InitializedBeforeCorrectInitializeResponse)
                 {
                     await WriteEventAsync("initialized", body: null, cancellationToken);
+                    _initializedEventSent = true;
                     await RecordAsync(new { kind = "early-initialized-event" }, cancellationToken);
                 }
 
@@ -541,6 +551,7 @@ internal sealed class ControlledDapAdapter
                 if (!_options.SuppressInitializedAfterInitializeResponse)
                 {
                     await WriteEventAsync("initialized", body: null, cancellationToken);
+                    _initializedEventSent = true;
                     await RecordAsync(new { kind = "initialized-event" }, cancellationToken);
                 }
 
@@ -585,10 +596,74 @@ internal sealed class ControlledDapAdapter
                 return await HandleStackTraceRequestAsync(sequence, cancellationToken);
             case "next":
                 return await HandleNextRequestAsync(sequence, root, cancellationToken);
+            case "setBreakpoints":
+                await HandleSetBreakpointsRequestAsync(sequence, root, cancellationToken);
+                return false;
             default:
                 await WriteResponseAsync(sequence, command, body: null, cancellationToken);
                 return false;
         }
+    }
+
+    private async Task HandleSetBreakpointsRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)
+    {
+        const string privatePayload = "private controlled breakpoint payload";
+        if (!_initializedEventSent)
+        {
+            await WriteResponseAsync(sequence, "setBreakpoints", new { message = "setBreakpoints arrived before initialized" }, cancellationToken, success: false);
+            return;
+        }
+
+        var requested = root.GetProperty("arguments").GetProperty("breakpoints").EnumerateArray();
+        var breakpoints = requested.Select((entry, index) =>
+        {
+            var line = entry.GetProperty("line").GetInt32();
+            var id = _nextBreakpointId++;
+            var breakpoint = new Dictionary<string, object?>
+            {
+                ["id"] = id,
+                ["verified"] = true,
+                ["line"] = line,
+                ["message"] = privatePayload,
+            };
+            if (_options.SetBreakpointsResponseMode == "mixed")
+            {
+                breakpoint["verified"] = index != 0;
+                if (index == 0)
+                {
+                    breakpoint.Remove("line");
+                    _initiallyUnverifiedBreakpoints.Add((id, line));
+                }
+                else
+                {
+                    breakpoint["line"] = checked(line + 1);
+                }
+            }
+            return breakpoint;
+        }).ToList();
+
+        object? body = new { breakpoints };
+        var success = true;
+        switch (_options.SetBreakpointsResponseMode)
+        {
+            case "success":
+            case "mixed":
+                break;
+            case "refused":
+                success = false;
+                body = new { message = privatePayload };
+                break;
+            case "missing-verified":
+                breakpoints[0].Remove("verified");
+                break;
+            case "too-few-results":
+                breakpoints.RemoveAt(breakpoints.Count - 1);
+                break;
+            default:
+                throw new InvalidOperationException($"Unknown setBreakpoints response mode '{_options.SetBreakpointsResponseMode}'.");
+        }
+
+        await WriteResponseAsync(sequence, "setBreakpoints", body, cancellationToken, success: success);
     }
 
     private async Task CompleteLaunchAsync(CancellationToken cancellationToken)
@@ -608,6 +683,12 @@ internal sealed class ControlledDapAdapter
         if (_options.DelayLaunchResponseForStartupTimeout)
         {
             await Task.Delay(TimeSpan.FromMilliseconds(1100), cancellationToken);
+        }
+
+        foreach (var (id, line) in _initiallyUnverifiedBreakpoints)
+        {
+            await WriteEventAsync("breakpoint", new { reason = "changed", breakpoint = new { id, verified = true, line } }, cancellationToken);
+            await RecordAsync(new { kind = "breakpoint-verified-event" }, cancellationToken);
         }
 
         await WriteResponseAsync(launch.Document.RootElement.GetProperty("seq").GetInt32(), "launch", body: null, cancellationToken);

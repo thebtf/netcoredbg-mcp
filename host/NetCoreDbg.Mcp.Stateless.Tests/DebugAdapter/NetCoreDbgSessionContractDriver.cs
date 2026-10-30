@@ -1378,7 +1378,8 @@ internal sealed record FixtureConfiguration(
     string LifecycleMode = "default",
     bool SuppressContinuedAfterStopped = false,
     string StackTraceResponseMode = "success",
-    string NextResponseMode = "success")
+    string NextResponseMode = "success",
+    string SetBreakpointsResponseMode = "success")
 {
     public string AsEnvironmentValue() => string.Join(
         ';',
@@ -1411,6 +1412,7 @@ internal sealed record FixtureConfiguration(
             SuppressContinuedAfterStopped ? "--suppress-continued-after-stopped" : null,
             $"--stack-trace-response={StackTraceResponseMode}",
             $"--next-response={NextResponseMode}",
+            $"--set-breakpoints-response={SetBreakpointsResponseMode}",
         }.Where(static value => value is not null));
 }
 

@@ -39,6 +39,15 @@ bundle the opt-in .NET preview executable. Corrected preview delivery is separat
 B3 native `step_over` and Native Scene Probe work remain modern-host source-only
 and add no tools to the Python catalog.
 
+In the source-built stateful host, `start_debug` also accepts an optional
+`breakpoints` array of up to 256 `{file, line}` entries. Each source file must
+exist; relative paths resolve from the host's working directory, and lines are
+one-based. The optional `initialBreakpoints` result records the debugger's
+initial verification only: `verified: false` can become bound after launch.
+Use the returned `debugSessionId` and, when available, the observed
+`state.currentThreadId` to inspect or step a stopped thread. This input is not
+part of the published read-only preview or the Python tool contract.
+
 The separate [native read-only preview](specs/016-a2-native-readonly-family/spec.md)
 exposes `find_code_symbol`, `find_code_references` and `get_source_context`.
 Each schema-2 manifest binds its exact proof generation; historical schema-1
