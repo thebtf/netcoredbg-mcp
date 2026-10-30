@@ -1,10 +1,13 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Unicode;
 
 if (args.Length == 1 && string.Equals(args[0], "--controlled-dap-descendant", StringComparison.Ordinal))
@@ -18,11 +21,87 @@ if (args.Length == 1 && string.Equals(args[0], "--controlled-dap-windowed-descen
     ControlledEvidenceWindow.Run();
     return;
 }
+if (args.Length > 0 && string.Equals(args[0], "--native-ui-invoke-pipe", StringComparison.Ordinal) &&
+    Environment.GetEnvironmentVariable("CONTROLLED_UI_INVOKE_FAILURE_MODE") == "disconnect-after-commit")
+{
+    await ControlledUiInvokeFailure.RunAsync(args);
+    return;
+}
+
 var options = AdapterOptions.Parse(args, Environment.GetEnvironmentVariable("CONTROLLED_DAP_OPTIONS"));
 var transcriptPath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT")
     ?? throw new InvalidOperationException("CONTROLLED_DAP_TRANSCRIPT is required.");
 var adapter = new ControlledDapAdapter(options, transcriptPath, args);
 await adapter.RunAsync(CancellationToken.None);
+
+internal static class ControlledUiInvokeFailure
+{
+    private const int MaximumFrameBytes = 8_192;
+
+    internal static async Task RunAsync(string[] arguments)
+    {
+        if (arguments.Length != 4 || string.IsNullOrWhiteSpace(arguments[1]) || string.IsNullOrWhiteSpace(arguments[2]) ||
+            !int.TryParse(arguments[3], NumberStyles.None, CultureInfo.InvariantCulture, out var processId) || processId <= 0)
+        {
+            throw new InvalidDataException("The controlled invoke helper requires a pipe, nonce and bound process ID.");
+        }
+        var transcript = Environment.GetEnvironmentVariable("CONTROLLED_UI_INVOKE_TRANSCRIPT")
+            ?? throw new InvalidOperationException("CONTROLLED_UI_INVOKE_TRANSCRIPT is required.");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await File.AppendAllTextAsync(transcript, "helper-start\n", deadline.Token);
+        await using var pipe = new NamedPipeServerStream(
+            arguments[1], PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        await pipe.WaitForConnectionAsync(deadline.Token);
+
+        var prepare = await ReadFrameAsync(pipe, deadline.Token);
+        var correlationId = prepare["correlationId"]?.GetValue<string>();
+        if (prepare.Count != 3 || prepare["nonce"]?.GetValue<string>() != arguments[2] || string.IsNullOrWhiteSpace(correlationId) ||
+            prepare["request"] is not JsonObject request || request["operation"]?.GetValue<string>() != "prepare" ||
+            request["processId"]?.GetValue<int>() != processId)
+        {
+            throw new InvalidDataException("The controlled invoke prepare frame is not bound to its launch.");
+        }
+        await File.AppendAllTextAsync(transcript, "prepare\n", deadline.Token);
+        var ready = new JsonObject
+        {
+            ["nonce"] = arguments[2],
+            ["correlationId"] = correlationId,
+            ["response"] = new JsonObject { ["status"] = "ready" },
+        };
+        var payload = Encoding.UTF8.GetBytes(ready.ToJsonString());
+        var header = new byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32LittleEndian(header, payload.Length);
+        await pipe.WriteAsync(header, deadline.Token);
+        await pipe.WriteAsync(payload, deadline.Token);
+        await pipe.FlushAsync(deadline.Token);
+
+        var commit = await ReadFrameAsync(pipe, deadline.Token);
+        if (commit.Count != 3 || commit["nonce"]?.GetValue<string>() != arguments[2] ||
+            commit["correlationId"]?.GetValue<string>() != correlationId ||
+            commit["request"] is not JsonObject invocation || invocation.Count != 1 ||
+            invocation["operation"]?.GetValue<string>() != "invoke")
+        {
+            throw new InvalidDataException("The controlled invoke commit frame does not match its preparation.");
+        }
+        await File.AppendAllTextAsync(transcript, "invoke\n", deadline.Token);
+        // Drop the post-dispatch reply without invoking anything or claiming success.
+    }
+
+    private static async Task<JsonObject> ReadFrameAsync(Stream stream, CancellationToken cancellationToken)
+    {
+        var header = new byte[sizeof(int)];
+        await stream.ReadExactlyAsync(header, cancellationToken);
+        var length = BinaryPrimitives.ReadInt32LittleEndian(header);
+        if (length is < 1 or > MaximumFrameBytes)
+        {
+            throw new InvalidDataException("The controlled invoke frame exceeds its bound.");
+        }
+        var payload = new byte[length];
+        await stream.ReadExactlyAsync(payload, cancellationToken);
+        return JsonNode.Parse(payload) as JsonObject
+            ?? throw new InvalidDataException("The controlled invoke frame must be an object.");
+    }
+}
 
 internal sealed record AdapterOptions(
     bool SupportsConfigurationDone,

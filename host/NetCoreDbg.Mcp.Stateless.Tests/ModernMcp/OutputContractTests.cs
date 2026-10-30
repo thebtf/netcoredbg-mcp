@@ -70,6 +70,66 @@ public sealed class OutputContractTests(ITestOutputHelper output)
         ("extra_field", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = 2, ["category"] = null, ["unexpected"] = true }),
         ("mis_cased_lines", new JsonObject { ["debugSessionId"] = "opaque", ["Lines"] = 2 }),
     ];
+    [Theory]
+    [InlineData(Tool)]
+    [InlineData(TailTool)]
+    public async Task LiveHost_OutputSuccess_MatchesApplicationSchemaWithoutDapIoOrConsumingOutput(string toolName)
+    {
+        const string original = "first\r\nsecond\0\U0001F600\nthird\n";
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(Output("first\r\n", "stdout"), Output("second\0\U0001F600\nthird\n", "stderr"))));
+        var token = await StartSessionAsync(driver, $"schema-{toolName}-start");
+        var arguments = new JsonObject { ["debugSessionId"] = token, ["category"] = null };
+        if (toolName == Tool)
+        {
+            arguments["clear"] = false;
+        }
+        else
+        {
+            arguments["lines"] = 2;
+        }
+        var before = await driver.ReadNativeActionsAsync();
+
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(
+            toolName, arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId($"schema-{toolName}-success")), isError: false);
+
+        Assert.Equal(toolName == Tool ? "output_success" : "output_tail_success", content["kind"]?.GetValue<string>());
+        Assert.Equal(toolName == Tool ? 2 : 4, content.Count);
+        Assert.Equal(toolName == Tool ? original : "second\0\U0001F600\nthird", content["output"]?.GetValue<string>());
+        if (toolName == TailTool)
+        {
+            Assert.Equal(3, content["totalLines"]?.GetValue<int>());
+            Assert.Equal(2, content["returnedLines"]?.GetValue<int>());
+        }
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+        Assert.Equal(original, await ReadOutputAsync(driver, token, $"schema-{toolName}-retained"));
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+    }
+
+    [Theory]
+    [InlineData(Tool)]
+    [InlineData(TailTool)]
+    public async Task LiveHost_OutputInvalidArguments_MatchApplicationSchemaWithoutDapIoOrConsumingOutput(string toolName)
+    {
+        const string original = "retained\0\U0001F600\r\n";
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(Output(original))));
+        var token = await StartSessionAsync(driver, $"schema-{toolName}-invalid-start");
+        var arguments = new JsonObject { ["debugSessionId"] = token };
+        arguments[toolName == Tool ? "clear" : "lines"] = "not-the-advertised-type";
+        var before = await driver.ReadNativeActionsAsync();
+
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(
+            toolName, arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId($"schema-{toolName}-invalid")), isError: true);
+
+        Assert.Equal(3, content.Count);
+        Assert.Equal("invalid_tool_arguments", content["kind"]?.GetValue<string>());
+        Assert.Equal("INVALID_TOOL_ARGUMENTS", content["error"]?.GetValue<string>());
+        Assert.Equal(toolName, content["tool"]?.GetValue<string>());
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+        Assert.Equal(original, await ReadOutputAsync(driver, token, $"schema-{toolName}-invalid-retained"));
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+    }
+
 
     [Fact]
     public async Task GetOutput_EmptyBuffer_ReturnsCompleteEmptySuccessWithoutDapIo()

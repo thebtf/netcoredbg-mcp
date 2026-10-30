@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Collections.Immutable;
 using System.IO.Pipes;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 using System.Security.Cryptography;
 using System.Text;
@@ -40,6 +41,43 @@ public sealed class NativeSceneAtomicityTests
         "adapter_reported");
 
     [Fact]
+    public async Task Fixture_WhenFirstObservedVisible_DoesNotOwnTheForegroundWindow()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        await using var driver = await StartInvokeFixtureDriverAsync();
+        await CallCaptureAsync(
+            driver,
+            "start_debug",
+            new JsonObject { ["program"] = ResolveFixtureExecutablePath() },
+            "fixture-nonactivating-start",
+            expectedError: false,
+            requireNativeSceneSchema: false);
+        var fixtureProcessId = await driver.ReadDescendantProcessIdAsync();
+        await WaitForMainWindowAsync(fixtureProcessId);
+
+        // Observe only: do not activate any window or send input. An unstable/unknown
+        // foreground is inconclusive and must fail, not silently pass or be retried.
+        var foreground = GetForegroundWindow();
+        Assert.True(foreground != IntPtr.Zero, "No foreground window was observable after the fixture was first shown.");
+        var threadId = GetWindowThreadProcessId(foreground, out var foregroundProcessId);
+        Assert.True(threadId != 0 && foregroundProcessId != 0, "The foreground window's owner could not be observed.");
+        Assert.True(foreground == GetForegroundWindow(), "Foreground changed during the ownership observation.");
+        Assert.NotEqual(checked((uint)fixtureProcessId), foregroundProcessId);
+    }
+
+    [DllImport("user32.dll", ExactSpelling = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll", ExactSpelling = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+
+    [Fact]
     public async Task UiInvoke_UniqueOwnedWindowElement_ChangesOnlyItsFixtureExactlyOnce()
     {
         await using var driver = await StartInvokeFixtureDriverAsync();
@@ -49,10 +87,17 @@ public sealed class NativeSceneAtomicityTests
         await AssertInvokeFixtureTextAsync(driver, session, "Save scene");
         await AssertInvokeFixtureTextAsync(otherDriver, otherSession, "Save scene");
 
-        await CallInvokeAsync(driver, InvokeArguments(session.DebugSessionId, "SaveButton"), "invoke-owned", expectedError: false);
+        var content = await CallInvokeAsync(
+            driver, InvokeArguments(session.DebugSessionId, "SaveButton"), "invoke-owned", expectedError: false);
 
         await WaitForInvokeFixtureActionAsync(driver, session);
         await AssertInvokeFixtureTextAsync(otherDriver, otherSession, "Save scene");
+        Assert.Equal(4, content.Count);
+        Assert.Equal("ui_invoke_success", Text(content["kind"]));
+        Assert.Equal("SaveButton", Text(content["automationId"]));
+        Assert.True(content["invoked"]!.GetValue<bool>());
+        Assert.Equal("InvokePattern", Text(content["method"]));
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
     }
 
     [Theory]
@@ -70,10 +115,23 @@ public sealed class NativeSceneAtomicityTests
         var error = await CallInvokeAsync(
             driver, InvokeArguments(session.DebugSessionId, automationId), "invoke-rejected", expectedError: true);
 
-        Assert.False(string.IsNullOrWhiteSpace(Text(error["code"] ?? error["error"])));
+        var code = automationId switch
+        {
+            "AmbiguousButton" => "ELEMENT_AMBIGUOUS",
+            "SceneHeading" => "UI_INVOKE_PATTERN_UNSUPPORTED",
+            _ => "ELEMENT_NOT_FOUND",
+        };
+        Assert.Equal(5, error.Count);
+        Assert.Equal("tool_error", Text(error["kind"]));
+        Assert.Equal("ui_invoke", Text(error["tool"]));
+        Assert.Equal(code, Text(error["code"]));
+        Assert.Equal("not_invoked", Text(error["outcome"]));
+        Assert.True(Assert.IsAssignableFrom<JsonValue>(error["message"]).TryGetValue<string>(out var message));
+        Assert.False(string.IsNullOrEmpty(message));
         await AssertInvokeFixtureTextAsync(driver, session, "Save scene");
         await CallInvokeAsync(driver, InvokeArguments(session.DebugSessionId, "SaveButton"), "invoke-positive-control", expectedError: false);
         await WaitForInvokeFixtureActionAsync(driver, session);
+        AssertInvokeErrorMatchesApplicationSchema(error);
     }
 
     [Fact]
@@ -116,10 +174,15 @@ public sealed class NativeSceneAtomicityTests
         var extraArgument = InvokeArguments(session.DebugSessionId, "SaveButton");
         extraArgument["unexpected"] = true;
         invalidRequests.Add(extraArgument);
+        var invalidContents = new List<JsonObject>();
         for (var index = 0; index < invalidRequests.Count; index++)
         {
             var error = await CallInvokeAsync(driver, invalidRequests[index], $"invoke-invalid-{index}", expectedError: true);
-            Assert.Equal("INVALID_TOOL_ARGUMENTS", Text(error["code"] ?? error["error"]));
+            Assert.Equal(3, error.Count);
+            Assert.Equal("invalid_tool_arguments", Text(error["kind"]));
+            Assert.Equal("INVALID_TOOL_ARGUMENTS", Text(error["error"]));
+            Assert.Equal("ui_invoke", Text(error["tool"]));
+            invalidContents.Add(error);
             await AssertInvokeFixtureTextAsync(driver, session, "Save scene");
         }
 
@@ -129,6 +192,7 @@ public sealed class NativeSceneAtomicityTests
         await AssertInvokeFixtureTextAsync(driver, session, "Save scene");
         await CallInvokeAsync(driver, InvokeArguments(session.DebugSessionId, "SaveButton"), "invoke-after-invalid", expectedError: false);
         await WaitForInvokeFixtureActionAsync(driver, session);
+        Assert.All(invalidContents, StructuredContentSchemaParityTests.AssertMatchesSchema);
     }
 
     [Fact]
@@ -196,7 +260,71 @@ public sealed class NativeSceneAtomicityTests
         Assert.Equal("UI_INVOKE_TARGET_UNAVAILABLE", Text(error["code"] ?? error["error"]));
     }
 
-    private static Task<ModernMcpProcessDriver> StartInvokeFixtureDriverAsync(string lifecycleMode = "all-stop-continued-true") =>
+    [Fact]
+    public async Task UiInvoke_LiveHostLostPostDispatchReply_MatchesApplicationSchemaAndDoesNotRetry()
+    {
+        var scratch = ModernMcpScratchDirectory.Create();
+        try
+        {
+            var transcript = Path.Combine(scratch, "invoke-helper.log");
+            var bridgePath = TestOutputPathResolver.ResolveManagedAssembly(
+                RepositoryLayout.Root,
+                Path.Combine("host", "NetCoreDbg.Mcp.Stateless.Tests", "Fixtures", "ControlledDapAdapter"),
+                "ControlledDapAdapter");
+            await using var driver = await StartInvokeFixtureDriverAsync(
+                bridgePath: bridgePath, invokeTranscriptPath: transcript);
+            var session = await StartBoundFixtureSessionAsync(driver, "invoke-unknown-outcome-start");
+            await AssertInvokeFixtureTextAsync(driver, session, "Save scene");
+            var before = await driver.ReadNativeActionsAsync();
+
+            var content = await CallInvokeAsync(
+                driver, InvokeArguments(session.DebugSessionId, "SaveButton"), "invoke-unknown-outcome", expectedError: true);
+
+            Assert.Equal(5, content.Count);
+            Assert.Equal("tool_error", Text(content["kind"]));
+            Assert.Equal("ui_invoke", Text(content["tool"]));
+            Assert.Equal("UI_INVOKE_OUTCOME_UNKNOWN", Text(content["code"]));
+            Assert.Equal("unknown", Text(content["outcome"]));
+            Assert.True(Assert.IsAssignableFrom<JsonValue>(content["message"]).TryGetValue<string>(out var message));
+            Assert.False(string.IsNullOrEmpty(message));
+            Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+            await AssertInvokeFixtureTextAsync(driver, session, "Save scene");
+            Assert.Equal(new[] { "helper-start", "prepare", "invoke" }, await File.ReadAllLinesAsync(transcript));
+            AssertInvokeErrorMatchesApplicationSchema(content);
+        }
+        finally
+        {
+            await ModernMcpScratchDirectory.DeleteAsync(scratch);
+        }
+    }
+
+    private static void AssertInvokeErrorMatchesApplicationSchema(JsonObject content)
+    {
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        var alternate = content.DeepClone().AsObject();
+        alternate["message"] = "Alternative nonempty diagnostic wording.";
+        StructuredContentSchemaParityTests.AssertMatchesSchema(alternate);
+        var unknown = Text(content["outcome"]) == "unknown";
+        var incompatible = new (string Property, JsonNode? Value)[]
+        {
+            ("outcome", JsonValue.Create(unknown ? "not_invoked" : "unknown")),
+            ("code", JsonValue.Create(unknown ? "ELEMENT_NOT_FOUND" : "UI_INVOKE_OUTCOME_UNKNOWN")),
+            ("message", JsonValue.Create(string.Empty)),
+            ("message", JsonValue.Create(42)),
+            ("message", null),
+        };
+        foreach (var (property, value) in incompatible)
+        {
+            var crossed = content.DeepClone().AsObject();
+            crossed[property] = value;
+            Assert.ThrowsAny<Xunit.Sdk.XunitException>(() => StructuredContentSchemaParityTests.AssertMatchesSchema(crossed));
+        }
+    }
+
+    private static Task<ModernMcpProcessDriver> StartInvokeFixtureDriverAsync(
+        string lifecycleMode = "all-stop-continued-true",
+        string? bridgePath = null,
+        string? invokeTranscriptPath = null) =>
         ModernMcpProcessDriver.StartAsync(
             new ModernMcpStartOptions(
                 FixtureConfiguration: new FixtureConfiguration(
@@ -210,7 +338,9 @@ public sealed class NativeSceneAtomicityTests
                     ]),
                 AdditionalEnvironment: new Dictionary<string, string?>
                 {
-                    ["FLAUI_BRIDGE_PATH"] = ResolveBridgeAssemblyPath(),
+                    ["FLAUI_BRIDGE_PATH"] = bridgePath ?? ResolveBridgeAssemblyPath(),
+                    ["CONTROLLED_UI_INVOKE_FAILURE_MODE"] = invokeTranscriptPath is null ? null : "disconnect-after-commit",
+                    ["CONTROLLED_UI_INVOKE_TRANSCRIPT"] = invokeTranscriptPath,
                 }));
 
     private static JsonObject InvokeArguments(string debugSessionId, string automationId) => new()
@@ -232,7 +362,11 @@ public sealed class NativeSceneAtomicityTests
         Assert.True(
             expectedError == (result["isError"]?.GetValue<bool>() ?? false),
             $"ui_invoke returned an unexpected result: {result.ToJsonString()}.");
-        return Object(result["structuredContent"]);
+        var content = Object(result["structuredContent"]);
+        var text = Object(Assert.Single(Array(result["content"])));
+        Assert.Equal("text", Text(text["type"]));
+        Assert.Equal(content.ToJsonString(), Text(text["text"]));
+        return content;
     }
 
     private static async Task WaitForInvokeFixtureActionAsync(
@@ -758,6 +892,21 @@ public sealed class NativeSceneAtomicityTests
         Assert.Equal("start_debug_success", Text(started["kind"]));
         var debugSessionId = Text(started["debugSessionId"]);
 
+        // Publication proves the fixture sent the event; the subsequent DAP response
+        // proves the session reader consumed it before capability discovery.
+        using (var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2)))
+        {
+            await driver.WaitForFixtureEventAsync("process", observation.Token);
+        }
+
+        await CallCaptureAsync(
+            driver,
+            "get_threads",
+            new JsonObject { ["debugSessionId"] = debugSessionId },
+            $"{requestId}-process-reader-barrier",
+            expectedError: false,
+            requireNativeSceneSchema: false);
+
         var declaration = await CallCaptureAsync(
             driver,
             "get_ui_probe_capabilities",
@@ -967,6 +1116,18 @@ public sealed class NativeSceneAtomicityTests
         var result = ModernMcpProcessDriver.RequireResult(response);
         Assert.Equal("complete", Text(result["resultType"]));
         var isError = result["isError"]?.GetValue<bool>() ?? false;
+        if (result["structuredContent"] is null)
+        {
+            var contentShape = result["content"] switch
+            {
+                JsonArray blocks => $"array[{blocks.Count}]",
+                JsonObject => "object",
+                JsonValue => "scalar",
+                _ => "missing_or_null",
+            };
+            Assert.Fail($"{tool} returned resultType=complete, isError={isError}, content={contentShape}, structuredContent=missing_or_null.");
+        }
+
         var content = Object(result["structuredContent"]);
         Assert.True(
             expectedError == isError,
