@@ -280,6 +280,32 @@
       },
       "additionalProperties": false
     },
+    "removeBreakpointArguments": {
+      "type": "object",
+      "required": [
+        "debugSessionId",
+        "file",
+        "line"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
     "breakpointAdded": {
       "type": "object",
       "required": [
@@ -310,6 +336,35 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
+    "breakpointRemoved": {
+      "type": "object",
+      "required": [
+        "kind",
+        "file",
+        "line",
+        "removed"
+      ],
+      "properties": {
+        "kind": {
+          "const": "breakpoint_removed"
+        },
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Normalized absolute source path."
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647,
+          "description": "Requested source line, not an adapter adjustment."
+        },
+        "removed": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false
@@ -1096,7 +1151,8 @@
             "get_variables",
             "step_over",
             "continue_execution",
-            "add_breakpoint"
+            "add_breakpoint",
+            "remove_breakpoint"
           ]
         }
       },
@@ -1145,6 +1201,9 @@
         },
         {
           "$ref": "#/$defs/breakpointAdded"
+        },
+        {
+          "$ref": "#/$defs/breakpointRemoved"
         },
         {
           "$ref": "#/$defs/debugSessionNotFound"

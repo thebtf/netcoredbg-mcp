@@ -175,6 +175,54 @@ public sealed class StructuredContentSchemaParityTests
         }
     }
 
+    [Fact]
+    public async Task LiveHost_RemoveBreakpointStructuredContentMatchesFrozenSchemaVariants()
+    {
+        var schema = LoadSchema();
+        var definitions = Assert.IsType<JsonObject>(schema["$defs"]);
+        var argumentsSchema = Assert.IsType<JsonObject>(definitions["removeBreakpointArguments"]);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true)));
+        var meta = ModernMcpProcessDriver.CurrentMeta();
+        var source = Path.Combine(RepositoryLayout.Root,
+            "host/NetCoreDbg.Mcp.Stateless.Tests/ModernMcp/StructuredContentSchemaParityTests.cs");
+        var start = Structured(await driver.CallToolRawAsync("start_debug",
+            new JsonObject
+            {
+                ["program"] = driver.InertProgramPath,
+                ["breakpoints"] = new JsonArray(new JsonObject { ["file"] = source, ["line"] = 2 }),
+            },
+            meta,
+            new RequestId("remove-breakpoint-schema-start")));
+        Assert.Equal("start_debug_success", start["kind"]?.GetValue<string>());
+        var debugSessionId = Assert.IsType<string>(start["debugSessionId"]?.GetValue<string>());
+
+        foreach (var expectedRemoved in new[] { true, false })
+        {
+            var arguments = new JsonObject { ["debugSessionId"] = debugSessionId, ["file"] = source, ["line"] = 2 };
+            ValidateObject(definitions, argumentsSchema, JsonNode.Parse(arguments.ToJsonString())!.AsObject());
+            var content = Structured(await driver.CallToolRawAsync("remove_breakpoint",
+                arguments,
+                meta,
+                new RequestId($"remove-breakpoint-schema-{expectedRemoved}")));
+
+            Assert.Equal("breakpoint_removed", content["kind"]?.GetValue<string>());
+            Assert.Equal(Path.GetFullPath(source), content["file"]?.GetValue<string>());
+            Assert.Equal(2, content["line"]?.GetValue<int>());
+            Assert.Equal(expectedRemoved, content["removed"]?.GetValue<bool>());
+            ValidateVariant(schema, content);
+        }
+
+        var invalidArguments = Structured(await driver.CallToolRawAsync("remove_breakpoint",
+            new JsonObject { ["debugSessionId"] = debugSessionId, ["file"] = source, ["line"] = 0 },
+            meta,
+            new RequestId("remove-breakpoint-schema-invalid")));
+        Assert.Equal("invalid_tool_arguments", invalidArguments["kind"]?.GetValue<string>());
+        Assert.Equal("INVALID_TOOL_ARGUMENTS", invalidArguments["error"]?.GetValue<string>());
+        Assert.Equal("remove_breakpoint", invalidArguments["tool"]?.GetValue<string>());
+        ValidateVariant(schema, invalidArguments);
+    }
+
 
     internal static void AssertMatchesSchema(JsonObject content) => ValidateVariant(LoadSchema(), content);
 

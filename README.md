@@ -60,7 +60,12 @@ applied set is not guaranteed; a later successful update resends the full set.
 A cancelled update with a possibly sent but unconfirmed request closes the
 session; cancellation after a fully written and confirmed response does not
 itself close it.
-Conditions, hit counts, and runtime removal/listing are not yet supported by
+`remove_breakpoint(debugSessionId, file, line)` removes all requested entries
+for that exact normalized source and requested line, including initial duplicates.
+It sends the remaining full source set to DAP, or an empty set for the last entry.
+A missing entry returns `removed: false` without a DAP write; the source file
+does not have to still exist. The same refusal, cancellation, and uncertain-write
+rules apply. Conditions, hit counts, and runtime listing are not yet supported by
 this native path.
 
 To inspect a stopped frame, call `get_call_stack` with
