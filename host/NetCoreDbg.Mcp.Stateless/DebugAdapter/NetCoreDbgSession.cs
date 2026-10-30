@@ -275,7 +275,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         uint levels,
         CancellationToken cancellationToken)
     {
-        var response = await SendStackTraceRequestAsync(
+        var (response, isPaged) = await SendStackTraceRequestAsync(
             threadId,
             startFrame,
             levels,
@@ -305,11 +305,21 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             totalFrames = parsedTotalFrames;
         }
 
-        var normalized = new DapStackFrame[stackFrames.GetArrayLength()];
+        var frameCount = stackFrames.GetArrayLength();
+        var pageStart = isPaged ? 0 : (int)Math.Min(startFrame, (uint)frameCount);
+        var pageLength = isPaged ? frameCount : (int)Math.Min(levels, (uint)(frameCount - pageStart));
+        var normalized = pageLength == 0 ? Array.Empty<DapStackFrame>() : new DapStackFrame[pageLength];
         var index = 0;
         foreach (var stackFrame in stackFrames.EnumerateArray())
         {
-            normalized[index++] = NormalizeStackFrame(stackFrame);
+            var pageIndex = index - pageStart;
+            var frame = NormalizeStackFrame(stackFrame, pageIndex >= 0 && pageIndex < pageLength);
+            if (frame is not null)
+            {
+                normalized[pageIndex] = frame;
+            }
+
+            index++;
         }
 
         return DapCallStackResult.Succeeded(normalized, totalFrames);
@@ -506,25 +516,28 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             RemovePending(request);
         }
     }
-    private async Task<DapResponse?> SendStackTraceRequestAsync(
+    private async Task<(DapResponse? Response, bool IsPaged)> SendStackTraceRequestAsync(
         int threadId,
         uint startFrame,
         uint levels,
         CancellationToken cancellationToken)
     {
         PendingRequest? request = null;
+        bool isPaged;
         await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             var target = CaptureCallStackTarget(threadId);
             if (target is null)
             {
-                return null;
+                return (null, false);
             }
 
+            isPaged = target.Value.SupportsPaging;
+            object arguments = isPaged ? new { threadId, startFrame, levels } : new { threadId };
             request = await BeginRequestAsync(
                 "stackTrace",
-                new { threadId, startFrame, levels },
+                arguments,
                 _requestTimeout,
                 cancellationToken,
                 target).ConfigureAwait(false);
@@ -536,7 +549,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         try
         {
-            return await WaitForResponseAsync(request, _requestTimeout, cancellationToken).ConfigureAwait(false);
+            var response = await WaitForResponseAsync(request, _requestTimeout, cancellationToken).ConfigureAwait(false);
+            return (response, isPaged);
         }
         finally
         {
@@ -1042,20 +1056,16 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     {
         lock (_stateGate)
         {
-            if (!_stackTraceCapabilities.SupportsDelayedStackTraceLoading)
-            {
-                return null;
-            }
-
+            var supportsPaging = _stackTraceCapabilities.SupportsDelayedStackTraceLoading;
             if (_allThreadsStoppedEligibility is { } allTargets
                 && (_invalidatedAllThreadTargets is null || !_invalidatedAllThreadTargets.Contains(threadId)))
             {
-                return new CapturedCallStackTarget(allTargets, threadId);
+                return new CapturedCallStackTarget(allTargets, threadId, supportsPaging);
             }
 
             return _threadEligibility is not null
                 && _threadEligibility.TryGetValue(threadId, out var target)
-                    ? new CapturedCallStackTarget(target, threadId)
+                    ? new CapturedCallStackTarget(target, threadId, supportsPaging)
                     : null;
         }
     }
@@ -1082,7 +1092,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         _invalidatedAllThreadTargets = null;
     }
 
-    private static DapStackFrame NormalizeStackFrame(JsonElement stackFrame)
+    private static DapStackFrame? NormalizeStackFrame(JsonElement stackFrame, bool materialize)
     {
         var id = RequireInt32(stackFrame, "id");
         var name = RequireString(stackFrame, "name");
@@ -1095,7 +1105,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         var column = RequireSafeDapInteger(stackFrame, "column");
         if (!stackFrame.TryGetProperty("source", out var sourceElement))
         {
-            return new DapStackFrame(id, name, null, 0, 0);
+            return materialize ? new DapStackFrame(id, name, null, 0, 0) : null;
         }
 
         if (sourceElement.ValueKind != JsonValueKind.Object)
@@ -1105,7 +1115,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         if (!sourceElement.TryGetProperty("path", out var pathElement))
         {
-            return new DapStackFrame(id, name, null, 0, 0);
+            return materialize ? new DapStackFrame(id, name, null, 0, 0) : null;
         }
 
         var path = RequireString(sourceElement, "path");
@@ -1114,7 +1124,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             throw new InvalidDataException("DAP stack frame source path exceeds the supported maximum.");
         }
 
-        return new DapStackFrame(id, name, path, line, column);
+        return materialize ? new DapStackFrame(id, name, path, line, column) : null;
     }
 
     private Task EnsureCleanupAsync()
@@ -2225,7 +2235,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private readonly record struct DapStackTraceCapabilities(bool SupportsDelayedStackTraceLoading);
 
-    private readonly record struct CapturedCallStackTarget(CallStackEligibility Eligibility, int ThreadId);
+    private readonly record struct CapturedCallStackTarget(
+        CallStackEligibility Eligibility,
+        int ThreadId,
+        bool SupportsPaging);
 
     private sealed record DapResponse(JsonElement Body, bool Success, bool TargetCurrent = true);
 }

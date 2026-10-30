@@ -1295,6 +1295,11 @@ internal sealed class ControlledDapAdapter
             case "success-with-total-frames":
                 await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = StackFrames(2, "frame"), totalFrames = 2U }, cancellationToken);
                 return false;
+            case "full-stack-with-total-frames":
+                var fullStack = StackFrames(256, "frame");
+                fullStack.Reverse();
+                await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = fullStack, totalFrames = 256U }, cancellationToken);
+                return false;
             case "empty-name-source-reference":
                 await WriteResponseAsync(sequence, "stackTrace", new
                 {
@@ -1314,6 +1319,11 @@ internal sealed class ControlledDapAdapter
                 return false;
             case "malformed-body":
                 await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = new[] { new Dictionary<string, object?> { ["id"] = "not-an-int32", ["name"] = 17 } } }, cancellationToken);
+                return false;
+            case "malformed-trailing-frame":
+                var malformedStack = StackFrames(2, "frame");
+                malformedStack[1]["column"] = -1;
+                await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = malformedStack }, cancellationToken);
                 return false;
             case "too-many-frames":
                 await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = StackFrames(257, "frame") }, cancellationToken);
