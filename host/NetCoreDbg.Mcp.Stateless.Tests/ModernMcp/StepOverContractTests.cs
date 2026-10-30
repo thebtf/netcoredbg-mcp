@@ -777,6 +777,61 @@ public sealed class StepOverContractTests
         }
     }
 
+    [Fact]
+    public async Task ContinueExecution_ExplicitStopAfterAcknowledgement_CompletesCleanupAndRetiresTheInterruptedCall()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            DisableFormElicitation: true,
+            FixtureConfiguration: new FixtureConfiguration(
+                SpawnDescendant: true,
+                SupportsDelayedStackTraceLoading: true,
+                LifecycleMode: "all-stop",
+                NextResponseMode: "continue-ack-held-stop")));
+        var session = await StartStoppedSessionAsync(driver, "continue-explicit-stop-start");
+        using var debuggee = System.Diagnostics.Process.GetProcessById(await driver.ReadDescendantProcessIdAsync());
+        Assert.False(debuggee.HasExited);
+        var operation = driver.CallToolRawAsync(
+            "continue_execution", Arguments(session, 1), ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("continue-explicit-stop-inflight"), timeout: TimeSpan.FromSeconds(15));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        try
+        {
+            await driver.WaitForFixtureRecordAsync("continue-acknowledged", observation.Token);
+            await ContinueReaderBarrierAsync(driver, session, "continue-explicit-stop-reader-barrier", observation.Token);
+            var running = await ReadDebugStateAsync(driver, session, "continue-explicit-stop-running");
+            Assert.Contains(running["event"]?.GetValue<string>(), new[] { "continued", "running" });
+            Assert.False(running.ContainsKey("currentThreadId"));
+            Assert.False(operation.IsCompleted, "The acknowledged continue must still await its held stop event.");
+            Assert.DoesNotContain(await driver.ReadNativeActionsAsync(), static action => action.Command is "terminate" or "disconnect");
+
+            var stop = driver.CallToolRawAsync(
+                "stop_debug", new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(),
+                new RequestId("continue-explicit-stop"), timeout: TimeSpan.FromSeconds(15));
+            var stopResponse = await stop.WaitAsync(TimeSpan.FromSeconds(10));
+
+            debuggee.Refresh();
+            Assert.True(debuggee.HasExited, "stop_debug must finish owned process-tree cleanup before returning success.");
+            var continueResponse = await operation.WaitAsync(TimeSpan.FromSeconds(5));
+            var stopped = AssertApplicationEnvelope(stopResponse, isError: false);
+            Assert.Equal("stop_debug_success", stopped["kind"]?.GetValue<string>());
+            AssertNotFound(AssertContinueEnvelope(continueResponse, isError: true));
+
+            var afterCleanup = await driver.ReadNativeActionsAsync();
+            Assert.Single(afterCleanup, static action => action.Command == "continue");
+            AssertNotFound(AssertApplicationEnvelope(await driver.CallToolRawAsync(
+                "get_debug_state", new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(),
+                new RequestId("continue-explicit-stop-retired-state")), isError: true));
+            AssertNotFound(AssertApplicationEnvelope(await driver.CallToolRawAsync(
+                "stop_debug", new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(),
+                new RequestId("continue-explicit-stop-retired-stop")), isError: true));
+            Assert.Equal(afterCleanup, await driver.ReadNativeActionsAsync());
+        }
+        finally
+        {
+            driver.ReleaseNextResponse();
+        }
+    }
+
     [Theory]
     [InlineData("continue-negative", "dap_continue_refused", "DAP_CONTINUE_REFUSED", false)]
     [InlineData("continue-wrong-command", "dap_continue_protocol_error", "DAP_CONTINUE_PROTOCOL_ERROR", true)]

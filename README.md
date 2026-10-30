@@ -77,6 +77,43 @@ waits up to 30 seconds after the write for the next observed stop or terminal
 event. An acknowledged timeout does not itself close the session; check state
 again before further inspection. An unacknowledged possible write closes the
 session rather than retrying an uncertain execution request.
+If `stop_debug` retires the session while a continue is waiting, an internal
+drain deadline still forces owned process-tree cleanup. The stop reports success
+only after cleanup completes; the owner-aborted continue returns
+`DEBUG_SESSION_NOT_FOUND`, not a DAP protocol error. Explicit caller/host
+cancellation and genuine cleanup/protocol failures remain failures.
+
+The source-built Windows stateful host also exposes
+`ui_invoke(debugSessionId, automationId)` when `FLAUI_BRIDGE_PATH` points to its
+built FlaUI bridge. These are the only two arguments: both must be nonblank
+strings, and the exact, case-sensitive AutomationId is limited to 256 characters
+(no trimming or alternate selectors). The action requires exactly one readable
+match in the session's current bound debuggee main window and UIA InvokePattern;
+there is no mouse/keyboard fallback or dialog/window selection. Unreadable,
+incomplete (over 4,096 nodes), missing, ambiguous, changed, or unsupported targets
+are refused before invocation. Process incarnation and HWND ownership are
+rechecked after preparation and immediately before the UIA call; these checks
+are not an atomic UI-tree snapshot or a guarantee against later application changes.
+
+Each action uses a separate one-shot helper with a 10-second lifetime and bounded
+cleanup. The EXE or dotnet-hosted DLL helper is created atomically inside a
+host-owned Windows kill-on-close Job using `PROC_THREAD_ATTRIBUTE_JOB_LIST`;
+there is no unassigned suspended-child interval. This action requires that
+attribute's documented Windows 10 / Server 2016-or-later support. Windows Server
+2012/R2 support is not claimed for `ui_invoke`; unsupported atomic ownership
+refuses the action before dispatch, without a weaker fallback. The established
+debugger launcher retains its previous assignment path and compatibility.
+Host exit closes the helper Job. Debugger state, continue,
+and stop remain independently callable even if a UIA provider blocks at a
+breakpoint or modal handler. Session retirement or an observed DAP terminal
+event revokes action authority and cancels its in-flight helper; Native Scene
+observation identity remains available. If dispatch may have occurred but its
+result is lost, the result is
+`UI_INVOKE_OUTCOME_UNKNOWN` with `outcome: "unknown"`, not a claim that no action
+ran. Never automatically retry it: inspect debugger/application state first.
+Success confirms only that InvokePattern returned, not arbitrary business
+completion. Native Scene IPC stays observation-only; this subset neither changes
+the Python default/catalog nor adds UI actions to the published read-only preview.
 
 The separate [native read-only preview](specs/016-a2-native-readonly-family/spec.md)
 exposes `find_code_symbol`, `find_code_references` and `get_source_context`.

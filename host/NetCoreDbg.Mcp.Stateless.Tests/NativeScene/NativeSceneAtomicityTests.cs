@@ -40,6 +40,255 @@ public sealed class NativeSceneAtomicityTests
         "adapter_reported");
 
     [Fact]
+    public async Task UiInvoke_UniqueOwnedWindowElement_ChangesOnlyItsFixtureExactlyOnce()
+    {
+        await using var driver = await StartInvokeFixtureDriverAsync();
+        var session = await StartBoundFixtureSessionAsync(driver, "invoke-owned-start");
+        await using var otherDriver = await StartInvokeFixtureDriverAsync();
+        var otherSession = await StartBoundFixtureSessionAsync(otherDriver, "invoke-other-start");
+        await AssertInvokeFixtureTextAsync(driver, session, "Save scene");
+        await AssertInvokeFixtureTextAsync(otherDriver, otherSession, "Save scene");
+
+        await CallInvokeAsync(driver, InvokeArguments(session.DebugSessionId, "SaveButton"), "invoke-owned", expectedError: false);
+
+        await WaitForInvokeFixtureActionAsync(driver, session);
+        await AssertInvokeFixtureTextAsync(otherDriver, otherSession, "Save scene");
+    }
+
+    [Theory]
+    [InlineData("MissingButton")]
+    [InlineData("AmbiguousButton")]
+    [InlineData("SaveButton ")]
+    [InlineData("savebutton")]
+    [InlineData("SceneHeading")]
+    public async Task UiInvoke_MissingAmbiguousOrNonInvokableElement_DoesNotClickOrInvoke(string automationId)
+    {
+        await using var driver = await StartInvokeFixtureDriverAsync();
+        var session = await StartBoundFixtureSessionAsync(driver, "invoke-rejected-start");
+        await AssertInvokeFixtureTextAsync(driver, session, "Save scene");
+
+        var error = await CallInvokeAsync(
+            driver, InvokeArguments(session.DebugSessionId, automationId), "invoke-rejected", expectedError: true);
+
+        Assert.False(string.IsNullOrWhiteSpace(Text(error["code"] ?? error["error"])));
+        await AssertInvokeFixtureTextAsync(driver, session, "Save scene");
+        await CallInvokeAsync(driver, InvokeArguments(session.DebugSessionId, "SaveButton"), "invoke-positive-control", expectedError: false);
+        await WaitForInvokeFixtureActionAsync(driver, session);
+    }
+
+    [Fact]
+    public async Task UiInvoke_MaximumSupplementaryUnicodeSelector_ReachesNoMatchWithoutChangingTheFixture()
+    {
+        await using var driver = await StartInvokeFixtureDriverAsync();
+        var session = await StartBoundFixtureSessionAsync(driver, "invoke-unicode-live-start");
+        await AssertInvokeFixtureTextAsync(driver, session, "Save scene");
+        var automationId = string.Concat(Enumerable.Repeat("\U0001F600", 256));
+
+        var error = await CallInvokeAsync(
+            driver, InvokeArguments(session.DebugSessionId, automationId), "invoke-unicode-live-no-match", expectedError: true);
+
+        Assert.Equal("ELEMENT_NOT_FOUND", Text(error["code"] ?? error["error"]));
+        Assert.Equal("not_invoked", Text(error["outcome"]));
+        await AssertInvokeFixtureTextAsync(driver, session, "Save scene");
+    }
+
+    [Fact]
+    public async Task UiInvoke_InvalidArgumentsOrUnknownSession_DoNotActOnALiveFixture()
+    {
+        await using var driver = await StartInvokeFixtureDriverAsync();
+        var session = await StartBoundFixtureSessionAsync(driver, "invoke-invalid-start");
+        await AssertInvokeFixtureTextAsync(driver, session, "Save scene");
+        var invalidRequests = new List<JsonObject>();
+        foreach (var member in new[] { "debugSessionId", "automationId" })
+        {
+            var missing = InvokeArguments(session.DebugSessionId, "SaveButton");
+            missing.Remove(member);
+            invalidRequests.Add(missing);
+            foreach (var value in new JsonNode?[] { null, JsonValue.Create(""), JsonValue.Create(" \t\r\n"), JsonValue.Create(42) })
+            {
+                var malformed = InvokeArguments(session.DebugSessionId, "SaveButton");
+                malformed[member] = value;
+                invalidRequests.Add(malformed);
+            }
+        }
+
+        invalidRequests.Add(InvokeArguments(session.DebugSessionId, new string('x', 257)));
+        var extraArgument = InvokeArguments(session.DebugSessionId, "SaveButton");
+        extraArgument["unexpected"] = true;
+        invalidRequests.Add(extraArgument);
+        for (var index = 0; index < invalidRequests.Count; index++)
+        {
+            var error = await CallInvokeAsync(driver, invalidRequests[index], $"invoke-invalid-{index}", expectedError: true);
+            Assert.Equal("INVALID_TOOL_ARGUMENTS", Text(error["code"] ?? error["error"]));
+            await AssertInvokeFixtureTextAsync(driver, session, "Save scene");
+        }
+
+        var unknown = await CallInvokeAsync(
+            driver, InvokeArguments("unknown-debug-session", "SaveButton"), "invoke-unknown-session", expectedError: true);
+        Assert.Equal("DEBUG_SESSION_NOT_FOUND", Text(unknown["code"] ?? unknown["error"]));
+        await AssertInvokeFixtureTextAsync(driver, session, "Save scene");
+        await CallInvokeAsync(driver, InvokeArguments(session.DebugSessionId, "SaveButton"), "invoke-after-invalid", expectedError: false);
+        await WaitForInvokeFixtureActionAsync(driver, session);
+    }
+
+    [Fact]
+    public async Task UiInvoke_AfterCompletedSessionStop_RejectsTheRetiredSession()
+    {
+        await using var driver = await StartInvokeFixtureDriverAsync();
+        var session = await StartBoundFixtureSessionAsync(driver, "invoke-retired-start");
+        await AssertInvokeFixtureTextAsync(driver, session, "Save scene");
+        await CallCaptureAsync(
+            driver,
+            "stop_debug",
+            new JsonObject { ["debugSessionId"] = session.DebugSessionId },
+            "invoke-retired-stop",
+            expectedError: false,
+            requireNativeSceneSchema: false);
+
+        var error = await CallInvokeAsync(
+            driver, InvokeArguments(session.DebugSessionId, "SaveButton"), "invoke-retired", expectedError: true);
+
+        Assert.Equal("DEBUG_SESSION_NOT_FOUND", Text(error["code"] ?? error["error"]));
+    }
+
+    [Fact]
+    public async Task UiInvoke_AfterObservedTerminationWhileOwnedProcessLives_RejectsWithoutChangingVisibleCounter()
+    {
+        await using var driver = await StartInvokeFixtureDriverAsync("all-stop-terminated");
+        var session = await StartBoundFixtureSessionAsync(driver, "invoke-terminated-start");
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await driver.WaitForFixtureEventAsync("terminated", observation.Token);
+        await CallCaptureAsync(
+            driver,
+            "get_threads",
+            new JsonObject { ["debugSessionId"] = session.DebugSessionId },
+            "invoke-terminated-reader-barrier",
+            expectedError: false,
+            requireNativeSceneSchema: false);
+        var state = await CallCaptureAsync(
+            driver,
+            "get_debug_state",
+            new JsonObject { ["debugSessionId"] = session.DebugSessionId },
+            "invoke-terminated-state",
+            expectedError: false,
+            requireNativeSceneSchema: false);
+        Assert.Equal("terminated", Text(Object(state["state"])["event"]));
+
+        var processId = Integer(session.Candidate["processId"]);
+        await WaitForMainWindowAsync(processId);
+        using var process = System.Diagnostics.Process.GetProcessById(processId);
+        Assert.False(process.HasExited, "The terminal DAP event must leave the owned WPF process alive.");
+        await AssertInvokeFixtureTextAsync(driver, session, "Save scene");
+
+        var response = await driver.CallToolRawAsync(
+            "ui_invoke",
+            InvokeArguments(session.DebugSessionId, "SaveButton"),
+            ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("invoke-terminated"));
+        var result = ModernMcpProcessDriver.RequireResult(response);
+
+        await AssertInvokeFixtureTextAsync(driver, session, "Save scene");
+        process.Refresh();
+        Assert.False(process.HasExited, "Refusing ui_invoke must not terminate the owned WPF process.");
+        Assert.Equal("complete", Text(result["resultType"]));
+        Assert.True(result["isError"]?.GetValue<bool>() ?? false, result.ToJsonString());
+        var error = Object(result["structuredContent"]);
+        Assert.Equal("UI_INVOKE_TARGET_UNAVAILABLE", Text(error["code"] ?? error["error"]));
+    }
+
+    private static Task<ModernMcpProcessDriver> StartInvokeFixtureDriverAsync(string lifecycleMode = "all-stop-continued-true") =>
+        ModernMcpProcessDriver.StartAsync(
+            new ModernMcpStartOptions(
+                FixtureConfiguration: new FixtureConfiguration(
+                    LifecycleMode: lifecycleMode,
+                    SpawnWindowedDescendant: true,
+                    WindowedDescendantExecutablePath: ResolveFixtureExecutablePath(),
+                    WindowedDescendantArguments:
+                    [
+                        "--native-scene-probe-test-harness",
+                        "--native-scene-probe-mode=stable",
+                    ]),
+                AdditionalEnvironment: new Dictionary<string, string?>
+                {
+                    ["FLAUI_BRIDGE_PATH"] = ResolveBridgeAssemblyPath(),
+                }));
+
+    private static JsonObject InvokeArguments(string debugSessionId, string automationId) => new()
+    {
+        ["debugSessionId"] = debugSessionId,
+        ["automationId"] = automationId,
+    };
+
+    private static async Task<JsonObject> CallInvokeAsync(
+        ModernMcpProcessDriver driver,
+        JsonObject arguments,
+        string requestId,
+        bool expectedError)
+    {
+        var response = await driver.CallToolRawAsync(
+            "ui_invoke", arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId(requestId));
+        var result = ModernMcpProcessDriver.RequireResult(response);
+        Assert.Equal("complete", Text(result["resultType"]));
+        Assert.True(
+            expectedError == (result["isError"]?.GetValue<bool>() ?? false),
+            $"ui_invoke returned an unexpected result: {result.ToJsonString()}.");
+        return Object(result["structuredContent"]);
+    }
+
+    private static async Task WaitForInvokeFixtureActionAsync(
+        ModernMcpProcessDriver driver,
+        BoundFixtureSession session)
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var lastObservedText = "<not sampled>";
+        try
+        {
+            while (true)
+            {
+                lastObservedText = await ReadInvokeFixtureTextAsync(driver, session, deadline.Token);
+                if (lastObservedText == "Invoked 1x")
+                {
+                    Assert.Equal("Invoked 1x", await ReadInvokeFixtureTextAsync(driver, session, deadline.Token));
+                    return;
+                }
+
+                Assert.Equal("Save scene", lastObservedText);
+                await Task.Delay(TimeSpan.FromMilliseconds(25), deadline.Token);
+            }
+        }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested)
+        {
+            Assert.Fail($"The visible fixture counter did not reach 'Invoked 1x' within five seconds; last observed text: '{lastObservedText}'.");
+        }
+    }
+
+    private static async Task AssertInvokeFixtureTextAsync(
+        ModernMcpProcessDriver driver,
+        BoundFixtureSession session,
+        string expectedText) =>
+        Assert.Equal(expectedText, await ReadInvokeFixtureTextAsync(driver, session));
+
+    private static async Task<string> ReadInvokeFixtureTextAsync(
+        ModernMcpProcessDriver driver,
+        BoundFixtureSession session,
+        CancellationToken cancellationToken = default)
+    {
+        var manifest = await CallCaptureAsync(
+            driver,
+            "capture_element_snapshot",
+            ElementCaptureArguments(session, ElementSelector(contractId: "Button.Primary", automationId: "SaveButton")),
+            "invoke-observe-button",
+            expectedError: false,
+            cancellationToken: cancellationToken);
+        var artifact = await ReadArtifactJsonAsync(driver, session.DebugSessionId, AssertObservedFactsDescriptor(manifest), cancellationToken);
+        var node = Object(Assert.Single(Array(Object(artifact["graph"])["nodes"])));
+        var evidence = Assert.Single(
+            Array(node["adapterEvidence"]).Select(Object),
+            item => Text(item["authority"]) == "in_process_framework_probe");
+        return Text(Object(evidence["payload"])["text"]);
+    }
+
+    [Fact]
     public async Task StableFixture_UniqueElementCapture_ReturnsACompleteOneNodeObservedFactsArtifact()
     {
         await using var driver = await StartFixtureDriverAsync("stable");
@@ -706,13 +955,15 @@ public sealed class NativeSceneAtomicityTests
         JsonObject arguments,
         string requestId,
         bool expectedError,
-        bool requireNativeSceneSchema = true)
+        bool requireNativeSceneSchema = true,
+        CancellationToken cancellationToken = default)
     {
         var response = await driver.CallToolRawAsync(
             tool,
             arguments,
             ModernMcpProcessDriver.CurrentMeta(),
-            new RequestId(requestId));
+            new RequestId(requestId),
+            cancellationToken);
         var result = ModernMcpProcessDriver.RequireResult(response);
         Assert.Equal("complete", Text(result["resultType"]));
         var isError = result["isError"]?.GetValue<bool>() ?? false;
@@ -810,7 +1061,8 @@ public sealed class NativeSceneAtomicityTests
     private static async Task<JsonObject> ReadArtifactJsonAsync(
         ModernMcpProcessDriver driver,
         string debugSessionId,
-        JsonObject descriptor)
+        JsonObject descriptor,
+        CancellationToken cancellationToken = default)
     {
         var artifactId = Text(descriptor["artifactId"]);
         var byteLength = Integer(descriptor["byteLength"]);
@@ -835,7 +1087,8 @@ public sealed class NativeSceneAtomicityTests
                     ["maxBytes"] = chunkSize,
                 },
                 $"atomic-artifact-read-{offset}",
-                expectedError: false);
+                expectedError: false,
+                cancellationToken: cancellationToken);
             AssertSchemaValid("read_capture_artifact", chunk);
             Assert.Equal("capture_artifact_chunk", Text(chunk["kind"]));
             Assert.Equal(artifactId, Text(chunk["artifactId"]));

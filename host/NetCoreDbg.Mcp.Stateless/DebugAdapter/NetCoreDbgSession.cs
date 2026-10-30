@@ -63,6 +63,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private NativeSceneTargetIdentity? _nativeSceneTargetIdentity;
     private readonly object _nativeSceneTargetIdentityGate = new();
     private int _nativeSceneCaptureAuthorityInvalidated;
+    private int _nativeUiInvokeAuthorityInvalidated;
     private int _outgoingSequence;
     private bool _supportsConfigurationDone;
     private bool _supportsTerminate;
@@ -128,6 +129,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     internal IReadOnlyList<DapInitialBreakpoint> InitialBreakpoints { get; private set; } = Array.Empty<DapInitialBreakpoint>();
 
     internal event Action<NetCoreDbgSession>? ReaderFailed;
+    internal event Action<NetCoreDbgSession>? NativeUiInvokeAuthorityRevoked;
     internal bool TryGetNativeSceneTargetIdentity(out NativeSceneTargetIdentity targetIdentity)
     {
         targetIdentity = Volatile.Read(ref _nativeSceneTargetIdentity)!;
@@ -144,6 +146,18 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         targetIdentity = Volatile.Read(ref _nativeSceneTargetIdentity)!;
         return targetIdentity is not null;
+    }
+
+    internal bool TryGetNativeUiInvokeTargetIdentity(out NativeSceneTargetIdentity targetIdentity)
+    {
+        if (Volatile.Read(ref _nativeUiInvokeAuthorityInvalidated) != 0 || !IsUsable)
+        {
+            targetIdentity = null!;
+            return false;
+        }
+
+        return TryGetNativeSceneCaptureTargetIdentity(out targetIdentity) &&
+               Volatile.Read(ref _nativeUiInvokeAuthorityInvalidated) == 0;
     }
 
     internal static Task<NetCoreDbgSession> StartAsync(
@@ -267,6 +281,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             await cleanup.ConfigureAwait(false);
             throw;
         }
+    }
+
+    internal async Task StopForOwnerAsync(CancellationToken forceCleanupToken)
+    {
+        // A drain abort requests forced cleanup; SessionSlot owns external cancellation reporting.
+        using var forceCleanup = forceCleanupToken.Register(
+            static state => ((CancellationTokenSource)state!).Cancel(), _forceCleanup);
+        await EnsureCleanupAsync().ConfigureAwait(false);
     }
 
     internal async Task<DapThreadsResult> GetThreadsAsync(CancellationToken cancellationToken)
@@ -1826,6 +1848,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private void HandleTerminalEvent(JsonElement message, string eventName, JsonElement body)
     {
+        var revokeUiInvoke = false;
         _callStackAdmissionGate.Wait();
         try
         {
@@ -1857,6 +1880,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                         CurrentThreadId = null,
                     }
                     : _state with { Event = eventName, CurrentThreadId = null };
+                revokeUiInvoke = Interlocked.Exchange(ref _nativeUiInvokeAuthorityInvalidated, 1) == 0;
                 ClearCallStackEligibility();
                 _inspectionContextId = null;
                 _activeStepOver?.ObserveTerminal(eventName, _state.ExitCode);
@@ -1869,6 +1893,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             _callStackAdmissionGate.Release();
         }
+
+        // Cancel an in-flight helper only after releasing DAP admission/state locks.
+        if (revokeUiInvoke)
+            NativeUiInvokeAuthorityRevoked?.Invoke(this);
     }
 
     private bool HasStepOverAuthority(int threadId) =>
@@ -2438,7 +2466,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
-    private interface IProcessTreeOwnership : IDisposable
+    internal interface IProcessTreeOwnership : IDisposable
     {
         void Terminate();
     }
@@ -2516,7 +2544,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private sealed record UnixProcessGroupLaunch(Process Process, UnixProcessGroupOwnership Ownership);
 
-    private sealed class WindowsProcessTreeOwnership : IProcessTreeOwnership
+    internal sealed class WindowsProcessTreeOwnership : IProcessTreeOwnership
     {
         private const uint CreateNoWindow = 0x08000000;
         private const uint CreateSuspended = 0x00000004;
@@ -2530,8 +2558,18 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         private WindowsProcessTreeOwnership(SafeKernelHandle job) => _job = job;
 
-        public static WindowsProcessTreeLaunch Start(string debuggerPath)
+        public static WindowsProcessTreeLaunch Start(string debuggerPath) =>
+            StartCore(debuggerPath, ["--interpreter=vscode"], atomicJobAssignment: false);
+
+        internal static WindowsProcessTreeLaunch Start(string executablePath, IReadOnlyList<string> arguments) =>
+            StartCore(executablePath, arguments, atomicJobAssignment: true);
+
+        private static WindowsProcessTreeLaunch StartCore(
+            string executablePath, IReadOnlyList<string> arguments, bool atomicJobAssignment)
         {
+            ArgumentException.ThrowIfNullOrWhiteSpace(executablePath);
+            ArgumentNullException.ThrowIfNull(arguments);
+            executablePath = ResolveExecutablePath(executablePath);
             SafeFileHandle? standardInput = null;
             SafeFileHandle? standardOutput = null;
             SafeFileHandle? standardError = null;
@@ -2553,13 +2591,16 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 CreatePipe(out standardError, out childError, parentReads: true);
 
                 job = CreateKillOnCloseJob();
-                var commandLine = new StringBuilder($"{QuoteCommandLineArgument(debuggerPath)} --interpreter=vscode");
+                var commandLine = new StringBuilder(QuoteCommandLineArgument(executablePath));
+                for (var index = 0; index < arguments.Count; index++)
+                    commandLine.Append(' ').Append(QuoteCommandLineArgument(arguments[index]));
                 var processInformation = CreateProcessWithStandardHandles(
-                    debuggerPath,
+                    executablePath,
                     commandLine,
                     childInput.DangerousGetHandle(),
                     childOutput.DangerousGetHandle(),
-                    childError.DangerousGetHandle());
+                    childError.DangerousGetHandle(),
+                    atomicJobAssignment ? job : null);
 
                 processHandle = processInformation.Process;
                 threadHandle = processInformation.Thread;
@@ -2570,7 +2611,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 childError.Dispose();
                 childError = null;
 
-                if (!AssignProcessToJobObject(job.DangerousGetHandle(), processHandle))
+                if (!atomicJobAssignment && !AssignProcessToJobObject(job.DangerousGetHandle(), processHandle))
                 {
                     throw LastWin32Error("Could not assign the debugger process to its job object.");
                 }
@@ -2708,22 +2749,25 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             StringBuilder commandLine,
             IntPtr standardInput,
             IntPtr standardOutput,
-            IntPtr standardError)
+            IntPtr standardError,
+            SafeKernelHandle? atomicJob)
         {
             IntPtr attributeList = IntPtr.Zero;
             IntPtr inheritedHandleList = IntPtr.Zero;
+            IntPtr jobHandleList = IntPtr.Zero;
             var attributeListInitialized = false;
             try
             {
                 var attributeListSize = IntPtr.Zero;
-                _ = InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeListSize);
+                var attributeCount = atomicJob is null ? 1u : 2u;
+                _ = InitializeProcThreadAttributeList(IntPtr.Zero, attributeCount, 0, ref attributeListSize);
                 if (attributeListSize == IntPtr.Zero)
                 {
                     throw LastWin32Error("Could not allocate debugger handle inheritance attributes.");
                 }
 
                 attributeList = Marshal.AllocHGlobal(attributeListSize);
-                if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref attributeListSize))
+                if (!InitializeProcThreadAttributeList(attributeList, attributeCount, 0, ref attributeListSize))
                 {
                     throw LastWin32Error("Could not initialize debugger handle inheritance attributes.");
                 }
@@ -2743,6 +2787,25 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                         IntPtr.Zero))
                 {
                     throw LastWin32Error("Could not restrict debugger handle inheritance.");
+                }
+
+                if (atomicJob is not null)
+                {
+                    // JOB_LIST closes the parent-death gap between creation and a later AssignProcessToJobObject.
+                    // Both attribute value buffers remain allocated until DeleteProcThreadAttributeList below.
+                    jobHandleList = Marshal.AllocHGlobal(IntPtr.Size);
+                    Marshal.WriteIntPtr(jobHandleList, atomicJob.DangerousGetHandle());
+                    if (!UpdateProcThreadAttribute(
+                            attributeList,
+                            0,
+                            new UIntPtr(0x0002000D),
+                            jobHandleList,
+                            new UIntPtr((uint)IntPtr.Size),
+                            IntPtr.Zero,
+                            IntPtr.Zero))
+                    {
+                        throw LastWin32Error("Could not atomically assign the invoke helper to its job object.");
+                    }
                 }
 
                 var startupInfo = new StartupInfoEx
@@ -2779,6 +2842,12 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 if (attributeListInitialized)
                 {
                     DeleteProcThreadAttributeList(attributeList);
+                }
+
+                GC.KeepAlive(atomicJob);
+                if (jobHandleList != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(jobHandleList);
                 }
 
                 if (inheritedHandleList != IntPtr.Zero)
@@ -2827,6 +2896,25 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             quoted.Append('"');
             return quoted.ToString();
         }
+
+        private static string ResolveExecutablePath(string executablePath)
+        {
+            var buffer = new StringBuilder(260);
+            var extension = Path.HasExtension(executablePath) ? null : ".exe";
+            var length = SearchPath(null, executablePath, extension, (uint)buffer.Capacity, buffer, IntPtr.Zero);
+            if (length >= buffer.Capacity && length <= 32_768)
+            {
+                buffer.EnsureCapacity(checked((int)length));
+                length = SearchPath(null, executablePath, extension, (uint)buffer.Capacity, buffer, IntPtr.Zero);
+            }
+            if (length == 0 || length >= buffer.Capacity)
+                throw LastWin32Error("Could not resolve the owned process executable.");
+            return buffer.ToString();
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern uint SearchPath(
+            string? path, string fileName, string? extension, uint bufferLength, StringBuilder buffer, IntPtr filePart);
 
         private static Win32Exception LastWin32Error(string message) =>
             new(Marshal.GetLastWin32Error(), message);
@@ -3003,7 +3091,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
-    private sealed class WindowsProcessTreeLaunch(
+    internal sealed class WindowsProcessTreeLaunch(
         Process process,
         Stream input,
         Stream output,

@@ -107,6 +107,42 @@ public sealed class ModernProtocolContractTests
         AssertCatalog(ModernMcpProcessDriver.RequireResult(response));
     }
 
+    [Theory]
+    [InlineData(129, "\U0001F600", "DEBUG_SESSION_NOT_FOUND")]
+    [InlineData(256, "\U0001F600", "DEBUG_SESSION_NOT_FOUND")]
+    [InlineData(256, "x", "DEBUG_SESSION_NOT_FOUND")]
+    [InlineData(257, "\U0001F600", "INVALID_TOOL_ARGUMENTS")]
+    public async Task UiInvoke_AutomationIdLength_MatchesPublishedSchemaBeforeSessionLookup(
+        int characterCount,
+        string character,
+        string expectedError)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync();
+        var catalog = ModernMcpProcessDriver.RequireResult(
+            await driver.ListToolsRawAsync(ModernMcpProcessDriver.CurrentMeta(), new RequestId("invoke-length-schema")));
+        var invoke = Assert.Single(
+            Assert.IsType<JsonArray>(catalog["tools"]).Select(static tool => Assert.IsType<JsonObject>(tool)),
+            static tool => tool["name"]?.GetValue<string>() == "ui_invoke");
+        Assert.Equal(256, invoke["inputSchema"]?["properties"]?["automationId"]?["maxLength"]?.GetValue<int>());
+
+        var response = await driver.CallToolRawAsync(
+            "ui_invoke",
+            new JsonObject
+            {
+                ["debugSessionId"] = "unknown-debug-session",
+                ["automationId"] = string.Concat(Enumerable.Repeat(character, characterCount)),
+            },
+            ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("invoke-length-call"));
+        var result = ModernMcpProcessDriver.RequireResult(response);
+
+        Assert.Equal("complete", result["resultType"]?.GetValue<string>());
+        Assert.True(result["isError"]?.GetValue<bool>() ?? false);
+        await AssertNoNativeActionsAsync(driver);
+        var error = Assert.IsType<JsonObject>(result["structuredContent"]);
+        Assert.Equal(expectedError, (error["code"] ?? error["error"])?.GetValue<string>());
+    }
+
     [Fact]
     public async Task CompleteStart_ReturnsCallToolEnvelopeWithoutCacheFields()
     {
@@ -837,7 +873,7 @@ public sealed class ModernProtocolContractTests
     private static void AssertCatalog(JsonObject result)
     {
         var tools = Assert.IsType<JsonArray>(result["tools"]);
-        Assert.Equal(16, tools.Count);
+        Assert.Equal(17, tools.Count);
         Assert.Equal(
             [
                 "start_debug",
@@ -850,6 +886,7 @@ public sealed class ModernProtocolContractTests
                 "get_variables",
                 "continue_execution",
                 "add_breakpoint",
+                "ui_invoke",
                 "get_ui_probe_capabilities",
                 "capture_visual_evidence",
                 "read_capture_artifact",
@@ -888,6 +925,21 @@ public sealed class ModernProtocolContractTests
         var debugSessionId = Assert.IsType<JsonObject>(threadsSchema["properties"])["debugSessionId"];
         Assert.Equal("string", debugSessionId?["type"]?.GetValue<string>());
         Assert.Equal(1, debugSessionId?["minLength"]?.GetValue<int>());
+
+        var invoke = Assert.IsType<JsonObject>(tools[10]);
+        var invokeSchema = Assert.IsType<JsonObject>(invoke["inputSchema"]);
+        Assert.Equal("object", invokeSchema["type"]?.GetValue<string>());
+        Assert.False(invokeSchema["additionalProperties"]?.GetValue<bool>() ?? true);
+        Assert.Equal(["debugSessionId", "automationId"], Assert.IsType<JsonArray>(invokeSchema["required"]).Select(static value => value?.GetValue<string>()));
+        var invokeProperties = Assert.IsType<JsonObject>(invokeSchema["properties"]);
+        Assert.Equal(2, invokeProperties.Count);
+        foreach (var property in invokeProperties.Select(static member => Assert.IsType<JsonObject>(member.Value)))
+        {
+            Assert.Equal("string", property["type"]?.GetValue<string>());
+            Assert.Equal(1, property["minLength"]?.GetValue<int>());
+            Assert.Equal("\\S", property["pattern"]?.GetValue<string>());
+        }
+        Assert.Equal(256, invokeProperties["automationId"]?["maxLength"]?.GetValue<int>());
     }
 
     private static async Task<string> RequestProgramElicitationAsync(ModernMcpFirstWireDriver driver, RequestId initialId, JsonObject? arguments = null)

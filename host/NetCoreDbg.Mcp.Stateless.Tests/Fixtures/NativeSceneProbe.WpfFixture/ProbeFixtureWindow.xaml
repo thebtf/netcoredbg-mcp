@@ -24,6 +24,7 @@
                        FontSize="26"
                        FontWeight="SemiBold"
                        AutomationProperties.AutomationId="SceneHeading"
+                       MouseLeftButtonDown="RecordFixtureAction"
                        AutomationProperties.Name="Gallery Button Primary" />
         </Border>
 
@@ -92,6 +93,7 @@
                             HorizontalAlignment="Left"
                             Content="Save scene"
                             Tag="Button.Primary"
+                            Click="RecordFixtureAction"
                             AutomationProperties.AutomationId="SaveButton"
                             AutomationProperties.Name="Save scene"
                             AutomationProperties.HelpText="contractId=Button.Primary" />
@@ -137,6 +139,7 @@
                                     Margin="0,0,0,8"
                                     Content="Ambiguous action one"
                                     Tag="Button.Duplicate"
+                                    Click="RecordFixtureAction"
                                     AutomationProperties.AutomationId="AmbiguousButton"
                                     AutomationProperties.Name="Ambiguous action one"
                                     AutomationProperties.HelpText="contractId=Button.Duplicate" />
@@ -144,6 +147,7 @@
                                     Height="40"
                                     Content="Ambiguous action two"
                                     Tag="Button.Duplicate"
+                                    Click="RecordFixtureAction"
                                     AutomationProperties.AutomationId="AmbiguousButton"
                                     AutomationProperties.Name="Ambiguous action two"
                                     AutomationProperties.HelpText="contractId=Button.Duplicate" />

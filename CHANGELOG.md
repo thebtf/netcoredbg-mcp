@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The source-built Windows stateful host adds `ui_invoke` for a unique AutomationId in the bound debuggee's main window. The isolated one-shot helper uses UIA InvokePattern without physical-input fallback; uncertain dispatched outcomes are reported without retry. This action requires Windows 10 / Server 2016 or newer, and Python remains the default.
 - The unreleased opt-in stateless preview successor adds native `find_code_references` and `get_source_context` beside `find_code_symbol`, using the same explicit project root, strict read budgets and bounded complete responses. A2 artifact identities bind the three-tool consumer contract; historical A1 evidence keeps its one-tool meaning. Python remains the default; source/process checks are not successor publication proof.
 - The opt-in modern native host adds `step_over(debugSessionId, threadId)` after `get_call_stack`: one explicit Int32 target, correlated DAP `next`, and a bounded wait for a later exact step stop, terminal event, or timeout. Concurrent steps are refused; uncertain post-write outcomes use the existing session close-and-drain owner.
 - The source-built native stateful host accepts request-local source breakpoints in `start_debug` before launch and returns the debugger's initial verification results. An initially unverified breakpoint may bind later; the published read-only preview and Python default are unchanged.
@@ -33,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retired the former runner-log grant collector, permission-probe job/selector and P0 permission-report dependency after migrating the surviving current-job selector. Removed requests and Attempt 1.0/2.0 fields refuse without aliases or synthetic upgrades. Historical run `38937481596/1` observed the same in-progress job at offsets 0/60 seconds, both UNAVAILABLE; original reports/history remain unchanged and are not relabeled PASS or server denial. The amendment requires a new canonical Candidate/Catalog, complete downloaded proof/reviews and explicit Root S4 before a new noncolliding preview tag; original `5f96014` approval remains original-only. No version bump or live release is claimed.
 
 ### Fixed
+- Stopping a native session during an acknowledged pending continue now waits for owned process cleanup and returns `DEBUG_SESSION_NOT_FOUND` to the interrupted continue instead of reporting a DAP protocol error. Caller cancellation and real cleanup failures remain distinct.
 - Native debug state exposes `currentThreadId` only when a stopped event identifies the thread; continued, terminal and admitted step transitions clear it, and stop results omit it. Clients can inspect or step the observed thread without guessing. The Python default is unchanged.
 - Native `get_call_stack` now supports debuggers that omit delayed-paging capability by requesting one unpaged stack and slicing it locally after full validation. The existing 256-frame input limit, response-size bounds, stopped-thread authority and cleanup behavior remain; an oversized unpaged stack still fails closed. Python remains the default.
 - The normal solution now includes the existing stateful native host and its tests under `host`, with matching Debug/Release platform mappings; code, packages, runtime behavior, and the Python default are unchanged.
@@ -66,7 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The retained-preview validator resolves the selected rollback executable and prepends its directory only to the child PATH, preserving inherited entries and the parent environment. Its separate total-journey budget is 120 seconds to admit an observed 74.9-second retained-Python replay; per-call deadlines, the driver, package, and Python default remain unchanged. This controller correction is not a startup-performance fix or evidence that T014 passed.
 
 ### Compatibility
-- The installed Python entry point remains the default and rollback route. This additive native slice does not add pause, step-in or step-out, change UI/bridge behavior, or authorize publication.
+- The installed Python entry point remains the default and rollback route. The additive native slices do not add pause, step-in or step-out, change the published Python catalog, or authorize publication.
 
 ## [stateless-preview-v0.23.17-preview.3] - 2026-10-27
 

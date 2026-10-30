@@ -35,22 +35,9 @@ public sealed class GetThreadsContractTests
 
         // Assert
         var tools = Assert.IsType<JsonArray>(result["tools"]);
-        Assert.Equal(
-            [
-                "start_debug",
-                "get_debug_state",
-                "stop_debug",
-                Tool,
-                "get_call_stack",
-                "step_over",
-                "get_ui_probe_capabilities",
-                "capture_visual_evidence",
-                "read_capture_artifact",
-                "wait_for_ui_stable",
-                "capture_element_snapshot",
-                "capture_native_scene",
-            ],
-            tools.Select(static tool => tool?["name"]?.GetValue<string>()));
+        Assert.Equal("stop_debug", tools[2]?["name"]?.GetValue<string>());
+        Assert.Equal(Tool, tools[3]?["name"]?.GetValue<string>());
+        Assert.Single(tools, static tool => tool?["name"]?.GetValue<string>() == Tool);
         var schema = Assert.IsType<JsonObject>(Assert.IsType<JsonObject>(tools[3])["inputSchema"]);
         Assert.Equal("object", schema["type"]?.GetValue<string>());
         Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);

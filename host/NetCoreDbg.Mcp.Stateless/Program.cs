@@ -12,6 +12,7 @@ using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using NetCoreDbg.Mcp.Stateless.DebugAdapter;
 using NetCoreDbg.Mcp.Stateless.NativeScene;
+using NetCoreDbg.Mcp.Stateless.NativeUi;
 
 namespace NetCoreDbg.Mcp.Stateless;
 
@@ -72,6 +73,7 @@ internal static class Program
                         && TryReadCancelledRequestId(parameters["requestId"], out var requestId))
                     {
                         sessions.CancelStepOver(requestId);
+                        sessions.CancelUiInvoke(requestId);
                     }
 
                     await next(context, cancellationToken).ConfigureAwait(false);
@@ -156,6 +158,7 @@ internal static class Program
         private const string StepOver = "step_over";
         private const string ContinueExecution = "continue_execution";
         private const string AddBreakpoint = "add_breakpoint";
+        private const string UiInvoke = "ui_invoke";
         private const string InputRequestId = "start_debug_program";
         private static readonly TimeSpan InitializeTimeout = TimeSpan.FromSeconds(10);
         private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
@@ -168,6 +171,7 @@ internal static class Program
         private readonly ConcurrentDictionary<string, NetCoreDbgSession> _sessions = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, SessionSlot> _slots = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<RequestId, CancellationTokenSource> _stepOverRequests = new();
+        private readonly ConcurrentDictionary<RequestId, CancellationTokenSource> _uiInvokeRequests = new();
         private readonly ConcurrentDictionary<string, NativeSceneSessionBinding> _nativeSceneBindings = new(StringComparer.Ordinal);
         private readonly string? _debuggerPath;
         private readonly string? _bridgePath;
@@ -244,6 +248,7 @@ internal static class Program
                 StepOver => await StepOverAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 ContinueExecution => await ContinueAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 AddBreakpoint => await AddBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                UiInvoke => await UiInvokeAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 _ when IsNativeSceneTool(request.Name) => await NativeSceneToolDispatcher.DispatchAsync(
                     request.Name,
                     request.Arguments,
@@ -326,7 +331,7 @@ internal static class Program
                 SessionSlot? slot = null;
                 slot = new SessionSlot(
                     StopTimeout,
-                    session.StopAsync,
+                    session.StopForOwnerAsync,
                     () => DisposeSlotResourcesAsync(session, binding),
                     () => RemoveSlot(token, session, binding, slot!));
                 if (!_sessions.TryAdd(token, session)
@@ -868,6 +873,11 @@ internal static class Program
             {
                 throw;
             }
+            catch (OperationCanceledException) when (lease.AbortToken.IsCancellationRequested)
+            {
+                // The owner has retired this session; this is not a DAP protocol failure.
+                return NotFound();
+            }
             catch (Exception)
             {
                 closeAfterLease = true;
@@ -972,6 +982,59 @@ internal static class Program
             }
         }
 
+        private async ValueTask<CallToolResult> UiInvokeAsync(
+            CallToolRequestParams request,
+            RequestId requestId,
+            CancellationToken cancellationToken)
+        {
+            if (request.Arguments is not { Count: 2 } arguments ||
+                !arguments.TryGetValue("debugSessionId", out var sessionValue) || sessionValue.ValueKind != JsonValueKind.String ||
+                string.IsNullOrWhiteSpace(sessionValue.GetString()) ||
+                !arguments.TryGetValue("automationId", out var automationIdValue) || automationIdValue.ValueKind != JsonValueKind.String ||
+                automationIdValue.GetString() is not { } automationId || !IsValidUiInvokeAutomationId(automationId))
+            {
+                return InvalidArguments(UiInvoke);
+            }
+
+            var sessionId = sessionValue.GetString()!;
+            var binding = await ResolveNativeSceneBindingAsync(sessionId).ConfigureAwait(false);
+            if (binding is null || !_sessions.TryGetValue(sessionId, out var session))
+                return NotFound();
+
+            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _uiInvokeRequests.TryAdd(requestId, cancellation);
+            try
+            {
+                var payload = await binding.InvokeAsync(
+                    automationId,
+                    () => _sessions.TryGetValue(sessionId, out var current) && ReferenceEquals(current, session) &&
+                          _nativeSceneBindings.TryGetValue(sessionId, out var currentBinding) && ReferenceEquals(currentBinding, binding) &&
+                          _slots.ContainsKey(sessionId),
+                    cancellation.Token).ConfigureAwait(false);
+                return Result(payload, isError: payload["kind"]?.GetValue<string>() != "ui_invoke_success");
+            }
+            finally
+            {
+                _uiInvokeRequests.TryRemove(new KeyValuePair<RequestId, CancellationTokenSource>(requestId, cancellation));
+            }
+        }
+
+        private static bool IsValidUiInvokeAutomationId(string automationId)
+        {
+            if (string.IsNullOrWhiteSpace(automationId))
+                return false;
+            if (automationId.Length <= 256)
+                return true;
+
+            var length = 0;
+            foreach (var _ in automationId.EnumerateRunes())
+            {
+                if (++length > 256)
+                    return false;
+            }
+            return true;
+        }
+
         private async ValueTask<CallToolResult> StopAsync(
             CallToolRequestParams request,
             CancellationToken cancellationToken)
@@ -1063,6 +1126,20 @@ internal static class Program
 
 
 
+        internal void CancelUiInvoke(RequestId requestId)
+        {
+            if (_uiInvokeRequests.TryGetValue(requestId, out var cancellation))
+            {
+                try
+                {
+                    cancellation.Cancel();
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+            }
+        }
+
         private static async Task ObserveCloseAsync(SessionSlot slot)
         {
             try
@@ -1080,6 +1157,7 @@ internal static class Program
             NativeSceneSessionBinding binding,
             SessionSlot slot)
         {
+            binding.RetireUiInvoke();
             _slots.TryRemove(new KeyValuePair<string, SessionSlot>(token, slot));
             _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(token, session));
             _nativeSceneBindings.TryRemove(new KeyValuePair<string, NativeSceneSessionBinding>(token, binding));
@@ -1108,6 +1186,7 @@ internal static class Program
             private readonly Action _remove;
             private readonly CancellationTokenSource _abort = new();
             private CancellationTokenRegistration? _cancellationRegistration;
+            private CancellationToken _externalCloseCancellation;
             private Task? _closeTask;
             private TaskCompletionSource<bool>? _drained;
             private int _leases;
@@ -1172,6 +1251,10 @@ internal static class Program
 
                     await drained.ConfigureAwait(false);
                     await _stop(_abort.IsCancellationRequested ? _abort.Token : CancellationToken.None).ConfigureAwait(false);
+                    lock (_gate)
+                    {
+                        _externalCloseCancellation.ThrowIfCancellationRequested();
+                    }
                 }
                 finally
                 {
@@ -1195,6 +1278,7 @@ internal static class Program
             {
                 if (!_abortDisposed && !_cancellationRegistration.HasValue && cancellationToken.CanBeCanceled)
                 {
+                    _externalCloseCancellation = cancellationToken;
                     _cancellationRegistration = cancellationToken.Register(
                         static source => ((CancellationTokenSource)source!).Cancel(),
                         _abort);
@@ -1738,6 +1822,7 @@ internal static class Program
                 Tool("get_variables", "Get bounded variables using a positive variablesReference and inspection context from the same stopped observation. A returned reference of zero is a leaf, not a valid input.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"inspectionContextId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"pattern\":\"\\\\S\"},\"variablesReference\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"inspectionContextId\",\"variablesReference\"],\"additionalProperties\":false}"),
                 Tool("continue_execution", "Continue execution using an explicitly named stopped thread; the request resumes all threads. Observe the next stop or terminal event for up to 30 seconds. An acknowledged timeout does not itself close the session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
                 Tool("add_breakpoint", "Add a source breakpoint to a live debug session while preserving its requested source breakpoint sets. Verification is an adapter observation, not proof of a hit. Conditions and hit counts are not supported.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"file\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"line\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"file\",\"line\"],\"additionalProperties\":false}"),
+                Tool("ui_invoke", "Invoke one uniquely resolved exact AutomationId in this session's bound debuggee main window using InvokePattern only. No physical input fallback. Success confirms the UIA call returned, not business completion; an unknown outcome must not be automatically retried.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"automationId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"pattern\":\"\\\\S\"}},\"required\":[\"debugSessionId\",\"automationId\"],\"additionalProperties\":false}"),
                 .. NativeSceneToolDispatcher.ListTools(),
             ],
             TimeToLive = CacheLifetime,
