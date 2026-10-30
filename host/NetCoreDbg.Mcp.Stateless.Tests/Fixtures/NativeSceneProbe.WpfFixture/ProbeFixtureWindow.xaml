@@ -8,6 +8,7 @@
         Left="120" Top="120"
         ResizeMode="NoResize"
         WindowStartupLocation="Manual"
+        ShowActivated="False"
         AutomationProperties.AutomationId="NativeSceneProbeWindow"
         AutomationProperties.Name="Native Scene Probe Fixture">
     <Grid Background="#FFF4F6F8">

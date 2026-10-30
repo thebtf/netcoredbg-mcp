@@ -1,4 +1,6 @@
+using System.Text;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using ModelContextProtocol.Protocol;
 using NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter;
 using Xunit;
@@ -223,6 +225,84 @@ public sealed class StructuredContentSchemaParityTests
         ValidateVariant(schema, invalidArguments);
     }
 
+    [Theory]
+    [InlineData("ui_invoke", "uiInvokeArguments")]
+    [InlineData("get_output", "getOutputArguments")]
+    [InlineData("get_output_tail", "getOutputTailArguments")]
+    public async Task LiveHost_InvokeAndOutputInputSchemas_MatchAdvertisedArguments(string toolName, string definitionName)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync();
+        var catalog = ModernMcpProcessDriver.RequireResult(await driver.ListToolsRawAsync(
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId($"application-schema-{toolName}")));
+        var tool = Assert.Single(
+            Assert.IsType<JsonArray>(catalog["tools"]).Select(static item => Assert.IsType<JsonObject>(item)),
+            item => item["name"]?.GetValue<string>() == toolName);
+        var advertised = Assert.IsType<JsonObject>(tool["inputSchema"]);
+        var definitions = Assert.IsType<JsonObject>(LoadSchema()["$defs"]);
+        var application = Assert.IsType<JsonObject>(definitions[definitionName]);
+
+        Assert.True(JsonNode.DeepEquals(advertised, application),
+            $"The application input schema for {toolName} must match its live tools/list inputSchema. Advertised: {advertised}; application: {application}.");
+        Assert.Empty(await driver.ReadNativeActionsAsync());
+    }
+
+    [Theory]
+    [InlineData("whitespace")]
+    [InlineData("257-ascii")]
+    public void ApplicationSchema_UiInvokeSelectorRejectsWhitespaceAnd257Ascii(string scenario)
+    {
+        var selector = scenario == "whitespace" ? " \t\r\n" : new string('a', 257);
+        var schema = LoadSchema();
+        var definitions = Assert.IsType<JsonObject>(schema["$defs"]);
+        var arguments = new JsonObject { ["debugSessionId"] = "opaque", ["automationId"] = selector };
+        var content = new JsonObject
+        {
+            ["kind"] = "ui_invoke_success",
+            ["automationId"] = selector,
+            ["invoked"] = true,
+            ["method"] = "InvokePattern",
+        };
+
+        Assert.ThrowsAny<Xunit.Sdk.XunitException>(() => ValidateObject(
+            definitions, Assert.IsType<JsonObject>(definitions["uiInvokeArguments"]), arguments));
+        Assert.ThrowsAny<Xunit.Sdk.XunitException>(() => ValidateVariant(schema, content));
+    }
+
+    [Fact]
+    public void ApplicationSchema_UiInvokeSelectorAccepts256SupplementaryCodePoints()
+    {
+        var selector = string.Concat(Enumerable.Repeat("\U0001F600", 256));
+        var schema = LoadSchema();
+        var definitions = Assert.IsType<JsonObject>(schema["$defs"]);
+        var arguments = new JsonObject { ["debugSessionId"] = "opaque", ["automationId"] = selector };
+        var content = new JsonObject
+        {
+            ["kind"] = "ui_invoke_success",
+            ["automationId"] = selector,
+            ["invoked"] = true,
+            ["method"] = "InvokePattern",
+        };
+
+        ValidateObject(definitions, Assert.IsType<JsonObject>(definitions["uiInvokeArguments"]), arguments);
+        ValidateVariant(schema, content);
+    }
+
+    [Fact]
+    public void StringLengthKeywords_CountCodePointsAndDoNotRejectNullableStrings()
+    {
+        var definitions = new JsonObject();
+        var schema = new JsonObject
+        {
+            ["type"] = new JsonArray("string", "null"),
+            ["minLength"] = 2,
+            ["maxLength"] = 2,
+        };
+
+        ValidateValue(definitions, schema, JsonValue.Create("\U0001F600\U0001F680"));
+        ValidateValue(definitions, schema, null);
+        Assert.ThrowsAny<Xunit.Sdk.XunitException>(() => ValidateValue(definitions, schema, JsonValue.Create("\U0001F600")));
+        Assert.ThrowsAny<Xunit.Sdk.XunitException>(() => ValidateValue(definitions, schema, JsonValue.Create("\U0001F600\U0001F680\U0001F600")));
+    }
 
     internal static void AssertMatchesSchema(JsonObject content) => ValidateVariant(LoadSchema(), content);
 
@@ -322,13 +402,7 @@ public sealed class StructuredContentSchemaParityTests
     private static void ValidateVariant(JsonObject schema, JsonObject content)
     {
         var definitions = Assert.IsType<JsonObject>(schema["$defs"]);
-        var variants = Assert.IsType<JsonArray>(definitions["toolStructuredContent"]?["oneOf"]);
-        var kind = Assert.IsType<string>(content["kind"]?.GetValue<string>());
-        var variant = Assert.Single(
-            variants.Select(variant => ResolveReference(definitions, Assert.IsType<JsonObject>(variant)["$ref"]?.GetValue<string>())),
-            candidate => candidate["properties"]?["kind"]?["const"]?.GetValue<string>() == kind);
-
-        ValidateObject(definitions, variant, content);
+        ValidateValue(definitions, Assert.IsType<JsonObject>(definitions["toolStructuredContent"]), content);
     }
 
     private static void ValidateObject(JsonObject definitions, JsonObject schema, JsonObject content)
@@ -354,20 +428,18 @@ public sealed class StructuredContentSchemaParityTests
     {
         if (schema["$ref"] is JsonValue reference)
         {
-            var resolved = ResolveReference(definitions, reference.GetValue<string>());
-            if (resolved["type"]?.GetValue<string>() == "object")
-            {
-                ValidateObject(definitions, resolved, Assert.IsType<JsonObject>(value));
-                return;
-            }
-
-            ValidateValue(definitions, resolved, value);
+            ValidateValue(definitions, ResolveReference(definitions, reference.GetValue<string>()), value);
             return;
+        }
+
+        if (schema["oneOf"] is JsonArray alternatives)
+        {
+            Assert.Single(alternatives, alternative => MatchesSchema(definitions, Assert.IsType<JsonObject>(alternative), value));
         }
 
         if (schema["const"] is JsonValue constant)
         {
-            Assert.Equal(constant.GetValue<string>(), Assert.IsAssignableFrom<JsonValue>(value).GetValue<string>());
+            Assert.True(JsonNode.DeepEquals(constant, value), $"Expected constant {constant}, got {value}.");
             return;
         }
 
@@ -376,7 +448,16 @@ public sealed class StructuredContentSchemaParityTests
             Assert.Contains(values, candidate => JsonNode.DeepEquals(candidate, value));
             return;
         }
+        if (!schema.ContainsKey("type") && schema["oneOf"] is JsonArray)
+        {
+            return;
+        }
 
+        if (schema["type"] is JsonValue typeValue && typeValue.TryGetValue<string>(out var objectType) && objectType == "object")
+        {
+            ValidateObject(definitions, schema, Assert.IsType<JsonObject>(value));
+            return;
+        }
         var types = schema["type"] is JsonArray typeArray
             ? typeArray.Select(static type => Assert.IsType<string>(type?.GetValue<string>()))
             : [Assert.IsType<string>(schema["type"]?.GetValue<string>())];
@@ -395,9 +476,28 @@ public sealed class StructuredContentSchemaParityTests
             }
         }
 
-        if (schema["minLength"] is JsonValue minimumLength)
+        if (value is JsonValue stringValue && stringValue.TryGetValue<string>(out var text))
         {
-            Assert.True(Assert.IsAssignableFrom<JsonValue>(value).GetValue<string>().Length >= minimumLength.GetValue<int>());
+            if (schema.ContainsKey("minLength") || schema.ContainsKey("maxLength"))
+            {
+                var codePoints = 0;
+                foreach (var rune in text.EnumerateRunes())
+                {
+                    codePoints++;
+                }
+                if (schema["minLength"] is JsonValue minimumLength)
+                {
+                    Assert.True(codePoints >= minimumLength.GetValue<int>());
+                }
+                if (schema["maxLength"] is JsonValue maximumLength)
+                {
+                    Assert.True(codePoints <= maximumLength.GetValue<int>());
+                }
+            }
+            if (schema["pattern"] is JsonValue pattern)
+            {
+                Assert.True(Regex.IsMatch(text, pattern.GetValue<string>(), RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1)));
+            }
         }
         if (schema["minimum"] is JsonValue minimum)
         {
@@ -409,6 +509,18 @@ public sealed class StructuredContentSchemaParityTests
         }
     }
 
+    private static bool MatchesSchema(JsonObject definitions, JsonObject schema, JsonNode? value)
+    {
+        try
+        {
+            ValidateValue(definitions, schema, value);
+            return true;
+        }
+        catch (Xunit.Sdk.XunitException)
+        {
+            return false;
+        }
+    }
     private static JsonObject ResolveReference(JsonObject definitions, string? reference)
     {
         var localReference = Assert.IsType<string>(reference);
@@ -423,6 +535,7 @@ public sealed class StructuredContentSchemaParityTests
         "integer" => value is JsonValue json && json.TryGetValue<long>(out _),
         "boolean" => value is JsonValue json && json.TryGetValue<bool>(out _),
         "array" => value is JsonArray,
+        "object" => value is JsonObject,
         _ => false,
     };
 }
