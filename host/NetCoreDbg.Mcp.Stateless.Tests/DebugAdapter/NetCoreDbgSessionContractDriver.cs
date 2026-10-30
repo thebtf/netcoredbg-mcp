@@ -133,7 +133,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         _ = await AwaitAsyncResult(getThreads.Invoke(_session, [cancellationToken]), "GetThreadsAsync", cancellationToken);
     }
 
-    public async Task<StepOverRegistryProbe> StepOverThroughRegistryAsync(
+    public Task<StepOverRegistryProbe> StepOverThroughRegistryAsync(
         int threadId,
         CancellationToken cancellationToken,
         bool inspectCancellation = false,
@@ -141,7 +141,27 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         Func<Func<string, CancellationToken, Task<ModelContextProtocol.Protocol.CallToolResult>>, Task<ModelContextProtocol.Protocol.CallToolResult>>? invokeSteps = null,
         Func<Task>? beforeStop = null,
         Func<Task>? beforeDispose = null,
-        Action<string?, bool>? afterUsabilityObservation = null)
+        Action<string?, bool>? afterUsabilityObservation = null) =>
+        InvokeThroughRegistryAsync(threadId, cancellationToken, inspectCancellation, beforeCancellationInspection,
+            invokeSteps, beforeStop, beforeDispose, afterUsabilityObservation);
+
+    public Task<StepOverRegistryProbe> GetCallStackThroughRegistryAsync(
+        int threadId,
+        CancellationToken cancellationToken,
+        Func<Task>? beforeCancellationInspection = null) =>
+        InvokeThroughRegistryAsync(threadId, cancellationToken, inspectCancellation: true,
+            beforeCancellationInspection: beforeCancellationInspection, inspectCallStack: true);
+
+    private async Task<StepOverRegistryProbe> InvokeThroughRegistryAsync(
+        int threadId,
+        CancellationToken cancellationToken,
+        bool inspectCancellation = false,
+        Func<Task>? beforeCancellationInspection = null,
+        Func<Func<string, CancellationToken, Task<ModelContextProtocol.Protocol.CallToolResult>>, Task<ModelContextProtocol.Protocol.CallToolResult>>? invokeSteps = null,
+        Func<Task>? beforeStop = null,
+        Func<Task>? beforeDispose = null,
+        Action<string?, bool>? afterUsabilityObservation = null,
+        bool inspectCallStack = false)
     {
         const string sessionId = "step-over-clock-session";
         var registryType = RequireType(_session.GetType().Assembly, "NetCoreDbg.Mcp.Stateless.Program+DebugSessionRegistry");
@@ -204,25 +224,35 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             Assert.True((bool)addSession!.Invoke(sessions, [sessionId, _session])!);
             Assert.True((bool)addSlot!.Invoke(slots, [sessionId, slot])!);
 
-            var stepOver = registryType.GetMethod("StepOverAsync", BindingFlags.Instance | BindingFlags.NonPublic,
-                binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(ModelContextProtocol.Protocol.RequestId), typeof(CancellationToken)], modifiers: null);
-            Assert.NotNull(stepOver);
+            var operationMethod = inspectCallStack
+                ? registryType.GetMethod("GetCallStackAsync", BindingFlags.Instance | BindingFlags.NonPublic,
+                    binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(CancellationToken)], modifiers: null)
+                : registryType.GetMethod("StepOverAsync", BindingFlags.Instance | BindingFlags.NonPublic,
+                    binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(ModelContextProtocol.Protocol.RequestId), typeof(CancellationToken)], modifiers: null);
+            Assert.NotNull(operationMethod);
             var request = new ModelContextProtocol.Protocol.CallToolRequestParams
             {
-                Name = "step_over",
+                Name = inspectCallStack ? "get_call_stack" : "step_over",
                 Arguments = new Dictionary<string, JsonElement>
                 {
                     ["debugSessionId"] = JsonSerializer.SerializeToElement(sessionId),
                     ["threadId"] = JsonSerializer.SerializeToElement(threadId),
                 },
             };
+            if (inspectCallStack)
+            {
+                request.Arguments["includeInspectionContext"] = JsonSerializer.SerializeToElement(true);
+            }
             Task<ModelContextProtocol.Protocol.CallToolResult> InvokeStep(string requestId, CancellationToken token)
             {
                 var previousRequestId = invokingRequestId.Value;
                 invokingRequestId.Value = requestId;
                 try
                 {
-                    var invocation = stepOver!.Invoke(registry, [request, new ModelContextProtocol.Protocol.RequestId(requestId), token]);
+                    object?[] invocationArguments = inspectCallStack
+                        ? [request, token]
+                        : [request, new ModelContextProtocol.Protocol.RequestId(requestId), token];
+                    var invocation = operationMethod!.Invoke(registry, invocationArguments);
                     return Assert.IsType<ValueTask<ModelContextProtocol.Protocol.CallToolResult>>(invocation).AsTask();
                 }
                 finally
@@ -1379,7 +1409,9 @@ internal sealed record FixtureConfiguration(
     bool SuppressContinuedAfterStopped = false,
     string StackTraceResponseMode = "success",
     string NextResponseMode = "success",
-    string SetBreakpointsResponseMode = "success")
+    string SetBreakpointsResponseMode = "success",
+    string ScopesResponseMode = "success",
+    string VariablesResponseMode = "success")
 {
     public string AsEnvironmentValue() => string.Join(
         ';',
@@ -1413,6 +1445,8 @@ internal sealed record FixtureConfiguration(
             $"--stack-trace-response={StackTraceResponseMode}",
             $"--next-response={NextResponseMode}",
             $"--set-breakpoints-response={SetBreakpointsResponseMode}",
+            $"--scopes-response={ScopesResponseMode}",
+            $"--variables-response={VariablesResponseMode}",
         }.Where(static value => value is not null));
 }
 

@@ -381,6 +381,219 @@ public sealed class GetCallStackContractTests
         }
     }
 
+    [Fact]
+    public async Task FrameInspection_OptInContext_NormalizesScopesVariablesAndNestedValuesWithoutChangingLegacyStack()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack());
+        var session = await StartStoppedSessionAsync(driver, "inspection-start");
+        var legacy = AssertApplicationEnvelope(await driver.CallToolRawAsync(Tool, Arguments(session, 1), ModernMcpProcessDriver.CurrentMeta(), new RequestId("inspection-legacy")), isError: false);
+        var explicitFalse = Arguments(session, 1);
+        explicitFalse["includeInspectionContext"] = false;
+        var unchanged = AssertApplicationEnvelope(await driver.CallToolRawAsync(Tool, explicitFalse, ModernMcpProcessDriver.CurrentMeta(), new RequestId("inspection-false")), isError: false);
+        Assert.True(JsonNode.DeepEquals(legacy, unchanged));
+        Assert.False(legacy.ContainsKey("inspectionContextId"));
+
+        var stack = await InspectionStackAsync(driver, session, "inspection-stack");
+        var context = Assert.IsType<string>(stack["inspectionContextId"]?.GetValue<string>());
+        Assert.False(string.IsNullOrWhiteSpace(context));
+        var withoutContext = stack.DeepClone().AsObject();
+        withoutContext.Remove("inspectionContextId");
+        Assert.True(JsonNode.DeepEquals(legacy, withoutContext));
+        var frame = Assert.IsType<JsonArray>(stack["frames"])[0]!["id"]!.GetValue<int>();
+        var before = await driver.ReadNativeActionsAsync();
+        var scopes = await InspectionCallAsync(driver, "get_scopes", InspectionArguments(session, context, "frameId", frame), "inspection-scopes");
+        Assert.Equal("scopes_success", scopes["kind"]?.GetValue<string>());
+        Assert.Equal(context, scopes["inspectionContextId"]?.GetValue<string>());
+        var scopeEntries = Assert.IsType<JsonArray>(scopes["scopes"]);
+        Assert.Equal(2, scopeEntries.Count);
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse("{\"name\":\"Locals\",\"variablesReference\":1001,\"expensive\":false}"), scopeEntries[0]));
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse("{\"name\":\"Registers\",\"variablesReference\":1003,\"expensive\":true}"), scopeEntries[1]));
+        var reference = scopeEntries[0]!["variablesReference"]!.GetValue<int>();
+        var variables = await InspectionCallAsync(driver, "get_variables", InspectionArguments(session, context, "variablesReference", reference), "inspection-variables");
+        Assert.Equal("variables_success", variables["kind"]?.GetValue<string>());
+        Assert.Equal(context, variables["inspectionContextId"]?.GetValue<string>());
+        var entries = Assert.IsType<JsonArray>(variables["variables"]);
+        Assert.Equal(3, entries.Count);
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse("{\"name\":\"intVar\",\"value\":\"42\",\"type\":\"int\",\"variablesReference\":0}"), entries[0]));
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse("{\"name\":\"tupleVar\",\"value\":\"(\\\"test\\\", 123)\",\"type\":null,\"variablesReference\":1002}"), entries[1]));
+        Assert.Equal(new string('v', 16_385), entries[2]?["value"]?.GetValue<string>());
+        Assert.True(Assert.IsType<JsonObject>(entries[2]).ContainsKey("type"));
+        Assert.Null(entries[2]?["type"]);
+        Assert.Equal(0, entries[2]?["variablesReference"]?.GetValue<int>());
+        var nested = await InspectionCallAsync(driver, "get_variables", InspectionArguments(session, context, "variablesReference", entries[1]!["variablesReference"]!.GetValue<int>()), "inspection-nested");
+        Assert.Equal("variables_success", nested["kind"]?.GetValue<string>());
+        Assert.Equal(context, nested["inspectionContextId"]?.GetValue<string>());
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse("[{\"name\":\"Item1\",\"value\":\"\\\"test\\\"\",\"type\":\"string\",\"variablesReference\":0},{\"name\":\"Item2\",\"value\":\"123\",\"type\":\"int\",\"variablesReference\":0}]"), nested["variables"]));
+        var actions = (await driver.ReadNativeActionsAsync()).Skip(before.Count).ToArray();
+        Assert.Equal(["scopes", "variables", "variables"], actions.Select(static action => action.Command));
+        Assert.True(JsonNode.DeepEquals(new JsonObject { ["frameId"] = frame }, JsonNode.Parse(actions[0].Detail!)!["arguments"]));
+        Assert.True(JsonNode.DeepEquals(new JsonObject { ["variablesReference"] = reference }, JsonNode.Parse(actions[1].Detail!)!["arguments"]));
+        Assert.True(JsonNode.DeepEquals(new JsonObject { ["variablesReference"] = 1002 }, JsonNode.Parse(actions[2].Detail!)!["arguments"]));
+    }
+
+    [Fact]
+    public async Task FrameInspection_StepReusesNumericReference_OldContextIsRefusedWithoutIoAndFreshContextWorks()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack());
+        var session = await StartStoppedSessionAsync(driver, "inspection-reuse-start");
+        var stack = await InspectionStackAsync(driver, session, "inspection-reuse-old-stack");
+        var oldContext = stack["inspectionContextId"]!.GetValue<string>();
+        var frame = Assert.IsType<JsonArray>(stack["frames"])[0]!["id"]!.GetValue<int>();
+        var oldScopes = await InspectionCallAsync(driver, "get_scopes", InspectionArguments(session, oldContext, "frameId", frame), "inspection-reuse-old-scopes");
+        var reference = Assert.IsType<JsonArray>(oldScopes["scopes"])[0]!["variablesReference"]!.GetValue<int>();
+        var oldVariables = await InspectionCallAsync(driver, "get_variables", InspectionArguments(session, oldContext, "variablesReference", reference), "inspection-reuse-old-variables");
+        Assert.Equal("42", Assert.IsType<JsonArray>(oldVariables["variables"])[0]?["value"]?.GetValue<string>());
+        var step = AssertApplicationEnvelope(await driver.CallToolRawAsync("step_over", Arguments(session, 1), ModernMcpProcessDriver.CurrentMeta(), new RequestId("inspection-reuse-step")), isError: false);
+        Assert.Equal("step_over_success", step["kind"]?.GetValue<string>());
+        var freshStack = await InspectionStackAsync(driver, session, "inspection-reuse-fresh-stack");
+        var context = freshStack["inspectionContextId"]!.GetValue<string>();
+        Assert.NotEqual(oldContext, context);
+        var freshFrame = Assert.IsType<JsonArray>(freshStack["frames"])[0]!["id"]!.GetValue<int>();
+        var freshScopes = await InspectionCallAsync(driver, "get_scopes", InspectionArguments(session, context, "frameId", freshFrame), "inspection-reuse-fresh-scopes");
+        Assert.Equal(reference, Assert.IsType<JsonArray>(freshScopes["scopes"])[0]?["variablesReference"]?.GetValue<int>());
+        var before = await driver.ReadNativeActionsAsync();
+        foreach (var (tool, field, id) in new[] { ("get_scopes", "frameId", frame), ("get_variables", "variablesReference", reference) })
+        {
+            var refused = await InspectionCallAsync(driver, tool, InspectionArguments(session, oldContext, field, id), $"inspection-reuse-stale-{tool}", isError: true);
+            AssertInspectionFailure(refused, tool, protocolFailure: false);
+        }
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+        var freshVariables = await InspectionCallAsync(driver, "get_variables", InspectionArguments(session, context, "variablesReference", reference), "inspection-reuse-fresh-variables");
+        Assert.Equal("variables_success", freshVariables["kind"]?.GetValue<string>());
+        Assert.Equal(context, freshVariables["inspectionContextId"]?.GetValue<string>());
+        Assert.Equal("43", Assert.IsType<JsonArray>(freshVariables["variables"])[0]?["value"]?.GetValue<string>());
+    }
+
+    [Theory]
+    [InlineData("get_scopes", "frameId", 1)]
+    [InlineData("get_variables", "variablesReference", 1001)]
+    public async Task FrameInspection_ResponseHeldAcrossInvalidatedEvent_RefusesStaleDataAndKeepsSession(string tool, string field, int id)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(InspectionOptions(tool, "hold-then-invalidated"));
+        var session = await StartStoppedSessionAsync(driver, $"inspection-held-{tool}-start");
+        var stack = await InspectionStackAsync(driver, session, $"inspection-held-{tool}-stack");
+        var context = stack["inspectionContextId"]!.GetValue<string>();
+        var response = driver.CallToolRawAsync(tool, InspectionArguments(session, context, field, id), ModernMcpProcessDriver.CurrentMeta(), new RequestId($"inspection-held-{tool}"));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await driver.WaitForFixtureRecordAsync("inspection-response-gated", observation.Token);
+        var barrier = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_threads", new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(), new RequestId($"inspection-held-{tool}-reader-barrier")), isError: false);
+        Assert.Equal("threads_success", barrier["kind"]?.GetValue<string>());
+        driver.ReleaseStackTraceResponse();
+        var refused = AssertApplicationEnvelope(await response, isError: true);
+        StructuredContentSchemaParityTests.AssertMatchesSchema(refused);
+        AssertInspectionFailure(refused, tool, protocolFailure: false);
+        var freshStack = await InspectionStackAsync(driver, session, $"inspection-held-{tool}-fresh-stack");
+        var freshContext = freshStack["inspectionContextId"]!.GetValue<string>();
+        Assert.NotEqual(context, freshContext);
+        var fresh = await InspectionCallAsync(driver, tool, InspectionArguments(session, freshContext, field, id), $"inspection-held-{tool}-fresh");
+        Assert.Equal(tool == "get_scopes" ? "scopes_success" : "variables_success", fresh["kind"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task FrameInspection_InvalidInputsAndUnknownContext_ReturnSafeErrorsWithoutDapIo()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack());
+        var session = await StartStoppedSessionAsync(driver, "inspection-invalid-start");
+        var stack = await InspectionStackAsync(driver, session, "inspection-invalid-stack");
+        var context = stack["inspectionContextId"]!.GetValue<string>();
+        var missingContext = new JsonObject { ["debugSessionId"] = session, ["frameId"] = 1 };
+        var fractionalFrame = InspectionArguments(session, context, "frameId", 1);
+        fractionalFrame["frameId"] = 1.5;
+        var invalidOptIn = Arguments(session, 1);
+        invalidOptIn["includeInspectionContext"] = "true";
+        var before = await driver.ReadNativeActionsAsync();
+        var caseIndex = 0;
+        foreach (var (tool, arguments) in new[]
+        {
+            ("get_scopes", missingContext),
+            ("get_scopes", fractionalFrame),
+            ("get_variables", InspectionArguments(session, context, "variablesReference", 0)),
+            (Tool, invalidOptIn),
+        })
+        {
+            var invalid = AssertApplicationEnvelope(await driver.CallToolRawAsync(tool, arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId($"inspection-invalid-{tool}-{caseIndex++}")), isError: true);
+            Assert.Equal("invalid_tool_arguments", invalid["kind"]?.GetValue<string>());
+            Assert.Equal("INVALID_TOOL_ARGUMENTS", invalid["error"]?.GetValue<string>());
+            Assert.Equal(tool, invalid["tool"]?.GetValue<string>());
+            StructuredContentSchemaParityTests.AssertMatchesSchema(invalid);
+        }
+        foreach (var (tool, field) in new[] { ("get_scopes", "frameId"), ("get_variables", "variablesReference") })
+        {
+            var refused = await InspectionCallAsync(driver, tool, InspectionArguments(session, "unknown-inspection-context", field, 1), $"inspection-unknown-{tool}", isError: true);
+            AssertInspectionFailure(refused, tool, protocolFailure: false);
+        }
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Theory]
+    [InlineData("get_scopes", "frameId", 1, "refused", false)]
+    [InlineData("get_variables", "variablesReference", 1001, "refused", false)]
+    [InlineData("get_scopes", "frameId", 1, "malformed-tail", true)]
+    [InlineData("get_variables", "variablesReference", 1001, "malformed-tail", true)]
+    public async Task FrameInspection_AdapterRefusalOrMalformedTail_RedactsAndPreservesOrDrains(string tool, string field, int id, string mode, bool protocolFailure)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(InspectionOptions(tool, mode));
+        var session = await StartStoppedSessionAsync(driver, $"inspection-failure-{tool}-{mode}-start");
+        var stack = await InspectionStackAsync(driver, session, $"inspection-failure-{tool}-{mode}-stack");
+        var context = stack["inspectionContextId"]!.GetValue<string>();
+        var before = await driver.ReadNativeActionsAsync();
+        var failure = await InspectionCallAsync(driver, tool, InspectionArguments(session, context, field, id), $"inspection-failure-{tool}-{mode}", isError: true);
+        AssertInspectionFailure(failure, tool, protocolFailure);
+        Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before.Count), action => action.Command == (tool == "get_scopes" ? "scopes" : "variables"));
+        var state = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(), new RequestId($"inspection-failure-{tool}-{mode}-state")), isError: protocolFailure);
+        if (protocolFailure)
+        {
+            AssertNotFound(state);
+        }
+        else
+        {
+            Assert.Equal("debug_state_success", state["kind"]?.GetValue<string>());
+        }
+    }
+
+    private static ModernMcpStartOptions InspectionOptions(string tool, string mode) => new(
+        DisableFormElicitation: true,
+        FixtureConfiguration: new FixtureConfiguration(
+            SupportsDelayedStackTraceLoading: true,
+            LifecycleMode: "all-stop",
+            ScopesResponseMode: tool == "get_scopes" ? mode : "success",
+            VariablesResponseMode: tool == "get_variables" ? mode : "success"));
+
+    private static JsonObject InspectionArguments(string session, string context, string field, int id) => new()
+    {
+        ["debugSessionId"] = session,
+        ["inspectionContextId"] = context,
+        [field] = id,
+    };
+
+    private static async Task<JsonObject> InspectionStackAsync(ModernMcpProcessDriver driver, string session, string requestId)
+    {
+        var arguments = Arguments(session, 1);
+        arguments["includeInspectionContext"] = true;
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(Tool, arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId(requestId)), isError: false);
+        Assert.Equal("call_stack_success", content["kind"]?.GetValue<string>());
+        Assert.False(string.IsNullOrWhiteSpace(content["inspectionContextId"]?.GetValue<string>()));
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        return content;
+    }
+
+    private static async Task<JsonObject> InspectionCallAsync(ModernMcpProcessDriver driver, string tool, JsonObject arguments, string requestId, bool isError = false)
+    {
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(tool, arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId(requestId)), isError);
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        return content;
+    }
+
+    private static void AssertInspectionFailure(JsonObject content, string tool, bool protocolFailure)
+    {
+        var operation = tool == "get_scopes" ? "scopes" : "variables";
+        var outcome = protocolFailure ? "protocol_error" : "refused";
+        Assert.Equal($"dap_{operation}_{outcome}", content["kind"]?.GetValue<string>());
+        Assert.Equal($"DAP_{operation.ToUpperInvariant()}_{outcome.ToUpperInvariant()}", content["error"]?.GetValue<string>());
+        Assert.Equal(2, content.Count);
+        Assert.DoesNotContain("private", content.ToJsonString(), StringComparison.OrdinalIgnoreCase);
+    }
+
     private static ModernMcpStartOptions CallStack(string responseMode = "success", bool supportsDelayedStackTraceLoading = true, bool omitDelayedStackTraceLoading = false, string lifecycleMode = "all-stop") => new(
         DisableFormElicitation: true,
         FixtureConfiguration: new FixtureConfiguration(

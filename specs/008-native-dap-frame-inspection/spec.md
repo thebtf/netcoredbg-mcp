@@ -18,12 +18,43 @@ An otherwise eligible stopped native session supports `get_call_stack` whether i
 - **Safety:** The DAP payload remains at most 16 MiB (16,777,216 bytes); normalized success `structuredContent` remains at most 256 KiB (262,144 bytes), both inclusive. All existing type, byte, stop-epoch, atomic admission, response-token, redaction, lease, and cleanup rules remain binding. An invalid frame outside the local page or a 257-frame response is still `DAP_STACK_TRACE_PROTOCOL_ERROR` with no partial page and existing eviction/drain. Host-side limits do not bound debugger-internal CPU or memory used to compute the full unpaged stack.
 - **Evidence boundary:** `.agent/runs/python-removal-strangler-program-v1/first-native-journey/native-console-baseline.json` records native refusal at `dff2821d9cd90e5debb7c2df5c8b9c67244d434e`. Its sibling `real-adapter-stack-capability.json` records netcoredbg `3.1.3-1` omitting the capability and returning one frame to an ordered unpaged control. A separate local native MCP replay returned one source frame, stepped and stopped without a Python backend; 16 new compatibility cases and 54 disjoint existing stack/lifecycle/schema cases passed. This is not installed-package or complete-migration proof. The original B2 acceptance remains valid for its original scope.
 
+## Inspection-context amendment — scopes and variables
+
+This amendment extends B2 only for the opt-in native inspection path. Existing
+`get_call_stack` requests and results remain unchanged when
+`includeInspectionContext` is omitted or `false`. With `true`, a successful
+stack result includes a process-local `inspectionContextId` captured with that
+stack request. The B2 stopped-thread eligibility token remains private.
+
+`get_scopes` accepts `debugSessionId`, `inspectionContextId`, and the returned
+`frameId`. `get_variables` accepts the same session and context plus a positive
+`variablesReference` from a scope or a structured variable. A zero reference in
+a result denotes a leaf. The client must carry the context and numeric IDs from
+the same observation: a context verifies the stopped epoch, not that the host
+issued a particular numeric ID. DAP may reuse numeric references after resume.
+
+The session invalidates the inspection context on a replacement stop, continue,
+admitted step, termination, reader failure, cleanup, invalidation event, or
+thread exit. Partial continuation invalidates inspection session-wide without
+changing B2's existing per-thread stack eligibility. The existing admission gate
+orders context capture, pending registration, and DAP writes against lifecycle
+transitions; the serial reader checks the captured context before accepting each
+response. A stale or unknown context is refused without DAP I/O and leaves the
+session usable. A protocol failure returns no partial values and uses the
+existing slot close-and-drain owner.
+
+The two tools return bounded normalized scopes or variables using the existing
+complete-result and identical text/structured-content convention. Each array is
+limited to 256 entries and each complete success `structuredContent` to 256 KiB.
+Variable paging, filters, evaluation, mutation, and full Python parity remain
+outside this increment. The Python default and rollback route are unchanged.
+
 ## Original B2 outcome — historical scope
 An opt-in modern native MCP client with a live, stopped debug session whose DAP initialize response explicitly supports delayed stack-trace loading can explicitly name one opaque session and one thread, receive one bounded normalized page of its DAP frames, and retain the session after a refusal. The installed Python `netcoredbg-mcp` remains the selected default/rollback route and independently proves `PRODUCT_WORKS` as non-selection compatibility.
 
 ## Original B2 requirements — amended clauses identified
 
-The current amendment supersedes B2-REQ-003's capability-as-admission and finite-only request clauses. B2-REQ-004/006 retain validation of the complete response before any local slice. B2-REQ-008/009 retain original scope/evidence and gate history, not new restrictions on the overall migration. Other unchanged requirements remain binding.
+The compatibility amendment supersedes B2-REQ-003's capability-as-admission and finite-only request clauses. The inspection-context amendment supersedes the closed input, private-epoch, and exact result-shape clauses of B2-REQ-001/003/005 only for the opt-in path described above. B2-REQ-004/006 retain validation of the complete response before any local slice. B2-REQ-008/009 retain original scope/evidence and gate history, not new restrictions on the overall migration. Other unchanged requirements remain binding.
 
 - **B2-REQ-001 — Closed explicit input:** `get_call_stack` accepts exactly `{debugSessionId,threadId,startFrame?,levels?}`. `debugSessionId` follows B1 opaque lookup policy: it is required, is a string, and must be non-whitespace after trim; a missing arguments object, omitted required field, non-string token, empty/whitespace-only token, extra field, non-integer numeric value, or numeric value outside its stated range returns `invalid_tool_arguments` before DAP I/O. `threadId` is required Int32. `startFrame`, when supplied, is uint32; `levels`, when supplied, is uint32 in `1..256`. Defaults are `startFrame=0` and `levels=20`; `levels=0` is invalid, never DAP's all-frames convention.
 - **B2-REQ-002 — Opaque session and explicit thread:** The registry resolves only a currently live opaque native `debugSessionId`; every unavailable non-whitespace token returns the existing `DEBUG_SESSION_NOT_FOUND` result without token grammar disclosure, ambient scanning, creator/connection ownership, or default-thread selection. The exact supplied `threadId` is the only DAP target.

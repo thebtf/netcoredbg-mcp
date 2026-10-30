@@ -98,7 +98,7 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
-    public async Task ToolsList_ReturnsExactlyTheOrderedTwelveToolCatalogWithRuntimeSchemas()
+    public async Task ToolsList_ReturnsExactlyTheOrderedFourteenToolCatalogWithRuntimeSchemas()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync();
 
@@ -488,7 +488,7 @@ public sealed class ModernProtocolContractTests
     private static void AssertCatalog(JsonObject result)
     {
         var tools = Assert.IsType<JsonArray>(result["tools"]);
-        Assert.Equal(12, tools.Count);
+        Assert.Equal(14, tools.Count);
         Assert.Equal(
             [
                 "start_debug",
@@ -497,6 +497,8 @@ public sealed class ModernProtocolContractTests
                 "get_threads",
                 "get_call_stack",
                 "step_over",
+                "get_scopes",
+                "get_variables",
                 "get_ui_probe_capabilities",
                 "capture_visual_evidence",
                 "read_capture_artifact",

@@ -176,6 +176,8 @@ public sealed class StructuredContentSchemaParityTests
     }
 
 
+    internal static void AssertMatchesSchema(JsonObject content) => ValidateVariant(LoadSchema(), content);
+
     private static JsonObject LoadSchema() => JsonNode.Parse(File.ReadAllText(Path.Combine(
         RepositoryLayout.Root,
         "specs",

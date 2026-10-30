@@ -151,6 +151,8 @@ internal static class Program
         private const string StopDebug = "stop_debug";
         private const string GetThreads = "get_threads";
         private const string GetCallStack = "get_call_stack";
+        private const string GetScopes = "get_scopes";
+        private const string GetVariables = "get_variables";
         private const string StepOver = "step_over";
         private const string InputRequestId = "start_debug_program";
         private static readonly TimeSpan InitializeTimeout = TimeSpan.FromSeconds(10);
@@ -158,6 +160,7 @@ internal static class Program
         private static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(1);
         private const int MaximumSerializedThreadsBytes = 256 * 1024;
         private const int MaximumSerializedCallStackBytes = 256 * 1024;
+        private const int MaximumSerializedInspectionBytes = 256 * 1024;
         private const int MaximumBreakpointCount = 256;
 
         private readonly ConcurrentDictionary<string, NetCoreDbgSession> _sessions = new(StringComparer.Ordinal);
@@ -234,6 +237,8 @@ internal static class Program
                 StopDebug => await StopAsync(request, cancellationToken).ConfigureAwait(false),
                 GetThreads => await GetThreadsAsync(request, cancellationToken).ConfigureAwait(false),
                 GetCallStack => await GetCallStackAsync(request, cancellationToken).ConfigureAwait(false),
+                GetScopes => await GetScopesAsync(request, cancellationToken).ConfigureAwait(false),
+                GetVariables => await GetVariablesAsync(request, cancellationToken).ConfigureAwait(false),
                 StepOver => await StepOverAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 _ when IsNativeSceneTool(request.Name) => await NativeSceneToolDispatcher.DispatchAsync(
                     request.Name,
@@ -569,6 +574,7 @@ internal static class Program
                     arguments.ThreadId,
                     arguments.StartFrame,
                     arguments.Levels,
+                    arguments.IncludeInspectionContext,
                     operation.Token).ConfigureAwait(false);
                 if (callStack.IsRefused)
                 {
@@ -578,7 +584,8 @@ internal static class Program
                 var serialized = JsonSerializer.Serialize(new CallStackSuccessContent(
                     "call_stack_success",
                     callStack.Frames,
-                    callStack.TotalFrames));
+                    callStack.TotalFrames,
+                    callStack.InspectionContextId));
                 if (Encoding.UTF8.GetByteCount(serialized) > MaximumSerializedCallStackBytes)
                 {
                     closeAfterLease = true;
@@ -589,6 +596,7 @@ internal static class Program
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                closeAfterLease = session.RequiresInspectionDrain();
                 throw;
             }
             catch (Exception)
@@ -611,6 +619,107 @@ internal static class Program
                 }
             }
         }
+
+        private ValueTask<CallToolResult> GetScopesAsync(CallToolRequestParams request, CancellationToken cancellationToken) =>
+            GetInspectionAsync(request, scopes: true, cancellationToken);
+
+        private ValueTask<CallToolResult> GetVariablesAsync(CallToolRequestParams request, CancellationToken cancellationToken) =>
+            GetInspectionAsync(request, scopes: false, cancellationToken);
+
+        private async ValueTask<CallToolResult> GetInspectionAsync(
+            CallToolRequestParams request,
+            bool scopes,
+            CancellationToken cancellationToken)
+        {
+            var tool = scopes ? GetScopes : GetVariables;
+            if (!TryReadInspectionArguments(request.Arguments, scopes, out var arguments))
+            {
+                return InvalidArguments(tool);
+            }
+
+            if (!_sessions.TryGetValue(arguments.SessionId, out var session)
+                || !_slots.TryGetValue(arguments.SessionId, out var slot))
+            {
+                await RemoveNativeSceneBindingAsync(arguments.SessionId).ConfigureAwait(false);
+                return NotFound();
+            }
+
+            var lease = slot.TryAcquire();
+            if (lease is null)
+            {
+                return NotFound();
+            }
+
+            var closeAfterLease = false;
+            try
+            {
+                if (!_isUsable(session))
+                {
+                    closeAfterLease = true;
+                    return NotFound();
+                }
+
+                using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.AbortToken);
+                string serialized;
+                if (scopes)
+                {
+                    var result = await session.GetScopesAsync(arguments.InspectionContextId, arguments.Id, operation.Token).ConfigureAwait(false);
+                    if (result.IsRefused)
+                    {
+                        return Error("dap_scopes_refused", "DAP_SCOPES_REFUSED");
+                    }
+
+                    serialized = JsonSerializer.Serialize(new ScopesSuccessContent("scopes_success", result.InspectionContextId!, result.Scopes));
+                }
+                else
+                {
+                    var result = await session.GetVariablesAsync(arguments.InspectionContextId, arguments.Id, operation.Token).ConfigureAwait(false);
+                    if (result.IsRefused)
+                    {
+                        return Error("dap_variables_refused", "DAP_VARIABLES_REFUSED");
+                    }
+
+                    serialized = JsonSerializer.Serialize(new VariablesSuccessContent("variables_success", result.InspectionContextId!, result.Variables));
+                }
+
+                if (Encoding.UTF8.GetByteCount(serialized) > MaximumSerializedInspectionBytes)
+                {
+                    closeAfterLease = true;
+                    return InspectionProtocolError(scopes);
+                }
+
+                return SerializedResult(serialized, isError: false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                closeAfterLease = session.RequiresInspectionDrain();
+                throw;
+            }
+            catch (Exception)
+            {
+                closeAfterLease = true;
+                return InspectionProtocolError(scopes);
+            }
+            finally
+            {
+                lease.Dispose();
+                if (closeAfterLease)
+                {
+                    try
+                    {
+                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            }
+        }
+
+        private static CallToolResult InspectionProtocolError(bool scopes) => scopes
+            ? Error("dap_scopes_protocol_error", "DAP_SCOPES_PROTOCOL_ERROR")
+            : Error("dap_variables_protocol_error", "DAP_VARIABLES_PROTOCOL_ERROR");
+
         private async ValueTask<CallToolResult> StepOverAsync(
             CallToolRequestParams request,
             RequestId requestId,
@@ -1193,14 +1302,42 @@ internal static class Program
             return true;
         }
 
+        private static bool TryReadInspectionArguments(
+            IDictionary<string, JsonElement>? arguments,
+            bool scopes,
+            out InspectionArguments result)
+        {
+            result = null!;
+            var idName = scopes ? "frameId" : "variablesReference";
+            if (arguments is null
+                || arguments.Count != 3
+                || !arguments.TryGetValue("debugSessionId", out var sessionIdElement)
+                || sessionIdElement.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(sessionIdElement.GetString())
+                || !arguments.TryGetValue("inspectionContextId", out var contextElement)
+                || contextElement.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(contextElement.GetString())
+                || contextElement.GetString()!.Length > 128
+                || !arguments.TryGetValue(idName, out var idElement)
+                || idElement.ValueKind != JsonValueKind.Number
+                || !idElement.TryGetInt32(out var id)
+                || (!scopes && id <= 0))
+            {
+                return false;
+            }
+
+            result = new InspectionArguments(sessionIdElement.GetString()!, contextElement.GetString()!, id);
+            return true;
+        }
+
         private static bool TryReadCallStackArguments(
             IDictionary<string, JsonElement>? arguments,
             out CallStackArguments result)
         {
             result = null!;
             if (arguments is null
-                || arguments.Count is < 2 or > 4
-                || arguments.Keys.Any(static name => name is not "debugSessionId" and not "threadId" and not "startFrame" and not "levels")
+                || arguments.Count is < 2 or > 5
+                || arguments.Keys.Any(static name => name is not "debugSessionId" and not "threadId" and not "startFrame" and not "levels" and not "includeInspectionContext")
                 || !arguments.TryGetValue("debugSessionId", out var sessionIdElement)
                 || sessionIdElement.ValueKind != JsonValueKind.String
                 || string.IsNullOrWhiteSpace(sessionIdElement.GetString())
@@ -1228,7 +1365,18 @@ internal static class Program
                 return false;
             }
 
-            result = new CallStackArguments(sessionIdElement.GetString()!, threadId, startFrame, levels);
+            var includeInspectionContext = false;
+            if (arguments.TryGetValue("includeInspectionContext", out var contextElement))
+            {
+                if (contextElement.ValueKind is not JsonValueKind.True and not JsonValueKind.False)
+                {
+                    return false;
+                }
+
+                includeInspectionContext = contextElement.GetBoolean();
+            }
+
+            result = new CallStackArguments(sessionIdElement.GetString()!, threadId, startFrame, levels, includeInspectionContext);
             return true;
         }
 
@@ -1324,12 +1472,16 @@ internal static class Program
             [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? currentThreadId = null);
 
         private sealed record ThreadsSuccessContent(string kind, IReadOnlyList<DapThread> threads);
-        private sealed record CallStackArguments(string SessionId, int ThreadId, uint StartFrame, uint Levels);
+        private sealed record CallStackArguments(string SessionId, int ThreadId, uint StartFrame, uint Levels, bool IncludeInspectionContext);
+        private sealed record InspectionArguments(string SessionId, string InspectionContextId, int Id);
+        private sealed record ScopesSuccessContent(string kind, string inspectionContextId, IReadOnlyList<DapScope> scopes);
+        private sealed record VariablesSuccessContent(string kind, string inspectionContextId, IReadOnlyList<DapVariable> variables);
 
         private sealed record CallStackSuccessContent(
             string kind,
             IReadOnlyList<DapStackFrame> frames,
-            [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] uint? totalFrames);
+            [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] uint? totalFrames,
+            [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? inspectionContextId = null);
         private sealed record StepOverArguments(string SessionId, int ThreadId);
         private sealed record StepOverSuccessContent(string kind, int threadId);
         private sealed record StepOverTerminalContent(
@@ -1350,8 +1502,10 @@ internal static class Program
                 Tool("get_debug_state", "Get the state of a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("stop_debug", "Stop a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("get_threads", "Get threads in a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
-                Tool("get_call_stack", "Get a bounded stack-frame page for one stopped thread.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647},\"startFrame\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295},\"levels\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":256}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
+                Tool("get_call_stack", "Get a bounded stack-frame page for one stopped thread. Opt in to an opaque stopped-epoch inspection context for get_scopes/get_variables; carry numeric IDs with the context from the same observation, not as proof that an ID was issued.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647},\"startFrame\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295},\"levels\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":256},\"includeInspectionContext\":{\"type\":\"boolean\",\"default\":false}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
                 Tool("step_over", "Step over one explicitly named stopped thread.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
+                Tool("get_scopes", "Get bounded scopes using a frame ID and inspection context from the same stopped observation. The context is process/session-local and expires on execution or inspection invalidation.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"inspectionContextId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"pattern\":\"\\\\S\"},\"frameId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"inspectionContextId\",\"frameId\"],\"additionalProperties\":false}"),
+                Tool("get_variables", "Get bounded variables using a positive variablesReference and inspection context from the same stopped observation. A returned reference of zero is a leaf, not a valid input.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"inspectionContextId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"pattern\":\"\\\\S\"},\"variablesReference\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"inspectionContextId\",\"variablesReference\"],\"additionalProperties\":false}"),
                 .. NativeSceneToolDispatcher.ListTools(),
             ],
             TimeToLive = CacheLifetime,
