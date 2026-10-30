@@ -679,6 +679,9 @@ internal sealed class ControlledDapAdapter
         {
             "hold-first-runtime" => "success",
             "refuse-first-runtime" => runtimeOrdinal == 1 ? "refused" : "success",
+            "missing-verified-first-runtime" => runtimeOrdinal == 1 ? "missing-verified" : "success",
+            "too-few-results-first-runtime" => runtimeOrdinal == 1 ? "too-few-results" : "success",
+            "reader-failure-first-runtime" => runtimeOrdinal == 1 ? "reader-failure" : "success",
             _ => _options.SetBreakpointsResponseMode,
         };
         var requested = root.GetProperty("arguments").GetProperty("breakpoints").EnumerateArray();

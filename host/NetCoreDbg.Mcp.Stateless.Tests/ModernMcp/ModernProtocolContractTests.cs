@@ -873,7 +873,7 @@ public sealed class ModernProtocolContractTests
     private static void AssertCatalog(JsonObject result)
     {
         var tools = Assert.IsType<JsonArray>(result["tools"]);
-        Assert.Equal(19, tools.Count);
+        Assert.Equal(20, tools.Count);
         Assert.Equal(
             [
                 "start_debug",
@@ -886,6 +886,7 @@ public sealed class ModernProtocolContractTests
                 "get_variables",
                 "continue_execution",
                 "add_breakpoint",
+                "remove_breakpoint",
                 "ui_invoke",
                 "get_output",
                 "get_output_tail",
@@ -898,8 +899,8 @@ public sealed class ModernProtocolContractTests
             ],
             tools.Select(static tool => tool?["name"]?.GetValue<string>()));
         Assert.Equal(
-            ["start_debug", "get_debug_state", "stop_debug", "get_threads", "get_call_stack", "step_over", "get_scopes", "get_variables", "continue_execution", "add_breakpoint"],
-            tools.Take(10).Select(static tool => tool?["name"]?.GetValue<string>()));
+            ["start_debug", "get_debug_state", "stop_debug", "get_threads", "get_call_stack", "step_over", "get_scopes", "get_variables", "continue_execution", "add_breakpoint", "remove_breakpoint"],
+            tools.Take(11).Select(static tool => tool?["name"]?.GetValue<string>()));
 
         var start = Assert.IsType<JsonObject>(tools[0]);
         Assert.Equal("object", start["inputSchema"]?["type"]?.GetValue<string>());
@@ -928,7 +929,7 @@ public sealed class ModernProtocolContractTests
         Assert.Equal("string", debugSessionId?["type"]?.GetValue<string>());
         Assert.Equal(1, debugSessionId?["minLength"]?.GetValue<int>());
 
-        var invoke = Assert.IsType<JsonObject>(tools[10]);
+        var invoke = Assert.IsType<JsonObject>(tools[11]);
         var invokeSchema = Assert.IsType<JsonObject>(invoke["inputSchema"]);
         Assert.Equal("object", invokeSchema["type"]?.GetValue<string>());
         Assert.False(invokeSchema["additionalProperties"]?.GetValue<bool>() ?? true);

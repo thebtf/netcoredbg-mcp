@@ -173,6 +173,7 @@ internal static class Program
         private const string StepOver = "step_over";
         private const string ContinueExecution = "continue_execution";
         private const string AddBreakpoint = "add_breakpoint";
+        private const string RemoveBreakpoint = "remove_breakpoint";
         private const string UiInvoke = "ui_invoke";
         private const string InputRequestId = "start_debug_program";
         private static readonly TimeSpan InitializeTimeout = TimeSpan.FromSeconds(10);
@@ -265,6 +266,7 @@ internal static class Program
                 StepOver => await StepOverAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 ContinueExecution => await ContinueAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 AddBreakpoint => await AddBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                RemoveBreakpoint => await RemoveBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 UiInvoke => await UiInvokeAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 _ when IsNativeSceneTool(request.Name) => await NativeSceneToolDispatcher.DispatchAsync(
                     request.Name,
@@ -989,14 +991,27 @@ internal static class Program
             }
         }
 
-        private async ValueTask<CallToolResult> AddBreakpointAsync(
+        private ValueTask<CallToolResult> AddBreakpointAsync(
             CallToolRequestParams request,
             RequestId requestId,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken) =>
+            UpdateBreakpointAsync(request, requestId, cancellationToken, remove: false);
+
+        private ValueTask<CallToolResult> RemoveBreakpointAsync(
+            CallToolRequestParams request,
+            RequestId requestId,
+            CancellationToken cancellationToken) =>
+            UpdateBreakpointAsync(request, requestId, cancellationToken, remove: true);
+
+        private async ValueTask<CallToolResult> UpdateBreakpointAsync(
+            CallToolRequestParams request,
+            RequestId requestId,
+            CancellationToken cancellationToken,
+            bool remove)
         {
-            if (!TryReadAddBreakpointArguments(request.Arguments, out var arguments))
+            if (!TryReadBreakpointArguments(request.Arguments, out var arguments))
             {
-                return InvalidArguments(AddBreakpoint);
+                return InvalidArguments(remove ? RemoveBreakpoint : AddBreakpoint);
             }
 
             if (!_sessions.TryGetValue(arguments.SessionId, out var session)
@@ -1024,19 +1039,23 @@ internal static class Program
                     return NotFound();
                 }
 
-                if (!TryNormalizeBreakpointSource(arguments.File, out var file))
+                if (!TryNormalizeBreakpointSource(arguments.File, out var file, requireExistingFile: !remove))
                 {
                     return Error("breakpoint_source_unavailable", "BREAKPOINT_SOURCE_UNAVAILABLE");
                 }
 
-                var added = await session.AddBreakpointAsync(file, arguments.Line, operation.Token).ConfigureAwait(false);
-                closeAfterLease = added.RequiresDrain;
-                return added.Outcome switch
+                var updated = remove
+                    ? await session.RemoveBreakpointAsync(file, arguments.Line, operation.Token).ConfigureAwait(false)
+                    : await session.AddBreakpointAsync(file, arguments.Line, operation.Token).ConfigureAwait(false);
+                closeAfterLease = updated.RequiresDrain;
+                return updated.Outcome switch
                 {
-                    DapAddBreakpointOutcome.Added => Result(new BreakpointAddedContent(
-                        "breakpoint_added", file, arguments.Line, added.Verified, added.ActualLine), isError: false),
-                    DapAddBreakpointOutcome.Refused => Error("dap_set_breakpoints_refused", "DAP_SET_BREAKPOINTS_REFUSED"),
-                    DapAddBreakpointOutcome.LimitReached => Error("breakpoint_limit_reached", "BREAKPOINT_LIMIT_REACHED"),
+                    DapBreakpointUpdateOutcome.Added => Result(new BreakpointAddedContent(
+                        "breakpoint_added", file, arguments.Line, updated.Verified, updated.ActualLine), isError: false),
+                    DapBreakpointUpdateOutcome.Removed or DapBreakpointUpdateOutcome.NotFound => Result(new BreakpointRemovedContent(
+                        "breakpoint_removed", file, arguments.Line, updated.Outcome == DapBreakpointUpdateOutcome.Removed), isError: false),
+                    DapBreakpointUpdateOutcome.Refused => Error("dap_set_breakpoints_refused", "DAP_SET_BREAKPOINTS_REFUSED"),
+                    DapBreakpointUpdateOutcome.LimitReached => Error("breakpoint_limit_reached", "BREAKPOINT_LIMIT_REACHED"),
                     _ => throw new InvalidOperationException("Unknown breakpoint update outcome."),
                 };
             }
@@ -1589,13 +1608,13 @@ internal static class Program
             }
         }
 
-        private static bool TryNormalizeBreakpointSource(string file, out string normalized)
+        private static bool TryNormalizeBreakpointSource(string file, out string normalized, bool requireExistingFile = true)
         {
             normalized = string.Empty;
             try
             {
                 var path = Path.GetFullPath(file, Environment.CurrentDirectory);
-                if (!File.Exists(path))
+                if (requireExistingFile && !File.Exists(path))
                 {
                     return false;
                 }
@@ -1610,9 +1629,9 @@ internal static class Program
             }
         }
 
-        private static bool TryReadAddBreakpointArguments(
+        private static bool TryReadBreakpointArguments(
             IDictionary<string, JsonElement>? arguments,
-            out AddBreakpointArguments result)
+            out BreakpointArguments result)
         {
             result = null!;
             if (arguments is null
@@ -1632,7 +1651,7 @@ internal static class Program
                 return false;
             }
 
-            result = new AddBreakpointArguments(sessionId.GetString()!, file.GetString()!, number);
+            result = new BreakpointArguments(sessionId.GetString()!, file.GetString()!, number);
             return true;
         }
 
@@ -2065,13 +2084,14 @@ internal static class Program
             string terminal,
             [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? exitCode);
         private sealed record ContinueTimedOutContent(string kind, int threadId, int timeoutSeconds, bool acknowledged);
-        private sealed record AddBreakpointArguments(string SessionId, string File, int Line);
+        private sealed record BreakpointArguments(string SessionId, string File, int Line);
         private sealed record BreakpointAddedContent(
             string kind,
             string file,
             int line,
             bool verified,
             [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? actualLine);
+        private sealed record BreakpointRemovedContent(string kind, string file, int line, bool removed);
 
     }
 
@@ -2091,6 +2111,7 @@ internal static class Program
                 Tool("get_variables", "Get bounded variables using a positive variablesReference and inspection context from the same stopped observation. A returned reference of zero is a leaf, not a valid input.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"inspectionContextId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"pattern\":\"\\\\S\"},\"variablesReference\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"inspectionContextId\",\"variablesReference\"],\"additionalProperties\":false}"),
                 Tool("continue_execution", "Continue execution using an explicitly named stopped thread; the request resumes all threads. Observe the next stop or terminal event for up to 30 seconds. An acknowledged timeout does not itself close the session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
                 Tool("add_breakpoint", "Add a source breakpoint to a live debug session while preserving its requested source breakpoint sets. Verification is an adapter observation, not proof of a hit. Conditions and hit counts are not supported.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"file\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"line\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"file\",\"line\"],\"additionalProperties\":false}"),
+                Tool("remove_breakpoint", "Remove every requested source breakpoint matching this file and line from a live debug session while preserving the remaining requested order. The source file need not still exist. An absent request returns removed:false without sending setBreakpoints; successful removal confirms adapter acknowledgement, not final Python wire parity.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"file\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"line\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"file\",\"line\"],\"additionalProperties\":false}"),
                 Tool("ui_invoke", "Invoke one uniquely resolved exact AutomationId in this session's bound debuggee main window using InvokePattern only. No physical input fallback. Success confirms the UIA call returned, not business completion; an unknown outcome must not be automatically retried.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"automationId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"pattern\":\"\\\\S\"}},\"required\":[\"debugSessionId\",\"automationId\"],\"additionalProperties\":false}"),
                 Tool("get_output", "Read retained debuggee output in DAP reader order. Category matching is case-sensitive. Clear consumes the snapshot only when category is omitted, null or empty; a nonempty category never clears the buffer.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"clear\":{\"type\":\"boolean\",\"default\":false},\"category\":{\"type\":[\"string\",\"null\"],\"default\":null}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("get_output_tail", "Read retained output without clearing it. Filter categories before joining event fragments and splitting Python-style logical lines. Positive lines selects the last N, zero selects all, and negative lines skips the first N.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"lines\":{\"type\":\"integer\",\"default\":50},\"category\":{\"type\":[\"string\",\"null\"],\"default\":null}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
