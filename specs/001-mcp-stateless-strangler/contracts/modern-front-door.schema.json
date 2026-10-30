@@ -306,6 +306,77 @@
       },
       "additionalProperties": false
     },
+    "uiInvokeArguments": {
+      "type": "object",
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "automationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "\\S"
+        }
+      },
+      "required": [
+        "debugSessionId",
+        "automationId"
+      ],
+      "additionalProperties": false
+    },
+    "getOutputArguments": {
+      "type": "object",
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "clear": {
+          "type": "boolean",
+          "default": false
+        },
+        "category": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "debugSessionId"
+      ],
+      "additionalProperties": false
+    },
+    "getOutputTailArguments": {
+      "type": "object",
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "lines": {
+          "type": "integer",
+          "default": 50
+        },
+        "category": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "debugSessionId"
+      ],
+      "additionalProperties": false
+    },
     "breakpointAdded": {
       "type": "object",
       "required": [
@@ -368,6 +439,151 @@
         }
       },
       "additionalProperties": false
+    },
+    "uiInvokeSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "automationId",
+        "invoked",
+        "method"
+      ],
+      "properties": {
+        "kind": {
+          "const": "ui_invoke_success"
+        },
+        "automationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "\\S"
+        },
+        "invoked": {
+          "const": true
+        },
+        "method": {
+          "const": "InvokePattern"
+        }
+      },
+      "additionalProperties": false
+    },
+    "outputSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "output"
+      ],
+      "properties": {
+        "kind": {
+          "const": "output_success"
+        },
+        "output": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "outputTailSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "totalLines",
+        "returnedLines",
+        "output"
+      ],
+      "properties": {
+        "kind": {
+          "const": "output_tail_success"
+        },
+        "totalLines": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "returnedLines": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "output": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "uiInvokeToolError": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "tool",
+            "code",
+            "outcome",
+            "message"
+          ],
+          "properties": {
+            "kind": {
+              "const": "tool_error"
+            },
+            "tool": {
+              "const": "ui_invoke"
+            },
+            "code": {
+              "enum": [
+                "DEBUG_SESSION_NOT_FOUND",
+                "UI_INVOKE_TARGET_UNAVAILABLE",
+                "UI_INVOKE_TARGET_CHANGED",
+                "ELEMENT_NOT_FOUND",
+                "ELEMENT_AMBIGUOUS",
+                "UI_INVOKE_SELECTION_UNREADABLE",
+                "UI_INVOKE_PATTERN_UNSUPPORTED",
+                "UI_INVOKE_BUSY",
+                "UI_INVOKE_ALREADY_USED",
+                "INVALID_TOOL_ARGUMENTS",
+                "UI_INVOKE_UNAVAILABLE"
+              ]
+            },
+            "outcome": {
+              "const": "not_invoked"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "tool",
+            "code",
+            "outcome",
+            "message"
+          ],
+          "properties": {
+            "kind": {
+              "const": "tool_error"
+            },
+            "tool": {
+              "const": "ui_invoke"
+            },
+            "code": {
+              "const": "UI_INVOKE_OUTCOME_UNKNOWN"
+            },
+            "outcome": {
+              "const": "unknown"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
     },
     "startDebugSuccess": {
       "type": "object",
@@ -1152,7 +1368,10 @@
             "step_over",
             "continue_execution",
             "add_breakpoint",
-            "remove_breakpoint"
+            "remove_breakpoint",
+            "ui_invoke",
+            "get_output",
+            "get_output_tail"
           ]
         }
       },
@@ -1204,6 +1423,18 @@
         },
         {
           "$ref": "#/$defs/breakpointRemoved"
+        },
+        {
+          "$ref": "#/$defs/uiInvokeSuccess"
+        },
+        {
+          "$ref": "#/$defs/outputSuccess"
+        },
+        {
+          "$ref": "#/$defs/outputTailSuccess"
+        },
+        {
+          "$ref": "#/$defs/uiInvokeToolError"
         },
         {
           "$ref": "#/$defs/debugSessionNotFound"
