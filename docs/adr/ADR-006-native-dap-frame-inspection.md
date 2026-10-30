@@ -1,16 +1,38 @@
-# ADR-006: Add typed native frame inspection with explicit thread and capability-gated bounded paging
+# ADR-006: Typed native frame inspection and bounded stack compatibility
 
 ## Status
-Proposed
+Original B2 status: Proposed (historical record). Compatibility amendment: implemented and verified against the local native consumer; publication is not claimed.
 
 ## Context
 B1 established the native stateful walking skeleton: an opaque `debugSessionId`, registry-owned `SessionSlot` leases, a typed `NetCoreDbgSession.GetThreadsAsync` seam, and a normalized modern MCP result rather than a raw DAP surface. B1 implementation is commit `3ed4b85`, merged by commit `11b69e8`. Its native 52/52 receipt was observed on the dirty pre-merge base, not a post-merge native-test receipt; this ADR does not treat that observation as current-head evidence.
+
+**Historical B2 premise, superseded by the compatibility amendment below:**
 
 A client can now enumerate threads but cannot locate execution within one. DAP `stackTrace` names one `threadId`; finite `startFrame`/`levels` paging is available to B2 only when the session's initialize response recorded `supportsDelayedStackTraceLoading:true`. DAP permits omitted or zero `levels` to request all frames, but this native boundary must never make an unbounded adapter request. A DAP `StackFrame` has an int32 id, name, source location fields, and many optional presentation/control fields; only the normalized execution-location projection belongs to B2.
 
 This is D2 for this artifact: a wrong native protocol/lifecycle choice would require rework across the MCP dispatcher, typed DAP session, frozen application schema, controlled fixture, and process/lifecycle tests; the boundary is consumed across sessions by future inspection slices.
 
-## Decision
+## Compatibility amendment — current contract
+
+The original B2 contract admits only adapters that explicitly advertise delayed stack loading. The real-adapter evidence changes request selection, not lifecycle authority:
+
+- `.agent/runs/python-removal-strangler-program-v1/first-native-journey/native-console-baseline.json` records native `get_call_stack` refusal at source commit `dff2821d9cd90e5debb7c2df5c8b9c67244d434e` (`DAP_STACK_TRACE_REFUSED`, zero returned frames).
+- `.agent/runs/python-removal-strangler-program-v1/first-native-journey/real-adapter-stack-capability.json` records netcoredbg `3.1.3-1` omitting `supportsDelayedStackTraceLoading` under native-equivalent initialization. Its ordered control reaches a paused state and returns one real frame to a standard unpaged `stackTrace`; its paged control also succeeds. Earlier launch timeouts remain recorded. This evidence does not establish paging support for arbitrary adapters or prove the amended native implementation.
+- The [official DAP StackTrace specification](https://github.com/microsoft/debug-adapter-protocol/blob/main/specification.md#requests_stacktrace) permits all-frame retrieval by omitting `startFrame` and `levels`; the capability governs piecemeal retrieval, not availability of `stackTrace` itself.
+
+For an otherwise eligible stopped target, the initialize-recorded capability selects exactly one request:
+
+1. Explicit boolean `true` retains the existing paged DAP request with the validated `threadId`, `startFrame`, and `levels`.
+2. Absent or boolean `false` sends exactly one standard unpaged DAP request with only `threadId`; it omits both paging fields. This is not a retry, capability inference, or a second request after a paged failure. Capability absence alone no longer causes refusal.
+3. Before local slicing, validate the complete correlated response, including every returned frame, against the existing types and field bounds in original decision 4. The entire `stackFrames` array contains at most 256 entries. A 257-frame response is `DAP_STACK_TRACE_PROTOCOL_ERROR` and follows existing eviction/drain even if the requested page is small or empty; no truncation or partial success is allowed.
+4. For the unpaged response only, apply the caller's validated uint32 `startFrame` and `levels` locally, preserving adapter order and optional validated uint32 `totalFrames`. If `startFrame` is at or beyond the validated frame count, return an empty page. Otherwise take `min(levels, frameCount - startFrame)` frames. Bounds checking precedes conversion/indexing; no unchecked uint32 `startFrame + levels` calculation is allowed. Defaults remain 0/20, `levels` remains `1..256`, and public `levels:0` remains invalid.
+5. Retain the inclusive 16 MiB (16,777,216-byte) DAP payload limit and inclusive 256 KiB (262,144-byte) normalized success `structuredContent` limit, existing type/per-field limits, redacted errors, admission/stop-epoch checks, response-token validation, leases, and cleanup ownership. Validate frames outside the requested local page too. These host-side transport, response, and result bounds **do not bound debugger-internal computation or memory**: an unpaged request asks the adapter to compute the full stack.
+
+This amendment supersedes only the original capability-absent/false refusal, capability-as-admission requirement, and prohibition on unpaged requests. All unchanged input, correlation, lifecycle, normalization, redaction, and cleanup requirements remain binding for both request forms. The original B2 acceptance and evidence remain evidence for their original scope. The amended source passed 16 new compatibility cases and 54 disjoint existing stack/lifecycle/schema cases; a locally built native host returned a real source frame with netcoredbg `3.1.3-1`, then stepped and stopped without a Python backend. These observations are not a published-package or complete-migration claim. Original Python-default/rollback and no-release statements describe B2 history, not a direction to stop the overall .NET migration.
+
+## Original B2 decision — historical request selection
+
+Decision 2's absent/false refusal and decision 3's capability requirement and finite-only request wording are superseded by the amendment. Their unchanged lifecycle and safety rules remain binding.
 
 1. Add the additive modern native tool `get_call_stack(debugSessionId, threadId, startFrame?, levels?)`. Its input is a closed object: `debugSessionId` is a required opaque non-whitespace string under the existing lookup policy; `threadId` is a required Int32; `startFrame` and `levels`, if present, are unsigned 32-bit integers. Missing arguments, omitted required fields, non-integral or out-of-range numeric fields, `levels: 0`, or an extra field return `invalid_tool_arguments` before DAP I/O. Defaults are `startFrame: 0` and `levels: 20`; `levels` is at most 256. No ambient thread selection, thread scan, or default-thread fallback is permitted.
 2. Retain one narrow native-session capability record populated from the DAP initialize response: `supportsDelayedStackTraceLoading` is true only when the response explicitly supplies boolean `true`. It is not a generic feature registry and B2 does not infer, mutate, or expose it. Only that recorded true value admits B2's finite paging; otherwise `GetCallStackAsync` returns `{kind:"dap_stack_trace_refused",error:"DAP_STACK_TRACE_REFUSED"}` without writing any `stackTrace` request.
@@ -28,7 +50,7 @@ This is D2 for this artifact: a wrong native protocol/lifecycle choice would req
 | Generic MCP-to-DAP request forwarding | Rejected | Would make arbitrary DAP commands, payloads, capability variance, and raw adapter failures a public authority surface. |
 | Leave call-stack inspection exclusively on the Python route | Rejected | Retains the user gap in the additive native walking skeleton and forces future native scopes work to begin without its typed frame boundary. |
 
-## Consequences and compatibility
+## Original B2 consequences and compatibility — historical scope
 
 The native catalog gains one tool after `get_threads`; the frozen application schema gains only the call-stack input and result variants needed by this tool. Existing lifecycle, thread, and Native Scene contracts remain unchanged. The controlled DAP fixture gains only explicit initialize-capability, stopped/continued all-thread and named-partial invalidation, held-response publication, all-stop/partial-stop admission-race, and `stackTrace` response modes needed to prove this contract.
 
@@ -38,10 +60,10 @@ This is a parallel additive change, not a selector migration. The installed Pyth
 
 The native path is `opaque token -> SessionSlot lease -> _callStackAdmissionGate target capture/pending registration/DAP write -> correlated stackTrace -> reader-ordered _stateGate token-current validation -> bounded normalized result`. The DAP reader also enters `_callStackAdmissionGate` before applying `stopped`, `continued`, `exited`, or `terminated`, and then mutates lifecycle state and private token visibility under `_stateGate`; no terminal or lifecycle handler can interleave between capture and write. The response reader does not reacquire admission: its `_stateGate` check at response dispatch makes a request captured before continuation or resume→restop refuse rather than publish stale frames. Closed input prevents accidental ambient selection; the initialize capability record prevents unsupported paging; mechanical all-thread and named-partial continuation transitions prevent resumed targets from publishing stale frames while retaining unrelated targets only after a valid named partial continuation; typed response validation and UTF-8 bounds prevent adapter data becoming an unbounded public payload; redaction prevents DAP messages/bodies from crossing the MCP boundary. The acquired lease spans typed admission, DAP I/O, validation, and result construction. Refusal preserves the session. A protocol failure releases its own lease before joining the existing one-winner close-and-drain sequence, which prevents self-deadlock.
 
-## Admission recheck
+## Original B2 admission recheck — historical gate
 
 `B2-G0` remains a fresh, independent pre-implementation recheck gate over this corrected ADR/spec/plan/tasks packet. This repair supersedes the prior incomplete recheck: it is not evidence that `B2-G0` passed. Implementation admission remains closed until the recheck records its terminal verdict against the all-thread/named-partial `continued` branches, request-local token-current response publication, strict partial-stop replacement, and safe-integer frame bounds.
 
-## Deferred work
+## Original B2 deferred work — historical scope
 
 Scopes, variables, frame remapping or persistence, source-context reads (including consumption of `sourceReference`), execution control, generic DAP forwarding, UI/bridge work, Python retirement, release, and publication remain outside B2. A future scopes slice must establish its own frame-id lifetime contract.

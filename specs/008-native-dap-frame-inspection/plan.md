@@ -1,6 +1,18 @@
 # Plan — Native DAP frame inspection
 
-## Architecture
+## Compatibility amendment — current implementation boundary
+
+Status: amended implementation verified on the local native consumer; publication is not claimed. [ADR-006](../../docs/adr/ADR-006-native-dap-frame-inspection.md#compatibility-amendment--current-contract) owns the decision. The retained baseline records native refusal at `dff2821d9cd90e5debb7c2df5c8b9c67244d434e`; the real-adapter control records netcoredbg `3.1.3-1` omitting the capability but returning one frame to an unpaged request.
+
+`NetCoreDbgSession` retains the existing admission/state gates, request-local stop token, correlated response validation, and typed result. Capability selects request shape rather than admission: explicit boolean `true` writes one existing paged request; absent/false writes exactly one unpaged request with only `threadId`, omitting `startFrame` and `levels`. No retry, second request, generic forwarder, or new cleanup owner is introduced.
+
+The typed response path validates the complete array (at most 256 frames) and every existing frame/field type and limit before locally slicing an unpaged response. It preserves adapter order and optional validated uint32 `totalFrames`. A uint32 start at/beyond count returns an empty page; otherwise use `min(levels, frameCount - startFrame)` only after the range check, with no unchecked uint32 addition or premature narrowing. Public input and defaults remain unchanged. A 257-frame response or invalid frame outside the requested page is a protocol error, never truncation, and uses existing eviction/drain.
+
+The inclusive 16 MiB DAP payload and 256 KiB normalized success `structuredContent` limits remain, alongside existing lifecycle/epoch, redaction, lease, and cleanup rules. These host-side bounds do not bound debugger-internal CPU or memory: the unpaged request asks the adapter to compute its full stack. The local candidate passed 16 compatibility cases and 54 disjoint existing stack/lifecycle/schema cases; a real native MCP replay returned one source frame, stepped and stopped without a Python backend. This is not installed-package or complete-migration proof.
+
+Everything below records original B2 planning and acceptance scope. Its absent/false refusal, capability-as-admission, and finite-only/no-unpaged request clauses are superseded, including the diagram's refusal branch and capability requirement. Original Python-default/rollback, no-migration, and no-release wording is historical, not a stop instruction for the separately user-requested overall .NET migration. Prior acceptance/evidence is not erased or promoted to proof of the amendment.
+
+## Original B2 architecture — historical request selection
 
 ```mermaid
 sequenceDiagram
@@ -53,7 +65,7 @@ B1 is binding provenance, not current-head test evidence: implementation `3ed4b8
 
 ADR-006 selects an internal typed bounded `stackTrace` seam with an initialize-derived paging gate, admission-serialized capture/register/write, and reader-ordered state-token validation. Generic DAP forwarding is rejected because it exports arbitrary adapter authority. Retaining call-stack inspection only in Python is rejected because it leaves the native stateful walking skeleton unable to locate execution. Scopes and frame consumption are deliberately deferred to a later slice.
 
-## Migration
+## Original B2 migration — historical scope
 
 Parallel additive change: the native catalog gains `get_call_stack` after `get_threads`, moving the current ten-tool native order to eleven tools. The modern frozen application schema receives only the new input/result variants and `invalid_tool_arguments` tool name required for B2; existing variants are not broadened. No native default selector exists to remove.
 
@@ -70,15 +82,15 @@ Python is neither called nor changed by this native request. Retained installed 
 | B2-REQ-009 | B2-G0, B2-T04 | fresh independent `B2-G0` recheck over the corrected ADR/spec/plan/tasks packet, including all-thread/named-partial continuation and held-response token-current publication, then installed platform security-review contract `C:/Users/btf/.omp/profiles/nvmd-selfhost/plugins/cache/plugins/nvmd-ai___nvmd-ai___0.9.19/wiki/security-review.md`; durable security evidence only at root `.agent/runs/b2-native-frame-inspection/security-review.md` |
 | B2-REQ-008/009 | B2-T05 | `GetThreadsContractTests.cs`; `SessionSlotContractTests.cs`; `SessionSlotLifecycleTests.cs`; `NetCoreDbgSessionTests.cs`; `StructuredContentSchemaParityTests.cs`; `specs/006-a1-local-preview/quickstart.md` journey evidence only; no package, selector, or Python file change |
 
-## Bounded ticket graph
+## Original B2 bounded ticket graph — historical gates
 
 `B2-G0 Admission recheck -> B2-T01 Explore -> B2-T02 RED Test -> B2-T03 Code -> B2-T04 Review -> B2-T05 final Test`. `B2-G0` independently admits only the corrected all-thread/named-partial `continued`, request-local token-current response-publication, strict partial-stop replacement, and safe-integer frame-bound contract; this repair supersedes the prior incomplete recheck. Each later ticket is a vertical tracer bullet or a bounded validation step: T01 resolves only existing ownership and DAP facts; T02 makes the observable capability, gate, lifecycle transition, held-response, valid-frame, and cleanup contract fail; T03 closes that contract through the named owners; T04 independently judges the exact candidate with the installed S2 security-review contract; T05 demonstrates the finished native and retained-Python journeys plus current-candidate B1 baseline. No ticket is an expand-contract migration because B2 has no live consumer migration.
 
-## FULL challenger
+## Original B2 FULL challenger — historical review
 
 **Status: REVISE findings incorporated; fresh `B2-G0` recheck required before implementation.** The architect FULL challenger found bounded, same-scope corrections: capability-gated paging, atomic stopped/continued-state and request admission, all-thread/named-partial continuation invalidation, request-local token-current response publication, strict partial-stop eligibility replacement, safe-integer frame bounds, S2 review/evidence ownership, current-candidate B1 baseline evidence, exact milestone closure, and valid empty-name/sourceReference-only normalization. This repair supersedes the prior incomplete recheck; it resolves the contract in B2-REQ-003/004/009, the scenarios, file map, and B2-T02/T04/T05 checkpoints but makes no fabricated recheck-clean claim. `B2-G0` must issue `GO`, `REVISE`, or `RETHINK` with the required taxonomy and inspect premise, existing B1 lifecycle leverage, alternatives, minimal scope, staleness, false dependencies, complexity, value, scope, verification, and rollout before implementation admission.
 
-## Milestone map
+## Original B2 milestone map — historical acceptance
 
 | Milestone | Tickets | Value statement | Binding constraints | Shipping moment |
 |---|---|---|---|---|

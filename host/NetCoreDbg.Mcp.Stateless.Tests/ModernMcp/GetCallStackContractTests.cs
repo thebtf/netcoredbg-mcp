@@ -85,15 +85,95 @@ public sealed class GetCallStackContractTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task GetCallStack_CapabilityOmittedOrFalse_ReturnsRedactedRefusalWithoutStackTraceWrite(bool explicitFalse)
+    public async Task GetCallStack_CapabilityOmittedOrFalse_ReturnsDefaultAndExplicitLocalPagesWithOneUnpagedWrite(bool explicitFalse)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack("full-stack-with-total-frames", supportsDelayedStackTraceLoading: false, omitDelayedStackTraceLoading: !explicitFalse));
+        var debugSessionId = await StartStoppedSessionAsync(driver, $"call-stack-unpaged-{explicitFalse}-start");
+        var pages = new (string Name, uint? StartFrame, uint? Levels, int FirstFrameId, int Count)[]
+        {
+            ("default", null, null, 256, 20),
+            ("whole-stack", 0U, 256U, 256, 256),
+            ("middle", 1U, 3U, 255, 3),
+            ("tail", 255U, 256U, 1, 1),
+            ("past-end", 256U, 1U, 0, 0),
+            ("maximum-offset", uint.MaxValue, 256U, 0, 0),
+        };
+        foreach (var page in pages)
+        {
+            var before = await driver.ReadNativeActionsAsync();
+            var response = await driver.CallToolRawAsync(Tool, Arguments(debugSessionId, int.MinValue, page.StartFrame, page.Levels), ModernMcpProcessDriver.CurrentMeta(), new RequestId($"call-stack-unpaged-{explicitFalse}-{page.Name}"));
+            var content = AssertApplicationEnvelope(response, isError: false);
+            Assert.Equal("call_stack_success", content["kind"]?.GetValue<string>());
+            Assert.Equal(256, content["totalFrames"]?.GetValue<int>());
+            var frames = Assert.IsType<JsonArray>(content["frames"]);
+            Assert.Equal(page.Count, frames.Count);
+            for (var index = 0; index < frames.Count; index++)
+            {
+                AssertFrame(frames[index], page.FirstFrameId - index, "frame", null, 0, 0);
+            }
+
+            AssertSingleUnpagedStackTrace((await driver.ReadNativeActionsAsync()).Skip(before.Count), int.MinValue);
+        }
+
+        Assert.Equal("debug_state_success", AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = debugSessionId }, ModernMcpProcessDriver.CurrentMeta(), new RequestId($"call-stack-unpaged-{explicitFalse}-state")), isError: false)["kind"]?.GetValue<string>());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GetCallStack_CapabilityOmittedOrFalse_PreservesOmittedTotalFramesOnLocalPage(bool explicitFalse)
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack(supportsDelayedStackTraceLoading: false, omitDelayedStackTraceLoading: !explicitFalse));
-        var debugSessionId = await StartStoppedSessionAsync(driver, $"call-stack-capability-{explicitFalse}");
+        var debugSessionId = await StartStoppedSessionAsync(driver, $"call-stack-unpaged-no-total-{explicitFalse}-start");
         var before = await driver.ReadNativeActionsAsync();
-        var response = await driver.CallToolRawAsync(Tool, Arguments(debugSessionId, 1), ModernMcpProcessDriver.CurrentMeta(), new RequestId($"call-stack-capability-{explicitFalse}-call"));
-        AssertRefused(AssertApplicationEnvelope(response, isError: true));
-        Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before.Count), static action => action.Command == "stackTrace");
-        Assert.Equal("debug_state_success", AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = debugSessionId }, ModernMcpProcessDriver.CurrentMeta(), new RequestId($"call-stack-capability-{explicitFalse}-state")), isError: false)["kind"]?.GetValue<string>());
+        var response = await driver.CallToolRawAsync(Tool, Arguments(debugSessionId, 17, 1, 1), ModernMcpProcessDriver.CurrentMeta(), new RequestId($"call-stack-unpaged-no-total-{explicitFalse}"));
+        var content = AssertApplicationEnvelope(response, isError: false);
+        Assert.Equal("call_stack_success", content["kind"]?.GetValue<string>());
+        Assert.False(content.ContainsKey("totalFrames"));
+        AssertFrame(Assert.Single(Assert.IsType<JsonArray>(content["frames"])), 2, "frame", null, 0, 0);
+        AssertSingleUnpagedStackTrace((await driver.ReadNativeActionsAsync()).Skip(before.Count), 17);
+    }
+
+    [Theory]
+    [InlineData(false, "too-many-frames", 0U)]
+    [InlineData(true, "too-many-frames", 0U)]
+    [InlineData(false, "too-many-frames", uint.MaxValue)]
+    [InlineData(true, "too-many-frames", uint.MaxValue)]
+    [InlineData(false, "malformed-trailing-frame", 0U)]
+    [InlineData(true, "malformed-trailing-frame", 0U)]
+    [InlineData(false, "malformed-trailing-frame", uint.MaxValue)]
+    [InlineData(true, "malformed-trailing-frame", uint.MaxValue)]
+    public async Task GetCallStack_CapabilityOmittedOrFalse_ValidatesWholeReplyBeforePagingAndDrainsOnProtocolError(bool explicitFalse, string responseMode, uint startFrame)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack(responseMode, supportsDelayedStackTraceLoading: false, omitDelayedStackTraceLoading: !explicitFalse));
+        var debugSessionId = await StartStoppedSessionAsync(driver, $"call-stack-unpaged-{explicitFalse}-{responseMode}-{startFrame}-start");
+        var before = await driver.ReadNativeActionsAsync();
+        var response = await driver.CallToolRawAsync(Tool, Arguments(debugSessionId, 1, startFrame, 1), ModernMcpProcessDriver.CurrentMeta(), new RequestId($"call-stack-unpaged-{explicitFalse}-{responseMode}-{startFrame}"));
+        AssertProtocolError(AssertApplicationEnvelope(response, isError: true));
+        AssertSingleUnpagedStackTrace((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1);
+        AssertNotFound(AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = debugSessionId }, ModernMcpProcessDriver.CurrentMeta(), new RequestId($"call-stack-unpaged-{explicitFalse}-{responseMode}-{startFrame}-state")), isError: true));
+    }
+
+    [Theory]
+    [InlineData(false, "hold-then-continued-omitted", "continued-event")]
+    [InlineData(true, "hold-then-continued-omitted", "continued-event")]
+    [InlineData(false, "hold-then-continued-restop", "restopped-event")]
+    [InlineData(true, "hold-then-continued-restop", "restopped-event")]
+    public async Task GetCallStack_CapabilityOmittedOrFalse_ResponseAfterCapturedTargetInvalidationRefusesStaleFrames(bool explicitFalse, string responseMode, string invalidationObservation)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack(responseMode, supportsDelayedStackTraceLoading: false, omitDelayedStackTraceLoading: !explicitFalse));
+        var debugSessionId = await StartStoppedSessionAsync(driver, $"call-stack-unpaged-{explicitFalse}-{responseMode}-start");
+        var before = await driver.ReadNativeActionsAsync();
+        var response = driver.CallToolRawAsync(Tool, Arguments(debugSessionId, 1, 0, 1), ModernMcpProcessDriver.CurrentMeta(), new RequestId($"call-stack-unpaged-{explicitFalse}-{responseMode}"), timeout: TimeSpan.FromSeconds(35));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await driver.WaitForStackTraceRequestAsync(observation.Token);
+        await driver.WaitForFixtureRecordAsync(invalidationObservation, observation.Token);
+        driver.ReleaseStackTraceResponse();
+        var content = AssertApplicationEnvelope(await response, isError: true);
+        AssertRefused(content);
+        Assert.False(content.ContainsKey("frames"));
+        AssertSingleUnpagedStackTrace((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1);
+        Assert.Equal("debug_state_success", AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = debugSessionId }, ModernMcpProcessDriver.CurrentMeta(), new RequestId($"call-stack-unpaged-{explicitFalse}-{responseMode}-state")), isError: false)["kind"]?.GetValue<string>());
     }
 
     [Fact]
@@ -331,6 +411,16 @@ public sealed class GetCallStackContractTests
         }
 
         return arguments;
+    }
+
+    private static void AssertSingleUnpagedStackTrace(IEnumerable<ModernNativeAction> actions, int threadId)
+    {
+        var stackTrace = Assert.Single(actions, static action => action.Command == "stackTrace");
+        using var request = JsonDocument.Parse(stackTrace.Detail ?? throw new Xunit.Sdk.XunitException("Controlled adapter did not record stackTrace arguments."));
+        var arguments = request.RootElement.GetProperty("arguments");
+        Assert.Equal(JsonValueKind.Object, arguments.ValueKind);
+        Assert.Single(arguments.EnumerateObject());
+        Assert.Equal(threadId, arguments.GetProperty("threadId").GetInt32());
     }
 
     private static JsonObject AssertApplicationEnvelope(JsonRpcResponse response, bool isError)
