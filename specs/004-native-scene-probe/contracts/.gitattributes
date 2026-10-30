@@ -1,0 +1,6 @@
+native-scene-probe.schema.json -text whitespace=cr-at-eol
+native-scene-artifact.schema.json -text whitespace=cr-at-eol
+parity-corpus.json -text whitespace=cr-at-eol
+approval-record.md -text whitespace=cr-at-eol
+native-scene-probe-v2.schema.json -text
+parity-corpus-v2.json -text
