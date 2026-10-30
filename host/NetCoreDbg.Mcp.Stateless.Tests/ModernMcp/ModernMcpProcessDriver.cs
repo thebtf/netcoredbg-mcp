@@ -61,7 +61,8 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
 
     internal static async Task<ModernMcpProcessDriver> StartAsync(
         ModernMcpStartOptions? options = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        TimeSpan? startupTimeout = null)
     {
         options ??= new ModernMcpStartOptions();
         var scratchDirectory = ModernMcpScratchDirectory.Create();
@@ -74,7 +75,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             var candidate = TestOutputPathResolver.ResolveProcess(Path.Combine(RepositoryLayout.Root, "host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
 
             var inertProgramPath = Path.Combine(scratchDirectory, "controlled-program.dll");
-            using var operation = CreateBoundedCancellation(cancellationToken);
+            using var operation = CreateBoundedCancellation(cancellationToken, startupTimeout);
             await File.WriteAllBytesAsync(inertProgramPath, [], operation.Token).ConfigureAwait(false);
 
             ModernMcpProcessDriver? driver = null;

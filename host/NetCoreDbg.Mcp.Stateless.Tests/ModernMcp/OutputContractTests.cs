@@ -3,12 +3,13 @@ using System.Text.Json.Nodes;
 using ModelContextProtocol.Protocol;
 using NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
 
 [Collection(NetCoreDbgSessionProcessCollection.Name)]
 [Trait("Coverage", "Exclude")]
-public sealed class OutputContractTests
+public sealed class OutputContractTests(ITestOutputHelper output)
 {
     private const string Tool = "get_output";
     private const string TailTool = "get_output_tail";
@@ -37,38 +38,38 @@ public sealed class OutputContractTests
         { "extra_field", new JsonObject { ["debugSessionId"] = "opaque", ["unexpected"] = true } },
     };
 
-    public static TheoryData<string, JsonObject?> InvalidTailArguments => new()
-    {
-        { "null_arguments", null },
-        { "omitted_token", new JsonObject() },
-        { "null_token", new JsonObject { ["debugSessionId"] = null } },
-        { "numeric_token", new JsonObject { ["debugSessionId"] = 17 } },
-        { "boolean_token", new JsonObject { ["debugSessionId"] = true } },
-        { "object_token", new JsonObject { ["debugSessionId"] = new JsonObject() } },
-        { "array_token", new JsonObject { ["debugSessionId"] = new JsonArray() } },
-        { "empty_token", new JsonObject { ["debugSessionId"] = string.Empty } },
-        { "whitespace_token", new JsonObject { ["debugSessionId"] = " \t\r\n" } },
-        { "null_lines", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = null } },
-        { "boolean_lines", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = true } },
-        { "string_lines", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = "2" } },
-        { "object_lines", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = new JsonObject() } },
-        { "array_lines", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = new JsonArray() } },
-        { "positive_fraction", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = JsonNode.Parse("2.5") } },
-        { "negative_fraction", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = JsonNode.Parse("-2.5") } },
-        { "fractional_exponent", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = JsonNode.Parse("2e-1") } },
-        { "underflowing_fraction", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = JsonNode.Parse("1e-1000") } },
-        { "fraction_beyond_double_precision", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = JsonNode.Parse("1.0000000000000000000000000000000001") } },
-        { "large_fraction_beyond_double_precision", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = JsonNode.Parse("9007199254740993.1") } },
-        { "numeric_category", new JsonObject { ["debugSessionId"] = "opaque", ["category"] = 17 } },
-        { "boolean_category", new JsonObject { ["debugSessionId"] = "opaque", ["category"] = false } },
-        { "object_category", new JsonObject { ["debugSessionId"] = "opaque", ["category"] = new JsonObject() } },
-        { "array_category", new JsonObject { ["debugSessionId"] = "opaque", ["category"] = new JsonArray() } },
-        { "forbidden_clear_true", new JsonObject { ["debugSessionId"] = "opaque", ["clear"] = true } },
-        { "forbidden_clear_false", new JsonObject { ["debugSessionId"] = "opaque", ["clear"] = false } },
-        { "forbidden_clear_null", new JsonObject { ["debugSessionId"] = "opaque", ["clear"] = null } },
-        { "extra_field", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = 2, ["category"] = null, ["unexpected"] = true } },
-        { "mis_cased_lines", new JsonObject { ["debugSessionId"] = "opaque", ["Lines"] = 2 } },
-    };
+    private static (string Scenario, JsonObject? Arguments)[] InvalidTailArguments =>
+    [
+        ("null_arguments", null),
+        ("omitted_token", new JsonObject()),
+        ("null_token", new JsonObject { ["debugSessionId"] = null }),
+        ("numeric_token", new JsonObject { ["debugSessionId"] = 17 }),
+        ("boolean_token", new JsonObject { ["debugSessionId"] = true }),
+        ("object_token", new JsonObject { ["debugSessionId"] = new JsonObject() }),
+        ("array_token", new JsonObject { ["debugSessionId"] = new JsonArray() }),
+        ("empty_token", new JsonObject { ["debugSessionId"] = string.Empty }),
+        ("whitespace_token", new JsonObject { ["debugSessionId"] = " \t\r\n" }),
+        ("null_lines", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = null }),
+        ("boolean_lines", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = true }),
+        ("string_lines", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = "2" }),
+        ("object_lines", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = new JsonObject() }),
+        ("array_lines", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = new JsonArray() }),
+        ("positive_fraction", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = JsonNode.Parse("2.5") }),
+        ("negative_fraction", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = JsonNode.Parse("-2.5") }),
+        ("fractional_exponent", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = JsonNode.Parse("2e-1") }),
+        ("underflowing_fraction", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = JsonNode.Parse("1e-1000") }),
+        ("fraction_beyond_double_precision", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = JsonNode.Parse("1.0000000000000000000000000000000001") }),
+        ("large_fraction_beyond_double_precision", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = JsonNode.Parse("9007199254740993.1") }),
+        ("numeric_category", new JsonObject { ["debugSessionId"] = "opaque", ["category"] = 17 }),
+        ("boolean_category", new JsonObject { ["debugSessionId"] = "opaque", ["category"] = false }),
+        ("object_category", new JsonObject { ["debugSessionId"] = "opaque", ["category"] = new JsonObject() }),
+        ("array_category", new JsonObject { ["debugSessionId"] = "opaque", ["category"] = new JsonArray() }),
+        ("forbidden_clear_true", new JsonObject { ["debugSessionId"] = "opaque", ["clear"] = true }),
+        ("forbidden_clear_false", new JsonObject { ["debugSessionId"] = "opaque", ["clear"] = false }),
+        ("forbidden_clear_null", new JsonObject { ["debugSessionId"] = "opaque", ["clear"] = null }),
+        ("extra_field", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = 2, ["category"] = null, ["unexpected"] = true }),
+        ("mis_cased_lines", new JsonObject { ["debugSessionId"] = "opaque", ["Lines"] = 2 }),
+    ];
 
     [Fact]
     public async Task GetOutput_EmptyBuffer_ReturnsCompleteEmptySuccessWithoutDapIo()
@@ -404,7 +405,7 @@ public sealed class OutputContractTests
     [Fact]
     public async Task GetOutputTail_Catalog_PublishesClosedArgumentsWithUnboundedIntegerLinesAndDefault50()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(OutputOptions());
+        await using var driver = await StartTailDriverAsync(OutputOptions());
         var catalog = ModernMcpProcessDriver.RequireResult(await driver.ListToolsRawAsync(
             ModernMcpProcessDriver.CurrentMeta(), new RequestId("output-tail-catalog")));
         var tool = Assert.Single(
@@ -430,7 +431,7 @@ public sealed class OutputContractTests
     [Fact]
     public async Task GetOutputTail_EmptyBuffer_ReturnsZeroCountsForDefaultAndSignedLineCounts()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(OutputOptions());
+        await using var driver = await StartTailDriverAsync(OutputOptions());
         var token = await StartSessionAsync(driver, "output-tail-empty-start");
         string?[] counts = [null, "1", "0", "-1", "10000000000000000000000000000000000000000", "-10000000000000000000000000000000000000000"];
 
@@ -444,7 +445,7 @@ public sealed class OutputContractTests
     public async Task GetOutputTail_OmittedLineCount_ReturnsLast50WithTotalCountBeforeSlicing()
     {
         var allLines = Enumerable.Range(1, 55).Select(static index => $"line-{index.ToString(CultureInfo.InvariantCulture)}").ToArray();
-        await using var driver = await ModernMcpProcessDriver.StartAsync(OutputOptions(
+        await using var driver = await StartTailDriverAsync(OutputOptions(
             launch: new JsonArray(Output(string.Join("\n", allLines) + "\n"))));
         var token = await StartSessionAsync(driver, "output-tail-default-start");
         var expected = string.Join("\n", allLines.Skip(5));
@@ -453,48 +454,57 @@ public sealed class OutputContractTests
         await AssertOutputTailAsync(driver, token, "output-tail-explicit-50", 55, 50, expected, "50");
     }
 
-    [Theory]
-    [InlineData("1", 1, "four")]
-    [InlineData("2", 2, "three\nfour")]
-    [InlineData("4", 4, "one\ntwo\nthree\nfour")]
-    [InlineData("5", 4, "one\ntwo\nthree\nfour")]
-    [InlineData("0", 4, "one\ntwo\nthree\nfour")]
-    [InlineData("-0", 4, "one\ntwo\nthree\nfour")]
-    [InlineData("-1", 3, "two\nthree\nfour")]
-    [InlineData("-2", 2, "three\nfour")]
-    [InlineData("-3", 1, "four")]
-    [InlineData("-4", 0, "")]
-    [InlineData("-5", 0, "")]
-    [InlineData("2147483647", 4, "one\ntwo\nthree\nfour")]
-    [InlineData("-2147483648", 0, "")]
-    [InlineData("9223372036854775807", 4, "one\ntwo\nthree\nfour")]
-    [InlineData("-9223372036854775808", 0, "")]
-    [InlineData("9223372036854775808", 4, "one\ntwo\nthree\nfour")]
-    [InlineData("-9223372036854775809", 0, "")]
-    [InlineData("1000000000000000000000000000000000000000000000000000000000000", 4, "one\ntwo\nthree\nfour")]
-    [InlineData("-1000000000000000000000000000000000000000000000000000000000000", 0, "")]
-    [InlineData("2.0", 2, "three\nfour")]
-    [InlineData("-2.000", 2, "three\nfour")]
-    [InlineData("2e0", 2, "three\nfour")]
-    [InlineData("20e-1", 2, "three\nfour")]
-    [InlineData("0.2e1", 2, "three\nfour")]
-    [InlineData("-20e-1", 2, "three\nfour")]
-    [InlineData("2000e-3", 2, "three\nfour")]
-    [InlineData("-0.0", 4, "one\ntwo\nthree\nfour")]
-    [InlineData("0e-1000", 4, "one\ntwo\nthree\nfour")]
-    [InlineData("-0e1000", 4, "one\ntwo\nthree\nfour")]
-    [InlineData("-0e-1000", 4, "one\ntwo\nthree\nfour")]
-    [InlineData("1e1000", 4, "one\ntwo\nthree\nfour")]
-    [InlineData("-1e1000", 0, "")]
-    [InlineData("10000000000000000000000000000000000000000.000", 4, "one\ntwo\nthree\nfour")]
-    [InlineData("-10000000000000000000000000000000000000000.000", 0, "")]
-    public async Task GetOutputTail_SignedIntegralJsonLineCounts_PreservePythonSliceResults(string linesJson, int returnedLines, string expected)
+    [Fact]
+    public async Task GetOutputTail_SignedIntegralJsonLineCounts_PreservePythonSliceResults()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(OutputOptions(
+        await using var driver = await StartTailDriverAsync(OutputOptions(
             launch: new JsonArray(Output("one\ntwo\nthree\nfour\n"))));
         var token = await StartSessionAsync(driver, "output-tail-signed-start");
+        var cases = new (string LinesJson, int ReturnedLines, string Expected)[]
+        {
+            ("1", 1, "four"),
+            ("2", 2, "three\nfour"),
+            ("4", 4, "one\ntwo\nthree\nfour"),
+            ("5", 4, "one\ntwo\nthree\nfour"),
+            ("0", 4, "one\ntwo\nthree\nfour"),
+            ("-0", 4, "one\ntwo\nthree\nfour"),
+            ("-1", 3, "two\nthree\nfour"),
+            ("-2", 2, "three\nfour"),
+            ("-3", 1, "four"),
+            ("-4", 0, ""),
+            ("-5", 0, ""),
+            ("2147483647", 4, "one\ntwo\nthree\nfour"),
+            ("-2147483648", 0, ""),
+            ("9223372036854775807", 4, "one\ntwo\nthree\nfour"),
+            ("-9223372036854775808", 0, ""),
+            ("9223372036854775808", 4, "one\ntwo\nthree\nfour"),
+            ("-9223372036854775809", 0, ""),
+            ("1000000000000000000000000000000000000000000000000000000000000", 4, "one\ntwo\nthree\nfour"),
+            ("-1000000000000000000000000000000000000000000000000000000000000", 0, ""),
+            ("2.0", 2, "three\nfour"),
+            ("-2.000", 2, "three\nfour"),
+            ("2e0", 2, "three\nfour"),
+            ("20e-1", 2, "three\nfour"),
+            ("0.2e1", 2, "three\nfour"),
+            ("-20e-1", 2, "three\nfour"),
+            ("2000e-3", 2, "three\nfour"),
+            ("-0.0", 4, "one\ntwo\nthree\nfour"),
+            ("0e-1000", 4, "one\ntwo\nthree\nfour"),
+            ("-0e1000", 4, "one\ntwo\nthree\nfour"),
+            ("-0e-1000", 4, "one\ntwo\nthree\nfour"),
+            ("1e1000", 4, "one\ntwo\nthree\nfour"),
+            ("-1e1000", 0, ""),
+            ("10000000000000000000000000000000000000000.000", 4, "one\ntwo\nthree\nfour"),
+            ("-10000000000000000000000000000000000000000.000", 0, ""),
+        };
 
-        await AssertOutputTailAsync(driver, token, "output-tail-signed", 4, returnedLines, expected, linesJson);
+        // These read-only vectors use identical session state; only the request arguments differ.
+        for (var index = 0; index < cases.Length; index++)
+        {
+            var (linesJson, returnedLines, expected) = cases[index];
+            output.WriteLine($"Tail line-count vector: {linesJson}");
+            await AssertOutputTailAsync(driver, token, $"output-tail-signed-{index}", 4, returnedLines, expected, linesJson);
+        }
     }
 
     [Theory]
@@ -511,7 +521,7 @@ public sealed class OutputContractTests
     [InlineData("paragraph-separator", "\u2029")]
     public async Task GetOutputTail_PythonLineSeparators_SplitAndNormalizeToLf(string scenario, string separator)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(OutputOptions(
+        await using var driver = await StartTailDriverAsync(OutputOptions(
             launch: new JsonArray(Output($"first{separator}second{separator}third{separator}"))));
         var token = await StartSessionAsync(driver, $"output-tail-separator-{scenario}-start");
 
@@ -534,7 +544,7 @@ public sealed class OutputContractTests
     public async Task GetOutputTail_TrailingAndEmptyLines_PreservePythonCountsWithoutInventingFinalLine(
         string text, int totalLines, string expectedAll, string expectedLast)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(OutputOptions(launch: new JsonArray(Output(text))));
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(Output(text))));
         var token = await StartSessionAsync(driver, "output-tail-empty-lines-start");
 
         await AssertOutputTailAsync(driver, token, "output-tail-empty-lines-all", totalLines, totalLines, expectedAll, "0");
@@ -544,7 +554,7 @@ public sealed class OutputContractTests
     [Fact]
     public async Task GetOutputTail_CrLfAcrossEvents_RecomputesLogicalLinesAfterLaterAppends()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(OutputOptions(
+        await using var driver = await StartTailDriverAsync(OutputOptions(
             launch: new JsonArray(Output("first\r")),
             batches: new JsonArray(Batch(Output("\nsecond\r")), Batch(Output("\n\r")), Batch(Output("\nlast")))));
         var token = await StartSessionAsync(driver, "output-tail-crlf-start");
@@ -558,22 +568,10 @@ public sealed class OutputContractTests
         await AssertOutputTailAsync(driver, token, "output-tail-crlf-last", 4, 4, "first\nsecond\n\nlast", "0");
     }
 
-    [Theory]
-    [InlineData("omitted", 8, "head\nerror\ntail\ndiscarded\nend\nconsole\nlast\nmetric", "metric")]
-    [InlineData("null", 8, "head\nerror\ntail\ndiscarded\nend\nconsole\nlast\nmetric", "metric")]
-    [InlineData("", 8, "head\nerror\ntail\ndiscarded\nend\nconsole\nlast\nmetric", "metric")]
-    [InlineData("stdout", 2, "headtail\nend", "end")]
-    [InlineData("stderr", 3, "\nerror\ndiscarded", "discarded")]
-    [InlineData("console", 2, "console\nlast", "last")]
-    [InlineData("telemetry", 2, "\nmetric", "metric")]
-    [InlineData("STDOUT", 0, "", "")]
-    [InlineData("Console", 0, "", "")]
-    [InlineData("unknown", 0, "", "")]
-    [InlineData(" ", 0, "", "")]
-    public async Task GetOutputTail_CategoryFilter_PrecedesFragmentJoiningSplittingAndSlicing(
-        string categoryShape, int totalLines, string expectedAll, string expectedLast)
+    [Fact]
+    public async Task GetOutputTail_CategoryFilter_PrecedesFragmentJoiningSplittingAndSlicing()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(OutputOptions(launch: new JsonArray(
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(
             Output("head", "stdout"),
             Output("\nerror\n", "stderr"),
             Output("tail\r", "stdout"),
@@ -583,11 +581,31 @@ public sealed class OutputContractTests
             Output("\vlast", "console"),
             Output("\nmetric\n", "telemetry"))));
         var token = await StartSessionAsync(driver, "output-tail-category-start");
-        var category = categoryShape is "omitted" or "null" ? null : categoryShape;
-        var includeCategory = categoryShape != "omitted";
+        var cases = new (string CategoryShape, int TotalLines, string ExpectedAll, string ExpectedLast)[]
+        {
+            ("omitted", 8, "head\nerror\ntail\ndiscarded\nend\nconsole\nlast\nmetric", "metric"),
+            ("null", 8, "head\nerror\ntail\ndiscarded\nend\nconsole\nlast\nmetric", "metric"),
+            ("", 8, "head\nerror\ntail\ndiscarded\nend\nconsole\nlast\nmetric", "metric"),
+            ("stdout", 2, "headtail\nend", "end"),
+            ("stderr", 3, "\nerror\ndiscarded", "discarded"),
+            ("console", 2, "console\nlast", "last"),
+            ("telemetry", 2, "\nmetric", "metric"),
+            ("STDOUT", 0, "", ""),
+            ("Console", 0, "", ""),
+            ("unknown", 0, "", ""),
+            (" ", 0, "", ""),
+        };
 
-        await AssertOutputTailAsync(driver, token, "output-tail-category-all", totalLines, totalLines, expectedAll, "0", category, includeCategory);
-        await AssertOutputTailAsync(driver, token, "output-tail-category-last", totalLines, totalLines == 0 ? 0 : 1, expectedLast, "1", category, includeCategory);
+        for (var index = 0; index < cases.Length; index++)
+        {
+            var (categoryShape, totalLines, expectedAll, expectedLast) = cases[index];
+            var category = categoryShape is "omitted" or "null" ? null : categoryShape;
+            var includeCategory = categoryShape != "omitted";
+            output.WriteLine($"Tail category vector: '{categoryShape}'");
+
+            await AssertOutputTailAsync(driver, token, $"output-tail-category-{index}-all", totalLines, totalLines, expectedAll, "0", category, includeCategory);
+            await AssertOutputTailAsync(driver, token, $"output-tail-category-{index}-last", totalLines, totalLines == 0 ? 0 : 1, expectedLast, "1", category, includeCategory);
+        }
     }
 
     [Theory]
@@ -597,7 +615,7 @@ public sealed class OutputContractTests
     {
         var batch = Batch(Output("final\n", "stderr"));
         batch["terminal"] = terminalEvent;
-        await using var driver = await ModernMcpProcessDriver.StartAsync(OutputOptions(
+        await using var driver = await StartTailDriverAsync(OutputOptions(
             launch: new JsonArray(Output("before\n", "stdout")), batches: new JsonArray(batch)));
         var token = await StartSessionAsync(driver, $"output-tail-{terminalEvent}-start");
 
@@ -616,7 +634,7 @@ public sealed class OutputContractTests
     public async Task GetOutputTail_RepeatedReadsAndLaterAppends_DoNotMutateRetainedOutput()
     {
         const string original = "one\r\ntwo\nthree";
-        await using var driver = await ModernMcpProcessDriver.StartAsync(OutputOptions(
+        await using var driver = await StartTailDriverAsync(OutputOptions(
             launch: new JsonArray(Output("one\r\n", "stdout"), Output("two\n", "stderr"), Output("three", "stdout")),
             batches: new JsonArray(Batch(Output("\nfour\n", "stdout")))));
         var token = await StartSessionAsync(driver, "output-tail-retained-start");
@@ -632,25 +650,28 @@ public sealed class OutputContractTests
         await AssertOutputTailAsync(driver, token, "output-tail-retained-after-clear", 0, 0, string.Empty, "0");
     }
 
-    [Theory]
-    [MemberData(nameof(InvalidTailArguments))]
-    public async Task GetOutputTail_InvalidInput_ReturnsCompleteInvalidArgumentsWithoutDapIo(string scenario, JsonObject? arguments)
+    [Fact]
+    public async Task GetOutputTail_InvalidInput_ReturnsCompleteInvalidArgumentsWithoutDapIo()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(OutputOptions());
-        var before = await driver.ReadNativeActionsAsync();
-        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(
-            TailTool, arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId($"output-tail-invalid-{scenario}")), isError: true);
+        await using var driver = await StartTailDriverAsync(OutputOptions());
+        foreach (var (scenario, arguments) in InvalidTailArguments)
+        {
+            output.WriteLine($"Tail invalid-input vector: {scenario}");
+            var before = await driver.ReadNativeActionsAsync();
+            var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(
+                TailTool, arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId($"output-tail-invalid-{scenario}")), isError: true);
 
-        Assert.Equal("invalid_tool_arguments", content["kind"]?.GetValue<string>());
-        Assert.Equal("INVALID_TOOL_ARGUMENTS", content["error"]?.GetValue<string>());
-        Assert.Equal(TailTool, content["tool"]?.GetValue<string>());
-        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+            Assert.Equal("invalid_tool_arguments", content["kind"]?.GetValue<string>());
+            Assert.Equal("INVALID_TOOL_ARGUMENTS", content["error"]?.GetValue<string>());
+            Assert.Equal(TailTool, content["tool"]?.GetValue<string>());
+            Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+        }
     }
 
     [Fact]
     public async Task GetOutputTail_OmittedArguments_ReturnsCompleteInvalidArgumentsWithoutDapIo()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(OutputOptions());
+        await using var driver = await StartTailDriverAsync(OutputOptions());
         var before = await driver.ReadNativeActionsAsync();
         var content = AssertApplicationEnvelope(await driver.SendRawRequestAsync(
             "tools/call", new JsonObject { ["name"] = TailTool, ["_meta"] = ModernMcpProcessDriver.CurrentMeta() },
@@ -665,7 +686,7 @@ public sealed class OutputContractTests
     [Fact]
     public async Task GetOutputTail_MissingAndRetiredSessions_ReturnUniformCompleteNotFoundWithoutDapIo()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(OutputOptions(
+        await using var driver = await StartTailDriverAsync(OutputOptions(
             launch: new JsonArray(Output("retired private output\n"))));
         var token = await StartSessionAsync(driver, "output-tail-retired-start");
         var stopped = AssertApplicationEnvelope(await driver.CallToolRawAsync(
@@ -694,6 +715,10 @@ public sealed class OutputContractTests
 
         Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
     }
+
+    // Bound host startup/discovery separately; tool calls retain the driver's two-second deadline.
+    private static Task<ModernMcpProcessDriver> StartTailDriverAsync(ModernMcpStartOptions options) =>
+        ModernMcpProcessDriver.StartAsync(options, startupTimeout: TimeSpan.FromSeconds(10));
 
     private static ModernMcpStartOptions OutputOptions(
         JsonArray? launch = null,
