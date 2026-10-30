@@ -1160,15 +1160,14 @@ internal static class Program
         private static CallToolResult StopSuccess(DapSessionState state) => Result(new
         {
             kind = "stop_debug_success",
-            state = LifecycleState(state),
+            state = new LifecycleStateContent(state.Event, state.StopReason, state.ExitCode),
         }, isError: false);
 
-        private static object LifecycleState(DapSessionState state) => new
-        {
-            @event = state.Event,
-            stopReason = state.StopReason,
-            exitCode = state.ExitCode,
-        };
+        private static LifecycleStateContent LifecycleState(DapSessionState state) => new(
+            state.Event,
+            state.StopReason,
+            state.ExitCode,
+            state.CurrentThreadId);
 
         private static CallToolResult NotFound() => Error("debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
 
@@ -1207,6 +1206,12 @@ internal static class Program
                 StructuredContent = document.RootElement.Clone(),
             };
         }
+
+        private sealed record LifecycleStateContent(
+            string? @event,
+            string? stopReason,
+            int? exitCode,
+            [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? currentThreadId = null);
 
         private sealed record ThreadsSuccessContent(string kind, IReadOnlyList<DapThread> threads);
         private sealed record CallStackArguments(string SessionId, int ThreadId, uint StartFrame, uint Levels);

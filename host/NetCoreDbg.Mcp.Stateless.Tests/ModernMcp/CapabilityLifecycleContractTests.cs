@@ -98,6 +98,139 @@ public sealed class CapabilityLifecycleContractTests
     }
 
     [Fact]
+    public async Task StopDebug_AllStopWithoutTerminalEvent_OmitsCurrentThreadIdAndInvalidatesToken()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop")));
+        var token = await StartAsync(driver, new RequestId("current-thread-stop-start"));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await driver.WaitForFixtureRecordAsync("stopped-event", observation.Token);
+
+        var stoppedState = await ReadStateAfterReaderBarrierAsync(driver, token, "current-thread-before-stop", observation.Token);
+        Assert.Equal("stopped", stoppedState["event"]?.GetValue<string>());
+        Assert.Equal(1, stoppedState["currentThreadId"]?.GetValue<int>());
+
+        var stopped = Structured(await driver.CallToolRawAsync(
+            "stop_debug",
+            new JsonObject { ["debugSessionId"] = token },
+            Meta(),
+            new RequestId("current-thread-stop"),
+            observation.Token));
+
+        AssertSuccess(stopped, "stop_debug_success");
+        Assert.False(Assert.IsType<JsonObject>(stopped["state"]).ContainsKey("currentThreadId"));
+        AssertNotFound(Structured(await driver.CallToolRawAsync(
+            "get_debug_state",
+            new JsonObject { ["debugSessionId"] = token },
+            Meta(),
+            new RequestId("current-thread-after-stop"),
+            observation.Token)));
+    }
+
+    [Theory]
+    [InlineData("default", "stopped-event", 1)]
+    [InlineData("all-stop", "stopped-event", 1)]
+    [InlineData("partial-stop", "stopped-event", 1)]
+    [InlineData("partial-stop-replacement", "partial-stop-replacement", 2)]
+    public async Task GetDebugState_StoppedEvent_PublishesOnlyItsObservedCurrentThreadId(
+        string lifecycleMode,
+        string stoppedRecord,
+        int expectedThreadId)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            FixtureConfiguration: new FixtureConfiguration(
+                LifecycleMode: lifecycleMode,
+                SuppressContinuedAfterStopped: true)));
+        var token = await StartAsync(driver, new RequestId($"current-thread-{lifecycleMode}-start"));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await driver.WaitForFixtureRecordAsync(stoppedRecord, observation.Token);
+
+        var state = await ReadStateAfterReaderBarrierAsync(driver, token, $"current-thread-{lifecycleMode}", observation.Token);
+
+        Assert.Equal("stopped", state["event"]?.GetValue<string>());
+        Assert.Equal("entry", state["stopReason"]?.GetValue<string>());
+        Assert.Equal(expectedThreadId, state["currentThreadId"]?.GetValue<int>());
+    }
+
+    [Theory]
+    [InlineData("all-stop-missing-thread")]
+    [InlineData("partial-stop-missing-thread")]
+    public async Task GetDebugState_MissingStoppedThread_OmitsCurrentThreadIdDespiteAvailableThreads(string lifecycleMode)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: lifecycleMode)));
+        var token = await StartAsync(driver, new RequestId($"current-thread-{lifecycleMode}-start"));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await driver.WaitForFixtureRecordAsync("stopped-event", observation.Token);
+
+        var state = await ReadStateAfterReaderBarrierAsync(driver, token, $"current-thread-{lifecycleMode}", observation.Token);
+
+        Assert.Equal("stopped", state["event"]?.GetValue<string>());
+        Assert.Equal("entry", state["stopReason"]?.GetValue<string>());
+        Assert.False(state.ContainsKey("currentThreadId"));
+    }
+
+    [Theory]
+    [InlineData("all-stop-continued-omitted")]
+    [InlineData("all-stop-continued-true")]
+    [InlineData("all-stop-continued-partial")]
+    [InlineData("all-stop-continued-partial-missing-thread")]
+    public async Task GetDebugState_ContinuedEvent_OmitsCurrentThreadId(string lifecycleMode)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: lifecycleMode)));
+        var token = await StartAsync(driver, new RequestId($"current-thread-{lifecycleMode}-start"));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await driver.WaitForFixtureRecordAsync("continued-event", observation.Token);
+
+        var state = await ReadStateAfterReaderBarrierAsync(driver, token, $"current-thread-{lifecycleMode}", observation.Token);
+
+        Assert.Equal("continued", state["event"]?.GetValue<string>());
+        Assert.False(state.ContainsKey("currentThreadId"));
+    }
+
+    [Theory]
+    [InlineData("all-stop-exited", "exited")]
+    [InlineData("all-stop-terminated", "terminated")]
+    public async Task GetDebugState_TerminalEvent_OmitsCurrentThreadId(string lifecycleMode, string terminalEvent)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: lifecycleMode)));
+        var token = await StartAsync(driver, new RequestId($"current-thread-{lifecycleMode}-start"));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await driver.WaitForFixtureEventAsync(terminalEvent, observation.Token);
+
+        var state = await ReadStateAfterReaderBarrierAsync(driver, token, $"current-thread-{lifecycleMode}", observation.Token);
+
+        Assert.Equal(terminalEvent, state["event"]?.GetValue<string>());
+        Assert.False(state.ContainsKey("currentThreadId"));
+        if (terminalEvent == "exited")
+        {
+            Assert.Equal(23, state["exitCode"]?.GetValue<int>());
+        }
+    }
+
+    [Fact]
+    public async Task StartDebug_WithoutStoppedEvent_OmitsCurrentThreadIdInStartAndSubsequentState()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true)));
+
+        var start = Structured(await driver.CallToolRawAsync(
+            "start_debug",
+            new JsonObject { ["program"] = driver.InertProgramPath },
+            Meta(),
+            new RequestId("current-thread-no-stop-start")));
+
+        AssertSuccess(start, "start_debug_success");
+        Assert.False(Assert.IsType<JsonObject>(start["state"]).ContainsKey("currentThreadId"));
+        var token = Assert.IsType<string>(start["debugSessionId"]?.GetValue<string>());
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        var state = await ReadStateAfterReaderBarrierAsync(driver, token, "current-thread-no-stop", observation.Token);
+        Assert.False(state.ContainsKey("currentThreadId"));
+    }
+
+    [Fact]
     public async Task GetDebugState_UsesOneUsabilityObservationPerRequest()
     {
         await using var session = await NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter.NetCoreDbgSessionContractDriver.StartAsync(
@@ -237,6 +370,32 @@ public sealed class CapabilityLifecycleContractTests
         Assert.True(completion.ExitCode.HasValue);
         var toolRequests = driver.Requests.Where(static request => request.Method == "tools/call").ToArray();
         Assert.Single(toolRequests);
+    }
+
+    private static async Task<JsonObject> ReadStateAfterReaderBarrierAsync(
+        ModernMcpProcessDriver driver,
+        string token,
+        string requestId,
+        CancellationToken cancellationToken)
+    {
+        var threads = Structured(await driver.CallToolRawAsync(
+            "get_threads",
+            new JsonObject { ["debugSessionId"] = token },
+            Meta(),
+            new RequestId($"{requestId}-reader-barrier"),
+            cancellationToken));
+        AssertSuccess(threads, "threads_success");
+        Assert.NotEmpty(Assert.IsType<JsonArray>(threads["threads"]));
+
+        var content = Structured(await driver.CallToolRawAsync(
+            "get_debug_state",
+            new JsonObject { ["debugSessionId"] = token },
+            Meta(),
+            new RequestId($"{requestId}-state"),
+            cancellationToken));
+        AssertSuccess(content, "debug_state_success");
+        Assert.Equal(token, content["debugSessionId"]?.GetValue<string>());
+        return Assert.IsType<JsonObject>(content["state"]);
     }
 
     private static JsonObject Meta(string? clientName = null)

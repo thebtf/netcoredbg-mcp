@@ -347,6 +347,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
                 active = new StepOverRecord(threadId, cancellationToken);
                 _activeStepOver = active;
+                _state = _state with { CurrentThreadId = null };
                 ClearCallStackEligibility();
             }
 
@@ -968,6 +969,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 {
                     Event = "stopped",
                     StopReason = reason,
+                    CurrentThreadId = threadId,
                 };
                 ClearCallStackEligibility();
                 if (allThreadsStopped)
@@ -998,7 +1000,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             lock (_stateGate)
             {
-                _state = _state with { Event = "continued" };
+                _state = _state with { Event = "continued", CurrentThreadId = null };
                 if (!hasAllThreadsContinued || allThreadsContinued || threadId is null)
                 {
                     ClearCallStackEligibility();
@@ -1035,8 +1037,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     {
                         Event = eventName,
                         ExitCode = _activeStepOver is null ? TryGetInt32(body, "exitCode") : RequireInt32(body, "exitCode"),
+                        CurrentThreadId = null,
                     }
-                    : _state with { Event = eventName };
+                    : _state with { Event = eventName, CurrentThreadId = null };
                 ClearCallStackEligibility();
                 _activeStepOver?.ObserveTerminal(eventName, _state.ExitCode);
             }

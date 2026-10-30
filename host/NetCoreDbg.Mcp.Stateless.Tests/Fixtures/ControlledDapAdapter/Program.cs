@@ -711,6 +711,9 @@ internal sealed class ControlledDapAdapter
                 await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: false, cancellationToken);
                 await WriteStoppedEventAsync(threadId: 2, allThreadsStopped: false, cancellationToken, "partial-stop-replacement");
                 return;
+            case "all-stop-missing-thread":
+                await WriteStoppedEventAsync(threadId: null, allThreadsStopped: true, cancellationToken);
+                return;
             case "partial-stop-missing-thread":
                 await WriteStoppedEventAsync(threadId: null, allThreadsStopped: false, cancellationToken);
                 return;
