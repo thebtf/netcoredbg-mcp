@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -31,6 +32,18 @@ internal static class Program
             && !string.IsNullOrWhiteSpace(arguments[2]))
         {
             await RunUnixProcessGroupProxyAsync(arguments[1], arguments[2]).ConfigureAwait(false);
+            return;
+        }
+
+        try
+        {
+            // Validate the existing limits before serving requests, without adding a dependency to the Unix proxy.
+            RuntimeHelpers.RunClassConstructor(typeof(DapOutputBuffer).TypeHandle);
+        }
+        catch (TypeInitializationException exception) when (exception.InnerException is FormatException)
+        {
+            await Console.Error.WriteLineAsync(exception.InnerException.Message).ConfigureAwait(false);
+            Environment.ExitCode = 1;
             return;
         }
 
