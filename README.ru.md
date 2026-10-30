@@ -53,8 +53,9 @@ B3 native `step_over` и Native Scene Probe остаются исходника�
 При переполнении удаляются целые старейшие события. Переменные
 `NETCOREDBG_MAX_OUTPUT_ENTRY` и `NETCOREDBG_MAX_OUTPUT_BYTES` задают пределы
 при запуске host; несмотря на название второй, единица измерения — кодовые
-точки, а не байты. Native `get_output_tail` и `search_output` пока недоступны;
-Python остаётся точкой входа по умолчанию.
+точки, а не байты. При неверном пределе host не запускается и выводит в stderr
+имя переменной без её значения. Native `get_output_tail` и `search_output` пока
+недоступны; Python остаётся точкой входа по умолчанию.
 
 Собранный из исходников stateful .NET host для Windows предоставляет
 `ui_invoke(debugSessionId, automationId)`, если `FLAUI_BRIDGE_PATH` указывает

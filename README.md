@@ -83,8 +83,10 @@ By default, each event retains at most 100,000 Unicode code points before the
 `... [truncated]` suffix, and the session retains at most 10,000,000 code points,
 evicting whole oldest events. `NETCOREDBG_MAX_OUTPUT_ENTRY` and
 `NETCOREDBG_MAX_OUTPUT_BYTES` override those limits at host startup; despite the
-latter name, the unit is code points, not encoded bytes. Native `get_output_tail`
-and `search_output` remain unavailable; Python remains the default.
+latter name, the unit is code points, not encoded bytes. An invalid limit stops
+the host before it serves requests and names the variable on stderr without its
+value. Native `get_output_tail` and `search_output` remain unavailable; Python
+remains the default.
 
 For a stopped session, `continue_execution(debugSessionId, threadId)` sends a
 DAP `continue` request without `singleThread`, so it resumes all threads. It

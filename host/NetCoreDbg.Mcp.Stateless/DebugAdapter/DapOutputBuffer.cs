@@ -135,7 +135,7 @@ internal sealed class DapOutputBuffer
             {
                 if (Rune.GetUnicodeCategory(rune) != UnicodeCategory.DecimalDigitNumber)
                 {
-                    throw new FormatException("The output retention limit must be a decimal integer.");
+                    throw new FormatException($"{name} must be a decimal integer.");
                 }
 
                 digit = (int)Rune.GetNumericValue(rune);
@@ -150,7 +150,7 @@ internal sealed class DapOutputBuffer
 
         if (!previousWasDigit)
         {
-            throw new FormatException("The output retention limit must be a decimal integer.");
+            throw new FormatException($"{name} must be a decimal integer.");
         }
 
         if (!negative)
