@@ -439,6 +439,8 @@ internal sealed class ControlledDapAdapter
     private readonly string? _threadsResponseReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_THREADS_RESPONSE_RELEASE");
     private readonly string? _stackTraceResponseReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_STACK_TRACE_RESPONSE_RELEASE");
     private readonly string? _nextResponseReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_NEXT_RESPONSE_RELEASE");
+    private readonly bool _holdLaunchResponse = string.Equals(
+        Environment.GetEnvironmentVariable("CONTROLLED_DAP_HOLD_LAUNCH_RESPONSE"), "1", StringComparison.Ordinal);
     private Process? _descendant;
     private Process? _secondDescendant;
     private Task? _lifecycleEvents;
@@ -716,6 +718,26 @@ internal sealed class ControlledDapAdapter
                 if (!_options.IgnoreGracefulShutdown)
                 {
                     await WaitForGracefulReleaseAsync(_options.BlockGracefulShutdown, cancellationToken);
+                    if (_outputScript.ValueKind == JsonValueKind.Object && _outputScript.TryGetProperty("disconnect", out var disconnectOutput))
+                    {
+                        if (disconnectOutput.TryGetProperty("waitForRelease", out var holdOutput) && holdOutput.GetBoolean())
+                        {
+                            await RecordAsync(new { kind = "output-disconnect-gated", sequence }, cancellationToken);
+                            if (disconnectOutput.TryGetProperty("releaseGate", out var releaseGate)
+                                && releaseGate.GetString() == "stackTrace")
+                            {
+                                await WaitForStackTraceResponseReleaseAsync(cancellationToken);
+                            }
+                            else
+                            {
+                                await WaitForThreadsResponseReleaseAsync(cancellationToken);
+                            }
+                        }
+
+                        // The disconnect response is a reader-order barrier for these late output events.
+                        await WriteOutputEntriesAsync(disconnectOutput.GetProperty("entries"), cancellationToken);
+                        await RecordAsync(new { kind = "output-disconnect-written", sequence }, cancellationToken);
+                    }
                     await WriteResponseAsync(sequence, command, body: null, cancellationToken);
                     await RecordAsync(new { kind = "disconnect-response", sequence }, cancellationToken);
                     await WaitForGracefulReleaseAsync(_options.HoldExitAfterDisconnectResponse, cancellationToken);
@@ -844,6 +866,12 @@ internal sealed class ControlledDapAdapter
         {
             _descendant = StartDescendant(_options.SpawnWindowedDescendant);
             await RecordAsync(new { kind = "descendant", processId = _descendant.Id }, cancellationToken);
+        }
+
+        if (_holdLaunchResponse)
+        {
+            await RecordAsync(new { kind = "launch-response-gated" }, cancellationToken);
+            await WaitForThreadsResponseReleaseAsync(cancellationToken);
         }
 
         if (_options.DelayLaunchResponseForStartupTimeout)
@@ -1352,6 +1380,21 @@ internal sealed class ControlledDapAdapter
         var threadId = ReadRequiredNextThreadId(root);
         _continueRequests++;
         await RecordAsync(new { kind = "continue-request", sequence }, cancellationToken);
+        if (_outputScript.ValueKind == JsonValueKind.Object && _outputScript.TryGetProperty("continue", out var continueOutput))
+        {
+            await WriteOutputBatchAsync(continueOutput, cancellationToken);
+            if (continueOutput.TryGetProperty("eof", out var eof) && eof.GetBoolean())
+            {
+                // Return through normal fixture teardown: stdout closes without any terminal event or continue response.
+                await RecordAsync(new { kind = "output-unexpected-eof", sequence }, cancellationToken);
+                return true;
+            }
+
+            await WriteResponseAsync(sequence, "continue", new { allThreadsContinued = true }, cancellationToken);
+            await RecordAsync(new { kind = "output-continue-acknowledged", sequence }, cancellationToken);
+            return false;
+        }
+
         switch (_options.NextResponseMode)
         {
             case "continue-breakpoint-terminal":

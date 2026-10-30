@@ -169,17 +169,19 @@ schemas remain in [`contracts/modern-front-door.schema.json`](./contracts/modern
 - **FR-008 Explicit capability:** Complete start mints opaque process-local
   `debugSessionId`; state/stop receive it explicitly. No listing, current
   session, connection ownership, or existence oracle exists.
-- **FR-009 Capability lifetime/races:** Token lifetime is bounded by its live
-  debugger and candidate host process. While that process is live, the registry
-  MUST NOT record or require creator, client, or connection identity; every
-  later request resolves only its explicit token. Under the stdio transport,
-  closing the client ends the single-session candidate host, so no token
-  survival or transfer after client close is required or observable. Atomic
-  removal permits one native stop and one success; concurrent/later callers
-  receive not-found.
-- **FR-010 Uniform handle failure:** Random/malformed, stopped/closed,
-  native-unavailable, and prior-process handles are the same complete
-  `DEBUG_SESSION_NOT_FOUND` application error.
+- **FR-009 Capability lifetime/races:** In the M1 baseline, token lifetime is
+  bounded by its live debugger and candidate host process. The additive output
+  amendment below changes that lifetime only for retained-output reads and their
+  explicit release. The registry MUST NOT record or require creator, client, or
+  connection identity; every later request resolves only its explicit token.
+  Closing the stdio client ends the single-session candidate host, so no token
+  survival after client close is required. Atomic explicit removal permits one
+  native stop and one success; concurrent/later callers receive not-found.
+- **FR-010 Uniform handle failure:** Random/malformed, explicitly stopped,
+  unavailable for the requested operation, and prior-process handles are the
+  same complete `DEBUG_SESSION_NOT_FOUND` application error. The additive
+  output amendment defines the limited operations available after automatic
+  native retirement.
 - **FR-011 Owned native lifecycle:** M1 MUST own the bounded internal
   `NetCoreDbgSession` contract above; no missing component may be described as
   an existing seam. It owns process/streams/framing/correlation/event state and
@@ -191,6 +193,22 @@ schemas remain in [`contracts/modern-front-door.schema.json`](./contracts/modern
 - **FR-014 Runtime input validation:** Before native side effects, runtime MUST
   reject empty/extra tool arguments as complete `invalid_tool_arguments` with
   `isError: true`; missing/short/malformed handle remains uniform not-found.
+
+### Additive stateful output lifetime amendment
+
+The source-built stateful host supports reading DAP output after automatic
+native retirement so callers can inspect a completed or unexpectedly closed
+debug session. After terminal cleanup or reader failure, the existing opaque
+`debugSessionId` authorizes only `get_output`, `get_output_tail`, and one
+`stop_debug` release. Control, inspection, breakpoint, and UI operations remain
+unavailable, and debugger/bridge resources are cleaned up independently of the
+retained buffer. Output accepted by the DAP reader during cleanup remains
+available under the existing buffer limits; this does not promise output the
+adapter never delivered. An explicit stop releases the record and completes
+owned cleanup before reporting success. Later reads and stops return uniform
+not-found. Host shutdown releases all retained output; records do not survive a
+host restart. This amendment supersedes FR-009/FR-010 only for these output and
+release operations; the Python default and rollback path are unchanged.
 
 ## Non-functional requirements
 

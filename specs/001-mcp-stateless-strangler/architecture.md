@@ -125,6 +125,12 @@ winner owns the session stop and every concurrent/later caller gets the same
 not-found result. This application rule is separate from the session's own
 idempotent internal cleanup.
 
+The later stateful-output amendment separates output retention from native
+session ownership: automatic retirement closes control admission and cleans up
+the debugger and bridge, but the same process-local token can read its retained
+buffer until explicit `stop_debug` or host shutdown. The amendment does not
+change M1's historical evidence or keep a native session alive for output.
+
 ```mermaid
 sequenceDiagram
     participant M as M1 MCP handler
