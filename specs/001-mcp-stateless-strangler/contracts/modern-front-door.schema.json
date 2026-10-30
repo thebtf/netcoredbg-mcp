@@ -234,6 +234,26 @@
       },
       "additionalProperties": false
     },
+    "continueArguments": {
+      "type": "object",
+      "required": [
+        "debugSessionId",
+        "threadId"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "threadId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
     "startDebugSuccess": {
       "type": "object",
       "required": [
@@ -576,6 +596,85 @@
       },
       "additionalProperties": false
     },
+    "continueStopped": {
+      "type": "object",
+      "required": [
+        "kind",
+        "reason"
+      ],
+      "properties": {
+        "kind": {
+          "const": "continue_stopped"
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 1024,
+          "description": "Actual adapter stop reason, bounded to 1024 UTF-8 bytes. Unfamiliar valid reasons are preserved."
+        },
+        "threadId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "allThreadsStopped": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "continueTerminal": {
+      "type": "object",
+      "required": [
+        "kind",
+        "terminal"
+      ],
+      "properties": {
+        "kind": {
+          "const": "continue_terminal"
+        },
+        "terminal": {
+          "enum": [
+            "exited",
+            "terminated"
+          ]
+        },
+        "exitCode": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
+    "continueTimedOut": {
+      "type": "object",
+      "required": [
+        "kind",
+        "threadId",
+        "timeoutSeconds",
+        "acknowledged"
+      ],
+      "properties": {
+        "kind": {
+          "const": "continue_timed_out"
+        },
+        "threadId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 30
+        },
+        "acknowledged": {
+          "type": "boolean",
+          "description": "A positive correlated acknowledgement was observed before this waiter finalized. An acknowledged fully written continue detaches without shutting down the session; an unacknowledged possible write is drained before return."
+        }
+      },
+      "additionalProperties": false
+    },
     "debugSessionNotFound": {
       "type": "object",
       "required": [
@@ -752,6 +851,38 @@
       },
       "additionalProperties": false
     },
+    "dapContinueRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_continue_refused"
+        },
+        "error": {
+          "const": "DAP_CONTINUE_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapContinueProtocolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_continue_protocol_error"
+        },
+        "error": {
+          "const": "DAP_CONTINUE_PROTOCOL_ERROR"
+        }
+      },
+      "additionalProperties": false
+    },
     "startDebugSourceUnavailable": {
       "type": "object",
       "required": [
@@ -839,7 +970,8 @@
             "get_call_stack",
             "get_scopes",
             "get_variables",
-            "step_over"
+            "step_over",
+            "continue_execution"
           ]
         }
       },
@@ -878,6 +1010,15 @@
           "$ref": "#/$defs/stepOverTimedOut"
         },
         {
+          "$ref": "#/$defs/continueStopped"
+        },
+        {
+          "$ref": "#/$defs/continueTerminal"
+        },
+        {
+          "$ref": "#/$defs/continueTimedOut"
+        },
+        {
           "$ref": "#/$defs/debugSessionNotFound"
         },
         {
@@ -912,6 +1053,12 @@
         },
         {
           "$ref": "#/$defs/dapStepOverProtocolError"
+        },
+        {
+          "$ref": "#/$defs/dapContinueRefused"
+        },
+        {
+          "$ref": "#/$defs/dapContinueProtocolError"
         },
         {
           "$ref": "#/$defs/startDebugSourceUnavailable"

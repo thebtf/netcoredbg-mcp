@@ -9,6 +9,32 @@ release_intent: none
 
 # Native DAP step-over
 
+## Continuation extension
+
+The source-built native host adds `continue_execution(debugSessionId, threadId)`
+as a separate typed operation. It shares execution admission with `step_over`:
+only one may be in flight per session. Admission invalidates stopped and
+inspection authority before the single DAP `continue` write, even if the
+adapter omits a `continued` event. This extends the original B3 scope without
+changing the existing step-over outcomes or cancellation contract below.
+
+After a correlated positive acknowledgement, the operation returns the latest
+still-current stop observed before or after that acknowledgement, with its
+actual bounded reason and observed optional fields. A terminal event may settle
+the operation before or after acknowledgement, with an optional observed exit
+code. An intervening continued event invalidates a candidate stop. The
+30-second deadline starts after the complete write. After a full write and
+positive acknowledgement, timeout or caller cancellation detaches the waiter
+without initiating session shutdown. An unacknowledged possible write closes
+and drains the session; cancellation before writer handoff retains it without
+restoring old inspection authority. Reader acknowledgement and timeout or
+cancellation finalization are ordered under the session state gate, so a late
+acknowledgement cannot reverse a finalized drain. Terminal outcomes use the
+existing close-and-drain owner. Refusals and protocol errors are typed and redacted.
+
+This extension is source-only until consumer delivery is separately proved;
+the Python entry point remains the default and rollback route.
+
 ## Outcome
 
 An opt-in modern native MCP client with a live opaque debug session and an explicitly named currently-authorized stopped Int32 thread can call `step_over(debugSessionId, threadId)`. Per `NetCoreDbgSession`, one fail-fast private single-flight record permits one admitted call; a concurrent call receives typed refusal with zero DAP I/O. The admitted native session sends only correlated DAP `next({threadId})`, accepts its exact positive acknowledgement, and within one 30-second post-write wall-clock limit returns only an exact later `reason:"step"` stop for that same explicit thread, a typed terminal result, a typed timeout result, a typed refusal, or a redacted protocol error. The installed Python route remains selected default/rollback and is not called or changed.
@@ -47,6 +73,6 @@ Retention now requires cancellation to finish before handing the frame to the lo
 8. Wrong command/correlation for the active pending request, malformed success, reader failure, write failure, or other malformed DAP exchange returns exactly `DAP_STEP_OVER_PROTOCOL_ERROR`, no partial outcome, then existing close/drain behavior and `DEBUG_SESSION_NOT_FOUND` for later access.
 9. On the exact candidate, each named native process/typed-session/lifecycle/schema baseline in B3-REQ-009 reports an actual nonzero denominator and is recorded in `.agent/runs/b3-native-step-over/receipt.yaml`. The retained installed-Python journey continues to reach `PRODUCT_WORKS` as a non-selection proof; B3 does not invoke the Python implementation.
 
-## Exclusions
+## Original B3 exclusions — historical increment scope
 
 `continue_execution`, `pause_execution`, `step_into`, `step_out`, breakpoints, step-in targets, single-thread execution, granularity, current-thread/first-thread fallback, frame/source/variable inspection after a step, generic DAP forwarding, Python fallback/retry/error-envelope behavior, UI/bridge, selector/default/package changes, persistence, release, publication, source implementation, tests, and Git actions are outside this D2 planning packet.

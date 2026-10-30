@@ -499,6 +499,228 @@ public sealed class NetCoreDbgSessionTests
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Continue_ResponseFaultAndTerminalBeforeOutcomeWait_PreservesReaderOrder(bool terminalFirst, bool invalidSuccess)
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(LifecycleMode: "all-stop", NextResponseMode: "continue-stop-after-injected-ack"),
+            "D:\\fixtures\\program.dll", InitializeTimeout, RequestTimeout, StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        session.ArmDapWriteAfterFlushBarrier();
+        try
+        {
+            var probe = await session.ContinueThroughRegistryAsync(1, observation.Token,
+                invokeContinue: async invoke =>
+                {
+                    var pending = invoke($"continue-fault-terminal-{terminalFirst}-{invalidSuccess}", observation.Token);
+                    await session.WaitForDapFlushAsync(observation.Token);
+                    await session.Fixture.WaitForTranscriptKindAsync("continue-ack-gated", observation.Token);
+                    var request = Assert.Single(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "continue");
+                    Assert.NotNull(request.Sequence);
+                    await session.DispatchContinueResponseFaultAndTerminalAsync(request.Sequence.Value, terminalFirst, invalidSuccess, observation.Token);
+                    return await pending.WaitAsync(observation.Token);
+                });
+
+            Assert.Equal("complete", probe.Result.ResultType);
+            Assert.Equal(!terminalFirst, probe.Result.IsError == true);
+            var content = Assert.IsType<JsonElement>(probe.Result.StructuredContent);
+            Assert.Equal(2, content.EnumerateObject().Count());
+            if (terminalFirst)
+            {
+                Assert.Equal("continue_terminal", content.GetProperty("kind").GetString());
+                Assert.Equal("terminated", content.GetProperty("terminal").GetString());
+                Assert.False(content.TryGetProperty("exitCode", out _));
+            }
+            else
+            {
+                Assert.Equal("dap_continue_protocol_error", content.GetProperty("kind").GetString());
+                Assert.Equal("DAP_CONTINUE_PROTOCOL_ERROR", content.GetProperty("error").GetString());
+            }
+            var text = Assert.IsType<ModelContextProtocol.Protocol.TextContentBlock>(Assert.Single(probe.Result.Content));
+            Assert.Equal(content.GetRawText(), text.Text);
+            Assert.False(probe.TokenRetained);
+            Assert.False(probe.SlotRetained);
+            Assert.False(probe.AdapterAlive);
+            Assert.True(probe.LeaseReleasedBeforeRemoval == true);
+            Assert.Equal(0, probe.ActiveRequestCount);
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Continue_PostAckContinuedBeforeFinalization_DiscardsStaleStopAndAwaitsFreshStop(bool stoppedBeforeAcknowledgement)
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SupportsDelayedStackTraceLoading: true, LifecycleMode: "all-stop", NextResponseMode: "continue-stop-after-injected-ack"),
+            "D:\\fixtures\\program.dll", InitializeTimeout, RequestTimeout, StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        try
+        {
+            var probe = await session.ContinueThroughRegistryAsync(1, observation.Token,
+                invokeContinue: async invoke =>
+                {
+                    var pending = invoke("continue-post-ack-invalidation", observation.Token);
+                    await session.Fixture.WaitForTranscriptKindAsync("continue-ack-gated", observation.Token);
+                    await session.WaitForReaderBarrierAsync(observation.Token);
+                    var request = Assert.Single(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "continue");
+                    Assert.NotNull(request.Sequence);
+                    await session.DispatchContinueStopThenContinuedAsync(request.Sequence.Value, stoppedBeforeAcknowledgement, observation.Token);
+
+                    // Dispatch order is already fixed; this deadline observes premature completion, not event ordering.
+                    await Assert.ThrowsAsync<TimeoutException>(async () =>
+                    {
+                        _ = await pending.WaitAsync(TimeSpan.FromMilliseconds(250), observation.Token);
+                    });
+
+                    session.Fixture.ReleaseNextResponse();
+                    var result = await pending.WaitAsync(observation.Token);
+                    Assert.Equal("complete", result.ResultType);
+                    Assert.False(result.IsError == true);
+                    var content = Assert.IsType<JsonElement>(result.StructuredContent);
+                    Assert.Equal("continue_stopped", content.GetProperty("kind").GetString());
+                    Assert.Equal("breakpoint", content.GetProperty("reason").GetString());
+                    Assert.Equal(1, content.GetProperty("threadId").GetInt32());
+                    Assert.True(content.GetProperty("allThreadsStopped").GetBoolean());
+                    var text = Assert.IsType<ModelContextProtocol.Protocol.TextContentBlock>(Assert.Single(result.Content));
+                    Assert.Equal(content.GetRawText(), text.Text);
+                    return result;
+                });
+            Assert.True(probe.TokenRetained);
+            Assert.True(probe.SlotRetained);
+            Assert.True(probe.AdapterAlive);
+        }
+        finally
+        {
+            session.Fixture.ReleaseNextResponse();
+        }
+    }
+
+    [Fact]
+    public async Task Continue_AcknowledgedCancellation_DetachesWaiterAndLaterStopRestoresInspection()
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SupportsDelayedStackTraceLoading: true, LifecycleMode: "all-stop", NextResponseMode: "continue-ack-held-stop"),
+            "D:\\fixtures\\program.dll", InitializeTimeout, RequestTimeout, StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        using var cancellation = new CancellationTokenSource();
+        var operation = session.ContinueThroughRegistryAsync(1, cancellation.Token,
+            beforeCancellationInspection: async () =>
+            {
+                Assert.True(session.IsUsable);
+                Assert.Equal(0, session.PendingRequestCount);
+                Assert.True(await session.GetCallStackIsRefusedAsync(1, 0, 20, observation.Token));
+                Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command is "terminate" or "disconnect");
+                session.Fixture.ReleaseNextResponse();
+                await session.Fixture.WaitForTranscriptKindAsync("continue-later-stop", observation.Token);
+                await session.WaitForReaderBarrierAsync(observation.Token);
+                Assert.False(await session.GetCallStackIsRefusedAsync(1, 0, 20, observation.Token));
+            });
+        try
+        {
+            await session.Fixture.WaitForTranscriptKindAsync("continue-acknowledged", observation.Token);
+            await session.WaitForReaderBarrierAsync(observation.Token);
+            Assert.False(operation.IsCompleted);
+            cancellation.Cancel();
+            var probe = await operation.WaitAsync(observation.Token);
+            Assert.True(probe.CancellationObserved);
+            Assert.True(probe.TokenRetained);
+            Assert.True(probe.SlotRetained);
+            Assert.True(probe.AdapterAlive);
+            Assert.Null(probe.LeaseReleasedBeforeRemoval);
+            Assert.Equal("threads_success", Assert.IsType<JsonElement>(probe.RetainedThreadsResult!.StructuredContent).GetProperty("kind").GetString());
+        }
+        finally
+        {
+            session.Fixture.ReleaseNextResponse();
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Continue_CancellationBeforeHeaderOrAfterPartialHeader_RetainsOnlyProvenUnwrittenSession(bool partialHeader)
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SupportsDelayedStackTraceLoading: true, LifecycleMode: "all-stop", NextResponseMode: "continue-hold"),
+            "D:\\fixtures\\program.dll", InitializeTimeout, RequestTimeout, StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var writesBefore = session.DapWriteCalls;
+        if (partialHeader)
+        {
+            session.ArmDapWriteAtHeaderEntryBarrier(prefixBytes: 1);
+        }
+        else
+        {
+            session.ArmDapWriteBeforeHeaderBarrier();
+        }
+        using var cancellation = new CancellationTokenSource();
+        var operation = session.ContinueThroughRegistryAsync(1, cancellation.Token,
+            beforeCancellationInspection: async () =>
+            {
+                Assert.Equal(0, session.PendingRequestCount);
+                session.ReleaseDapWriteBarrier();
+                if (!partialHeader)
+                {
+                    Assert.Equal(writesBefore, session.DapWriteCalls);
+                    Assert.True(session.IsUsable);
+                    Assert.True(await session.GetCallStackIsRefusedAsync(1, 0, 20, observation.Token));
+                }
+            });
+        try
+        {
+            if (partialHeader)
+            {
+                await session.WaitForDapHeaderEntryAsync(observation.Token);
+            }
+            else
+            {
+                await session.WaitForDapPreHeaderWriteAsync(observation.Token);
+            }
+            cancellation.Cancel();
+            var probe = await operation.WaitAsync(observation.Token);
+            Assert.True(probe.CancellationObserved);
+            Assert.Equal(!partialHeader, probe.TokenRetained);
+            Assert.Equal(!partialHeader, probe.SlotRetained);
+            Assert.Equal(!partialHeader, probe.AdapterAlive);
+            Assert.Equal(partialHeader ? "debug_session_not_found" : "debug_state_success",
+                Assert.IsType<JsonElement>(probe.Result.StructuredContent).GetProperty("kind").GetString());
+            if (partialHeader)
+            {
+                Assert.Equal(1, session.ArmedHeaderUnderlyingWriteCalls);
+                Assert.Equal(1L, session.ArmedHeaderBytesForwarded);
+                Assert.True(probe.LeaseReleasedBeforeRemoval == true);
+                Assert.Null(probe.RetainedThreadsResult);
+            }
+            else
+            {
+                Assert.Null(probe.LeaseReleasedBeforeRemoval);
+                Assert.Equal("threads_success", Assert.IsType<JsonElement>(probe.RetainedThreadsResult!.StructuredContent).GetProperty("kind").GetString());
+            }
+            Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command is "continue" or "stackTrace");
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+        }
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task GetCallStack_OptInCancellation_BeforeHeaderPreservesSessionButPartialHeaderDrains(bool partialHeader)

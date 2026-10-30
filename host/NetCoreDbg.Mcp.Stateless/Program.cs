@@ -154,6 +154,7 @@ internal static class Program
         private const string GetScopes = "get_scopes";
         private const string GetVariables = "get_variables";
         private const string StepOver = "step_over";
+        private const string ContinueExecution = "continue_execution";
         private const string InputRequestId = "start_debug_program";
         private static readonly TimeSpan InitializeTimeout = TimeSpan.FromSeconds(10);
         private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
@@ -240,6 +241,7 @@ internal static class Program
                 GetScopes => await GetScopesAsync(request, cancellationToken).ConfigureAwait(false),
                 GetVariables => await GetVariablesAsync(request, cancellationToken).ConfigureAwait(false),
                 StepOver => await StepOverAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                ContinueExecution => await ContinueAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 _ when IsNativeSceneTool(request.Name) => await NativeSceneToolDispatcher.DispatchAsync(
                     request.Name,
                     request.Arguments,
@@ -788,6 +790,86 @@ internal static class Program
             {
                 closeAfterLease = true;
                 return Error("dap_step_over_protocol_error", "DAP_STEP_OVER_PROTOCOL_ERROR");
+            }
+            finally
+            {
+                _stepOverRequests.TryRemove(new KeyValuePair<RequestId, CancellationTokenSource>(requestId, callerCancellation));
+                lease.Dispose();
+                if (closeAfterLease)
+                {
+                    try
+                    {
+                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            }
+        }
+
+        private async ValueTask<CallToolResult> ContinueAsync(
+            CallToolRequestParams request,
+            RequestId requestId,
+            CancellationToken cancellationToken)
+        {
+            if (!TryReadStepOverArguments(request.Arguments, out var arguments))
+            {
+                return InvalidArguments(ContinueExecution);
+            }
+
+            if (!_sessions.TryGetValue(arguments.SessionId, out var session)
+                || !_slots.TryGetValue(arguments.SessionId, out var slot))
+            {
+                await RemoveNativeSceneBindingAsync(arguments.SessionId).ConfigureAwait(false);
+                return NotFound();
+            }
+
+            var lease = slot.TryAcquire();
+            if (lease is null)
+            {
+                return NotFound();
+            }
+
+            var closeAfterLease = false;
+            using var callerCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var operation = CancellationTokenSource.CreateLinkedTokenSource(callerCancellation.Token, lease.AbortToken);
+            _stepOverRequests.TryAdd(requestId, callerCancellation);
+            try
+            {
+                if (!_isUsable(session))
+                {
+                    closeAfterLease = true;
+                    return NotFound();
+                }
+
+                var continued = await session.ContinueAsync(arguments.ThreadId, operation.Token).ConfigureAwait(false);
+                closeAfterLease = continued.RequiresDrain;
+                return continued.Outcome switch
+                {
+                    DapContinueOutcome.Refused => Error("dap_continue_refused", "DAP_CONTINUE_REFUSED"),
+                    DapContinueOutcome.Stopped => Result(new ContinueStoppedContent(
+                        "continue_stopped", continued.Reason!, continued.ThreadId, continued.AllThreadsStopped), isError: false),
+                    DapContinueOutcome.Terminal => Result(new ContinueTerminalContent(
+                        "continue_terminal", continued.Terminal!, continued.ExitCode), isError: false),
+                    DapContinueOutcome.TimedOut => Result(new ContinueTimedOutContent(
+                        "continue_timed_out", arguments.ThreadId, 30, continued.Acknowledged), isError: false),
+                    _ => throw new InvalidOperationException("Unknown continue outcome."),
+                };
+            }
+            catch (DapContinueCanceledException exception) when (callerCancellation.IsCancellationRequested)
+            {
+                closeAfterLease = exception.RequiresDrain;
+                throw;
+            }
+            catch (OperationCanceledException) when (callerCancellation.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                closeAfterLease = true;
+                return Error("dap_continue_protocol_error", "DAP_CONTINUE_PROTOCOL_ERROR");
             }
             finally
             {
@@ -1489,6 +1571,16 @@ internal static class Program
             string terminal,
             [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? exitCode);
         private sealed record StepOverTimedOutContent(string kind, int threadId, int timeoutSeconds);
+        private sealed record ContinueStoppedContent(
+            string kind,
+            string reason,
+            [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? threadId,
+            [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? allThreadsStopped);
+        private sealed record ContinueTerminalContent(
+            string kind,
+            string terminal,
+            [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? exitCode);
+        private sealed record ContinueTimedOutContent(string kind, int threadId, int timeoutSeconds, bool acknowledged);
 
     }
 
@@ -1506,6 +1598,7 @@ internal static class Program
                 Tool("step_over", "Step over one explicitly named stopped thread.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
                 Tool("get_scopes", "Get bounded scopes using a frame ID and inspection context from the same stopped observation. The context is process/session-local and expires on execution or inspection invalidation.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"inspectionContextId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"pattern\":\"\\\\S\"},\"frameId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"inspectionContextId\",\"frameId\"],\"additionalProperties\":false}"),
                 Tool("get_variables", "Get bounded variables using a positive variablesReference and inspection context from the same stopped observation. A returned reference of zero is a leaf, not a valid input.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"inspectionContextId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"pattern\":\"\\\\S\"},\"variablesReference\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"inspectionContextId\",\"variablesReference\"],\"additionalProperties\":false}"),
+                Tool("continue_execution", "Continue execution using an explicitly named stopped thread; the request resumes all threads. Observe the next stop or terminal event for up to 30 seconds. An acknowledged timeout does not itself close the session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
                 .. NativeSceneToolDispatcher.ListTools(),
             ],
             TimeToLive = CacheLifetime,
