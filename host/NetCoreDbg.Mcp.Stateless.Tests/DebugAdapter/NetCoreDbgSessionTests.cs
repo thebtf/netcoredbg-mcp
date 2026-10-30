@@ -498,6 +498,57 @@ public sealed class NetCoreDbgSessionTests
         }
     }
 
+    [Fact]
+    public async Task AddBreakpoint_PositiveAcknowledgementBeforeCallerCancellation_RetainsSessionAndCommittedRequestedLine()
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(LifecycleMode: "all-stop", SetBreakpointsResponseMode: "hold-first-runtime"),
+            "D:\\fixtures\\program.dll", InitializeTimeout, RequestTimeout, StopTimeout, CancellationToken.None);
+        var source = Path.GetFullPath(Path.Combine(RepositoryLayout.Root,
+            "host/NetCoreDbg.Mcp.Stateless.Tests/ModernMcp/ModernProtocolContractTests.cs"));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        using var cancellation = new CancellationTokenSource();
+        var operation = session.AddBreakpointThroughRegistryAsync(source, 2, cancellation.Token,
+            beforeCancellationInspection: async () =>
+            {
+                Assert.True(session.IsUsable, "A fully written and positively acknowledged update must not drain on caller cancellation.");
+                Assert.Equal(0, session.PendingRequestCount);
+                Assert.True(await session.AddBreakpointIsAddedAsync(source, 6, observation.Token));
+                Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command is "terminate" or "disconnect");
+            });
+        try
+        {
+            await session.Fixture.WaitForTranscriptKindAsync("runtime-breakpoints-response-gated", observation.Token);
+            // This later DAP exchange cannot pass the writer gate until the entire setBreakpoints write and flush have completed.
+            await session.WaitForReaderBarrierAsync(observation.Token);
+            var request = Assert.Single(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "setBreakpoints");
+            Assert.NotNull(request.Sequence);
+            Assert.False(operation.IsCompleted);
+            await session.DispatchBreakpointAcknowledgementThenCancelAsync(request.Sequence.Value, actualLine: 3, cancellation.Cancel, observation.Token);
+            var probe = await operation.WaitAsync(observation.Token);
+
+            Assert.True(probe.CancellationObserved);
+            Assert.True(probe.TokenRetained);
+            Assert.True(probe.SlotRetained);
+            Assert.True(probe.AdapterAlive);
+            Assert.Null(probe.LeaseReleasedBeforeRemoval);
+            Assert.Equal(0, probe.ActiveRequestCount);
+            Assert.Equal("debug_state_success", Assert.IsType<JsonElement>(probe.Result.StructuredContent).GetProperty("kind").GetString());
+            Assert.Equal("threads_success", Assert.IsType<JsonElement>(probe.RetainedThreadsResult!.StructuredContent).GetProperty("kind").GetString());
+            var writes = (await session.Fixture.ReadTranscriptAsync()).Where(static entry => entry.Command == "setBreakpoints").ToArray();
+            Assert.Equal(2, writes.Length);
+            using var later = JsonDocument.Parse(writes[1].Arguments!);
+            Assert.Equal(source, later.RootElement.GetProperty("source").GetProperty("path").GetString());
+            Assert.Equal([2, 6], later.RootElement.GetProperty("breakpoints").EnumerateArray().Select(static breakpoint => breakpoint.GetProperty("line").GetInt32()));
+        }
+        finally
+        {
+            session.Fixture.ReleaseNextResponse();
+        }
+    }
+
     [Theory]
     [InlineData(false, false)]
     [InlineData(false, true)]

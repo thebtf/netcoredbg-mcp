@@ -127,6 +127,16 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             cancellationToken);
     }
 
+    public async Task<bool> AddBreakpointIsAddedAsync(string file, int line, CancellationToken cancellationToken)
+    {
+        var add = RequireTaskMethod(_session.GetType(), "AddBreakpointAsync", typeof(string), typeof(int), typeof(CancellationToken));
+        var result = await AwaitAsyncResult(add.Invoke(_session, [file, line, cancellationToken]), "AddBreakpointAsync", cancellationToken);
+        Assert.NotNull(result);
+        var outcome = result!.GetType().GetProperty("Outcome", BindingFlags.Instance | BindingFlags.Public);
+        Assert.NotNull(outcome);
+        return string.Equals(outcome!.GetValue(result)?.ToString(), "Added", StringComparison.Ordinal);
+    }
+
     public async Task WaitForReaderBarrierAsync(CancellationToken cancellationToken)
     {
         var getThreads = RequireTaskMethod(_session.GetType(), "GetThreadsAsync", typeof(CancellationToken));
@@ -153,6 +163,14 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         InvokeThroughRegistryAsync(threadId, cancellationToken, inspectCancellation: true,
             beforeCancellationInspection: beforeCancellationInspection, invokeSteps: invokeContinue, continueExecution: true);
 
+    public Task<StepOverRegistryProbe> AddBreakpointThroughRegistryAsync(
+        string file,
+        int line,
+        CancellationToken cancellationToken,
+        Func<Task>? beforeCancellationInspection = null) =>
+        InvokeThroughRegistryAsync(0, cancellationToken, inspectCancellation: true,
+            beforeCancellationInspection: beforeCancellationInspection, breakpoint: (file, line));
+
     public Task<StepOverRegistryProbe> GetCallStackThroughRegistryAsync(
         int threadId,
         CancellationToken cancellationToken,
@@ -170,7 +188,8 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         Func<Task>? beforeDispose = null,
         Action<string?, bool>? afterUsabilityObservation = null,
         bool inspectCallStack = false,
-        bool continueExecution = false)
+        bool continueExecution = false,
+        (string File, int Line)? breakpoint = null)
     {
         const string sessionId = "step-over-clock-session";
         var registryType = RequireType(_session.GetType().Assembly, "NetCoreDbg.Mcp.Stateless.Program+DebugSessionRegistry");
@@ -236,12 +255,12 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             var operationMethod = inspectCallStack
                 ? registryType.GetMethod("GetCallStackAsync", BindingFlags.Instance | BindingFlags.NonPublic,
                     binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(CancellationToken)], modifiers: null)
-                : registryType.GetMethod(continueExecution ? "ContinueAsync" : "StepOverAsync", BindingFlags.Instance | BindingFlags.NonPublic,
+                : registryType.GetMethod(breakpoint.HasValue ? "AddBreakpointAsync" : continueExecution ? "ContinueAsync" : "StepOverAsync", BindingFlags.Instance | BindingFlags.NonPublic,
                     binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(ModelContextProtocol.Protocol.RequestId), typeof(CancellationToken)], modifiers: null);
             Assert.NotNull(operationMethod);
             var request = new ModelContextProtocol.Protocol.CallToolRequestParams
             {
-                Name = inspectCallStack ? "get_call_stack" : continueExecution ? "continue_execution" : "step_over",
+                Name = inspectCallStack ? "get_call_stack" : breakpoint.HasValue ? "add_breakpoint" : continueExecution ? "continue_execution" : "step_over",
                 Arguments = new Dictionary<string, JsonElement>
                 {
                     ["debugSessionId"] = JsonSerializer.SerializeToElement(sessionId),
@@ -251,6 +270,12 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             if (inspectCallStack)
             {
                 request.Arguments["includeInspectionContext"] = JsonSerializer.SerializeToElement(true);
+            }
+            if (breakpoint is { } targetBreakpoint)
+            {
+                request.Arguments.Remove("threadId");
+                request.Arguments["file"] = JsonSerializer.SerializeToElement(targetBreakpoint.File);
+                request.Arguments["line"] = JsonSerializer.SerializeToElement(targetBreakpoint.Line);
             }
             Task<ModelContextProtocol.Protocol.CallToolResult> InvokeStep(string requestId, CancellationToken token)
             {
@@ -381,7 +406,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             @event = "continued",
             body = new { threadId = 2, allThreadsContinued = true },
         });
-        return DispatchContinueMessagesUnderStateGateAsync(
+        return DispatchMessagesUnderStateGateAsync(
             [stoppedBeforeAcknowledgement ? stopped : acknowledgement,
                 stoppedBeforeAcknowledgement ? acknowledgement : stopped, continued],
             releaseWriter: false, cancellationToken);
@@ -404,11 +429,25 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             type = "event",
             @event = "terminated",
         });
-        return DispatchContinueMessagesUnderStateGateAsync(
+        return DispatchMessagesUnderStateGateAsync(
             terminalFirst ? [terminal, fault] : [fault, terminal], releaseWriter: true, cancellationToken);
     }
 
-    private Task DispatchContinueMessagesUnderStateGateAsync(JsonElement[] messages, bool releaseWriter, CancellationToken cancellationToken)
+    public Task DispatchBreakpointAcknowledgementThenCancelAsync(int requestSequence, int actualLine, Action cancel, CancellationToken cancellationToken)
+    {
+        var acknowledgement = JsonSerializer.SerializeToElement(new
+        {
+            seq = 1_000_001,
+            type = "response",
+            request_seq = requestSequence,
+            success = true,
+            command = "setBreakpoints",
+            body = new { breakpoints = new[] { new { verified = true, line = actualLine } } },
+        });
+        return DispatchMessagesUnderStateGateAsync([acknowledgement], releaseWriter: false, cancellationToken, afterDispatch: cancel);
+    }
+
+    private Task DispatchMessagesUnderStateGateAsync(JsonElement[] messages, bool releaseWriter, CancellationToken cancellationToken, Action? afterDispatch = null)
     {
         var stateGate = RequirePrivateField(_session.GetType(), "_stateGate").GetValue(_session)
             ?? throw new InvalidOperationException("NetCoreDbgSession._stateGate returned null.");
@@ -419,7 +458,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         {
             if (!Monitor.TryEnter(stateGate, TimeSpan.FromSeconds(2)))
             {
-                throw new TimeoutException("The continue regression could not acquire NetCoreDbgSession._stateGate.");
+                throw new TimeoutException("The regression could not acquire NetCoreDbgSession._stateGate.");
             }
             try
             {
@@ -433,6 +472,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                 {
                     _ = dispatch!.Invoke(_session, [message]);
                 }
+                afterDispatch?.Invoke();
             }
             finally
             {
