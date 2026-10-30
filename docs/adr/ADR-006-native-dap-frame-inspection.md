@@ -30,6 +30,17 @@ For an otherwise eligible stopped target, the initialize-recorded capability sel
 
 This amendment supersedes only the original capability-absent/false refusal, capability-as-admission requirement, and prohibition on unpaged requests. All unchanged input, correlation, lifecycle, normalization, redaction, and cleanup requirements remain binding for both request forms. The original B2 acceptance and evidence remain evidence for their original scope. The amended source passed 16 new compatibility cases and 54 disjoint existing stack/lifecycle/schema cases; a locally built native host returned a real source frame with netcoredbg `3.1.3-1`, then stepped and stopped without a Python backend. These observations are not a published-package or complete-migration claim. Original Python-default/rollback and no-release statements describe B2 history, not a direction to stop the overall .NET migration.
 
+## Inspection-context amendment
+
+The later native scopes/variables increment adds an opt-in inspection context to
+`get_call_stack` while preserving the original result when the option is absent
+or false. Its lifetime, reader-order checks, limits, and client obligation to
+keep numeric DAP references paired with their context are defined in the
+[B2 specification amendment](../../specs/008-native-dap-frame-inspection/spec.md#inspection-context-amendment--scopes-and-variables).
+The internal B2 eligibility token remains private; the new context is not proof
+that the host issued any particular numeric reference. Python remains the
+default, and this source amendment is not a publication or full-parity claim.
+
 ## Original B2 decision — historical request selection
 
 Decision 2's absent/false refusal and decision 3's capability requirement and finite-only request wording are superseded by the amendment. Their unchanged lifecycle and safety rules remain binding.

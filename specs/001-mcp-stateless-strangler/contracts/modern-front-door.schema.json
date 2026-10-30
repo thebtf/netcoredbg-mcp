@@ -10,6 +10,13 @@
       "minLength": 32,
       "description": "Opaque server-minted process-local capability; format is private. `required`/`minLength` advertise a valid capability-bearing call. Direct runtime maps a missing `debugSessionId` or non-empty short/malformed token string uniformly to not-found; empty/whitespace, non-string, and extra-field shapes are invalid arguments."
     },
+    "inspectionContextId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "\\S",
+      "description": "Opaque process/session-local stopped-epoch token, obtained only from a successful get_call_stack with includeInspectionContext=true. Carry each numeric ID with the context from the same observation; the token does not prove that the numeric ID was ever issued. Execution, stopped replacement, terminal, invalidated, thread-exit, reader failure and cleanup invalidate the inspection epoch session-wide."
+    },
     "lifecycleState": {
       "type": "object",
       "required": [
@@ -154,6 +161,56 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 256
+        },
+        "includeInspectionContext": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "getScopesArguments": {
+      "type": "object",
+      "required": [
+        "debugSessionId",
+        "inspectionContextId",
+        "frameId"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "inspectionContextId": {
+          "$ref": "#/$defs/inspectionContextId"
+        },
+        "frameId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
+    "getVariablesArguments": {
+      "type": "object",
+      "required": [
+        "debugSessionId",
+        "inspectionContextId",
+        "variablesReference"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "inspectionContextId": {
+          "$ref": "#/$defs/inspectionContextId"
+        },
+        "variablesReference": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
         }
       },
       "additionalProperties": false
@@ -337,6 +394,118 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 4294967295
+        },
+        "inspectionContextId": {
+          "$ref": "#/$defs/inspectionContextId"
+        }
+      },
+      "additionalProperties": false
+    },
+    "scope": {
+      "type": "object",
+      "required": [
+        "name",
+        "variablesReference",
+        "expensive"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 1024,
+          "description": "Runtime additionally enforces a maximum of 1024 UTF-8 bytes."
+        },
+        "variablesReference": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "expensive": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "variable": {
+      "type": "object",
+      "required": [
+        "name",
+        "value",
+        "type",
+        "variablesReference"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 1024,
+          "description": "Runtime additionally enforces a maximum of 1024 UTF-8 bytes."
+        },
+        "value": {
+          "type": "string",
+          "description": "No smaller per-value limit; the complete serialized success structuredContent is bounded to 262144 UTF-8 bytes inclusive."
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 1024,
+          "description": "Null when the adapter omits type. Runtime limits a present string to 1024 UTF-8 bytes."
+        },
+        "variablesReference": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647,
+          "description": "Zero marks an output leaf only and is never valid as get_variables input."
+        }
+      },
+      "additionalProperties": false
+    },
+    "scopesSuccess": {
+      "type": "object",
+      "description": "Complete serialized structuredContent is bounded to 262144 UTF-8 bytes inclusive.",
+      "required": [
+        "kind",
+        "inspectionContextId",
+        "scopes"
+      ],
+      "properties": {
+        "kind": {
+          "const": "scopes_success"
+        },
+        "inspectionContextId": {
+          "$ref": "#/$defs/inspectionContextId"
+        },
+        "scopes": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/scope"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "variablesSuccess": {
+      "type": "object",
+      "description": "Complete serialized structuredContent is bounded to 262144 UTF-8 bytes inclusive.",
+      "required": [
+        "kind",
+        "inspectionContextId",
+        "variables"
+      ],
+      "properties": {
+        "kind": {
+          "const": "variables_success"
+        },
+        "inspectionContextId": {
+          "$ref": "#/$defs/inspectionContextId"
+        },
+        "variables": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/variable"
+          }
         }
       },
       "additionalProperties": false
@@ -487,6 +656,70 @@
       },
       "additionalProperties": false
     },
+    "dapScopesRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_scopes_refused"
+        },
+        "error": {
+          "const": "DAP_SCOPES_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapScopesProtocolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_scopes_protocol_error"
+        },
+        "error": {
+          "const": "DAP_SCOPES_PROTOCOL_ERROR"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapVariablesRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_variables_refused"
+        },
+        "error": {
+          "const": "DAP_VARIABLES_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapVariablesProtocolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_variables_protocol_error"
+        },
+        "error": {
+          "const": "DAP_VARIABLES_PROTOCOL_ERROR"
+        }
+      },
+      "additionalProperties": false
+    },
     "dapStepOverRefused": {
       "type": "object",
       "required": [
@@ -604,6 +837,8 @@
             "stop_debug",
             "get_threads",
             "get_call_stack",
+            "get_scopes",
+            "get_variables",
             "step_over"
           ]
         }
@@ -626,6 +861,12 @@
         },
         {
           "$ref": "#/$defs/callStackSuccess"
+        },
+        {
+          "$ref": "#/$defs/scopesSuccess"
+        },
+        {
+          "$ref": "#/$defs/variablesSuccess"
         },
         {
           "$ref": "#/$defs/stepOverSuccess"
@@ -653,6 +894,18 @@
         },
         {
           "$ref": "#/$defs/dapStackTraceProtocolError"
+        },
+        {
+          "$ref": "#/$defs/dapScopesRefused"
+        },
+        {
+          "$ref": "#/$defs/dapScopesProtocolError"
+        },
+        {
+          "$ref": "#/$defs/dapVariablesRefused"
+        },
+        {
+          "$ref": "#/$defs/dapVariablesProtocolError"
         },
         {
           "$ref": "#/$defs/dapStepOverRefused"

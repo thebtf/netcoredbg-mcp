@@ -48,6 +48,14 @@ Use the returned `debugSessionId` and, when available, the observed
 `state.currentThreadId` to inspect or step a stopped thread. This input is not
 part of the published read-only preview or the Python tool contract.
 
+To inspect a stopped frame, call `get_call_stack` with
+`includeInspectionContext: true`, then pass its `inspectionContextId` with the
+frame ID to `get_scopes` and with each returned reference to `get_variables`.
+Keep each numeric ID paired with the context from the same observation; a zero
+variable reference is a leaf. After a step, continuation, or other invalidation,
+fetch a new stack and context: the debugger may reuse numeric references. This
+source-built path does not yet support variable paging or filtering.
+
 The separate [native read-only preview](specs/016-a2-native-readonly-family/spec.md)
 exposes `find_code_symbol`, `find_code_references` and `get_source_context`.
 Each schema-2 manifest binds its exact proof generation; historical schema-1

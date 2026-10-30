@@ -53,7 +53,9 @@ internal sealed record AdapterOptions(
     bool SuppressContinuedAfterStopped,
     string StackTraceResponseMode,
     string NextResponseMode,
-    string SetBreakpointsResponseMode)
+    string SetBreakpointsResponseMode,
+    string ScopesResponseMode,
+    string VariablesResponseMode)
 {
     public static AdapterOptions Parse(string[] args, string? environmentOptions)
     {
@@ -86,6 +88,8 @@ internal sealed record AdapterOptions(
         var stackTraceResponseMode = "success";
         var nextResponseMode = "success";
         var setBreakpointsResponseMode = "success";
+        var scopesResponseMode = "success";
+        var variablesResponseMode = "success";
 
         foreach (var argument in args.Concat(SplitOptions(environmentOptions)))
         {
@@ -182,6 +186,12 @@ internal sealed record AdapterOptions(
                 case var _ when argument.StartsWith("--set-breakpoints-response=", StringComparison.Ordinal):
                     setBreakpointsResponseMode = argument["--set-breakpoints-response=".Length..];
                     break;
+                case var _ when argument.StartsWith("--scopes-response=", StringComparison.Ordinal):
+                    scopesResponseMode = argument["--scopes-response=".Length..];
+                    break;
+                case var _ when argument.StartsWith("--variables-response=", StringComparison.Ordinal):
+                    variablesResponseMode = argument["--variables-response=".Length..];
+                    break;
                 default:
                     throw new ArgumentException($"Unknown fixture option '{argument}'.", nameof(args));
             }
@@ -216,7 +226,9 @@ internal sealed record AdapterOptions(
             suppressContinuedAfterStopped,
             stackTraceResponseMode,
             nextResponseMode,
-            setBreakpointsResponseMode);
+            setBreakpointsResponseMode,
+            scopesResponseMode,
+            variablesResponseMode);
     }
 
     private static IEnumerable<string> SplitOptions(string? options) =>
@@ -350,6 +362,9 @@ internal sealed class ControlledDapAdapter
     private int? _heldStackTraceResponseSequence;
     private Task? _heldThreadsResponse;
     private Task? _heldNextResponse;
+    private Task? _heldInspectionResponse;
+    private bool _inspectionResponseHeld;
+    private bool _inspectionStepped;
     private static readonly TimeSpan InitializeGateWindow = TimeSpan.FromMilliseconds(75);
     private static readonly TimeSpan GracefulReleaseTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ConfigurationDoneCapabilityDeltaReleaseTimeout = TimeSpan.FromSeconds(2);
@@ -427,6 +442,17 @@ internal sealed class ControlledDapAdapter
                 catch (OperationCanceledException) when (_lifecycleEventsCancellation.IsCancellationRequested)
                 {
                     // Fixture teardown aborts an unreleased held next response after cleanup commands were observed.
+                }
+            }
+            if (_heldInspectionResponse is { } heldInspectionResponse)
+            {
+                try
+                {
+                    await heldInspectionResponse.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (_lifecycleEventsCancellation.IsCancellationRequested)
+                {
+                    // The existing stack-response release also gates inspection responses.
                 }
             }
 
@@ -594,6 +620,10 @@ internal sealed class ControlledDapAdapter
                 return await HandleThreadsRequestAsync(sequence, cancellationToken);
             case "stackTrace":
                 return await HandleStackTraceRequestAsync(sequence, cancellationToken);
+            case "scopes":
+            case "variables":
+                await HandleInspectionRequestAsync(sequence, command, root, cancellationToken);
+                return false;
             case "next":
                 return await HandleNextRequestAsync(sequence, root, cancellationToken);
             case "setBreakpoints":
@@ -1182,6 +1212,7 @@ internal sealed class ControlledDapAdapter
         switch (_options.NextResponseMode)
         {
             case "success":
+                _inspectionStepped = true;
                 await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
                 await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "step");
                 return false;
@@ -1367,6 +1398,59 @@ internal sealed class ControlledDapAdapter
             default:
                 throw new InvalidOperationException($"Unknown threads response mode '{_options.ThreadsResponseMode}'.");
         }
+    }
+
+    private async Task HandleInspectionRequestAsync(int sequence, string command, JsonElement root, CancellationToken cancellationToken)
+    {
+        const string privatePayload = "private controlled inspection payload";
+        var mode = command == "scopes" ? _options.ScopesResponseMode : _options.VariablesResponseMode;
+        object[] entries = command == "scopes"
+            ? [
+                new { name = "Locals", variablesReference = 1001, expensive = false, presentationHint = "locals" },
+                new { name = "Registers", variablesReference = 1003, expensive = true, presentationHint = "registers" },
+            ]
+            : root.GetProperty("arguments").GetProperty("variablesReference").GetInt32() == 1002
+                ? [
+                    new { name = "Item1", value = "\"test\"", type = "string", variablesReference = 0 },
+                    new { name = "Item2", value = "123", type = "int", variablesReference = 0 },
+                ]
+                : [
+                    new { name = "intVar", value = _inspectionStepped ? "43" : "42", type = "int", variablesReference = 0 },
+                    new { name = "tupleVar", value = "(\"test\", 123)", variablesReference = 1002, evaluateName = "private tuple expression" },
+                    new { name = "longValue", value = new string('v', 16_385), variablesReference = 0 },
+                ];
+        if (mode == "refused")
+        {
+            await WriteResponseAsync(sequence, command, new { message = privatePayload }, cancellationToken, success: false);
+            return;
+        }
+
+        if (mode == "malformed-tail")
+        {
+            entries = [entries[0], new { name = privatePayload, value = privatePayload, variablesReference = "not-an-integer" }];
+        }
+        else if (mode is not ("success" or "hold-then-invalidated"))
+        {
+            throw new InvalidOperationException($"Unknown inspection response mode '{mode}'.");
+        }
+
+        var body = new Dictionary<string, object?> { [command] = entries };
+        if (mode == "hold-then-invalidated" && !_inspectionResponseHeld)
+        {
+            _inspectionResponseHeld = true;
+            await WriteEventAsync("invalidated", new { areas = new[] { "variables" }, threadId = 1 }, cancellationToken);
+            await RecordAsync(new { kind = "inspection-response-gated", command }, cancellationToken);
+            _heldInspectionResponse = CompleteHeldInspectionResponseAsync(sequence, command, body, _lifecycleEventsCancellation.Token);
+            return;
+        }
+
+        await WriteResponseAsync(sequence, command, body, cancellationToken);
+    }
+
+    private async Task CompleteHeldInspectionResponseAsync(int sequence, string command, object body, CancellationToken cancellationToken)
+    {
+        await WaitForStackTraceResponseReleaseAsync(cancellationToken);
+        await WriteResponseAsync(sequence, command, body, cancellationToken);
     }
 
     private async Task<bool> HandleStackTraceRequestAsync(int sequence, CancellationToken cancellationToken)

@@ -499,6 +499,84 @@ public sealed class NetCoreDbgSessionTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GetCallStack_OptInCancellation_BeforeHeaderPreservesSessionButPartialHeaderDrains(bool partialHeader)
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SupportsDelayedStackTraceLoading: true, LifecycleMode: "all-stop"),
+            "D:\\fixtures\\program.dll",
+            InitializeTimeout,
+            RequestTimeout,
+            StopTimeout,
+            CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var writesBefore = session.DapWriteCalls;
+        if (partialHeader)
+        {
+            session.ArmDapWriteAtHeaderEntryBarrier(prefixBytes: 1);
+        }
+        else
+        {
+            session.ArmDapWriteBeforeHeaderBarrier();
+        }
+        using var cancellation = new CancellationTokenSource();
+        var operation = session.GetCallStackThroughRegistryAsync(1, cancellation.Token,
+            beforeCancellationInspection: () =>
+            {
+                Assert.Equal(0, session.PendingRequestCount);
+                if (!partialHeader)
+                {
+                    Assert.Equal(writesBefore, session.DapWriteCalls);
+                    Assert.True(session.IsUsable);
+                }
+                session.ReleaseDapWriteBarrier();
+                return Task.CompletedTask;
+            });
+        try
+        {
+            if (partialHeader)
+            {
+                await session.WaitForDapHeaderEntryAsync(observation.Token);
+            }
+            else
+            {
+                await session.WaitForDapPreHeaderWriteAsync(observation.Token);
+            }
+            cancellation.Cancel();
+            var probe = await operation.WaitAsync(observation.Token);
+            Assert.True(probe.CancellationObserved);
+            Assert.Equal(!partialHeader, probe.TokenRetained);
+            Assert.Equal(!partialHeader, probe.SlotRetained);
+            Assert.Equal(!partialHeader, probe.AdapterAlive);
+            Assert.Equal(0, probe.ActiveRequestCount);
+            var content = Assert.IsType<JsonElement>(probe.Result.StructuredContent);
+            Assert.Equal(partialHeader ? "debug_session_not_found" : "debug_state_success", content.GetProperty("kind").GetString());
+            if (partialHeader)
+            {
+                Assert.Equal(1, session.ArmedHeaderUnderlyingWriteCalls);
+                Assert.Equal(1L, session.ArmedHeaderBytesForwarded);
+                Assert.True(probe.LeaseReleasedBeforeRemoval == true);
+                Assert.Null(probe.RetainedThreadsResult);
+            }
+            else
+            {
+                Assert.Null(probe.LeaseReleasedBeforeRemoval);
+                var threads = Assert.IsType<ModelContextProtocol.Protocol.CallToolResult>(probe.RetainedThreadsResult);
+                Assert.False(threads.IsError == true);
+                Assert.Equal("threads_success", Assert.IsType<JsonElement>(threads.StructuredContent).GetProperty("kind").GetString());
+            }
+            Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "stackTrace");
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+        }
+    }
+
+    [Theory]
     [InlineData("zero", 0, false, false)]
     [InlineData("header-prefix", 1, false, false)]
     [InlineData("opaque-oce", 1, true, false)]
