@@ -75,6 +75,10 @@ flowchart LR
 
 ### Public primitives
 
+The table and initial declaration rules below describe the frozen `/1`
+contract. The later compatibility amendment defines revision-specific
+declarations and the unavailable-identity exception.
+
 | Milestone | Primitive | Inputs beyond MCP envelope | Successful result | Compatibility |
 |---|---|---|---|---|
 | M0 | `get_ui_probe_capabilities` | None | Supported protocol/schema versions, an exact six-entry fixed name/milestone primitive declaration, explicit settle-condition states, structurally fixed `sampleCount` limits 2/16, namespaces, candidate provenance | **ADDITIVE**; supported protocol/schema arrays are non-empty, unique, and contain their active `/1` values; must not enumerate artifact IDs. |
@@ -89,6 +93,29 @@ Every request includes `debugSessionId`, `protocolVersion`, and `schemaVersion`.
 The `primitives` capability member remains an array but is exactly six entries: Draft-7 `minItems: 6` and `maxItems: 6`, plus one `allOf`/`contains` rule for each approved name, require all six. Each `primitiveCapability` is structurally constrained by `oneOf` fixed `{name, milestone}` pairs: `get_ui_probe_capabilities`, `capture_visual_evidence`, and `read_capture_artifact` pair only with M0; `wait_for_ui_stable`, `capture_element_snapshot`, and `capture_native_scene` pair only with M1. Runtime asserts the exact paired set and rejects an omission, duplicate, or cross-milestone pairing. `supportedProtocolVersions` and `supportedSchemaVersions` independently require `minItems: 1`, `uniqueItems: true`, and `contains` their active `/1` version. The declaration separately states the availability of `dispatcherIdle`, `stableLayout`, `animationState`, `windowGeometry`, `contextMaterialization`, and `asyncLoadSettled`.
 
 Current existing tools retain their contracts. The new names are registered only at their milestone, have no aliases, and do not implement `check_element_tokens`.
+
+### Later version-compatibility amendment
+
+The source-built host selects an immutable contract context per request for
+probe schema `/1` or `/2`; the protocol and artifact schema remain `/1`.
+The context supplies the candidate contract hash, response version, and result
+validator to the existing dispatcher and capture path. It does not mutate the
+session's selected version. A later artifact read returns the descriptor and
+bytes committed by the original capture, irrespective of the read request's
+probe schema revision.
+
+The frozen `/1` capability error has no truthful code for a live session whose
+candidate identity is unavailable. That combination produces an intentional
+MCP-level error without structured application content. `/2` represents the
+same condition as a typed `UNSUPPORTED_CAPABILITY` result; neither path invents
+a candidate, waits for an event, or starts observation. Other application
+results remain subject to their selected schema. The original `/1` approval is
+not an approval of `/2`; its exact provenance remains unchanged.
+
+The owning native-scene catalog and dispatcher retain `/1` until an explicitly
+incompatible revision follows migration of known supported consumers and meets
+their compatibility obligations. Unknown external consumers are not evidence
+that migration is complete.
 
 ### M0-G0 contract-validation boundary
 

@@ -146,6 +146,16 @@ Success confirms only that InvokePattern returned, not arbitrary business
 completion. Native Scene IPC stays observation-only; this subset neither changes
 the Python default/catalog nor adds UI actions to the published read-only preview.
 
+The source-built native scene tools accept `native-scene-probe/1` with probe
+schema `/1` or `/2`. A successful `/1` request keeps its original contract.
+If a live session has no positively identified candidate,
+`get_ui_probe_capabilities` returns a typed `UNSUPPORTED_CAPABILITY` under `/2`.
+The frozen `/1` schema cannot represent that error, so the same condition
+returns an MCP-level error without structured application content. No capture
+is started and no identity is inferred. Artifacts keep their original bytes and
+provenance when read through either revision. These source-built tools do not
+change the installed Python default or the published read-only preview.
+
 The separate [native read-only preview](specs/016-a2-native-readonly-family/spec.md)
 exposes `find_code_symbol`, `find_code_references` and `get_source_context`.
 Each schema-2 manifest binds its exact proof generation; historical schema-1
