@@ -309,6 +309,9 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
     internal void ReleaseStackTraceResponse() => _fixture.ReleaseStackTraceResponse();
     internal void ReleaseNextResponse() => _fixture.ReleaseNextResponse();
 
+    internal Task<int> ReadAdapterProcessIdAsync(CancellationToken cancellationToken = default) =>
+        _fixture.GetProcessIdAsync(cancellationToken);
+
     internal async Task<int> ReadDescendantProcessIdAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();

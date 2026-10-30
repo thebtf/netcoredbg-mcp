@@ -790,6 +790,10 @@ public sealed class StepOverContractTests
         var session = await StartStoppedSessionAsync(driver, "continue-explicit-stop-start");
         using var debuggee = System.Diagnostics.Process.GetProcessById(await driver.ReadDescendantProcessIdAsync());
         Assert.False(debuggee.HasExited);
+        using (var setup = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+        {
+            await ContinueReaderBarrierAsync(driver, session, "continue-explicit-stop-initial-reader-barrier", setup.Token);
+        }
         var operation = driver.CallToolRawAsync(
             "continue_execution", Arguments(session, 1), ModernMcpProcessDriver.CurrentMeta(),
             new RequestId("continue-explicit-stop-inflight"), timeout: TimeSpan.FromSeconds(15));

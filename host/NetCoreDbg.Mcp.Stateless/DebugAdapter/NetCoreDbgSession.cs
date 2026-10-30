@@ -61,6 +61,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private DapSessionState _state = new(null, null, null);
     private Task? _cleanupTask;
     private Exception? _readerFailure;
+    private int _retirementRequested;
     private NativeSceneTargetIdentity? _nativeSceneTargetIdentity;
     private readonly object _nativeSceneTargetIdentityGate = new();
     private int _nativeSceneCaptureAuthorityInvalidated;
@@ -126,12 +127,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             }
         }
     }
-    internal bool IsUsable => !_readerTask.IsCompleted && !HasExited();
+    internal bool IsUsable => !IsRetirementRequested && !_readerTask.IsCompleted && !HasExited();
     internal IReadOnlyList<DapInitialBreakpoint> InitialBreakpoints { get; private set; } = Array.Empty<DapInitialBreakpoint>();
 
     internal string GetOutput(bool clear, string? category) => _outputBuffer.Snapshot(clear, category);
 
     internal (long TotalLines, long ReturnedLines, string Output) GetOutputTail(long lines, string? category) => _outputBuffer.Tail(lines, category);
+    internal DapOutputBuffer OutputBuffer => _outputBuffer;
+    internal bool IsRetirementRequested => Volatile.Read(ref _retirementRequested) != 0;
+    internal event Action<NetCoreDbgSession>? RetirementRequested;
 
     internal event Action<NetCoreDbgSession>? ReaderFailed;
     internal event Action<NetCoreDbgSession>? NativeUiInvokeAuthorityRevoked;
@@ -199,6 +203,18 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             Array.Empty<DapSourceBreakpoint>(),
             cancellationToken);
 
+    internal static Task<NetCoreDbgSession> StartAsync(
+        string debuggerPath,
+        string programPath,
+        TimeSpan initializeTimeout,
+        TimeSpan requestTimeout,
+        TimeSpan stopTimeout,
+        IReadOnlyDictionary<string, string>? launchEnvironment,
+        IReadOnlyList<DapSourceBreakpoint> breakpoints,
+        CancellationToken cancellationToken) =>
+        StartAsync(debuggerPath, programPath, initializeTimeout, requestTimeout, stopTimeout,
+            launchEnvironment, breakpoints, failedStartCleanupCompleted: null, cancellationToken);
+
     internal static async Task<NetCoreDbgSession> StartAsync(
         string debuggerPath,
         string programPath,
@@ -207,6 +223,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         TimeSpan stopTimeout,
         IReadOnlyDictionary<string, string>? launchEnvironment,
         IReadOnlyList<DapSourceBreakpoint> breakpoints,
+        Action? failedStartCleanupCompleted,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(debuggerPath);
@@ -253,20 +270,32 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             await session.StartProtocolAsync(programPath, initializeTimeout, launchEnvironment, breakpoints, cancellationToken).ConfigureAwait(false);
             return session;
         }
-        catch
+        catch (Exception startupFailure)
         {
-            if (session is not null)
+            try
             {
-                session._forceCleanup.Cancel();
-                await session.EnsureCleanupAsync().ConfigureAwait(false);
+                if (session is not null)
+                {
+                    session._forceCleanup.Cancel();
+                    await session.EnsureCleanupAsync().ConfigureAwait(false);
+                }
+                else if (windowsLaunch is not null)
+                {
+                    windowsLaunch.Dispose();
+                }
+                else if (process is not null)
+                {
+                    await StopUnmanagedProcessAsync(process, stopTimeout, processTreeOwnership).ConfigureAwait(false);
+                }
+
+                if (session is not null || windowsLaunch is not null || process is not null)
+                {
+                    failedStartCleanupCompleted?.Invoke();
+                }
             }
-            else if (windowsLaunch is not null)
+            catch (Exception cleanupFailure)
             {
-                windowsLaunch.Dispose();
-            }
-            else if (process is not null)
-            {
-                await StopUnmanagedProcessAsync(process, stopTimeout, processTreeOwnership).ConfigureAwait(false);
+                throw new DapStartupCleanupException(startupFailure, cleanupFailure);
             }
 
             throw;
@@ -1416,6 +1445,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 catch (Exception)
                 {
                 }
+                RequestRetirement();
             }
             InvalidateInspectionContext(close: true);
         }
@@ -2003,6 +2033,23 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         // Cancel an in-flight helper only after releasing DAP admission/state locks.
         if (revokeUiInvoke)
             NativeUiInvokeAuthorityRevoked?.Invoke(this);
+    }
+
+    private void RequestRetirement()
+    {
+        if (Interlocked.Exchange(ref _retirementRequested, 1) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            RetirementRequested?.Invoke(this);
+        }
+        catch (Exception)
+        {
+            // Registry cleanup is observed separately from reader dispatch.
+        }
     }
 
     private bool HasStepOverAuthority(int threadId) =>
@@ -3554,6 +3601,13 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             }
         }
     }
+}
+
+internal sealed class DapStartupCleanupException(Exception startupFailure, Exception cleanupFailure)
+    : AggregateException("DAP startup cleanup failed.", cleanupFailure, startupFailure)
+{
+    internal Exception StartupFailure { get; } = startupFailure;
+    internal Exception CleanupFailure { get; } = cleanupFailure;
 }
 
 internal readonly record struct DapSourceBreakpoint(int Index, string File, int Line);

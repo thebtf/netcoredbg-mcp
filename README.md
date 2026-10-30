@@ -81,8 +81,12 @@ category?)` for retained DAP output. It concatenates events in reader order;
 categories `console`, `stdout`, `stderr`, and `telemetry` are retained, and an
 omitted event category means `console`. Filtering is case-sensitive. A clear
 returns the current snapshot and empties the buffer only when `category` is
-omitted, null, or empty; a nonempty filter never clears it. Output remains
-available after a terminal event while the session is retained.
+omitted, null, or empty; a nonempty filter never clears it. After automatic
+terminal or reader-failure cleanup, both output tools remain available with the
+same token, while debugger control and UI operations are unavailable. Call
+`stop_debug` after reading to release the retained buffer; subsequent calls
+return `DEBUG_SESSION_NOT_FOUND`. Retained output is process-local and is lost
+when the host exits. Output not delivered by the adapter cannot be recovered.
 
 By default, each event retains at most 100,000 Unicode code points before the
 `... [truncated]` suffix, and the session retains at most 10,000,000 code points,
