@@ -85,8 +85,13 @@ evicting whole oldest events. `NETCOREDBG_MAX_OUTPUT_ENTRY` and
 `NETCOREDBG_MAX_OUTPUT_BYTES` override those limits at host startup; despite the
 latter name, the unit is code points, not encoded bytes. An invalid limit stops
 the host before it serves requests and names the variable on stderr without its
-value. Native `get_output_tail` and `search_output` remain unavailable; Python
-remains the default.
+value. Native `search_output` remains unavailable; Python remains the default.
+
+`get_output_tail(debugSessionId, lines?, category?)` reads the same buffer
+without clearing it. It filters by category before splitting lines, returns
+`totalLines`, `returnedLines`, and LF-joined `output`, and defaults to the last
+50 lines. For compatibility with the existing Python slicing behavior, `lines: 0`
+returns all lines and a negative `lines: -N` skips the first N lines.
 
 For a stopped session, `continue_execution(debugSessionId, threadId)` sends a
 DAP `continue` request without `singleThread`, so it resumes all threads. It

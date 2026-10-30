@@ -3,14 +3,16 @@ using System.Text.Json.Nodes;
 using ModelContextProtocol.Protocol;
 using NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
 
 [Collection(NetCoreDbgSessionProcessCollection.Name)]
 [Trait("Coverage", "Exclude")]
-public sealed class OutputContractTests
+public sealed class OutputContractTests(ITestOutputHelper output)
 {
     private const string Tool = "get_output";
+    private const string TailTool = "get_output_tail";
     private const string TruncationSuffix = "... [truncated]";
 
     public static TheoryData<string, JsonObject?> InvalidArguments => new()
@@ -35,6 +37,39 @@ public sealed class OutputContractTests
         { "array_category", new JsonObject { ["debugSessionId"] = "opaque", ["category"] = new JsonArray() } },
         { "extra_field", new JsonObject { ["debugSessionId"] = "opaque", ["unexpected"] = true } },
     };
+
+    private static (string Scenario, JsonObject? Arguments)[] InvalidTailArguments =>
+    [
+        ("null_arguments", null),
+        ("omitted_token", new JsonObject()),
+        ("null_token", new JsonObject { ["debugSessionId"] = null }),
+        ("numeric_token", new JsonObject { ["debugSessionId"] = 17 }),
+        ("boolean_token", new JsonObject { ["debugSessionId"] = true }),
+        ("object_token", new JsonObject { ["debugSessionId"] = new JsonObject() }),
+        ("array_token", new JsonObject { ["debugSessionId"] = new JsonArray() }),
+        ("empty_token", new JsonObject { ["debugSessionId"] = string.Empty }),
+        ("whitespace_token", new JsonObject { ["debugSessionId"] = " \t\r\n" }),
+        ("null_lines", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = null }),
+        ("boolean_lines", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = true }),
+        ("string_lines", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = "2" }),
+        ("object_lines", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = new JsonObject() }),
+        ("array_lines", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = new JsonArray() }),
+        ("positive_fraction", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = JsonNode.Parse("2.5") }),
+        ("negative_fraction", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = JsonNode.Parse("-2.5") }),
+        ("fractional_exponent", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = JsonNode.Parse("2e-1") }),
+        ("underflowing_fraction", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = JsonNode.Parse("1e-1000") }),
+        ("fraction_beyond_double_precision", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = JsonNode.Parse("1.0000000000000000000000000000000001") }),
+        ("large_fraction_beyond_double_precision", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = JsonNode.Parse("9007199254740993.1") }),
+        ("numeric_category", new JsonObject { ["debugSessionId"] = "opaque", ["category"] = 17 }),
+        ("boolean_category", new JsonObject { ["debugSessionId"] = "opaque", ["category"] = false }),
+        ("object_category", new JsonObject { ["debugSessionId"] = "opaque", ["category"] = new JsonObject() }),
+        ("array_category", new JsonObject { ["debugSessionId"] = "opaque", ["category"] = new JsonArray() }),
+        ("forbidden_clear_true", new JsonObject { ["debugSessionId"] = "opaque", ["clear"] = true }),
+        ("forbidden_clear_false", new JsonObject { ["debugSessionId"] = "opaque", ["clear"] = false }),
+        ("forbidden_clear_null", new JsonObject { ["debugSessionId"] = "opaque", ["clear"] = null }),
+        ("extra_field", new JsonObject { ["debugSessionId"] = "opaque", ["lines"] = 2, ["category"] = null, ["unexpected"] = true }),
+        ("mis_cased_lines", new JsonObject { ["debugSessionId"] = "opaque", ["Lines"] = 2 }),
+    ];
 
     [Fact]
     public async Task GetOutput_EmptyBuffer_ReturnsCompleteEmptySuccessWithoutDapIo()
@@ -367,6 +402,324 @@ public sealed class OutputContractTests
         }
     }
 
+    [Fact]
+    public async Task GetOutputTail_Catalog_PublishesClosedArgumentsWithUnboundedIntegerLinesAndDefault50()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions());
+        var catalog = ModernMcpProcessDriver.RequireResult(await driver.ListToolsRawAsync(
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("output-tail-catalog")));
+        var tool = Assert.Single(
+            Assert.IsType<JsonArray>(catalog["tools"]).Select(static item => Assert.IsType<JsonObject>(item)),
+            static item => item["name"]?.GetValue<string>() == TailTool);
+        var schema = Assert.IsType<JsonObject>(tool["inputSchema"]);
+        Assert.Equal("object", schema["type"]?.GetValue<string>());
+        Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
+        Assert.Equal(["debugSessionId"], Assert.IsType<JsonArray>(schema["required"]).Select(static item => item?.GetValue<string>()));
+        var properties = Assert.IsType<JsonObject>(schema["properties"]);
+        Assert.Equal(new[] { "category", "debugSessionId", "lines" }, properties.Select(static item => item.Key).Order(StringComparer.Ordinal));
+        Assert.Equal("string", properties["debugSessionId"]?["type"]?.GetValue<string>());
+        Assert.Equal(1, properties["debugSessionId"]?["minLength"]?.GetValue<int>());
+        var lines = Assert.IsType<JsonObject>(properties["lines"]);
+        Assert.Equal("integer", lines["type"]?.GetValue<string>());
+        Assert.Equal(50, lines["default"]?.GetValue<int>());
+        Assert.False(lines.ContainsKey("minimum"));
+        Assert.False(lines.ContainsKey("maximum"));
+        Assert.Equal(new[] { "null", "string" }, Assert.IsType<JsonArray>(properties["category"]?["type"])
+            .Select(static item => item!.GetValue<string>()).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public async Task GetOutputTail_EmptyBuffer_ReturnsZeroCountsForDefaultAndSignedLineCounts()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions());
+        var token = await StartSessionAsync(driver, "output-tail-empty-start");
+        string?[] counts = [null, "1", "0", "-1", "10000000000000000000000000000000000000000", "-10000000000000000000000000000000000000000"];
+
+        for (var index = 0; index < counts.Length; index++)
+        {
+            await AssertOutputTailAsync(driver, token, $"output-tail-empty-{index}", 0, 0, string.Empty, counts[index]);
+        }
+    }
+
+    [Fact]
+    public async Task GetOutputTail_OmittedLineCount_ReturnsLast50WithTotalCountBeforeSlicing()
+    {
+        var allLines = Enumerable.Range(1, 55).Select(static index => $"line-{index.ToString(CultureInfo.InvariantCulture)}").ToArray();
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(Output(string.Join("\n", allLines) + "\n"))));
+        var token = await StartSessionAsync(driver, "output-tail-default-start");
+        var expected = string.Join("\n", allLines.Skip(5));
+
+        await AssertOutputTailAsync(driver, token, "output-tail-default", 55, 50, expected);
+        await AssertOutputTailAsync(driver, token, "output-tail-explicit-50", 55, 50, expected, "50");
+    }
+
+    [Fact]
+    public async Task GetOutputTail_SignedIntegralJsonLineCounts_PreservePythonSliceResults()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(Output("one\ntwo\nthree\nfour\n"))));
+        var token = await StartSessionAsync(driver, "output-tail-signed-start");
+        var cases = new (string LinesJson, int ReturnedLines, string Expected)[]
+        {
+            ("1", 1, "four"),
+            ("2", 2, "three\nfour"),
+            ("4", 4, "one\ntwo\nthree\nfour"),
+            ("5", 4, "one\ntwo\nthree\nfour"),
+            ("0", 4, "one\ntwo\nthree\nfour"),
+            ("-0", 4, "one\ntwo\nthree\nfour"),
+            ("-1", 3, "two\nthree\nfour"),
+            ("-2", 2, "three\nfour"),
+            ("-3", 1, "four"),
+            ("-4", 0, ""),
+            ("-5", 0, ""),
+            ("2147483647", 4, "one\ntwo\nthree\nfour"),
+            ("-2147483648", 0, ""),
+            ("9223372036854775807", 4, "one\ntwo\nthree\nfour"),
+            ("-9223372036854775808", 0, ""),
+            ("9223372036854775808", 4, "one\ntwo\nthree\nfour"),
+            ("-9223372036854775809", 0, ""),
+            ("1000000000000000000000000000000000000000000000000000000000000", 4, "one\ntwo\nthree\nfour"),
+            ("-1000000000000000000000000000000000000000000000000000000000000", 0, ""),
+            ("2.0", 2, "three\nfour"),
+            ("-2.000", 2, "three\nfour"),
+            ("2e0", 2, "three\nfour"),
+            ("20e-1", 2, "three\nfour"),
+            ("0.2e1", 2, "three\nfour"),
+            ("-20e-1", 2, "three\nfour"),
+            ("2000e-3", 2, "three\nfour"),
+            ("-0.0", 4, "one\ntwo\nthree\nfour"),
+            ("0e-1000", 4, "one\ntwo\nthree\nfour"),
+            ("-0e1000", 4, "one\ntwo\nthree\nfour"),
+            ("-0e-1000", 4, "one\ntwo\nthree\nfour"),
+            ("1e1000", 4, "one\ntwo\nthree\nfour"),
+            ("-1e1000", 0, ""),
+            ("10000000000000000000000000000000000000000.000", 4, "one\ntwo\nthree\nfour"),
+            ("-10000000000000000000000000000000000000000.000", 0, ""),
+        };
+
+        // These read-only vectors use identical session state; only the request arguments differ.
+        for (var index = 0; index < cases.Length; index++)
+        {
+            var (linesJson, returnedLines, expected) = cases[index];
+            output.WriteLine($"Tail line-count vector: {linesJson}");
+            await AssertOutputTailAsync(driver, token, $"output-tail-signed-{index}", 4, returnedLines, expected, linesJson);
+        }
+    }
+
+    [Theory]
+    [InlineData("lf", "\n")]
+    [InlineData("cr", "\r")]
+    [InlineData("crlf", "\r\n")]
+    [InlineData("vertical-tab", "\v")]
+    [InlineData("form-feed", "\f")]
+    [InlineData("file-separator", "\u001c")]
+    [InlineData("group-separator", "\u001d")]
+    [InlineData("record-separator", "\u001e")]
+    [InlineData("next-line", "\u0085")]
+    [InlineData("line-separator", "\u2028")]
+    [InlineData("paragraph-separator", "\u2029")]
+    public async Task GetOutputTail_PythonLineSeparators_SplitAndNormalizeToLf(string scenario, string separator)
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(Output($"first{separator}second{separator}third{separator}"))));
+        var token = await StartSessionAsync(driver, $"output-tail-separator-{scenario}-start");
+
+        await AssertOutputTailAsync(driver, token, $"output-tail-separator-{scenario}-all", 3, 3, "first\nsecond\nthird", "0");
+        await AssertOutputTailAsync(driver, token, $"output-tail-separator-{scenario}-last", 3, 2, "second\nthird", "2");
+    }
+
+    [Theory]
+    [InlineData("", 0, "", "")]
+    [InlineData("\n", 1, "", "")]
+    [InlineData("\r\n", 1, "", "")]
+    [InlineData("\n\n", 2, "\n", "")]
+    [InlineData("a", 1, "a", "a")]
+    [InlineData("a\n", 1, "a", "a")]
+    [InlineData("a\n\n", 2, "a\n", "")]
+    [InlineData("\na\n\n", 3, "\na\n", "")]
+    [InlineData("a\r\n\r\n", 2, "a\n", "")]
+    [InlineData("a\n\nb\n", 3, "a\n\nb", "b")]
+    [InlineData("a\u001f\t\0\U0001F600b", 1, "a\u001f\t\0\U0001F600b", "a\u001f\t\0\U0001F600b")]
+    public async Task GetOutputTail_TrailingAndEmptyLines_PreservePythonCountsWithoutInventingFinalLine(
+        string text, int totalLines, string expectedAll, string expectedLast)
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(Output(text))));
+        var token = await StartSessionAsync(driver, "output-tail-empty-lines-start");
+
+        await AssertOutputTailAsync(driver, token, "output-tail-empty-lines-all", totalLines, totalLines, expectedAll, "0");
+        await AssertOutputTailAsync(driver, token, "output-tail-empty-lines-last", totalLines, totalLines == 0 ? 0 : 1, expectedLast, "1");
+    }
+
+    [Fact]
+    public async Task GetOutputTail_CrLfAcrossEvents_RecomputesLogicalLinesAfterLaterAppends()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(Output("first\r")),
+            batches: new JsonArray(Batch(Output("\nsecond\r")), Batch(Output("\n\r")), Batch(Output("\nlast")))));
+        var token = await StartSessionAsync(driver, "output-tail-crlf-start");
+
+        await AssertOutputTailAsync(driver, token, "output-tail-crlf-initial", 1, 1, "first", "0");
+        await AdvanceOutputAsync(driver, token, "output-tail-crlf-first-append");
+        await AssertOutputTailAsync(driver, token, "output-tail-crlf-first", 2, 2, "first\nsecond", "0");
+        await AdvanceOutputAsync(driver, token, "output-tail-crlf-empty-append");
+        await AssertOutputTailAsync(driver, token, "output-tail-crlf-empty", 3, 3, "first\nsecond\n", "0");
+        await AdvanceOutputAsync(driver, token, "output-tail-crlf-last-append");
+        await AssertOutputTailAsync(driver, token, "output-tail-crlf-last", 4, 4, "first\nsecond\n\nlast", "0");
+    }
+
+    [Fact]
+    public async Task GetOutputTail_CategoryFilter_PrecedesFragmentJoiningSplittingAndSlicing()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(
+            Output("head", "stdout"),
+            Output("\nerror\n", "stderr"),
+            Output("tail\r", "stdout"),
+            Output("discarded", "stderr"),
+            Output("\nend\n", "stdout"),
+            Output("console"),
+            Output("\vlast", "console"),
+            Output("\nmetric\n", "telemetry"))));
+        var token = await StartSessionAsync(driver, "output-tail-category-start");
+        var cases = new (string CategoryShape, int TotalLines, string ExpectedAll, string ExpectedLast)[]
+        {
+            ("omitted", 8, "head\nerror\ntail\ndiscarded\nend\nconsole\nlast\nmetric", "metric"),
+            ("null", 8, "head\nerror\ntail\ndiscarded\nend\nconsole\nlast\nmetric", "metric"),
+            ("", 8, "head\nerror\ntail\ndiscarded\nend\nconsole\nlast\nmetric", "metric"),
+            ("stdout", 2, "headtail\nend", "end"),
+            ("stderr", 3, "\nerror\ndiscarded", "discarded"),
+            ("console", 2, "console\nlast", "last"),
+            ("telemetry", 2, "\nmetric", "metric"),
+            ("STDOUT", 0, "", ""),
+            ("Console", 0, "", ""),
+            ("unknown", 0, "", ""),
+            (" ", 0, "", ""),
+        };
+
+        for (var index = 0; index < cases.Length; index++)
+        {
+            var (categoryShape, totalLines, expectedAll, expectedLast) = cases[index];
+            var category = categoryShape is "omitted" or "null" ? null : categoryShape;
+            var includeCategory = categoryShape != "omitted";
+            output.WriteLine($"Tail category vector: '{categoryShape}'");
+
+            await AssertOutputTailAsync(driver, token, $"output-tail-category-{index}-all", totalLines, totalLines, expectedAll, "0", category, includeCategory);
+            await AssertOutputTailAsync(driver, token, $"output-tail-category-{index}-last", totalLines, totalLines == 0 ? 0 : 1, expectedLast, "1", category, includeCategory);
+        }
+    }
+
+    [Theory]
+    [InlineData("exited")]
+    [InlineData("terminated")]
+    public async Task GetOutputTail_TerminalSession_RemainsReadableWithoutConsumingOutput(string terminalEvent)
+    {
+        var batch = Batch(Output("final\n", "stderr"));
+        batch["terminal"] = terminalEvent;
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(Output("before\n", "stdout")), batches: new JsonArray(batch)));
+        var token = await StartSessionAsync(driver, $"output-tail-{terminalEvent}-start");
+
+        await AdvanceOutputAsync(driver, token, $"output-tail-{terminalEvent}-barrier");
+        var state = AssertApplicationEnvelope(await driver.CallToolRawAsync(
+            "get_debug_state", new JsonObject { ["debugSessionId"] = token },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId($"output-tail-{terminalEvent}-state")), isError: false);
+        Assert.Equal("debug_state_success", state["kind"]?.GetValue<string>());
+        Assert.Equal(terminalEvent, state["state"]?["event"]?.GetValue<string>());
+        await AssertOutputTailAsync(driver, token, $"output-tail-{terminalEvent}-all", 2, 2, "before\nfinal");
+        await AssertOutputTailAsync(driver, token, $"output-tail-{terminalEvent}-stderr", 1, 1, "final", "1", "stderr");
+        Assert.Equal("before\nfinal\n", await ReadOutputAsync(driver, token, $"output-tail-{terminalEvent}-retained"));
+    }
+
+    [Fact]
+    public async Task GetOutputTail_RepeatedReadsAndLaterAppends_DoNotMutateRetainedOutput()
+    {
+        const string original = "one\r\ntwo\nthree";
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(Output("one\r\n", "stdout"), Output("two\n", "stderr"), Output("three", "stdout")),
+            batches: new JsonArray(Batch(Output("\nfour\n", "stdout")))));
+        var token = await StartSessionAsync(driver, "output-tail-retained-start");
+
+        await AssertOutputTailAsync(driver, token, "output-tail-retained-first", 3, 1, "three", "1");
+        await AssertOutputTailAsync(driver, token, "output-tail-retained-filtered", 2, 2, "one\nthree", "0", "stdout");
+        await AssertOutputTailAsync(driver, token, "output-tail-retained-negative", 3, 1, "three", "-2");
+        await AssertOutputTailAsync(driver, token, "output-tail-retained-repeat", 3, 1, "three", "1");
+        Assert.Equal(original, await ReadOutputAsync(driver, token, "output-tail-retained-raw"));
+        await AdvanceOutputAsync(driver, token, "output-tail-retained-append");
+        await AssertOutputTailAsync(driver, token, "output-tail-retained-appended", 4, 2, "three\nfour", "2");
+        Assert.Equal(original + "\nfour\n", await ReadOutputAsync(driver, token, "output-tail-retained-clear", clear: true));
+        await AssertOutputTailAsync(driver, token, "output-tail-retained-after-clear", 0, 0, string.Empty, "0");
+    }
+
+    [Fact]
+    public async Task GetOutputTail_InvalidInput_ReturnsCompleteInvalidArgumentsWithoutDapIo()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions());
+        foreach (var (scenario, arguments) in InvalidTailArguments)
+        {
+            output.WriteLine($"Tail invalid-input vector: {scenario}");
+            var before = await driver.ReadNativeActionsAsync();
+            var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(
+                TailTool, arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId($"output-tail-invalid-{scenario}")), isError: true);
+
+            Assert.Equal("invalid_tool_arguments", content["kind"]?.GetValue<string>());
+            Assert.Equal("INVALID_TOOL_ARGUMENTS", content["error"]?.GetValue<string>());
+            Assert.Equal(TailTool, content["tool"]?.GetValue<string>());
+            Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+        }
+    }
+
+    [Fact]
+    public async Task GetOutputTail_OmittedArguments_ReturnsCompleteInvalidArgumentsWithoutDapIo()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions());
+        var before = await driver.ReadNativeActionsAsync();
+        var content = AssertApplicationEnvelope(await driver.SendRawRequestAsync(
+            "tools/call", new JsonObject { ["name"] = TailTool, ["_meta"] = ModernMcpProcessDriver.CurrentMeta() },
+            new RequestId("output-tail-omitted-arguments")), isError: true);
+
+        Assert.Equal("invalid_tool_arguments", content["kind"]?.GetValue<string>());
+        Assert.Equal("INVALID_TOOL_ARGUMENTS", content["error"]?.GetValue<string>());
+        Assert.Equal(TailTool, content["tool"]?.GetValue<string>());
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Fact]
+    public async Task GetOutputTail_MissingAndRetiredSessions_ReturnUniformCompleteNotFoundWithoutDapIo()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(Output("retired private output\n"))));
+        var token = await StartSessionAsync(driver, "output-tail-retired-start");
+        var stopped = AssertApplicationEnvelope(await driver.CallToolRawAsync(
+            "stop_debug", new JsonObject { ["debugSessionId"] = token },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("output-tail-retire")), isError: false);
+        Assert.Equal("stop_debug_success", stopped["kind"]?.GetValue<string>());
+        var before = await driver.ReadNativeActionsAsync();
+        JsonObject? previous = null;
+        var tokens = new[] { "!", "short", new string('r', 32), token };
+
+        for (var index = 0; index < tokens.Length; index++)
+        {
+            var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(
+                TailTool, new JsonObject { ["debugSessionId"] = tokens[index], ["lines"] = 0, ["category"] = null },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId($"output-tail-unavailable-{index}")), isError: true);
+            Assert.Equal("debug_session_not_found", content["kind"]?.GetValue<string>());
+            Assert.Equal("DEBUG_SESSION_NOT_FOUND", content["error"]?.GetValue<string>());
+            Assert.Equal(2, content.Count);
+            if (previous is not null)
+            {
+                Assert.Equal(previous.ToJsonString(), content.ToJsonString());
+            }
+
+            previous = content;
+        }
+
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    // Bound host startup/discovery separately; tool calls retain the driver's two-second deadline.
+    private static Task<ModernMcpProcessDriver> StartTailDriverAsync(ModernMcpStartOptions options) =>
+        ModernMcpProcessDriver.StartAsync(options, startupTimeout: TimeSpan.FromSeconds(10));
+
     private static ModernMcpStartOptions OutputOptions(
         JsonArray? launch = null,
         JsonArray? batches = null,
@@ -472,6 +825,39 @@ public sealed class OutputContractTests
             Tool, arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId(requestId)));
         Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
         return output;
+    }
+
+    private static async Task AssertOutputTailAsync(
+        ModernMcpProcessDriver driver,
+        string token,
+        string requestId,
+        int totalLines,
+        int returnedLines,
+        string expected,
+        string? linesJson = null,
+        string? category = null,
+        bool includeCategory = false)
+    {
+        var arguments = new JsonObject { ["debugSessionId"] = token };
+        if (linesJson is not null)
+        {
+            arguments["lines"] = JsonNode.Parse(linesJson);
+        }
+
+        if (includeCategory || category is not null)
+        {
+            arguments["category"] = category;
+        }
+
+        var before = await driver.ReadNativeActionsAsync();
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(
+            TailTool, arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId(requestId)), isError: false);
+        Assert.Equal("output_tail_success", content["kind"]?.GetValue<string>());
+        Assert.Equal(4, content.Count);
+        Assert.Equal(totalLines, content["totalLines"]?.GetValue<int>());
+        Assert.Equal(returnedLines, content["returnedLines"]?.GetValue<int>());
+        Assert.Equal(expected, content["output"]?.GetValue<string>());
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
     }
 
     private static string OutputText(JsonRpcResponse response)
