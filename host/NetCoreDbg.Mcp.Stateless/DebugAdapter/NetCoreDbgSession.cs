@@ -2626,7 +2626,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(executablePath);
             ArgumentNullException.ThrowIfNull(arguments);
-            executablePath = ResolveExecutablePath(executablePath);
+            if (atomicJobAssignment)
+            {
+                executablePath = ResolveExecutablePath(executablePath);
+            }
             SafeFileHandle? standardInput = null;
             SafeFileHandle? standardOutput = null;
             SafeFileHandle? standardError = null;
