@@ -36,8 +36,8 @@ preparation is not publication.
 
 The Python package remains the default consumer entry point. Its wheel does not
 bundle the opt-in .NET preview executable. Corrected preview delivery is separate;
-B3 native `step_over` and Native Scene Probe work remain modern-host source-only
-and add no tools to the Python catalog.
+B3 native `step_over`, the native step pair and Native Scene Probe work remain
+modern-host source-only and add no tools to the Python catalog.
 
 In the source-built stateful host, `start_debug` also accepts an optional
 `breakpoints` array of up to 256 `{file, line}` entries. Each source file must
@@ -101,6 +101,42 @@ without clearing it. It filters by category before splitting lines, returns
 `totalLines`, `returnedLines`, and LF-joined `output`, and defaults to the last
 50 lines. For compatibility with the existing Python slicing behavior, `lines: 0`
 returns all lines and a negative `lines: -N` skips the first N lines.
+
+The source-built stateful host exposes `step_over(debugSessionId, threadId)`,
+`step_into(debugSessionId, threadId)` and `step_out(debugSessionId, threadId)`.
+Both arguments are required: use the opaque session token and an explicit Int32
+thread with current stopped authority. Invalid or extra arguments cause no DAP
+I/O. Each admitted call sends exactly one DAP `next`, `stepIn` or `stepOut`,
+respectively, with only `{threadId}`; target selection is not supported.
+
+A correlated positive acknowledgement is not a completed step. Success requires
+a later `stopped(reason: "step")` event for that exact thread. Pre-acknowledgement,
+missing/different-thread and non-step stops do not satisfy the waiter. The
+debugger may step over rather than enter a call; inspect the actual new stack
+with `get_call_stack` to establish whether the callee was entered or the caller
+was reached. Admission invalidates earlier stopped and inspection authority.
+
+One 30-second deadline starts after the complete write and covers both
+acknowledgement and observation. An `exited` or `terminated` event can settle
+the call before or after acknowledgement. The new tools return their own
+`step_into_*` or `step_out_*` success, terminal and timed-out results, or typed,
+redacted refusal/protocol errors. Terminal, timeout and protocol failure retire
+debugger control through the existing close-and-drain owner; retained output
+follows the rules above. Unlike an acknowledged continue timeout, a step timeout
+does not retain debugger control. Negative acknowledgement retains the usable
+session. Cancellation completed before writer handoff retains it without
+restoring old inspection authority; a possible or uncertain write is drained
+without retry.
+
+Only one step or continue is admitted per session. An active step excludes all
+other steps, continue and pause; an active pause excludes new steps and continue.
+Pause may still overlap an already committed continue. Competing execution is
+refused without DAP I/O. Root observed passing source-candidate checks and a real
+source-host/netcoredbg journey entering `Middle` and returning to `Outer`, with
+public stop and retained Job drain. This does not prove absence of transient
+focus. Integration, installed delivery and full Python compatibility remain
+unproven. Python remains the default and rollback; these source-built tools do
+not change the published read-only preview.
 
 For a stopped session, `continue_execution(debugSessionId, threadId)` sends a
 DAP `continue` request without `singleThread`, so it resumes all threads. It

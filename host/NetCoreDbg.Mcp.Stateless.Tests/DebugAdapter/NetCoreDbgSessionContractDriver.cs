@@ -2213,7 +2213,9 @@ internal sealed record FixtureTranscriptEntry(
         var root = document.RootElement;
         return new FixtureTranscriptEntry(
             root.GetProperty("kind").GetString() ?? throw new InvalidDataException("Fixture transcript kind is absent."),
-            root.TryGetProperty("sequence", out var sequence) ? sequence.GetInt32() : null,
+            root.TryGetProperty("sequence", out var sequence)
+                && sequence.ValueKind == JsonValueKind.Number
+                && sequence.TryGetInt32(out var sequenceValue) ? sequenceValue : null,
             root.TryGetProperty("command", out var command) ? command.GetString() : null,
             root.TryGetProperty("arguments", out var arguments) ? arguments.GetString() : null,
             root.TryGetProperty("rawPayload", out var rawPayload) ? rawPayload.GetString() : null,

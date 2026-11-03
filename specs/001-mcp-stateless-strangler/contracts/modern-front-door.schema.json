@@ -234,6 +234,12 @@
       },
       "additionalProperties": false
     },
+    "stepIntoArguments": {
+      "$ref": "#/$defs/stepOverArguments"
+    },
+    "stepOutArguments": {
+      "$ref": "#/$defs/stepOverArguments"
+    },
     "continueArguments": {
       "type": "object",
       "required": [
@@ -1508,6 +1514,138 @@
       },
       "additionalProperties": false
     },
+    "stepIntoSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "threadId"
+      ],
+      "properties": {
+        "kind": {
+          "const": "step_into_success"
+        },
+        "threadId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
+    "stepIntoTerminal": {
+      "type": "object",
+      "required": [
+        "kind",
+        "terminal"
+      ],
+      "properties": {
+        "kind": {
+          "const": "step_into_terminal"
+        },
+        "terminal": {
+          "enum": [
+            "exited",
+            "terminated"
+          ]
+        },
+        "exitCode": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
+    "stepIntoTimedOut": {
+      "type": "object",
+      "required": [
+        "kind",
+        "threadId",
+        "timeoutSeconds"
+      ],
+      "properties": {
+        "kind": {
+          "const": "step_into_timed_out"
+        },
+        "threadId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 30
+        }
+      },
+      "additionalProperties": false
+    },
+    "stepOutSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "threadId"
+      ],
+      "properties": {
+        "kind": {
+          "const": "step_out_success"
+        },
+        "threadId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
+    "stepOutTerminal": {
+      "type": "object",
+      "required": [
+        "kind",
+        "terminal"
+      ],
+      "properties": {
+        "kind": {
+          "const": "step_out_terminal"
+        },
+        "terminal": {
+          "enum": [
+            "exited",
+            "terminated"
+          ]
+        },
+        "exitCode": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
+    "stepOutTimedOut": {
+      "type": "object",
+      "required": [
+        "kind",
+        "threadId",
+        "timeoutSeconds"
+      ],
+      "properties": {
+        "kind": {
+          "const": "step_out_timed_out"
+        },
+        "threadId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 30
+        }
+      },
+      "additionalProperties": false
+    },
     "continueStopped": {
       "type": "object",
       "required": [
@@ -1805,6 +1943,70 @@
       },
       "additionalProperties": false
     },
+    "dapStepIntoRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_step_into_refused"
+        },
+        "error": {
+          "const": "DAP_STEP_INTO_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapStepIntoProtocolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_step_into_protocol_error"
+        },
+        "error": {
+          "const": "DAP_STEP_INTO_PROTOCOL_ERROR"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapStepOutRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_step_out_refused"
+        },
+        "error": {
+          "const": "DAP_STEP_OUT_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapStepOutProtocolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_step_out_protocol_error"
+        },
+        "error": {
+          "const": "DAP_STEP_OUT_PROTOCOL_ERROR"
+        }
+      },
+      "additionalProperties": false
+    },
     "dapContinueRefused": {
       "type": "object",
       "required": [
@@ -2053,6 +2255,8 @@
             "get_scopes",
             "get_variables",
             "step_over",
+            "step_into",
+            "step_out",
             "continue_execution",
             "pause_execution",
             "add_breakpoint",
@@ -2098,6 +2302,24 @@
         },
         {
           "$ref": "#/$defs/stepOverTimedOut"
+        },
+        {
+          "$ref": "#/$defs/stepIntoSuccess"
+        },
+        {
+          "$ref": "#/$defs/stepIntoTerminal"
+        },
+        {
+          "$ref": "#/$defs/stepIntoTimedOut"
+        },
+        {
+          "$ref": "#/$defs/stepOutSuccess"
+        },
+        {
+          "$ref": "#/$defs/stepOutTerminal"
+        },
+        {
+          "$ref": "#/$defs/stepOutTimedOut"
         },
         {
           "$ref": "#/$defs/continueStopped"
@@ -2179,6 +2401,18 @@
         },
         {
           "$ref": "#/$defs/dapStepOverProtocolError"
+        },
+        {
+          "$ref": "#/$defs/dapStepIntoRefused"
+        },
+        {
+          "$ref": "#/$defs/dapStepIntoProtocolError"
+        },
+        {
+          "$ref": "#/$defs/dapStepOutRefused"
+        },
+        {
+          "$ref": "#/$defs/dapStepOutProtocolError"
         },
         {
           "$ref": "#/$defs/dapContinueRefused"
