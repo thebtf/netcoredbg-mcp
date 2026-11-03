@@ -114,20 +114,65 @@ only after cleanup completes; the owner-aborted continue returns
 `DEBUG_SESSION_NOT_FOUND`, not a DAP protocol error. Explicit caller/host
 cancellation and genuine cleanup/protocol failures remain failures.
 
-The source-built Windows stateful host also exposes
-`ui_invoke(debugSessionId, automationId)` when `FLAUI_BRIDGE_PATH` points to its
-built FlaUI bridge. These are the only two arguments: both must be nonblank
-strings, and the exact, case-sensitive AutomationId is limited to 256 characters
-(no trimming or alternate selectors). The action requires exactly one readable
-match in the session's current bound debuggee main window and UIA InvokePattern;
-there is no mouse/keyboard fallback or dialog/window selection. Unreadable,
-incomplete (over 4,096 nodes), missing, ambiguous, changed, or unsupported targets
-are refused before invocation. Process incarnation and HWND ownership are
-rechecked after preparation and immediately before the UIA call; these checks
-are not an atomic UI-tree snapshot or a guarantee against later application changes.
+The source-built Windows stateful host exposes
+`ui_get_window_tree(debugSessionId, maxDepth = 3, maxChildren = 50)` when
+`FLAUI_BRIDGE_PATH` points to its built FlaUI bridge. This read-only observation
+covers only the bound debuggee's current main window. It does not activate or
+focus a window, send input, expand controls, or resume execution. Inputs are
+closed: depth is an integer from 0 through 32, and children per parent from 1
+through 256. Traversal is preorder, with at most 4,096 nodes, an 8,192-byte request,
+a 262,144-byte helper response, and a 1,048,576-byte final MCP result including
+its matching JSON text mirror. Depth, child and field limits are explicit;
+unreadable properties are null with `unavailableFields`, and oversized fields
+are null with `truncatedFields`. An AutomationId is returned intact only when
+it fits 256 Unicode code points, never shortened into an actionable selector.
+Display names are limited to 1,024 code points, control types to 256, and opaque
+runtime IDs to 1–64 Int32 values. A required unreadable root identity is an error,
+not an empty-success tree.
+`childrenComplete: false` and `truncated: true` mean absence and uniqueness cannot
+be inferred. `atomicity: "unproven"` applies even to a complete traversal.
 
-Each action uses a separate one-shot helper with a 10-second lifetime and bounded
-cleanup. The EXE or dotnet-hosted DLL helper is created atomically inside a
+`ui_invoke(debugSessionId, automationId, expectedTarget?)` accepts the existing
+two nonblank string arguments unchanged. Its exact, case-sensitive AutomationId
+is limited to 256 Unicode code points (no trimming or alternate selectors).
+Optional `expectedTarget` is a closed object requiring `processIdentity`, the
+opaque lossless `hwnd` string, `rootRuntimeId`, and `elementRuntimeId` from one
+discovery response; each runtime ID is an array of 1–64 Int32 values. These are
+comparison constraints, not authority to choose a process or window. Observable
+drift returns `UI_INVOKE_TARGET_CHANGED` with `outcome: "not_invoked"`.
+When `expectedTarget` is supplied, the action requires a complete bounded
+exact-AutomationId uniqueness check: unreadable or overlong IDs and incomplete
+traversal refuse selection. Two readable matches prove ambiguity even when
+another ID is unknown. Existing two-argument calls retain their previous
+selection behavior, including unrelated unsupported or overlong IDs.
+
+`ui_invoke_observed(debugSessionId, target, expectedAutomationId)` explicitly
+selects an element observed through discovery instead. All three arguments are
+required; extra fields are rejected. `target` is the same closed four-field
+identity object described above, and `expectedAutomationId` must be exact,
+nonblank, and at most 256 Unicode code points. The serialized arguments and
+helper request each fit 8,192 bytes. The action traverses the complete bounded
+raw tree (at most 4,096 nodes), checks every visited process/runtime identity,
+and requires exactly one matching element runtime ID. It then checks that
+element's exact AutomationId and InvokePattern, plus the bound process, HWND
+and root identity. Unknown or duplicate AutomationIds on other elements do not
+select the target and are not treated as absent. Incomplete traversal, unreadable
+runtime identities, or multiple matches for the requested runtime ID refuse the
+action. Neither tool falls back to the other or uses mouse/keyboard input.
+
+Both action modes repeat their selection and identity checks at commit before
+at most one InvokePattern call. Observed success reports
+`kind: "ui_invoke_observed_success"`, `selection: "runtime_id"`, `invoked: true`,
+`method: "InvokePattern"`, and `atomicity: "unproven"`. Runtime IDs can be reused;
+these comparisons are not an element lease or proof of unchanged business
+meaning. UIA provides no atomic compare-and-invoke transaction: a replacement
+preserving all checked values may be indistinguishable.
+
+Discovery and invoke share one session-owned helper admission/lifecycle. Each
+operation uses a separate one-shot helper with a single 10-second deadline and
+at most two further seconds for cleanup. Unconfirmed cleanup is reported and
+keeps admission closed until the retained helper's exit is confirmed. The EXE
+or dotnet-hosted DLL helper is created atomically inside a
 host-owned Windows kill-on-close Job using `PROC_THREAD_ATTRIBUTE_JOB_LIST`;
 there is no unassigned suspended-child interval. This action requires that
 attribute's documented Windows 10 / Server 2016-or-later support. Windows Server
@@ -143,8 +188,11 @@ result is lost, the result is
 `UI_INVOKE_OUTCOME_UNKNOWN` with `outcome: "unknown"`, not a claim that no action
 ran. Never automatically retry it: inspect debugger/application state first.
 Success confirms only that InvokePattern returned, not arbitrary business
-completion. Native Scene IPC stays observation-only; this subset neither changes
-the Python default/catalog nor adds UI actions to the published read-only preview.
+completion. Discovery IPC has no invoke commit. This native slice is explicitly
+main-window-only: it does not provide Python's all-top-level-window coverage,
+`ui_find_element`, selected-window state, sibling/modal-window actions, or XPath.
+It is not full Python parity, does not change the Python default/catalog, and
+does not add UI actions to the published read-only preview.
 
 The source-built native scene tools accept `native-scene-probe/1` with probe
 schema `/1` or `/2`. A successful `/1` request keeps its original contract.

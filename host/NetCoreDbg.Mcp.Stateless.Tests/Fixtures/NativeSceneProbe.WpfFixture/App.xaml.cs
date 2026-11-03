@@ -7,6 +7,7 @@ namespace NativeSceneProbe.WpfFixture;
 public partial class App : Application
 {
     private LocalProbeClient? _probeClient;
+    private DiscoveryFixtureScene? _discoveryScene;
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -18,6 +19,7 @@ public partial class App : Application
         }
 
         var window = new ProbeFixtureWindow(options.Mode);
+        _discoveryScene = DiscoveryFixtureScene.Attach(window, e.Args);
         MainWindow = window;
         ShutdownMode = ShutdownMode.OnMainWindowClose;
         window.Show();
@@ -27,6 +29,8 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _discoveryScene?.Dispose();
+        _discoveryScene = null;
         _probeClient?.Dispose();
         _probeClient = null;
         base.OnExit(e);

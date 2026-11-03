@@ -227,6 +227,7 @@ public sealed class StructuredContentSchemaParityTests
 
     [Theory]
     [InlineData("ui_invoke", "uiInvokeArguments")]
+    [InlineData("ui_invoke_observed", "uiInvokeObservedArguments")]
     [InlineData("get_output", "getOutputArguments")]
     [InlineData("get_output_tail", "getOutputTailArguments")]
     public async Task LiveHost_InvokeAndOutputInputSchemas_MatchAdvertisedArguments(string toolName, string definitionName)
@@ -302,6 +303,28 @@ public sealed class StructuredContentSchemaParityTests
         ValidateValue(definitions, schema, null);
         Assert.ThrowsAny<Xunit.Sdk.XunitException>(() => ValidateValue(definitions, schema, JsonValue.Create("\U0001F600")));
         Assert.ThrowsAny<Xunit.Sdk.XunitException>(() => ValidateValue(definitions, schema, JsonValue.Create("\U0001F600\U0001F680\U0001F600")));
+    }
+
+    [Theory]
+    [InlineData("null", true)]
+    [InlineData("0", true)]
+    [InlineData("4095", true)]
+    [InlineData("-1", false)]
+    [InlineData("4096", false)]
+    public void NumericBounds_WindowTreeParentId_AcceptsNullAndEnforcesIntegerBounds(string json, bool accepted)
+    {
+        var definitions = Assert.IsType<JsonObject>(LoadSchema()["$defs"]);
+        var schema = Assert.IsType<JsonObject>(definitions["uiWindowTree"]!["properties"]!["nodes"]!["items"]!["properties"]!["parentId"]);
+        var value = JsonNode.Parse(json);
+
+        if (accepted)
+        {
+            ValidateValue(definitions, schema, value);
+        }
+        else
+        {
+            Assert.ThrowsAny<Xunit.Sdk.XunitException>(() => ValidateValue(definitions, schema, value));
+        }
     }
 
     internal static void AssertMatchesSchema(JsonObject content) => ValidateVariant(LoadSchema(), content);
@@ -499,13 +522,16 @@ public sealed class StructuredContentSchemaParityTests
                 Assert.True(Regex.IsMatch(text, pattern.GetValue<string>(), RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1)));
             }
         }
-        if (schema["minimum"] is JsonValue minimum)
+        if (value is JsonValue numericValue && numericValue.TryGetValue<long>(out var number))
         {
-            Assert.True(Assert.IsAssignableFrom<JsonValue>(value).GetValue<long>() >= minimum.GetValue<long>());
-        }
-        if (schema["maximum"] is JsonValue maximum)
-        {
-            Assert.True(Assert.IsAssignableFrom<JsonValue>(value).GetValue<long>() <= maximum.GetValue<long>());
+            if (schema["minimum"] is JsonValue minimum)
+            {
+                Assert.True(number >= minimum.GetValue<long>());
+            }
+            if (schema["maximum"] is JsonValue maximum)
+            {
+                Assert.True(number <= maximum.GetValue<long>());
+            }
         }
     }
 

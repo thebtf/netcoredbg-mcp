@@ -193,11 +193,38 @@ public sealed class NativeSceneBridgeLifecycleTests
         await disconnected;
     }
 
+    [Fact]
+    public async Task ObserveAsync_ReturnsDiscoveryLimitExceeded_WhenTheResponseFrameExceedsTheReadLimit_WithoutNodes_AndClosesThePipe()
+    {
+        const int maximumDiscoveryResponseBytes = 262_144;
+        using var deadline = new CancellationTokenSource(TestTimeout);
+        await using var observer = new LocalNamedPipeObserver();
+        await using var client = NativeUiInvokeBridgeClientDriver.Create(observer.PipeName);
+
+        var pending = client.ObserveAsync(
+            AuthorizationNonce,
+            new JsonObject { ["operation"] = "get_window_tree" },
+            deadline.Token);
+        _ = await observer.ReadRequestAsync(deadline.Token);
+        await observer.WriteResponseLengthAsync(maximumDiscoveryResponseBytes + 1, deadline.Token);
+
+        var result = await pending;
+
+        Assert.Equal("tool_error", Text(result["kind"]));
+        Assert.Equal("ui_get_window_tree", Text(result["tool"]));
+        Assert.Equal("UI_DISCOVERY_LIMIT_EXCEEDED", Text(result["code"]));
+        Assert.False(result.ContainsKey("nodes"));
+        await observer.AssertClientDisconnectedAsync(deadline.Token);
+    }
+
     [Theory]
-    [InlineData("disconnect")]
-    [InlineData("cancel")]
-    [InlineData("timeout")]
-    public async Task UiInvoke_LostPostDispatchResponse_IsUnknownAndNeverRetried(string failure)
+    [InlineData("disconnect", "prepare", "ui_invoke")]
+    [InlineData("cancel", "prepare", "ui_invoke")]
+    [InlineData("timeout", "prepare", "ui_invoke")]
+    [InlineData("disconnect", "prepare_observed", "ui_invoke_observed")]
+    [InlineData("cancel", "prepare_observed", "ui_invoke_observed")]
+    [InlineData("timeout", "prepare_observed", "ui_invoke_observed")]
+    public async Task UiInvoke_LostPostDispatchResponse_IsUnknownAndNeverRetried(string failure, string operation, string expectedTool)
     {
         using var deadline = new CancellationTokenSource(TestTimeout);
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
@@ -205,7 +232,7 @@ public sealed class NativeSceneBridgeLifecycleTests
         await using var client = NativeUiInvokeBridgeClientDriver.Create(observer.PipeName);
         var request = new JsonObject
         {
-            ["operation"] = "prepare",
+            ["operation"] = operation,
             ["processId"] = 4242,
             ["processIdentity"] = "process_4242_start_1",
             ["hwnd"] = 1234,
@@ -213,7 +240,7 @@ public sealed class NativeSceneBridgeLifecycleTests
         };
         var pending = client.SendAsync(AuthorizationNonce, request, cancellation.Token);
         var prepare = await observer.ReadRequestAsync(deadline.Token);
-        Assert.Equal("prepare", Text(prepare.Request["operation"]));
+        Assert.Equal(operation, Text(prepare.Request["operation"]));
         await observer.WriteResponseAsync(ResponseFor(prepare, new JsonObject { ["status"] = "ready" }), deadline.Token);
         var commit = await observer.ReadRequestAsync(deadline.Token);
         Assert.Equal("invoke", Text(commit.Request["operation"]));
@@ -229,18 +256,29 @@ public sealed class NativeSceneBridgeLifecycleTests
             cancellation.Cancel();
 
         var result = await pending;
+        Assert.Equal(expectedTool, Text(result["tool"]));
         Assert.Equal("UI_INVOKE_OUTCOME_UNKNOWN", Text(result["code"]));
         Assert.Equal("unknown", Text(result["outcome"]));
         Assert.False(result.ContainsKey("invoked"));
+
+        var cleanupUnconfirmed = client.CleanupUnconfirmed(result, operation == "prepare_observed");
+        Assert.Equal(expectedTool, Text(cleanupUnconfirmed["tool"]));
+        Assert.Equal("UI_INVOKE_CLEANUP_UNCONFIRMED", Text(cleanupUnconfirmed["code"]));
+        Assert.Equal("unknown", Text(cleanupUnconfirmed["outcome"]));
+
         if (disconnected is not null)
             await disconnected;
         var attemptedReuse = await client.SendAsync(AuthorizationNonce, request, deadline.Token);
         Assert.Equal("UI_INVOKE_ALREADY_USED", Text(attemptedReuse["code"]));
+        Assert.Equal(expectedTool, Text(attemptedReuse["tool"]));
+        Assert.Equal("not_invoked", Text(attemptedReuse["outcome"]));
         Assert.Equal(2, observer.RequestsObserved);
     }
 
-    [Fact]
-    public async Task UiInvoke_AuthorityRevokedDuringPreparation_DoesNotSendCommit()
+    [Theory]
+    [InlineData("prepare", "ui_invoke")]
+    [InlineData("prepare_observed", "ui_invoke_observed")]
+    public async Task UiInvoke_AuthorityRevokedDuringPreparation_DoesNotSendCommit(string operation, string expectedTool)
     {
         using var deadline = new CancellationTokenSource(TestTimeout);
         await using var observer = new LocalNamedPipeObserver();
@@ -248,14 +286,16 @@ public sealed class NativeSceneBridgeLifecycleTests
         var authorized = true;
         var pending = client.SendAsync(
             AuthorizationNonce,
-            new JsonObject { ["operation"] = "prepare", ["automationId"] = "SaveButton" },
+            new JsonObject { ["operation"] = operation, ["automationId"] = "SaveButton" },
             deadline.Token,
             () => Volatile.Read(ref authorized));
         var prepare = await observer.ReadRequestAsync(deadline.Token);
+        Assert.Equal(operation, Text(prepare.Request["operation"]));
         Volatile.Write(ref authorized, false);
         await observer.WriteResponseAsync(ResponseFor(prepare, new JsonObject { ["status"] = "ready" }), deadline.Token);
 
         var result = await pending;
+        Assert.Equal(expectedTool, Text(result["tool"]));
 
         Assert.Equal("UI_INVOKE_TARGET_CHANGED", Text(result["code"]));
         Assert.Equal("not_invoked", Text(result["outcome"]));
@@ -529,11 +569,13 @@ public sealed class NativeSceneBridgeLifecycleTests
     {
         private readonly IAsyncDisposable _client;
         private readonly MethodInfo _sendAsync;
+        private readonly MethodInfo _observeAsync;
 
-        private NativeUiInvokeBridgeClientDriver(IAsyncDisposable client, MethodInfo sendAsync)
+        private NativeUiInvokeBridgeClientDriver(IAsyncDisposable client, MethodInfo sendAsync, MethodInfo observeAsync)
         {
             _client = client;
             _sendAsync = sendAsync;
+            _observeAsync = observeAsync;
         }
 
         internal static NativeUiInvokeBridgeClientDriver Create(string pipeName)
@@ -548,13 +590,32 @@ public sealed class NativeSceneBridgeLifecycleTests
             var client = Assert.IsAssignableFrom<IAsyncDisposable>(instance);
             var sendAsync = type.GetMethod("SendAsync", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
                 ?? throw new InvalidOperationException("Missing one-shot invoke transport.");
-            return new NativeUiInvokeBridgeClientDriver(client, sendAsync);
+            var observeAsync = type.GetMethod(
+                "ObserveAsync", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                binder: null, types: [typeof(string), typeof(JsonObject), typeof(CancellationToken)], modifiers: null)
+                ?? throw new InvalidOperationException("Missing read-only discovery transport.");
+            return new NativeUiInvokeBridgeClientDriver(client, sendAsync, observeAsync);
         }
 
         internal Task<JsonObject> SendAsync(
             string nonce, JsonObject request, CancellationToken cancellationToken, Func<bool>? authorizeDispatch = null) =>
             Assert.IsAssignableFrom<Task<JsonObject>>(
                 _sendAsync.Invoke(_client, [nonce, request, authorizeDispatch ?? (Func<bool>)(() => true), cancellationToken]));
+
+        internal Task<JsonObject> ObserveAsync(string nonce, JsonObject request, CancellationToken cancellationToken) =>
+            Assert.IsAssignableFrom<Task<JsonObject>>(
+                _observeAsync.Invoke(_client, [nonce, request, cancellationToken]));
+
+        internal JsonObject CleanupUnconfirmed(JsonObject previous, bool observed)
+        {
+            var resultType = _client.GetType().Assembly.GetType(
+                "NetCoreDbg.Mcp.Stateless.NativeUi.NativeUiInvokeResult", throwOnError: true)!;
+            var method = resultType.GetMethod(
+                "CleanupUnconfirmed", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic,
+                binder: null, types: [typeof(JsonObject), typeof(bool)], modifiers: null)
+                ?? throw new InvalidOperationException("Missing invoke cleanup outcome mapper.");
+            return Assert.IsAssignableFrom<JsonObject>(method.Invoke(null, [previous, observed]));
+        }
 
         public ValueTask DisposeAsync() => _client.DisposeAsync();
     }

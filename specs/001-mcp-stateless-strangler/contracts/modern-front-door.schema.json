@@ -319,12 +319,403 @@
           "minLength": 1,
           "maxLength": 256,
           "pattern": "\\S"
+        },
+        "expectedTarget": {
+          "type": "object",
+          "properties": {
+            "processIdentity": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S"
+            },
+            "hwnd": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S"
+            },
+            "rootRuntimeId": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "items": {
+                "type": "integer",
+                "minimum": -2147483648,
+                "maximum": 2147483647
+              }
+            },
+            "elementRuntimeId": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "items": {
+                "type": "integer",
+                "minimum": -2147483648,
+                "maximum": 2147483647
+              }
+            }
+          },
+          "required": [
+            "processIdentity",
+            "hwnd",
+            "rootRuntimeId",
+            "elementRuntimeId"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
         "debugSessionId",
         "automationId"
       ],
+      "additionalProperties": false
+    },
+    "uiInvokeObservedArguments": {
+      "type": "object",
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "target": {
+          "type": "object",
+          "properties": {
+            "processIdentity": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S"
+            },
+            "hwnd": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S"
+            },
+            "rootRuntimeId": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "items": {
+                "type": "integer",
+                "minimum": -2147483648,
+                "maximum": 2147483647
+              }
+            },
+            "elementRuntimeId": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "items": {
+                "type": "integer",
+                "minimum": -2147483648,
+                "maximum": 2147483647
+              }
+            }
+          },
+          "required": [
+            "processIdentity",
+            "hwnd",
+            "rootRuntimeId",
+            "elementRuntimeId"
+          ],
+          "additionalProperties": false
+        },
+        "expectedAutomationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "\\S"
+        }
+      },
+      "required": [
+        "debugSessionId",
+        "target",
+        "expectedAutomationId"
+      ],
+      "additionalProperties": false
+    },
+    "uiRuntimeId": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "integer",
+        "minimum": -2147483648,
+        "maximum": 2147483647
+      }
+    },
+    "uiExpectedTarget": {
+      "type": "object",
+      "properties": {
+        "processIdentity": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "hwnd": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "Opaque lossless handle string echoed from discovery; comparison only, never target selection."
+        },
+        "rootRuntimeId": {
+          "$ref": "#/$defs/uiRuntimeId"
+        },
+        "elementRuntimeId": {
+          "$ref": "#/$defs/uiRuntimeId"
+        }
+      },
+      "required": [
+        "processIdentity",
+        "hwnd",
+        "rootRuntimeId",
+        "elementRuntimeId"
+      ],
+      "additionalProperties": false
+    },
+    "uiGetWindowTreeArguments": {
+      "type": "object",
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "maxDepth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32,
+          "default": 3
+        },
+        "maxChildren": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256,
+          "default": 50
+        }
+      },
+      "required": [
+        "debugSessionId"
+      ],
+      "additionalProperties": false
+    },
+    "uiWindowTree": {
+      "type": "object",
+      "required": [
+        "kind",
+        "scope",
+        "atomicity",
+        "process",
+        "window",
+        "nodes",
+        "limits",
+        "truncated"
+      ],
+      "properties": {
+        "kind": {
+          "const": "ui_window_tree"
+        },
+        "scope": {
+          "const": "main_window"
+        },
+        "atomicity": {
+          "const": "unproven"
+        },
+        "process": {
+          "type": "object",
+          "required": [
+            "processId",
+            "processIdentity"
+          ],
+          "properties": {
+            "processId": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2147483647
+            },
+            "processIdentity": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "window": {
+          "type": "object",
+          "required": [
+            "hwnd",
+            "runtimeId"
+          ],
+          "properties": {
+            "hwnd": {
+              "type": "string",
+              "minLength": 1
+            },
+            "runtimeId": {
+              "$ref": "#/$defs/uiRuntimeId"
+            }
+          },
+          "additionalProperties": false
+        },
+        "nodes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "object",
+            "required": [
+              "nodeId",
+              "parentId",
+              "automationId",
+              "name",
+              "controlType",
+              "runtimeId",
+              "supportsInvoke",
+              "childrenComplete",
+              "unavailableFields",
+              "truncatedFields"
+            ],
+            "properties": {
+              "nodeId": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4095
+              },
+              "parentId": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 4095
+              },
+              "automationId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 256
+              },
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 1024
+              },
+              "controlType": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 256
+              },
+              "runtimeId": {
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/uiRuntimeId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "supportsInvoke": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "childrenComplete": {
+                "type": "boolean"
+              },
+              "unavailableFields": {
+                "$ref": "#/$defs/uiObservationFields"
+              },
+              "truncatedFields": {
+                "$ref": "#/$defs/uiObservationFields"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "limits": {
+          "type": "object",
+          "required": [
+            "maxDepth",
+            "maxChildren",
+            "maxNodes"
+          ],
+          "properties": {
+            "maxDepth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            },
+            "maxChildren": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 256
+            },
+            "maxNodes": {
+              "const": 4096
+            }
+          },
+          "additionalProperties": false
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "uiObservationFields": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "automationId",
+          "name",
+          "controlType",
+          "runtimeId",
+          "supportsInvoke",
+          "children"
+        ]
+      }
+    },
+    "uiDiscoveryToolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "tool",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "kind": {
+          "const": "tool_error"
+        },
+        "tool": {
+          "const": "ui_get_window_tree"
+        },
+        "code": {
+          "enum": [
+            "DEBUG_SESSION_NOT_FOUND",
+            "UI_DISCOVERY_UNAVAILABLE",
+            "UI_DISCOVERY_TARGET_UNAVAILABLE",
+            "UI_DISCOVERY_TARGET_CHANGED",
+            "UI_DISCOVERY_BUSY",
+            "UI_DISCOVERY_TIMEOUT",
+            "UI_DISCOVERY_CANCELLED",
+            "UI_DISCOVERY_UNREADABLE",
+            "UI_DISCOVERY_LIMIT_EXCEEDED",
+            "UI_DISCOVERY_CLEANUP_UNCONFIRMED"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
       "additionalProperties": false
     },
     "getOutputArguments": {
@@ -467,6 +858,34 @@
       },
       "additionalProperties": false
     },
+    "uiInvokeObservedSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "selection",
+        "invoked",
+        "method",
+        "atomicity"
+      ],
+      "properties": {
+        "kind": {
+          "const": "ui_invoke_observed_success"
+        },
+        "selection": {
+          "const": "runtime_id"
+        },
+        "invoked": {
+          "const": true
+        },
+        "method": {
+          "const": "InvokePattern"
+        },
+        "atomicity": {
+          "const": "unproven"
+        }
+      },
+      "additionalProperties": false
+    },
     "outputSuccess": {
       "type": "object",
       "required": [
@@ -575,6 +994,146 @@
             },
             "outcome": {
               "const": "unknown"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "tool",
+            "code",
+            "outcome",
+            "message"
+          ],
+          "properties": {
+            "kind": {
+              "const": "tool_error"
+            },
+            "tool": {
+              "const": "ui_invoke"
+            },
+            "code": {
+              "const": "UI_INVOKE_CLEANUP_UNCONFIRMED"
+            },
+            "outcome": {
+              "enum": [
+                "not_invoked",
+                "invoked",
+                "unknown"
+              ]
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "uiInvokeObservedToolError": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "tool",
+            "code",
+            "outcome",
+            "message"
+          ],
+          "properties": {
+            "kind": {
+              "const": "tool_error"
+            },
+            "tool": {
+              "const": "ui_invoke_observed"
+            },
+            "code": {
+              "enum": [
+                "DEBUG_SESSION_NOT_FOUND",
+                "UI_INVOKE_TARGET_UNAVAILABLE",
+                "UI_INVOKE_TARGET_CHANGED",
+                "ELEMENT_NOT_FOUND",
+                "ELEMENT_AMBIGUOUS",
+                "UI_INVOKE_SELECTION_UNREADABLE",
+                "UI_INVOKE_PATTERN_UNSUPPORTED",
+                "UI_INVOKE_BUSY",
+                "UI_INVOKE_ALREADY_USED",
+                "INVALID_TOOL_ARGUMENTS",
+                "UI_INVOKE_UNAVAILABLE"
+              ]
+            },
+            "outcome": {
+              "const": "not_invoked"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "tool",
+            "code",
+            "outcome",
+            "message"
+          ],
+          "properties": {
+            "kind": {
+              "const": "tool_error"
+            },
+            "tool": {
+              "const": "ui_invoke_observed"
+            },
+            "code": {
+              "const": "UI_INVOKE_OUTCOME_UNKNOWN"
+            },
+            "outcome": {
+              "const": "unknown"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "tool",
+            "code",
+            "outcome",
+            "message"
+          ],
+          "properties": {
+            "kind": {
+              "const": "tool_error"
+            },
+            "tool": {
+              "const": "ui_invoke_observed"
+            },
+            "code": {
+              "const": "UI_INVOKE_CLEANUP_UNCONFIRMED"
+            },
+            "outcome": {
+              "enum": [
+                "not_invoked",
+                "invoked",
+                "unknown"
+              ]
             },
             "message": {
               "type": "string",
@@ -1370,6 +1929,8 @@
             "add_breakpoint",
             "remove_breakpoint",
             "ui_invoke",
+            "ui_invoke_observed",
+            "ui_get_window_tree",
             "get_output",
             "get_output_tail"
           ]
@@ -1428,6 +1989,9 @@
           "$ref": "#/$defs/uiInvokeSuccess"
         },
         {
+          "$ref": "#/$defs/uiInvokeObservedSuccess"
+        },
+        {
           "$ref": "#/$defs/outputSuccess"
         },
         {
@@ -1435,6 +1999,15 @@
         },
         {
           "$ref": "#/$defs/uiInvokeToolError"
+        },
+        {
+          "$ref": "#/$defs/uiInvokeObservedToolError"
+        },
+        {
+          "$ref": "#/$defs/uiWindowTree"
+        },
+        {
+          "$ref": "#/$defs/uiDiscoveryToolError"
         },
         {
           "$ref": "#/$defs/debugSessionNotFound"
