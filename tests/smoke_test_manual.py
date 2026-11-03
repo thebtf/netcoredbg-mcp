@@ -7,9 +7,9 @@ Exact ``--scenario`` selection also retains every original diagnostic.
 Requires netcoredbg on PATH or NETCOREDBG_PATH. The normal producer builds its
 own fixtures/bridge; it does not require a prebuilt console fixture.
 Usage: python tests/smoke_test_manual.py [--extended-gui] [--scenario NAME]
-The opt-in ``Native WPF Concurrent Continue Stop`` and ``Native Terminal Output Retention``
-scenarios use prebuilt source native-host/fixture outputs and real netcoredbg;
-they never build or select the Python backend.
+The opt-in ``Native WPF Concurrent Continue Stop``, ``Native Terminal Output Retention``,
+and ``Native WPF Discovery To Observed Invoke`` scenarios use prebuilt source native-host/fixture
+outputs and real netcoredbg; they never build or select the Python backend.
 """
 
 import asyncio
@@ -8243,6 +8243,512 @@ async def test_native_terminal_output_retention() -> None:
             )
 
 
+async def test_native_wpf_discovery_to_invoke() -> None:
+    """Discover a WPF target, invoke it once by runtime ID, inspect its stop and observe its action."""
+    import shutil
+    from datetime import timedelta
+    from pathlib import Path
+
+    import psutil
+    from mcp import ClientSession, StdioServerParameters, types
+    from mcp.client.stdio import stdio_client
+
+    print("\nSOURCE-NATIVE WPF DISCOVERY TO OBSERVED INVOKE")
+    if os.name != "nt":
+        raise RuntimeError("The source-native WPF discovery scenario requires Windows")
+    windows_directory = os.environ.get("WINDIR") or os.environ.get("SystemRoot")
+    if (
+        not windows_directory
+        or not os.path.isabs(windows_directory)
+        or not os.path.isdir(windows_directory)
+    ):
+        raise RuntimeError("WPF requires an existing absolute WINDIR or SystemRoot")
+    root = Path(BASE)
+    host = root / "host/NetCoreDbg.Mcp.Stateless/bin/Debug/net8.0/NetCoreDbg.Mcp.Stateless.exe"
+    program = Path(WPF_DLL)
+    source = root / "tests/fixtures/WpfSmokeApp/MainWindow.xaml.cs"
+    configured_bridge = os.environ.get("FLAUI_BRIDGE_PATH")
+    bridge_directory = root / "bridge/bin/Debug/net8.0-windows"
+    bridge_candidates = (
+        [(root / configured_bridge).resolve()]
+        if configured_bridge
+        else [bridge_directory / "win-x64/FlaUIBridge.dll", bridge_directory / "FlaUIBridge.dll"]
+    )
+    bridge = next((path for path in bridge_candidates if path.is_file()), None)
+    if bridge is None:
+        raise RuntimeError(f"Required source-native FlaUI bridge is absent: {bridge_candidates}")
+    for prerequisite in (
+        host,
+        host.with_suffix(".dll"),
+        host.with_suffix(".runtimeconfig.json"),
+        program,
+        program.with_suffix(".pdb"),
+        program.with_suffix(".runtimeconfig.json"),
+        source,
+    ):
+        if not prerequisite.is_file():
+            raise RuntimeError(
+                f"Required source-native smoke prerequisite is absent: {prerequisite}"
+            )
+    configured = os.environ.get("NETCOREDBG_PATH")
+    debugger = (root / configured).resolve() if configured else shutil.which("netcoredbg")
+    if debugger is None or not Path(debugger).is_file():
+        raise RuntimeError("Real netcoredbg is required through NETCOREDBG_PATH or PATH")
+
+    lines = source.read_text(encoding="utf-8-sig").splitlines()
+    handlers = [
+        index
+        for index, line in enumerate(lines)
+        if re.match(
+            r"\s*(?:private|public|internal|protected)\s+void\s+NativeDiscoveryAction_Click\s*\(",
+            line,
+        )
+    ]
+    assert len(handlers) == 1, "The WPF fixture must define one NativeDiscoveryAction_Click handler"
+    body = next((index for index in range(handlers[0], len(lines)) if "{" in lines[index]), None)
+    assert body is not None, "The discovery action handler has no body"
+    statement = next(
+        (
+            index
+            for index in range(body + 1, len(lines))
+            if lines[index].strip() and not lines[index].lstrip().startswith("//")
+        ),
+        None,
+    )
+    assert statement is not None and lines[statement].strip() != "}", (
+        "The discovery action handler has no executable breakpoint statement"
+    )
+    breakpoint_line = statement + 1
+    metadata = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {
+            "name": "native-wpf-discovery-smoke",
+            "version": "1",
+        },
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
+    parameters = StdioServerParameters(
+        command=str(host),
+        cwd=str(root),
+        env={
+            "NETCOREDBG_PATH": str(Path(debugger).resolve()),
+            "FLAUI_BRIDGE_PATH": str(bridge.resolve()),
+            "WINDIR": windows_directory,
+            "DOTNET_ADD_GLOBAL_TOOLS_TO_PATH": "false",
+            "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
+        },
+    )
+    owned_host: Any = None
+    owned_processes: dict[tuple[int, float], Any] = {}
+    previous_children = {
+        (process.pid, process.create_time()) for process in psutil.Process().children()
+    }
+
+    def remember_owned_processes() -> None:
+        if owned_host is None or not owned_host.is_running():
+            return
+        try:
+            descendants = owned_host.children(recursive=True)
+        except psutil.NoSuchProcess:
+            return
+        for process in [owned_host, *descendants]:
+            try:
+                owned_processes[(process.pid, process.create_time())] = process
+            except psutil.NoSuchProcess:
+                pass
+
+    def content(result: dict[str, Any]) -> dict[str, Any]:
+        assert not result.get("isError", False), f"Native discovery journey tool failed: {result}"
+        data = _native_content(result)
+        blocks = result.get("content", [])
+        assert len(blocks) == 1 and blocks[0].get("type") == "text", (
+            "Native discovery journey omitted its JSON text mirror"
+        )
+        assert json.loads(blocks[0]["text"]) == data, "Native text and structured content differ"
+        return data
+
+    def require_observed_tree(tree: dict[str, Any]) -> list[dict[str, Any]]:
+        assert tree.get("kind") == "ui_window_tree" and tree.get("scope") == "main_window", (
+            "Discovery did not return the bound main-window tree"
+        )
+        assert tree.get("atomicity") == "unproven", "Discovery overclaims atomicity"
+
+        assert type(tree.get("truncated")) is bool, "Discovery omitted its truncation state"
+        nodes = tree.get("nodes")
+        assert isinstance(nodes, list) and nodes, "Discovery returned no root observation"
+        for index, node in enumerate(nodes):
+            assert node.get("nodeId") == index, "Discovery nodes are not in preorder"
+            parent = node.get("parentId")
+            assert parent is None if index == 0 else type(parent) is int and 0 <= parent < index, (
+                "Discovery has an invalid parent observation"
+            )
+            assert type(node.get("childrenComplete")) is bool, (
+                "Discovery omitted a node's child-completeness state"
+            )
+            for field in ("unavailableFields", "truncatedFields"):
+                assert isinstance(node.get(field), list) and all(
+                    isinstance(value, str) for value in node[field]
+                ), "Discovery omitted explicit field-completeness information"
+        assert nodes[0].get("runtimeId") == tree.get("window", {}).get("runtimeId"), (
+            "Discovery root and window runtime IDs differ"
+        )
+        if tree["truncated"] or any(
+            not node["childrenComplete"] or node["unavailableFields"] or node["truncatedFields"]
+            for node in nodes
+        ):
+            field_counts: dict[str, dict[str, int]] = {
+                "unavailableFields": {},
+                "truncatedFields": {},
+            }
+            for node in nodes:
+                for category, counts in field_counts.items():
+                    for field in node[category]:
+                        counts[field] = counts.get(field, 0) + 1
+            diagnostic_fields = (
+                "nodeId",
+                "controlType",
+                "childrenComplete",
+                "unavailableFields",
+                "truncatedFields",
+            )
+            diagnostic = {
+                "truncated": tree["truncated"],
+                "nodeCount": len(nodes),
+                "incompleteChildrenCount": sum(not node["childrenComplete"] for node in nodes),
+                **field_counts,
+                "firstNodes": [
+                    {field: node.get(field) for field in diagnostic_fields} for node in nodes[:20]
+                ],
+            }
+            print(
+                "Native tree is partial; global absence/uniqueness is unproven: "
+                f"{json.dumps(diagnostic, ensure_ascii=True)}"
+            )
+        return nodes
+
+    def readable_fields(node: dict[str, Any], *fields: str) -> bool:
+        return all(
+            node.get(field) is not None
+            and field not in node["unavailableFields"]
+            and field not in node["truncatedFields"]
+            for field in fields
+        )
+
+    try:
+        with open(os.devnull, "w", encoding="utf-8") as errlog:
+            async with stdio_client(parameters, errlog=errlog) as (read_stream, write_stream):
+                hosts = [
+                    process
+                    for process in psutil.Process().children()
+                    if (process.pid, process.create_time()) not in previous_children
+                    and os.path.normcase(process.exe()) == os.path.normcase(str(host.resolve()))
+                ]
+                assert len(hosts) == 1, "The SDK's newly owned native host is not unique"
+                owned_host = hosts[0]
+                remember_owned_processes()
+                async with ClientSession(
+                    read_stream, write_stream, read_timeout_seconds=timedelta(seconds=45)
+                ) as client:
+                    session_id = None
+                    invocation = None
+                    continuation = None
+                    stopped_successfully = False
+
+                    async def call(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+                        return await asyncio.wait_for(
+                            _call_native_tool(client, metadata, tool, arguments),
+                            timeout=40 if tool == "continue_execution" else 15,
+                        )
+
+                    async def wait_for_tree(count: int) -> tuple[dict[str, Any], dict[str, Any]]:
+                        last_observation: Any = None
+                        deadline = asyncio.get_running_loop().time() + 30
+                        while asyncio.get_running_loop().time() < deadline:
+                            result = await call(
+                                "ui_get_window_tree",
+                                {"debugSessionId": session_id, "maxDepth": 32, "maxChildren": 256},
+                            )
+                            last_observation = result
+                            if not result.get("isError", False):
+                                tree = content(result)
+                                nodes = require_observed_tree(tree)
+                                buttons = [
+                                    node
+                                    for node in nodes
+                                    if node.get("name") == "Native discovery action"
+                                    and node.get("controlType") == "Button"
+                                    and readable_fields(node, "name", "controlType")
+                                ]
+                                statuses = [
+                                    node
+                                    for node in nodes
+                                    if isinstance(node.get("name"), str)
+                                    and node["name"].startswith("Native discovery count: ")
+                                    and readable_fields(node, "name")
+                                ]
+                                assert len(buttons) <= 1 and len(statuses) <= 1, (
+                                    "Multiple matching discovery actions or counters were observed"
+                                )
+                                if buttons and statuses:
+                                    if statuses[0]["name"] == f"Native discovery count: {count}":
+                                        return tree, buttons[0]
+                                    assert (
+                                        count == 1
+                                        and statuses[0]["name"] == "Native discovery count: 0"
+                                    ), f"Unexpected discovery action counter: {statuses[0]['name']}"
+                            elif count != 0:
+                                content(result)
+                            await asyncio.sleep(0.05)
+                        raise AssertionError(
+                            f"Discovery counter {count} was not observed: {last_observation}"
+                        )
+
+                    async def wait_for_state(event: str) -> dict[str, Any]:
+                        while True:
+                            if invocation is not None and invocation.done():
+                                content(invocation.result())
+                            state = content(
+                                await call("get_debug_state", {"debugSessionId": session_id})
+                            )["state"]
+                            if state.get("event") == event:
+                                return state
+                            assert state.get("event") not in ("exited", "terminated"), (
+                                f"WPF exited before {event} was observed"
+                            )
+                            await asyncio.sleep(0.05)
+
+                    try:
+                        catalog_request = types.ListToolsRequest(
+                            params=types.PaginatedRequestParams(
+                                _meta=types.RequestParams.Meta(**metadata)
+                            )
+                        )
+                        catalog = await asyncio.wait_for(
+                            client.send_request(
+                                types.ClientRequest(catalog_request), types.ListToolsResult
+                            ),
+                            timeout=10,
+                        )
+                        assert (
+                            sum(tool.name == "ui_get_window_tree" for tool in catalog.tools) == 1
+                        ), "Native catalog lacks ui_get_window_tree"
+                        assert (
+                            sum(tool.name == "ui_invoke_observed" for tool in catalog.tools) == 1
+                        ), "Native catalog lacks ui_invoke_observed"
+                        assert not catalog.nextCursor, (
+                            "Native discovery catalog unexpectedly needs pagination"
+                        )
+                        started = content(await call("start_debug", {"program": str(program)}))
+                        session_id = started.get("debugSessionId")
+                        assert (
+                            started.get("kind") == "start_debug_success"
+                            and isinstance(session_id, str)
+                            and session_id
+                        ), "Native WPF debugger did not return a session ID"
+                        remember_owned_processes()
+                        tree, button = await asyncio.wait_for(wait_for_tree(0), timeout=35)
+                        process_id = tree.get("process", {}).get("processId")
+                        remember_owned_processes()
+                        assert type(process_id) is int and any(
+                            process.pid == process_id and process.is_running()
+                            for process in owned_processes.values()
+                        ), "Discovery did not identify the SDK host's owned debuggee"
+                        assert readable_fields(
+                            button, "automationId", "runtimeId", "supportsInvoke"
+                        ), "The observed button's action target fields are unavailable or truncated"
+                        assert readable_fields(tree["nodes"][0], "runtimeId"), (
+                            "The observed root runtime ID is unavailable or truncated"
+                        )
+                        automation_id = button.get("automationId")
+                        assert (
+                            isinstance(automation_id, str)
+                            and automation_id.strip()
+                            and len(automation_id) <= 256
+                        ), "The discovered button has no complete actionable AutomationId"
+                        assert button.get("supportsInvoke") is True, (
+                            "The discovered button lacks InvokePattern"
+                        )
+                        assert (
+                            sum(node.get("automationId") == automation_id for node in tree["nodes"])
+                            == 1
+                        ), "Multiple observed nodes share the chosen exact AutomationId"
+                        expected_target = {
+                            "processIdentity": tree["process"]["processIdentity"],
+                            "hwnd": tree["window"]["hwnd"],
+                            "rootRuntimeId": tree["window"]["runtimeId"],
+                            "elementRuntimeId": button["runtimeId"],
+                        }
+                        for field in ("processIdentity", "hwnd"):
+                            assert (
+                                isinstance(expected_target[field], str) and expected_target[field]
+                            ), f"Discovery omitted {field}"
+                        for field in ("rootRuntimeId", "elementRuntimeId"):
+                            values = expected_target[field]
+                            assert (
+                                isinstance(values, list)
+                                and 1 <= len(values) <= 64
+                                and all(
+                                    type(value) is int and -(2**31) <= value < 2**31
+                                    for value in values
+                                )
+                            ), f"Discovery omitted a complete {field}"
+                        check(
+                            "Native WPF observes an actionable button and same-response runtime-ID target",
+                            True,
+                        )
+
+                        added = content(
+                            await call(
+                                "add_breakpoint",
+                                {
+                                    "debugSessionId": session_id,
+                                    "file": str(source),
+                                    "line": breakpoint_line,
+                                },
+                            )
+                        )
+                        assert (
+                            added.get("kind") == "breakpoint_added"
+                            and added.get("verified") is True
+                        ), "The dynamically located discovery handler breakpoint was not verified"
+                        invocation = asyncio.create_task(
+                            call(
+                                "ui_invoke_observed",
+                                {
+                                    "debugSessionId": session_id,
+                                    "target": expected_target,
+                                    "expectedAutomationId": automation_id,
+                                },
+                            )
+                        )
+                        state = await asyncio.wait_for(wait_for_state("stopped"), timeout=20)
+                        thread_id = state.get("currentThreadId")
+                        assert state.get("stopReason") == "breakpoint" and type(thread_id) is int, (
+                            "The observed-target invoke did not reach a real breakpoint stop"
+                        )
+                        stack = content(
+                            await call(
+                                "get_call_stack",
+                                {
+                                    "debugSessionId": session_id,
+                                    "threadId": thread_id,
+                                },
+                            )
+                        )
+                        frames = stack.get("frames", [])
+                        assert (
+                            frames
+                            and "WpfSmokeApp.MainWindow.NativeDiscoveryAction_Click"
+                            in frames[0].get("name", "")
+                        ), "The invoke stop is not inside the real discovery handler"
+                        assert Path(frames[0].get("source", "")).resolve() == source.resolve(), (
+                            "The invoke stop does not identify the WPF fixture source"
+                        )
+                        assert frames[0].get("line") == added.get("actualLine", breakpoint_line), (
+                            "The invoke stop does not match the verified handler breakpoint"
+                        )
+                        check(
+                            "Native observed-target invoke reaches and inspects the real WPF handler stop",
+                            True,
+                        )
+
+                        continuation = asyncio.create_task(
+                            call(
+                                "continue_execution",
+                                {
+                                    "debugSessionId": session_id,
+                                    "threadId": thread_id,
+                                },
+                            )
+                        )
+                        await asyncio.wait_for(wait_for_state("continued"), timeout=15)
+                        invoked = content(
+                            await asyncio.wait_for(asyncio.shield(invocation), timeout=15)
+                        )
+                        assert (
+                            invoked.get("kind") == "ui_invoke_observed_success"
+                            and invoked.get("selection") == "runtime_id"
+                            and invoked.get("invoked") is True
+                            and invoked.get("method") == "InvokePattern"
+                            and invoked.get("atomicity") == "unproven"
+                        ), "The single observed-target InvokePattern call did not return success"
+                        await asyncio.wait_for(wait_for_tree(1), timeout=35)
+                        check("Native WPF tree observes count 1 after asynchronous resume", True)
+                        stopped = content(await call("stop_debug", {"debugSessionId": session_id}))
+                        assert stopped.get("kind") == "stop_debug_success", (
+                            "Native explicit cleanup failed"
+                        )
+                        stopped_successfully = True
+                        continued = await asyncio.wait_for(asyncio.shield(continuation), timeout=5)
+                        if continued.get("isError", False):
+                            assert _native_content(continued, error=True) == {
+                                "kind": "debug_session_not_found",
+                                "error": "DEBUG_SESSION_NOT_FOUND",
+                            }, f"Native continuation failed unexpectedly: {continued}"
+                        else:
+                            assert content(continued).get("kind") in (
+                                "continue_stopped",
+                                "continue_terminal",
+                                "continue_timed_out",
+                            ), f"Native continuation returned an unexpected outcome: {continued}"
+                    finally:
+                        try:
+                            remember_owned_processes()
+                            if session_id is not None and not stopped_successfully:
+                                cleanup = content(
+                                    await call("stop_debug", {"debugSessionId": session_id})
+                                )
+                                assert cleanup.get("kind") == "stop_debug_success", (
+                                    "Native failure cleanup failed"
+                                )
+                        finally:
+                            remember_owned_processes()
+                            pending = [
+                                task for task in (invocation, continuation) if task is not None
+                            ]
+                            for task in pending:
+                                if not task.done():
+                                    task.cancel()
+                            if pending:
+                                await asyncio.wait_for(
+                                    asyncio.gather(*pending, return_exceptions=True), timeout=5
+                                )
+    finally:
+        observation_error = ""
+        try:
+            _, alive = await asyncio.to_thread(
+                psutil.wait_procs, list(owned_processes.values()), timeout=5
+            )
+        except Exception as exc:
+            alive = list(owned_processes.values())
+            observation_error = f"Normal teardown observation failed: {type(exc).__name__}"
+        check(
+            "Native discovery normal teardown releases its owned host, adapter, helper and debuggee",
+            not alive and not observation_error,
+            observation_error or f"Surviving owned PIDs: {[process.pid for process in alive]}",
+        )
+        emergency_errors: list[str] = []
+        for process in alive:
+            try:
+                process.kill()
+            except psutil.NoSuchProcess:
+                pass
+            except Exception as exc:
+                emergency_errors.append(f"PID {process.pid} kill failed: {type(exc).__name__}")
+        try:
+            _, remaining = await asyncio.to_thread(psutil.wait_procs, alive, timeout=5)
+        except Exception as exc:
+            remaining = alive
+            emergency_errors.append(f"Emergency cleanup observation failed: {type(exc).__name__}")
+        if alive or emergency_errors:
+            check(
+                "Native discovery emergency cleanup releases only captured owned processes",
+                not remaining and not emergency_errors,
+                "; ".join(emergency_errors)
+                or f"Remaining owned PIDs: {[process.pid for process in remaining]}",
+            )
+
+
 def _base_scenarios() -> list[tuple[str, Callable[..., Any]]]:
     return [
         ("Hit Counting", test_hit_counting),
@@ -8368,6 +8874,7 @@ def _complete_scenario_catalog() -> list[tuple[str, Callable[..., Any]]]:
         ("Nullable Launch Environment", test_nullable_launch_environment),
         ("Native WPF Concurrent Continue Stop", test_native_wpf_concurrent_continue_stop),
         ("Native Terminal Output Retention", test_native_terminal_output_retention),
+        ("Native WPF Discovery To Observed Invoke", test_native_wpf_discovery_to_invoke),
         *_base_scenarios(),
         *_winforms_extended_scenarios(),
         *_wpf_extended_scenarios(),

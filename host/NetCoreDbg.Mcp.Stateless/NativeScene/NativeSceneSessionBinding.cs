@@ -95,17 +95,23 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
 
     private void OnUiInvokeAuthorityRevoked(NetCoreDbgSession _) => _uiInvoke.Retire();
 
-    internal Task<JsonObject> InvokeAsync(string automationId, Func<bool> isSessionCurrent, CancellationToken cancellationToken)
+    internal Task<JsonObject> InvokeAsync(string automationId, Func<bool> isSessionCurrent, CancellationToken cancellationToken,
+        JsonObject? expectedTarget = null, bool observed = false)
     {
         if (Volatile.Read(ref _disposed) != 0 || !isSessionCurrent())
-            return Task.FromResult(NativeUiInvokeResult.Refused("DEBUG_SESSION_NOT_FOUND"));
+            return Task.FromResult(NativeUiInvokeResult.Refused("DEBUG_SESSION_NOT_FOUND", observed));
         if (!OperatingSystem.IsWindows() || !TryGetBridgePath(out var bridgePath))
-            return Task.FromResult(NativeUiInvokeResult.Refused("UI_INVOKE_UNAVAILABLE"));
+            return Task.FromResult(NativeUiInvokeResult.Refused("UI_INVOKE_UNAVAILABLE", observed));
         if (_session is not { } session ||
             !session.TryGetNativeUiInvokeTargetIdentity(out var target) || !TryGetBoundWindowHandle(out var hwnd))
         {
-            return Task.FromResult(NativeUiInvokeResult.Refused("UI_INVOKE_TARGET_UNAVAILABLE"));
+            return Task.FromResult(NativeUiInvokeResult.Refused("UI_INVOKE_TARGET_UNAVAILABLE", observed));
         }
+        if (expectedTarget is not null &&
+            (NativeUiDiscoveryContract.Text(expectedTarget, "processIdentity") != target.ProcessIdentity ||
+             NativeUiDiscoveryContract.Text(expectedTarget, "hwnd") != hwnd.ToString(CultureInfo.InvariantCulture)))
+            return Task.FromResult(NativeUiInvokeResult.Refused("UI_INVOKE_TARGET_CHANGED", observed));
+
 
         // No observation gate or DAP lease spans this separately bounded UIA operation.
         return _uiInvoke.InvokeAsync(
@@ -113,7 +119,29 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
             () => Volatile.Read(ref _disposed) == 0 && isSessionCurrent() &&
                   session.TryGetNativeUiInvokeTargetIdentity(out var current) && target.Equals(current) &&
                   TryGetBoundWindowHandle(out var currentHwnd) && currentHwnd == hwnd,
-            cancellationToken);
+            cancellationToken, expectedTarget, observed);
+    }
+
+    internal async Task<JsonObject> ObserveWindowTreeAsync(int maxDepth, int maxChildren, Func<bool> isSessionCurrent,
+        CancellationToken cancellationToken)
+    {
+        if (Volatile.Read(ref _disposed) != 0 || !isSessionCurrent())
+            return NativeUiDiscoveryResult.Error("DEBUG_SESSION_NOT_FOUND");
+        if (!OperatingSystem.IsWindows() || !TryGetBridgePath(out var bridgePath))
+            return NativeUiDiscoveryResult.Error("UI_DISCOVERY_UNAVAILABLE");
+        if (_session is not { } session || !session.TryGetNativeUiInvokeTargetIdentity(out var target) ||
+            !TryGetBoundWindowHandle(out var hwnd))
+            return NativeUiDiscoveryResult.Error("UI_DISCOVERY_TARGET_UNAVAILABLE");
+
+        bool Current() => Volatile.Read(ref _disposed) == 0 && isSessionCurrent() &&
+            session.TryGetNativeUiInvokeTargetIdentity(out var current) && target.Equals(current) &&
+            TryGetBoundWindowHandle(out var currentHwnd) && currentHwnd == hwnd;
+        var result = await _uiInvoke.ObserveAsync(bridgePath, target, hwnd, maxDepth, maxChildren, Current, cancellationToken).ConfigureAwait(false);
+        if (NativeUiDiscoveryContract.Text(result, "kind") != "ui_window_tree")
+            return result;
+        if (cancellationToken.IsCancellationRequested)
+            return NativeUiDiscoveryResult.Error("UI_DISCOVERY_CANCELLED");
+        return Current() ? result : NativeUiDiscoveryResult.Error("UI_DISCOVERY_TARGET_CHANGED");
     }
 
     internal bool TryGetCandidate(out JsonElement candidate)
@@ -487,6 +515,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
         try
         {
             using var process = Process.GetProcessById(target.ProcessId);
+            _ = process.SafeHandle;
             if (process.HasExited ||
                 !StringComparer.Ordinal.Equals(
                     target.ProcessIdentity,

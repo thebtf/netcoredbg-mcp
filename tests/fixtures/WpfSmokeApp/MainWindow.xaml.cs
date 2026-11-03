@@ -26,6 +26,7 @@ public partial class MainWindow : Window
     private const string CanonicalMutableFileBaseline = "baseline";
     private long _galleryGeneration;
     private int _dataGridAnchorIndex;
+    private int _nativeDiscoveryCount;
     private int _dataGridCurrentIndex;
     private Point? _dragStartPoint;
     private CueRow? _dragSourceRow;
@@ -130,6 +131,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        AutomationProperties.SetAutomationId(NativeDiscoveryActionButton, Guid.NewGuid().ToString("N"));
         DataContext = _viewModel;
         _mutableFile = Environment.GetEnvironmentVariable("WPF_SMOKE_MUTABLE_FILE");
         _hoverCloseTimer = new DispatcherTimer
@@ -150,6 +152,13 @@ public partial class MainWindow : Window
             Closed += OnCalibrationClosed;
         }
     }
+
+    private void NativeDiscoveryAction_Click(object sender, RoutedEventArgs e)
+    {
+        _nativeDiscoveryCount++;
+        NativeDiscoveryStatus.Text = $"Native discovery count: {_nativeDiscoveryCount}";
+    }
+
     private void ResetGallery_Click(object sender, RoutedEventArgs e)
     {
         ResetGallery();

@@ -28,11 +28,13 @@ public static class Program
                 return;
             }
 
-            if (args.Length > 0 && string.Equals(args[0], "--native-ui-invoke-pipe", StringComparison.Ordinal))
+            if (args.Length > 0 && (string.Equals(args[0], "--native-ui-invoke-pipe", StringComparison.Ordinal) ||
+                string.Equals(args[0], "--native-ui-observe-pipe", StringComparison.Ordinal)))
             {
                 if (TryParseNativeScenePipeArguments(args, out var pipeName, out var nonce, out var processId))
                 {
-                    await RunNativeUiInvokePipeAsync(pipeName, nonce, processId);
+                    await RunNativeUiInvokePipeAsync(pipeName, nonce, processId,
+                        observationOnly: string.Equals(args[0], "--native-ui-observe-pipe", StringComparison.Ordinal));
                 }
 
                 return;
@@ -126,7 +128,7 @@ public static class Program
         }
     }
 
-    private static async Task RunNativeUiInvokePipeAsync(string pipeName, string nonce, int processId)
+    private static async Task RunNativeUiInvokePipeAsync(string pipeName, string nonce, int processId, bool observationOnly)
     {
         const int maximumInvokeFrameBytes = 8_192;
         using var pipe = new NamedPipeServerStream(
@@ -145,6 +147,21 @@ public static class Program
             }
 
             var correlationId = envelope["correlationId"]!.GetValue<string>();
+            if (observationOnly)
+            {
+                var observation = NativeUiWindowTreeCommand.Observe(request, processId, JsonRpcHandler.Automation);
+                var observationPayload = JsonSerializer.SerializeToUtf8Bytes(new { nonce, correlationId, response = observation });
+                if (observationPayload.Length > 262_144)
+                    observationPayload = JsonSerializer.SerializeToUtf8Bytes(new
+                    {
+                        nonce,
+                        correlationId,
+                        response = new { status = "refused", code = "UI_DISCOVERY_LIMIT_EXCEEDED" },
+                    });
+                await WriteFrameAsync(pipe, observationPayload);
+                return; // A read-only exchange never accepts a second frame or enters the action commit.
+            }
+
             var prepared = NativeUiInvokeCommand.Prepare(request, processId, JsonRpcHandler.Automation, out var command);
             using (command)
             {
@@ -152,7 +169,7 @@ public static class Program
                 if (command is null)
                     return;
 
-                // The observation pipe cannot reach this commit, even with an action-shaped request.
+                // Only a successfully prepared action can reach this commit, never the read-only branch above.
                 payload = await ReadFrameAsync(pipe, maximumInvokeFrameBytes);
                 if (payload is null || JsonNode.Parse(payload) is not JsonObject commit || commit.Count != 3 ||
                     !string.Equals(commit["nonce"]?.GetValue<string>(), nonce, StringComparison.Ordinal) ||

@@ -175,6 +175,8 @@ internal static class Program
         private const string AddBreakpoint = "add_breakpoint";
         private const string RemoveBreakpoint = "remove_breakpoint";
         private const string UiInvoke = "ui_invoke";
+        private const string UiInvokeObserved = "ui_invoke_observed";
+        private const string UiGetWindowTree = "ui_get_window_tree";
         private const string InputRequestId = "start_debug_program";
         private static readonly TimeSpan InitializeTimeout = TimeSpan.FromSeconds(10);
         private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
@@ -298,6 +300,8 @@ internal static class Program
                 AddBreakpoint => await AddBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 RemoveBreakpoint => await RemoveBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 UiInvoke => await UiInvokeAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                UiInvokeObserved => await UiInvokeObservedAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                UiGetWindowTree => await UiGetWindowTreeAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 _ when IsNativeSceneTool(request.Name) => await NativeSceneToolDispatcher.DispatchAsync(
                     request.Name,
                     request.Arguments,
@@ -1146,7 +1150,8 @@ internal static class Program
             RequestId requestId,
             CancellationToken cancellationToken)
         {
-            if (request.Arguments is not { Count: 2 } arguments ||
+            if (request.Arguments is not { Count: >= 2 and <= 3 } arguments ||
+                arguments.Keys.Any(key => key is not ("debugSessionId" or "automationId" or "expectedTarget")) ||
                 !arguments.TryGetValue("debugSessionId", out var sessionValue) || sessionValue.ValueKind != JsonValueKind.String ||
                 string.IsNullOrWhiteSpace(sessionValue.GetString()) ||
                 !arguments.TryGetValue("automationId", out var automationIdValue) || automationIdValue.ValueKind != JsonValueKind.String ||
@@ -1154,6 +1159,11 @@ internal static class Program
             {
                 return InvalidArguments(UiInvoke);
             }
+            JsonObject? expectedTarget = null;
+            if (arguments.TryGetValue("expectedTarget", out var expectedValue) &&
+                (!NativeUiDiscoveryContract.TryReadExpectation(expectedValue, out expectedTarget) ||
+                 JsonSerializer.SerializeToUtf8Bytes(arguments).Length > NativeUiDiscoveryContract.MaximumRequestBytes))
+                return InvalidArguments(UiInvoke);
 
             var sessionId = sessionValue.GetString()!;
             var binding = await ResolveNativeSceneBindingAsync(sessionId).ConfigureAwait(false);
@@ -1169,8 +1179,132 @@ internal static class Program
                     () => _sessions.TryGetValue(sessionId, out var current) && ReferenceEquals(current, session) &&
                           _nativeSceneBindings.TryGetValue(sessionId, out var currentBinding) && ReferenceEquals(currentBinding, binding) &&
                           _slots.ContainsKey(sessionId),
-                    cancellation.Token).ConfigureAwait(false);
+                    cancellation.Token, expectedTarget).ConfigureAwait(false);
                 return Result(payload, isError: payload["kind"]?.GetValue<string>() != "ui_invoke_success");
+            }
+            finally
+            {
+                _uiInvokeRequests.TryRemove(new KeyValuePair<RequestId, CancellationTokenSource>(requestId, cancellation));
+            }
+        }
+
+        private async ValueTask<CallToolResult> UiInvokeObservedAsync(
+            CallToolRequestParams request, RequestId requestId, CancellationToken cancellationToken)
+        {
+            if (!TryReadObservedInvokeArguments(request.Arguments, out var sessionId, out var automationId, out var target))
+                return InvalidArguments(UiInvokeObserved);
+
+            var binding = await ResolveNativeSceneBindingAsync(sessionId).ConfigureAwait(false);
+            if (binding is null || !_sessions.TryGetValue(sessionId, out var session))
+                return NotFound();
+
+            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _uiInvokeRequests.TryAdd(requestId, cancellation);
+            try
+            {
+                var payload = await binding.InvokeAsync(
+                    automationId,
+                    () => _sessions.TryGetValue(sessionId, out var current) && ReferenceEquals(current, session) &&
+                          _nativeSceneBindings.TryGetValue(sessionId, out var currentBinding) && ReferenceEquals(currentBinding, binding) &&
+                          _slots.ContainsKey(sessionId),
+                    cancellation.Token, target, observed: true).ConfigureAwait(false);
+                return Result(payload, isError: NativeUiDiscoveryContract.Text(payload, "kind") != "ui_invoke_observed_success");
+            }
+            finally
+            {
+                _uiInvokeRequests.TryRemove(new KeyValuePair<RequestId, CancellationTokenSource>(requestId, cancellation));
+            }
+        }
+
+        private static bool TryReadObservedInvokeArguments(
+            IDictionary<string, JsonElement>? arguments, out string sessionId, out string automationId, out JsonObject target)
+        {
+            sessionId = automationId = string.Empty;
+            target = null!;
+            try
+            {
+                if (arguments is not { Count: 3 } ||
+                    arguments.Keys.Any(key => key is not ("debugSessionId" or "target" or "expectedAutomationId")) ||
+                    !arguments.TryGetValue("debugSessionId", out var sessionValue) || sessionValue.ValueKind != JsonValueKind.String ||
+                    !IsValidObservedText(sessionValue.GetString(), NativeUiDiscoveryContract.MaximumRequestBytes) ||
+                    !arguments.TryGetValue("expectedAutomationId", out var idValue) || idValue.ValueKind != JsonValueKind.String ||
+                    !IsValidObservedText(idValue.GetString(), 256) ||
+                    JsonSerializer.SerializeToUtf8Bytes(arguments).Length > NativeUiDiscoveryContract.MaximumRequestBytes ||
+                    !arguments.TryGetValue("target", out var targetValue) ||
+                    !NativeUiDiscoveryContract.TryReadExpectation(targetValue, out var expectation) || expectation is null ||
+                    !IsValidObservedText(NativeUiDiscoveryContract.Text(expectation, "processIdentity"), NativeUiDiscoveryContract.MaximumRequestBytes) ||
+                    !IsValidObservedText(NativeUiDiscoveryContract.Text(expectation, "hwnd"), NativeUiDiscoveryContract.MaximumRequestBytes))
+                    return false;
+
+                sessionId = sessionValue.GetString()!;
+                automationId = idValue.GetString()!;
+                target = expectation;
+                return true;
+            }
+            catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or JsonException)
+            {
+                return false;
+            }
+        }
+
+        private static bool IsValidObservedText(string? text, int maximumCodePoints)
+        {
+            if (string.IsNullOrWhiteSpace(text) || text.Length > maximumCodePoints * 2)
+                return false;
+            var codePoints = 0;
+            for (var index = 0; index < text.Length; index++)
+            {
+                if (char.IsSurrogate(text[index]) &&
+                    (!char.IsHighSurrogate(text[index]) || ++index >= text.Length || !char.IsLowSurrogate(text[index])))
+                    return false;
+                if (++codePoints > maximumCodePoints)
+                    return false;
+            }
+            return true;
+        }
+
+        private async ValueTask<CallToolResult> UiGetWindowTreeAsync(
+            CallToolRequestParams request, RequestId requestId, CancellationToken cancellationToken)
+        {
+            var maxDepth = 3;
+            var maxChildren = 50;
+            if (request.Arguments is not { Count: >= 1 and <= 3 } arguments ||
+                arguments.Keys.Any(key => key is not ("debugSessionId" or "maxDepth" or "maxChildren")) ||
+                !arguments.TryGetValue("debugSessionId", out var sessionValue) || sessionValue.ValueKind != JsonValueKind.String ||
+                (sessionValue.GetString() is not { Length: <= NativeUiDiscoveryContract.MaximumRequestBytes } sessionText ||
+                 string.IsNullOrWhiteSpace(sessionText)) ||
+                (arguments.TryGetValue("maxDepth", out var depth) &&
+                    (depth.ValueKind != JsonValueKind.Number || !depth.TryGetInt32(out maxDepth) || maxDepth is < 0 or > 32)) ||
+                (arguments.TryGetValue("maxChildren", out var children) &&
+                    (children.ValueKind != JsonValueKind.Number || !children.TryGetInt32(out maxChildren) || maxChildren is < 1 or > 256)) ||
+                JsonSerializer.SerializeToUtf8Bytes(arguments).Length > NativeUiDiscoveryContract.MaximumRequestBytes)
+                return InvalidArguments(UiGetWindowTree);
+
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token);
+            _uiInvokeRequests.TryAdd(requestId, cancellation);
+            try
+            {
+                var sessionId = sessionValue.GetString()!;
+                var binding = await ResolveNativeSceneBindingAsync(sessionId).ConfigureAwait(false);
+                if (binding is null || !_sessions.TryGetValue(sessionId, out var session))
+                    return NotFound();
+                bool Current() => _sessions.TryGetValue(sessionId, out var current) && ReferenceEquals(current, session) &&
+                    _nativeSceneBindings.TryGetValue(sessionId, out var currentBinding) && ReferenceEquals(currentBinding, binding) &&
+                    _slots.ContainsKey(sessionId);
+                var payload = await binding.ObserveWindowTreeAsync(maxDepth, maxChildren, Current, cancellation.Token).ConfigureAwait(false);
+                if (NativeUiDiscoveryContract.Text(payload, "code") != "UI_DISCOVERY_CLEANUP_UNCONFIRMED")
+                {
+                    if (deadline.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                        payload = NativeUiDiscoveryResult.Error("UI_DISCOVERY_TIMEOUT");
+                    else if (cancellation.IsCancellationRequested)
+                        payload = NativeUiDiscoveryResult.Error("UI_DISCOVERY_CANCELLED");
+                    else if (NativeUiDiscoveryContract.Text(payload, "kind") == "ui_window_tree" && !Current())
+                        payload = NativeUiDiscoveryResult.Error("UI_DISCOVERY_TARGET_CHANGED");
+                }
+                var result = Result(payload, isError: NativeUiDiscoveryContract.Text(payload, "kind") != "ui_window_tree");
+                return JsonSerializer.SerializeToUtf8Bytes(result).Length <= NativeUiDiscoveryContract.MaximumResultBytes
+                    ? result : Result(NativeUiDiscoveryResult.Error("UI_DISCOVERY_LIMIT_EXCEEDED"), isError: true);
             }
             finally
             {
@@ -2498,7 +2632,9 @@ internal static class Program
                 Tool("continue_execution", "Continue execution using an explicitly named stopped thread; the request resumes all threads. Observe the next stop or terminal event for up to 30 seconds. An acknowledged timeout does not itself close the session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
                 Tool("add_breakpoint", "Add a source breakpoint to a live debug session while preserving its requested source breakpoint sets. Verification is an adapter observation, not proof of a hit. Conditions and hit counts are not supported.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"file\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"line\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"file\",\"line\"],\"additionalProperties\":false}"),
                 Tool("remove_breakpoint", "Remove every requested source breakpoint matching this file and line from a live debug session while preserving the remaining requested order. The source file need not still exist. An absent request returns removed:false without sending setBreakpoints; successful removal confirms adapter acknowledgement, not final Python wire parity.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"file\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"line\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"file\",\"line\"],\"additionalProperties\":false}"),
-                Tool("ui_invoke", "Invoke one uniquely resolved exact AutomationId in this session's bound debuggee main window using InvokePattern only. No physical input fallback. Success confirms the UIA call returned, not business completion; an unknown outcome must not be automatically retried.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"automationId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"pattern\":\"\\\\S\"}},\"required\":[\"debugSessionId\",\"automationId\"],\"additionalProperties\":false}"),
+                Tool("ui_invoke", "Invoke one uniquely resolved exact AutomationId in this session's bound debuggee main window using InvokePattern only. Optional expectedTarget compares identities observed by ui_get_window_tree; it cannot select a different target. Success confirms only that the UIA call returned; never automatically retry an unknown outcome.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"automationId":{"type":"string","minLength":1,"maxLength":256,"pattern":"\\S"},"expectedTarget":{"type":"object","properties":{"processIdentity":{"type":"string","minLength":1,"pattern":"\\S"},"hwnd":{"type":"string","minLength":1,"pattern":"\\S"},"rootRuntimeId":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"integer","minimum":-2147483648,"maximum":2147483647}},"elementRuntimeId":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"integer","minimum":-2147483648,"maximum":2147483647}}},"required":["processIdentity","hwnd","rootRuntimeId","elementRuntimeId"],"additionalProperties":false}},"required":["debugSessionId","automationId"],"additionalProperties":false}"""),
+                Tool("ui_invoke_observed", "Invoke one explicitly observed runtime-ID-selected element in the bound debuggee main window using InvokePattern only. Echo target identities from ui_get_window_tree and require the selected element's exact expectedAutomationId; other AutomationIds need not be unique. Complete bounded runtime-ID selection and commit-time checks fail closed. Runtime IDs may be reused and atomicity is unproven; never automatically retry an unknown outcome. No selector or input fallback.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"target":{"type":"object","properties":{"processIdentity":{"type":"string","minLength":1,"pattern":"\\S"},"hwnd":{"type":"string","minLength":1,"pattern":"\\S"},"rootRuntimeId":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"integer","minimum":-2147483648,"maximum":2147483647}},"elementRuntimeId":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"integer","minimum":-2147483648,"maximum":2147483647}}},"required":["processIdentity","hwnd","rootRuntimeId","elementRuntimeId"],"additionalProperties":false},"expectedAutomationId":{"type":"string","minLength":1,"maxLength":256,"pattern":"\\S"}},"required":["debugSessionId","target","expectedAutomationId"],"additionalProperties":false}"""),
+                Tool("ui_get_window_tree", "Read a bounded preorder tree of only the bound debuggee's current main window without activation, focus, input, expansion or resume. Atomicity is unproven; partial/unreadable observations cannot prove absence or uniqueness. This is not Python all-window parity.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"maxDepth":{"type":"integer","minimum":0,"maximum":32,"default":3},"maxChildren":{"type":"integer","minimum":1,"maximum":256,"default":50}},"required":["debugSessionId"],"additionalProperties":false}"""),
                 Tool("get_output", "Read retained debuggee output in DAP reader order. Category matching is case-sensitive. Clear consumes the snapshot only when category is omitted, null or empty; a nonempty category never clears the buffer.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"clear\":{\"type\":\"boolean\",\"default\":false},\"category\":{\"type\":[\"string\",\"null\"],\"default\":null}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("get_output_tail", "Read retained output without clearing it. Filter categories before joining event fragments and splitting Python-style logical lines. Positive lines selects the last N, zero selects all, and negative lines skips the first N.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"lines\":{\"type\":\"integer\",\"default\":50},\"category\":{\"type\":[\"string\",\"null\"],\"default\":null}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 .. NativeSceneToolDispatcher.ListTools(),

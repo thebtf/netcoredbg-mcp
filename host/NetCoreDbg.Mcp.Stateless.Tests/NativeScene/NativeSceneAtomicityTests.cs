@@ -341,7 +341,8 @@ public sealed class NativeSceneAtomicityTests
                     ["FLAUI_BRIDGE_PATH"] = bridgePath ?? ResolveBridgeAssemblyPath(),
                     ["CONTROLLED_UI_INVOKE_FAILURE_MODE"] = invokeTranscriptPath is null ? null : "disconnect-after-commit",
                     ["CONTROLLED_UI_INVOKE_TRANSCRIPT"] = invokeTranscriptPath,
-                }));
+                }),
+            startupTimeout: TimeSpan.FromSeconds(30));
 
     private static JsonObject InvokeArguments(string debugSessionId, string automationId) => new()
     {
@@ -356,7 +357,8 @@ public sealed class NativeSceneAtomicityTests
         bool expectedError)
     {
         var response = await driver.CallToolRawAsync(
-            "ui_invoke", arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId(requestId));
+            "ui_invoke", arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId(requestId),
+            timeout: TimeSpan.FromSeconds(15));
         var result = ModernMcpProcessDriver.RequireResult(response);
         Assert.Equal("complete", Text(result["resultType"]));
         Assert.True(
@@ -1112,7 +1114,8 @@ public sealed class NativeSceneAtomicityTests
             arguments,
             ModernMcpProcessDriver.CurrentMeta(),
             new RequestId(requestId),
-            cancellationToken);
+            cancellationToken,
+            timeout: tool == "start_debug" ? TimeSpan.FromSeconds(30) : null);
         var result = ModernMcpProcessDriver.RequireResult(response);
         Assert.Equal("complete", Text(result["resultType"]));
         var isError = result["isError"]?.GetValue<bool>() ?? false;
@@ -1209,8 +1212,51 @@ public sealed class NativeSceneAtomicityTests
         Assert.IsAssignableFrom<JsonValue>(stability["sequence"]);
     }
 
-    private static JsonObject AssertObservedFactsDescriptor(JsonObject manifest) =>
-        Assert.Single(ObservedFactsDescriptors(manifest));
+    private static JsonObject AssertObservedFactsDescriptor(JsonObject manifest)
+    {
+        try
+        {
+            return Assert.Single(ObservedFactsDescriptors(manifest));
+        }
+        catch (Xunit.Sdk.SingleException)
+        {
+            var issueCodes = Summarize((manifest["issues"] as JsonArray ?? new JsonArray())
+                .Select(issue => DiagnosticValue((issue as JsonObject)?["code"])));
+            var descriptors = Summarize((manifest["artifacts"] as JsonArray ?? new JsonArray())
+                .Select(descriptor =>
+                    $"mediaType={DiagnosticValue((descriptor as JsonObject)?["mediaType"])}, " +
+                    $"evidenceGrade={DiagnosticValue((descriptor as JsonObject)?["evidenceGrade"])}, " +
+                    $"byteLength={DiagnosticValue((descriptor as JsonObject)?["byteLength"])}"));
+            throw new Xunit.Sdk.XunitException(
+                $"Expected exactly one observed-facts descriptor; " +
+                $"manifest status={DiagnosticValue(manifest["status"])}; " +
+                $"issueCodes=[{issueCodes}]; descriptors=[{descriptors}].");
+        }
+
+        static string DiagnosticValue(JsonNode? node)
+        {
+            if (node is not JsonValue value)
+            {
+                return "<missing-or-invalid>";
+            }
+
+            if (value.TryGetValue<string>(out var text))
+            {
+                return JsonSerializer.Serialize(text.Length <= 128 ? text : text[..128] + "...");
+            }
+
+            return value.TryGetValue<long>(out var number)
+                ? JsonSerializer.Serialize(number)
+                : "<missing-or-invalid>";
+        }
+
+        static string Summarize(IEnumerable<string> entries)
+        {
+            var bounded = entries.Take(17).ToArray();
+            return string.Join("; ", bounded.Take(16)) +
+                (bounded.Length > 16 ? "; ... (additional entries omitted)" : string.Empty);
+        }
+    }
 
     private static IEnumerable<JsonObject> ObservedFactsDescriptors(JsonObject manifest) =>
         Array(manifest["artifacts"])

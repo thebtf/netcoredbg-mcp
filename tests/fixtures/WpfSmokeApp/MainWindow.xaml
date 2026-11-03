@@ -42,9 +42,23 @@
             <StackPanel Margin="5">
 
                 <!-- Invoke Button -->
-                <Button Content="Invoke Me" Margin="0,5"
-                        AutomationProperties.AutomationId="btnInvoke"
-                        Click="BtnInvoke_Click"/>
+                <Grid Margin="0,5">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Button Grid.Column="0" Content="Invoke Me"
+                            AutomationProperties.AutomationId="btnInvoke"
+                            Click="BtnInvoke_Click"/>
+                    <Button x:Name="NativeDiscoveryActionButton" Grid.Column="1"
+                            Content="Native discovery action" Margin="10,0,8,0" Padding="6,0"
+                            AutomationProperties.Name="Native discovery action"
+                            Click="NativeDiscoveryAction_Click"/>
+                    <TextBlock x:Name="NativeDiscoveryStatus" Grid.Column="2"
+                               Text="Native discovery count: 0" VerticalAlignment="Center"
+                               AutomationProperties.Name="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+                </Grid>
 
                 <!-- Toggle CheckBox -->
                 <CheckBox Content="Enable Feature" Margin="0,5"
