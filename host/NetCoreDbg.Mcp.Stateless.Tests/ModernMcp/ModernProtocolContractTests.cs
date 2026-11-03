@@ -108,6 +108,32 @@ public sealed class ModernProtocolContractTests
     }
 
     [Theory]
+    [InlineData("get_modules")]
+    [InlineData("get_progress")]
+    public async Task ToolsList_RuntimeInventory_PublishesRequiredOpaqueSessionOnly(string toolName)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(startupTimeout: TimeSpan.FromSeconds(10));
+        var result = ModernMcpProcessDriver.RequireResult(await driver.ListToolsRawAsync(
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId($"inventory-catalog-{toolName}")));
+
+        var tool = Assert.Single(
+            Assert.IsType<JsonArray>(result["tools"]).Select(static item => Assert.IsType<JsonObject>(item)),
+            item => item["name"]?.GetValue<string>() == toolName);
+        var schema = Assert.IsType<JsonObject>(tool["inputSchema"]);
+        Assert.Equal("object", schema["type"]?.GetValue<string>());
+        Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
+        Assert.Equal(["debugSessionId"], Assert.IsType<JsonArray>(schema["required"])
+            .Select(static item => item?.GetValue<string>()));
+        var property = Assert.Single(Assert.IsType<JsonObject>(schema["properties"]));
+        Assert.Equal("debugSessionId", property.Key);
+        var sessionId = Assert.IsType<JsonObject>(property.Value);
+        Assert.Equal("string", sessionId["type"]?.GetValue<string>());
+        Assert.Equal(1, sessionId["minLength"]?.GetValue<int>());
+        Assert.Equal("\\S", sessionId["pattern"]?.GetValue<string>());
+        await AssertNoNativeActionsAsync(driver);
+    }
+
+    [Theory]
     [InlineData(129, "\U0001F600", "DEBUG_SESSION_NOT_FOUND")]
     [InlineData(256, "\U0001F600", "DEBUG_SESSION_NOT_FOUND")]
     [InlineData(256, "x", "DEBUG_SESSION_NOT_FOUND")]
@@ -874,7 +900,7 @@ public sealed class ModernProtocolContractTests
     private static void AssertCatalog(JsonObject result)
     {
         var tools = Assert.IsType<JsonArray>(result["tools"]);
-        Assert.Equal(27, tools.Count);
+        Assert.Equal(29, tools.Count);
         Assert.Equal(
             [
                 "start_debug",
@@ -898,6 +924,8 @@ public sealed class ModernProtocolContractTests
                 "step_out",
                 "evaluate_expression",
                 "get_exception_info",
+                "get_modules",
+                "get_progress",
                 "get_ui_probe_capabilities",
                 "capture_visual_evidence",
                 "read_capture_artifact",

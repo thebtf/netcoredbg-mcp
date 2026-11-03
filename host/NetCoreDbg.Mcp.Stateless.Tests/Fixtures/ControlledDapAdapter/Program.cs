@@ -2002,6 +2002,42 @@ internal sealed class ControlledDapAdapter
     {
         foreach (var entry in entries.EnumerateArray())
         {
+            if (entry.TryGetProperty("event", out var eventName))
+            {
+                var name = eventName.GetString() ?? throw new InvalidDataException("Scripted event name is required.");
+                var count = entry.TryGetProperty("generatedCount", out var generatedCount) ? generatedCount.GetInt32() : 1;
+                var offset = entry.TryGetProperty("generatedIdOffset", out var idOffset) ? idOffset.GetInt32() : 0;
+                for (var index = 0; index < count; index++)
+                {
+                    var eventBody = JsonNode.Parse(entry.GetProperty("body").GetRawText());
+                    if (entry.TryGetProperty("generatedTextLength", out var textLength))
+                    {
+                        // Expand bounded inventory cases here, not in the child-process environment block.
+                        var character = entry.TryGetProperty("generatedTextCharacter", out var textCharacter)
+                            ? textCharacter.GetString()![0] : 'x';
+                        var text = new string(character, textLength.GetInt32());
+                        if (name == "module")
+                        {
+                            eventBody!["module"]!["id"] = offset + index;
+                            eventBody["module"]!["name"] = text;
+                        }
+                        else if (name == "progressStart")
+                        {
+                            eventBody!["progressId"] = $"generated-{offset + index}";
+                            eventBody["title"] = text;
+                        }
+                        else
+                        {
+                            throw new InvalidDataException("Generated inventory event must be module or progressStart.");
+                        }
+                    }
+
+                    await WriteEventAsync(name, eventBody, cancellationToken);
+                }
+
+                continue;
+            }
+
             var isRaw = entry.TryGetProperty("rawBody", out var rawBody);
             object body = entry;
             if (entry.TryGetProperty("prefixLength", out var prefixLength))
