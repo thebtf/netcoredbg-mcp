@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -154,10 +156,18 @@ class TestFlaUIBackendInvoke:
         assert response["data"]["requested"]["rootAutomationId"] == "selectorSafetyPanel"
 
 
+@pytest.mark.parametrize(
+    ("generation", "should_click", "refresh_during_connect"),
+    [(None, True, False), (2, True, False), (1, False, False), (2, False, True)],
+    ids=["legacy", "current", "stale", "refreshed-during-connect"],
+)
 @pytest.mark.asyncio
 async def test_ui_click_annotated_uses_cached_screen_bounds_after_annotated_screenshot(
     capturing_mcp,
     monkeypatch,
+    generation: int | None,
+    should_click: bool,
+    refresh_during_connect: bool,
 ) -> None:
     pil_image = pytest.importorskip("PIL.Image")
 
@@ -188,17 +198,30 @@ async def test_ui_click_annotated_uses_cached_screen_bounds_after_annotated_scre
         "netcoredbg_mcp.ui.screenshot.capture_window",
         lambda _hwnd: (png.getvalue(), 120, 80),
     )
+    observed = iter(
+        [
+            {"id": 7, "name": "Save", "type": "Button", "automationId": "saveButton",
+             "bounds": {"x": 110, "y": 220, "width": 40, "height": 20}},
+            {"id": 7, "name": "Delete", "type": "Button", "automationId": "deleteButton",
+             "bounds": {"x": 110, "y": 220, "width": 40, "height": 20}},
+            {"id": 7, "name": "Run", "type": "Button", "automationId": "runButton",
+             "bounds": {"x": 110, "y": 220, "width": 40, "height": 20}},
+        ]
+    )
+    refresh_collecting = threading.Event()
+    continue_refresh = threading.Event()
+
+    def collect_visible(_app, _max_depth, _interactive_only):
+        element = next(observed)
+        if refresh_during_connect and element["name"] == "Run":
+            refresh_collecting.set()
+            if not continue_refresh.wait(5):
+                raise TimeoutError("The synthetic refresh was not released")
+        return [element]
+
     monkeypatch.setattr(
         "netcoredbg_mcp.ui.screenshot.collect_visible_elements",
-        lambda _app, _max_depth, _interactive_only: [
-            {
-                "id": 7,
-                "name": "Save",
-                "type": "Button",
-                "automationId": "saveButton",
-                "bounds": {"x": 110, "y": 220, "width": 40, "height": 20},
-            }
-        ],
+        collect_visible,
     )
     monkeypatch.setattr(
         "ctypes.windll",
@@ -220,14 +243,47 @@ async def test_ui_click_annotated_uses_cached_screen_bounds_after_annotated_scre
             check_session_access=lambda ctx: None,
         )
         await capturing_mcp.tools["ui_take_annotated_screenshot"](SimpleNamespace())
-        response = await capturing_mcp.tools["ui_click_annotated"](
-            SimpleNamespace(),
-            element_id=7,
-        )
+        await capturing_mcp.tools["ui_take_annotated_screenshot"](SimpleNamespace())
+        if refresh_during_connect:
+            refresh = asyncio.create_task(
+                capturing_mcp.tools["ui_take_annotated_screenshot"](SimpleNamespace())
+            )
+            assert await asyncio.to_thread(refresh_collecting.wait, 5)
+            connecting = asyncio.Event()
+            continue_connect = asyncio.Event()
 
-    backend.click_at.assert_awaited_once_with(130, 230)
-    assert response["data"]["clicked"] is True
-    assert response["data"]["position"] == {"x": 130, "y": 230}
+            async def wait_for_connect():
+                connecting.set()
+                await continue_connect.wait()
+                return False
+
+            session.cancel_pending_stealth_foreground_restore = wait_for_connect
+            click = asyncio.create_task(
+                capturing_mcp.tools["ui_click_annotated"](
+                    SimpleNamespace(), element_id=7, generation=generation
+                )
+            )
+            try:
+                await asyncio.wait_for(connecting.wait(), 5)
+                continue_refresh.set()
+                assert isinstance(await asyncio.wait_for(refresh, 5), list)
+            finally:
+                continue_refresh.set()
+                continue_connect.set()
+            response = await asyncio.wait_for(click, 5)
+        else:
+            response = await capturing_mcp.tools["ui_click_annotated"](
+                SimpleNamespace(), element_id=7, generation=generation
+            )
+
+    if should_click:
+        backend.click_at.assert_awaited_once_with(130, 230)
+        assert response["data"]["clicked"] is True
+        assert response["data"]["element"] == "Delete"
+        assert response["data"]["position"] == {"x": 130, "y": 230}
+    else:
+        assert "error" in response
+        backend.click_at.assert_not_awaited()
 
 
 def _pywinauto_backend_with_element(element: MagicMock) -> tuple[object, SimpleNamespace]:

@@ -2489,30 +2489,29 @@ def register_ui_tools(
 
         Args:
             element_id: Element ID number from the annotated screenshot
-            generation: Generation counter from the screenshot response (optional, warns if stale)
+            generation: Optional screenshot generation; a mismatch is rejected before clicking.
         """
         try:
             access_error = check_session_access(ctx)
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
-            if _last_annotation is None:
+            annotation = _last_annotation
+            if annotation is None:
                 return build_error_response(
                     "No annotation data. Call ui_take_annotated_screenshot first.",
                     state=session.state.state,
                 )
 
-            # Warn if annotation data may be stale
-            stale_warning = None
-            current_gen = _last_annotation.get("generation", 0)
+            current_gen = annotation.get("generation", 0)
             if generation is not None and generation != current_gen:
-                stale_warning = (
-                    f"Annotation data may be stale: requested generation {generation}, "
-                    f"current is {current_gen}. Consider retaking the screenshot."
+                return build_error_response(
+                    f"Annotation generation {generation} is stale; current is {current_gen}. "
+                    "Take a new annotated screenshot before clicking.",
+                    state=session.state.state,
                 )
-                logger.warning(stale_warning)
 
-            elements = _last_annotation["elements"]
+            elements = annotation["elements"]
             target = None
             for e in elements:
                 if e["id"] == element_id:
@@ -2531,6 +2530,12 @@ def register_ui_tools(
             center_y = bounds["y"] + bounds["height"] // 2
 
             ui = await _ensure_ui_connected()
+            if annotation is not _last_annotation:
+                return build_error_response(
+                    "Annotation changed while preparing the click. "
+                    "Take a new annotated screenshot before clicking.",
+                    state=session.state.state,
+                )
             await ui.click_at(center_x, center_y)
 
             response_data: dict[str, Any] = {
@@ -2538,8 +2543,6 @@ def register_ui_tools(
                 "element": target["name"],
                 "position": {"x": center_x, "y": center_y},
             }
-            if stale_warning:
-                response_data["warning"] = stale_warning
 
             return build_response(
                 data=response_data,

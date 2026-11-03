@@ -520,9 +520,15 @@ comparison. `ui_resize_window()` reports request-versus-readback
 `target_comparability.status` as `MATCHED`, `MISMATCH`, or `UNAVAILABLE`;
 `resized=true` confirms request completion, not target equality.
 
-Use `ui_take_annotated_screenshot()` to receive Set-of-Mark labels, then invoke
-`ui_click_annotated(element_id=...)`. Use `ui_bring_to_front()` only when the
-debuggee should intentionally leave stealth mode.
+Use `ui_take_annotated_screenshot()` to receive Set-of-Mark labels, then pass
+its `generation` to `ui_click_annotated(element_id=..., generation=...)`.
+A supplied generation that differs from the latest screenshot is rejected
+before clicking. A refresh while the click is being prepared is also rejected.
+Omitting `generation` retains the legacy behavior and cannot detect that the
+caller is using an older screenshot. Even a matching generation does not prove
+that the window or element remains at the same screen position.
+Use `ui_bring_to_front()` only when the debuggee should intentionally leave
+stealth mode.
 
 ## Tool map
 
