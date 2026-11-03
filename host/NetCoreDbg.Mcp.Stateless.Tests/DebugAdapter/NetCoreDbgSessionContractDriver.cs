@@ -221,6 +221,14 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             beforeStop: beforeStop, beforeDispose: beforeDispose,
             pauseExecution: true, omitThreadId: threadId is null);
 
+    public Task<StepOverRegistryProbe> StepPairThroughRegistryAsync(
+        string tool,
+        int threadId,
+        CancellationToken cancellationToken,
+        Func<Task>? beforeCancellationInspection = null) =>
+        InvokeThroughRegistryAsync(threadId, cancellationToken, inspectCancellation: true,
+            beforeCancellationInspection: beforeCancellationInspection, stepTool: tool);
+
     private async Task<StepOverRegistryProbe> InvokeThroughRegistryAsync(
         int threadId,
         CancellationToken cancellationToken,
@@ -234,7 +242,8 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         bool continueExecution = false,
         (string File, int Line)? breakpoint = null,
         bool pauseExecution = false,
-        bool omitThreadId = false)
+        bool omitThreadId = false,
+        string? stepTool = null)
     {
         const string sessionId = "step-over-clock-session";
         var registryType = RequireType(_session.GetType().Assembly, "NetCoreDbg.Mcp.Stateless.Program+DebugSessionRegistry");
@@ -297,15 +306,22 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             Assert.True((bool)addSession!.Invoke(sessions, [sessionId, _session])!);
             Assert.True((bool)addSlot!.Invoke(slots, [sessionId, slot])!);
 
+            var stepMethod = stepTool switch
+            {
+                null => "StepOverAsync",
+                "step_into" => "StepIntoAsync",
+                "step_out" => "StepOutAsync",
+                _ => throw new ArgumentOutOfRangeException(nameof(stepTool)),
+            };
             var operationMethod = inspectCallStack
                 ? registryType.GetMethod("GetCallStackAsync", BindingFlags.Instance | BindingFlags.NonPublic,
                     binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(CancellationToken)], modifiers: null)
-                : registryType.GetMethod(pauseExecution ? "PauseAsync" : breakpoint.HasValue ? "AddBreakpointAsync" : continueExecution ? "ContinueAsync" : "StepOverAsync", BindingFlags.Instance | BindingFlags.NonPublic,
+                : registryType.GetMethod(pauseExecution ? "PauseAsync" : breakpoint.HasValue ? "AddBreakpointAsync" : continueExecution ? "ContinueAsync" : stepMethod, BindingFlags.Instance | BindingFlags.NonPublic,
                     binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(ModelContextProtocol.Protocol.RequestId), typeof(CancellationToken)], modifiers: null);
             Assert.NotNull(operationMethod);
             var request = new ModelContextProtocol.Protocol.CallToolRequestParams
             {
-                Name = pauseExecution ? "pause_execution" : inspectCallStack ? "get_call_stack" : breakpoint.HasValue ? "add_breakpoint" : continueExecution ? "continue_execution" : "step_over",
+                Name = pauseExecution ? "pause_execution" : inspectCallStack ? "get_call_stack" : breakpoint.HasValue ? "add_breakpoint" : continueExecution ? "continue_execution" : stepTool ?? "step_over",
                 Arguments = new Dictionary<string, JsonElement>
                 {
                     ["debugSessionId"] = JsonSerializer.SerializeToElement(sessionId),
@@ -2197,7 +2213,9 @@ internal sealed record FixtureTranscriptEntry(
         var root = document.RootElement;
         return new FixtureTranscriptEntry(
             root.GetProperty("kind").GetString() ?? throw new InvalidDataException("Fixture transcript kind is absent."),
-            root.TryGetProperty("sequence", out var sequence) ? sequence.GetInt32() : null,
+            root.TryGetProperty("sequence", out var sequence)
+                && sequence.ValueKind == JsonValueKind.Number
+                && sequence.TryGetInt32(out var sequenceValue) ? sequenceValue : null,
             root.TryGetProperty("command", out var command) ? command.GetString() : null,
             root.TryGetProperty("arguments", out var arguments) ? arguments.GetString() : null,
             root.TryGetProperty("rawPayload", out var rawPayload) ? rawPayload.GetString() : null,

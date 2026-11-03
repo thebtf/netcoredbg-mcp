@@ -760,7 +760,16 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         return response;
     }
 
-    internal async Task<DapStepOverResult> StepOverAsync(int threadId, CancellationToken cancellationToken)
+    internal Task<DapStepOverResult> StepOverAsync(int threadId, CancellationToken cancellationToken) =>
+        StepAsync(threadId, DapStepKind.Over, cancellationToken);
+
+    internal Task<DapStepOverResult> StepIntoAsync(int threadId, CancellationToken cancellationToken) =>
+        StepAsync(threadId, DapStepKind.Into, cancellationToken);
+
+    internal Task<DapStepOverResult> StepOutAsync(int threadId, CancellationToken cancellationToken) =>
+        StepAsync(threadId, DapStepKind.Out, cancellationToken);
+
+    private async Task<DapStepOverResult> StepAsync(int threadId, DapStepKind kind, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!TryAdmitExecution())
@@ -783,7 +792,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                         return DapStepOverResult.Refused;
                     }
 
-                    active = new StepOverRecord(threadId, cancellationToken);
+                    active = new StepOverRecord(threadId, kind, cancellationToken);
                     _activeStepOver = active;
                     _state = _state with { CurrentThreadId = null };
                     ClearCallStackEligibility();
@@ -791,7 +800,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 }
 
                 request = await BeginRequestAsync(
-                    "next",
+                    active.Command,
                     new { threadId },
                     _requestTimeout,
                     cancellationToken,
@@ -1751,20 +1760,21 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private bool FailActiveStepOverForWrongCorrelation(int requestSequence, string? command)
     {
-        if (!string.Equals(command, "next", StringComparison.Ordinal))
+        if (command is not ("next" or "stepIn" or "stepOut"))
         {
             return false;
         }
 
         lock (_stateGate)
         {
-            if (_activeStepOver is not { } active || active.RequestSequence == requestSequence)
+            if (_activeStepOver is not { } active || active.RequestSequence == requestSequence
+                || !string.Equals(command, active.Command, StringComparison.Ordinal))
             {
                 return false;
             }
 
             active.Completion.TrySetException(new InvalidDataException(
-                $"DAP next response for request '{requestSequence}' did not match active request '{active.RequestSequence}'."));
+                $"DAP {active.Command} response for request '{requestSequence}' did not match active request '{active.RequestSequence}'."));
             return true;
         }
     }
@@ -3806,7 +3816,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private sealed record DapPauseArguments([property: JsonPropertyName("threadId")] int ThreadId);
 
-    private sealed class StepOverRecord(int threadId, CancellationToken callerCancellation) : IDisposable
+    private sealed class StepOverRecord(int threadId, DapStepKind kind, CancellationToken callerCancellation) : IDisposable
     {
         private bool _acknowledged;
         private int _writeStarted;
@@ -3816,6 +3826,13 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         private CancellationTokenRegistration _callerCancellationRegistration;
 
         public int ThreadId { get; } = threadId;
+        public string Command { get; } = kind switch
+        {
+            DapStepKind.Over => "next",
+            DapStepKind.Into => "stepIn",
+            DapStepKind.Out => "stepOut",
+            _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+        };
         public int RequestSequence => Volatile.Read(ref _requestSequence);
         public bool WriteStarted => Volatile.Read(ref _writeStarted) != 0;
         public bool CommittedWrite => Volatile.Read(ref _committedWrite) != 0;
@@ -4139,6 +4156,13 @@ internal sealed class DapBreakpointCanceledException(bool requiresDrain, Excepti
     : OperationCanceledException("Breakpoint update was cancelled.", innerException, cancellationToken)
 {
     internal bool RequiresDrain { get; } = requiresDrain;
+}
+
+internal enum DapStepKind
+{
+    Over,
+    Into,
+    Out,
 }
 
 internal enum DapStepOverOutcome

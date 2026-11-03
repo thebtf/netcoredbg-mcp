@@ -181,6 +181,8 @@ internal static class Program
         private const string GetOutput = "get_output";
         private const string GetOutputTail = "get_output_tail";
         private const string StepOver = "step_over";
+        private const string StepInto = "step_into";
+        private const string StepOut = "step_out";
         private const string ContinueExecution = "continue_execution";
         private const string PauseExecution = "pause_execution";
         private const string AddBreakpoint = "add_breakpoint";
@@ -307,6 +309,8 @@ internal static class Program
                 GetOutput => await GetOutputAsync(request, cancellationToken).ConfigureAwait(false),
                 GetOutputTail => await GetOutputAsync(request, cancellationToken, tail: true).ConfigureAwait(false),
                 StepOver => await StepOverAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                StepInto => await StepIntoAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                StepOut => await StepOutAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 ContinueExecution => await ContinueAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 PauseExecution => await PauseAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 AddBreakpoint => await AddBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
@@ -887,14 +891,40 @@ internal static class Program
             ? Error("dap_scopes_protocol_error", "DAP_SCOPES_PROTOCOL_ERROR")
             : Error("dap_variables_protocol_error", "DAP_VARIABLES_PROTOCOL_ERROR");
 
-        private async ValueTask<CallToolResult> StepOverAsync(
+        private ValueTask<CallToolResult> StepOverAsync(
             CallToolRequestParams request,
             RequestId requestId,
+            CancellationToken cancellationToken) =>
+            StepAsync(request, requestId, DapStepKind.Over, cancellationToken);
+
+        private ValueTask<CallToolResult> StepIntoAsync(
+            CallToolRequestParams request,
+            RequestId requestId,
+            CancellationToken cancellationToken) =>
+            StepAsync(request, requestId, DapStepKind.Into, cancellationToken);
+
+        private ValueTask<CallToolResult> StepOutAsync(
+            CallToolRequestParams request,
+            RequestId requestId,
+            CancellationToken cancellationToken) =>
+            StepAsync(request, requestId, DapStepKind.Out, cancellationToken);
+
+        private async ValueTask<CallToolResult> StepAsync(
+            CallToolRequestParams request,
+            RequestId requestId,
+            DapStepKind kind,
             CancellationToken cancellationToken)
         {
+            var tool = kind switch
+            {
+                DapStepKind.Over => StepOver,
+                DapStepKind.Into => StepInto,
+                DapStepKind.Out => StepOut,
+                _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+            };
             if (!TryReadStepOverArguments(request.Arguments, out var arguments))
             {
-                return InvalidArguments(StepOver);
+                return InvalidArguments(tool);
             }
 
             if (!_sessions.TryGetValue(arguments.SessionId, out var session)
@@ -922,29 +952,54 @@ internal static class Program
                     return NotFound();
                 }
 
-                var stepOver = await session.StepOverAsync(arguments.ThreadId, operation.Token).ConfigureAwait(false);
+                var stepOver = await (kind switch
+                {
+                    DapStepKind.Into => session.StepIntoAsync(arguments.ThreadId, operation.Token),
+                    DapStepKind.Out => session.StepOutAsync(arguments.ThreadId, operation.Token),
+                    _ => session.StepOverAsync(arguments.ThreadId, operation.Token),
+                }).ConfigureAwait(false);
                 if (stepOver.Outcome == DapStepOverOutcome.Refused)
                 {
-                    return Error("dap_step_over_refused", "DAP_STEP_OVER_REFUSED");
+                    return kind switch
+                    {
+                        DapStepKind.Into => Error("dap_step_into_refused", "DAP_STEP_INTO_REFUSED"),
+                        DapStepKind.Out => Error("dap_step_out_refused", "DAP_STEP_OUT_REFUSED"),
+                        _ => Error("dap_step_over_refused", "DAP_STEP_OVER_REFUSED"),
+                    };
                 }
 
                 if (stepOver.Outcome == DapStepOverOutcome.Succeeded)
                 {
-                    return Result(new StepOverSuccessContent("step_over_success", stepOver.ThreadId), isError: false);
+                    return Result(new StepOverSuccessContent(kind switch
+                    {
+                        DapStepKind.Into => "step_into_success",
+                        DapStepKind.Out => "step_out_success",
+                        _ => "step_over_success",
+                    }, stepOver.ThreadId), isError: false);
                 }
 
                 closeAfterLease = true;
                 if (stepOver.Outcome == DapStepOverOutcome.Terminal)
                 {
-                    return Result(new StepOverTerminalContent("step_over_terminal", stepOver.Terminal!, stepOver.ExitCode), isError: false);
+                    return Result(new StepOverTerminalContent(kind switch
+                    {
+                        DapStepKind.Into => "step_into_terminal",
+                        DapStepKind.Out => "step_out_terminal",
+                        _ => "step_over_terminal",
+                    }, stepOver.Terminal!, stepOver.ExitCode), isError: false);
                 }
 
                 if (stepOver.Outcome == DapStepOverOutcome.TimedOut)
                 {
-                    return Result(new StepOverTimedOutContent("step_over_timed_out", stepOver.ThreadId, 30), isError: false);
+                    return Result(new StepOverTimedOutContent(kind switch
+                    {
+                        DapStepKind.Into => "step_into_timed_out",
+                        DapStepKind.Out => "step_out_timed_out",
+                        _ => "step_over_timed_out",
+                    }, stepOver.ThreadId, 30), isError: false);
                 }
 
-                throw new InvalidOperationException("Unknown step-over outcome.");
+                throw new InvalidOperationException("Unknown step outcome.");
             }
             catch (OperationCanceledException) when (callerCancellation.IsCancellationRequested)
             {
@@ -954,7 +1009,12 @@ internal static class Program
             catch (Exception)
             {
                 closeAfterLease = true;
-                return Error("dap_step_over_protocol_error", "DAP_STEP_OVER_PROTOCOL_ERROR");
+                return kind switch
+                {
+                    DapStepKind.Into => Error("dap_step_into_protocol_error", "DAP_STEP_INTO_PROTOCOL_ERROR"),
+                    DapStepKind.Out => Error("dap_step_out_protocol_error", "DAP_STEP_OUT_PROTOCOL_ERROR"),
+                    _ => Error("dap_step_over_protocol_error", "DAP_STEP_OVER_PROTOCOL_ERROR"),
+                };
             }
             finally
             {
@@ -2774,6 +2834,8 @@ internal static class Program
                 Tool("ui_get_window_tree", "Read a bounded preorder tree of only the bound debuggee's current main window without activation, focus, input, expansion or resume. Atomicity is unproven; partial/unreadable observations cannot prove absence or uniqueness. This is not Python all-window parity.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"maxDepth":{"type":"integer","minimum":0,"maximum":32,"default":3},"maxChildren":{"type":"integer","minimum":1,"maximum":256,"default":50}},"required":["debugSessionId"],"additionalProperties":false}"""),
                 Tool("get_output", "Read retained debuggee output in DAP reader order. Category matching is case-sensitive. Clear consumes the snapshot only when category is omitted, null or empty; a nonempty category never clears the buffer.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"clear\":{\"type\":\"boolean\",\"default\":false},\"category\":{\"type\":[\"string\",\"null\"],\"default\":null}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("get_output_tail", "Read retained output without clearing it. Filter categories before joining event fragments and splitting Python-style logical lines. Positive lines selects the last N, zero selects all, and negative lines skips the first N.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"lines\":{\"type\":\"integer\",\"default\":50},\"category\":{\"type\":[\"string\",\"null\"],\"default\":null}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
+                Tool("step_into", "Step into one explicitly named stopped thread. Completion requires the correlated acknowledgement and a later exact step stop; inspect the observed stack to establish whether the adapter entered a callee or stepped over.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
+                Tool("step_out", "Step out of one explicitly named stopped thread. Completion requires the correlated acknowledgement and a later exact step stop; inspect the observed stack to establish the caller.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
                 .. NativeSceneToolDispatcher.ListTools(),
             ],
             TimeToLive = CacheLifetime,
