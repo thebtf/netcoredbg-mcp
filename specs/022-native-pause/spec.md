@@ -1,6 +1,6 @@
 # Native DAP Pause
 
-Status: implemented with passing controlled source checks; real-debugger consumer proof is partial, and integration and delivery remain pending. This additive source slice advances the .NET replacement; Python remains the installed default and rollback. It does not complete migration, installed delivery, or full legacy wire parity.
+Status: source integrated via PR #387 at `f152e60de5b8d599db7a7fd135436170a15aed50`, with passing controlled source checks. Real-debugger consumer proof is partial and installed delivery remains pending. This additive slice advances the .NET replacement; Python remains the installed default and rollback. It does not complete migration, installed delivery, or full legacy wire parity.
 
 ## Consumer outcome
 
