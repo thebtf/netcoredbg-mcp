@@ -188,7 +188,7 @@ public sealed class OutputContractTests(ITestOutputHelper output)
     [InlineData("unknown", "")]
     public async Task GetOutput_FilteredClear_ReturnsMatchesWithoutClearingAnyCategory(string category, string expected)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(OutputOptions(launch: MixedOutput()));
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: MixedOutput()));
         var token = await StartSessionAsync(driver, "output-filtered-clear-start");
 
         Assert.Equal(expected, await ReadOutputAsync(driver, token, "output-filtered-clear", clear: true, category: category));
@@ -396,7 +396,7 @@ public sealed class OutputContractTests(ITestOutputHelper output)
     public async Task GetOutput_AggregateLimit_IncludesTruncationSuffixAndNeverRetainsPartialEntries(
         int maximumTotal, string expectedInitial, string expectedAfterAppend)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(OutputOptions(
+        await using var driver = await StartTailDriverAsync(OutputOptions(
             launch: new JsonArray(Output("xy"), Output("abcdef")),
             batches: new JsonArray(Batch(Output("Z"))),
             maximumEntry: 3,
@@ -1293,7 +1293,7 @@ public sealed class OutputContractTests(ITestOutputHelper output)
     {
         var response = await driver.CallToolRawAsync(
             "start_debug", new JsonObject { ["program"] = driver.InertProgramPath },
-            ModernMcpProcessDriver.CurrentMeta(), new RequestId(requestId));
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId(requestId), timeout: TimeSpan.FromSeconds(10));
         var result = ModernMcpProcessDriver.RequireResult(response);
         if (result["isError"]?.GetValue<bool>() == true)
         {
