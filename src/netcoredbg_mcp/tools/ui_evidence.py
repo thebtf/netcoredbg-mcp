@@ -28,6 +28,8 @@ from ..ui.grid import (
     snapshot_grid,
 )
 from ..ui.key_sequence import run_scoped_key_sequence, validate_scoped_key_sequence
+from ..ui.provider_text import blocked as provider_text_blocked
+from ..ui.provider_text import replace_for_session
 from ..ui.snapshots import (
     ALLOWED_UI_FIELDS,
     UISnapshotStore,
@@ -233,14 +235,60 @@ def register_ui_evidence_tools(
         selection_start: int | None = None,
         selection_end: int | None = None,
         text: str | None = None,
+        replacement_mode: str | None = None,
     ) -> dict:
-        """Read or safely replace bounded TextBox/text evidence."""
+        """Read text or explicitly set one provider value with verified readback.
+
+        Replacement requires replacement_mode="provider_value" and an exact,
+        unique automation_id/name/control_type selector. The tool makes no explicit
+        keyboard, pointer or focus calls; UIA/provider behavior may still move focus.
+        Undo, caret and application binding behavior need not match keyboard typing.
+        """
         try:
             access_error = check_session_access(ctx)
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
             canonical_action = _TEXT_ACTION_ALIASES.get(action, action)
+            if canonical_action == "set_text":
+                raw_selector = {
+                    key: value
+                    for key, value in (
+                        ("automation_id", automation_id),
+                        ("name", name),
+                        ("control_type", control_type),
+                        ("root_id", root_id),
+                        ("xpath", xpath),
+                    )
+                    if value is not None
+                }
+                if not raw_selector:
+                    result = {
+                        "status": "FAIL",
+                        "reason": "invalid selector",
+                        "effect_state": "not_started",
+                        "verified": False,
+                    }
+                elif text is None:
+                    result = {
+                        "status": "FAIL",
+                        "reason": "text is required",
+                        "effect_state": "not_started",
+                        "verified": False,
+                    }
+                else:
+                    result = await replace_for_session(
+                        session,
+                        selector=raw_selector,
+                        text=text,
+                        replacement_mode=replacement_mode,
+                    )
+                return build_response(data=result, state=session.state.state)
+            if replacement_mode is not None:
+                return build_response(
+                    data=provider_text_blocked("replacement_mode_requires_set_text"),
+                    state=session.state.state,
+                )
             if action not in _TEXT_ACTIONS:
                 return build_response(
                     data={
@@ -263,16 +311,6 @@ def register_ui_evidence_tools(
                     state=session.state.state,
                 )
 
-            if canonical_action == "set_text" and text is None:
-                return build_response(
-                    data={
-                        "status": "FAIL",
-                        "reason": "text is required",
-                        "action": action,
-                    },
-                    state=session.state.state,
-                )
-
             selection_range: tuple[int, int] | None = None
             if canonical_action == "assert_selection":
                 if selection_start is None or selection_end is None:
@@ -286,15 +324,7 @@ def register_ui_evidence_tools(
                     )
                 selection_range = (selection_start, selection_end)
 
-            backend = await _ensure_ui_connected(observation=canonical_action != "set_text")
-            if canonical_action == "set_text":
-                backend_provider = _static_backend_provider(backend)
-                adapters = ui_operation_adapters(backend_provider)
-                result = await adapters["ui.text.set_text"](selector=selector, text=text)
-                return build_response(
-                    data=_strip_unbounded_evidence_value(result),
-                    state=session.state.state,
-                )
+            backend = await _ensure_ui_connected(observation=True)
             if canonical_action == "get_state":
                 return build_response(
                     data=await read_textbox_state(backend, selector),
@@ -1298,13 +1328,6 @@ def _strip_unbounded_evidence_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_strip_unbounded_evidence_value(item) for item in value]
     return value
-
-
-def _static_backend_provider(backend: Any) -> Callable[[], Any]:
-    async def _provider() -> Any:
-        return backend
-
-    return _provider
 
 
 async def _confirm_grid_selection(

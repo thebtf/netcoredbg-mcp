@@ -1745,6 +1745,8 @@ def _plan_has_ui_operations(plan: dict[str, Any]) -> bool:
     for section_name in ("steps", "actions", "assertions", "evidence"):
         for item in plan.get(section_name, []) or []:
             name = _raw_step_name(item)
+            if name == "ui.text.set_text":
+                continue
             if name in UI_OPERATION_NAMES or name.startswith(UI_OPERATION_PREFIXES):
                 return True
     return False

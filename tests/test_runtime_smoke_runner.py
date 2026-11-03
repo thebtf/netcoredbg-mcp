@@ -564,6 +564,143 @@ async def test_runner_eagerly_connects_ui_after_launch_before_freshness() -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("step_style", ["op", "name-args"])
+@pytest.mark.parametrize("admitted", [False, True], ids=["omitted-mode", "provider-mode"])
+async def test_runner_provider_only_text_plan_does_not_eagerly_connect_ui(
+    step_style: str,
+    admitted: bool,
+) -> None:
+    session = FakeRuntimeSmokeSession()
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    session.replace_text_provider = AsyncMock(
+        return_value={"status": "PASS", "effect_state": "completed", "verified": True}
+    )
+    backend_provider = AsyncMock()
+    ensure_connected = AsyncMock(
+        name="ui.ensure_connected", side_effect=session.ui_ensure_connected
+    )
+    adapters = ui_operation_adapters(backend_provider, session=session)
+    args: dict[str, Any] = {
+        "selector": {"automation_id": "CueTextBox"},
+        "text": "Replaced text",
+    }
+    if admitted:
+        args["replacement_mode"] = "provider_value"
+    step = (
+        {"op": "ui.text.set_text", **args}
+        if step_style == "op"
+        else {"name": "ui.text.set_text", "args": args}
+    )
+
+    result = await RuntimeSmokeRunner(
+        session,
+        service_adapters={
+            "ui.ensure_connected": ensure_connected,
+            "ui.text.set_text": adapters["ui.text.set_text"],
+        },
+    ).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v1",
+            "launch": {"program": "Smoke.dll"},
+            "steps": [step],
+        }
+    )
+
+    ensure_connected.assert_not_awaited()
+    backend_provider.assert_not_awaited()
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+    session.wait_for_pending_stealth_foreground_restore.assert_not_awaited()
+    assert session.workflow_calls == []
+    if admitted:
+        assert result["status"] == "PASS"
+        assert session.launch_calls == 1
+        assert [item["name"] for item in result["completed_steps"]] == [
+            "launch",
+            "ui.text.set_text",
+        ]
+        session.replace_text_provider.assert_awaited_once_with(
+            {"automation_id": "CueTextBox"}, "Replaced text"
+        )
+    else:
+        session.replace_text_provider.assert_not_awaited()
+        if step_style == "op":
+            assert result["status"] == "FAIL"
+            assert result["reason"] == "invalid plan schema"
+            assert result["validation_errors"]
+            assert session.launch_calls == 0
+            assert result["completed_steps"] == []
+        else:
+            assert result["status"] == "BLOCKED"
+            assert result["reason"] == "replacement_mode_required"
+            assert session.launch_calls == 1
+            assert [item["name"] for item in result["completed_steps"]] == [
+                "launch",
+                "ui.text.set_text",
+            ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step_style", ["op", "name-args"])
+async def test_runner_text_provider_with_shared_ui_operation_still_connects_after_launch(
+    step_style: str,
+) -> None:
+    session = FakeRuntimeSmokeSession()
+    session.replace_text_provider = AsyncMock(
+        return_value={"status": "PASS", "effect_state": "completed", "verified": True}
+    )
+    backend_provider = AsyncMock()
+    ensure_connected = AsyncMock(side_effect=session.ui_ensure_connected)
+    adapters = ui_operation_adapters(backend_provider, session=session)
+    text_args = {
+        "selector": {"automation_id": "CueTextBox"},
+        "text": "Replaced text",
+        "replacement_mode": "provider_value",
+    }
+    grid_args = {"selector": {"automation_id": "CueGrid"}}
+    steps = (
+        [
+            {"op": "ui.text.set_text", **text_args},
+            {"op": "ui.grid.snapshot", **grid_args},
+        ]
+        if step_style == "op"
+        else [
+            {"name": "ui.text.set_text", "args": text_args},
+            {"name": "ui.grid.snapshot", "args": grid_args},
+        ]
+    )
+
+    result = await RuntimeSmokeRunner(
+        session,
+        service_adapters={
+            "ui.ensure_connected": ensure_connected,
+            "ui.text.set_text": adapters["ui.text.set_text"],
+            "ui.grid.snapshot": session.grid_snapshot,
+        },
+    ).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v1",
+            "launch": {"program": "Smoke.dll"},
+            "steps": steps,
+        }
+    )
+
+    assert result["status"] == "PASS"
+    assert session.launch_calls == 1
+    ensure_connected.assert_awaited_once_with()
+    backend_provider.assert_not_awaited()
+    session.replace_text_provider.assert_awaited_once_with(
+        {"automation_id": "CueTextBox"}, "Replaced text"
+    )
+    assert [item["name"] for item in result["completed_steps"]] == [
+        "launch",
+        "ui.ensure_connected",
+        "ui.text.set_text",
+        "ui.grid.snapshot",
+    ]
+    assert session.workflow_calls == ["ui.ensure_connected", "ui.grid.snapshot"]
+
+
+@pytest.mark.asyncio
 async def test_runner_accepted_ui_op_without_backend_returns_blocked_not_schema_error() -> None:
     session = FakeRuntimeSmokeSession()
 
@@ -1449,127 +1586,36 @@ async def test_ui_text_assert_selection_adapter_fails_with_observed_range() -> N
 
 
 @pytest.mark.asyncio
-async def test_ui_operation_adapters_text_set_text_uses_safe_type_replace() -> None:
-    class FakeClient:
-        def __init__(self, calls: list[tuple[str, Any]]) -> None:
-            self._calls = calls
+@pytest.mark.parametrize("with_session", [False, True], ids=["without-session", "with-session"])
+async def test_ui_operation_adapters_text_set_text_without_mode_refuses_before_backend(
+    with_session: bool,
+) -> None:
+    session = FakeRuntimeSmokeSession()
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    session.replace_text_provider = AsyncMock()
+    backend_provider = AsyncMock()
+    observation_provider = AsyncMock()
 
-        async def call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
-            self._calls.append(("client_call", method, dict(payload)))
-            if method == "set_focus":
-                return {"status": "PASS", "focused": True}
-            return {"status": "FAIL", "reason": f"unexpected method {method}"}
-
-    class FakeBackend:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, Any]] = []
-            self.client = FakeClient(self.calls)
-
-        async def find_element(
-            self,
-            automation_id: str | None = None,
-            name: str | None = None,
-            control_type: str | None = None,
-            root_id: str | None = None,
-            xpath: str | None = None,
-        ) -> dict[str, Any]:
-            self.calls.append(
-                (
-                    "find_element",
-                    {
-                        "automation_id": automation_id,
-                        "name": name,
-                        "control_type": control_type,
-                        "root_id": root_id,
-                        "xpath": xpath,
-                    },
-                )
-            )
-            return {"status": "PASS", "found": True}
-
-        def send_keys(self, keys: str) -> dict[str, Any]:
-            self.calls.append(("send_keys", keys))
-            return {"status": "PASS", "keys": keys}
-
-        async def textbox_state(self, selector: dict[str, Any]) -> dict[str, Any]:
-            self.calls.append(("textbox_state", dict(selector)))
-            return {
-                "status": "PASS",
-                "text": "Fixture cue one",
-                "selection": {"start": 0, "end": 15, "length": 15},
-                "focus_within": True,
-                "source": "TextPattern",
-                "full_tree": {"must": "not leak"},
-            }
-
-        async def extract_text(
-            self,
-            automation_id: str | None = None,
-            name: str | None = None,
-            control_type: str | None = None,
-            root_id: str | None = None,
-            xpath: str | None = None,
-        ) -> dict[str, Any]:
-            self.calls.append(
-                (
-                    "extract_text",
-                    {
-                        "automation_id": automation_id,
-                        "name": name,
-                        "control_type": control_type,
-                        "root_id": root_id,
-                        "xpath": xpath,
-                    },
-                )
-            )
-            return {"status": "PASS", "text": "Replaced text", "full_tree": {"must": "not leak"}}
-
-    backend = FakeBackend()
-
-    async def backend_provider() -> FakeBackend:
-        return backend
-
-    result = await ui_operation_adapters(backend_provider)["ui.text.set_text"](
+    result = await ui_operation_adapters(
+        backend_provider,
+        observation_ui_connected=observation_provider,
+        session=session if with_session else None,
+    )["ui.text.set_text"](
         selector={"automation_id": "CueTextBox"},
         text="Replaced text",
     )
 
-    assert result["status"] == "PASS"
-    assert result["route"] == "text_type_replace_selection"
-    assert result["verified"] is True
-    assert result["text"] == "Replaced text"
-    assert result["precondition"]["selected"] is True
-    assert "full_tree" not in str(result)
-    assert backend.calls == [
-        (
-            "find_element",
-            {
-                "automation_id": "CueTextBox",
-                "name": None,
-                "control_type": None,
-                "root_id": None,
-                "xpath": None,
-            },
-        ),
-        (
-            "client_call",
-            "set_focus",
-            {"automationId": "CueTextBox"},
-        ),
-        ("send_keys", "^a"),
-        ("textbox_state", {"automation_id": "CueTextBox"}),
-        ("send_keys", "Replaced text"),
-        (
-            "extract_text",
-            {
-                "automation_id": "CueTextBox",
-                "name": None,
-                "control_type": None,
-                "root_id": None,
-                "xpath": None,
-            },
-        ),
-    ]
+    assert result == {
+        "status": "BLOCKED",
+        "reason": "replacement_mode_required",
+        "effect_state": "not_started",
+        "verified": False,
+    }
+    backend_provider.assert_not_awaited()
+    observation_provider.assert_not_awaited()
+    session.replace_text_provider.assert_not_awaited()
+    session.wait_for_pending_stealth_foreground_restore.assert_not_awaited()
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
 
 
 @pytest.mark.asyncio
