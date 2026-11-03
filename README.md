@@ -156,9 +156,9 @@ raw tree (at most 4,096 nodes), checks every visited process/runtime identity,
 and requires exactly one matching element runtime ID. It then checks that
 element's exact AutomationId and InvokePattern, plus the bound process, HWND
 and root identity. Unknown or duplicate AutomationIds on other elements do not
-select the target and are not treated as absent. Incomplete traversal or
-unreadable/duplicate runtime identities refuse the action. Neither tool falls
-back to the other, and neither uses mouse/keyboard input.
+select the target and are not treated as absent. Incomplete traversal, unreadable
+runtime identities, or multiple matches for the requested runtime ID refuse the
+action. Neither tool falls back to the other or uses mouse/keyboard input.
 
 Both action modes repeat their selection and identity checks at commit before
 at most one InvokePattern call. Observed success reports
