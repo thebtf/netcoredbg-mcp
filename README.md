@@ -114,6 +114,27 @@ only after cleanup completes; the owner-aborted continue returns
 `DEBUG_SESSION_NOT_FOUND`, not a DAP protocol error. Explicit caller/host
 cancellation and genuine cleanup/protocol failures remain failures.
 
+The source-built stateful host also exposes
+`pause_execution(debugSessionId, threadId?)`. A nonzero explicit Int32 selects
+that exact thread. Omitted, null or zero input uses the currently observed
+thread, including a current ID of zero. If no current thread exists, one bounded
+DAP `threads` request selects the first returned ID without sorting; a newly
+observed current thread takes precedence before the pause write. Empty discovery
+returns `DAP_PAUSE_NO_THREADS` when no current thread has appeared.
+One absolute 30-second deadline covers discovery and pause acknowledgement.
+
+The result `pause_acknowledged` confirms only the adapter's acknowledgement,
+not stopped state or inspection authority. Only real DAP events update those
+observations. One pause may run alongside an already committed continue, even
+while its acknowledgement is held. Another pause, a new continue or step, and
+pause during an active step are refused without DAP I/O. Refusal, timeout and
+protocol errors have fixed, redacted outcomes; a terminal result contains only
+observed terminal fields. Uncertain writes are drained without retry. Cancelling
+before writer handoff or while a fully committed discovery reply is pending
+preserves the session; a fully committed pause with a valid acknowledgement is
+not undone by later caller cancellation. This additive source slice does not
+change the Python default, installed routing or claim full Python wire parity.
+
 The source-built Windows stateful host exposes
 `ui_get_window_tree(debugSessionId, maxDepth = 3, maxChildren = 50)` when
 `FLAUI_BRIDGE_PATH` points to its built FlaUI bridge. This read-only observation

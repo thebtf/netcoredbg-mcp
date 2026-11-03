@@ -134,7 +134,10 @@ internal sealed record AdapterOptions(
     string NextResponseMode,
     string SetBreakpointsResponseMode,
     string ScopesResponseMode,
-    string VariablesResponseMode)
+    string VariablesResponseMode,
+    string PauseResponseMode,
+    int? PauseEventThreadId,
+    bool? PauseAllThreadsStopped)
 {
     public static AdapterOptions Parse(string[] args, string? environmentOptions)
     {
@@ -169,6 +172,9 @@ internal sealed record AdapterOptions(
         var setBreakpointsResponseMode = "success";
         var scopesResponseMode = "success";
         var variablesResponseMode = "success";
+        var pauseResponseMode = "ack-only";
+        int? pauseEventThreadId = 1;
+        bool? pauseAllThreadsStopped = true;
 
         foreach (var argument in args.Concat(SplitOptions(environmentOptions)))
         {
@@ -238,7 +244,7 @@ internal sealed record AdapterOptions(
                     stopReason = argument["--stop-reason=".Length..];
                     break;
                 case var _ when argument.StartsWith("--exit-code=", StringComparison.Ordinal)
-                    && int.TryParse(argument["--exit-code=".Length..], NumberStyles.None, CultureInfo.InvariantCulture, out var parsedExitCode):
+                    && int.TryParse(argument["--exit-code=".Length..], NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var parsedExitCode):
                     exitCode = parsedExitCode;
                     break;
                 case var _ when argument.StartsWith("--threads-response=", StringComparison.Ordinal):
@@ -270,6 +276,17 @@ internal sealed record AdapterOptions(
                     break;
                 case var _ when argument.StartsWith("--variables-response=", StringComparison.Ordinal):
                     variablesResponseMode = argument["--variables-response=".Length..];
+                    break;
+                case var _ when argument.StartsWith("--pause-response=", StringComparison.Ordinal):
+                    pauseResponseMode = argument["--pause-response=".Length..];
+                    break;
+                case var _ when argument.StartsWith("--pause-event-thread-id=", StringComparison.Ordinal):
+                    var eventThread = argument["--pause-event-thread-id=".Length..];
+                    pauseEventThreadId = eventThread == "omit" ? null : int.Parse(eventThread, CultureInfo.InvariantCulture);
+                    break;
+                case var _ when argument.StartsWith("--pause-all-threads-stopped=", StringComparison.Ordinal):
+                    var allStopped = argument["--pause-all-threads-stopped=".Length..];
+                    pauseAllThreadsStopped = allStopped == "omit" ? null : bool.Parse(allStopped);
                     break;
                 default:
                     throw new ArgumentException($"Unknown fixture option '{argument}'.", nameof(args));
@@ -307,7 +324,10 @@ internal sealed record AdapterOptions(
             nextResponseMode,
             setBreakpointsResponseMode,
             scopesResponseMode,
-            variablesResponseMode);
+            variablesResponseMode,
+            pauseResponseMode,
+            pauseEventThreadId,
+            pauseAllThreadsStopped);
     }
 
     private static IEnumerable<string> SplitOptions(string? options) =>
@@ -453,6 +473,9 @@ internal sealed class ControlledDapAdapter
     private Task? _heldNextResponse;
     private Task? _heldInspectionResponse;
     private Task? _heldBreakpointsResponse;
+    private readonly List<Task> _heldPauseControls = [];
+    private int _independentThreadsRequests;
+    private bool _recordPauseWire;
     private bool _launchCompleted;
     private int _runtimeBreakpointRequests;
     private bool _inspectionResponseHeld;
@@ -474,6 +497,11 @@ internal sealed class ControlledDapAdapter
     {
         _options = options;
         _transcriptPath = transcriptPath;
+        _recordPauseWire = options.PauseResponseMode != "ack-only"
+            || options.NextResponseMode is "continue-ack-only" or "continue-hold-ack"
+            || options.ThreadsResponseMode is "empty" or "first-zero" or "first-seven" or "first-unsorted"
+                or "discovery-current-before-reply" or "hold-independent" or "hold-independent-distinct" or "hold-with-current-event"
+                or "hold-independent-late-response-event" or "wrong-request-sequence" or "eof";
         _processArguments = processArguments;
         _transcriptWriteMutex = new Mutex(
             initiallyOwned: false,
@@ -511,6 +539,17 @@ internal sealed class ControlledDapAdapter
         {
             using var suspendedDescendantLifetime = _suspendedDescendant;
             _lifecycleEventsCancellation.Cancel();
+            foreach (var heldControl in _heldPauseControls)
+            {
+                try
+                {
+                    await heldControl.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (_lifecycleEventsCancellation.IsCancellationRequested)
+                {
+                    // Teardown cancels independent pause, continue and discovery barriers.
+                }
+            }
             if (_heldThreadsResponse is { } heldThreadsResponse)
             {
                 try
@@ -760,6 +799,9 @@ internal sealed class ControlledDapAdapter
                 return await HandleNextRequestAsync(sequence, root, cancellationToken);
             case "continue":
                 return await HandleContinueRequestAsync(sequence, root, cancellationToken);
+            case "pause":
+                _recordPauseWire = true;
+                return await HandlePauseRequestAsync(sequence, root, cancellationToken);
             case "setBreakpoints":
                 await HandleSetBreakpointsRequestAsync(sequence, root, cancellationToken);
                 return false;
@@ -987,6 +1029,9 @@ internal sealed class ControlledDapAdapter
                 await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken);
                 await Task.Delay(TimeSpan.FromMilliseconds(75), cancellationToken);
                 await WriteEventAsync("terminated", body: null, cancellationToken);
+                return;
+            case "all-stop-zero":
+                await WriteStoppedEventAsync(threadId: 0, allThreadsStopped: true, cancellationToken);
                 return;
             case "all-stop":
                 await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken);
@@ -1398,6 +1443,159 @@ internal sealed class ControlledDapAdapter
             }
         }
     }
+    private string PauseControlPath(string control) => _transcriptPath + "." + control + ".release";
+
+    private static async Task WaitForControlReleaseAsync(string path, CancellationToken cancellationToken)
+    {
+        while (!File.Exists(path))
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken);
+        }
+    }
+
+    private async Task<bool> HandlePauseRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)
+    {
+        _ = ReadRequiredNextThreadId(root);
+        switch (_options.PauseResponseMode)
+        {
+            case "ack-only":
+            case "ack-body-absent":
+            case "ack-body-null":
+            case "ack-body-object":
+            case "ack-body-array":
+            case "ack-body-string":
+            case "ack-body-boolean":
+            case "ack-body-number":
+                await WritePauseAcknowledgementAsync(sequence, cancellationToken);
+                return false;
+            case "hold":
+                await HoldPauseAcknowledgementAsync(sequence, cancellationToken);
+                return false;
+            case "stopped-before-ack":
+            case "stopped-continued-before-ack":
+                await WritePauseStoppedEventAsync(sequence, cancellationToken);
+                if (_options.PauseResponseMode == "stopped-continued-before-ack")
+                {
+                    await WriteContinuedEventAsync(_options.PauseEventThreadId, allThreadsContinued: true, cancellationToken);
+                    await RecordAsync(new { kind = "pause-continued", sequence }, cancellationToken);
+                }
+                await HoldPauseAcknowledgementAsync(sequence, cancellationToken);
+                return false;
+            case "ack-before-stopped":
+            case "ack-before-stopped-held":
+                await WritePauseAcknowledgementAsync(sequence, cancellationToken);
+                await RecordAsync(new { kind = "pause-stop-gated", sequence }, cancellationToken);
+                _heldPauseControls.Add(CompleteHeldPauseStopAsync(sequence, _lifecycleEventsCancellation.Token));
+                return false;
+            case "terminal-before-ack":
+                await WriteEventAsync("exited", new { exitCode = _options.ExitCode }, cancellationToken);
+                await RecordAsync(new { kind = "pause-terminal", sequence }, cancellationToken);
+                await HoldPauseAcknowledgementAsync(sequence, cancellationToken);
+                return false;
+            case "negative":
+                await WriteResponseAsync(sequence, "pause", new { message = "private controlled pause refusal" }, cancellationToken, success: false);
+                return false;
+            case "wrong-command":
+                await WriteResponseAsync(sequence, "threads", body: null, cancellationToken);
+                return false;
+            case "wrong-command-continue":
+                await WriteResponseAsync(sequence, "continue", body: null, cancellationToken);
+                return false;
+            case "wrong-correlation":
+            case "wrong-request-sequence":
+                await WriteResponseAsync(sequence == int.MaxValue ? int.MinValue : sequence + 1, "pause", body: null, cancellationToken);
+                return false;
+            case "malformed-success":
+                await WriteMessageAsync(new
+                {
+                    seq = Interlocked.Increment(ref _outgoingSequence) - 1,
+                    type = "response",
+                    request_seq = sequence,
+                    success = "true",
+                    command = "pause",
+                }, cancellationToken);
+                return false;
+            case "malformed":
+            case "reader-failure":
+                await WriteMalformedDapFrameAsync(cancellationToken);
+                await RecordAsync(new { kind = "pause-malformed-response", sequence }, cancellationToken);
+                return false;
+            case "eof":
+                await RecordAsync(new { kind = "pause-eof", sequence }, cancellationToken);
+                return true;
+            case "no-response":
+            case "timeout":
+                await RecordAsync(new { kind = "pause-response-timeout", sequence }, cancellationToken);
+                return false;
+            default:
+                throw new InvalidOperationException($"Unknown pause response mode '{_options.PauseResponseMode}'.");
+        }
+    }
+
+    private async Task WritePauseAcknowledgementAsync(int sequence, CancellationToken cancellationToken)
+    {
+        object? body = _options.PauseResponseMode switch
+        {
+            "ack-body-object" => new { detail = "private controlled pause body" },
+            "ack-body-array" => new object?[] { "private controlled pause body", 17, null },
+            "ack-body-string" => "private controlled pause body",
+            "ack-body-boolean" => true,
+            "ack-body-number" => 1.5,
+            _ => null,
+        };
+        await WriteResponseAsync(sequence, "pause", body, cancellationToken,
+            omitBody: _options.PauseResponseMode == "ack-body-absent");
+        await RecordAsync(new { kind = "pause-acknowledged", sequence }, cancellationToken);
+    }
+
+    private async Task HoldPauseAcknowledgementAsync(int sequence, CancellationToken cancellationToken)
+    {
+        await RecordAsync(new { kind = "pause-response-gated", sequence }, cancellationToken);
+        _heldPauseControls.Add(CompleteHeldPauseAcknowledgementAsync(sequence, _lifecycleEventsCancellation.Token));
+    }
+
+    private async Task CompleteHeldPauseAcknowledgementAsync(int sequence, CancellationToken cancellationToken)
+    {
+        await WaitForControlReleaseAsync(PauseControlPath("pause-response"), cancellationToken);
+        await RecordAsync(new { kind = "pause-response-releasing", sequence }, cancellationToken);
+        await WritePauseAcknowledgementAsync(sequence, cancellationToken);
+    }
+
+    private async Task WritePauseStoppedEventAsync(int sequence, CancellationToken cancellationToken)
+    {
+        await WriteStoppedEventAsync(_options.PauseEventThreadId, _options.PauseAllThreadsStopped, cancellationToken,
+            reason: "pause");
+        await RecordAsync(new { kind = "pause-stopped", sequence }, cancellationToken);
+    }
+
+    private async Task CompleteHeldPauseStopAsync(int sequence, CancellationToken cancellationToken)
+    {
+        await WaitForControlReleaseAsync(PauseControlPath("pause-stop"), cancellationToken);
+        await RecordAsync(new { kind = "pause-stop-releasing", sequence }, cancellationToken);
+        await WritePauseStoppedEventAsync(sequence, cancellationToken);
+    }
+
+    private async Task CompleteHeldContinueAcknowledgementAsync(int sequence, CancellationToken cancellationToken)
+    {
+        await WaitForControlReleaseAsync(PauseControlPath("continue-response"), cancellationToken);
+        await RecordAsync(new { kind = "continue-response-releasing", sequence }, cancellationToken);
+        await WriteResponseAsync(sequence, "continue", new { allThreadsContinued = true }, cancellationToken);
+        await RecordAsync(new { kind = "continue-acknowledged", sequence }, cancellationToken);
+    }
+
+    private async Task CompleteIndependentThreadsResponseAsync(int sequence, int threadId, CancellationToken cancellationToken)
+    {
+        await WaitForControlReleaseAsync(PauseControlPath("threads-response-" + sequence.ToString(CultureInfo.InvariantCulture)), cancellationToken);
+        await RecordAsync(new { kind = "threads-response-releasing", sequence }, cancellationToken);
+        await WriteResponseAsync(sequence, "threads", new { threads = new[] { new { id = threadId, name = "worker" } } }, cancellationToken);
+        await RecordAsync(new { kind = "threads-response-written", sequence }, cancellationToken);
+        if (_options.ThreadsResponseMode == "hold-independent-late-response-event" && threadId == 7)
+        {
+            await WriteStoppedEventAsync(17, allThreadsStopped: false, cancellationToken,
+                recordKind: "discovery-reply-barrier-written", reason: "discovery-reply-barrier");
+        }
+    }
+
     private async Task<bool> HandleContinueRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)
     {
         var threadId = ReadRequiredNextThreadId(root);
@@ -1420,6 +1618,14 @@ internal sealed class ControlledDapAdapter
 
         switch (_options.NextResponseMode)
         {
+            case "continue-ack-only":
+                await WriteResponseAsync(sequence, "continue", new { allThreadsContinued = true }, cancellationToken);
+                await RecordAsync(new { kind = "continue-acknowledged", sequence }, cancellationToken);
+                return false;
+            case "continue-hold-ack":
+                await RecordAsync(new { kind = "continue-response-gated", sequence }, cancellationToken);
+                _heldPauseControls.Add(CompleteHeldContinueAcknowledgementAsync(sequence, _lifecycleEventsCancellation.Token));
+                return false;
             case "continue-breakpoint-terminal":
             case "continue-optional-stop":
                 await WriteResponseAsync(sequence, "continue", new { allThreadsContinued = true }, cancellationToken);
@@ -1660,6 +1866,38 @@ internal sealed class ControlledDapAdapter
 
         switch (_options.ThreadsResponseMode)
         {
+            case "empty":
+                await WriteResponseAsync(sequence, "threads", new { threads = Array.Empty<object>() }, cancellationToken);
+                return false;
+            case "first-zero":
+                await WriteResponseAsync(sequence, "threads", new { threads = new[] { new { id = 0, name = "zero" }, new { id = 2, name = "worker" } } }, cancellationToken);
+                return false;
+            case "first-seven":
+            case "first-unsorted":
+            case "discovery-current-before-reply":
+                if (_options.ThreadsResponseMode == "discovery-current-before-reply")
+                {
+                    await WriteStoppedEventAsync(9, allThreadsStopped: true, cancellationToken, recordKind: "discovery-current-event");
+                }
+                await WriteResponseAsync(sequence, "threads", new { threads = new[] { new { id = 7, name = "first" }, new { id = 2, name = "second" } } }, cancellationToken);
+                return false;
+            case "hold-independent":
+            case "hold-independent-distinct":
+            case "hold-independent-late-response-event":
+                var ordinal = ++_independentThreadsRequests;
+                if (_options.ThreadsResponseMode == "hold-independent-late-response-event" && ordinal > 2)
+                {
+                    await WriteResponseAsync(sequence, "threads", new { threads = new[] { new { id = 29, name = "worker" } } }, cancellationToken);
+                    return false;
+                }
+                await RecordAsync(new { kind = "threads-response-gated", sequence, ordinal }, cancellationToken);
+                _heldPauseControls.Add(CompleteIndependentThreadsResponseAsync(sequence, ordinal == 1 ? 7 : 29, _lifecycleEventsCancellation.Token));
+                return false;
+            case "hold-with-current-event":
+                await WriteStoppedEventAsync(7, allThreadsStopped: true, cancellationToken, recordKind: "discovery-current-event");
+                await RecordAsync(new { kind = "threads-response-gated", sequence }, cancellationToken);
+                _heldThreadsResponse = CompleteHeldThreadsResponseAsync(sequence, _lifecycleEventsCancellation.Token);
+                return false;
             case "success":
                 await WriteResponseAsync(sequence, "threads", new { threads = Threads(2, "worker") }, cancellationToken);
                 return false;
@@ -1669,6 +1907,13 @@ internal sealed class ControlledDapAdapter
             case "wrong-command":
                 await WriteResponseAsync(sequence, "stackTrace", new { threads = Threads(1, "worker") }, cancellationToken);
                 return false;
+            case "wrong-request-sequence":
+                await WriteResponseAsync(sequence == int.MaxValue ? int.MinValue : sequence + 1,
+                    "threads", new { threads = Threads(1, "worker") }, cancellationToken);
+                return false;
+            case "eof":
+                await RecordAsync(new { kind = "threads-eof", sequence }, cancellationToken);
+                return true;
             case "malformed-body":
                 await WriteResponseAsync(sequence, "threads", new
                 {
@@ -2043,7 +2288,7 @@ internal sealed class ControlledDapAdapter
         {
             await WriteMessageAsync(new
             {
-                seq = _outgoingSequence++,
+                seq = Interlocked.Increment(ref _outgoingSequence) - 1,
                 type = "response",
                 request_seq = requestSequence,
                 success,
@@ -2054,7 +2299,7 @@ internal sealed class ControlledDapAdapter
 
         await WriteMessageAsync(new
         {
-            seq = _outgoingSequence++,
+            seq = Interlocked.Increment(ref _outgoingSequence) - 1,
             type = "response",
             request_seq = requestSequence,
             success,
@@ -2175,7 +2420,7 @@ internal sealed class ControlledDapAdapter
     {
         await WriteMessageAsync(new
         {
-            seq = _outgoingSequence++,
+            seq = Interlocked.Increment(ref _outgoingSequence) - 1,
             type = "event",
             @event = eventName,
             body,
@@ -2206,6 +2451,22 @@ internal sealed class ControlledDapAdapter
             await _output.WriteAsync(header, cancellationToken);
             await _output.WriteAsync(payload, cancellationToken);
             await _output.FlushAsync(cancellationToken);
+            if (_recordPauseWire)
+            {
+                using var message = JsonDocument.Parse(payload);
+                var root = message.RootElement;
+                var isResponse = root.GetProperty("type").GetString() == "response";
+                var sequenceProperty = isResponse ? "request_seq" : "seq";
+                int? sequence = root.TryGetProperty(sequenceProperty, out var sequenceElement)
+                    && sequenceElement.TryGetInt32(out var parsedSequence) ? parsedSequence : null;
+                await RecordAsync(new
+                {
+                    kind = isResponse ? "response" : "wire-event",
+                    sequence,
+                    command = isResponse ? root.GetProperty("command").GetString() : null,
+                    rawPayload = BodyEncoding.GetString(payload),
+                }, cancellationToken);
+            }
         }
         finally
         {
