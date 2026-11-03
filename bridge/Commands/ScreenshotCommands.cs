@@ -233,7 +233,11 @@ public static class ScreenshotCommands
     {
         var connectedProcessId = RequireConnectedProcessId();
         if (typedBitBltFallback && strictCaptureTarget is StrictCaptureTarget expectedTarget)
+        {
+            if (hwnd.ToInt64() != expectedTarget.ExpectedHwnd)
+                throw new InvalidOperationException("Capture HWND does not match the expected capture target.");
             EnsureStrictExpectedHandle(expectedTarget);
+        }
 
         var printWindowBefore = ReadCaptureSnapshot(hwnd);
         EnsureStrictCaptureProcess(printWindowBefore, connectedProcessId);
