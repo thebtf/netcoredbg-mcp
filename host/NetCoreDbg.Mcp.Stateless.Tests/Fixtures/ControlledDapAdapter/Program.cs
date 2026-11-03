@@ -797,6 +797,10 @@ internal sealed class ControlledDapAdapter
                 return false;
             case "next":
                 return await HandleNextRequestAsync(sequence, root, cancellationToken);
+            case "stepIn":
+            case "stepOut":
+                _recordPauseWire = true;
+                return await HandleNextRequestAsync(sequence, root, cancellationToken, command);
             case "continue":
                 return await HandleContinueRequestAsync(sequence, root, cancellationToken);
             case "pause":
@@ -1379,10 +1383,10 @@ internal sealed class ControlledDapAdapter
         }
     }
 
-    private async Task CompleteHeldNextResponseAsync(int sequence, int threadId, CancellationToken cancellationToken)
+    private async Task CompleteHeldNextResponseAsync(int sequence, int threadId, CancellationToken cancellationToken, string command = "next")
     {
         await WaitForNextResponseReleaseAsync(cancellationToken);
-        await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+        await WriteResponseAsync(sequence, command, body: null, cancellationToken);
         await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "step");
     }
 
@@ -1392,10 +1396,10 @@ internal sealed class ControlledDapAdapter
         await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "step");
     }
 
-    private async Task CompleteHeldNextAcknowledgementAsync(int sequence, CancellationToken cancellationToken)
+    private async Task CompleteHeldNextAcknowledgementAsync(int sequence, CancellationToken cancellationToken, string command = "next")
     {
         await WaitForNextResponseReleaseAsync(cancellationToken);
-        await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+        await WriteResponseAsync(sequence, command, body: null, cancellationToken);
         await RecordAsync(new { kind = "next-acknowledged", sequence }, cancellationToken);
     }
 
@@ -1709,7 +1713,7 @@ internal sealed class ControlledDapAdapter
         }
     }
 
-    private async Task<bool> HandleNextRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)
+    private async Task<bool> HandleNextRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken, string command = "next")
     {
         var threadId = ReadRequiredNextThreadId(root);
         var differentThreadId = threadId == int.MaxValue ? int.MinValue : threadId + 1;
@@ -1717,17 +1721,17 @@ internal sealed class ControlledDapAdapter
         {
             case "success":
                 _inspectionStepped = true;
-                await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+                await WriteResponseAsync(sequence, command, body: null, cancellationToken);
                 await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "step");
                 return false;
             case "negative":
-                await WriteResponseAsync(sequence, "next", new { message = "controlled adapter next refusal" }, cancellationToken, success: false);
+                await WriteResponseAsync(sequence, command, new { message = "controlled adapter next refusal" }, cancellationToken, success: false);
                 return false;
             case "wrong-command":
-                await WriteResponseAsync(sequence, "threads", body: null, cancellationToken);
+                await WriteResponseAsync(sequence, command == "next" ? "threads" : "next", body: null, cancellationToken);
                 return false;
             case "wrong-request-sequence":
-                await WriteResponseAsync(sequence == int.MaxValue ? int.MinValue : sequence + 1, "next", body: null, cancellationToken);
+                await WriteResponseAsync(sequence == int.MaxValue ? int.MinValue : sequence + 1, command, body: null, cancellationToken);
                 return false;
             case "wrong-request-sequence-collides-with-stack-trace":
                 if (_heldStackTraceResponseSequence is not { } heldStackTraceSequence)
@@ -1735,10 +1739,10 @@ internal sealed class ControlledDapAdapter
                     throw new InvalidOperationException("The collision response requires a held stackTrace request.");
                 }
 
-                await WriteResponseAsync(heldStackTraceSequence, "next", body: null, cancellationToken);
+                await WriteResponseAsync(heldStackTraceSequence, command, body: null, cancellationToken);
                 return false;
             case "malformed-success":
-                await WriteMalformedNextSuccessResponseAsync(sequence, cancellationToken);
+                await WriteMalformedNextSuccessResponseAsync(sequence, cancellationToken, command);
                 return false;
             case "missing-response-sequence":
             case "wrong-type-response-sequence":
@@ -1746,7 +1750,7 @@ internal sealed class ControlledDapAdapter
             case "negative-response-sequence":
             case "overflow-response-sequence":
             case "underflow-response-sequence":
-                await WriteMalformedNextSequenceResponseAsync(sequence, cancellationToken);
+                await WriteMalformedNextSequenceResponseAsync(sequence, cancellationToken, command);
                 await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "step");
                 return false;
             case "missing-stop-sequence":
@@ -1755,7 +1759,7 @@ internal sealed class ControlledDapAdapter
             case "negative-stop-sequence":
             case "overflow-stop-sequence":
             case "underflow-stop-sequence":
-                await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+                await WriteResponseAsync(sequence, command, body: null, cancellationToken);
                 await WriteMalformedNextStoppedSequenceEventAsync(threadId, cancellationToken);
                 return false;
             case "reader-failure":
@@ -1766,28 +1770,28 @@ internal sealed class ControlledDapAdapter
                 return false;
             case "hold-ack-no-stop":
                 await RecordAsync(new { kind = "next-response-gated", sequence }, cancellationToken);
-                _heldNextResponse = CompleteHeldNextAcknowledgementAsync(sequence, _lifecycleEventsCancellation.Token);
+                _heldNextResponse = CompleteHeldNextAcknowledgementAsync(sequence, _lifecycleEventsCancellation.Token, command);
                 return false;
             case "hold":
                 await RecordAsync(new { kind = "next-response-gated", sequence }, cancellationToken);
-                _heldNextResponse = CompleteHeldNextResponseAsync(sequence, threadId, _lifecycleEventsCancellation.Token);
+                _heldNextResponse = CompleteHeldNextResponseAsync(sequence, threadId, _lifecycleEventsCancellation.Token, command);
                 return false;
             case "hold-then-continued":
                 await WriteContinuedEventAsync(threadId, allThreadsContinued: true, cancellationToken);
                 await RecordAsync(new { kind = "next-response-gated", sequence }, cancellationToken);
-                _heldNextResponse = CompleteHeldNextResponseAsync(sequence, threadId, _lifecycleEventsCancellation.Token);
+                _heldNextResponse = CompleteHeldNextResponseAsync(sequence, threadId, _lifecycleEventsCancellation.Token, command);
                 return false;
             case "pre-ack-ignored-stops":
                 await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "breakpoint");
                 await WriteStoppedEventAsync(threadId: null, allThreadsStopped: true, cancellationToken, reason: "step");
                 await WriteStoppedEventAsync(differentThreadId, allThreadsStopped: true, cancellationToken, reason: "step");
                 await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "step");
-                await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+                await WriteResponseAsync(sequence, command, body: null, cancellationToken);
                 await RecordAsync(new { kind = "next-final-stop-gated", sequence }, cancellationToken);
                 _heldNextResponse = CompleteHeldNextStopAsync(threadId, _lifecycleEventsCancellation.Token);
                 return false;
             case "post-ack-ignored-stops":
-                await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+                await WriteResponseAsync(sequence, command, body: null, cancellationToken);
                 await WriteStoppedEventAsync(threadId, allThreadsStopped: true, cancellationToken, reason: "breakpoint");
                 await WriteStoppedEventAsync(threadId: null, allThreadsStopped: true, cancellationToken, reason: "step");
                 await WriteStoppedEventAsync(differentThreadId, allThreadsStopped: true, cancellationToken, reason: "step");
@@ -1798,7 +1802,7 @@ internal sealed class ControlledDapAdapter
                 await WriteEventAsync("exited", new { exitCode = _options.ExitCode }, cancellationToken);
                 return false;
             case "terminal-after-ack":
-                await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+                await WriteResponseAsync(sequence, command, body: null, cancellationToken);
                 await WriteEventAsync("terminated", body: null, cancellationToken);
                 await RecordAsync(new { kind = "next-terminal-after-ack", sequence }, cancellationToken);
                 return false;
@@ -1824,7 +1828,7 @@ internal sealed class ControlledDapAdapter
                 var terminal = _options.NextResponseMode.StartsWith("exited-", StringComparison.Ordinal) ? "exited" : "terminated";
                 if (terminal == "terminated")
                 {
-                    await WriteResponseAsync(sequence, "next", body: null, cancellationToken);
+                    await WriteResponseAsync(sequence, command, body: null, cancellationToken);
                 }
                 await WriteMalformedNextTerminalEventAsync(terminal, cancellationToken);
                 return false;
@@ -2307,25 +2311,25 @@ internal sealed class ControlledDapAdapter
             body,
         }, cancellationToken);
     }
-    private Task WriteMalformedNextSuccessResponseAsync(int requestSequence, CancellationToken cancellationToken) =>
+    private Task WriteMalformedNextSuccessResponseAsync(int requestSequence, CancellationToken cancellationToken, string command = "next") =>
         WriteMessageAsync(new
         {
             seq = _outgoingSequence++,
             type = "response",
             request_seq = requestSequence,
             success = "true",
-            command = "next",
+            command,
             body = (object?)null,
         }, cancellationToken);
 
-    private Task WriteMalformedNextSequenceResponseAsync(int requestSequence, CancellationToken cancellationToken)
+    private Task WriteMalformedNextSequenceResponseAsync(int requestSequence, CancellationToken cancellationToken, string command = "next")
     {
         var response = new Dictionary<string, object?>
         {
             ["type"] = "response",
             ["request_seq"] = requestSequence,
             ["success"] = true,
-            ["command"] = "next",
+            ["command"] = command,
             ["body"] = new { message = "controlled private next acknowledgement" },
         };
         _outgoingSequence++;
