@@ -6,6 +6,7 @@ import asyncio
 import io
 import json
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -172,6 +173,7 @@ class TestFlaUIBackendInvoke:
 async def test_ui_click_annotated_uses_cached_screen_bounds_after_annotated_screenshot(
     capturing_mcp,
     monkeypatch,
+    tmp_path,
     generation: int | None,
     should_click: bool,
     refresh_during_connect: bool,
@@ -183,9 +185,16 @@ async def test_ui_click_annotated_uses_cached_screen_bounds_after_annotated_scre
     from netcoredbg_mcp.tools.ui import register_ui_tools
     from netcoredbg_mcp.ui import screenshot
     from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
+    from netcoredbg_mcp.ui.temp_manager import SessionTempManager
 
     png = io.BytesIO()
     pil_image.new("RGB", (120, 80), (255, 255, 255)).save(png, format="PNG")
+    alternate_png = io.BytesIO()
+    pil_image.new("RGB", (120, 80), (0, 200, 240)).save(alternate_png, format="PNG")
+    captures = iter(
+        [png.getvalue(), alternate_png.getvalue() if overlapping_screenshots else png.getvalue(),
+         png.getvalue()]
+    )
 
     backend = PywinautoBackend.__new__(PywinautoBackend)
     backend._ui = SimpleNamespace(process_id=42, _app=object())
@@ -205,7 +214,7 @@ async def test_ui_click_annotated_uses_cached_screen_bounds_after_annotated_scre
     )
     monkeypatch.setattr(
         "netcoredbg_mcp.ui.screenshot.capture_window",
-        lambda _hwnd: (png.getvalue(), 120, 80),
+        lambda _hwnd: (next(captures), 120, 80),
     )
     observed = iter(
         [
@@ -250,11 +259,17 @@ async def test_ui_click_annotated_uses_cached_screen_bounds_after_annotated_scre
         raising=False,
     )
 
+    temp_manager = SessionTempManager()
+    if overlapping_screenshots:
+        with patch("netcoredbg_mcp.ui.temp_manager.tempfile.mkdtemp", return_value=str(tmp_path)):
+            assert temp_manager.get_session_dir("synthetic") == tmp_path
+
     session = SimpleNamespace(
         process_registry=None,
         state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
         stealth_mode=False,
-        session_id=None,
+        session_id="synthetic" if overlapping_screenshots else None,
+        temp_manager=temp_manager,
     )
 
     with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
@@ -265,12 +280,12 @@ async def test_ui_click_annotated_uses_cached_screen_bounds_after_annotated_scre
         )
         if overlapping_screenshots:
             first = asyncio.create_task(
-                capturing_mcp.tools["ui_take_annotated_screenshot"](SimpleNamespace())
+                capturing_mcp.tools["ui_take_annotated_screenshot"](SimpleNamespace(), format="png")
             )
             try:
                 assert await asyncio.to_thread(first_processing.wait, 5)
                 second_result = await capturing_mcp.tools["ui_take_annotated_screenshot"](
-                    SimpleNamespace()
+                    SimpleNamespace(), format="png"
                 )
             finally:
                 continue_processing.set()
@@ -281,6 +296,12 @@ async def test_ui_click_annotated_uses_cached_screen_bounds_after_annotated_scre
             assert first_metadata["elements"] == ["7: Save"]
             assert second_metadata["elements"] == ["7: Delete"]
             assert second_metadata["generation"] == 2
+            first_path = Path(first_metadata["hd_path"])
+            second_path = Path(second_metadata["hd_path"])
+            assert first_path != second_path
+            with pil_image.open(first_path) as first_image, pil_image.open(second_path) as second_image:
+                assert first_image.getpixel((119, 79))[:3] == (255, 255, 255)
+                assert second_image.getpixel((119, 79))[:3] == (0, 200, 240)
             generation = first_metadata["generation"]
         else:
             await capturing_mcp.tools["ui_take_annotated_screenshot"](SimpleNamespace())

@@ -2459,7 +2459,7 @@ def register_ui_tools(
                 hd_path = session.temp_manager.save_screenshot(
                     sid,
                     hd_bytes,
-                    f"annotated_{_annotation_generation:04d}.{safe_format}",
+                    f"annotated_{generation:04d}.{safe_format}",
                 )
                 if hd_path:
                     metadata["hd_path"] = str(hd_path)
