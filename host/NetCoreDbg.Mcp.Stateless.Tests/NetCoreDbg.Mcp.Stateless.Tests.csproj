@@ -18,6 +18,7 @@
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.10" />
     <PackageReference Include="ModelContextProtocol.Core" Version="2.1.0" />
     <PackageReference Include="NJsonSchema" Version="11.6.1" />
+    <PackageReference Include="JsonSchema.Net" Version="[8.0.5]" PrivateAssets="all" />
   </ItemGroup>
   <ItemGroup>
     <Compile Remove="Fixtures\**\*.cs" />

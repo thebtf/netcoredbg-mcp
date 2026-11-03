@@ -28,7 +28,7 @@ internal sealed class NativeSceneCaptureCoordinator
 
     private readonly NativeSceneArtifactStore _artifactStore;
     private readonly string _debugSessionId;
-    private readonly Func<JsonObject> _candidate;
+    private readonly Func<NativeSceneContractContext, JsonObject> _candidate;
     private readonly Func<NativeSceneTargetIdentity?> _target;
     private readonly Func<CancellationToken, Task<JsonObject?>> _probeProducer;
     private readonly Func<string, JsonObject, CancellationToken, Task<JsonObject?>> _guardedProducer;
@@ -39,6 +39,20 @@ internal sealed class NativeSceneCaptureCoordinator
         NativeSceneArtifactStore artifactStore,
         string debugSessionId,
         Func<JsonObject> candidate,
+        Func<NativeSceneTargetIdentity?> target,
+        Func<CancellationToken, Task<JsonObject?>> probeProducer,
+        Func<string, JsonObject, CancellationToken, Task<JsonObject?>> guardedProducer,
+        Action<JsonObject?> setCaptureStabilityObservation,
+        Func<JsonElement, CancellationToken, Task<JsonObject>> revalidate)
+        : this(artifactStore, debugSessionId, AdaptLegacyCandidate(candidate), target, probeProducer, guardedProducer,
+            setCaptureStabilityObservation, revalidate)
+    {
+    }
+
+    internal NativeSceneCaptureCoordinator(
+        NativeSceneArtifactStore artifactStore,
+        string debugSessionId,
+        Func<NativeSceneContractContext, JsonObject> candidate,
         Func<NativeSceneTargetIdentity?> target,
         Func<CancellationToken, Task<JsonObject?>> probeProducer,
         Func<string, JsonObject, CancellationToken, Task<JsonObject?>> guardedProducer,
@@ -56,13 +70,35 @@ internal sealed class NativeSceneCaptureCoordinator
         _revalidate = revalidate ?? throw new ArgumentNullException(nameof(revalidate));
     }
 
+    private static Func<NativeSceneContractContext, JsonObject> AdaptLegacyCandidate(Func<JsonObject> candidate)
+    {
+        ArgumentNullException.ThrowIfNull(candidate);
+        return contract =>
+        {
+            var projection = candidate();
+            if (!ReferenceEquals(contract, NativeSceneContractCatalog.LegacyContract))
+            {
+                projection = projection.DeepClone().AsObject();
+                projection["contractSetHash"] = contract.ContractSetHash;
+            }
+
+            return projection;
+        };
+    }
+
     internal Task<JsonObject> CaptureElementAsync(JsonElement request, CancellationToken cancellationToken) =>
-        CaptureAsync(request, isElement: true, cancellationToken);
+        CaptureElementAsync(request, NativeSceneContractCatalog.LegacyContract, cancellationToken);
+
+    internal Task<JsonObject> CaptureElementAsync(JsonElement request, NativeSceneContractContext contract, CancellationToken cancellationToken) =>
+        CaptureAsync(request, isElement: true, contract, cancellationToken);
 
     internal Task<JsonObject> CaptureNativeSceneAsync(JsonElement request, CancellationToken cancellationToken) =>
-        CaptureAsync(request, isElement: false, cancellationToken);
+        CaptureNativeSceneAsync(request, NativeSceneContractCatalog.LegacyContract, cancellationToken);
 
-    private async Task<JsonObject> CaptureAsync(JsonElement request, bool isElement, CancellationToken cancellationToken)
+    internal Task<JsonObject> CaptureNativeSceneAsync(JsonElement request, NativeSceneContractContext contract, CancellationToken cancellationToken) =>
+        CaptureAsync(request, isElement: false, contract, cancellationToken);
+
+    private async Task<JsonObject> CaptureAsync(JsonElement request, bool isElement, NativeSceneContractContext contract, CancellationToken cancellationToken)
     {
         var tool = isElement ? "capture_element_snapshot" : "capture_native_scene";
         var sceneRequest = request.GetProperty("sceneRequest");
@@ -81,12 +117,13 @@ internal sealed class NativeSceneCaptureCoordinator
 
         var capturedAt = DateTimeOffset.UtcNow;
         var captureId = CreateOpaqueId();
-        var candidate = _candidate();
+        var candidate = _candidate(contract);
 
         if (probe is not null && TryNormalizeProbe(probe, target, out var normalized))
         {
             return await CaptureQualifiedAsync(
                 tool,
+                contract,
                 sceneRequest,
                 selector,
                 candidate,
@@ -106,6 +143,7 @@ internal sealed class NativeSceneCaptureCoordinator
         {
             return await CaptureQualifiedAsync(
                 tool,
+                contract,
                 sceneRequest,
                 selector,
                 candidate,
@@ -119,6 +157,7 @@ internal sealed class NativeSceneCaptureCoordinator
 
         var unavailableStability = await _revalidate(sceneRequest, cancellationToken).ConfigureAwait(false);
         return CreateUnobservableManifest(
+            contract,
             isElement,
             sceneRequest,
             selector,
@@ -137,6 +176,7 @@ internal sealed class NativeSceneCaptureCoordinator
 
     private async Task<JsonObject> CaptureQualifiedAsync(
         string tool,
+        NativeSceneContractContext contract,
         JsonElement sceneRequest,
         JsonElement selector,
         JsonObject candidate,
@@ -195,6 +235,7 @@ internal sealed class NativeSceneCaptureCoordinator
         if (status == "UNOBSERVABLE")
         {
             return CreateUnobservableManifest(
+                contract,
                 isElement,
                 sceneRequest,
                 selector,
@@ -207,6 +248,7 @@ internal sealed class NativeSceneCaptureCoordinator
         }
 
         var artifact = CreateArtifact(
+            contract,
             isElement ? "element_snapshot" : "native_scene",
             status,
             sceneRequest,
@@ -222,6 +264,7 @@ internal sealed class NativeSceneCaptureCoordinator
         if (artifactBytes.Length > MaximumArtifactBytes)
         {
             return CreateUnobservableManifest(
+                contract,
                 isElement,
                 sceneRequest,
                 selector,
@@ -276,6 +319,7 @@ internal sealed class NativeSceneCaptureCoordinator
         }
 
         return CreateManifest(
+            contract,
             isElement,
             status,
             sceneRequest,
@@ -366,6 +410,7 @@ internal sealed class NativeSceneCaptureCoordinator
     }
 
     private static JsonObject CreateManifest(
+        NativeSceneContractContext contract,
         bool isElement,
         string status,
         JsonElement sceneRequest,
@@ -382,8 +427,8 @@ internal sealed class NativeSceneCaptureCoordinator
             ["kind"] = isElement ? "element_snapshot_capture" : "native_scene_capture",
             ["status"] = status,
             ["captureId"] = captureId,
-            ["protocolVersion"] = "native-scene-probe/1",
-            ["schemaVersion"] = "native-scene-probe.schema/1",
+            ["protocolVersion"] = contract.ProtocolVersion,
+            ["schemaVersion"] = contract.SchemaVersion,
             ["sceneRequest"] = CloneObject(sceneRequest),
             ["evidenceScope"] = null,
             ["capturedAt"] = Timestamp(capturedAt),
@@ -396,6 +441,7 @@ internal sealed class NativeSceneCaptureCoordinator
         };
 
     private static JsonObject CreateUnobservableManifest(
+        NativeSceneContractContext contract,
         bool isElement,
         JsonElement sceneRequest,
         JsonElement selector,
@@ -406,6 +452,7 @@ internal sealed class NativeSceneCaptureCoordinator
         JsonArray issues,
         JsonObject? stability = null) =>
         CreateManifest(
+            contract,
             isElement,
             "UNOBSERVABLE",
             sceneRequest,
@@ -419,6 +466,7 @@ internal sealed class NativeSceneCaptureCoordinator
             issues);
 
     private static JsonObject CreateArtifact(
+        NativeSceneContractContext contract,
         string observationKind,
         string status,
         JsonElement sceneRequest,
@@ -434,7 +482,7 @@ internal sealed class NativeSceneCaptureCoordinator
         {
             ["kind"] = "native_scene_artifact",
             ["schemaVersion"] = ArtifactSchemaVersion,
-            ["protocolVersion"] = "native-scene-probe/1",
+            ["protocolVersion"] = contract.ProtocolVersion,
             ["captureId"] = captureId,
             ["capturedAt"] = Timestamp(capturedAt),
             ["status"] = status,

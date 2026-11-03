@@ -15,7 +15,8 @@ internal static class NativeSceneContractCatalog
     private const int MaxContainerMembers = 256;
     private const string ManifestPrefix = "NetCoreDbg.Mcp.Stateless.NativeScene.";
     private const string ActiveProtocolVersion = "native-scene-probe/1";
-    private const string ActiveSchemaVersion = "native-scene-probe.schema/1";
+    private const string LegacySchemaVersion = "native-scene-probe.schema/1";
+    private const string CurrentSchemaVersion = "native-scene-probe.schema/2";
 
     private static readonly NativeSceneValidationResult Valid = new(true, null, null);
     private static readonly NativeSceneValidationResult InvalidRequest = new(false, "INVALID_TOOL_ARGUMENTS", "Native scene request is invalid.");
@@ -23,35 +24,70 @@ internal static class NativeSceneContractCatalog
     private static readonly NativeSceneValidationResult InvalidVersion = new(false, "INVALID_TOOL_ARGUMENTS", "Native scene version syntax is invalid.");
     private static readonly NativeSceneValidationResult UnsupportedVersion = new(false, "UNSUPPORTED_PROTOCOL", "Native scene version is unsupported.");
     private static readonly NativeSceneValidationResult InvalidCorpus = new(false, "INVALID_TOOL_ARGUMENTS", "Native scene corpus is invalid.");
-    private static readonly ContractState State = LoadState();
+    private static readonly IReadOnlyDictionary<string, ContractArtifact> Artifacts = LoadArtifacts();
+    private static readonly ContractState State = LoadState("native-scene-probe.schema.json", "parity-corpus.json", LegacySchemaVersion, 24);
+    private static readonly ContractState CurrentState = LoadState("native-scene-probe-v2.schema.json", "parity-corpus-v2.json", CurrentSchemaVersion, 26);
 
-    internal static ReadOnlyMemory<byte> GetArtifactBytes(string fileName) => State.Artifacts.TryGetValue(fileName, out var artifact)
+    internal static NativeSceneContractContext LegacyContract => State.Context;
+
+    internal static NativeSceneContractContext SelectContract(string protocolVersion, string schemaVersion)
+    {
+        if (!ClassifyVersions(protocolVersion, schemaVersion).IsValid)
+        {
+            throw new ArgumentException("Native scene version is unsupported.");
+        }
+
+        return StringComparer.Ordinal.Equals(schemaVersion, LegacySchemaVersion) ? State.Context : CurrentState.Context;
+    }
+
+    internal static ReadOnlyMemory<byte> GetArtifactBytes(string fileName) => Artifacts.TryGetValue(fileName, out var artifact)
         ? new ReadOnlyMemory<byte>(artifact.Bytes.ToArray())
         : throw new InvalidOperationException("Unknown native scene contract artifact.");
 
-    internal static string GetArtifactSha256(string fileName) => State.Artifacts.TryGetValue(fileName, out var artifact)
+    internal static string GetArtifactSha256(string fileName) => Artifacts.TryGetValue(fileName, out var artifact)
         ? artifact.Sha256
         : throw new InvalidOperationException("Unknown native scene contract artifact.");
 
     internal static NativeSceneValidationResult ValidateRequest(string tool, string json)
+        => ValidateRequest(tool, json, out _);
+
+    internal static NativeSceneValidationResult ValidateRequest(string tool, string json, out NativeSceneContractContext? context)
     {
+        context = null;
         if (!TryGetRequestDefinition(tool, out var definition) || !TryParseBounded(json, out var instance))
         {
             return InvalidRequest;
         }
 
-        if (!ValidatesDefinition(State.ProbeDefinitions, instance, definition) || instance is not JsonObject request ||
+        if (instance is not JsonObject request ||
             !TryGetString(request["protocolVersion"], out var protocolVersion) ||
             !TryGetString(request["schemaVersion"], out var schemaVersion))
         {
             return InvalidRequest;
         }
 
-        return ClassifyVersions(protocolVersion, schemaVersion);
+        var state = StringComparer.Ordinal.Equals(schemaVersion, CurrentSchemaVersion) ? CurrentState : State;
+        if (!ValidatesDefinition(state.ProbeDefinitions, instance, definition))
+        {
+            return InvalidRequest;
+        }
+
+        var versions = ClassifyVersions(protocolVersion, schemaVersion);
+        if (!versions.IsValid)
+        {
+            return versions;
+        }
+
+        context = state.Context;
+        return Valid;
     }
 
     internal static NativeSceneValidationResult ValidateResult(string tool, string json)
+        => ValidateResult(tool, json, LegacyContract);
+
+    internal static NativeSceneValidationResult ValidateResult(string tool, string json, NativeSceneContractContext context)
     {
+        var state = GetState(context);
         if (!TryGetResultDefinitions(tool, out var definitions) || !TryParseBounded(json, out var instance))
         {
             return InvalidResult;
@@ -60,7 +96,7 @@ internal static class NativeSceneContractCatalog
         var matches = 0;
         foreach (var definition in definitions)
         {
-            if (ValidatesDefinition(State.ProbeDefinitions, instance, definition))
+            if (ValidatesDefinition(state.ProbeDefinitions, instance, definition))
             {
                 matches++;
             }
@@ -78,16 +114,20 @@ internal static class NativeSceneContractCatalog
         }
 
         return StringComparer.Ordinal.Equals(protocolVersion, ActiveProtocolVersion) &&
-               StringComparer.Ordinal.Equals(schemaVersion, ActiveSchemaVersion)
+               (StringComparer.Ordinal.Equals(schemaVersion, LegacySchemaVersion) ||
+                StringComparer.Ordinal.Equals(schemaVersion, CurrentSchemaVersion))
             ? Valid
             : UnsupportedVersion;
     }
 
     internal static NativeSceneValidationResult ValidateCorpus()
+        => ValidateCorpus(LegacyContract);
+
+    internal static NativeSceneValidationResult ValidateCorpus(NativeSceneContractContext context)
     {
         try
         {
-            return IsApprovedCorpus(State) ? Valid : InvalidCorpus;
+            return IsApprovedCorpus(GetState(context)) ? Valid : InvalidCorpus;
         }
         catch (JsonException)
         {
@@ -99,18 +139,37 @@ internal static class NativeSceneContractCatalog
         }
     }
 
-    private static ContractState LoadState()
+    private static ContractState GetState(NativeSceneContractContext context)
     {
-        var artifacts = new Dictionary<string, ContractArtifact>(StringComparer.Ordinal)
+        ArgumentNullException.ThrowIfNull(context);
+        if (ReferenceEquals(context, State.Context))
+        {
+            return State;
+        }
+
+        if (ReferenceEquals(context, CurrentState.Context))
+        {
+            return CurrentState;
+        }
+
+        throw new ArgumentException("Unknown native scene contract context.", nameof(context));
+    }
+
+    private static IReadOnlyDictionary<string, ContractArtifact> LoadArtifacts() =>
+        new Dictionary<string, ContractArtifact>(StringComparer.Ordinal)
         {
             ["native-scene-probe.schema.json"] = LoadArtifact("native-scene-probe.schema.json", "f446166f9a1062d3e1a2190327d06c04905e76a1c1f81af16c87572394f90022"),
             ["native-scene-artifact.schema.json"] = LoadArtifact("native-scene-artifact.schema.json", "07c257c9b5f75c01aa4f4141968c789b045d7c831575343df429075c732f7668"),
             ["parity-corpus.json"] = LoadArtifact("parity-corpus.json", "90c24f8f9706c207ca3ecf8dee93d1937c16a6be45feac65d812e48853bc4621"),
+            ["native-scene-probe-v2.schema.json"] = LoadArtifact("native-scene-probe-v2.schema.json", "9a9de59e1f9803b0965f07f8edcb61876cd93e18dfe121ad02b502dd724e1dfe"),
+            ["parity-corpus-v2.json"] = LoadArtifact("parity-corpus-v2.json", "bfa7faa1801deb632ae242ad04cea6751744155659a7fad3aff09a28033797f8"),
         };
 
-        var probeSchema = ParseObject(artifacts["native-scene-probe.schema.json"].Bytes, "native-scene-probe.schema.json");
-        var artifactSchema = ParseObject(artifacts["native-scene-artifact.schema.json"].Bytes, "native-scene-artifact.schema.json");
-        var corpus = ParseObject(artifacts["parity-corpus.json"].Bytes, "parity-corpus.json");
+    private static ContractState LoadState(string probeSchemaArtifact, string corpusArtifact, string schemaVersion, int caseCount)
+    {
+        var probeSchema = ParseObject(Artifacts[probeSchemaArtifact].Bytes, probeSchemaArtifact);
+        var artifactSchema = ParseObject(Artifacts["native-scene-artifact.schema.json"].Bytes, "native-scene-artifact.schema.json");
+        var corpus = ParseObject(Artifacts[corpusArtifact].Bytes, corpusArtifact);
         var probeDefinitions = RequiredObject(probeSchema["definitions"]);
         var artifactDefinitions = RequiredObject(artifactSchema["definitions"]);
 
@@ -121,7 +180,8 @@ internal static class NativeSceneContractCatalog
             throw new InvalidOperationException("Native scene contract resources are invalid.");
         }
 
-        return new ContractState(artifacts, probeSchema, probeDefinitions, artifactSchema, artifactDefinitions, corpus);
+        var context = new NativeSceneContractContext(ActiveProtocolVersion, schemaVersion, Artifacts[probeSchemaArtifact].Sha256);
+        return new ContractState(context, caseCount, probeSchema, probeDefinitions, artifactSchema, artifactDefinitions, corpus);
     }
 
     private static ContractArtifact LoadArtifact(string fileName, string expectedSha256)
@@ -300,8 +360,8 @@ internal static class NativeSceneContractCatalog
             !TryGetString(contract["protocolVersion"], out var protocolVersion) ||
             !TryGetString(contract["schemaVersion"], out var schemaVersion) ||
             !TryGetString(contract["artifactSchemaVersion"], out var artifactSchemaVersion) ||
-            !StringComparer.Ordinal.Equals(protocolVersion, ActiveProtocolVersion) ||
-            !StringComparer.Ordinal.Equals(schemaVersion, ActiveSchemaVersion) ||
+            !StringComparer.Ordinal.Equals(protocolVersion, state.Context.ProtocolVersion) ||
+            !StringComparer.Ordinal.Equals(schemaVersion, state.Context.SchemaVersion) ||
             !StringComparer.Ordinal.Equals(artifactSchemaVersion, "native-scene-artifact/1") ||
             !TryGetObject(state.Corpus["fixtures"], out var fixtures) ||
             !TryGetString(fixtures["sessionId"], out var sessionId) ||
@@ -309,12 +369,12 @@ internal static class NativeSceneContractCatalog
             !ValidatesDefinition(state.ProbeDefinitions, fixtures["sceneRequest"], "sceneRequest") ||
             !TryGetObject(state.Corpus["gateStages"], out var gateStages) ||
             !HasExpectedGateStage(gateStages) ||
-            !TryGetArray(state.Corpus["cases"], out var cases) || cases.Count != 24)
+            !TryGetArray(state.Corpus["cases"], out var cases) || cases.Count != state.CaseCount)
         {
             return false;
         }
 
-        var caseNumbers = new bool[25];
+        var caseNumbers = new bool[state.CaseCount + 1];
         foreach (var item in cases)
         {
             if (!TryGetObject(item, out var caseEntry) || !IsApprovedCase(state, caseEntry, caseNumbers))
@@ -323,7 +383,7 @@ internal static class NativeSceneContractCatalog
             }
         }
 
-        for (var number = 1; number <= 24; number++)
+        for (var number = 1; number <= state.CaseCount; number++)
         {
             if (!caseNumbers[number])
             {
@@ -336,7 +396,7 @@ internal static class NativeSceneContractCatalog
 
     private static bool IsApprovedCase(ContractState state, JsonObject caseEntry, bool[] caseNumbers)
     {
-        if (!TryGetString(caseEntry["id"], out var id) || !TryGetCaseNumber(id, out var number) || caseNumbers[number] ||
+        if (!TryGetString(caseEntry["id"], out var id) || !TryGetCaseNumber(id, state.CaseCount, out var number) || caseNumbers[number] ||
             !TryGetString(caseEntry["contractGateExpectation"], out var gateExpectation) || !IsGateExpectation(gateExpectation) ||
             !TryGetBoolean(caseEntry["runtimeBehaviorRequired"], out _) ||
             !TryGetString(caseEntry["primitive"], out var primitive) || !TryGetRequestDefinition(primitive, out _) ||
@@ -495,7 +555,7 @@ internal static class NativeSceneContractCatalog
         return true;
     }
 
-    private static bool TryGetCaseNumber(string id, out int number)
+    private static bool TryGetCaseNumber(string id, int maximum, out int number)
     {
         number = 0;
         if (id.Length < 6 || id[0] != 'C' || id[4] != '-' ||
@@ -505,7 +565,7 @@ internal static class NativeSceneContractCatalog
         }
 
         number = ((id[1] - '0') * 100) + ((id[2] - '0') * 10) + (id[3] - '0');
-        return number is >= 1 and <= 24;
+        return number >= 1 && number <= maximum;
     }
 
     private static bool IsGateExpectation(string value) =>
@@ -558,7 +618,8 @@ internal static class NativeSceneContractCatalog
     private sealed record ContractArtifact(byte[] Bytes, string Sha256);
 
     private sealed record ContractState(
-        IReadOnlyDictionary<string, ContractArtifact> Artifacts,
+        NativeSceneContractContext Context,
+        int CaseCount,
         JsonObject ProbeSchema,
         JsonObject ProbeDefinitions,
         JsonObject ArtifactSchema,
@@ -1030,3 +1091,17 @@ internal static class NativeSceneContractCatalog
 }
 
 internal sealed record NativeSceneValidationResult(bool IsValid, string? Code, string? Message);
+
+internal sealed class NativeSceneContractContext
+{
+    internal NativeSceneContractContext(string protocolVersion, string schemaVersion, string contractSetHash)
+    {
+        ProtocolVersion = protocolVersion;
+        SchemaVersion = schemaVersion;
+        ContractSetHash = contractSetHash;
+    }
+
+    internal string ProtocolVersion { get; }
+    internal string SchemaVersion { get; }
+    internal string ContractSetHash { get; }
+}

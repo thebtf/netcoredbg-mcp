@@ -115,6 +115,30 @@ An external design-evaluation consumer needs to obtain the captured facts throug
 - **FR-020**: The new capability MUST be independent of the retained legacy runtime. It MUST NOT execute through, invoke, or depend on that route, and it MUST leave the retained route unchanged.
 - **FR-021**: The feature MUST introduce no direct storage-path retrieval, arbitrary external-address retrieval, remote listener, public route cutover, private design comparator, or deferred token-check facade during M0 or M1.
 
+### Later source-built compatibility amendment
+
+The initial approval and phase gate above describe the original `/1` contract.
+The later compatible `/2` probe-schema revision is a technical amendment under
+the autonomous .NET replacement mandate, not a claim that the operator approved
+its exact bytes or that historical T007/T032 evidence covers it. The original
+approval record and `/1` resources retain their historical meaning.
+
+The host accepts probe schema `/1` and `/2` with protocol
+`native-scene-probe/1`, preserving existing `/1` success and error behavior.
+Each request selects its own validation, response revision, and candidate
+contract hash. If candidate identity is unavailable for a live session,
+`get_ui_probe_capabilities` returns a typed `UNSUPPORTED_CAPABILITY` under `/2`;
+under frozen `/1`, it returns a deliberate MCP-level error without structured
+application content. Neither case fabricates identity or starts observation.
+Previously committed artifact bytes and provenance remain unchanged when read
+through either revision. Removing `/1` requires an explicitly incompatible
+revision after known supported consumers migrate and their compatibility
+obligations are met.
+
+The `/1` declaration continues to advertise `/1`; a `/2` declaration contains
+`/2` and may also advertise `/1`. This revision-specific membership replaces
+the `/1`-specific declaration constraint in FR-005 only for `/2`.
+
 ### Key Entities *(include if feature involves data)*
 
 - **Evidence Contract**: The operator-approved, versioned agreement defining evidence meaning, exchange validity, limits, outcomes, and compatibility rules before implementation.
