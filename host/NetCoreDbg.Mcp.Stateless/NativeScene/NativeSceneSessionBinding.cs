@@ -145,6 +145,9 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
     }
 
     internal bool TryGetCandidate(out JsonElement candidate)
+        => TryGetCandidate(NativeSceneContractCatalog.LegacyContract, out candidate);
+
+    internal bool TryGetCandidate(NativeSceneContractContext contract, out JsonElement candidate)
     {
         if (_session is not { } session || !session.TryGetNativeSceneTargetIdentity(out var targetIdentity))
         {
@@ -161,7 +164,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
             assemblyVersion = targetIdentity.AssemblyVersion,
             probeVersion = targetIdentity.ProbeVersion,
             observerVersions = Array.Empty<object>(),
-            contractSetHash = NativeSceneContractCatalog.GetArtifactSha256("native-scene-probe.schema.json"),
+            contractSetHash = contract.ContractSetHash,
             storyHash = (string?)null,
             capturedAt = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture),
             source = new
@@ -186,14 +189,21 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
     internal Task<JsonObject> WaitForStableAsync(JsonElement sceneRequest, CancellationToken cancellationToken) =>
         _stabilityCoordinator.WaitForStableAsync(sceneRequest, cancellationToken);
     internal Task<JsonObject> CaptureElementAsync(JsonElement request, CancellationToken cancellationToken) =>
-        CaptureSceneAsync(request, isElement: true, cancellationToken);
+        CaptureElementAsync(request, NativeSceneContractCatalog.LegacyContract, cancellationToken);
+
+    internal Task<JsonObject> CaptureElementAsync(JsonElement request, NativeSceneContractContext contract, CancellationToken cancellationToken) =>
+        CaptureSceneAsync(request, isElement: true, contract, cancellationToken);
 
     internal Task<JsonObject> CaptureNativeSceneAsync(JsonElement request, CancellationToken cancellationToken) =>
-        CaptureSceneAsync(request, isElement: false, cancellationToken);
+        CaptureNativeSceneAsync(request, NativeSceneContractCatalog.LegacyContract, cancellationToken);
+
+    internal Task<JsonObject> CaptureNativeSceneAsync(JsonElement request, NativeSceneContractContext contract, CancellationToken cancellationToken) =>
+        CaptureSceneAsync(request, isElement: false, contract, cancellationToken);
 
     private async Task<JsonObject> CaptureSceneAsync(
         JsonElement request,
         bool isElement,
+        NativeSceneContractContext contract,
         CancellationToken cancellationToken)
     {
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -211,8 +221,8 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
             }
 
             return isElement
-                ? await GetOrCreateCaptureCoordinator().CaptureElementAsync(request, cancellationToken).ConfigureAwait(false)
-                : await GetOrCreateCaptureCoordinator().CaptureNativeSceneAsync(request, cancellationToken).ConfigureAwait(false);
+                ? await GetOrCreateCaptureCoordinator().CaptureElementAsync(request, contract, cancellationToken).ConfigureAwait(false)
+                : await GetOrCreateCaptureCoordinator().CaptureNativeSceneAsync(request, contract, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -222,10 +232,18 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
 
 
 
+    internal Task<NativeSceneVisualEvidenceResult> CaptureVisualEvidenceAsync(
+        JsonElement sceneRequest,
+        JsonElement evidenceScope,
+        JsonElement candidate,
+        CancellationToken cancellationToken)
+        => CaptureVisualEvidenceAsync(sceneRequest, evidenceScope, candidate, NativeSceneContractCatalog.LegacyContract, cancellationToken);
+
     internal async Task<NativeSceneVisualEvidenceResult> CaptureVisualEvidenceAsync(
         JsonElement sceneRequest,
         JsonElement evidenceScope,
         JsonElement candidate,
+        NativeSceneContractContext contract,
         CancellationToken cancellationToken)
     {
         var entered = false;
@@ -308,6 +326,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
 
                 committed = true;
                 return NativeSceneVisualEvidenceResult.Succeeded(CreateVisualEvidenceManifest(
+                    contract,
                     sceneRequest,
                     evidenceScope,
                     candidate,
@@ -427,9 +446,9 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
             SetCaptureStabilityObservation,
             _stabilityCoordinator.RevalidateForCaptureAsync);
 
-    private JsonObject CreateCurrentCandidate()
+    private JsonObject CreateCurrentCandidate(NativeSceneContractContext contract)
     {
-        if (!TryGetCandidate(out var candidate))
+        if (!TryGetCandidate(contract, out var candidate))
         {
             throw new InvalidOperationException("Native-scene capture candidate is unavailable.");
         }
@@ -723,6 +742,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
     }
 
     private static JsonObject CreateVisualEvidenceManifest(
+        NativeSceneContractContext contract,
         JsonElement sceneRequest,
         JsonElement evidenceScope,
         JsonElement candidate,
@@ -737,8 +757,8 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
             ["kind"] = "visual_evidence_capture",
             ["status"] = "COMPLETE",
             ["captureId"] = captureId,
-            ["protocolVersion"] = "native-scene-probe/1",
-            ["schemaVersion"] = "native-scene-probe.schema/1",
+            ["protocolVersion"] = contract.ProtocolVersion,
+            ["schemaVersion"] = contract.SchemaVersion,
             ["sceneRequest"] = CloneObject(sceneRequest),
             ["evidenceScope"] = CloneObject(evidenceScope),
             ["capturedAt"] = timestamp,
