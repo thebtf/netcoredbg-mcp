@@ -524,6 +524,15 @@ Use `ui_take_annotated_screenshot()` to receive Set-of-Mark labels, then invoke
 `ui_click_annotated(element_id=...)`. Use `ui_bring_to_front()` only when the
 debuggee should intentionally leave stealth mode.
 
+`ui_bring_to_front()` reports the target HWND and expected/observed PID, the
+foreground HWND and PID observed at the end of the call, and
+`foreground_matches_target` (`true`, `false`, or `null` when unknown).
+`activation_attempted` and `activation_api_result` separately describe the
+ordinary Windows request. `activated=true` requires a valid current target and
+a matching final observation; it does not promise that foreground ownership
+persists after return. Windows may deny activation. `stealth_mode` can be
+`null` when a bridge reconnect has an uncertain outcome.
+
 ## Tool map
 
 The published MCP catalog has 135 tools.

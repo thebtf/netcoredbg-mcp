@@ -7573,7 +7573,7 @@ async def test_screenshot_black_frame_guard():
     print("\n--- Screenshot Black Frame Guard ---")
     import ctypes
     import io
-    from unittest.mock import patch
+    from unittest.mock import MagicMock, patch
 
     from PIL import Image
 
@@ -7586,9 +7586,9 @@ async def test_screenshot_black_frame_guard():
     registry = _CapturingMCP()
     session = SimpleNamespace(
         process_registry=None,
-        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42, activity_epoch=object()),
         stealth_mode=False,
-        session_id=None,
+        session_id="fake-black-frame-recovery",
     )
 
     with (
@@ -7622,6 +7622,32 @@ async def test_screenshot_black_frame_guard():
 
     fallback_backend = PywinautoBackend.__new__(PywinautoBackend)
     fallback_backend._ui = SimpleNamespace(process_id=42)
+    foreground_state = {"hwnd": 0}
+
+    def fake_owner(hwnd, pid_out):
+        if hwnd != 123:
+            return 0
+        if pid_out is not None:
+            ctypes.cast(pid_out, ctypes.POINTER(ctypes.c_ulong)).contents.value = 42
+        return 7
+
+    def fake_activate(hwnd):
+        assert hwnd == 123
+        foreground_state["hwnd"] = hwnd
+        return True
+
+    fake_user32 = SimpleNamespace(
+        IsWindow=MagicMock(side_effect=lambda hwnd: hwnd == 123),
+        GetWindowThreadProcessId=MagicMock(side_effect=fake_owner),
+        GetForegroundWindow=MagicMock(side_effect=lambda: foreground_state["hwnd"]),
+        ShowWindow=MagicMock(return_value=True),
+        SetForegroundWindow=MagicMock(side_effect=fake_activate),
+    )
+    forbidden_input = []
+    for name in ("AttachThreadInput", "SendInput", "keybd_event", "mouse_event", "SetCursorPos"):
+        operation = MagicMock(side_effect=AssertionError("Fake recovery must not inject input"))
+        forbidden_input.append(operation)
+        setattr(fake_user32, name, operation)
     with (
         patch(
             "netcoredbg_mcp.ui.backend.create_backend",
@@ -7629,21 +7655,29 @@ async def test_screenshot_black_frame_guard():
         ),
         patch("netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid", return_value=123),
         patch(
-            "netcoredbg_mcp.ui.foreground.restore_foreground_window",
-            return_value=True,
+            "netcoredbg_mcp.ui.foreground.os",
+            SimpleNamespace(name="nt"),
         ),
         patch.object(
-            ctypes.windll,
-            "user32",
-            SimpleNamespace(ShowWindow=lambda _hwnd, _command: True),
+            ctypes,
+            "windll",
+            SimpleNamespace(user32=fake_user32, kernel32=SimpleNamespace()),
+            create=True,
         ),
+        patch.object(ctypes, "WinDLL", lambda *_args, **_kwargs: fake_user32, create=True),
     ):
         recovery = await registry.tools["ui_bring_to_front"](SimpleNamespace())
 
     recovery_data = recovery.get("data", {}) if isinstance(recovery, dict) else {}
     check(
         "Black-frame recovery supports pywinauto fallback",
-        "error" not in recovery and recovery_data.get("activated") is True,
+        "error" not in recovery
+        and recovery_data.get("activated") is True
+        and recovery_data.get("foreground") == {"hwnd": 123, "pid": 42}
+        and recovery_data.get("foreground_matches_target") is True
+        and recovery_data.get("stealth_mode") is False
+        and session.stealth_mode is False
+        and all(not operation.called for operation in forbidden_input),
         str(recovery)[:240],
     )
 

@@ -727,47 +727,85 @@ def register_ui_tools(
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def ui_bring_to_front(ctx: Context) -> dict:
-        """Bring the debuggee window to the foreground and exit stealth mode."""
+        """Request foreground once and report the final point-in-time evidence."""
         try:
             access_error = check_session_access(ctx)
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
-            ui = await _ensure_ui_connected()
-            bring_to_front = getattr(ui, "bring_to_front", None)
-            if bring_to_front is None:
-                import ctypes
+            from ..ui import NoActiveSessionError, NoProcessIdError
+            from ..ui.foreground import ForegroundActivation
 
-                from ..ui.foreground import restore_foreground_window
-                from ..ui.screenshot import get_hwnd_for_pid
+            state = session.state
+            if state.state in (DebugState.IDLE, DebugState.TERMINATED):
+                raise NoActiveSessionError("No debug session is active. Start debugging first.")
+            pid = state.process_id
+            if not pid:
+                raise NoProcessIdError("Process ID not available for foreground activation.")
+            session_id = getattr(session, "session_id", None)
+            epoch = getattr(state, "activity_epoch", None)
+            # RUNNING can lag an explicit stop or a manager-owned terminal fact.
+            dap_generation = getattr(session, "_active_dap_run", None)
+            dap_client = getattr(session, "client", None)
+            activation = ForegroundActivation(pid)
+            ui = _get_backend()
+            # A retained backend PID is connection state, not session identity.
+            # Native activation stays bound to the session target captured above.
 
-                pid = session.state.process_id
-                hwnd = get_hwnd_for_pid(pid) if pid else None
-                if not hwnd:
-                    return build_error_response(
-                        f"No visible window for process {pid}.",
-                        state=session.state.state,
+            def session_is_current() -> bool:
+                return (
+                    session.state is state
+                    and session_id is not None
+                    and epoch is not None
+                    and getattr(session, "session_id", None) == session_id
+                    and getattr(state, "activity_epoch", None) is epoch
+                    and state.process_id == pid
+                    and state.state not in (DebugState.IDLE, DebugState.TERMINATED)
+                    and getattr(state, "transport_terminal", None) is None
+                    and getattr(session, "_active_dap_run", None) == dap_generation
+                    and (
+                        dap_generation is None
+                        or getattr(session, "_stopping_dap_run", None) != dap_generation
                     )
-
-                loop = asyncio.get_running_loop()
-
-                def activate_window() -> bool:
-                    ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-                    return restore_foreground_window(hwnd)
-
-                activated = await loop.run_in_executor(None, activate_window)
-                result = {"activated": activated, "hwnd": hwnd}
-            else:
-                result = await bring_to_front()
-            if not isinstance(result, dict):
-                return build_error_response(
-                    f"bring_to_front: backend returned non-dict response ({type(result).__name__})",
-                    state=session.state.state,
+                    and getattr(session, "client", None) is dap_client
+                    and (
+                        dap_client is None or getattr(dap_client, "is_running", False) is True
+                    )
+                    and _backend_holder["instance"] is ui
                 )
 
-            if result.get("activated") is True:
-                session.stealth_mode = False
-                result["stealth_mode"] = False
+            async with connection_lock:
+                if session_is_current():
+                    await _join_launch_foreground_restore()
+
+                if _is_flaui_backend(ui) and session_is_current():
+                    result = await ui.bring_to_front(
+                        activation=activation, is_current=session_is_current
+                    )
+                else:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(
+                        None, lambda: activation.request(is_current=session_is_current)
+                    )
+                    result = activation.observe(is_current=session_is_current)
+
+                backend_activated = result["activated"] is True
+                result.update(activation.observe(is_current=session_is_current))
+                result["activated"] = backend_activated and result["activated"]
+
+                current = session_is_current()
+                if current:
+                    if result.get("stealth_mode") is False or (
+                        not _is_flaui_backend(ui) and result["activated"] is True
+                    ):
+                        session.stealth_mode = False
+                    mode = result.get("stealth_mode", getattr(session, "stealth_mode", None))
+                else:
+                    # An old reconnect must not overwrite a replacement session.
+                    mode = getattr(session, "stealth_mode", None)
+                    result["activated"] = False
+
+                result["stealth_mode"] = mode
 
             return build_response(data=result, state=session.state.state)
         except Exception as e:

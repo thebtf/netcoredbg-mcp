@@ -18,6 +18,11 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
+from tests import test_ui_foreground_reporting
+from tests.test_ui_foreground_reporting import TARGET_HWND
+
+foreground_case = test_ui_foreground_reporting.foreground_case
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 REQUIRES_WINDOWS_DOTNET = pytest.mark.skipif(
@@ -2327,17 +2332,36 @@ def test_session_manager_allows_explicit_stealth_exit_source_contract() -> None:
     assert "self._stealth_mode = value" in manager
 
 
-def test_flaui_backend_bring_to_front_reconnects_bridge_without_stealth() -> None:
-    backend = (PROJECT_ROOT / "src" / "netcoredbg_mcp" / "ui" / "flaui_client.py").read_text(
-        encoding="utf-8"
-    )
+@pytest.mark.asyncio
+async def test_ui_bring_to_front_bridge_failure_after_activation_reports_unknown_stealth(
+    foreground_case,
+) -> None:
+    case = foreground_case
+    case.backend._stealth_mode = True
+    failed_connects = []
 
-    assert "async def bring_to_front(self) -> dict[str, Any]:" in backend
-    assert "get_hwnd_for_pid(self._process_id)" in backend
-    assert "SetForegroundWindow(hwnd)" in backend
-    assert "await self.connect(self._process_id, stealth=False)" in backend
-    assert '["activated"] = activated' not in backend
-    assert '"activated": activated' in backend
+    async def fail_after_activation(method, params=None, **_kwargs):
+        assert method == "connect"
+        assert params == {"pid": 42}
+        assert case.desktop.foreground_hwnd == TARGET_HWND
+        failed_connects.append(TARGET_HWND)
+        raise RuntimeError("Fake bridge connect failed after activation")
+
+    case.backend.client.call.side_effect = fail_after_activation
+
+    result = await case.invoke("public")
+
+    assert failed_connects == [TARGET_HWND]
+    assert result["activation_attempted"] is True
+    assert result["activation_api_result"] is True
+    assert result["foreground"] == {"hwnd": TARGET_HWND, "pid": 42}
+    assert result["foreground_matches_target"] is True
+    assert result["activated"] is False
+    assert result["reconnect_error"]
+    assert result["stealth_mode"] is None
+    assert case.session.stealth_mode is True
+    case.session.cancel_pending_stealth_foreground_restore.assert_awaited_once_with()
+    case.desktop.user32.SetForegroundWindow.assert_called_once_with(TARGET_HWND)
 
 
 @pytest.mark.asyncio
@@ -2354,51 +2378,57 @@ async def test_flaui_backend_bring_to_front_blocks_when_no_visible_window(monkey
 
 
 @pytest.mark.asyncio
-async def test_ui_get_window_tree_reconnects_same_pid_after_bridge_disconnect() -> None:
-    from netcoredbg_mcp.session.manager import DebugState
+async def test_ui_get_window_tree_reconnects_same_pid_after_bridge_disconnect(
+    foreground_case,
+) -> None:
     from netcoredbg_mcp.tools.ui import register_ui_tools
     from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
 
-    class DisconnectingBackend(FlaUIBackend):
-        process_id = 42
+    case = foreground_case
+    backend = FlaUIBackend("never-launched-fake-bridge.exe")
+    backend._process_id = 42
+    backend._stealth_mode = True
+    bridge = {"connected": False, "stealth": True}
 
-        def __init__(self) -> None:
-            self.connected = False
-            self.connect = AsyncMock(side_effect=self._connect)
-            self.bring_to_front = AsyncMock(return_value={"activated": True})
+    async def bridge_call(method, params=None, **_kwargs):
+        if method == "connect":
+            assert isinstance(params, dict)
+            assert params["pid"] == 42
+            bridge["connected"] = True
+            bridge["stealth"] = params.get("stealth", False)
+            return {"connected": True}
+        assert method == "get_tree"
+        if not bridge["connected"]:
+            raise RuntimeError("FlaUI bridge error: Not connected. Call 'connect' first.")
+        assert bridge["stealth"] is False
+        return {"windows": [{"automationId": "MainWindow"}], "count": 1}
 
-        async def _connect(self, pid: int, stealth: bool = False) -> None:
-            self.connected = True
-
-        async def get_window_tree(self, max_depth: int = 3, max_children: int = 50) -> dict:
-            if not self.connected:
-                raise RuntimeError(
-                    "FlaUI bridge error: Internal error: Not connected. Call 'connect' first."
-                )
-            return {"windows": [{"automationId": "MainWindow"}], "count": 1}
-
-    backend = DisconnectingBackend()
-    session = SimpleNamespace(
-        process_registry=None,
-        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
-        stealth_mode=True,
+    backend._client = SimpleNamespace(
+        is_running=True,
+        ensure_alive=AsyncMock(return_value=True),
+        call=AsyncMock(side_effect=bridge_call),
     )
     registry = ToolRegistry()
+    register_ui_tools(
+        registry,
+        case.session,
+        check_session_access=lambda _ctx: None,
+        backend_holder={"instance": backend},
+    )
 
-    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
-        register_ui_tools(
-            registry,
-            session,
-            check_session_access=lambda ctx: None,
-        )
-
-        bring_response = await registry.tools["ui_bring_to_front"](SimpleNamespace())
-        tree_response = await registry.tools["ui_get_window_tree"]()
-
+    bring_response = await registry.tools["ui_bring_to_front"](SimpleNamespace())
     assert bring_response["data"]["activated"] is True
+    assert bring_response["data"]["stealth_mode"] is False
+    assert bridge == {"connected": True, "stealth": False}
+    # Lose only the bridge-side binding: the cached backend still has the same PID.
+    bridge["connected"] = False
+    tree_response = await registry.tools["ui_get_window_tree"]()
+
     assert "error" not in tree_response
     assert tree_response["data"]["count"] == 1
-    assert call(42, stealth=False) in backend.connect.await_args_list
+    assert tree_response["data"]["windows"][0]["automationId"] == "MainWindow"
+    assert bridge == {"connected": True, "stealth": False}
+    case.desktop.user32.SetForegroundWindow.assert_called_once_with(TARGET_HWND)
 
 
 @pytest.mark.asyncio
@@ -2599,24 +2629,18 @@ async def test_ui_tools_connect_flaui_backend_with_session_stealth_mode() -> Non
 
 
 @pytest.mark.asyncio
-async def test_ui_get_window_tree_timeout_returns_structured_blocked() -> None:
-    from netcoredbg_mcp.session.manager import DebugState
+async def test_ui_get_window_tree_timeout_returns_structured_blocked(foreground_case) -> None:
     from netcoredbg_mcp.tools.ui import register_ui_tools
 
     async def slow_window_tree(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-        await asyncio.sleep(0.05)
+        await asyncio.Event().wait()
         return {"windows": [], "count": 0}
 
     backend = SimpleNamespace(
         process_id=42,
         get_window_tree=AsyncMock(side_effect=slow_window_tree),
-        bring_to_front=AsyncMock(return_value={"activated": True}),
     )
-    session = SimpleNamespace(
-        process_registry=None,
-        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
-        stealth_mode=True,
-    )
+    session = foreground_case.session
     registry = ToolRegistry()
 
     with (
@@ -2681,68 +2705,63 @@ async def test_ui_get_window_tree_connect_timeout_is_not_discovery_timeout() -> 
 
 
 @pytest.mark.asyncio
-async def test_ui_mutation_connect_failure_preserves_pending_restore() -> None:
-    from netcoredbg_mcp.session.manager import DebugState
+async def test_ui_bring_to_front_preparation_failure_preserves_pending_restore(
+    foreground_case, monkeypatch
+) -> None:
     from netcoredbg_mcp.tools.ui import register_ui_tools
 
-    backend = SimpleNamespace(process_id=None, bring_to_front=AsyncMock())
-    cancel_restore = AsyncMock()
-    session = SimpleNamespace(
-        process_registry=None,
-        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
-        stealth_mode=True,
-        cancel_pending_stealth_foreground_restore=cancel_restore,
-    )
+    case = foreground_case
     registry = ToolRegistry()
+    monkeypatch.setattr(
+        "netcoredbg_mcp.ui.backend.create_backend",
+        MagicMock(side_effect=RuntimeError("Fake backend preparation refused")),
+    )
+    register_ui_tools(
+        registry,
+        case.session,
+        check_session_access=lambda _ctx: None,
+        backend_holder={"instance": None},
+    )
 
-    with (
-        patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend),
-        patch(
-            "netcoredbg_mcp.ui.backend.connect_backend",
-            AsyncMock(side_effect=asyncio.TimeoutError("connect timeout")),
-        ),
-    ):
-        register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
-        response = await registry.tools["ui_bring_to_front"](SimpleNamespace())
+    response = await registry.tools["ui_bring_to_front"](SimpleNamespace())
 
-    assert response["error"] == "connect timeout"
-    cancel_restore.assert_not_awaited()
-    backend.bring_to_front.assert_not_awaited()
+    assert response.get("error")
+    assert response.get("data", {}).get("activated") is not True
+    assert case.session.stealth_mode is True
+    case.session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+    case.desktop.user32.ShowWindow.assert_not_called()
+    case.desktop.user32.SetForegroundWindow.assert_not_called()
+    case.backend.client.call.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_ui_bring_to_front_disables_session_stealth_mode() -> None:
-    from netcoredbg_mcp.session.manager import DebugState
-    from netcoredbg_mcp.tools.ui import register_ui_tools
+async def test_ui_bring_to_front_disables_session_stealth_mode(foreground_case) -> None:
+    case = foreground_case
+    case.backend._stealth_mode = True
+    pending_restore = {"pending": True}
 
-    backend = SimpleNamespace(
-        process_id=42,
-        bring_to_front=AsyncMock(return_value={"activated": True, "hwnd": 123}),
-    )
-    cancel_restore = AsyncMock()
-    session = SimpleNamespace(
-        process_registry=None,
-        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
-        stealth_mode=True,
-        cancel_pending_stealth_foreground_restore=cancel_restore,
-    )
-    registry = ToolRegistry()
-    ctx = SimpleNamespace()
+    async def cancel_restore():
+        pending_restore["pending"] = False
+        return False
 
-    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
-        register_ui_tools(
-            registry,
-            session,
-            check_session_access=lambda ctx: None,
-        )
+    def show_after_restore_cancelled(hwnd, _command):
+        assert hwnd == TARGET_HWND
+        assert pending_restore["pending"] is False
+        return True
 
-        response = await registry.tools["ui_bring_to_front"](ctx)
+    case.session.cancel_pending_stealth_foreground_restore.side_effect = cancel_restore
+    case.desktop.user32.ShowWindow.side_effect = show_after_restore_cancelled
 
-    backend.bring_to_front.assert_awaited_once_with()
-    cancel_restore.assert_awaited_once_with()
-    assert session.stealth_mode is False
-    assert response["data"]["activated"] is True
-    assert response["data"]["stealth_mode"] is False
+    result = await case.invoke("public")
+
+    case.session.cancel_pending_stealth_foreground_restore.assert_awaited_once_with()
+    assert pending_restore["pending"] is False
+    assert case.session.stealth_mode is False
+    assert result["activated"] is True
+    assert result["foreground"] == {"hwnd": TARGET_HWND, "pid": 42}
+    assert result["foreground_matches_target"] is True
+    assert result["stealth_mode"] is False
+    case.desktop.user32.SetForegroundWindow.assert_called_once_with(TARGET_HWND)
 
 
 @pytest.mark.asyncio
@@ -3899,9 +3918,41 @@ def _typed_bitblt_backend(result: dict[str, object]):
     return backend
 
 
+def _prepare_fake_screenshot_activation(foreground_case, backend):
+    """Keep the screenshot consumers' HWND 777 and all activation calls fake."""
+    desktop = foreground_case.desktop
+    desktop.windows.add(777)
+    desktop.owners[777] = 42
+
+    def activate(hwnd):
+        assert hwnd == 777
+        desktop.foreground_hwnd = hwnd
+        return True
+
+    desktop.user32.SetForegroundWindow.side_effect = activate
+    screenshot_result = backend._client.call.return_value
+    bridge = {"connected": False}
+
+    async def bridge_call(method, params=None, **_kwargs):
+        if method == "connect":
+            assert params == {"pid": 42}
+            bridge["connected"] = True
+            return {"connected": True}
+        assert method == "screenshot"
+        assert bridge["connected"] is True
+        return screenshot_result
+
+    backend._element_cache = {}
+    backend._client.is_running = True
+    backend._client.ensure_alive = AsyncMock(return_value=True)
+    backend._client.call.side_effect = bridge_call
+    return bridge
+
+
 @pytest.mark.asyncio
 async def test_ui_take_screenshot_ordinary_evidence_uses_connected_flaui_typed_bitblt_fallback(
     tmp_path,
+    foreground_case,
 ) -> None:
     from PIL import Image
 
@@ -3912,12 +3963,11 @@ async def test_ui_take_screenshot_ordinary_evidence_uses_connected_flaui_typed_b
     Image.new("RGB", (8, 8), (255, 255, 255)).save(fallback_png, format="PNG")
     backend = _typed_bitblt_backend(_typed_bitblt_bridge_screenshot(fallback_png.getvalue()))
     backend._process_id = None
-    backend._client.is_running = True
-    backend.bring_to_front = AsyncMock(return_value={"activated": True, "hwnd": 777})
+    bridge = _prepare_fake_screenshot_activation(foreground_case, backend)
     bundle_calls: list[tuple[str, str, str | None, int]] = []
     session = SimpleNamespace(
         process_registry=None,
-        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42, activity_epoch=object()),
         stealth_mode=False,
         session_id="ordinary-typed-bitblt",
         temp_manager=SimpleNamespace(
@@ -3928,17 +3978,8 @@ async def test_ui_take_screenshot_ordinary_evidence_uses_connected_flaui_typed_b
     )
     registry = ToolRegistry()
 
-    async def connect_backend(ui, process_id: int, *, stealth_mode: bool) -> None:
-        assert ui is backend
-        assert process_id == 42
-        assert stealth_mode is False
-        backend._process_id = process_id
-
     with (
         patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend),
-        patch(
-            "netcoredbg_mcp.ui.backend.connect_backend", side_effect=connect_backend
-        ) as reconnect,
         patch("netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid", return_value=777),
         patch(
             "netcoredbg_mcp.ui.screenshot.capture_window_evidence",
@@ -3953,9 +3994,9 @@ async def test_ui_take_screenshot_ordinary_evidence_uses_connected_flaui_typed_b
         )
 
     assert isinstance(content, list), content
-    reconnect.assert_awaited_once_with(backend, 42, stealth_mode=False)
-    backend.bring_to_front.assert_awaited_once_with()
-    backend._client.call.assert_awaited_once_with("screenshot", {"evidence": True})
+    assert bridge["connected"] is True
+    assert backend.process_id == 42
+    backend._client.call.assert_any_await("screenshot", {"evidence": True})
     metadata = json.loads(content[1].text)
     assert metadata["evidence_grade"] == "typed_bitblt_fallback"
     assert metadata["target_comparability"] == {"status": "UNASSERTED"}
@@ -3981,6 +4022,7 @@ async def test_ui_take_screenshot_ordinary_evidence_uses_connected_flaui_typed_b
 @pytest.mark.asyncio
 async def test_ui_take_screenshot_ordinary_evidence_with_disconnected_flaui_uses_direct_capture(
     tmp_path,
+    foreground_case,
 ) -> None:
     from PIL import Image
 
@@ -3991,15 +4033,14 @@ async def test_ui_take_screenshot_ordinary_evidence_with_disconnected_flaui_uses
     Image.new("RGB", (8, 8), (0, 0, 0)).save(black_png, format="PNG")
     backend = _typed_bitblt_backend(_typed_bitblt_bridge_screenshot(black_png.getvalue()))
     backend._process_id = None
-    backend._client.is_running = True
-    backend.bring_to_front = AsyncMock(return_value={"activated": True, "hwnd": 777})
+    bridge = _prepare_fake_screenshot_activation(foreground_case, backend)
     capture_metadata = _capture_metadata("PrintWindow", 8, 8)
     capture_metadata["hwnd"] = 777
     capture = MagicMock(return_value=(black_png.getvalue(), 8, 8, capture_metadata))
     bundle_calls: list[tuple[str, str, str | None, int]] = []
     session = SimpleNamespace(
         process_registry=None,
-        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42, activity_epoch=object()),
         stealth_mode=False,
         session_id="ordinary-final-black",
         temp_manager=SimpleNamespace(
@@ -4010,16 +4051,13 @@ async def test_ui_take_screenshot_ordinary_evidence_with_disconnected_flaui_uses
     )
     registry = ToolRegistry()
 
-    async def connect_backend(ui, process_id: int, *, stealth_mode: bool) -> None:
-        assert ui is backend
-        assert process_id == 42
-        assert stealth_mode is False
-        backend._process_id = process_id
-
     with (
         patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend),
         patch(
-            "netcoredbg_mcp.ui.backend.connect_backend", side_effect=connect_backend
+            "netcoredbg_mcp.ui.backend.connect_backend",
+            AsyncMock(
+                side_effect=AssertionError("Disconnected ordinary evidence must not reconnect")
+            ),
         ) as reconnect,
         patch("netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid", return_value=777),
         patch("netcoredbg_mcp.ui.screenshot.capture_window_evidence", capture),
@@ -4027,9 +4065,10 @@ async def test_ui_take_screenshot_ordinary_evidence_with_disconnected_flaui_uses
         register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
         activation = await registry.tools["ui_bring_to_front"](SimpleNamespace())
         assert activation["data"]["activated"] is True, activation
-        reconnect.assert_awaited_once_with(backend, 42, stealth_mode=False)
+        assert bridge["connected"] is True
         backend._process_id = None
-        reconnect.reset_mock()
+        bridge["connected"] = False
+        backend._client.call.reset_mock()
         response = await registry.tools["ui_take_screenshot"](
             SimpleNamespace(), evidence=True, format="png"
         )
@@ -4334,6 +4373,7 @@ async def test_ui_take_screenshot_strict_typed_bitblt_rejects_nonfinite_provenan
 @pytest.mark.asyncio
 async def test_ui_take_screenshot_ordinary_printwindow_rejects_foreign_process_before_persistence(
     tmp_path,
+    foreground_case,
 ) -> None:
     from PIL import Image
 
@@ -4344,11 +4384,11 @@ async def test_ui_take_screenshot_ordinary_printwindow_rejects_foreign_process_b
     backend = _typed_bitblt_backend(
         _bridge_lossless_screenshot(png.getvalue(), width=8, height=8, process_id=43)
     )
-    backend._client.is_running = True
-    backend.bring_to_front = AsyncMock(return_value={"activated": True, "hwnd": 777})
+    _prepare_fake_screenshot_activation(foreground_case, backend)
     bundle_calls: list[tuple[str, str, str | None, int]] = []
     session = _stealth_evidence_session(tmp_path, bundle_calls)
     session.stealth_mode = False
+    session.state.activity_epoch = object()
     registry = ToolRegistry()
 
     with (
