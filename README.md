@@ -76,6 +76,29 @@ variable reference is a leaf. After a step, continuation, or other invalidation,
 fetch a new stack and context: the debugger may reuse numeric references. This
 source-built path does not yet support variable paging or filtering.
 
+The source-built stateful host also exposes
+`evaluate_expression(debugSessionId, inspectionContextId, frameId, expression)`.
+All four arguments are required. It sends the exact expression and explicit
+Int32 frame ID once with DAP `context: "watch"`; it never infers a frame.
+**Expressions may execute application code or mutate the debuggee. `watch` is
+not a read-only guarantee.** A current successful reply returns
+`kind: "evaluate_success"`, the same `inspectionContextId`, `result`, nullable
+`type`, and a nonnegative `variablesReference`. Expand a positive reference with
+`get_variables` using that same current context. The complete serialized success
+`structuredContent` is limited to 256 KiB, including JSON escaping and all fields.
+
+An unknown or stale context detected before the write returns
+`DAP_EVALUATE_REFUSED` without DAP I/O. A negative DAP reply returns
+`DAP_EVALUATE_FAILED`; expression side effects may already have occurred.
+A stale post-write reply or a malformed, oversized, timed-out or failed exchange
+returns the redacted `DAP_EVALUATE_OUTCOME_UNKNOWN` and drains the session.
+Cancellation before writer handoff keeps the session usable and sends nothing;
+cancellation during or after a possible write invalidates inspection and drains
+through the existing session owner before server cleanup finishes. Never retry
+automatically after a failed or unknown outcome. This additive native path does
+not change Python's installed default or its optional-frame evaluation contract;
+`quick_evaluate`, real-debugger proof and installed delivery remain separate.
+
 The source-built stateful host exposes `get_output(debugSessionId, clear?,
 category?)` for retained DAP output. It concatenates events in reader order;
 categories `console`, `stdout`, `stderr`, and `telemetry` are retained, and an
