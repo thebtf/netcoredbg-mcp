@@ -1,6 +1,6 @@
 # Native DAP Pause
 
-Status: implemented and verified in the source candidate; integration and delivery remain pending. This additive source slice advances the consumer-proven .NET replacement; Python remains the installed default and rollback. It does not complete migration, installed delivery, or full legacy wire parity.
+Status: implemented with passing controlled source checks; real-debugger consumer proof is partial, and integration and delivery remain pending. This additive source slice advances the .NET replacement; Python remains the installed default and rollback. It does not complete migration, installed delivery, or full legacy wire parity.
 
 ## Consumer outcome
 
@@ -26,5 +26,7 @@ A native MCP client can request that a live debuggee pause, including while `con
 3. With barriers rather than sleeps, cover pause while continue is committed but ACK-held and while continue is long-polling, concurrent second pause, active step refusal, and the race where pause fences the session before continue finalizes. A closing session must remain closed.
 4. Exercise cancellation, timeout, EOF, unmatched responses, wrong commands for matched requests, partial writes, committed-no-ACK, and committed-ACK paths for both optional discovery and pause; verify pending cleanup, lease ordering, session preservation or drain, and no replay. Include a response read before flush/commit publication: an ACK alone cannot establish a fully committed write. Preserve existing continue/step/inspection/output regressions and schema parity.
 5. Through a fresh official MCP client, source-built native host, real netcoredbg, and an owned .NET fixture, stop at a real breakpoint, start `continue_execution`, call optional-thread pause while continue is pending, separately observe the real stopped event and managed stack, and repeat with an explicitly observed thread ID. Clean up only the scenario's owned processes. Source-built proof does not establish installed delivery or full migration.
+
+The earlier source-consumer run observed both pause cycles and managed stacks, but its SDK launcher assigned the Windows Job after child start. A later pre-resume-Job-admitted replay observed both cycles, public stop and a drained Job, but its required stdout heartbeat was not observed, so that replay reported `INCOMPLETE`. No single run establishes the complete owned-consumer proof.
 
 Sources: `src/netcoredbg_mcp/tools/debug.py`, `src/netcoredbg_mcp/session/manager.py`, `host/NetCoreDbg.Mcp.Stateless/DebugAdapter/NetCoreDbgSession.cs`, and `docs/dap-protocol/specification.md` Pause Request.
