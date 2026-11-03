@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
+import json
+import threading
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -154,19 +158,43 @@ class TestFlaUIBackendInvoke:
         assert response["data"]["requested"]["rootAutomationId"] == "selectorSafetyPanel"
 
 
+@pytest.mark.parametrize(
+    ("generation", "should_click", "refresh_during_connect", "overlapping_screenshots"),
+    [
+        (None, True, False, False),
+        (2, True, False, False),
+        (1, False, False, False),
+        (2, False, True, False),
+        (None, False, False, True),
+    ],
+    ids=["legacy", "current", "stale", "refreshed-during-connect", "overlapping-screenshots"],
+)
 @pytest.mark.asyncio
 async def test_ui_click_annotated_uses_cached_screen_bounds_after_annotated_screenshot(
     capturing_mcp,
     monkeypatch,
+    tmp_path,
+    generation: int | None,
+    should_click: bool,
+    refresh_during_connect: bool,
+    overlapping_screenshots: bool,
 ) -> None:
     pil_image = pytest.importorskip("PIL.Image")
 
     from netcoredbg_mcp.session.manager import DebugState
     from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui import screenshot
     from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
+    from netcoredbg_mcp.ui.temp_manager import SessionTempManager
 
     png = io.BytesIO()
     pil_image.new("RGB", (120, 80), (255, 255, 255)).save(png, format="PNG")
+    alternate_png = io.BytesIO()
+    pil_image.new("RGB", (120, 80), (0, 200, 240)).save(alternate_png, format="PNG")
+    captures = iter(
+        [png.getvalue(), alternate_png.getvalue() if overlapping_screenshots else png.getvalue(),
+         png.getvalue()]
+    )
 
     backend = PywinautoBackend.__new__(PywinautoBackend)
     backend._ui = SimpleNamespace(process_id=42, _app=object())
@@ -186,19 +214,44 @@ async def test_ui_click_annotated_uses_cached_screen_bounds_after_annotated_scre
     )
     monkeypatch.setattr(
         "netcoredbg_mcp.ui.screenshot.capture_window",
-        lambda _hwnd: (png.getvalue(), 120, 80),
+        lambda _hwnd: (next(captures), 120, 80),
     )
+    observed = iter(
+        [
+            {"id": 7, "name": "Save", "type": "Button", "automationId": "saveButton",
+             "bounds": {"x": 110, "y": 220, "width": 40, "height": 20}},
+            {"id": 7, "name": "Delete", "type": "Button", "automationId": "deleteButton",
+             "bounds": {"x": 110, "y": 220, "width": 40, "height": 20}},
+            {"id": 7, "name": "Run", "type": "Button", "automationId": "runButton",
+             "bounds": {"x": 110, "y": 220, "width": 40, "height": 20}},
+        ]
+    )
+    refresh_collecting = threading.Event()
+    continue_refresh = threading.Event()
+    first_processing = threading.Event()
+    continue_processing = threading.Event()
+    original_process = screenshot._process_screenshot
+
+    def process_screenshot(*args, **kwargs):
+        if overlapping_screenshots and not first_processing.is_set():
+            first_processing.set()
+            if not continue_processing.wait(5):
+                raise TimeoutError("The synthetic screenshot was not released")
+        return original_process(*args, **kwargs)
+
+    monkeypatch.setattr(screenshot, "_process_screenshot", process_screenshot)
+
+    def collect_visible(_app, _max_depth, _interactive_only):
+        element = next(observed)
+        if refresh_during_connect and element["name"] == "Run":
+            refresh_collecting.set()
+            if not continue_refresh.wait(5):
+                raise TimeoutError("The synthetic refresh was not released")
+        return [element]
+
     monkeypatch.setattr(
         "netcoredbg_mcp.ui.screenshot.collect_visible_elements",
-        lambda _app, _max_depth, _interactive_only: [
-            {
-                "id": 7,
-                "name": "Save",
-                "type": "Button",
-                "automationId": "saveButton",
-                "bounds": {"x": 110, "y": 220, "width": 40, "height": 20},
-            }
-        ],
+        collect_visible,
     )
     monkeypatch.setattr(
         "ctypes.windll",
@@ -206,11 +259,17 @@ async def test_ui_click_annotated_uses_cached_screen_bounds_after_annotated_scre
         raising=False,
     )
 
+    temp_manager = SessionTempManager()
+    if overlapping_screenshots:
+        with patch("netcoredbg_mcp.ui.temp_manager.tempfile.mkdtemp", return_value=str(tmp_path)):
+            assert temp_manager.get_session_dir("synthetic") == tmp_path
+
     session = SimpleNamespace(
         process_registry=None,
         state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
         stealth_mode=False,
-        session_id=None,
+        session_id="synthetic" if overlapping_screenshots else None,
+        temp_manager=temp_manager,
     )
 
     with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
@@ -219,15 +278,76 @@ async def test_ui_click_annotated_uses_cached_screen_bounds_after_annotated_scre
             session,
             check_session_access=lambda ctx: None,
         )
-        await capturing_mcp.tools["ui_take_annotated_screenshot"](SimpleNamespace())
-        response = await capturing_mcp.tools["ui_click_annotated"](
-            SimpleNamespace(),
-            element_id=7,
-        )
+        if overlapping_screenshots:
+            first = asyncio.create_task(
+                capturing_mcp.tools["ui_take_annotated_screenshot"](SimpleNamespace(), format="png")
+            )
+            try:
+                assert await asyncio.to_thread(first_processing.wait, 5)
+                second_result = await capturing_mcp.tools["ui_take_annotated_screenshot"](
+                    SimpleNamespace(), format="png"
+                )
+            finally:
+                continue_processing.set()
+            first_result = await asyncio.wait_for(first, 5)
+            assert isinstance(first_result, list) and isinstance(second_result, list)
+            first_metadata = json.loads(first_result[1].text)
+            second_metadata = json.loads(second_result[1].text)
+            assert first_metadata["elements"] == ["7: Save"]
+            assert second_metadata["elements"] == ["7: Delete"]
+            assert second_metadata["generation"] == 2
+            first_path = Path(first_metadata["hd_path"])
+            second_path = Path(second_metadata["hd_path"])
+            assert first_path != second_path
+            with pil_image.open(first_path) as first_image, pil_image.open(second_path) as second_image:
+                assert first_image.getpixel((119, 79))[:3] == (255, 255, 255)
+                assert second_image.getpixel((119, 79))[:3] == (0, 200, 240)
+            generation = first_metadata["generation"]
+        else:
+            await capturing_mcp.tools["ui_take_annotated_screenshot"](SimpleNamespace())
+            await capturing_mcp.tools["ui_take_annotated_screenshot"](SimpleNamespace())
+        if refresh_during_connect:
+            refresh = asyncio.create_task(
+                capturing_mcp.tools["ui_take_annotated_screenshot"](SimpleNamespace())
+            )
+            assert await asyncio.to_thread(refresh_collecting.wait, 5)
+            connecting = asyncio.Event()
+            continue_connect = asyncio.Event()
 
-    backend.click_at.assert_awaited_once_with(130, 230)
-    assert response["data"]["clicked"] is True
-    assert response["data"]["position"] == {"x": 130, "y": 230}
+            async def wait_for_connect():
+                connecting.set()
+                await continue_connect.wait()
+                return False
+
+            session.cancel_pending_stealth_foreground_restore = wait_for_connect
+            click = asyncio.create_task(
+                capturing_mcp.tools["ui_click_annotated"](
+                    SimpleNamespace(), element_id=7, generation=generation
+                )
+            )
+            try:
+                await asyncio.wait_for(connecting.wait(), 5)
+                continue_refresh.set()
+                assert isinstance(await asyncio.wait_for(refresh, 5), list)
+            finally:
+                continue_refresh.set()
+                continue_connect.set()
+            response = await asyncio.wait_for(click, 5)
+        else:
+            response = await capturing_mcp.tools["ui_click_annotated"](
+                SimpleNamespace(), element_id=7, generation=generation
+            )
+
+    if should_click:
+        backend.click_at.assert_awaited_once_with(130, 230)
+        assert response["data"]["clicked"] is True
+        assert response["data"]["element"] == "Delete"
+        assert response["data"]["position"] == {"x": 130, "y": 230}
+    else:
+        assert "error" in response
+        backend.click_at.assert_not_awaited()
+        if overlapping_screenshots:
+            assert generation == 1
 
 
 def _pywinauto_backend_with_element(element: MagicMock) -> tuple[object, SimpleNamespace]:
