@@ -10,6 +10,7 @@ import os
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..build import BuildError, BuildManager, BuildResult
@@ -46,6 +47,7 @@ from ..enc.detect import detect_enc_support
 from ..posix_process_owner import PosixCleanupResult, PosixOwnedProcess
 from ..process_registry import CleanupOutcome, ProcessEntry, ProcessRegistry
 from ..resource_updates import BREAKPOINTS_URI, OUTPUT_URI, STATE_URI, THREADS_URI
+from ..ui import provider_text
 from ..ui.foreground import (
     get_foreground_window,
     get_window_process_id,
@@ -89,6 +91,16 @@ MAX_OUTPUT_ENTRY = int(os.environ.get("NETCOREDBG_MAX_OUTPUT_ENTRY", "100000")) 
 
 
 BreakpointResourceSnapshot = tuple[tuple[str, int, int | None, str | None, bool], ...]
+
+
+@dataclass(eq=False)
+class _ProviderTextOperation:
+    binding: Any
+    task: asyncio.Task[dict[str, Any]] | None = None
+    dispatched: bool = False
+    released: bool = False
+    binding_closed: bool = False
+    outcome: dict[str, Any] | None = None
 
 
 class _ResourceOutputBuffer(deque[OutputEntry]):
@@ -154,6 +166,157 @@ class SessionManager:
         self._debuggee_mode: tuple[object | None, str] | None = None
         self._registry_observations: dict[object | None, list[ProcessEntry]] = {}
         self._registry_owner_tokens: dict[object, object] = {}
+        self._provider_text_operations: dict[tuple[int, str], _ProviderTextOperation] = {}
+        self._provider_text_receivers: set[asyncio.Task[dict[str, Any]]] = set()
+        self._provider_text_close_pending: set[_ProviderTextOperation] = set()
+
+    def _release_provider_text(self, operation: _ProviderTextOperation) -> None:
+        identity = operation.binding.identity
+        if self._provider_text_operations.get(identity) is operation:
+            self._provider_text_operations.pop(identity)
+        operation.released = True
+        if not operation.binding_closed:
+            try:
+                operation.binding.close()
+            except Exception:
+                self._provider_text_close_pending.add(operation)
+                return
+            operation.binding_closed = True
+            self._provider_text_close_pending.discard(operation)
+
+    def _finish_provider_text(self, operation: _ProviderTextOperation) -> None:
+        task = operation.task
+        if task is None or not task.done():
+            return
+        self._provider_text_receivers.discard(task)
+        try:
+            operation.outcome = provider_text.sanitize_result(task.result())
+        except (Exception, asyncio.CancelledError):
+            operation.outcome = (
+                provider_text.unknown()
+                if operation.dispatched
+                else provider_text.blocked("provider_unavailable")
+            )
+        if not operation.dispatched or operation.outcome["effect_state"] != "unknown":
+            self._release_provider_text(operation)
+
+    async def replace_text_provider(self, selector: dict[str, Any], text: str) -> dict[str, Any]:
+        """Reserve one process instance and retain uncertainty across session resets."""
+        refused = provider_text.validate_request(selector, text)
+        if refused is not None:
+            return refused
+        pid = self._state.process_id
+        if (
+            not self.is_active
+            or self._state.transport_terminal is not None
+            or (
+                self._active_dap_run is not None
+                and self._stopping_dap_run == self._active_dap_run
+            )
+        ):
+            return provider_text.blocked("no_active_session")
+        if type(pid) is not int or pid <= 0:
+            return provider_text.blocked("process_unavailable")
+        for retired in tuple(self._provider_text_close_pending):
+            self._release_provider_text(retired)
+
+        for previous in tuple(self._provider_text_operations.values()):
+            try:
+                signaled = previous.binding.is_signaled() is True
+            except Exception:
+                signaled = False
+            if signaled:
+                self._release_provider_text(previous)
+            elif previous.binding.identity[0] == pid:
+                return provider_text.blocked("provider_operation_unresolved")
+        binding = None
+        try:
+            binding = provider_text.capture_process(pid)
+            identity = binding.identity
+            if (
+                not isinstance(identity, tuple)
+                or len(identity) != 2
+                or identity[0] != pid
+                or binding.is_signaled() is not False
+            ):
+                self._release_provider_text(_ProviderTextOperation(binding))
+                return provider_text.blocked("process_identity_unavailable")
+        except Exception:
+            if binding is not None:
+                self._release_provider_text(_ProviderTextOperation(binding))
+            return provider_text.blocked(
+                "unsupported_platform" if os.name != "nt" else "process_identity_unavailable"
+            )
+
+        operation = _ProviderTextOperation(binding)
+        activity_epoch = self._state.activity_epoch
+        dap_generation = self._active_dap_run
+        source_client = self._client
+        adapter_owner = source_client.adapter_cleanup_owner
+
+        def owns_session() -> bool:
+            return (
+                self.is_active
+                and self._state.transport_terminal is None
+                and (dap_generation is None or self._stopping_dap_run != dap_generation)
+                and self._state.process_id == pid
+                and self._state.activity_epoch is activity_epoch
+                and self._active_dap_run is dap_generation
+                and self._client is source_client
+                and source_client.adapter_cleanup_owner is adapter_owner
+            )
+
+        self._provider_text_operations[identity] = operation
+
+        def on_dispatch() -> None:
+            if (
+                operation.released
+                or self._provider_text_operations.get(identity) is not operation
+                or not owns_session()
+                or binding.is_signaled() is not False
+            ):
+                raise RuntimeError("provider_dispatch_refused")
+            operation.dispatched = True
+
+        async def receive() -> dict[str, Any]:
+            try:
+                result = await provider_text.run_provider_text(
+                    binding=binding,
+                    selector=dict(selector),
+                    text=text,
+                    on_dispatch=on_dispatch,
+                )
+                return provider_text.sanitize_result(result)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return (
+                    provider_text.unknown()
+                    if operation.dispatched
+                    else provider_text.blocked("provider_unavailable")
+                )
+
+        task = asyncio.create_task(receive())
+        operation.task = task
+        self._provider_text_receivers.add(task)
+        task.add_done_callback(lambda _task: self._finish_provider_text(operation))
+        try:
+            result = await asyncio.shield(task)
+            if result["effect_state"] == "completed" and not owns_session():
+                return {
+                    "status": "FAIL",
+                    "effect_state": "completed",
+                    "verified": False,
+                    "reason": "provider_session_changed",
+                }
+            return result
+        except asyncio.CancelledError:
+            if operation.dispatched:
+                operation.outcome = provider_text.unknown()
+            else:
+                self._release_provider_text(operation)
+                task.cancel()
+            raise
 
     def _create_session_state(self, state: DebugState = DebugState.IDLE) -> SessionState:
         session_state = SessionState(state=state)

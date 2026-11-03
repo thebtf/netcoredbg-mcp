@@ -12,7 +12,6 @@ import pytest
 from netcoredbg_mcp.session.state import DebugState
 from netcoredbg_mcp.tools.ui_evidence import register_ui_evidence_tools
 
-
 _INPUT_METHODS = frozenset(
     {
         "set_focus",

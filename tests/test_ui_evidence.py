@@ -305,110 +305,6 @@ class FakeEvidenceBackend:
         }
 
 
-class FakeSetTextClient:
-    def __init__(self, owner: FakeSetTextBackend) -> None:
-        self._owner = owner
-
-    async def call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
-        self._owner.calls.append({"client_call": {"method": method, "payload": dict(payload)}})
-        if method == "set_focus":
-            return {"status": "PASS", "focused": True}
-        return {"status": "FAIL", "reason": f"unexpected method {method}"}
-
-
-class RawFailingSetTextClient:
-    def __init__(self, owner: FakeSetTextBackend) -> None:
-        self._owner = owner
-
-    async def call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
-        self._owner.calls.append({"client_call": {"method": method, "payload": dict(payload)}})
-        return {
-            "status": "BLOCKED",
-            "reason": "focus rejected",
-            "full_tree": {"must": "not leak"},
-            "result": {"raw_tree": {"must": "not leak"}},
-        }
-
-
-class FakeSetTextBackend:
-    def __init__(
-        self,
-        *,
-        state_result: dict[str, Any] | None = None,
-        read_result: dict[str, Any] | None = None,
-        find_result: dict[str, Any] | None = None,
-    ) -> None:
-        self.process_id = 42
-        self.calls: list[dict[str, Any]] = []
-        self.client = FakeSetTextClient(self)
-        self.state_result = state_result or {
-            "status": "PASS",
-            "text": "Fixture cue one",
-            "value": "Fixture cue one",
-            "selection": {"start": 0, "end": 15, "length": 15},
-            "focus_within": True,
-            "source": "TextPattern",
-            "full_tree": {"must": "not leak"},
-        }
-        self.read_result = read_result or {
-            "status": "PASS",
-            "text": "Replaced text",
-            "source": "ValuePattern",
-            "full_tree": {"must": "not leak"},
-        }
-        self.find_result = find_result or {"status": "PASS", "found": True}
-
-    async def find_element(
-        self,
-        automation_id: str | None = None,
-        name: str | None = None,
-        control_type: str | None = None,
-        root_id: str | None = None,
-        xpath: str | None = None,
-    ) -> dict[str, Any]:
-        self.calls.append(
-            {
-                "find_element": {
-                    "automation_id": automation_id,
-                    "name": name,
-                    "control_type": control_type,
-                    "root_id": root_id,
-                    "xpath": xpath,
-                }
-            }
-        )
-        return dict(self.find_result)
-
-    def send_keys(self, keys: str) -> dict[str, Any]:
-        self.calls.append({"send_keys": keys})
-        return {"status": "PASS", "keys": keys}
-
-    async def textbox_state(self, selector: dict[str, Any]) -> dict[str, Any]:
-        self.calls.append({"textbox_state": {"selector": dict(selector)}})
-        return dict(self.state_result)
-
-    async def extract_text(
-        self,
-        automation_id: str | None = None,
-        name: str | None = None,
-        control_type: str | None = None,
-        root_id: str | None = None,
-        xpath: str | None = None,
-    ) -> dict[str, Any]:
-        self.calls.append(
-            {
-                "extract_text": {
-                    "automation_id": automation_id,
-                    "name": name,
-                    "control_type": control_type,
-                    "root_id": root_id,
-                    "xpath": xpath,
-                }
-            }
-        )
-        return dict(self.read_result)
-
-
 class UnsupportedEvidenceBackend:
     async def query_ui(
         self,
@@ -1757,17 +1653,28 @@ async def test_ui_text_tool_assert_selection_fails_with_observed_range(
 
 
 @pytest.mark.asyncio
-async def test_ui_text_set_text_without_text_preserves_pending_restore(
+@pytest.mark.parametrize(
+    ("call_args", "reason"),
+    [
+        ({"automation_id": "CueTextBox"}, "text is required"),
+        ({"text": "Replaced text"}, "invalid selector"),
+        ({}, "invalid selector"),
+    ],
+    ids=["missing-text", "missing-selector", "missing-both"],
+)
+async def test_ui_text_set_text_missing_input_preserves_pending_restore(
     capturing_mcp,
     monkeypatch,
+    call_args: dict[str, Any],
+    reason: str,
 ) -> None:
     session = FakeUiSession()
     session.state.state = DebugState.RUNNING
     session.state.process_id = 42
     session.wait_for_pending_stealth_foreground_restore = AsyncMock()
-    backend = FakeSetTextBackend()
+    backend_factory = MagicMock()
 
-    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", backend_factory)
     register_ui_evidence_tools(
         mcp=capturing_mcp,
         session=session,
@@ -1777,13 +1684,14 @@ async def test_ui_text_set_text_without_text_preserves_pending_restore(
     response = await capturing_mcp.tools["ui_text"](
         ctx=None,
         action="set_text",
-        automation_id="CueTextBox",
+        **call_args,
     )
 
-    assert response["data"]["reason"] == "text is required"
+    assert response["data"]["status"] == "FAIL"
+    assert response["data"]["reason"] == reason
+    backend_factory.assert_not_called()
     session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
     session.wait_for_pending_stealth_foreground_restore.assert_not_awaited()
-    assert backend.calls == []
 
 
 @pytest.mark.asyncio
@@ -2117,280 +2025,55 @@ async def test_ui_grid_negative_row_index_preserves_pending_restore(
 
 
 @pytest.mark.asyncio
-async def test_ui_text_set_text_joins_pending_restore_before_focus(
+@pytest.mark.parametrize(
+    "selector",
+    [
+        {"automation_id": "CueTextBox", "control_type": "TextBox"},
+        {"name": "Cue text"},
+        {"control_type": "TextBox"},
+        {"automation_id": "CueTextBox", "root_id": "Editor"},
+        {"xpath": "//TextBox"},
+    ],
+    ids=["automation-id", "name", "control-type", "root", "xpath"],
+)
+@pytest.mark.parametrize("text", ["Replaced text", "", "^+%{ENTER}()~"])
+async def test_ui_text_set_text_without_mode_refuses_before_backend_and_preserves_restore(
     capturing_mcp,
     monkeypatch,
+    selector: dict[str, str],
+    text: str,
 ) -> None:
     session = FakeUiSession()
     session.state.state = DebugState.RUNNING
     session.state.process_id = 42
-    backend = FakeSetTextBackend()
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    session.replace_text_provider = AsyncMock()
+    backend_factory = MagicMock()
 
-    async def join_restore() -> None:
-        assert backend.calls == []
-
-    session.cancel_pending_stealth_foreground_restore = AsyncMock(side_effect=join_restore)
-    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", backend_factory)
     register_ui_evidence_tools(
         mcp=capturing_mcp,
         session=session,
-        check_session_access=lambda ctx: None,
+        check_session_access=lambda _ctx: None,
     )
 
     response = await capturing_mcp.tools["ui_text"](
         ctx=None,
         action="set_text",
-        automation_id="CueTextBox",
-        text="Replaced text",
+        text=text,
+        **selector,
     )
 
-    assert response["data"]["status"] == "PASS"
-    session.cancel_pending_stealth_foreground_restore.assert_awaited_once_with()
-
-
-@pytest.mark.asyncio
-async def test_ui_text_set_text_focuses_selects_types_and_verifies(
-    capturing_mcp,
-    monkeypatch,
-) -> None:
-    session = FakeUiSession()
-    session.state.state = DebugState.RUNNING
-    session.state.process_id = 42
-    backend = FakeSetTextBackend()
-
-    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
-    register_ui_evidence_tools(
-        mcp=capturing_mcp,
-        session=session,
-        check_session_access=lambda ctx: None,
-    )
-
-    response = await capturing_mcp.tools["ui_text"](
-        ctx=None,
-        action="set_text",
-        automation_id="CueTextBox",
-        control_type="TextBox",
-        text="Replaced text",
-    )
-
-    assert response["data"]["status"] == "PASS"
-    assert response["data"]["route"] == "text_type_replace_selection"
-    assert response["data"]["verified"] is True
-    assert response["data"]["text"] == "Replaced text"
-    assert response["data"]["precondition"]["selected"] is True
-    assert "full_tree" not in str(response["data"])
-    assert "raw_tree" not in str(response["data"])
-    assert backend.calls == [
-        {
-            "find_element": {
-                "automation_id": "CueTextBox",
-                "name": None,
-                "control_type": "TextBox",
-                "root_id": None,
-                "xpath": None,
-            }
-        },
-        {
-            "client_call": {
-                "method": "set_focus",
-                "payload": {
-                    "automationId": "CueTextBox",
-                    "controlType": "TextBox",
-                },
-            }
-        },
-        {"send_keys": "^a"},
-        {"textbox_state": {"selector": {"automation_id": "CueTextBox", "control_type": "TextBox"}}},
-        {"send_keys": "Replaced text"},
-        {
-            "extract_text": {
-                "automation_id": "CueTextBox",
-                "name": None,
-                "control_type": "TextBox",
-                "root_id": None,
-                "xpath": None,
-            }
-        },
-    ]
-
-
-@pytest.mark.asyncio
-async def test_ui_text_set_text_blocks_selector_miss_before_typing(
-    capturing_mcp,
-    monkeypatch,
-) -> None:
-    session = FakeUiSession()
-    session.state.state = DebugState.RUNNING
-    session.state.process_id = 42
-    backend = FakeSetTextBackend(
-        find_result={"status": "PASS", "found": False, "full_tree": {"must": "not leak"}}
-    )
-
-    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
-    register_ui_evidence_tools(
-        mcp=capturing_mcp,
-        session=session,
-        check_session_access=lambda ctx: None,
-    )
-
-    response = await capturing_mcp.tools["ui_text"](
-        ctx=None,
-        action="set_text",
-        automation_id="MissingCueTextBox",
-        text="Replaced text",
-    )
-
-    assert response["data"]["status"] == "BLOCKED"
-    assert response["data"]["reason"] == "selector not found"
-    assert "full_tree" not in str(response["data"])
-    assert backend.calls == [
-        {
-            "find_element": {
-                "automation_id": "MissingCueTextBox",
-                "name": None,
-                "control_type": None,
-                "root_id": None,
-                "xpath": None,
-            }
-        }
-    ]
-
-
-@pytest.mark.asyncio
-async def test_ui_text_set_text_strips_raw_backend_failure_evidence(
-    capturing_mcp,
-    monkeypatch,
-) -> None:
-    session = FakeUiSession()
-    session.state.state = DebugState.RUNNING
-    session.state.process_id = 42
-    backend = FakeSetTextBackend()
-    backend.client = RawFailingSetTextClient(backend)
-
-    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
-    register_ui_evidence_tools(
-        mcp=capturing_mcp,
-        session=session,
-        check_session_access=lambda ctx: None,
-    )
-
-    response = await capturing_mcp.tools["ui_text"](
-        ctx=None,
-        action="set_text",
-        automation_id="CueTextBox",
-        text="Replaced text",
-    )
-
-    assert response["data"]["status"] == "BLOCKED"
-    assert response["data"]["reason"] == "focus rejected"
-    assert "full_tree" not in str(response["data"])
-    assert "raw_tree" not in str(response["data"])
-
-
-@pytest.mark.asyncio
-async def test_ui_text_set_text_blocks_bad_select_all_state_before_literal_input(
-    capturing_mcp,
-    monkeypatch,
-) -> None:
-    session = FakeUiSession()
-    session.state.state = DebugState.RUNNING
-    session.state.process_id = 42
-    backend = FakeSetTextBackend(
-        state_result={
-            "status": "PASS",
-            "text": "Fixture cue one",
-            "selection": {"start": 0, "end": 3, "length": 3},
-            "focus_within": True,
-            "full_tree": {"must": "not leak"},
-        }
-    )
-
-    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
-    register_ui_evidence_tools(
-        mcp=capturing_mcp,
-        session=session,
-        check_session_access=lambda ctx: None,
-    )
-
-    response = await capturing_mcp.tools["ui_text"](
-        ctx=None,
-        action="set_text",
-        automation_id="CueTextBox",
-        text="Replaced text",
-    )
-
-    assert response["data"]["status"] == "BLOCKED"
-    assert response["data"]["reason"] == "select-all precondition failed"
-    assert response["data"]["precondition"]["selected"] is False
-    assert "full_tree" not in str(response["data"])
-    assert {"send_keys": "Replaced text"} not in backend.calls
-
-
-@pytest.mark.asyncio
-async def test_ui_text_set_text_blocks_without_textbox_state_evidence(
-    capturing_mcp,
-    monkeypatch,
-) -> None:
-    session = FakeUiSession()
-    session.state.state = DebugState.RUNNING
-    session.state.process_id = 42
-    backend = FakeSetTextBackend(
-        state_result={
-            "status": "PASS",
-            "selection": {"start": 0, "end": 15, "length": 15},
-            "focus_within": True,
-            "full_tree": {"must": "not leak"},
-        }
-    )
-
-    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
-    register_ui_evidence_tools(
-        mcp=capturing_mcp,
-        session=session,
-        check_session_access=lambda ctx: None,
-    )
-
-    response = await capturing_mcp.tools["ui_text"](
-        ctx=None,
-        action="set_text",
-        automation_id="CueTextBox",
-        text="Replaced text",
-    )
-
-    assert response["data"]["status"] == "BLOCKED"
-    assert response["data"]["precondition"]["reason"] == "TextBox text evidence unavailable"
-    assert "full_tree" not in str(response["data"])
-    assert {"send_keys": "Replaced text"} not in backend.calls
-
-
-@pytest.mark.asyncio
-async def test_ui_text_set_text_fails_on_post_read_mismatch(
-    capturing_mcp,
-    monkeypatch,
-) -> None:
-    session = FakeUiSession()
-    session.state.state = DebugState.RUNNING
-    session.state.process_id = 42
-    backend = FakeSetTextBackend(read_result={"status": "PASS", "text": "Different text"})
-
-    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
-    register_ui_evidence_tools(
-        mcp=capturing_mcp,
-        session=session,
-        check_session_access=lambda ctx: None,
-    )
-
-    response = await capturing_mcp.tools["ui_text"](
-        ctx=None,
-        action="set_text",
-        automation_id="CueTextBox",
-        text="Replaced text",
-    )
-
-    assert response["data"]["status"] == "FAIL"
-    assert response["data"]["reason"] == "post-read text mismatch"
-    assert response["data"]["expected"] == "Replaced text"
-    assert response["data"]["actual"] == "Different text"
+    assert response["data"] == {
+        "status": "BLOCKED",
+        "reason": "replacement_mode_required",
+        "effect_state": "not_started",
+        "verified": False,
+    }
+    backend_factory.assert_not_called()
+    session.replace_text_provider.assert_not_awaited()
+    session.wait_for_pending_stealth_foreground_restore.assert_not_awaited()
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
 
 
 @pytest.mark.asyncio

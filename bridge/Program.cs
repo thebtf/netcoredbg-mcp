@@ -15,6 +15,13 @@ public static class Program
 
     public static async Task Main(string[] args)
     {
+        if (Array.IndexOf(args, "--provider-text-stdio") >= 0)
+        {
+            if (args.Length == 1)
+                ProviderTextCommand.RunStdio();
+            return;
+        }
+
         AppDomain.CurrentDomain.ProcessExit += (_, _) => ModifierCommands.ReleaseAllHeldModifiers();
         try
         {

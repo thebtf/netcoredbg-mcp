@@ -836,6 +836,7 @@ def test_runtime_smoke_schema_accepts_ui_text_set_text_operation() -> None:
                         "op": "ui.text.set_text",
                         "selector": {"automation_id": "CueTextBox"},
                         "text": "Replaced text",
+                        "replacement_mode": "provider_value",
                     }
                 ]
             }
@@ -851,6 +852,7 @@ def test_runtime_smoke_schema_requires_ui_text_set_text_text() -> None:
                 {
                     "op": "ui.text.set_text",
                     "selector": {"automation_id": "CueTextBox"},
+                    "replacement_mode": "provider_value",
                 }
             ]
         }
@@ -865,10 +867,49 @@ def test_runtime_smoke_schema_rejects_non_string_ui_text_set_text_text() -> None
                     "op": "ui.text.set_text",
                     "selector": {"automation_id": "CueTextBox"},
                     "text": 42,
+                    "replacement_mode": "provider_value",
                 }
             ]
         }
     ) == ["steps[0].text must be a string for op ui.text.set_text"]
+
+
+def test_runtime_smoke_schema_rejects_ui_text_set_text_without_replacement_mode() -> None:
+    errors = validate_plan(
+        {
+            "steps": [
+                {
+                    "op": "ui.text.set_text",
+                    "selector": {"automation_id": "CueTextBox"},
+                    "text": "Replaced text",
+                }
+            ]
+        }
+    )
+
+    assert errors
+    assert all("steps[0].replacement_mode" in error for error in errors)
+
+
+@pytest.mark.parametrize("mode", [None, "", "keyboard", "PROVIDER_VALUE", True, 42])
+def test_runtime_smoke_schema_rejects_ui_text_set_text_invalid_replacement_mode(
+    mode: Any,
+) -> None:
+    errors = validate_plan(
+        {
+            "steps": [
+                {
+                    "op": "ui.text.set_text",
+                    "selector": {"automation_id": "CueTextBox"},
+                    "text": "Replaced text",
+                    "replacement_mode": mode,
+                }
+            ]
+        }
+    )
+
+    assert errors
+    assert all("steps[0].replacement_mode" in error for error in errors)
 
 
 def test_runtime_smoke_schema_requires_ui_text_assert_selection_range() -> None:

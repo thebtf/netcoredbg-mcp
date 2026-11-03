@@ -171,7 +171,7 @@ _OPERATION_SCHEMA_DEFINITIONS: tuple[
     (
         "ui.text.set_text",
         None,
-        (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_TEXT),
+        (SCHEMA_FIELD_SELECTOR, SCHEMA_FIELD_TEXT, "replacement_mode"),
     ),
     ("ui.text.assert_selection", None, (SCHEMA_FIELD_SELECTOR,)),
     ("ui.get_property", None, (SCHEMA_FIELD_SELECTOR,)),
@@ -1216,6 +1216,11 @@ def _validate_op_args(
     elif op_name == "ui.text.set_text":
         if "text" in args and not isinstance(args["text"], str):
             errors.append(f"{prefix}.text must be a string for op {op_name}")
+        if (
+            args.get("replacement_mode") is not None
+            and args["replacement_mode"] != "provider_value"
+        ):
+            errors.append(f'{prefix}.replacement_mode must be "provider_value" for op {op_name}')
     elif op_name == "ui.get_property":
         has_property_argument = args.get("property") is not None
         has_property_name_argument = args.get("property_name") is not None
