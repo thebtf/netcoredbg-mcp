@@ -506,6 +506,35 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         return new DapVariablesResult(false, response.InspectionContextId!, normalized);
     }
 
+    internal async Task<DapEvaluateResult> EvaluateExpressionAsync(
+        string inspectionContextId,
+        int frameId,
+        string expression,
+        CancellationToken cancellationToken)
+    {
+        var response = await SendInspectionRequestAsync(
+            "evaluate", new { expression, frameId, context = "watch" }, inspectionContextId, cancellationToken).ConfigureAwait(false);
+        if (response is null)
+        {
+            return DapEvaluateResult.Refused;
+        }
+        if (!response.TargetCurrent)
+        {
+            return DapEvaluateResult.OutcomeUnknown;
+        }
+        if (!response.Success)
+        {
+            // An adapter failure does not prove that the expression had no side effects.
+            return DapEvaluateResult.Failed;
+        }
+
+        var result = RequireString(response.Body, "result");
+        var type = response.Body.TryGetProperty("type", out var typeElement) && typeElement.ValueKind != JsonValueKind.Null
+            ? RequireInspectionName(response.Body, "type") : null;
+        return new DapEvaluateResult(DapEvaluateOutcome.Success, response.InspectionContextId!, result, type,
+            RequireVariablesReference(response.Body));
+    }
+
     internal bool RequiresInspectionDrain() => Volatile.Read(ref _inspectionWriteDrainRequired) != 0;
 
     private static JsonElement RequireInspectionArray(JsonElement body, string name)
@@ -1521,6 +1550,13 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         try
         {
             return await WaitForResponseAsync(request, _requestTimeout, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (command == "evaluate" && request.WriteStarted)
+        {
+            // A committed evaluate can still be executing after its caller stops waiting.
+            Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
+            InvalidateInspectionContext(close: true);
+            throw;
         }
         finally
         {
@@ -4285,4 +4321,24 @@ internal sealed record DapScopesResult(bool IsRefused, string? InspectionContext
 internal sealed record DapVariablesResult(bool IsRefused, string? InspectionContextId, IReadOnlyList<DapVariable> Variables)
 {
     internal static DapVariablesResult Refused { get; } = new(true, null, Array.Empty<DapVariable>());
+}
+
+internal enum DapEvaluateOutcome
+{
+    Success,
+    Refused,
+    Failed,
+    OutcomeUnknown,
+}
+
+internal sealed record DapEvaluateResult(
+    DapEvaluateOutcome Outcome,
+    string? InspectionContextId = null,
+    string? Result = null,
+    string? Type = null,
+    int VariablesReference = 0)
+{
+    internal static DapEvaluateResult Refused { get; } = new(DapEvaluateOutcome.Refused);
+    internal static DapEvaluateResult Failed { get; } = new(DapEvaluateOutcome.Failed);
+    internal static DapEvaluateResult OutcomeUnknown { get; } = new(DapEvaluateOutcome.OutcomeUnknown);
 }

@@ -178,6 +178,7 @@ internal static class Program
         private const string GetCallStack = "get_call_stack";
         private const string GetScopes = "get_scopes";
         private const string GetVariables = "get_variables";
+        private const string EvaluateExpression = "evaluate_expression";
         private const string GetOutput = "get_output";
         private const string GetOutputTail = "get_output_tail";
         private const string StepOver = "step_over";
@@ -306,6 +307,7 @@ internal static class Program
                 GetCallStack => await GetCallStackAsync(request, cancellationToken).ConfigureAwait(false),
                 GetScopes => await GetScopesAsync(request, cancellationToken).ConfigureAwait(false),
                 GetVariables => await GetVariablesAsync(request, cancellationToken).ConfigureAwait(false),
+                EvaluateExpression => await EvaluateExpressionAsync(request, cancellationToken).ConfigureAwait(false),
                 GetOutput => await GetOutputAsync(request, cancellationToken).ConfigureAwait(false),
                 GetOutputTail => await GetOutputAsync(request, cancellationToken, tail: true).ConfigureAwait(false),
                 StepOver => await StepOverAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
@@ -886,6 +888,86 @@ internal static class Program
                 }
             }
         }
+
+        private async ValueTask<CallToolResult> EvaluateExpressionAsync(CallToolRequestParams request, CancellationToken cancellationToken)
+        {
+            if (!TryReadEvaluateArguments(request.Arguments, out var arguments))
+            {
+                return InvalidArguments(EvaluateExpression);
+            }
+            if (!_sessions.TryGetValue(arguments.SessionId, out var session)
+                || !_slots.TryGetValue(arguments.SessionId, out var slot))
+            {
+                await RemoveNativeSceneBindingAsync(arguments.SessionId).ConfigureAwait(false);
+                return NotFound();
+            }
+
+            var lease = slot.TryAcquire();
+            if (lease is null)
+            {
+                return NotFound();
+            }
+
+            var closeAfterLease = false;
+            try
+            {
+                if (!_isUsable(session))
+                {
+                    closeAfterLease = true;
+                    return NotFound();
+                }
+
+                using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.AbortToken);
+                var result = await session.EvaluateExpressionAsync(arguments.InspectionContextId, arguments.FrameId,
+                    arguments.Expression, operation.Token).ConfigureAwait(false);
+                switch (result.Outcome)
+                {
+                    case DapEvaluateOutcome.Refused:
+                        return Error("dap_evaluate_refused", "DAP_EVALUATE_REFUSED");
+                    case DapEvaluateOutcome.Failed:
+                        return Error("dap_evaluate_failed", "DAP_EVALUATE_FAILED");
+                    case DapEvaluateOutcome.OutcomeUnknown:
+                        closeAfterLease = true;
+                        return EvaluateOutcomeUnknown();
+                }
+
+                var serialized = JsonSerializer.Serialize(new EvaluateSuccessContent(
+                    "evaluate_success", result.InspectionContextId!, result.Result!, result.Type, result.VariablesReference));
+                if (Encoding.UTF8.GetByteCount(serialized) > MaximumSerializedInspectionBytes)
+                {
+                    closeAfterLease = true;
+                    return EvaluateOutcomeUnknown();
+                }
+                return SerializedResult(serialized, isError: false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                closeAfterLease = session.RequiresInspectionDrain();
+                throw;
+            }
+            catch (Exception)
+            {
+                closeAfterLease = true;
+                return EvaluateOutcomeUnknown();
+            }
+            finally
+            {
+                lease.Dispose();
+                if (closeAfterLease)
+                {
+                    try
+                    {
+                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            }
+        }
+
+        private static CallToolResult EvaluateOutcomeUnknown() =>
+            Error("dap_evaluate_outcome_unknown", "DAP_EVALUATE_OUTCOME_UNKNOWN");
 
         private static CallToolResult InspectionProtocolError(bool scopes) => scopes
             ? Error("dap_scopes_protocol_error", "DAP_SCOPES_PROTOCOL_ERROR")
@@ -2597,6 +2679,33 @@ internal static class Program
             return true;
         }
 
+        private static bool TryReadEvaluateArguments(
+            IDictionary<string, JsonElement>? arguments,
+            out EvaluateArguments result)
+        {
+            result = null!;
+            if (arguments is null
+                || arguments.Count != 4
+                || !arguments.TryGetValue("debugSessionId", out var sessionIdElement)
+                || sessionIdElement.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(sessionIdElement.GetString())
+                || !arguments.TryGetValue("inspectionContextId", out var contextElement)
+                || contextElement.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(contextElement.GetString())
+                || contextElement.GetString()!.Length > 128
+                || !arguments.TryGetValue("frameId", out var frameElement)
+                || frameElement.ValueKind != JsonValueKind.Number
+                || !frameElement.TryGetInt32(out var frameId)
+                || !arguments.TryGetValue("expression", out var expressionElement)
+                || expressionElement.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+
+            result = new EvaluateArguments(sessionIdElement.GetString()!, contextElement.GetString()!, frameId, expressionElement.GetString()!);
+            return true;
+        }
+
         private static bool TryReadInspectionArguments(
             IDictionary<string, JsonElement>? arguments,
             bool scopes,
@@ -2771,6 +2880,8 @@ internal static class Program
         private sealed record InspectionArguments(string SessionId, string InspectionContextId, int Id);
         private sealed record ScopesSuccessContent(string kind, string inspectionContextId, IReadOnlyList<DapScope> scopes);
         private sealed record VariablesSuccessContent(string kind, string inspectionContextId, IReadOnlyList<DapVariable> variables);
+        private sealed record EvaluateArguments(string SessionId, string InspectionContextId, int FrameId, string Expression);
+        private sealed record EvaluateSuccessContent(string kind, string inspectionContextId, string result, string? type, int variablesReference);
 
         private sealed record CallStackSuccessContent(
             string kind,
@@ -2836,17 +2947,20 @@ internal static class Program
                 Tool("get_output_tail", "Read retained output without clearing it. Filter categories before joining event fragments and splitting Python-style logical lines. Positive lines selects the last N, zero selects all, and negative lines skips the first N.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"lines\":{\"type\":\"integer\",\"default\":50},\"category\":{\"type\":[\"string\",\"null\"],\"default\":null}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("step_into", "Step into one explicitly named stopped thread. Completion requires the correlated acknowledgement and a later exact step stop; inspect the observed stack to establish whether the adapter entered a callee or stepped over.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
                 Tool("step_out", "Step out of one explicitly named stopped thread. Completion requires the correlated acknowledgement and a later exact step stop; inspect the observed stack to establish the caller.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
+                Tool("evaluate_expression", "Evaluate an exact expression in an explicit frame and current inspection context using DAP watch. Expressions may execute code or mutate the debuggee; watch is not read-only. A positive result reference can be expanded with get_variables in the same context. Never automatically retry a failed or unknown outcome.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1},"inspectionContextId":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"},"frameId":{"type":"integer","minimum":-2147483648,"maximum":2147483647},"expression":{"type":"string"}},"required":["debugSessionId","inspectionContextId","frameId","expression"],"additionalProperties":false}""",
+                    new ToolAnnotations { ReadOnlyHint = false, IdempotentHint = false, DestructiveHint = true }),
                 .. NativeSceneToolDispatcher.ListTools(),
             ],
             TimeToLive = CacheLifetime,
             CacheScope = CacheScope.Public,
         };
 
-        private static Tool Tool(string name, string description, string schema) => new()
+        private static Tool Tool(string name, string description, string schema, ToolAnnotations? annotations = null) => new()
         {
             Name = name,
             Description = description,
             InputSchema = JsonDocument.Parse(schema).RootElement.Clone(),
+            Annotations = annotations,
         };
     }
 

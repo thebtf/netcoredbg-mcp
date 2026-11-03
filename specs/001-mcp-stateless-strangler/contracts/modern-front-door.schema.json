@@ -215,6 +215,35 @@
       },
       "additionalProperties": false
     },
+    "evaluateExpressionArguments": {
+      "type": "object",
+      "description": "All inputs are explicit. DAP watch can execute code or mutate the debuggee; it is not read-only or idempotent.",
+      "required": [
+        "debugSessionId",
+        "inspectionContextId",
+        "frameId",
+        "expression"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "inspectionContextId": {
+          "$ref": "#/$defs/inspectionContextId"
+        },
+        "frameId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "expression": {
+          "type": "string",
+          "description": "Forwarded exactly once, unchanged, with the explicit frameId and DAP context watch. No automatic retry or implicit frame selection."
+        }
+      },
+      "additionalProperties": false
+    },
     "stepOverArguments": {
       "type": "object",
       "required": [
@@ -1448,6 +1477,43 @@
       },
       "additionalProperties": false
     },
+    "evaluateSuccess": {
+      "type": "object",
+      "description": "Complete serialized structuredContent is bounded to 262144 UTF-8 bytes inclusive. Success is a current adapter response, not a read-only or no-side-effect claim.",
+      "required": [
+        "kind",
+        "inspectionContextId",
+        "result",
+        "type",
+        "variablesReference"
+      ],
+      "properties": {
+        "kind": {
+          "const": "evaluate_success"
+        },
+        "inspectionContextId": {
+          "$ref": "#/$defs/inspectionContextId"
+        },
+        "result": {
+          "type": "string"
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 1024,
+          "description": "Null when the adapter omits type or explicitly returns null. A present string is limited to 1024 UTF-8 bytes."
+        },
+        "variablesReference": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647,
+          "description": "A positive reference can be expanded with get_variables using the same current inspectionContextId; zero is a leaf."
+        }
+      },
+      "additionalProperties": false
+    },
     "stepOverSuccess": {
       "type": "object",
       "required": [
@@ -1911,6 +1977,57 @@
       },
       "additionalProperties": false
     },
+    "dapEvaluateRefused": {
+      "type": "object",
+      "description": "The inspection context was unavailable or stale before writer handoff; no evaluate request was sent.",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_evaluate_refused"
+        },
+        "error": {
+          "const": "DAP_EVALUATE_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapEvaluateFailed": {
+      "type": "object",
+      "description": "The adapter returned a negative evaluate response. Expression side effects may already have occurred; no no-effect claim or automatic retry follows.",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_evaluate_failed"
+        },
+        "error": {
+          "const": "DAP_EVALUATE_FAILED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapEvaluateOutcomeUnknown": {
+      "type": "object",
+      "description": "A stale post-write response or malformed, oversized, timed-out or failed exchange cannot establish a usable result or absence of expression effects. The session is drained; never retry automatically. Caller cancellation after a possible write also invalidates inspection and drains before server cleanup finishes, without inventing a result.",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_evaluate_outcome_unknown"
+        },
+        "error": {
+          "const": "DAP_EVALUATE_OUTCOME_UNKNOWN"
+        }
+      },
+      "additionalProperties": false
+    },
     "dapStepOverRefused": {
       "type": "object",
       "required": [
@@ -2254,6 +2371,7 @@
             "get_call_stack",
             "get_scopes",
             "get_variables",
+            "evaluate_expression",
             "step_over",
             "step_into",
             "step_out",
@@ -2293,6 +2411,9 @@
         },
         {
           "$ref": "#/$defs/variablesSuccess"
+        },
+        {
+          "$ref": "#/$defs/evaluateSuccess"
         },
         {
           "$ref": "#/$defs/stepOverSuccess"
@@ -2395,6 +2516,15 @@
         },
         {
           "$ref": "#/$defs/dapVariablesProtocolError"
+        },
+        {
+          "$ref": "#/$defs/dapEvaluateRefused"
+        },
+        {
+          "$ref": "#/$defs/dapEvaluateFailed"
+        },
+        {
+          "$ref": "#/$defs/dapEvaluateOutcomeUnknown"
         },
         {
           "$ref": "#/$defs/dapStepOverRefused"

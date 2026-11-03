@@ -1,6 +1,6 @@
 # Native Step Into and Step Out
 
-Status: implemented with source-candidate checks observed; integration and installed delivery pending. This source slice is stacked on the native pause base `3384ffa318cdbf0406c8df0f0eec3bf9986702c8`. Python remains the installed default and rollback. Completing this slice does not complete the Python-to-.NET migration or prove legacy parity; full compatibility remains open.
+Status: source integrated via PR #388 at `891f1deb68c942a48f327f6e7eefae7efb7d803f`; installed delivery remains pending. This source slice was built on the native pause base `3384ffa318cdbf0406c8df0f0eec3bf9986702c8`. Python remains the installed default and rollback. Completing this slice does not complete the Python-to-.NET migration or prove legacy parity; full compatibility remains open.
 
 ## Consumer outcome
 
@@ -18,7 +18,7 @@ A native MCP client can stop at a managed call, use `step_into` on the observed 
 
 The owners are `host/NetCoreDbg.Mcp.Stateless/Program.cs`, its `DebugAdapter/NetCoreDbgSession.cs` lifecycle owner, and existing controlled-adapter and modern MCP contract tests. Reuse the current fixture and response/event coordination rather than a generic DAP relay. Preserve the pause candidate's admission and close/drain invariants.
 
-Root observed on this source candidate: new pair plus parser selection 128/128, existing step-over 100/100 with separately bounded startup, and pause contract/behavior/lifecycle 112/112. The prior host/schema source review was clean. These scoped results do not establish all migration gates green; integration and installed delivery remain unproven.
+Root observed on the source candidate: new pair plus parser selection 128/128, existing step-over 100/100 with separately bounded startup, and pause contract/behavior/lifecycle 112/112. An independent source review of the step changes found no material defect. These scoped results do not establish all migration gates green or installed delivery.
 
 The direct consumer oracle uses a source-built native host, fresh MCP client, real netcoredbg and an owned managed fixture with symbols: observe a breakpoint on a call, step into the actual callee, verify its top frame, step out, and verify the caller. Root observed the real source-host/netcoredbg journey entering `Middle` and returning to `Outer`, with public stop and retained Job drain. This source proof does not establish absence of transient focus, installed delivery, target selection, or full migration.
 

@@ -121,6 +121,17 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         return Assert.IsType<bool>(RequireProperty(result!.GetType(), "IsRefused", typeof(bool)).GetValue(result));
     }
 
+    public async Task<string> GetInspectionContextAsync(CancellationToken cancellationToken)
+    {
+        var method = RequireTaskMethod(_session.GetType(), "GetCallStackAsync",
+            typeof(int), typeof(uint), typeof(uint), typeof(bool), typeof(CancellationToken));
+        var result = await AwaitAsyncResult(method.Invoke(_session, [1, 0u, 20u, true, cancellationToken]),
+            "GetCallStackAsync", cancellationToken);
+        Assert.NotNull(result);
+        Assert.False(Assert.IsType<bool>(result!.GetType().GetProperty("IsRefused")?.GetValue(result)));
+        return Assert.IsType<string>(result.GetType().GetProperty("InspectionContextId")?.GetValue(result));
+    }
+
     public async Task StepOverAsync(int threadId, CancellationToken cancellationToken)
     {
         var stepOverAsync = RequireTaskMethod(_session.GetType(), "StepOverAsync", typeof(int), typeof(CancellationToken));
@@ -229,6 +240,15 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         InvokeThroughRegistryAsync(threadId, cancellationToken, inspectCancellation: true,
             beforeCancellationInspection: beforeCancellationInspection, stepTool: tool);
 
+    public Task<StepOverRegistryProbe> EvaluateThroughRegistryAsync(
+        string inspectionContextId,
+        CancellationToken cancellationToken,
+        Func<Task>? beforeCancellationInspection = null,
+        Func<Func<string, CancellationToken, Task<ModelContextProtocol.Protocol.CallToolResult>>, Task<ModelContextProtocol.Protocol.CallToolResult>>? invokeEvaluate = null) =>
+        InvokeThroughRegistryAsync(0, cancellationToken, inspectCancellation: true,
+            beforeCancellationInspection: beforeCancellationInspection, invokeSteps: invokeEvaluate,
+            evaluateContext: inspectionContextId);
+
     private async Task<StepOverRegistryProbe> InvokeThroughRegistryAsync(
         int threadId,
         CancellationToken cancellationToken,
@@ -243,7 +263,8 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         (string File, int Line)? breakpoint = null,
         bool pauseExecution = false,
         bool omitThreadId = false,
-        string? stepTool = null)
+        string? stepTool = null,
+        string? evaluateContext = null)
     {
         const string sessionId = "step-over-clock-session";
         var registryType = RequireType(_session.GetType().Assembly, "NetCoreDbg.Mcp.Stateless.Program+DebugSessionRegistry");
@@ -313,15 +334,15 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                 "step_out" => "StepOutAsync",
                 _ => throw new ArgumentOutOfRangeException(nameof(stepTool)),
             };
-            var operationMethod = inspectCallStack
-                ? registryType.GetMethod("GetCallStackAsync", BindingFlags.Instance | BindingFlags.NonPublic,
+            var operationMethod = inspectCallStack || evaluateContext is not null
+                ? registryType.GetMethod(evaluateContext is null ? "GetCallStackAsync" : "EvaluateExpressionAsync", BindingFlags.Instance | BindingFlags.NonPublic,
                     binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(CancellationToken)], modifiers: null)
                 : registryType.GetMethod(pauseExecution ? "PauseAsync" : breakpoint.HasValue ? "AddBreakpointAsync" : continueExecution ? "ContinueAsync" : stepMethod, BindingFlags.Instance | BindingFlags.NonPublic,
                     binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(ModelContextProtocol.Protocol.RequestId), typeof(CancellationToken)], modifiers: null);
             Assert.NotNull(operationMethod);
             var request = new ModelContextProtocol.Protocol.CallToolRequestParams
             {
-                Name = pauseExecution ? "pause_execution" : inspectCallStack ? "get_call_stack" : breakpoint.HasValue ? "add_breakpoint" : continueExecution ? "continue_execution" : stepTool ?? "step_over",
+                Name = pauseExecution ? "pause_execution" : inspectCallStack ? "get_call_stack" : evaluateContext is not null ? "evaluate_expression" : breakpoint.HasValue ? "add_breakpoint" : continueExecution ? "continue_execution" : stepTool ?? "step_over",
                 Arguments = new Dictionary<string, JsonElement>
                 {
                     ["debugSessionId"] = JsonSerializer.SerializeToElement(sessionId),
@@ -336,6 +357,13 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             {
                 request.Arguments["includeInspectionContext"] = JsonSerializer.SerializeToElement(true);
             }
+            if (evaluateContext is not null)
+            {
+                request.Arguments.Remove("threadId");
+                request.Arguments["inspectionContextId"] = JsonSerializer.SerializeToElement(evaluateContext);
+                request.Arguments["frameId"] = JsonSerializer.SerializeToElement(1);
+                request.Arguments["expression"] = JsonSerializer.SerializeToElement("6 * 7");
+            }
             if (breakpoint is { } targetBreakpoint)
             {
                 request.Arguments.Remove("threadId");
@@ -348,7 +376,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                 invokingRequestId.Value = requestId;
                 try
                 {
-                    object?[] invocationArguments = inspectCallStack
+                    object?[] invocationArguments = inspectCallStack || evaluateContext is not null
                         ? [request, token]
                         : [request, new ModelContextProtocol.Protocol.RequestId(requestId), token];
                     var invocation = operationMethod!.Invoke(registry, invocationArguments);

@@ -795,6 +795,9 @@ internal sealed class ControlledDapAdapter
             case "variables":
                 await HandleInspectionRequestAsync(sequence, command, root, cancellationToken);
                 return false;
+            case "evaluate":
+                await HandleEvaluateRequestAsync(sequence, root, cancellationToken);
+                return false;
             case "next":
                 return await HandleNextRequestAsync(sequence, root, cancellationToken);
             case "stepIn":
@@ -2021,6 +2024,90 @@ internal sealed class ControlledDapAdapter
         await WriteResponseAsync(sequence, "threads", new { threads = Threads(2, "worker") }, cancellationToken);
     }
 
+
+    private async Task HandleEvaluateRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)
+    {
+        const string privatePayload = "private controlled evaluation payload";
+        var expression = root.GetProperty("arguments").GetProperty("expression").GetString();
+        const string sizePrefix = "fixture:sized:";
+        if (expression is not null && expression.StartsWith(sizePrefix, StringComparison.Ordinal)
+            && int.TryParse(expression.AsSpan(sizePrefix.Length), out var size) && size is >= 0 and <= 262_144)
+        {
+            await WriteResponseAsync(sequence, "evaluate",
+                new { result = new string('x', size) + "\"\nЖ", type = "string", variablesReference = 0 }, cancellationToken);
+            return;
+        }
+        object body;
+        switch (expression)
+        {
+            case "6 * 7":
+            case " \t6 * 7\r\n":
+                body = new { result = "42", type = "int", variablesReference = 0, evaluateName = privatePayload };
+                break;
+            case "tupleVar":
+                body = new { result = "(\"test\", 123)", type = "(string, int)", variablesReference = 1002, namedVariables = 2, memoryReference = privatePayload };
+                break;
+            case "fixture:missing-type":
+                body = new { result = "untyped", variablesReference = 0 };
+                break;
+            case "fixture:null-type":
+                body = new { result = "untyped", type = (string?)null, variablesReference = 0 };
+                break;
+            case "fixture:empty-result":
+                body = new { result = string.Empty, type = "string", variablesReference = 0 };
+                break;
+            case "fixture:negative":
+                await WriteResponseAsync(sequence, "evaluate", new { message = privatePayload, result = privatePayload }, cancellationToken, success: false);
+                return;
+            case "fixture:missing-result":
+                body = new { type = privatePayload, variablesReference = 0 };
+                break;
+            case "fixture:non-string-result":
+                body = new { result = 42, type = privatePayload, variablesReference = 0 };
+                break;
+            case "fixture:non-string-type":
+                body = new { result = privatePayload, type = 17, variablesReference = 0 };
+                break;
+            case "fixture:missing-reference":
+                body = new { result = privatePayload, type = "int" };
+                break;
+            case "fixture:negative-reference":
+                body = new { result = privatePayload, variablesReference = -1 };
+                break;
+            case "fixture:fractional-reference":
+                body = new { result = privatePayload, variablesReference = 1.5 };
+                break;
+            case "fixture:oversized-result":
+                body = new { result = privatePayload + new string('x', 262_145), type = "string", variablesReference = 0 };
+                break;
+            case "fixture:wrong-command":
+                await WriteResponseAsync(sequence, "variables", new { result = privatePayload, variablesReference = 0 }, cancellationToken);
+                return;
+            case "fixture:timeout":
+                await RecordAsync(new { kind = "evaluate-response-timeout", sequence }, cancellationToken);
+                return;
+            case "fixture:hold":
+            case "fixture:hold-then-invalidated":
+            case "fixture:hold-then-continued-restop":
+                if (expression == "fixture:hold-then-invalidated")
+                {
+                    await WriteEventAsync("invalidated", new { areas = new[] { "variables" }, threadId = 1 }, cancellationToken);
+                }
+                else if (expression == "fixture:hold-then-continued-restop")
+                {
+                    await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
+                    await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken, "evaluate-restopped-event");
+                }
+                await RecordAsync(new { kind = "evaluate-response-gated", sequence }, cancellationToken);
+                _heldInspectionResponse = CompleteHeldInspectionResponseAsync(sequence, "evaluate",
+                    new { result = privatePayload, type = "int", variablesReference = 1002 }, _lifecycleEventsCancellation.Token);
+                return;
+            default:
+                throw new InvalidOperationException("Unknown controlled evaluation expression.");
+        }
+
+        await WriteResponseAsync(sequence, "evaluate", body, cancellationToken);
+    }
 
     private async Task HandleInspectionRequestAsync(int sequence, string command, JsonElement root, CancellationToken cancellationToken)
     {
