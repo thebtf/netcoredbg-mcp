@@ -1789,8 +1789,19 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         try
         {
-            using var process = Process.GetProcessById(processId);
-            var executablePath = process.MainModule?.FileName;
+            using var windowsProcess = OperatingSystem.IsWindows() ? WindowsNativeSceneProcess.Open(processId) : null;
+            using var process = windowsProcess is null ? Process.GetProcessById(processId) : null;
+            string? executablePath;
+            long windowsCreationUtcTicks = 0;
+            if (windowsProcess is null)
+            {
+                executablePath = process!.MainModule?.FileName;
+            }
+            else if (!WindowsNativeSceneProcess.TryReadIdentity(windowsProcess, out executablePath, out windowsCreationUtcTicks))
+            {
+                return;
+            }
+
             if (string.IsNullOrWhiteSpace(executablePath))
             {
                 return;
@@ -1803,13 +1814,18 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     "process_",
                     processId.ToString(CultureInfo.InvariantCulture),
                     "_start_",
-                    process.StartTime.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture)),
+                    (windowsProcess is null ? process!.StartTime.ToUniversalTime().Ticks : windowsCreationUtcTicks).ToString(CultureInfo.InvariantCulture)),
                 executablePath,
                 Convert.ToHexString(SHA256.HashData(executable)).ToLowerInvariant(),
                 TryGetAssemblyVersion(executablePath),
                 ProbeVersion: null);
             lock (_nativeSceneTargetIdentityGate)
             {
+                if (windowsProcess is not null && !WindowsNativeSceneProcess.IsAlive(windowsProcess))
+                {
+                    return;
+                }
+
                 pinned = _nativeSceneTargetIdentity;
                 if (pinned is null)
                 {
@@ -1831,6 +1847,90 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                                          or CryptographicException)
         {
         }
+    }
+
+    private static class WindowsNativeSceneProcess
+    {
+        private const uint ProcessQueryLimitedInformation = 0x1000;
+        private const uint Synchronize = 0x00100000;
+        private const uint WaitTimeout = 258;
+        private const int MaximumImagePathCharacters = 32_768;
+
+        public static SafeProcessHandle Open(int processId) =>
+            OpenProcess(ProcessQueryLimitedInformation | Synchronize, inheritHandle: false, checked((uint)processId));
+
+        public static bool IsAlive(SafeProcessHandle process) =>
+            !process.IsInvalid && WaitForSingleObject(process, 0) == WaitTimeout;
+
+        public static bool TryReadIdentity(SafeProcessHandle process, out string executablePath, out long creationUtcTicks)
+        {
+            executablePath = string.Empty;
+            creationUtcTicks = 0;
+            if (!IsAlive(process))
+            {
+                return false;
+            }
+
+            // Query the kernel process object, not its not-yet-initialized user-mode module list.
+            // Keep this same handle through creation-time capture, hashing and the final pin liveness check.
+            var image = System.Buffers.ArrayPool<char>.Shared.Rent(MaximumImagePathCharacters);
+            try
+            {
+                uint characters = MaximumImagePathCharacters;
+                if (!QueryFullProcessImageNameW(process, 0, image, ref characters)
+                    || characters == 0 || characters >= MaximumImagePathCharacters)
+                {
+                    return false;
+                }
+
+                var length = checked((int)characters);
+                ReadOnlySpan<char> imagePath = image.AsSpan(0, length);
+                if (image[length] != '\0' || imagePath.IndexOf('\0') >= 0 || imagePath.IsWhiteSpace()
+                    || !GetProcessTimes(process, out var creation, out _, out _, out _))
+                {
+                    return false;
+                }
+
+                var fileTime = ((long)(uint)creation.dwHighDateTime << 32) | (uint)creation.dwLowDateTime;
+                if (fileTime <= 0)
+                {
+                    return false;
+                }
+
+                creationUtcTicks = DateTime.FromFileTimeUtc(fileTime).Ticks;
+                if (!IsAlive(process))
+                {
+                    return false;
+                }
+
+                executablePath = new string(image, 0, length);
+                return true;
+            }
+            finally
+            {
+                System.Buffers.ArrayPool<char>.Shared.Return(image, clearArray: true);
+            }
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern SafeProcessHandle OpenProcess(
+            uint desiredAccess, [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, uint processId);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryFullProcessImageNameW(
+            SafeProcessHandle process, uint flags, [Out] char[] executableName, ref uint characters);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetProcessTimes(
+            SafeProcessHandle process, out System.Runtime.InteropServices.ComTypes.FILETIME creationTime,
+            out System.Runtime.InteropServices.ComTypes.FILETIME exitTime,
+            out System.Runtime.InteropServices.ComTypes.FILETIME kernelTime,
+            out System.Runtime.InteropServices.ComTypes.FILETIME userTime);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint WaitForSingleObject(SafeProcessHandle handle, uint milliseconds);
     }
 
     private static string? TryGetAssemblyVersion(string executablePath)

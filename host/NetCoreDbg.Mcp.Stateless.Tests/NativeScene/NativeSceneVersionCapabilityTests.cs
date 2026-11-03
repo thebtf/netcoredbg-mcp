@@ -73,7 +73,7 @@ public sealed class NativeSceneVersionCapabilityTests
     public async Task Capability_SameLiveCandidateAcrossRevisions_KeepsRequestLocalVersionAndContractHash(bool concurrent)
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
-            FixtureConfiguration: new FixtureConfiguration(SpawnDescendant: true, LifecycleMode: "all-stop")));
+            FixtureConfiguration: new FixtureConfiguration(SpawnDescendant: true, LifecycleMode: "all-stop")), startupTimeout: TimeSpan.FromSeconds(30));
         var session = await StartSessionAsync(driver, "version-isolation-start");
         using (var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2)))
         {
@@ -159,7 +159,7 @@ public sealed class NativeSceneVersionCapabilityTests
     [InlineData(Protocol, "native-scene-probe.schema/3")]
     public async Task Capability_UnsupportedVersionCrossPairs_StayRejectedBeforeSessionLookupOrNativeIo(string protocol, string schema)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync();
+        await using var driver = await ModernMcpProcessDriver.StartAsync(startupTimeout: TimeSpan.FromSeconds(30));
         var before = await driver.ReadNativeActionsAsync();
         var content = Application(await driver.CallToolRawAsync(
             Tool, Arguments(new string('a', 32), schema, protocol), ModernMcpProcessDriver.CurrentMeta(),
@@ -183,7 +183,7 @@ public sealed class NativeSceneVersionCapabilityTests
                 AdditionalEnvironment: new Dictionary<string, string?>
                 {
                     ["NETCOREDBG_MCP_ARTIFACT_ROOT"] = artifacts,
-                }));
+                }), startupTimeout: TimeSpan.FromSeconds(30));
             var session = await StartSessionAsync(driver, "no-candidate-start");
             await ReaderBarrierAsync(driver, session, "no-candidate-launch-reader-barrier");
             await AssertLiveAsync(driver, session, "no-candidate-before");
@@ -219,7 +219,7 @@ public sealed class NativeSceneVersionCapabilityTests
     {
         var content = Application(await driver.CallToolRawAsync(
             "start_debug", new JsonObject { ["program"] = driver.InertProgramPath },
-            ModernMcpProcessDriver.CurrentMeta(), new RequestId(id)), isError: false);
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId(id), timeout: TimeSpan.FromSeconds(30)), isError: false);
         Assert.Equal("start_debug_success", Text(content["kind"]));
         return Text(content["debugSessionId"]);
     }

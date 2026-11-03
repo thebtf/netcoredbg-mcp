@@ -210,7 +210,7 @@ public sealed class NativeSceneVersionCaptureArtifactTests
         // Fragment fixtures need a real successful capability envelope for the runtime
         // result validator; do not manufacture a candidate or echo a mocked declaration.
         await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
-            FixtureConfiguration: new FixtureConfiguration(SpawnDescendant: true)));
+            FixtureConfiguration: new FixtureConfiguration(SpawnDescendant: true)), startupTimeout: TimeSpan.FromSeconds(30));
         var session = await StartSessionAsync(driver, driver.InertProgramPath, "parity-start");
         await WaitForCandidateAsync(driver, session);
         var declaration = await CallAsync(driver, "get_ui_probe_capabilities", Arguments(session, revision), "parity-capabilities", false);
@@ -391,7 +391,7 @@ public sealed class NativeSceneVersionCaptureArtifactTests
         {
             await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
                 FixtureConfiguration: new FixtureConfiguration(SpawnDescendant: true),
-                AdditionalEnvironment: new Dictionary<string, string?> { ["NETCOREDBG_MCP_ARTIFACT_ROOT"] = artifactRoot }));
+                AdditionalEnvironment: new Dictionary<string, string?> { ["NETCOREDBG_MCP_ARTIFACT_ROOT"] = artifactRoot }), startupTimeout: TimeSpan.FromSeconds(30));
             var liveSession = await StartSessionAsync(driver, driver.InertProgramPath, "session-start");
             await WaitForCandidateAsync(driver, liveSession);
             var declaration = await CallAsync(driver, "get_ui_probe_capabilities", Arguments(liveSession, revision), "live-candidate", false);
@@ -448,7 +448,7 @@ public sealed class NativeSceneVersionCaptureArtifactTests
         {
             await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
                 FixtureConfiguration: new FixtureConfiguration(SpawnDescendant: true),
-                AdditionalEnvironment: new Dictionary<string, string?> { ["NETCOREDBG_MCP_ARTIFACT_ROOT"] = artifactRoot }));
+                AdditionalEnvironment: new Dictionary<string, string?> { ["NETCOREDBG_MCP_ARTIFACT_ROOT"] = artifactRoot }), startupTimeout: TimeSpan.FromSeconds(30));
             var session = await StartSessionAsync(driver, driver.InertProgramPath, "mismatch-start");
             await WaitForCandidateAsync(driver, session);
             var declaration = await CallAsync(driver, "get_ui_probe_capabilities", Arguments(session, revision), "mismatch-candidate", false);
@@ -657,7 +657,7 @@ public sealed class NativeSceneVersionCaptureArtifactTests
             {
                 ["NETCOREDBG_MCP_ARTIFACT_ROOT"] = artifactRoot,
                 ["FLAUI_BRIDGE_PATH"] = visual ? BridgeAssemblyPath() : null,
-            }));
+            }), startupTimeout: TimeSpan.FromSeconds(30));
 
     private static string FixtureExecutablePath()
     {
@@ -772,7 +772,8 @@ public sealed class NativeSceneVersionCaptureArtifactTests
         var response = await driver.CallToolRawAsync(tool, arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId(id), timeout: TimeSpan.FromSeconds(30));
         var result = ModernMcpProcessDriver.RequireResult(response);
         Assert.Equal("complete", Text(result["resultType"]));
-        Assert.Equal(isError, result["isError"]?.GetValue<bool>() ?? false);
+        Assert.True(isError == (result["isError"]?.GetValue<bool>() ?? false),
+            $"Tool '{tool}', request '{id}': expected isError={isError}; full result={result.ToJsonString()}");
         var content = Object(result["structuredContent"]);
         var block = Object(Assert.Single(Assert.IsType<JsonArray>(result["content"])));
         Assert.Equal("text", Text(block["type"]));

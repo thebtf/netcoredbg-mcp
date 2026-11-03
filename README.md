@@ -156,6 +156,14 @@ is started and no identity is inferred. Artifacts keep their original bytes and
 provenance when read through either revision. These source-built tools do not
 change the installed Python default or the published read-only preview.
 
+On Windows, the source-built host identifies the local process from its DAP
+`process` event through one non-inheritable handle with
+`PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`. It reads the executable image
+and creation time without enumerating modules, then rechecks that same process
+object is alive before pinning the identity. Denied queries, incomplete image
+paths, exited processes, and unreadable executables leave identity unavailable;
+the host neither substitutes the launch path nor retries a failed query.
+
 The separate [native read-only preview](specs/016-a2-native-readonly-family/spec.md)
 exposes `find_code_symbol`, `find_code_references` and `get_source_context`.
 Each schema-2 manifest binds its exact proof generation; historical schema-1

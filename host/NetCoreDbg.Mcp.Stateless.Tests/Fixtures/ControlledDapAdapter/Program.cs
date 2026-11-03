@@ -439,6 +439,8 @@ internal sealed class ControlledDapAdapter
     private readonly string? _threadsResponseReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_THREADS_RESPONSE_RELEASE");
     private readonly string? _stackTraceResponseReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_STACK_TRACE_RESPONSE_RELEASE");
     private readonly string? _nextResponseReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_NEXT_RESPONSE_RELEASE");
+    private readonly string? _suspendedDescendantProcessEventReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_SUSPENDED_DESCENDANT_PROCESS_EVENT_RELEASE");
+    private SuspendedControlledProcess? _suspendedDescendant;
     private readonly bool _holdLaunchResponse = string.Equals(
         Environment.GetEnvironmentVariable("CONTROLLED_DAP_HOLD_LAUNCH_RESPONSE"), "1", StringComparison.Ordinal);
     private Process? _descendant;
@@ -507,6 +509,7 @@ internal sealed class ControlledDapAdapter
         }
         finally
         {
+            using var suspendedDescendantLifetime = _suspendedDescendant;
             _lifecycleEventsCancellation.Cancel();
             if (_heldThreadsResponse is { } heldThreadsResponse)
             {
@@ -584,7 +587,7 @@ internal sealed class ControlledDapAdapter
                 await _secondDescendant.WaitForExitAsync(secondDescendantCleanup.Token);
             }
 
-            if (_descendant is { HasExited: false })
+            if (_suspendedDescendant is null && _descendant is { HasExited: false })
             {
                 _descendant.Kill(entireProcessTree: true);
                 using var descendantCleanup = new CancellationTokenSource(DescendantCleanupTimeout);
@@ -919,6 +922,15 @@ internal sealed class ControlledDapAdapter
     {
         if (_descendant is { } descendant)
         {
+            if (_suspendedDescendant is not null)
+            {
+                await RecordAsync(new { kind = "suspended-descendant-process-event-gated", processId = descendant.Id }, cancellationToken);
+                while (!File.Exists(_suspendedDescendantProcessEventReleasePath))
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken);
+                }
+            }
+
             await WriteEventAsync(
                 "process",
                 new
@@ -1063,6 +1075,17 @@ internal sealed class ControlledDapAdapter
 
     private Process StartDescendant(bool windowed)
     {
+        if (!string.IsNullOrWhiteSpace(_suspendedDescendantProcessEventReleasePath))
+        {
+            if (windowed || _suspendedDescendant is not null)
+            {
+                throw new InvalidOperationException("The suspended initial-module fixture owns exactly one non-windowed descendant.");
+            }
+
+            _suspendedDescendant = SuspendedControlledProcess.Start();
+            return _suspendedDescendant.Process;
+        }
+
         var configuredExecutable = windowed
             ? Environment.GetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE")
             : null;
