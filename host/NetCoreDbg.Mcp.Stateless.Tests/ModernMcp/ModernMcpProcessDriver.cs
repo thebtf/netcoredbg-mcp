@@ -308,6 +308,26 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
     internal void ReleaseThreadsResponse() => _fixture.ReleaseThreadsResponse();
     internal void ReleaseStackTraceResponse() => _fixture.ReleaseStackTraceResponse();
     internal void ReleaseNextResponse() => _fixture.ReleaseNextResponse();
+    internal void ReleasePauseResponse() => _fixture.ReleasePauseResponse();
+    internal void ReleasePauseStoppedEvent() => _fixture.ReleasePauseStoppedEvent();
+    internal void ReleasePauseStop() => _fixture.ReleasePauseStoppedEvent();
+    internal void ReleaseContinueResponse() => _fixture.ReleaseContinueResponse();
+    internal void ReleaseThreadsResponse(int requestSequence) => _fixture.ReleaseThreadsResponse(requestSequence);
+
+    internal Task WaitForPauseRequestAsync(CancellationToken cancellationToken = default) =>
+        _fixture.WaitForPauseRequestAsync(cancellationToken);
+
+    internal Task WaitForDapRequestCountAsync(string command, int count, CancellationToken cancellationToken = default) =>
+        _fixture.WaitForDapRequestCountAsync(command, count, cancellationToken);
+
+    internal Task WaitForDapResponseAsync(string command, int requestSequence, CancellationToken cancellationToken = default) =>
+        _fixture.WaitForDapResponseAsync(command, requestSequence, cancellationToken);
+
+    internal Task<IReadOnlyList<FixtureTranscriptEntry>> ReadFixtureTranscriptAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return _fixture.ReadTranscriptAsync();
+    }
 
     internal Task<int> ReadAdapterProcessIdAsync(CancellationToken cancellationToken = default) =>
         _fixture.GetProcessIdAsync(cancellationToken);

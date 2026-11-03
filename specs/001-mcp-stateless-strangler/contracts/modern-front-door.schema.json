@@ -254,6 +254,28 @@
       },
       "additionalProperties": false
     },
+    "pauseArguments": {
+      "type": "object",
+      "required": [
+        "debugSessionId"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "threadId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
     "addBreakpointArguments": {
       "type": "object",
       "required": [
@@ -1565,6 +1587,48 @@
       },
       "additionalProperties": false
     },
+    "pauseAcknowledged": {
+      "type": "object",
+      "required": [
+        "kind",
+        "threadId"
+      ],
+      "properties": {
+        "kind": {
+          "const": "pause_acknowledged"
+        },
+        "threadId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
+    "pauseTerminal": {
+      "type": "object",
+      "required": [
+        "kind",
+        "terminal"
+      ],
+      "properties": {
+        "kind": {
+          "const": "pause_terminal"
+        },
+        "terminal": {
+          "enum": [
+            "exited",
+            "terminated"
+          ]
+        },
+        "exitCode": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
     "debugSessionNotFound": {
       "type": "object",
       "required": [
@@ -1773,6 +1837,70 @@
       },
       "additionalProperties": false
     },
+    "dapPauseRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_pause_refused"
+        },
+        "error": {
+          "const": "DAP_PAUSE_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapPauseNoThreads": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_pause_no_threads"
+        },
+        "error": {
+          "const": "DAP_PAUSE_NO_THREADS"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapPauseTimeout": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_pause_timeout"
+        },
+        "error": {
+          "const": "DAP_PAUSE_TIMEOUT"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapPauseProtocolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_pause_protocol_error"
+        },
+        "error": {
+          "const": "DAP_PAUSE_PROTOCOL_ERROR"
+        }
+      },
+      "additionalProperties": false
+    },
     "breakpointSourceUnavailable": {
       "type": "object",
       "required": [
@@ -1926,6 +2054,7 @@
             "get_variables",
             "step_over",
             "continue_execution",
+            "pause_execution",
             "add_breakpoint",
             "remove_breakpoint",
             "ui_invoke",
@@ -1978,6 +2107,12 @@
         },
         {
           "$ref": "#/$defs/continueTimedOut"
+        },
+        {
+          "$ref": "#/$defs/pauseAcknowledged"
+        },
+        {
+          "$ref": "#/$defs/pauseTerminal"
         },
         {
           "$ref": "#/$defs/breakpointAdded"
@@ -2050,6 +2185,18 @@
         },
         {
           "$ref": "#/$defs/dapContinueProtocolError"
+        },
+        {
+          "$ref": "#/$defs/dapPauseRefused"
+        },
+        {
+          "$ref": "#/$defs/dapPauseNoThreads"
+        },
+        {
+          "$ref": "#/$defs/dapPauseTimeout"
+        },
+        {
+          "$ref": "#/$defs/dapPauseProtocolError"
         },
         {
           "$ref": "#/$defs/startDebugSourceUnavailable"

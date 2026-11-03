@@ -99,6 +99,9 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
     public int PendingRequestCount => Assert.IsAssignableFrom<System.Collections.IDictionary>(_pending.GetValue(_session)).Count;
     public int DapWriteCalls => (_dapWriteBarrier
         ?? throw new InvalidOperationException("This session has no deterministic DAP write barrier.")).WriteCalls;
+    public bool IsExecutionClosing => string.Equals(
+        RequirePrivateField(_session.GetType(), "_executionAdmission").GetValue(_session)?.ToString(),
+        "Closing", StringComparison.Ordinal);
 
     public Task WaitForReaderCompletionAsync(CancellationToken cancellationToken) => _readerTask.WaitAsync(cancellationToken);
 
@@ -126,6 +129,11 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             "StepOverAsync",
             cancellationToken);
     }
+    public async Task ContinueAsync(int threadId, CancellationToken cancellationToken)
+    {
+        var method = RequireTaskMethod(_session.GetType(), "ContinueAsync", typeof(int), typeof(CancellationToken));
+        _ = await AwaitAsyncResult(method.Invoke(_session, [threadId, cancellationToken]), "ContinueAsync", CancellationToken.None);
+    }
 
     public async Task<bool> AddBreakpointIsAddedAsync(string file, int line, CancellationToken cancellationToken)
     {
@@ -141,6 +149,29 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
     {
         var getThreads = RequireTaskMethod(_session.GetType(), "GetThreadsAsync", typeof(CancellationToken));
         _ = await AwaitAsyncResult(getThreads.Invoke(_session, [cancellationToken]), "GetThreadsAsync", cancellationToken);
+    }
+
+    public async Task<int[]> GetThreadIdsAsync(CancellationToken cancellationToken)
+    {
+        var method = RequireTaskMethod(_session.GetType(), "GetThreadsAsync", typeof(CancellationToken));
+        var result = await AwaitAsyncResult(method.Invoke(_session, [cancellationToken]), "GetThreadsAsync", CancellationToken.None);
+        Assert.NotNull(result);
+        Assert.False(Assert.IsType<bool>(result!.GetType().GetProperty("IsRefused")?.GetValue(result)));
+        var threads = Assert.IsAssignableFrom<System.Collections.IEnumerable>(result.GetType().GetProperty("Threads")?.GetValue(result));
+        return threads.Cast<object>().Select(thread => Assert.IsType<int>(thread.GetType().GetProperty("Id")?.GetValue(thread))).ToArray();
+    }
+
+    public async Task WaitForObservedStopReasonAsync(string reason, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            var observed = State;
+            if (observed.Event == "stopped" && string.Equals(observed.StopReason, reason, StringComparison.Ordinal))
+            {
+                return;
+            }
+            await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken);
+        }
     }
 
     public Task<StepOverRegistryProbe> StepOverThroughRegistryAsync(
@@ -178,6 +209,18 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         InvokeThroughRegistryAsync(threadId, cancellationToken, inspectCancellation: true,
             beforeCancellationInspection: beforeCancellationInspection, inspectCallStack: true);
 
+    public Task<StepOverRegistryProbe> PauseThroughRegistryAsync(
+        int? threadId,
+        CancellationToken cancellationToken,
+        Func<Task>? beforeCancellationInspection = null,
+        Func<Func<string, CancellationToken, Task<ModelContextProtocol.Protocol.CallToolResult>>, Task<ModelContextProtocol.Protocol.CallToolResult>>? invokePause = null,
+        Func<Task>? beforeStop = null,
+        Func<Task>? beforeDispose = null) =>
+        InvokeThroughRegistryAsync(threadId ?? 0, cancellationToken, inspectCancellation: true,
+            beforeCancellationInspection: beforeCancellationInspection, invokeSteps: invokePause,
+            beforeStop: beforeStop, beforeDispose: beforeDispose,
+            pauseExecution: true, omitThreadId: threadId is null);
+
     private async Task<StepOverRegistryProbe> InvokeThroughRegistryAsync(
         int threadId,
         CancellationToken cancellationToken,
@@ -189,7 +232,9 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         Action<string?, bool>? afterUsabilityObservation = null,
         bool inspectCallStack = false,
         bool continueExecution = false,
-        (string File, int Line)? breakpoint = null)
+        (string File, int Line)? breakpoint = null,
+        bool pauseExecution = false,
+        bool omitThreadId = false)
     {
         const string sessionId = "step-over-clock-session";
         var registryType = RequireType(_session.GetType().Assembly, "NetCoreDbg.Mcp.Stateless.Program+DebugSessionRegistry");
@@ -255,18 +300,22 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             var operationMethod = inspectCallStack
                 ? registryType.GetMethod("GetCallStackAsync", BindingFlags.Instance | BindingFlags.NonPublic,
                     binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(CancellationToken)], modifiers: null)
-                : registryType.GetMethod(breakpoint.HasValue ? "AddBreakpointAsync" : continueExecution ? "ContinueAsync" : "StepOverAsync", BindingFlags.Instance | BindingFlags.NonPublic,
+                : registryType.GetMethod(pauseExecution ? "PauseAsync" : breakpoint.HasValue ? "AddBreakpointAsync" : continueExecution ? "ContinueAsync" : "StepOverAsync", BindingFlags.Instance | BindingFlags.NonPublic,
                     binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(ModelContextProtocol.Protocol.RequestId), typeof(CancellationToken)], modifiers: null);
             Assert.NotNull(operationMethod);
             var request = new ModelContextProtocol.Protocol.CallToolRequestParams
             {
-                Name = inspectCallStack ? "get_call_stack" : breakpoint.HasValue ? "add_breakpoint" : continueExecution ? "continue_execution" : "step_over",
+                Name = pauseExecution ? "pause_execution" : inspectCallStack ? "get_call_stack" : breakpoint.HasValue ? "add_breakpoint" : continueExecution ? "continue_execution" : "step_over",
                 Arguments = new Dictionary<string, JsonElement>
                 {
                     ["debugSessionId"] = JsonSerializer.SerializeToElement(sessionId),
                     ["threadId"] = JsonSerializer.SerializeToElement(threadId),
                 },
             };
+            if (omitThreadId)
+            {
+                request.Arguments.Remove("threadId");
+            }
             if (inspectCallStack)
             {
                 request.Arguments["includeInspectionContext"] = JsonSerializer.SerializeToElement(true);
@@ -358,6 +407,47 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         {
             _ = await AwaitAsyncResult(RequireAsyncDisposable(registryType).Invoke(registry, []), "DisposeAsync", CancellationToken.None);
         }
+    }
+
+    public async Task WaitForPendingCommandAsync(string command, CancellationToken cancellationToken)
+    {
+        while (!PendingRequests().Any(request =>
+            string.Equals(request.GetType().GetProperty("Command")?.GetValue(request) as string, command, StringComparison.Ordinal)))
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken);
+        }
+    }
+
+    public async Task WaitForPendingResponseAsync(string command, CancellationToken cancellationToken)
+    {
+        await WaitForPendingCommandAsync(command, cancellationToken);
+        var request = Assert.Single(PendingRequests(), entry =>
+            string.Equals(entry.GetType().GetProperty("Command")?.GetValue(entry) as string, command, StringComparison.Ordinal));
+        var completion = request.GetType().GetProperty("Completion")?.GetValue(request);
+        Assert.NotNull(completion);
+        var response = Assert.IsAssignableFrom<Task>(completion!.GetType().GetProperty("Task")?.GetValue(completion));
+        await response.WaitAsync(cancellationToken);
+    }
+
+    private IEnumerable<object> PendingRequests()
+    {
+        var pending = _pending.GetValue(_session)
+            ?? throw new InvalidOperationException("NetCoreDbgSession._pending returned null.");
+        var values = Assert.IsAssignableFrom<System.Collections.IEnumerable>(_pending.FieldType.GetProperty("Values")?.GetValue(pending));
+        return values.Cast<object>();
+    }
+
+    public Task DispatchPauseAcknowledgementThenCancelAsync(int requestSequence, Action cancel, CancellationToken cancellationToken)
+    {
+        var acknowledgement = JsonSerializer.SerializeToElement(new
+        {
+            seq = 1_000_001,
+            type = "response",
+            request_seq = requestSequence,
+            success = true,
+            command = "pause",
+        });
+        return DispatchMessagesUnderStateGateAsync([acknowledgement], releaseWriter: false, cancellationToken, afterDispatch: cancel);
     }
 
     public async Task WaitForPendingNextAsync(CancellationToken cancellationToken)
@@ -955,7 +1045,14 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         return Assert.IsAssignableFrom<Task>(stopAsync!.Invoke(disposer, [cancellationToken]));
     }
 
-    public async Task<HostedThreadsLease> StartHostedThreadsLeaseAsync(CancellationToken cancellationToken)
+    public Task<HostedThreadsLease> StartHostedThreadsLeaseAsync(CancellationToken cancellationToken) =>
+        StartHostedLeaseAsync(cancellationToken);
+
+    public Task<HostedThreadsLease> StartHostedPauseLeaseAsync(int? threadId, CancellationToken cancellationToken) =>
+        StartHostedLeaseAsync(cancellationToken, pauseExecution: true, pauseThreadId: threadId);
+
+    private async Task<HostedThreadsLease> StartHostedLeaseAsync(
+        CancellationToken cancellationToken, bool pauseExecution = false, int? pauseThreadId = null)
     {
         const string sessionId = "host-drain-session";
         var assembly = _session.GetType().Assembly;
@@ -985,12 +1082,20 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         Assert.NotNull(addSession);
         Assert.NotNull(addSlot);
 
+        var admissionClosed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         Action remove = () =>
         {
             _ = removeSlot!.Invoke(slots, [sessionId, null]);
             _ = removeSession!.Invoke(sessions, [sessionId, null]);
+            admissionClosed.TrySetResult(true);
         };
-        Func<CancellationToken, Task> stop = StopAsync;
+        object? slot = null;
+        int? leaseCountAtStop = null;
+        Func<CancellationToken, Task> stop = token =>
+        {
+            leaseCountAtStop = Assert.IsType<int>(RequirePrivateField(slotType, "_leases", typeof(int)).GetValue(slot));
+            return StopAsync(token);
+        };
         Func<ValueTask> dispose = () => new ValueTask(DisposeSessionAsync());
         var slotConstructor = slotType.GetConstructor(
             BindingFlags.Instance | BindingFlags.NonPublic,
@@ -998,7 +1103,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             types: [typeof(TimeSpan), typeof(Func<CancellationToken, Task>), typeof(Func<ValueTask>), typeof(Action)],
             modifiers: null);
         Assert.NotNull(slotConstructor);
-        var slot = slotConstructor!.Invoke([TimeSpan.FromSeconds(2), stop, dispose, remove]);
+        slot = slotConstructor!.Invoke([TimeSpan.FromSeconds(2), stop, dispose, remove]);
         Assert.True((bool)addSession!.Invoke(sessions, [sessionId, _session])!);
         Assert.True((bool)addSlot!.Invoke(slots, [sessionId, slot])!);
 
@@ -1017,28 +1122,34 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             await host.StartAsync(cancellationToken).ConfigureAwait(false);
 
             var getThreadsAsync = registryType.GetMethod(
-                "GetThreadsAsync",
+                pauseExecution ? "PauseAsync" : "GetThreadsAsync",
                 BindingFlags.Instance | BindingFlags.NonPublic,
                 binder: null,
-                types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(CancellationToken)],
+                types: pauseExecution
+                    ? [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(ModelContextProtocol.Protocol.RequestId), typeof(CancellationToken)]
+                    : [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(CancellationToken)],
                 modifiers: null);
             Assert.NotNull(getThreadsAsync);
-            var pending = getThreadsAsync!.Invoke(registry,
-            [
-                new ModelContextProtocol.Protocol.CallToolRequestParams
+            var request = new ModelContextProtocol.Protocol.CallToolRequestParams
+            {
+                Name = pauseExecution ? "pause_execution" : "get_threads",
+                Arguments = new Dictionary<string, JsonElement>
                 {
-                    Name = "get_threads",
-                    Arguments = new Dictionary<string, JsonElement>
-                    {
-                        ["debugSessionId"] = JsonSerializer.SerializeToElement(sessionId),
-                    },
+                    ["debugSessionId"] = JsonSerializer.SerializeToElement(sessionId),
                 },
-                cancellationToken,
-            ]);
+            };
+            if (pauseThreadId.HasValue)
+            {
+                request.Arguments["threadId"] = JsonSerializer.SerializeToElement(pauseThreadId.Value);
+            }
+            object?[] arguments = pauseExecution
+                ? [request, new ModelContextProtocol.Protocol.RequestId("host-pause-lease"), cancellationToken]
+                : [request, cancellationToken];
+            var pending = getThreadsAsync!.Invoke(registry, arguments);
             var asTask = pending?.GetType().GetMethod("AsTask", BindingFlags.Instance | BindingFlags.Public, Type.EmptyTypes);
             Assert.NotNull(asTask);
             var threads = Assert.IsAssignableFrom<Task<ModelContextProtocol.Protocol.CallToolResult>>(asTask!.Invoke(pending, []));
-            return new HostedThreadsLease(host, threads);
+            return new HostedThreadsLease(host, threads, admissionClosed.Task, () => leaseCountAtStop);
         }
         catch
         {
@@ -1467,11 +1578,18 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             await inner.WriteAsync(buffer, cancellationToken).ConfigureAwait(false);
         }
     }
-    internal sealed class HostedThreadsLease(IHost host, Task<ModelContextProtocol.Protocol.CallToolResult> threads) : IAsyncDisposable
+    internal sealed class HostedThreadsLease(
+        IHost host,
+        Task<ModelContextProtocol.Protocol.CallToolResult> threads,
+        Task admissionClosed,
+        Func<int?> leaseCountAtStop) : IAsyncDisposable
     {
         private bool _stopped;
 
         public Task<ModelContextProtocol.Protocol.CallToolResult> Threads { get; } = threads;
+        public Task<ModelContextProtocol.Protocol.CallToolResult> Operation => Threads;
+        public Task AdmissionClosed => admissionClosed;
+        public int? LeaseCountAtStop => leaseCountAtStop();
 
         public async Task StopAsync(CancellationToken cancellationToken)
         {
@@ -1562,7 +1680,10 @@ internal sealed record FixtureConfiguration(
     string NextResponseMode = "success",
     string SetBreakpointsResponseMode = "success",
     string ScopesResponseMode = "success",
-    string VariablesResponseMode = "success")
+    string VariablesResponseMode = "success",
+    string PauseResponseMode = "ack-only",
+    int? PauseEventThreadId = 1,
+    bool? PauseAllThreadsStopped = true)
 {
     public string AsEnvironmentValue() => string.Join(
         ';',
@@ -1598,6 +1719,9 @@ internal sealed record FixtureConfiguration(
             $"--set-breakpoints-response={SetBreakpointsResponseMode}",
             $"--scopes-response={ScopesResponseMode}",
             $"--variables-response={VariablesResponseMode}",
+            $"--pause-response={PauseResponseMode}",
+            $"--pause-event-thread-id={PauseEventThreadId?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "omit"}",
+            $"--pause-all-threads-stopped={PauseAllThreadsStopped?.ToString() ?? "omit"}",
         }.Where(static value => value is not null));
 }
 
@@ -1743,6 +1867,15 @@ internal sealed class FixtureProcess : IAsyncDisposable
     public void ReleaseThreadsResponse() => File.WriteAllText(_threadsResponseReleasePath, string.Empty);
     public void ReleaseStackTraceResponse() => File.WriteAllText(_stackTraceResponseReleasePath, string.Empty);
     public void ReleaseNextResponse() => File.WriteAllText(_nextResponseReleasePath, string.Empty);
+    public void ReleasePauseResponse() => ReleasePauseControl("pause-response");
+    public void ReleasePauseStoppedEvent() => ReleasePauseControl("pause-stop");
+    public void ReleasePauseStop() => ReleasePauseStoppedEvent();
+    public void ReleaseContinueResponse() => ReleasePauseControl("continue-response");
+    public void ReleaseThreadsResponse(int requestSequence) =>
+        ReleasePauseControl("threads-response-" + requestSequence.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+    private void ReleasePauseControl(string control) =>
+        File.WriteAllText(_transcriptPath + "." + control + ".release", string.Empty);
 
     public async Task WaitForStartupAsync(CancellationToken cancellationToken)
     {
@@ -1756,6 +1889,21 @@ internal sealed class FixtureProcess : IAsyncDisposable
             .Select(FixtureTranscriptEntry.Parse)
             .ToArray();
     }
+
+    public Task WaitForPauseRequestAsync(CancellationToken cancellationToken) =>
+        WaitForDapRequestCountAsync("pause", 1, cancellationToken);
+
+    public Task WaitForDapRequestCountAsync(string command, int count, CancellationToken cancellationToken) => WaitUntilAsync(
+        () => ReadTranscriptLinesSnapshot()
+            .Select(FixtureTranscriptEntry.Parse)
+            .Count(entry => entry.Kind == "request" && entry.Command == command) >= count,
+        cancellationToken);
+
+    public Task WaitForDapResponseAsync(string command, int requestSequence, CancellationToken cancellationToken = default) => WaitUntilAsync(
+        () => ReadTranscriptLinesSnapshot()
+            .Select(FixtureTranscriptEntry.Parse)
+            .Any(entry => entry.Kind == "response" && entry.Command == command && entry.Sequence == requestSequence),
+        cancellationToken);
 
     public Task WaitForThreadsRequestAsync(CancellationToken cancellationToken) => WaitUntilAsync(
         () => ReadTranscriptLinesSnapshot()

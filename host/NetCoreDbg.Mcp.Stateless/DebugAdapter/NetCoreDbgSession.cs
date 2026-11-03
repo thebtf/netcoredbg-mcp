@@ -79,6 +79,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private StepOverRecord? _activeStepOver;
     private int _stepOverDrainRequired;
     private ContinueRecord? _activeContinue;
+    private PauseRecord? _activePause;
     private ExecutionAdmission _executionAdmission;
     private BreakpointUpdate? _activeBreakpointUpdate;
     private int _requestedBreakpointCount;
@@ -337,15 +338,28 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             return DapThreadsResult.Refused;
         }
 
-        if (response.Body.ValueKind != JsonValueKind.Object
-            || !response.Body.TryGetProperty("threads", out var threads)
+        var threads = RequireThreads(response.Body);
+        var normalized = new DapThread[threads.GetArrayLength()];
+        _ = ReadThreads(threads, normalized);
+        return DapThreadsResult.Succeeded(normalized);
+    }
+
+    private static JsonElement RequireThreads(JsonElement body)
+    {
+        if (body.ValueKind != JsonValueKind.Object
+            || !body.TryGetProperty("threads", out var threads)
             || threads.ValueKind != JsonValueKind.Array
             || threads.GetArrayLength() > MaximumThreadCount)
         {
             throw new InvalidDataException("DAP threads response body is invalid.");
         }
 
-        var normalized = new DapThread[threads.GetArrayLength()];
+        return threads;
+    }
+
+    private static int? ReadThreads(JsonElement threads, DapThread[]? normalized)
+    {
+        int? firstThread = null;
         var index = 0;
         foreach (var thread in threads.EnumerateArray())
         {
@@ -356,11 +370,20 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 throw new InvalidDataException("DAP thread name exceeds the supported maximum.");
             }
 
-            normalized[index++] = new DapThread(id, name);
+            if (index == 0)
+            {
+                firstThread = id;
+            }
+            if (normalized is not null)
+            {
+                normalized[index] = new DapThread(id, name);
+            }
+            index++;
         }
 
-        return DapThreadsResult.Succeeded(normalized);
+        return firstThread;
     }
+
     internal Task<DapCallStackResult> GetCallStackAsync(
         int threadId,
         uint startFrame,
@@ -520,6 +543,223 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         return reference;
     }
 
+    internal async Task<DapPauseResult> PauseAsync(int? threadId, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        PauseRecord active;
+        lock (_stateGate)
+        {
+            if (_inspectionClosed || IsRetirementRequested || _executionAdmission == ExecutionAdmission.Closing
+                || _activePause is not null || _activeStepOver is not null
+                || (_executionAdmission == ExecutionAdmission.Active && _activeContinue is not { CommittedWrite: true }))
+            {
+                return DapPauseResult.Refused;
+            }
+
+            if (_state.Event is "exited" or "terminated")
+            {
+                FencePause();
+                return new DapPauseResult(DapPauseOutcome.Terminal, Terminal: _state.Event,
+                    ExitCode: _state.ExitCode, RequiresDrain: true);
+            }
+
+            active = new PauseRecord(_requestTimeout, _stepOverTimeProvider, cancellationToken);
+            _activePause = active;
+        }
+
+        try
+        {
+            int? selectedThread = threadId is { } explicitThread && explicitThread != 0 ? explicitThread : null;
+            PendingRequest request;
+            await _callStackAdmissionGate.WaitAsync(active.DeadlineToken).ConfigureAwait(false);
+            try
+            {
+                lock (_stateGate)
+                {
+                    if (!CanWritePause(active))
+                    {
+                        return CompletePause(active, active.ProtocolFailure is not null
+                            ? new DapPauseResult(DapPauseOutcome.ProtocolError) : active.Outcome ?? DapPauseResult.Refused);
+                    }
+
+                    selectedThread ??= _state.CurrentThreadId;
+                    active.ThreadId = selectedThread;
+                }
+
+                request = await BeginRequestAsync(selectedThread.HasValue ? "pause" : "threads",
+                    selectedThread.HasValue ? new DapPauseArguments(selectedThread.Value) : null,
+                    _requestTimeout, active.DeadlineToken, pause: active).ConfigureAwait(false);
+            }
+            finally
+            {
+                _callStackAdmissionGate.Release();
+            }
+
+            if (!selectedThread.HasValue)
+            {
+                var response = await WaitForPauseResponseAsync(request, active).ConfigureAwait(false);
+                lock (_stateGate)
+                {
+                    if (active.Outcome is { } observed)
+                    {
+                        return CompletePause(active, observed);
+                    }
+                }
+
+                if (!response!.Success)
+                {
+                    return CompletePause(active, DapPauseResult.Refused);
+                }
+
+                var discoveredThread = ReadThreads(RequireThreads(response.Body), normalized: null);
+                RemovePending(request);
+                await _callStackAdmissionGate.WaitAsync(active.DeadlineToken).ConfigureAwait(false);
+                try
+                {
+                    lock (_stateGate)
+                    {
+                        if (!CanWritePause(active))
+                        {
+                            return CompletePause(active, active.ProtocolFailure is not null
+                                ? new DapPauseResult(DapPauseOutcome.ProtocolError) : active.Outcome ?? DapPauseResult.Refused);
+                        }
+
+                        selectedThread = _state.CurrentThreadId ?? discoveredThread;
+                        if (!selectedThread.HasValue)
+                        {
+                            return CompletePause(active, new DapPauseResult(DapPauseOutcome.NoThreads));
+                        }
+
+                        active.ThreadId = selectedThread;
+                    }
+
+                    request = await BeginRequestAsync("pause", new DapPauseArguments(selectedThread.Value),
+                        _requestTimeout, active.DeadlineToken, pause: active).ConfigureAwait(false);
+                }
+                finally
+                {
+                    _callStackAdmissionGate.Release();
+                }
+            }
+
+            _ = await WaitForPauseResponseAsync(request, active).ConfigureAwait(false);
+            lock (_stateGate)
+            {
+                return CompletePause(active, active.Outcome
+                    ?? throw new InvalidDataException("DAP pause completed without an acknowledgement."));
+            }
+        }
+        catch (OperationCanceledException exception)
+        {
+            lock (_stateGate)
+            {
+                var requiresDrain = PauseWriteRequiresDrain(active);
+                if (requiresDrain)
+                {
+                    FencePause();
+                }
+
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw new DapPauseCanceledException(requiresDrain, exception, cancellationToken);
+                }
+
+                if (active.Outcome is { } observed && active.Request is { CommittedWrite: true })
+                {
+                    return CompletePause(active, observed);
+                }
+
+                return CompletePause(active, new DapPauseResult(active.ProtocolFailure is null && active.DeadlineToken.IsCancellationRequested
+                    ? DapPauseOutcome.TimedOut : DapPauseOutcome.ProtocolError));
+            }
+        }
+        catch (Exception)
+        {
+            return CompletePause(active, new DapPauseResult(DapPauseOutcome.ProtocolError));
+        }
+        finally
+        {
+            lock (_stateGate)
+            {
+                active.Finalized = true;
+                if (active.Request is { } pending)
+                {
+                    RemovePending(pending);
+                }
+
+                if (ReferenceEquals(_activePause, active))
+                {
+                    _activePause = null;
+                }
+            }
+
+            active.Dispose();
+        }
+    }
+
+    private bool CanWritePause(PauseRecord active) =>
+        ReferenceEquals(_activePause, active) && active.Outcome is null && active.ProtocolFailure is null
+        && !_inspectionClosed && !IsRetirementRequested && _executionAdmission != ExecutionAdmission.Closing
+        && _state.Event is not "exited" and not "terminated";
+
+    private static bool PauseWriteRequiresDrain(PauseRecord active) =>
+        active.ProtocolFailure is not null || active.Outcome?.Outcome == DapPauseOutcome.Terminal
+        || (active.Request is { WriteStarted: true } request
+            && (!request.CommittedWrite || (request.Command == "pause" && !active.AcknowledgementObserved)));
+
+    private DapPauseResult CompletePause(PauseRecord active, DapPauseResult result)
+    {
+        lock (_stateGate)
+        {
+            var requiresDrain = result.Outcome is DapPauseOutcome.ProtocolError or DapPauseOutcome.Terminal
+                || PauseWriteRequiresDrain(active);
+            if (requiresDrain)
+            {
+                FencePause();
+            }
+            active.Finalized = true;
+
+            return result with { RequiresDrain = requiresDrain };
+        }
+    }
+
+    private void FencePause()
+    {
+        _executionAdmission = ExecutionAdmission.Closing;
+        _inspectionClosed = true;
+        _inspectionContextId = null;
+        ClearCallStackEligibility();
+    }
+
+    private async Task<DapResponse?> WaitForPauseResponseAsync(PendingRequest request, PauseRecord active)
+    {
+        await Task.WhenAny(request.Completion.Task, active.Completion.Task)
+            .WaitAsync(active.DeadlineToken).ConfigureAwait(false);
+        lock (_stateGate)
+        {
+            if (active.ProtocolFailure is { } failure)
+            {
+                throw new InvalidDataException("DAP pause exchange failed.", failure);
+            }
+
+            if (active.Outcome is not null)
+            {
+                return null;
+            }
+            active.DeadlineToken.ThrowIfCancellationRequested();
+        }
+
+        var response = await request.Completion.Task.WaitAsync(active.DeadlineToken).ConfigureAwait(false);
+        lock (_stateGate)
+        {
+            if (active.Outcome is null)
+            {
+                active.DeadlineToken.ThrowIfCancellationRequested();
+            }
+        }
+        return response;
+    }
+
     internal async Task<DapStepOverResult> StepOverAsync(int threadId, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -609,7 +849,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     _activeStepOver = null;
                 }
 
-                _executionAdmission = closeAdmission || RequiresStepOverDrain()
+                _executionAdmission = _executionAdmission == ExecutionAdmission.Closing
+                    || closeAdmission || RequiresStepOverDrain()
                     ? ExecutionAdmission.Closing
                     : ExecutionAdmission.Available;
             }
@@ -624,7 +865,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     {
         lock (_stateGate)
         {
-            if (_executionAdmission != ExecutionAdmission.Available || _inspectionClosed)
+            if (_executionAdmission != ExecutionAdmission.Available || _inspectionClosed || _activePause is not null)
             {
                 return false;
             }
@@ -735,7 +976,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     _activeContinue = null;
                 }
 
-                if (active is null || _executionAdmission == ExecutionAdmission.Active)
+                if (_executionAdmission == ExecutionAdmission.Active)
                 {
                     _executionAdmission = ExecutionAdmission.Available;
                 }
@@ -762,7 +1003,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         var requiresDrain = active.ProtocolFailure is not null || result.Outcome == DapContinueOutcome.Terminal
             || (interrupted && active.WriteStarted && !(active.CommittedWrite && acknowledged));
         active.Finalized = true;
-        _executionAdmission = requiresDrain ? ExecutionAdmission.Closing : ExecutionAdmission.Active;
+        if (requiresDrain)
+        {
+            _executionAdmission = ExecutionAdmission.Closing;
+        }
+        else if (_executionAdmission != ExecutionAdmission.Closing)
+        {
+            _executionAdmission = ExecutionAdmission.Active;
+        }
         if (requiresDrain)
         {
             _inspectionClosed = true;
@@ -1280,7 +1528,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         StepOverRecord? stepOver = null,
         string? inspectionContextId = null,
         ContinueRecord? continueExecution = null,
-        BreakpointUpdate? breakpointUpdate = null)
+        BreakpointUpdate? breakpointUpdate = null,
+        PauseRecord? pause = null)
     {
         if (Volatile.Read(ref _readerFailure) is { } readerFailure)
         {
@@ -1292,7 +1541,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         continueExecution?.SetRequestSequence(sequence);
         breakpointUpdate?.SetRequestSequence(sequence);
         var request = new PendingRequest(sequence, command, stackTraceTarget, stepOver,
-            inspectionContextId ?? stackTraceTarget?.InspectionContextId, continueExecution, breakpointUpdate);
+            inspectionContextId ?? stackTraceTarget?.InspectionContextId, continueExecution, breakpointUpdate, pause);
+        if (pause is not null)
+        {
+            lock (_stateGate)
+            {
+                pause.Request = request;
+            }
+        }
         if (!_pending.TryAdd(sequence, request))
         {
             throw new InvalidOperationException($"DAP request sequence '{sequence}' was reused.");
@@ -1300,7 +1556,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         try
         {
-            using var deadline = stepOver is null && continueExecution is null && breakpointUpdate is null
+            using var deadline = stepOver is null && continueExecution is null && breakpointUpdate is null && pause is null
                 ? CreateDeadline(timeout, cancellationToken) : null;
             await WriteMessageAsync(new
             {
@@ -1309,7 +1565,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 command,
                 arguments,
             }, deadline?.Token ?? cancellationToken, stepOver,
-                request.InspectionContextId is null ? null : request, continueExecution, breakpointUpdate).ConfigureAwait(false);
+                request.InspectionContextId is null && pause is null ? null : request, continueExecution, breakpointUpdate).ConfigureAwait(false);
             return request;
         }
         catch (Exception exception)
@@ -1326,6 +1582,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
             RemovePending(request);
             request.Completion.TrySetException(exception);
+            if (pause is not null)
+            {
+                _ = request.Completion.Task.Exception;
+            }
             throw;
         }
     }
@@ -1395,6 +1655,16 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             await (_preHeaderWriteGate?.Invoke(cancellationToken) ?? Task.CompletedTask).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
+            if (inspectionRequest?.Pause is { } pause)
+            {
+                lock (_stateGate)
+                {
+                    if (!CanWritePause(pause))
+                    {
+                        throw new InvalidDataException("DAP pause lost write admission.");
+                    }
+                }
+            }
             stepOver?.MarkWriteStarted();
             continueExecution?.MarkWriteStarted();
             inspectionRequest?.MarkWriteStarted();
@@ -1402,6 +1672,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             await _input.WriteAsync(header, cancellationToken).ConfigureAwait(false);
             await _input.WriteAsync(payload, cancellationToken).ConfigureAwait(false);
             await _input.FlushAsync(cancellationToken).ConfigureAwait(false);
+            inspectionRequest?.CommitWrite();
             breakpointUpdate?.CommitWrite();
             stepOver?.Commit(_requestTimeout, _stepOverTimeProvider);
             continueExecution?.Commit(_stepOverTimeProvider);
@@ -1438,6 +1709,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 Volatile.Write(ref _readerFailure, failure);
                 _initialized.TrySetException(failure);
                 FailPending(failure);
+                lock (_stateGate)
+                {
+                    if (_activePause is { Finalized: false, Outcome: null } pause)
+                    {
+                        pause.ObserveFailure(failure);
+                        FencePause();
+                    }
+                }
                 try
                 {
                     ReaderFailed?.Invoke(this);
@@ -1532,14 +1811,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private void HandleResponse(JsonElement message)
     {
         var requestSequence = RequireInt32(message, "request_seq");
-        if (FailActiveStepOverForWrongCorrelation(requestSequence, TryGetString(message, "command"))
+        var pauseOwned = _pending.TryGetValue(requestSequence, out var request) && request.Pause is not null;
+        if (!pauseOwned && (FailActiveStepOverForWrongCorrelation(requestSequence, TryGetString(message, "command"))
             || FailActiveContinueForWrongCorrelation(requestSequence, TryGetString(message, "command"))
-            || FailActiveBreakpointForWrongCorrelation(requestSequence, TryGetString(message, "command")))
+            || FailActiveBreakpointForWrongCorrelation(requestSequence, TryGetString(message, "command"))))
         {
             return;
         }
 
-        if (!_pending.TryGetValue(requestSequence, out var request))
+        if (request is null)
         {
             return;
         }
@@ -1560,7 +1840,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             return;
         }
 
-        var body = message.TryGetProperty("body", out var bodyElement)
+        var body = (request.Pause is null || request.Command != "pause")
+            && message.TryGetProperty("body", out var bodyElement)
             ? bodyElement.Clone()
             : default;
         if (success.ValueKind == JsonValueKind.True && request.Command == "initialize")
@@ -1644,12 +1925,27 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     _ = ReadOptionalBoolean(body, "allThreadsContinued");
                 }
 
-                if (acknowledged && !continued.HasObservedLifecycle)
+                if (acknowledged && !continued.HasObservedLifecycle
+                    && !_inspectionClosed && _executionAdmission != ExecutionAdmission.Closing)
                 {
                     _state = _state with { Event = "continued", StopReason = null, CurrentThreadId = null };
                 }
 
                 continued.ObserveAcknowledgement(acknowledged);
+            }
+
+            if (request.Pause is { Finalized: false } pause && ReferenceEquals(_activePause, pause)
+                && ReferenceEquals(pause.Request, request))
+            {
+                if (RequireInt32(message, "seq") <= 0)
+                {
+                    throw new InvalidDataException("DAP pause acknowledgement is invalid.");
+                }
+
+                if (request.Command == "pause")
+                {
+                    pause.ObserveAcknowledgement(success.ValueKind == JsonValueKind.True);
+                }
             }
 
             var targetCurrent = (request.StackTraceTarget is not { } target || IsCallStackTargetCurrent(target))
@@ -2032,11 +2328,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 };
                 ClearCallStackEligibility();
                 _inspectionContextId = null;
-                if (allThreadsStopped)
+                if (!_inspectionClosed && allThreadsStopped)
                 {
                     _allThreadsStoppedEligibility = new CallStackEligibility();
                 }
-                else if (threadId is { } stoppedThreadId)
+                else if (!_inspectionClosed && threadId is { } stoppedThreadId)
                 {
                     (_threadEligibility ??= new())[stoppedThreadId] = new CallStackEligibility();
                 }
@@ -2095,6 +2391,18 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     throw new InvalidDataException("DAP step terminal event sequence must be positive.");
                 }
 
+                if (_activePause is not null)
+                {
+                    if (RequireInt32(message, "seq") <= 0)
+                    {
+                        throw new InvalidDataException("DAP pause terminal event sequence is invalid.");
+                    }
+                    if (body.ValueKind == JsonValueKind.Object && body.TryGetProperty("exitCode", out _))
+                    {
+                        _state = _state with { ExitCode = RequireInt32(body, "exitCode") };
+                    }
+                }
+
                 if (_activeContinue is { Finalized: false })
                 {
                     if (RequireInt32(message, "seq") <= 0)
@@ -2119,6 +2427,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 revokeUiInvoke = Interlocked.Exchange(ref _nativeUiInvokeAuthorityInvalidated, 1) == 0;
                 ClearCallStackEligibility();
                 _inspectionContextId = null;
+                _executionAdmission = ExecutionAdmission.Closing;
+                _inspectionClosed = true;
+                _activePause?.ObserveTerminal(eventName, _state.ExitCode);
                 _activeStepOver?.ObserveTerminal(eventName, _state.ExitCode);
                 _activeContinue?.ObserveTerminal(eventName, _state.ExitCode);
                 _breakpointUpdatesClosed = true;
@@ -2618,6 +2929,21 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private void FailRequest(PendingRequest request, Exception failure)
     {
+        if (request.Pause is { } pause)
+        {
+            lock (_stateGate)
+            {
+                if (ReferenceEquals(_activePause, pause) && !pause.Finalized && pause.Outcome is null)
+                {
+                    pause.ObserveFailure(failure);
+                    FencePause();
+                }
+                request.Completion.TrySetException(failure);
+                _ = request.Completion.Task.Exception;
+            }
+            return;
+        }
+
         if (request.BreakpointUpdate is { } update)
         {
             lock (_stateGate)
@@ -3401,7 +3727,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         StepOverRecord? stepOver = null,
         string? inspectionContextId = null,
         ContinueRecord? continueExecution = null,
-        BreakpointUpdate? breakpointUpdate = null)
+        BreakpointUpdate? breakpointUpdate = null,
+        PauseRecord? pause = null)
     {
         public int Sequence { get; } = sequence;
         public string Command { get; } = command;
@@ -3409,11 +3736,75 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         public StepOverRecord? StepOver { get; } = stepOver;
         public ContinueRecord? ContinueExecution { get; } = continueExecution;
         public BreakpointUpdate? BreakpointUpdate { get; } = breakpointUpdate;
+        public PauseRecord? Pause { get; } = pause;
         public string? InspectionContextId { get; } = inspectionContextId;
-        public bool WriteStarted { get; private set; }
-        public void MarkWriteStarted() => WriteStarted = true;
+        private int _writeStarted;
+        private int _committedWrite;
+        public bool WriteStarted => Volatile.Read(ref _writeStarted) != 0;
+        public bool CommittedWrite => Volatile.Read(ref _committedWrite) != 0;
+        public void MarkWriteStarted() => Volatile.Write(ref _writeStarted, 1);
+        public void CommitWrite() => Volatile.Write(ref _committedWrite, 1);
         public TaskCompletionSource<DapResponse> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
+
+    private sealed class PauseRecord : IDisposable
+    {
+        private readonly CancellationTokenSource _deadline;
+        private readonly CancellationTokenRegistration _callerCancellation;
+
+        internal PauseRecord(TimeSpan timeout, TimeProvider timeProvider, CancellationToken cancellationToken)
+        {
+            _deadline = new CancellationTokenSource(timeout, timeProvider);
+            _callerCancellation = cancellationToken.Register(static state => ((CancellationTokenSource)state!).Cancel(), _deadline);
+        }
+
+        public CancellationToken DeadlineToken => _deadline.Token;
+        public PendingRequest? Request { get; set; }
+        public int? ThreadId { get; set; }
+        public bool Finalized { get; set; }
+        public bool AcknowledgementObserved { get; private set; }
+        public DapPauseResult? Outcome { get; private set; }
+        public Exception? ProtocolFailure { get; private set; }
+        public TaskCompletionSource<bool> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void ObserveAcknowledgement(bool success)
+        {
+            if (!Finalized && Outcome is null && ProtocolFailure is null && !_deadline.IsCancellationRequested)
+            {
+                AcknowledgementObserved = true;
+                Outcome = success
+                    ? new DapPauseResult(DapPauseOutcome.Acknowledged, ThreadId)
+                    : DapPauseResult.Refused;
+                Completion.TrySetResult(true);
+            }
+        }
+
+        public void ObserveTerminal(string terminal, int? exitCode)
+        {
+            if (!Finalized && Outcome is null && ProtocolFailure is null && !_deadline.IsCancellationRequested)
+            {
+                Outcome = new DapPauseResult(DapPauseOutcome.Terminal, Terminal: terminal, ExitCode: exitCode);
+                Completion.TrySetResult(true);
+            }
+        }
+
+        public void ObserveFailure(Exception failure)
+        {
+            if (!Finalized && Outcome is null && ProtocolFailure is null)
+            {
+                ProtocolFailure = failure;
+                Completion.TrySetResult(true);
+            }
+        }
+
+        public void Dispose()
+        {
+            _callerCancellation.Dispose();
+            _deadline.Dispose();
+        }
+    }
+
+    private sealed record DapPauseArguments([property: JsonPropertyName("threadId")] int ThreadId);
 
     private sealed class StepOverRecord(int threadId, CancellationToken callerCancellation) : IDisposable
     {
@@ -3793,6 +4184,32 @@ internal sealed record DapContinueResult(
 
 internal sealed class DapContinueCanceledException(bool requiresDrain, Exception innerException, CancellationToken cancellationToken)
     : OperationCanceledException("Continue observation was cancelled.", innerException, cancellationToken)
+{
+    internal bool RequiresDrain { get; } = requiresDrain;
+}
+
+internal enum DapPauseOutcome
+{
+    Refused,
+    Acknowledged,
+    NoThreads,
+    Terminal,
+    TimedOut,
+    ProtocolError,
+}
+
+internal sealed record DapPauseResult(
+    DapPauseOutcome Outcome,
+    int? ThreadId = null,
+    string? Terminal = null,
+    int? ExitCode = null,
+    bool RequiresDrain = false)
+{
+    internal static DapPauseResult Refused { get; } = new(DapPauseOutcome.Refused);
+}
+
+internal sealed class DapPauseCanceledException(bool requiresDrain, Exception innerException, CancellationToken cancellationToken)
+    : OperationCanceledException("Pause observation was cancelled.", innerException, cancellationToken)
 {
     internal bool RequiresDrain { get; } = requiresDrain;
 }
