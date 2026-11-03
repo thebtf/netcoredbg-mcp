@@ -179,6 +179,7 @@ internal static class Program
         private const string GetScopes = "get_scopes";
         private const string GetVariables = "get_variables";
         private const string EvaluateExpression = "evaluate_expression";
+        private const string GetExceptionInfo = "get_exception_info";
         private const string GetOutput = "get_output";
         private const string GetOutputTail = "get_output_tail";
         private const string StepOver = "step_over";
@@ -308,6 +309,7 @@ internal static class Program
                 GetScopes => await GetScopesAsync(request, cancellationToken).ConfigureAwait(false),
                 GetVariables => await GetVariablesAsync(request, cancellationToken).ConfigureAwait(false),
                 EvaluateExpression => await EvaluateExpressionAsync(request, cancellationToken).ConfigureAwait(false),
+                GetExceptionInfo => await GetExceptionInfoAsync(request, cancellationToken).ConfigureAwait(false),
                 GetOutput => await GetOutputAsync(request, cancellationToken).ConfigureAwait(false),
                 GetOutputTail => await GetOutputAsync(request, cancellationToken, tail: true).ConfigureAwait(false),
                 StepOver => await StepOverAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
@@ -792,6 +794,82 @@ internal static class Program
                 }
             }
         }
+
+        private async ValueTask<CallToolResult> GetExceptionInfoAsync(CallToolRequestParams request, CancellationToken cancellationToken)
+        {
+            if (!TryReadStepOverArguments(request.Arguments, out var arguments))
+            {
+                return InvalidArguments(GetExceptionInfo);
+            }
+            if (!_sessions.TryGetValue(arguments.SessionId, out var session)
+                || !_slots.TryGetValue(arguments.SessionId, out var slot))
+            {
+                await RemoveNativeSceneBindingAsync(arguments.SessionId).ConfigureAwait(false);
+                return NotFound();
+            }
+
+            var lease = slot.TryAcquire();
+            if (lease is null)
+            {
+                return NotFound();
+            }
+
+            var closeAfterLease = false;
+            try
+            {
+                if (!_isUsable(session))
+                {
+                    closeAfterLease = true;
+                    return NotFound();
+                }
+
+                using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.AbortToken);
+                var result = await session.GetExceptionInfoAsync(arguments.ThreadId, operation.Token).ConfigureAwait(false);
+                switch (result.Outcome)
+                {
+                    case DapExceptionInfoOutcome.Unsupported:
+                        return Error("dap_exception_info_unsupported", "DAP_EXCEPTION_INFO_UNSUPPORTED");
+                    case DapExceptionInfoOutcome.Refused:
+                        return Error("dap_exception_info_refused", "DAP_EXCEPTION_INFO_REFUSED");
+                }
+
+                var serialized = JsonSerializer.Serialize(new ExceptionInfoSuccessContent("exception_info_success", result.Body));
+                if (Encoding.UTF8.GetByteCount(serialized) > MaximumSerializedInspectionBytes)
+                {
+                    closeAfterLease = true;
+                    return ExceptionInfoProtocolError();
+                }
+
+                return SerializedResult(serialized, isError: false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                closeAfterLease = session.RequiresInspectionDrain();
+                throw;
+            }
+            catch (Exception)
+            {
+                closeAfterLease = true;
+                return ExceptionInfoProtocolError();
+            }
+            finally
+            {
+                lease.Dispose();
+                if (closeAfterLease)
+                {
+                    try
+                    {
+                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            }
+        }
+
+        private static CallToolResult ExceptionInfoProtocolError() =>
+            Error("dap_exception_info_protocol_error", "DAP_EXCEPTION_INFO_PROTOCOL_ERROR");
 
         private ValueTask<CallToolResult> GetScopesAsync(CallToolRequestParams request, CancellationToken cancellationToken) =>
             GetInspectionAsync(request, scopes: true, cancellationToken);
@@ -2882,6 +2960,7 @@ internal static class Program
         private sealed record VariablesSuccessContent(string kind, string inspectionContextId, IReadOnlyList<DapVariable> variables);
         private sealed record EvaluateArguments(string SessionId, string InspectionContextId, int FrameId, string Expression);
         private sealed record EvaluateSuccessContent(string kind, string inspectionContextId, string result, string? type, int variablesReference);
+        private sealed record ExceptionInfoSuccessContent(string kind, JsonElement exception);
 
         private sealed record CallStackSuccessContent(
             string kind,
@@ -2949,6 +3028,7 @@ internal static class Program
                 Tool("step_out", "Step out of one explicitly named stopped thread. Completion requires the correlated acknowledgement and a later exact step stop; inspect the observed stack to establish the caller.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
                 Tool("evaluate_expression", "Evaluate an exact expression in an explicit frame and current inspection context using DAP watch. Expressions may execute code or mutate the debuggee; watch is not read-only. A positive result reference can be expanded with get_variables in the same context. Never automatically retry a failed or unknown outcome.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1},"inspectionContextId":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"},"frameId":{"type":"integer","minimum":-2147483648,"maximum":2147483647},"expression":{"type":"string"}},"required":["debugSessionId","inspectionContextId","frameId","expression"],"additionalProperties":false}""",
                     new ToolAnnotations { ReadOnlyHint = false, IdempotentHint = false, DestructiveHint = true }),
+                Tool("get_exception_info", "Get exception information for one explicitly named stopped Int32 thread when the adapter advertises support. Returns the complete current adapter body, including nested details and extension fields, within 256 KiB. A later stop is a different observation; no implicit thread selection, exception cache, combined autopsy or automatic retry.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"threadId":{"type":"integer","minimum":-2147483648,"maximum":2147483647}},"required":["debugSessionId","threadId"],"additionalProperties":false}"""),
                 .. NativeSceneToolDispatcher.ListTools(),
             ],
             TimeToLive = CacheLifetime,

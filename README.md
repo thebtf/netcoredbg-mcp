@@ -99,6 +99,32 @@ automatically after a failed or unknown outcome. This additive native path does
 not change Python's installed default or its optional-frame evaluation contract;
 `quick_evaluate`, real-debugger proof and installed delivery remain separate.
 
+The source-built stateful host also exposes
+`get_exception_info(debugSessionId, threadId)`. Both arguments are required:
+use the opaque session token and an explicit Int32 stopped-thread ID. It sends
+one DAP `exceptionInfo` request only when `supportsExceptionInfoRequest` is true
+in the correlated initialize response or a later capabilities event. An absent
+or false capability returns `DAP_EXCEPTION_INFO_UNSUPPORTED` without a write.
+Revocation fences new requests; it does not invalidate an already admitted reply
+while that request's stopped-thread epoch remains current.
+
+A current reply returns `kind: "exception_info_success"` and an `exception`
+object preserving the adapter body, including nested `details.innerException`
+and extension fields such as `formattedDescription` and `source`. The body must
+contain a string `exceptionId` and DAP `breakMode`; optional `description` must
+be a string and `details` an object. The complete serialized success content,
+including its envelope and escaping, is limited to 256 KiB without truncation.
+A stale target, negative reply or lifecycle invalidation before reader correlation
+returns `DAP_EXCEPTION_INFO_REFUSED`. Malformed, oversized, timed-out or failed
+exchanges return redacted `DAP_EXCEPTION_INFO_PROTOCOL_ERROR` and drain through
+the existing session owner after releasing the operation lease. Cancellation
+before writer handoff preserves the session; a potentially partial frame drains
+it. Stopping the wait after a fully committed read-only request does not by itself
+close the session or claim a debuggee mutation. No automatic retry is performed.
+This native path neither infers a thread nor updates Python's exception cache
+or provides `get_exception_context`. Python remains the installed default;
+real-debugger exception-stop and installed-delivery proof remain separate.
+
 The source-built stateful host exposes `get_output(debugSessionId, clear?,
 category?)` for retained DAP output. It concatenates events in reader order;
 categories `console`, `stdout`, `stderr`, and `telemetry` are retained, and an

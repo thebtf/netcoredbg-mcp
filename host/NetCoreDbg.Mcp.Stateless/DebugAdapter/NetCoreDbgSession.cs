@@ -70,6 +70,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private bool _supportsConfigurationDone;
     private bool _supportsTerminate;
     private DapStackTraceCapabilities _stackTraceCapabilities;
+    private bool _supportsExceptionInfoRequest;
     private CallStackEligibility? _allThreadsStoppedEligibility;
     private Dictionary<int, CallStackEligibility>? _threadEligibility;
     private HashSet<int>? _invalidatedAllThreadTargets;
@@ -447,6 +448,65 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
 
         return DapCallStackResult.Succeeded(normalized, totalFrames, response.InspectionContextId);
+    }
+
+    internal async Task<DapExceptionInfoResult> GetExceptionInfoAsync(int threadId, CancellationToken cancellationToken)
+    {
+        PendingRequest request;
+        await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            lock (_stateGate)
+            {
+                if (!_supportsExceptionInfoRequest)
+                {
+                    return DapExceptionInfoResult.Unsupported;
+                }
+            }
+
+            var target = CaptureCallStackTarget(threadId, includeInspectionContext: true);
+            if (target is null)
+            {
+                return DapExceptionInfoResult.Refused;
+            }
+
+            request = await BeginRequestAsync("exceptionInfo", new { threadId }, _requestTimeout,
+                cancellationToken, stackTraceTarget: target).ConfigureAwait(false);
+        }
+        finally
+        {
+            _callStackAdmissionGate.Release();
+        }
+
+        try
+        {
+            var response = await WaitForResponseAsync(request, _requestTimeout, cancellationToken).ConfigureAwait(false);
+            if (!response.Success || !response.TargetCurrent)
+            {
+                return DapExceptionInfoResult.Refused;
+            }
+
+            var body = response.Body;
+            _ = RequireString(body, "exceptionId");
+            if (RequireString(body, "breakMode") is not ("never" or "always" or "unhandled" or "userUnhandled"))
+            {
+                throw new InvalidDataException("DAP exceptionInfo breakMode is invalid.");
+            }
+            if (body.TryGetProperty("description", out _))
+            {
+                _ = RequireString(body, "description");
+            }
+            if (body.TryGetProperty("details", out var details) && details.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidDataException("DAP exceptionInfo details must be an object.");
+            }
+
+            return new DapExceptionInfoResult(DapExceptionInfoOutcome.Success, body);
+        }
+        finally
+        {
+            RemovePending(request);
+        }
     }
 
     internal async Task<DapScopesResult> GetScopesAsync(
@@ -2039,6 +2099,22 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 {
                     _supportsConfigurationDone = ReadOptionalBoolean(capabilities, "supportsConfigurationDoneRequest");
                 }
+                if (capabilities.TryGetProperty("supportsExceptionInfoRequest", out _))
+                {
+                    var supportsExceptionInfo = ReadOptionalBoolean(capabilities, "supportsExceptionInfoRequest");
+                    _callStackAdmissionGate.Wait();
+                    try
+                    {
+                        lock (_stateGate)
+                        {
+                            _supportsExceptionInfoRequest = supportsExceptionInfo;
+                        }
+                    }
+                    finally
+                    {
+                        _callStackAdmissionGate.Release();
+                    }
+                }
 
                 CapabilitiesObserved = true;
                 break;
@@ -2312,6 +2388,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             lock (_stateGate)
             {
                 _stackTraceCapabilities = default;
+                _supportsExceptionInfoRequest = false;
             }
 
             return;
@@ -2325,9 +2402,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         _supportsConfigurationDone = ReadOptionalBoolean(body, "supportsConfigurationDoneRequest");
         _supportsTerminate = ReadOptionalBoolean(body, "supportsTerminateRequest");
         var capabilities = new DapStackTraceCapabilities(ReadOptionalBoolean(body, "supportsDelayedStackTraceLoading"));
+        var supportsExceptionInfo = ReadOptionalBoolean(body, "supportsExceptionInfoRequest");
         lock (_stateGate)
         {
             _stackTraceCapabilities = capabilities;
+            _supportsExceptionInfoRequest = supportsExceptionInfo;
         }
     }
 
@@ -4321,6 +4400,19 @@ internal sealed record DapScopesResult(bool IsRefused, string? InspectionContext
 internal sealed record DapVariablesResult(bool IsRefused, string? InspectionContextId, IReadOnlyList<DapVariable> Variables)
 {
     internal static DapVariablesResult Refused { get; } = new(true, null, Array.Empty<DapVariable>());
+}
+
+internal enum DapExceptionInfoOutcome
+{
+    Success,
+    Unsupported,
+    Refused,
+}
+
+internal sealed record DapExceptionInfoResult(DapExceptionInfoOutcome Outcome, JsonElement Body = default)
+{
+    internal static DapExceptionInfoResult Unsupported { get; } = new(DapExceptionInfoOutcome.Unsupported);
+    internal static DapExceptionInfoResult Refused { get; } = new(DapExceptionInfoOutcome.Refused);
 }
 
 internal enum DapEvaluateOutcome
