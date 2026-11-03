@@ -431,19 +431,34 @@ public sealed class StructuredContentSchemaParityTests
     private static void ValidateObject(JsonObject definitions, JsonObject schema, JsonObject content)
     {
         Assert.Equal("object", schema["type"]?.GetValue<string>());
-        Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
 
-        var required = Assert.IsType<JsonArray>(schema["required"])
-            .Select(static property => Assert.IsType<string>(property?.GetValue<string>()))
-            .Order()
-            .ToArray();
-        var properties = Assert.IsType<JsonObject>(schema["properties"]);
-        Assert.All(content, property => Assert.True(properties.ContainsKey(property.Key)));
+        var exceptionBody = definitions["exceptionInfoSuccess"]?["properties"]?["exception"];
+        var allowsAdditionalProperties = ReferenceEquals(schema, exceptionBody)
+            || ReferenceEquals(schema, exceptionBody?["properties"]?["details"]);
+        if (allowsAdditionalProperties)
+        {
+            Assert.True(schema["additionalProperties"]?.GetValue<bool>() ?? false);
+        }
+        else
+        {
+            Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
+        }
+        var requiredNode = allowsAdditionalProperties ? schema["required"] as JsonArray : Assert.IsType<JsonArray>(schema["required"]);
+        var required = requiredNode?.Select(static property => Assert.IsType<string>(property?.GetValue<string>()))
+            ?? Enumerable.Empty<string>();
+        var properties = allowsAdditionalProperties ? schema["properties"] as JsonObject : Assert.IsType<JsonObject>(schema["properties"]);
         Assert.All(required, property => Assert.True(content.ContainsKey(property)));
 
         foreach (var property in content)
         {
-            ValidateValue(definitions, Assert.IsType<JsonObject>(properties[property.Key]), property.Value);
+            if (properties?[property.Key] is JsonObject propertySchema)
+            {
+                ValidateValue(definitions, propertySchema, property.Value);
+            }
+            else
+            {
+                Assert.True(allowsAdditionalProperties, $"Unexpected property '{property.Key}' in a closed object.");
+            }
         }
     }
 

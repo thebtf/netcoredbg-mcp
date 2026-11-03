@@ -1477,6 +1477,48 @@
       },
       "additionalProperties": false
     },
+    "exceptionInfoSuccess": {
+      "type": "object",
+      "description": "Current stopped-thread observation. The complete serialized structuredContent is bounded to 262144 UTF-8 bytes inclusive; the exception body is preserved without truncating nested details or extension fields.",
+      "required": [
+        "kind",
+        "exception"
+      ],
+      "properties": {
+        "kind": {
+          "const": "exception_info_success"
+        },
+        "exception": {
+          "type": "object",
+          "required": [
+            "exceptionId",
+            "breakMode"
+          ],
+          "properties": {
+            "exceptionId": {
+              "type": "string"
+            },
+            "breakMode": {
+              "enum": [
+                "never",
+                "always",
+                "unhandled",
+                "userUnhandled"
+              ]
+            },
+            "description": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
     "evaluateSuccess": {
       "type": "object",
       "description": "Complete serialized structuredContent is bounded to 262144 UTF-8 bytes inclusive. Success is a current adapter response, not a read-only or no-side-effect claim.",
@@ -1909,6 +1951,57 @@
         },
         "error": {
           "const": "DAP_STACK_TRACE_PROTOCOL_ERROR"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapExceptionInfoUnsupported": {
+      "type": "object",
+      "description": "The capability was absent or false at admission; no exceptionInfo request was written. Revocation alone does not invalidate an already admitted response in the same stopped epoch.",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_exception_info_unsupported"
+        },
+        "error": {
+          "const": "DAP_EXCEPTION_INFO_UNSUPPORTED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapExceptionInfoRefused": {
+      "type": "object",
+      "description": "The stopped target was unavailable or stale, the adapter refused the request, or lifecycle invalidation preceded reader correlation. No stale exception body is returned and no retry is performed.",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_exception_info_refused"
+        },
+        "error": {
+          "const": "DAP_EXCEPTION_INFO_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapExceptionInfoProtocolError": {
+      "type": "object",
+      "description": "A malformed, oversized, timed-out or failed exchange uses lease-release-before-close-and-drain and returns no adapter diagnostic or exception body.",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_exception_info_protocol_error"
+        },
+        "error": {
+          "const": "DAP_EXCEPTION_INFO_PROTOCOL_ERROR"
         }
       },
       "additionalProperties": false
@@ -2372,6 +2465,7 @@
             "get_scopes",
             "get_variables",
             "evaluate_expression",
+            "get_exception_info",
             "step_over",
             "step_into",
             "step_out",
@@ -2414,6 +2508,9 @@
         },
         {
           "$ref": "#/$defs/evaluateSuccess"
+        },
+        {
+          "$ref": "#/$defs/exceptionInfoSuccess"
         },
         {
           "$ref": "#/$defs/stepOverSuccess"
@@ -2504,6 +2601,15 @@
         },
         {
           "$ref": "#/$defs/dapStackTraceProtocolError"
+        },
+        {
+          "$ref": "#/$defs/dapExceptionInfoUnsupported"
+        },
+        {
+          "$ref": "#/$defs/dapExceptionInfoRefused"
+        },
+        {
+          "$ref": "#/$defs/dapExceptionInfoProtocolError"
         },
         {
           "$ref": "#/$defs/dapScopesRefused"

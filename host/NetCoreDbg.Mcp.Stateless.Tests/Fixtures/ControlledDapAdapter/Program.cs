@@ -137,7 +137,10 @@ internal sealed record AdapterOptions(
     string VariablesResponseMode,
     string PauseResponseMode,
     int? PauseEventThreadId,
-    bool? PauseAllThreadsStopped)
+    bool? PauseAllThreadsStopped,
+    bool? SupportsExceptionInfoRequest,
+    string ExceptionInfoResponseMode,
+    string ExceptionInfoCapabilityDelta)
 {
     public static AdapterOptions Parse(string[] args, string? environmentOptions)
     {
@@ -175,6 +178,9 @@ internal sealed record AdapterOptions(
         var pauseResponseMode = "ack-only";
         int? pauseEventThreadId = 1;
         bool? pauseAllThreadsStopped = true;
+        bool? supportsExceptionInfoRequest = null;
+        var exceptionInfoResponseMode = "success";
+        var exceptionInfoCapabilityDelta = "none";
 
         foreach (var argument in args.Concat(SplitOptions(environmentOptions)))
         {
@@ -288,6 +294,16 @@ internal sealed record AdapterOptions(
                     var allStopped = argument["--pause-all-threads-stopped=".Length..];
                     pauseAllThreadsStopped = allStopped == "omit" ? null : bool.Parse(allStopped);
                     break;
+                case var _ when argument.StartsWith("--supports-exception-info=", StringComparison.Ordinal):
+                    var exceptionSupport = argument["--supports-exception-info=".Length..];
+                    supportsExceptionInfoRequest = exceptionSupport == "omit" ? null : bool.Parse(exceptionSupport);
+                    break;
+                case var _ when argument.StartsWith("--exception-info-response=", StringComparison.Ordinal):
+                    exceptionInfoResponseMode = argument["--exception-info-response=".Length..];
+                    break;
+                case var _ when argument.StartsWith("--exception-info-capability-delta=", StringComparison.Ordinal):
+                    exceptionInfoCapabilityDelta = argument["--exception-info-capability-delta=".Length..];
+                    break;
                 default:
                     throw new ArgumentException($"Unknown fixture option '{argument}'.", nameof(args));
             }
@@ -327,7 +343,10 @@ internal sealed record AdapterOptions(
             variablesResponseMode,
             pauseResponseMode,
             pauseEventThreadId,
-            pauseAllThreadsStopped);
+            pauseAllThreadsStopped,
+            supportsExceptionInfoRequest,
+            exceptionInfoResponseMode,
+            exceptionInfoCapabilityDelta);
     }
 
     private static IEnumerable<string> SplitOptions(string? options) =>
@@ -700,6 +719,10 @@ internal sealed class ControlledDapAdapter
                 {
                     initializeCapabilities["supportsDelayedStackTraceLoading"] = _options.SupportsDelayedStackTraceLoading;
                 }
+                if (_options.SupportsExceptionInfoRequest is { } exceptionInfoSupport)
+                {
+                    initializeCapabilities["supportsExceptionInfoRequest"] = exceptionInfoSupport;
+                }
 
                 await WriteResponseAsync(sequence, command, initializeCapabilities, cancellationToken, omitBody: _options.OmitInitializeResponseBody);
                 await RecordAsync(new
@@ -788,6 +811,12 @@ internal sealed class ControlledDapAdapter
 
                 return false;
             case "threads":
+                if (_options.ExceptionInfoCapabilityDelta is "enable-on-threads" or "disable-on-threads")
+                {
+                    var supported = _options.ExceptionInfoCapabilityDelta == "enable-on-threads";
+                    await WriteEventAsync("capabilities", new { capabilities = new { supportsExceptionInfoRequest = supported } }, cancellationToken);
+                    await RecordAsync(new { kind = "exception-info-capabilities-delta-event", supported }, cancellationToken);
+                }
                 return await HandleThreadsRequestAsync(sequence, cancellationToken);
             case "stackTrace":
                 return await HandleStackTraceRequestAsync(sequence, cancellationToken);
@@ -797,6 +826,9 @@ internal sealed class ControlledDapAdapter
                 return false;
             case "evaluate":
                 await HandleEvaluateRequestAsync(sequence, root, cancellationToken);
+                return false;
+            case "exceptionInfo":
+                await HandleExceptionInfoRequestAsync(sequence, cancellationToken);
                 return false;
             case "next":
                 return await HandleNextRequestAsync(sequence, root, cancellationToken);
@@ -2024,6 +2056,133 @@ internal sealed class ControlledDapAdapter
         await WriteResponseAsync(sequence, "threads", new { threads = Threads(2, "worker") }, cancellationToken);
     }
 
+
+    private async Task HandleExceptionInfoRequestAsync(int sequence, CancellationToken cancellationToken)
+    {
+        const string privatePayload = "private controlled exception payload";
+        var mode = _options.ExceptionInfoResponseMode;
+        var body = new JsonObject
+        {
+            ["exceptionId"] = "System.InvalidOperationException",
+            ["breakMode"] = "always",
+            ["description"] = "Outer \"failure\"\nЖ",
+            ["details"] = new JsonObject
+            {
+                ["message"] = "Outer failure",
+                ["typeName"] = "InvalidOperationException",
+                ["fullTypeName"] = "System.InvalidOperationException",
+                ["evaluateName"] = "$exception",
+                ["stackTrace"] = "at Controlled.Throw()\nat Controlled.Main()",
+                ["formattedDescription"] = "<b>Outer failure</b>",
+                ["source"] = "ControlledAssembly",
+                ["innerException"] = new JsonArray(new JsonObject
+                {
+                    ["message"] = "Inner failure",
+                    ["typeName"] = "ArgumentException",
+                    ["fullTypeName"] = "System.ArgumentException",
+                    ["formattedDescription"] = "<i>Inner failure</i>",
+                    ["source"] = "ControlledInnerAssembly",
+                    ["innerException"] = new JsonArray(new JsonObject { ["message"] = "Root cause" }),
+                }),
+            },
+            ["adapterExtension"] = new JsonObject { ["code"] = 17, ["tags"] = new JsonArray("controlled", "nested") },
+        };
+        if (mode.StartsWith("sized:", StringComparison.Ordinal))
+        {
+            var size = int.Parse(mode["sized:".Length..], CultureInfo.InvariantCulture);
+            if (size is < 0 or > 262_144)
+            {
+                throw new InvalidOperationException("The controlled exception size exceeds its bound.");
+            }
+            body = new JsonObject
+            {
+                ["exceptionId"] = "ControlledException",
+                ["breakMode"] = "always",
+                ["description"] = new string('x', size) + "\"\nЖ",
+            };
+        }
+        else
+        {
+            switch (mode)
+            {
+                case "success":
+                    break;
+                case "break-never":
+                case "break-unhandled":
+                case "break-userUnhandled":
+                    body["breakMode"] = mode["break-".Length..];
+                    break;
+                case "minimal":
+                    body = new JsonObject { ["exceptionId"] = "ControlledException", ["breakMode"] = "never" };
+                    break;
+                case "refused":
+                    await WriteResponseAsync(sequence, "exceptionInfo", new { message = privatePayload, details = privatePayload }, cancellationToken, success: false);
+                    return;
+                case "non-object-body":
+                    await WriteResponseAsync(sequence, "exceptionInfo", new[] { privatePayload }, cancellationToken);
+                    return;
+                case "missing-id":
+                    body.Remove("exceptionId");
+                    break;
+                case "non-string-id":
+                    body["exceptionId"] = 17;
+                    break;
+                case "missing-break-mode":
+                    body.Remove("breakMode");
+                    break;
+                case "invalid-break-mode":
+                    body["breakMode"] = "sometimes";
+                    break;
+                case "non-string-description":
+                    body["description"] = 17;
+                    break;
+                case "null-description":
+                    body["description"] = null;
+                    break;
+                case "non-object-details":
+                    body["details"] = new JsonArray(privatePayload);
+                    break;
+                case "null-details":
+                    body["details"] = null;
+                    break;
+                case "oversized":
+                    body["description"] = privatePayload + new string('x', 262_145);
+                    break;
+                case "wrong-command":
+                    await WriteResponseAsync(sequence, "stackTrace", body, cancellationToken);
+                    return;
+                case "timeout":
+                    await RecordAsync(new { kind = "exception-info-response-timeout", sequence }, cancellationToken);
+                    return;
+                case "hold-then-continued":
+                case "hold-then-continued-restop":
+                case "hold-then-capability-revoked":
+                    if (mode == "hold-then-capability-revoked")
+                    {
+                        await WriteEventAsync("capabilities", new { capabilities = new { supportsExceptionInfoRequest = false } }, cancellationToken);
+                    }
+                    else
+                    {
+                        await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
+                        if (mode == "hold-then-continued-restop")
+                        {
+                            await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken, "exception-info-restopped-event");
+                        }
+                    }
+                    if (mode != "hold-then-capability-revoked")
+                    {
+                        body["description"] = privatePayload;
+                    }
+                    await RecordAsync(new { kind = "exception-info-response-gated", sequence }, cancellationToken);
+                    _heldInspectionResponse = CompleteHeldInspectionResponseAsync(sequence, "exceptionInfo", body, _lifecycleEventsCancellation.Token);
+                    return;
+                default:
+                    throw new InvalidOperationException($"Unknown exception-info response mode '{mode}'.");
+            }
+        }
+
+        await WriteResponseAsync(sequence, "exceptionInfo", body, cancellationToken);
+    }
 
     private async Task HandleEvaluateRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)
     {

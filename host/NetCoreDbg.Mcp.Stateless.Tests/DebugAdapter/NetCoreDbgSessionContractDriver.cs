@@ -249,6 +249,14 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             beforeCancellationInspection: beforeCancellationInspection, invokeSteps: invokeEvaluate,
             evaluateContext: inspectionContextId);
 
+    public Task<StepOverRegistryProbe> ExceptionInfoThroughRegistryAsync(
+        CancellationToken cancellationToken,
+        Func<Task>? beforeCancellationInspection = null,
+        Func<Func<string, CancellationToken, Task<ModelContextProtocol.Protocol.CallToolResult>>, Task<ModelContextProtocol.Protocol.CallToolResult>>? invokeInspection = null) =>
+        InvokeThroughRegistryAsync(1, cancellationToken, inspectCancellation: true,
+            beforeCancellationInspection: beforeCancellationInspection, invokeSteps: invokeInspection,
+            inspectExceptionInfo: true);
+
     private async Task<StepOverRegistryProbe> InvokeThroughRegistryAsync(
         int threadId,
         CancellationToken cancellationToken,
@@ -264,7 +272,8 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         bool pauseExecution = false,
         bool omitThreadId = false,
         string? stepTool = null,
-        string? evaluateContext = null)
+        string? evaluateContext = null,
+        bool inspectExceptionInfo = false)
     {
         const string sessionId = "step-over-clock-session";
         var registryType = RequireType(_session.GetType().Assembly, "NetCoreDbg.Mcp.Stateless.Program+DebugSessionRegistry");
@@ -334,15 +343,15 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                 "step_out" => "StepOutAsync",
                 _ => throw new ArgumentOutOfRangeException(nameof(stepTool)),
             };
-            var operationMethod = inspectCallStack || evaluateContext is not null
-                ? registryType.GetMethod(evaluateContext is null ? "GetCallStackAsync" : "EvaluateExpressionAsync", BindingFlags.Instance | BindingFlags.NonPublic,
+            var operationMethod = inspectCallStack || evaluateContext is not null || inspectExceptionInfo
+                ? registryType.GetMethod(inspectExceptionInfo ? "GetExceptionInfoAsync" : evaluateContext is null ? "GetCallStackAsync" : "EvaluateExpressionAsync", BindingFlags.Instance | BindingFlags.NonPublic,
                     binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(CancellationToken)], modifiers: null)
                 : registryType.GetMethod(pauseExecution ? "PauseAsync" : breakpoint.HasValue ? "AddBreakpointAsync" : continueExecution ? "ContinueAsync" : stepMethod, BindingFlags.Instance | BindingFlags.NonPublic,
                     binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(ModelContextProtocol.Protocol.RequestId), typeof(CancellationToken)], modifiers: null);
             Assert.NotNull(operationMethod);
             var request = new ModelContextProtocol.Protocol.CallToolRequestParams
             {
-                Name = pauseExecution ? "pause_execution" : inspectCallStack ? "get_call_stack" : evaluateContext is not null ? "evaluate_expression" : breakpoint.HasValue ? "add_breakpoint" : continueExecution ? "continue_execution" : stepTool ?? "step_over",
+                Name = pauseExecution ? "pause_execution" : inspectCallStack ? "get_call_stack" : inspectExceptionInfo ? "get_exception_info" : evaluateContext is not null ? "evaluate_expression" : breakpoint.HasValue ? "add_breakpoint" : continueExecution ? "continue_execution" : stepTool ?? "step_over",
                 Arguments = new Dictionary<string, JsonElement>
                 {
                     ["debugSessionId"] = JsonSerializer.SerializeToElement(sessionId),
@@ -376,7 +385,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                 invokingRequestId.Value = requestId;
                 try
                 {
-                    object?[] invocationArguments = inspectCallStack || evaluateContext is not null
+                    object?[] invocationArguments = inspectCallStack || evaluateContext is not null || inspectExceptionInfo
                         ? [request, token]
                         : [request, new ModelContextProtocol.Protocol.RequestId(requestId), token];
                     var invocation = operationMethod!.Invoke(registry, invocationArguments);
@@ -1727,7 +1736,10 @@ internal sealed record FixtureConfiguration(
     string VariablesResponseMode = "success",
     string PauseResponseMode = "ack-only",
     int? PauseEventThreadId = 1,
-    bool? PauseAllThreadsStopped = true)
+    bool? PauseAllThreadsStopped = true,
+    bool? SupportsExceptionInfoRequest = null,
+    string ExceptionInfoResponseMode = "success",
+    string ExceptionInfoCapabilityDelta = "none")
 {
     public string AsEnvironmentValue() => string.Join(
         ';',
@@ -1766,6 +1778,9 @@ internal sealed record FixtureConfiguration(
             $"--pause-response={PauseResponseMode}",
             $"--pause-event-thread-id={PauseEventThreadId?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "omit"}",
             $"--pause-all-threads-stopped={PauseAllThreadsStopped?.ToString() ?? "omit"}",
+            $"--supports-exception-info={SupportsExceptionInfoRequest?.ToString() ?? "omit"}",
+            $"--exception-info-response={ExceptionInfoResponseMode}",
+            $"--exception-info-capability-delta={ExceptionInfoCapabilityDelta}",
         }.Where(static value => value is not null));
 }
 

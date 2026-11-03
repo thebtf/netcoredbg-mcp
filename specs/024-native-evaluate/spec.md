@@ -1,6 +1,6 @@
 # Native Expression Evaluation
 
-Status: source candidate implemented and exercised with a controlled DAP adapter; integration, a real debugger, and installed delivery remain unproven. This additive slice starts from native step-pair tree `ad77f0f689319171e6f0bc1cbeb1464ee853b525`. Python remains the installed default and rollback. It does not establish full Python parity or complete the migration.
+Status: source integrated via PR #393 at `95d87a7e5209ff9f3250c8f804527aee3c14c830` after controlled DAP checks; a real debugger and installed delivery remain unproven. This additive slice started from native step-pair tree `ad77f0f689319171e6f0bc1cbeb1464ee853b525`. Python remains the installed default and rollback. It does not establish full Python parity or complete the migration.
 
 ## Consumer outcome
 
