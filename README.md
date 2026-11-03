@@ -522,6 +522,7 @@ comparison. `ui_resize_window()` reports request-versus-readback
 
 Use `ui_take_annotated_screenshot()` to receive Set-of-Mark labels, then pass
 its `generation` to `ui_click_annotated(element_id=..., generation=...)`.
+Each response's generation belongs to its own labels, even when screenshots overlap.
 A supplied generation that differs from the latest screenshot is rejected
 before clicking. A refresh while the click is being prepared is also rejected.
 Omitting `generation` retains the legacy behavior and cannot detect that the

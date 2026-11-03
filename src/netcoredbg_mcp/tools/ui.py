@@ -2392,11 +2392,12 @@ def register_ui_tools(
 
             # Cache elements for ui_click_annotated
             _annotation_generation += 1
+            generation = _annotation_generation
             _last_annotation = {
                 "elements": elements,
                 "window_rect": window_rect,
                 "hwnd": hwnd,
-                "generation": _annotation_generation,
+                "generation": generation,
             }
 
             # Convert to optimal format
@@ -2446,7 +2447,7 @@ def register_ui_tools(
                 "preview_width": preview_w,
                 "elements": elem_index,
                 "element_count": len(elements),
-                "generation": _annotation_generation,
+                "generation": generation,
                 "format": safe_format,
                 "state": session.state.state.value
                 if hasattr(session.state.state, "value")
