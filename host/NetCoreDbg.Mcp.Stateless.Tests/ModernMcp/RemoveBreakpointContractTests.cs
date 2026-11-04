@@ -476,7 +476,7 @@ public sealed class RemoveBreakpointContractTests
     [InlineData("ordered")]
     public async Task ConfigureExceptions_OptionalAndOrderedFilters_ForwardsExactlyOneReplacement(string shape)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionFiltersOptions());
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionFiltersOptions(), startupTimeout: TimeSpan.FromSeconds(10));
         var session = await StartSessionAsync(driver, "filters-shape-start");
         string[] filters = shape == "ordered" ? ["user-unhandled", "adapter-specific", "all", "all", ""] : [];
         var arguments = ExceptionFiltersArguments(session, filters);

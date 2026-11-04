@@ -146,7 +146,7 @@ internal static class Program
             }
             return true;
         }
-        catch (InvalidOperationException)
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
         {
             return false;
         }

@@ -128,6 +128,29 @@ public sealed class OutputConfigurationContractTests
         });
     }
 
+    [Fact]
+    public async Task ConfigureExceptions_DuplicateArgumentProperty_ReturnsInvalidArguments()
+    {
+        await WithHostAsync("100000", "10000000", async (process, standardError, token) =>
+        {
+            var request = "{\"jsonrpc\":\"2.0\",\"id\":\"duplicate\",\"method\":\"tools/call\",\"params\":{\"name\":\"configure_exceptions\",\"arguments\":{\"debugSessionId\":\"missing\",\"filters\":[],\"filters\":[]},\"_meta\":"
+                + ModernMcpProcessDriver.CurrentMeta().ToJsonString() + "}}";
+            await process.StandardInput.WriteLineAsync(request.AsMemory(), token);
+            await process.StandardInput.FlushAsync(token);
+            var line = await process.StandardOutput.ReadLineAsync(token);
+            Assert.NotNull(line);
+            var response = Assert.IsType<JsonObject>(JsonNode.Parse(line));
+            process.StandardInput.Close();
+            await process.WaitForExitAsync(token);
+            var diagnostic = await standardError.WaitAsync(token);
+            Assert.False(response.ContainsKey("error"), $"{line}\n{diagnostic}");
+            var result = Assert.IsType<JsonObject>(response["result"]);
+            Assert.True(result["isError"]?.GetValue<bool>());
+            Assert.Equal("invalid_tool_arguments", result["structuredContent"]?["kind"]?.GetValue<string>());
+            Assert.Equal("INVALID_TOOL_ARGUMENTS", result["structuredContent"]?["error"]?.GetValue<string>());
+        });
+    }
+
     private static async Task SendDiscoveryAsync(Process process, CancellationToken cancellationToken)
     {
         var request = new JsonObject
