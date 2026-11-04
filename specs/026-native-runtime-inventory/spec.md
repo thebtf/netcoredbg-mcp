@@ -1,6 +1,6 @@
 # Native Runtime Inventory
 
-Status: implemented and exercised with a controlled DAP adapter; integration, a real debugger and installed delivery remain pending. This additive source batch starts from `9732184ecf8af20944deacad5e3421def3a287f7`; Python remains the installed default and rollback. It does not establish complete Python parity or completion of the migration.
+Status: implemented and exercised with a controlled DAP adapter; a real debugger and installed delivery remain pending. This additive source batch starts from `9732184ecf8af20944deacad5e3421def3a287f7`; Python remains the installed default and rollback. It does not establish complete Python parity or completion of the migration.
 
 ## Consumer outcome
 
