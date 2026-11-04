@@ -286,6 +286,9 @@ public sealed class ModernProtocolContractTests
         var arguments = includeBreakpoints
             ? new JsonObject { ["breakpoints"] = new JsonArray(new JsonObject { ["file"] = BreakpointSourcePath, ["line"] = 2 }) }
             : new JsonObject();
+        arguments["args"] = new JsonArray("via elicitation");
+        arguments["cwd"] = RepositoryLayout.Root;
+        arguments["stopAtEntry"] = true;
         var inputRequestId = await RequestProgramElicitationAsync(driver, initialId, arguments);
         await AssertNoNativeActionsAsync(driver);
         var retryId = new RequestId("input-required-retry");
@@ -298,11 +301,17 @@ public sealed class ModernProtocolContractTests
                 ["inputResponses"] = new JsonObject { [inputRequestId] = new JsonObject { ["action"] = "accept", ["content"] = new JsonObject { ["program"] = ValidProgram } } },
                 ["_meta"] = ModernMcpProcessDriver.CurrentMeta(formElicitation: true),
             },
-            retryId);
+            retryId, timeout: TimeSpan.FromSeconds(10));
 
         Assert.NotEqual(initialId, retryId);
         var result = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(retry));
         AssertCompleteStartEnvelope(result);
+        var launch = Assert.Single(await driver.ReadNativeActionsAsync(), static action => action.Command == "launch");
+        using var document = System.Text.Json.JsonDocument.Parse(launch.Detail!);
+        var launchArguments = document.RootElement.GetProperty("arguments");
+        Assert.Equal("via elicitation", Assert.Single(launchArguments.GetProperty("args").EnumerateArray()).GetString());
+        Assert.Equal(RepositoryLayout.Root, launchArguments.GetProperty("cwd").GetString());
+        Assert.True(launchArguments.GetProperty("stopAtEntry").GetBoolean());
         if (includeBreakpoints)
         {
             AssertBreakpointRequest(Assert.Single(await driver.ReadNativeActionsAsync(),

@@ -514,6 +514,11 @@ public class Program
         var scenario = args.Length > 0 ? args[0] : "all";
 
         Console.WriteLine($"=== SmokeTestApp: scenario={scenario} ===");
+        if (args.Length > 1 && args[1] == "--launch-options")
+        {
+            Console.WriteLine($"SMOKE_LAUNCH_ARGS={System.Text.Json.JsonSerializer.Serialize(args)}");
+            Console.WriteLine($"SMOKE_LAUNCH_CWD={Environment.CurrentDirectory}");
+        }
 
         switch (scenario)
         {

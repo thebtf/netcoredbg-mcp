@@ -344,6 +344,19 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         StartAsync(debuggerPath, programPath, initializeTimeout, requestTimeout, stopTimeout,
             launchEnvironment, breakpoints, failedStartCleanupCompleted: null, cancellationToken);
 
+    internal static Task<NetCoreDbgSession> StartAsync(
+        string debuggerPath,
+        string programPath,
+        TimeSpan initializeTimeout,
+        TimeSpan requestTimeout,
+        TimeSpan stopTimeout,
+        IReadOnlyDictionary<string, string>? launchEnvironment,
+        IReadOnlyList<DapSourceBreakpoint> breakpoints,
+        Action? failedStartCleanupCompleted,
+        CancellationToken cancellationToken) =>
+        StartAsync(debuggerPath, programPath, initializeTimeout, requestTimeout, stopTimeout,
+            launchEnvironment, breakpoints, failedStartCleanupCompleted, launchOptions: null, cancellationToken);
+
     internal static async Task<NetCoreDbgSession> StartAsync(
         string debuggerPath,
         string programPath,
@@ -353,6 +366,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         IReadOnlyDictionary<string, string>? launchEnvironment,
         IReadOnlyList<DapSourceBreakpoint> breakpoints,
         Action? failedStartCleanupCompleted,
+        DapLaunchOptions? launchOptions,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(debuggerPath);
@@ -396,7 +410,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     processTreeOwnership);
             }
 
-            await session.StartProtocolAsync(programPath, initializeTimeout, launchEnvironment, breakpoints, cancellationToken).ConfigureAwait(false);
+            await session.StartProtocolAsync(programPath, initializeTimeout, launchEnvironment, breakpoints, launchOptions, cancellationToken).ConfigureAwait(false);
             return session;
         }
         catch (Exception startupFailure)
@@ -1350,11 +1364,20 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         CancellationToken cancellationToken) =>
         StartProtocolAsync(programPath, initializeTimeout, launchEnvironment, Array.Empty<DapSourceBreakpoint>(), cancellationToken);
 
+    private Task StartProtocolAsync(
+        string programPath,
+        TimeSpan initializeTimeout,
+        IReadOnlyDictionary<string, string>? launchEnvironment,
+        IReadOnlyList<DapSourceBreakpoint> breakpoints,
+        CancellationToken cancellationToken) =>
+        StartProtocolAsync(programPath, initializeTimeout, launchEnvironment, breakpoints, launchOptions: null, cancellationToken);
+
     private async Task StartProtocolAsync(
         string programPath,
         TimeSpan initializeTimeout,
         IReadOnlyDictionary<string, string>? launchEnvironment,
         IReadOnlyList<DapSourceBreakpoint> breakpoints,
+        DapLaunchOptions? launchOptions,
         CancellationToken cancellationToken)
     {
         _ = await SendRequestAsync(
@@ -1379,9 +1402,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         await _initialized.Task.WaitAsync(initializeTimeout, cancellationToken).ConfigureAwait(false);
         await ConfigureBreakpointsAsync(breakpoints, cancellationToken).ConfigureAwait(false);
 
-        object launchArguments = launchEnvironment is { Count: > 0 }
-            ? new { program = programPath, env = launchEnvironment }
-            : new { program = programPath };
+        var launchArguments = new DapLaunchArguments(programPath,
+            launchEnvironment is { Count: > 0 } ? launchEnvironment : null,
+            launchOptions?.WorkingDirectory, launchOptions?.Arguments, launchOptions?.StopAtEntry);
         var launch = await BeginRequestAsync(
             "launch",
             launchArguments,
@@ -1398,7 +1421,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     cancellationToken).ConfigureAwait(false);
             }
 
-            _ = await WaitForResponseAsync(launch, _requestTimeout, cancellationToken).ConfigureAwait(false);
+            var response = await WaitForResponseAsync(launch, _requestTimeout, cancellationToken).ConfigureAwait(false);
+            if (!response.Success)
+            {
+                throw new DapLaunchRefusedException();
+            }
         }
         finally
         {
@@ -4955,6 +4982,8 @@ internal sealed class DapStartupCleanupException(Exception startupFailure, Excep
     internal Exception CleanupFailure { get; } = cleanupFailure;
 }
 
+internal sealed class DapLaunchRefusedException() : Exception("DAP launch request was refused.");
+
 internal readonly record struct DapSourceBreakpoint(int Index, string File, int Line);
 
 internal readonly record struct DapInitialBreakpoint(
@@ -5077,6 +5106,15 @@ internal sealed class DapPauseCanceledException(bool requiresDrain, Exception in
 {
     internal bool RequiresDrain { get; } = requiresDrain;
 }
+
+internal sealed record DapLaunchOptions(string? WorkingDirectory, string[]? Arguments, bool? StopAtEntry);
+
+internal sealed record DapLaunchArguments(
+    [property: JsonPropertyName("program")] string Program,
+    [property: JsonPropertyName("env"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyDictionary<string, string>? Environment,
+    [property: JsonPropertyName("cwd"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? WorkingDirectory,
+    [property: JsonPropertyName("args"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string[]? Arguments,
+    [property: JsonPropertyName("stopAtEntry"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? StopAtEntry);
 
 internal sealed record DapThread(
     [property: JsonPropertyName("id")] int Id,
