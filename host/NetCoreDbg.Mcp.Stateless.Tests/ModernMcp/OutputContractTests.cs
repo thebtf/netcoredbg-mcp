@@ -132,6 +132,200 @@ public sealed class OutputContractTests(ITestOutputHelper output)
 
 
     [Fact]
+    public async Task SearchOutput_MatchesJoinedFilteredLinesWithContextWithoutConsumingOutput()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(
+            Output("intro\r", "stdout"), Output("ignored\n", "stderr"), Output("\nERROR 42\nnext\nFail 7\nlast", "stdout"))));
+        var token = await StartSessionAsync(driver, "search-output-start");
+        var before = await driver.ReadNativeActionsAsync();
+        var arguments = new JsonObject { ["debugSessionId"] = token, ["pattern"] = "error|fail", ["contextLines"] = 1, ["category"] = "stdout" };
+        var result = AssertApplicationEnvelope(await driver.CallToolRawAsync("search_output", arguments,
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("search-output-context")), isError: false);
+        Assert.Equal("output_search_success", result["kind"]?.GetValue<string>());
+        Assert.Equal(2, result["matchCount"]?.GetValue<int>());
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse("""[{"lineNumber":2,"match":"ERROR 42","context":["intro","ERROR 42","next"]},{"lineNumber":4,"match":"Fail 7","context":["next","Fail 7","last"]}]"""), result["matches"]));
+        StructuredContentSchemaParityTests.AssertMatchesSchema(result);
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+        Assert.Equal("intro\r\nERROR 42\nnext\nFail 7\nlast", await ReadOutputAsync(driver, token, "search-output-retained", category: "stdout"));
+    }
+
+    [Fact]
+    public async Task SearchOutput_CountsEveryMatchButReturnsOnlyFirstFifty()
+    {
+        var lines = Enumerable.Range(1, 55).Select(static index => $"hit-{index}").ToArray();
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(Output(string.Join("\n", lines)))));
+        var token = await StartSessionAsync(driver, "search-limit-start");
+        var result = AssertApplicationEnvelope(await driver.CallToolRawAsync("search_output",
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "hit", ["contextLines"] = 0 },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("search-limit")), isError: false);
+        Assert.Equal(55, result["matchCount"]?.GetValue<int>());
+        var matches = Assert.IsType<JsonArray>(result["matches"]);
+        Assert.Equal(50, matches.Count);
+        Assert.Equal("hit-1", matches[0]?["match"]?.GetValue<string>());
+        Assert.Equal("hit-50", matches[49]?["match"]?.GetValue<string>());
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse("[\"hit-50\"]"), matches[49]?["context"]));
+    }
+
+    [Fact]
+    public async Task SearchOutput_InvalidPattern_ReturnsFixedErrorWithoutClearingOutput()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(Output("retained output"))));
+        var token = await StartSessionAsync(driver, "search-invalid-start");
+        var result = AssertApplicationEnvelope(await driver.CallToolRawAsync("search_output",
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "(" }, ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("search-invalid")), isError: true);
+        Assert.Equal("output_search_invalid_pattern", result["kind"]?.GetValue<string>());
+        Assert.Equal("OUTPUT_SEARCH_INVALID_PATTERN", result["error"]?.GetValue<string>());
+        Assert.Equal("retained output", await ReadOutputAsync(driver, token, "search-invalid-retained"));
+    }
+
+    [Fact]
+    public async Task SearchOutput_PatternThatCannotFitInAResultIsRejectedBeforeRegexParsing()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(Output("retained"))));
+        var token = await StartSessionAsync(driver, "search-pattern-size-start");
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("search_output",
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "(" + new string('x', 256 * 1024) },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("search-pattern-size")), isError: true);
+        Assert.Equal("output_search_too_large", content["kind"]?.GetValue<string>());
+        Assert.Equal("OUTPUT_SEARCH_TOO_LARGE", content["error"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        Assert.Equal("retained", await ReadOutputAsync(driver, token, "search-pattern-size-retained"));
+    }
+
+    [Fact]
+    public async Task SearchOutput_SplitsAllLogicalLineSeparatorsAndDoesNotAddATrailingLine()
+    {
+        const string text = "a\r\n\nb\vc\fd\u001ce\u001df\u001eg\u0085h\u2028i\u2029j\n";
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(Output(text))));
+        var token = await StartSessionAsync(driver, "search-lines-start");
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("search_output",
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "^$|^[bdh]$", ["contextLines"] = 0 },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("search-lines")), isError: false);
+        Assert.Equal(4, content["matchCount"]?.GetValue<int>());
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse("""[{"lineNumber":2,"match":"","context":[""]},{"lineNumber":3,"match":"b","context":["b"]},{"lineNumber":5,"match":"d","context":["d"]},{"lineNumber":9,"match":"h","context":["h"]}]"""), content["matches"]));
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+    }
+
+    [Fact]
+    public async Task SearchOutput_SignedContextUsesPythonSliceBoundaries()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(Output("a\nb\nc\nd\n"))));
+        var token = await StartSessionAsync(driver, "search-context-start");
+        var cases = new (JsonNode Lines, string Contexts)[]
+        {
+            (JsonValue.Create(long.MinValue)!, "[[],[],[],[]]"),
+            (JsonValue.Create(-2)!, "[[\"c\"],[],[],[]]"),
+            (JsonValue.Create(-1)!, "[[],[],[],[]]"),
+            (JsonValue.Create(0)!, "[[\"a\"],[\"b\"],[\"c\"],[\"d\"]]"),
+            (JsonNode.Parse("1e0")!, "[[\"a\",\"b\"],[\"a\",\"b\",\"c\"],[\"b\",\"c\",\"d\"],[\"c\",\"d\"]]"),
+            (JsonValue.Create(long.MaxValue)!, "[[\"a\",\"b\",\"c\",\"d\"],[\"a\",\"b\",\"c\",\"d\"],[\"a\",\"b\",\"c\",\"d\"],[\"a\",\"b\",\"c\",\"d\"]]"),
+        };
+        for (var index = 0; index < cases.Length; index++)
+        {
+            var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("search_output",
+                new JsonObject { ["debugSessionId"] = token, ["pattern"] = ".", ["contextLines"] = cases[index].Lines },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId($"search-context-{index}")), isError: false);
+            var contexts = new JsonArray(Assert.IsType<JsonArray>(content["matches"]).Select(static match => match!["context"]!.DeepClone()).ToArray());
+            Assert.True(JsonNode.DeepEquals(JsonNode.Parse(cases[index].Contexts), contexts));
+        }
+    }
+
+    [Fact]
+    public async Task SearchOutput_InvalidArgumentsDoNotConsumeOutputOrSendDapRequests()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(Output("retained"))));
+        var token = await StartSessionAsync(driver, "search-arguments-start");
+        var invalid = new[]
+        {
+            new JsonObject { ["debugSessionId"] = token },
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = null },
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = 1 },
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "x", ["contextLines"] = null },
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "x", ["contextLines"] = JsonNode.Parse("1.5") },
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "x", ["category"] = true },
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "x", ["clear"] = false },
+        };
+        var before = await driver.ReadNativeActionsAsync();
+        for (var index = 0; index < invalid.Length; index++)
+        {
+            var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("search_output", invalid[index],
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId($"search-arguments-{index}")), isError: true);
+            Assert.Equal("invalid_tool_arguments", content["kind"]?.GetValue<string>());
+            Assert.Equal("search_output", content["tool"]?.GetValue<string>());
+            StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        }
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+        Assert.Equal("retained", await ReadOutputAsync(driver, token, "search-arguments-retained"));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task SearchOutput_EnforcesExactSerializedSizeWithoutPartialResults(int excessBytes)
+    {
+        const int limit = 256 * 1024;
+        var template = new JsonObject
+        {
+            ["kind"] = "output_search_success",
+            ["pattern"] = "!",
+            ["matchCount"] = 1,
+            ["matches"] = new JsonArray(new JsonObject
+            {
+                ["lineNumber"] = 2,
+                ["match"] = "!",
+                ["context"] = new JsonArray("", "!", ""),
+            }),
+        };
+        var remaining = limit - System.Text.Encoding.UTF8.GetByteCount(template.ToJsonString());
+        var first = Output("\n");
+        first["prefixLength"] = 70_000;
+        var middle = Output("!\n");
+        middle["prefixLength"] = 50_000;
+        var last = Output("\n");
+        last["prefixLength"] = remaining - 170_000 + excessBytes;
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(first, middle, last)));
+        var token = await StartSessionAsync(driver, $"search-size-{excessBytes}-start");
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("search_output",
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "!", ["contextLines"] = 1 },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId($"search-size-{excessBytes}")), isError: excessBytes != 0);
+        if (excessBytes == 0)
+        {
+            Assert.Equal("output_search_success", content["kind"]?.GetValue<string>());
+            Assert.Equal(limit, System.Text.Encoding.UTF8.GetByteCount(content.ToJsonString()));
+        }
+        else
+        {
+            Assert.Equal("output_search_too_large", content["kind"]?.GetValue<string>());
+            Assert.Equal("OUTPUT_SEARCH_TOO_LARGE", content["error"]?.GetValue<string>());
+            Assert.False(content.ContainsKey("matches"));
+        }
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        Assert.Equal(70_000 + 50_001 + (remaining - 170_000 + excessBytes) + 3,
+            (await ReadOutputAsync(driver, token, $"search-size-{excessBytes}-retained")).Length);
+    }
+
+    [Fact]
+    public async Task SearchOutput_RegexTimeoutLeavesOutputAndSessionUsable()
+    {
+        var entry = Output("\n");
+        entry["prefixLength"] = 50_000;
+        await using var driver = await StartTailDriverAsync(OutputOptions(launch: new JsonArray(entry)));
+        var token = await StartSessionAsync(driver, "search-timeout-start");
+        var timedOut = AssertApplicationEnvelope(await driver.CallToolRawAsync("search_output",
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "^(x+)+y$" },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("search-timeout")), isError: true);
+        Assert.Equal("output_search_timeout", timedOut["kind"]?.GetValue<string>());
+        Assert.Equal("OUTPUT_SEARCH_TIMEOUT", timedOut["error"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(timedOut);
+        var next = AssertApplicationEnvelope(await driver.CallToolRawAsync("search_output",
+            new JsonObject { ["debugSessionId"] = token, ["pattern"] = "^x" },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("search-after-timeout")), isError: false);
+        Assert.Equal(1, next["matchCount"]?.GetValue<int>());
+        Assert.Equal(50_001, (await ReadOutputAsync(driver, token, "search-timeout-retained")).Length);
+    }
+
+    [Fact]
     public async Task GetOutput_EmptyBuffer_ReturnsCompleteEmptySuccessWithoutDapIo()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync(OutputOptions());
@@ -1190,6 +1384,7 @@ public sealed class OutputContractTests(ITestOutputHelper output)
     [Theory]
     [InlineData("get_modules")]
     [InlineData("get_progress")]
+    [InlineData("search_output")]
     public async Task RuntimeInventory_NonObjectArguments_ReturnInvalidArgumentsBeforeDapIo(string tool)
     {
         await using var driver = await StartTailDriverAsync(OutputOptions());

@@ -254,6 +254,7 @@ public sealed class StructuredContentSchemaParityTests
     [InlineData("ui_invoke_observed", "uiInvokeObservedArguments")]
     [InlineData("get_output", "getOutputArguments")]
     [InlineData("get_output_tail", "getOutputTailArguments")]
+    [InlineData("search_output", "searchOutputArguments")]
     [InlineData("get_modules", "getModulesArguments")]
     [InlineData("get_progress", "getProgressArguments")]
     [InlineData("configure_exceptions", "configureExceptionsArguments")]
