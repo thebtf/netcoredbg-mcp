@@ -673,8 +673,10 @@ ui_take_screenshot(evidence=true)
 ```
 
 Normally this mode returns `evidence_grade=lossless_raster`, persists a session-scoped
-PrintWindow PNG, and includes SHA-256 and geometry provenance. For a strict physical
-target, a probable-black PrintWindow raster may make one verified `BitBlt` attempt.
+PrintWindow PNG, and includes SHA-256 and geometry provenance. When a bridge
+PrintWindow frame is probably black, capture may attempt one verified `BitBlt`
+fallback even without a strict target. It may temporarily activate the target
+window and then attempt to restore the previous foreground.
 That response is explicitly `method=BitBlt`, `fallback=flash-focus`,
 `fallback_reason=probable_black_printwindow`, and
 `evidence_grade=typed_bitblt_fallback`; it records the `GetWindowDC` authority,
@@ -716,6 +718,16 @@ caller is using an older screenshot. Even a matching generation does not prove
 that the window or element remains at the same screen position.
 Use `ui_bring_to_front()` only when the debuggee should intentionally leave
 stealth mode.
+
+`ui_bring_to_front()` reports the target HWND and expected/observed PID, the
+foreground HWND and PID observed at the end of the call, and
+`foreground_matches_target` (`true`, `false`, or `null` when unknown).
+`activation_attempted` and `activation_api_result` separately describe the
+ordinary Windows request. `activated=true` requires a still-current session and
+a matching final HWND/PID observation; it does not promise that foreground
+ownership persists after return. Numeric PID and HWND checks cannot establish
+the original process or window incarnation after identifier reuse. Windows may
+deny activation. `stealth_mode` can be `null` when bridge reconnect is uncertain.
 
 ## Tool map
 

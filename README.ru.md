@@ -410,9 +410,11 @@ Bridge удерживает открытый handle исходного экзе�
 ui_take_screenshot(evidence=true)
 ```
 
-Обычно этот режим возвращает `evidence_grade=lossless_raster`, сохраняет session-scoped
-PrintWindow PNG и добавляет SHA-256 с geometry provenance. Для strict physical target
-после вероятно чёрного PrintWindow raster допустима одна проверенная попытка `BitBlt`.
+Обычно этот режим возвращает `evidence_grade=lossless_raster`, сохраняет PNG
+PrintWindow в каталоге сессии и добавляет SHA-256 и геометрию окна. Если bridge
+получил вероятно чёрный кадр PrintWindow, он может выполнить одну проверенную
+попытку `BitBlt` даже без строгой привязки к окну. При этом окно может временно
+перейти на передний план; затем bridge попытается восстановить прежнее окно.
 Такой ответ явно содержит `method=BitBlt`, `fallback=flash-focus`,
 `fallback_reason=probable_black_printwindow` и
 `evidence_grade=typed_bitblt_fallback`; в нём есть authority `GetWindowDC`, ROP,
@@ -440,6 +442,14 @@ ui_take_screenshot(evidence=true, expected_hwnd=..., expected_physical_width=...
 `ui_take_annotated_screenshot()` возвращает Set-of-Mark labels, после чего можно
 вызвать `ui_click_annotated(element_id=...)`. Используйте `ui_bring_to_front()`,
 только когда debuggee должен намеренно выйти из stealth mode.
+
+`ui_bring_to_front()` отдельно сообщает о запросе активации, ответе Windows и
+наблюдаемых HWND и PID цели и окна на переднем плане. `activated=true` означает,
+что сессия оставалась текущей, а значения совпали в момент проверки. Это не
+гарантия, что фокус сохранится после ответа или что повторно использованный PID
+либо HWND относится к исходному процессу или окну. Windows может отказать в
+активации; при неопределённом результате переподключения `stealth_mode` может
+быть `null`.
 
 ## Карта инструментов
 
