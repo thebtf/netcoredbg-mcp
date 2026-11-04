@@ -60,7 +60,38 @@ public sealed class ModernProtocolContractTests
             },
             new RequestId("call-first"));
 
-        AssertCompleteStartEnvelope(ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(message)));
+        var result = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(message));
+        AssertCompleteStartEnvelope(result);
+        await driver.StopSingleControlledSessionAsync(Assert.IsType<string>(result["structuredContent"]?["debugSessionId"]?.GetValue<string>()));
+    }
+
+    [Fact]
+    public async Task FirstWire_OverlappingRequests_AreRefusedBeforeDispatch()
+    {
+        var driver = await ModernMcpProcessDriver.StartFirstWireAsync(
+            fixtureConfiguration: new FixtureConfiguration(DelayLaunchResponseForStartupTimeout: true));
+        var primary = await Record.ExceptionAsync(async () =>
+        {
+            var first = driver.SendFirstRequestAsync("tools/call", new JsonObject
+            {
+                ["name"] = "start_debug",
+                ["arguments"] = new JsonObject { ["program"] = ValidProgram },
+                ["_meta"] = ModernMcpProcessDriver.CurrentMeta(),
+            }, new RequestId("overlap-start"), timeout: TimeSpan.FromSeconds(10));
+            Assert.False(first.IsCompleted);
+
+            var secondFailure = await Record.ExceptionAsync(async () => await driver.SendFirstRequestAsync(
+                "tools/list", new JsonObject { ["_meta"] = ModernMcpProcessDriver.CurrentMeta() },
+                new RequestId("overlap-list")));
+            var result = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(await first));
+            AssertCompleteStartEnvelope(result);
+            await driver.StopSingleControlledSessionAsync(Assert.IsType<string>(result["structuredContent"]?["debugSessionId"]?.GetValue<string>()));
+            Assert.IsType<InvalidOperationException>(secondFailure);
+        });
+        var cleanup = await Record.ExceptionAsync(async () => await driver.DisposeAsync());
+        if (primary is not null && cleanup is not null) throw new AggregateException(primary, cleanup);
+        if (primary is not null) throw primary;
+        if (cleanup is not null) throw cleanup;
     }
 
     [Fact]
@@ -105,6 +136,55 @@ public sealed class ModernProtocolContractTests
         var response = await driver.ListToolsRawAsync(ModernMcpProcessDriver.CurrentMeta(), new RequestId("catalog"));
 
         AssertCatalog(ModernMcpProcessDriver.RequireResult(response));
+    }
+
+    [Fact]
+    public async Task ToolsList_ConfigureExceptions_PublishesClosedOptionalFiltersInput()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(startupTimeout: TimeSpan.FromSeconds(10));
+        var catalog = ModernMcpProcessDriver.RequireResult(await driver.ListToolsRawAsync(
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("exception-filters-catalog")));
+        var tool = Assert.Single(
+            Assert.IsType<JsonArray>(catalog["tools"]).Select(static item => Assert.IsType<JsonObject>(item)),
+            static item => item["name"]?.GetValue<string>() == "configure_exceptions");
+        var schema = Assert.IsType<JsonObject>(tool["inputSchema"]);
+        Assert.Equal("object", schema["type"]?.GetValue<string>());
+        Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
+        Assert.Equal(["debugSessionId"], Assert.IsType<JsonArray>(schema["required"])
+            .Select(static item => item?.GetValue<string>()));
+        var properties = Assert.IsType<JsonObject>(schema["properties"]);
+        Assert.Equal(["debugSessionId", "filters"], properties.Select(static item => item.Key).Order());
+        Assert.Equal("string", properties["debugSessionId"]?["type"]?.GetValue<string>());
+        Assert.Equal(1, properties["debugSessionId"]?["minLength"]?.GetValue<int>());
+        Assert.Equal("\\S", properties["debugSessionId"]?["pattern"]?.GetValue<string>());
+        Assert.IsType<JsonObject>(properties["filters"]);
+        await AssertNoNativeActionsAsync(driver);
+    }
+
+    [Theory]
+    [InlineData("get_modules")]
+    [InlineData("get_progress")]
+    public async Task ToolsList_RuntimeInventory_PublishesRequiredOpaqueSessionOnly(string toolName)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(startupTimeout: TimeSpan.FromSeconds(10));
+        var result = ModernMcpProcessDriver.RequireResult(await driver.ListToolsRawAsync(
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId($"inventory-catalog-{toolName}")));
+
+        var tool = Assert.Single(
+            Assert.IsType<JsonArray>(result["tools"]).Select(static item => Assert.IsType<JsonObject>(item)),
+            item => item["name"]?.GetValue<string>() == toolName);
+        var schema = Assert.IsType<JsonObject>(tool["inputSchema"]);
+        Assert.Equal("object", schema["type"]?.GetValue<string>());
+        Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
+        Assert.Equal(["debugSessionId"], Assert.IsType<JsonArray>(schema["required"])
+            .Select(static item => item?.GetValue<string>()));
+        var property = Assert.Single(Assert.IsType<JsonObject>(schema["properties"]));
+        Assert.Equal("debugSessionId", property.Key);
+        var sessionId = Assert.IsType<JsonObject>(property.Value);
+        Assert.Equal("string", sessionId["type"]?.GetValue<string>());
+        Assert.Equal(1, sessionId["minLength"]?.GetValue<int>());
+        Assert.Equal("\\S", sessionId["pattern"]?.GetValue<string>());
+        await AssertNoNativeActionsAsync(driver);
     }
 
     [Theory]
@@ -220,12 +300,14 @@ public sealed class ModernProtocolContractTests
             retryId);
 
         Assert.NotEqual(initialId, retryId);
-        AssertCompleteStartEnvelope(ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(retry)));
+        var result = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(retry));
+        AssertCompleteStartEnvelope(result);
         if (includeBreakpoints)
         {
             AssertBreakpointRequest(Assert.Single(await driver.ReadNativeActionsAsync(),
                 static action => action.Command == "setBreakpoints"), BreakpointSourcePath, [2]);
         }
+        await driver.StopSingleControlledSessionAsync(Assert.IsType<string>(result["structuredContent"]?["debugSessionId"]?.GetValue<string>()));
     }
 
     [Theory]
@@ -501,8 +583,9 @@ public sealed class ModernProtocolContractTests
         await using var driver = await ModernMcpProcessDriver.StartAsync();
         var catalog = ModernMcpProcessDriver.RequireResult(await driver.ListToolsRawAsync(
             ModernMcpProcessDriver.CurrentMeta(), new RequestId("add-breakpoint-catalog")));
-        var tool = Assert.IsType<JsonObject>(Assert.IsType<JsonArray>(catalog["tools"])[9]);
-        Assert.Equal("add_breakpoint", tool["name"]?.GetValue<string>());
+        var tool = Assert.Single(
+            Assert.IsType<JsonArray>(catalog["tools"]).Select(static item => Assert.IsType<JsonObject>(item)),
+            static item => item["name"]?.GetValue<string>() == "add_breakpoint");
         var schema = Assert.IsType<JsonObject>(tool["inputSchema"]);
         Assert.Equal("object", schema["type"]?.GetValue<string>());
         Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
@@ -873,7 +956,7 @@ public sealed class ModernProtocolContractTests
     private static void AssertCatalog(JsonObject result)
     {
         var tools = Assert.IsType<JsonArray>(result["tools"]);
-        Assert.Equal(20, tools.Count);
+        Assert.Equal(32, tools.Count);
         Assert.Equal(
             [
                 "start_debug",
@@ -885,11 +968,23 @@ public sealed class ModernProtocolContractTests
                 "get_scopes",
                 "get_variables",
                 "continue_execution",
+                "pause_execution",
                 "add_breakpoint",
                 "remove_breakpoint",
+                "configure_exceptions",
                 "ui_invoke",
+                "ui_invoke_observed",
+                "ui_get_window_tree",
                 "get_output",
                 "get_output_tail",
+                "search_output",
+                "step_into",
+                "step_out",
+                "evaluate_expression",
+                "set_variable",
+                "get_exception_info",
+                "get_modules",
+                "get_progress",
                 "get_ui_probe_capabilities",
                 "capture_visual_evidence",
                 "read_capture_artifact",
@@ -899,8 +994,8 @@ public sealed class ModernProtocolContractTests
             ],
             tools.Select(static tool => tool?["name"]?.GetValue<string>()));
         Assert.Equal(
-            ["start_debug", "get_debug_state", "stop_debug", "get_threads", "get_call_stack", "step_over", "get_scopes", "get_variables", "continue_execution", "add_breakpoint", "remove_breakpoint"],
-            tools.Take(11).Select(static tool => tool?["name"]?.GetValue<string>()));
+            ["start_debug", "get_debug_state", "stop_debug", "get_threads", "get_call_stack", "step_over", "get_scopes", "get_variables", "continue_execution", "pause_execution", "add_breakpoint", "remove_breakpoint"],
+            tools.Take(12).Select(static tool => tool?["name"]?.GetValue<string>()));
 
         var start = Assert.IsType<JsonObject>(tools[0]);
         Assert.Equal("object", start["inputSchema"]?["type"]?.GetValue<string>());
@@ -929,20 +1024,40 @@ public sealed class ModernProtocolContractTests
         Assert.Equal("string", debugSessionId?["type"]?.GetValue<string>());
         Assert.Equal(1, debugSessionId?["minLength"]?.GetValue<int>());
 
-        var invoke = Assert.IsType<JsonObject>(tools[11]);
+        var invoke = Assert.IsType<JsonObject>(tools[13]);
         var invokeSchema = Assert.IsType<JsonObject>(invoke["inputSchema"]);
         Assert.Equal("object", invokeSchema["type"]?.GetValue<string>());
         Assert.False(invokeSchema["additionalProperties"]?.GetValue<bool>() ?? true);
         Assert.Equal(["debugSessionId", "automationId"], Assert.IsType<JsonArray>(invokeSchema["required"]).Select(static value => value?.GetValue<string>()));
         var invokeProperties = Assert.IsType<JsonObject>(invokeSchema["properties"]);
-        Assert.Equal(2, invokeProperties.Count);
-        foreach (var property in invokeProperties.Select(static member => Assert.IsType<JsonObject>(member.Value)))
+        Assert.Equal(3, invokeProperties.Count);
+        foreach (var property in new[] { invokeProperties["debugSessionId"], invokeProperties["automationId"] }.Select(static value => Assert.IsType<JsonObject>(value)))
         {
             Assert.Equal("string", property["type"]?.GetValue<string>());
             Assert.Equal(1, property["minLength"]?.GetValue<int>());
             Assert.Equal("\\S", property["pattern"]?.GetValue<string>());
         }
         Assert.Equal(256, invokeProperties["automationId"]?["maxLength"]?.GetValue<int>());
+        var expectedTarget = Assert.IsType<JsonObject>(invokeProperties["expectedTarget"]);
+        Assert.Equal("object", expectedTarget["type"]?.GetValue<string>());
+        Assert.False(expectedTarget["additionalProperties"]?.GetValue<bool>() ?? true);
+        Assert.Equal(["processIdentity", "hwnd", "rootRuntimeId", "elementRuntimeId"],
+            Assert.IsType<JsonArray>(expectedTarget["required"]).Select(static value => value?.GetValue<string>()));
+        var targetProperties = Assert.IsType<JsonObject>(expectedTarget["properties"]);
+        Assert.Equal(4, targetProperties.Count);
+        foreach (var name in new[] { "processIdentity", "hwnd" })
+        {
+            Assert.Equal("string", targetProperties[name]?["type"]?.GetValue<string>());
+            Assert.Equal(1, targetProperties[name]?["minLength"]?.GetValue<int>());
+            Assert.Equal("\\S", targetProperties[name]?["pattern"]?.GetValue<string>());
+        }
+        foreach (var name in new[] { "rootRuntimeId", "elementRuntimeId" })
+        {
+            Assert.Equal("array", targetProperties[name]?["type"]?.GetValue<string>());
+            Assert.Equal(1, targetProperties[name]?["minItems"]?.GetValue<int>());
+            Assert.Equal(64, targetProperties[name]?["maxItems"]?.GetValue<int>());
+            Assert.Equal("integer", targetProperties[name]?["items"]?["type"]?.GetValue<string>());
+        }
     }
 
     private static async Task<string> RequestProgramElicitationAsync(ModernMcpFirstWireDriver driver, RequestId initialId, JsonObject? arguments = null)

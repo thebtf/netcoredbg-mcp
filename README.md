@@ -36,8 +36,8 @@ preparation is not publication.
 
 The Python package remains the default consumer entry point. Its wheel does not
 bundle the opt-in .NET preview executable. Corrected preview delivery is separate;
-B3 native `step_over` and Native Scene Probe work remain modern-host source-only
-and add no tools to the Python catalog.
+B3 native `step_over`, the native step pair and Native Scene Probe work remain
+modern-host source-only and add no tools to the Python catalog.
 
 In the source-built stateful host, `start_debug` also accepts an optional
 `breakpoints` array of up to 256 `{file, line}` entries. Each source file must
@@ -73,8 +73,115 @@ To inspect a stopped frame, call `get_call_stack` with
 frame ID to `get_scopes` and with each returned reference to `get_variables`.
 Keep each numeric ID paired with the context from the same observation; a zero
 variable reference is a leaf. After a step, continuation, or other invalidation,
-fetch a new stack and context: the debugger may reuse numeric references. This
-source-built path does not yet support variable paging or filtering.
+fetch a new stack and context: the debugger may reuse numeric references.
+The source-built host accepts optional `start` and `count` and forwards them to
+the adapter. Omitted or null options are omitted from DAP; `count: 0` requests
+all remaining children. Results remain limited to 256 entries and 256 KiB. If
+an adapter returns more than a positive `count`, the host returns a protocol
+error and closes the session rather than returning a misleading page. The adapter
+still determines which entries it returns. Variable filtering is not supported: a
+real `netcoredbg` 3.1.3-1 run returned an empty `indexed` result for an integer
+array and classified its elements as `named` (Engram issue #547).
+
+The source-built stateful host also exposes
+`evaluate_expression(debugSessionId, inspectionContextId, frameId, expression)`.
+All four arguments are required. It sends the exact expression and explicit
+Int32 frame ID once with DAP `context: "watch"`; it never infers a frame.
+**Expressions may execute application code or mutate the debuggee. `watch` is
+not a read-only guarantee.** A current successful reply returns
+`kind: "evaluate_success"`, the same `inspectionContextId`, `result`, nullable
+`type`, and a nonnegative `variablesReference`. Expand a positive reference with
+`get_variables` using that same current context. The complete serialized success
+`structuredContent` is limited to 256 KiB, including JSON escaping and all fields.
+
+An unknown or stale context detected before the write returns
+`DAP_EVALUATE_REFUSED` without DAP I/O. A negative DAP reply returns
+`DAP_EVALUATE_FAILED`; expression side effects may already have occurred.
+A stale post-write reply or a malformed, oversized, timed-out or failed exchange
+returns the redacted `DAP_EVALUATE_OUTCOME_UNKNOWN` and drains the session.
+Cancellation before writer handoff keeps the session usable and sends nothing;
+cancellation during or after a possible write invalidates inspection and drains
+through the existing session owner before server cleanup finishes. Never retry
+automatically after a failed or unknown outcome. This additive native path does
+not change Python's installed default or its optional-frame evaluation contract;
+`quick_evaluate`, real-debugger proof and installed delivery remain separate.
+
+The source-built stateful host also exposes
+`get_exception_info(debugSessionId, threadId)`. Both arguments are required:
+use the opaque session token and an explicit Int32 stopped-thread ID. It sends
+one DAP `exceptionInfo` request only when `supportsExceptionInfoRequest` is true
+in the correlated initialize response or a later capabilities event. An absent
+or false capability returns `DAP_EXCEPTION_INFO_UNSUPPORTED` without a write.
+Revocation fences new requests; it does not invalidate an already admitted reply
+while that request's stopped-thread epoch remains current.
+
+A current reply returns `kind: "exception_info_success"` and an `exception`
+object preserving the adapter body, including nested `details.innerException`
+and extension fields such as `formattedDescription` and `source`. The body must
+contain a string `exceptionId` and DAP `breakMode`; optional `description` must
+be a string and `details` an object. The complete serialized success content,
+including its envelope and escaping, is limited to 256 KiB without truncation.
+A stale target, negative reply or lifecycle invalidation before reader correlation
+returns `DAP_EXCEPTION_INFO_REFUSED`. Malformed, oversized, timed-out or failed
+exchanges return redacted `DAP_EXCEPTION_INFO_PROTOCOL_ERROR` and drain through
+the existing session owner after releasing the operation lease. Cancellation
+before writer handoff preserves the session; a potentially partial frame drains
+it. Stopping the wait after a fully committed read-only request does not by itself
+close the session or claim a debuggee mutation. No automatic retry is performed.
+This native path neither infers a thread nor updates Python's exception cache
+or provides `get_exception_context`. Python remains the installed default;
+real-debugger exception-stop and installed-delivery proof remain separate.
+
+The source-built stateful host also accepts
+`configure_exceptions(debugSessionId, filters?)` while a session is running or
+stopped. Omitted or null `filters` replaces the adapter's filters with an empty
+list; supplied strings retain their order and duplicates. The host sends one DAP
+`setExceptionBreakpoints` request only when the adapter advertises exception
+filters. An acknowledgement is not an exception stop: `breakpoints` is null
+when the adapter omits verification, or contains only its per-filter `verified`
+values when supplied.
+
+Unsupported adapters return `DAP_EXCEPTION_FILTERS_UNSUPPORTED` before a write.
+A negative response returns `DAP_EXCEPTION_FILTERS_REFUSED` and does not prove
+the adapter left its previous filters unchanged. Malformed or failed exchanges
+return `DAP_EXCEPTION_FILTERS_PROTOCOL_ERROR` and drain the session. Cancellation
+before writer handoff sends nothing; a potentially written but unconfirmed update
+drains without retry. Python remains the installed default; a real-debugger
+exception-stop journey and installed delivery are not yet proven for this path.
+
+The source-built stateful host exposes `get_modules(debugSessionId)` and
+`get_progress(debugSessionId)`. Each accepts only a required, nonblank opaque
+session token and reads a snapshot retained by the existing DAP reader without
+sending a DAP request. Startup events are included. These tools are available
+only while the native session registry entry is live; unlike retained output,
+they do not remain available after automatic session retirement.
+
+`get_modules` returns `kind: "modules_success"`, `modules` and `count`.
+Numeric and string module IDs remain distinct. A `new` event adds only an
+unknown ID, `changed` replaces only a known entry, and `removed` removes it.
+Entries preserve insertion order and expose `id`, `name`, nullable `path`,
+nullable `version`, `isOptimized` (false when omitted), and nullable
+`symbolStatus`. Removing and later reintroducing an ID places it at the end.
+
+Initialization advertises `supportsProgressReporting: true`. `get_progress`
+returns `kind: "progress_success"`, `progress` and `count` for active operations.
+Starts create or replace entries; updates change only supplied non-null message
+and percentage fields for known IDs; ends remove entries. Entries preserve
+insertion order and expose `progressId`, `title`, nullable `message`, nullable
+`percentage`, `cancellable` (false when omitted), and monotonic `startedAt`
+seconds. Replacing a start resets its optional fields and timestamp.
+
+Each inventory independently retains at most 16 MiB of its normalized UTF-8 JSON
+array, including escaping. A malformed relevant event or retention overflow
+latches a fixed, redacted `runtime_inventory_incomplete` error for that tool;
+later events cannot restore a provably complete inventory. A complete serialized
+success content over 256 KiB returns `runtime_inventory_too_large` without
+truncation. Both errors leave the debug session, neighboring inventory and
+output usable. These are snapshots of received events, not an OS module scan,
+an atomic debuggee snapshot or proof that the adapter reported every operation.
+No retry, cached-resource notification or Python snake_case alias is added.
+Python remains the installed default and rollback; the preview channel,
+real-debugger event completeness and installed-delivery proof are unchanged.
 
 The source-built stateful host exposes `get_output(debugSessionId, clear?,
 category?)` for retained DAP output. It concatenates events in reader order;
@@ -82,8 +189,8 @@ categories `console`, `stdout`, `stderr`, and `telemetry` are retained, and an
 omitted event category means `console`. Filtering is case-sensitive. A clear
 returns the current snapshot and empties the buffer only when `category` is
 omitted, null, or empty; a nonempty filter never clears it. After automatic
-terminal or reader-failure cleanup, both output tools remain available with the
-same token, while debugger control and UI operations are unavailable. Call
+terminal or reader-failure cleanup, all three output tools remain available with
+the same token, while debugger control and UI operations are unavailable. Call
 `stop_debug` after reading to release the retained buffer; subsequent calls
 return `DEBUG_SESSION_NOT_FOUND`. Retained output is process-local and is lost
 when the host exits. Output not delivered by the adapter cannot be recovered.
@@ -94,13 +201,63 @@ evicting whole oldest events. `NETCOREDBG_MAX_OUTPUT_ENTRY` and
 `NETCOREDBG_MAX_OUTPUT_BYTES` override those limits at host startup; despite the
 latter name, the unit is code points, not encoded bytes. An invalid limit stops
 the host before it serves requests and names the variable on stderr without its
-value. Native `search_output` remains unavailable; Python remains the default.
+value. Python remains the installed default.
 
 `get_output_tail(debugSessionId, lines?, category?)` reads the same buffer
 without clearing it. It filters by category before splitting lines, returns
 `totalLines`, `returnedLines`, and LF-joined `output`, and defaults to the last
 50 lines. For compatibility with the existing Python slicing behavior, `lines: 0`
 returns all lines and a negative `lines: -N` skips the first N lines.
+
+`search_output(debugSessionId, pattern, contextLines?, category?)` searches a
+non-consuming, category-filtered output snapshot. It uses case-insensitive,
+culture-invariant .NET regular expressions; their syntax and Unicode case
+behavior are not Python `re` parity. It counts every matching line and returns
+the first 50 matches with one-based line numbers and context (two lines by
+default). A pattern over 262,142 UTF-16 code units is rejected before parsing
+with `OUTPUT_SEARCH_TOO_LARGE`; other invalid patterns return
+`OUTPUT_SEARCH_INVALID_PATTERN`. A regex match exceeding 100 ms or search work
+exceeding two seconds returns `OUTPUT_SEARCH_TIMEOUT`. Regex construction and
+obtaining the retained snapshot cannot be interrupted by that work budget.
+Serialized application content over 256 KiB returns `OUTPUT_SEARCH_TOO_LARGE`,
+with no partial results or buffer clearing. The surrounding MCP response can be
+larger because it carries both text and structured content.
+
+The source-built stateful host exposes `step_over(debugSessionId, threadId)`,
+`step_into(debugSessionId, threadId)` and `step_out(debugSessionId, threadId)`.
+Both arguments are required: use the opaque session token and an explicit Int32
+thread with current stopped authority. Invalid or extra arguments cause no DAP
+I/O. Each admitted call sends exactly one DAP `next`, `stepIn` or `stepOut`,
+respectively, with only `{threadId}`; target selection is not supported.
+
+A correlated positive acknowledgement is not a completed step. Success requires
+a later `stopped(reason: "step")` event for that exact thread. Pre-acknowledgement,
+missing/different-thread and non-step stops do not satisfy the waiter. The
+debugger may step over rather than enter a call; inspect the actual new stack
+with `get_call_stack` to establish whether the callee was entered or the caller
+was reached. Admission invalidates earlier stopped and inspection authority.
+
+One 30-second deadline starts after the complete write and covers both
+acknowledgement and observation. An `exited` or `terminated` event can settle
+the call before or after acknowledgement. The new tools return their own
+`step_into_*` or `step_out_*` success, terminal and timed-out results, or typed,
+redacted refusal/protocol errors. Terminal, timeout and protocol failure retire
+debugger control through the existing close-and-drain owner; retained output
+follows the rules above. Unlike an acknowledged continue timeout, a step timeout
+does not retain debugger control. Negative acknowledgement retains the usable
+session. Cancellation completed before writer handoff retains it without
+restoring old inspection authority; a possible or uncertain write is drained
+without retry.
+
+Only one step or continue is admitted per session. An active step excludes all
+other steps, continue and pause; an active pause excludes new steps and continue.
+Pause may still overlap an already committed continue. Competing execution is
+refused without DAP I/O. Root observed passing source-candidate checks and a real
+source-host/netcoredbg journey entering `Middle` and returning to `Outer`, with
+public stop and retained Job drain. This does not prove absence of transient
+focus. Integration, installed delivery and full Python compatibility remain
+unproven. Python remains the default and rollback; these source-built tools do
+not change the published read-only preview.
 
 For a stopped session, `continue_execution(debugSessionId, threadId)` sends a
 DAP `continue` request without `singleThread`, so it resumes all threads. It
@@ -113,6 +270,27 @@ drain deadline still forces owned process-tree cleanup. The stop reports success
 only after cleanup completes; the owner-aborted continue returns
 `DEBUG_SESSION_NOT_FOUND`, not a DAP protocol error. Explicit caller/host
 cancellation and genuine cleanup/protocol failures remain failures.
+
+The source-built stateful host also exposes
+`pause_execution(debugSessionId, threadId?)`. A nonzero explicit Int32 selects
+that exact thread. Omitted, null or zero input uses the currently observed
+thread, including a current ID of zero. If no current thread exists, one bounded
+DAP `threads` request selects the first returned ID without sorting; a newly
+observed current thread takes precedence before the pause write. Empty discovery
+returns `DAP_PAUSE_NO_THREADS` when no current thread has appeared.
+One absolute 30-second deadline covers discovery and pause acknowledgement.
+
+The result `pause_acknowledged` confirms only the adapter's acknowledgement,
+not stopped state or inspection authority. Only real DAP events update those
+observations. One pause may run alongside an already committed continue, even
+while its acknowledgement is held. Another pause, a new continue or step, and
+pause during an active step are refused without DAP I/O. Refusal, timeout and
+protocol errors have fixed, redacted outcomes; a terminal result contains only
+observed terminal fields. Uncertain writes are drained without retry. Cancelling
+before writer handoff or while a fully committed discovery reply is pending
+preserves the session; a fully committed pause with a valid acknowledgement is
+not undone by later caller cancellation. This additive source slice does not
+change the Python default, installed routing or claim full Python wire parity.
 
 The source-built Windows stateful host exposes
 `ui_get_window_tree(debugSessionId, maxDepth = 3, maxChildren = 50)` when
@@ -495,8 +673,10 @@ ui_take_screenshot(evidence=true)
 ```
 
 Normally this mode returns `evidence_grade=lossless_raster`, persists a session-scoped
-PrintWindow PNG, and includes SHA-256 and geometry provenance. For a strict physical
-target, a probable-black PrintWindow raster may make one verified `BitBlt` attempt.
+PrintWindow PNG, and includes SHA-256 and geometry provenance. When a bridge
+PrintWindow frame is probably black, capture may attempt one verified `BitBlt`
+fallback even without a strict target. It may temporarily activate the target
+window and then attempt to restore the previous foreground.
 That response is explicitly `method=BitBlt`, `fallback=flash-focus`,
 `fallback_reason=probable_black_printwindow`, and
 `evidence_grade=typed_bitblt_fallback`; it records the `GetWindowDC` authority,
@@ -514,11 +694,18 @@ compare the raw raster, not a derivative:
 ui_take_screenshot(evidence=true, expected_hwnd=..., expected_physical_width=..., expected_physical_height=...)
 ```
 
-The response reports `MATCHED` or `MISMATCH`; only `MATCHED` persists raw
-evidence. `max_width` affects only the preview and HD derivative, never this
-comparison. `ui_resize_window()` reports request-versus-readback
-`target_comparability.status` as `MATCHED`, `MISMATCH`, or `UNAVAILABLE`;
-`resized=true` confirms request completion, not target equality.
+Strict capture targets the supplied `expected_hwnd`, rather than rediscovering a
+window for the same process. The bridge refuses a different resolved HWND before
+raster capture or activation. If a bridge still returns another HWND, the public
+tool returns `PHYSICAL_CAPTURE_MISMATCH` without an image, pixel payload, or
+persisted screenshot. A size-only mismatch for the expected HWND still returns a
+navigation preview with `MISMATCH` and no persisted evidence; only `MATCHED`
+persists raw evidence. Matching HWND and dimensions checks capture provenance,
+not whether the compositor supplied the intended window's pixels. `max_width`
+affects only the preview and HD derivative, never this comparison.
+`ui_resize_window()` reports request-versus-readback `target_comparability.status`
+as `MATCHED`, `MISMATCH`, or `UNAVAILABLE`; `resized=true` confirms request
+completion, not target equality.
 
 Use `ui_take_annotated_screenshot()` to receive Set-of-Mark labels, then pass
 its `generation` to `ui_click_annotated(element_id=..., generation=...)`.
@@ -536,10 +723,11 @@ stealth mode.
 foreground HWND and PID observed at the end of the call, and
 `foreground_matches_target` (`true`, `false`, or `null` when unknown).
 `activation_attempted` and `activation_api_result` separately describe the
-ordinary Windows request. `activated=true` requires a valid current target and
-a matching final observation; it does not promise that foreground ownership
-persists after return. Windows may deny activation. `stealth_mode` can be
-`null` when a bridge reconnect has an uncertain outcome.
+ordinary Windows request. `activated=true` requires a still-current session and
+a matching final HWND/PID observation; it does not promise that foreground
+ownership persists after return. Numeric PID and HWND checks cannot establish
+the original process or window incarnation after identifier reuse. Windows may
+deny activation. `stealth_mode` can be `null` when bridge reconnect is uncertain.
 
 ## Tool map
 

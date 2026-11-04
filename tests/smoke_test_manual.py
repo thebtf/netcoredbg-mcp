@@ -7568,6 +7568,120 @@ async def test_typed_bitblt_fallback_native_bridge():
                     await m.stop()
 
 
+async def test_screenshot_expected_hwnd_guard():
+    """Issue #467: same-process wrong-HWND bridge pixels never reach the public consumer."""
+    print("\n--- Screenshot Expected HWND Guard (Synthetic Bridge) ---")
+    import base64
+    import io
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from mcp.types import ImageContent
+    from PIL import Image
+
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), (255, 192, 64)).save(buffer, format="PNG")
+    encoded_png = base64.b64encode(buffer.getvalue()).decode("ascii")
+    bridge_result = {
+        "base64": encoded_png,
+        "width": 8,
+        "height": 8,
+        "method": "PrintWindow",
+        "hwnd": 778,
+        "process_id": 42,
+        "client_rect": {
+            "left": 0,
+            "top": 0,
+            "right": 8,
+            "bottom": 8,
+            "unit": "physical_px",
+            "coordinate_space": "client",
+            "source_api": "GetClientRect",
+        },
+        "window_bounds": {
+            "left": 100,
+            "top": 50,
+            "right": 108,
+            "bottom": 58,
+            "unit": "physical_px",
+            "coordinate_space": "screen",
+            "source_api": "GetWindowRect",
+        },
+        "dpi": 144,
+    }
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._client = MagicMock()
+    backend._client.call = AsyncMock(return_value=bridge_result)
+    save_bundle = MagicMock()
+    save_screenshot = MagicMock()
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+        session_id="synthetic-expected-hwnd-467",
+        temp_manager=SimpleNamespace(
+            save_screenshot_bundle=save_bundle,
+            save_screenshot=save_screenshot,
+        ),
+    )
+    registry = _CapturingMCP()
+
+    with (
+        patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend),
+        patch(
+            "netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid",
+            side_effect=AssertionError("Synthetic smoke must not inspect desktop windows"),
+        ),
+        patch(
+            "netcoredbg_mcp.ui.screenshot.capture_window",
+            side_effect=AssertionError("Synthetic smoke must not capture desktop pixels"),
+        ),
+        patch(
+            "netcoredbg_mcp.ui.screenshot.capture_window_evidence",
+            side_effect=AssertionError("Synthetic smoke must not capture desktop evidence"),
+        ),
+    ):
+        register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+        response = await registry.tools["ui_take_screenshot"](
+            SimpleNamespace(),
+            evidence=True,
+            format="png",
+            expected_hwnd=777,
+            expected_physical_width=8,
+            expected_physical_height=8,
+        )
+
+    check(
+        "Wrong-HWND screenshot returns an explicit public failure",
+        isinstance(response, dict)
+        and response.get("code") == "PHYSICAL_CAPTURE_MISMATCH"
+        and bool(response.get("error")),
+    )
+    no_pixels = True
+    pending = [response]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, ImageContent):
+            no_pixels = False
+        elif isinstance(item, dict):
+            no_pixels = no_pixels and not {
+                "base64", "raw_path", "crop_path", "hd_path"
+            }.intersection(item)
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            pending.extend(item)
+        elif isinstance(item, str) and encoded_png in item:
+            no_pixels = False
+    check("Wrong-HWND screenshot exposes no image or pixel payload", no_pixels)
+    check(
+        "Wrong-HWND screenshot never invokes persistence",
+        not save_bundle.called and not save_screenshot.called,
+    )
+
+
 async def test_screenshot_black_frame_guard():
     """Scenario: probable-black screenshot evidence fails closed without foreground mutation."""
     print("\n--- Screenshot Black Frame Guard ---")
@@ -8813,6 +8927,7 @@ def _base_scenarios() -> list[tuple[str, Callable[..., Any]]]:
         ("UI Focused Evidence", test_ui_focused_evidence),
         ("Code Search", test_code_search),
         ("Screenshot Black Frame Guard", test_screenshot_black_frame_guard),
+        ("Screenshot Expected HWND Guard", test_screenshot_expected_hwnd_guard),
         ("WPF Smoke Gallery", test_wpf_smoke_gallery),
         ("WinForms Smoke Gallery", test_winforms_smoke_gallery),
         ("Process Owner Cleanup", test_process_owner_cleanup),

@@ -57,6 +57,8 @@ public sealed class DebuggerLaunchContractTests
             Assert.Single(actions, static action => action.Kind == "startup");
             Assert.Contains(actions, static action => action.Command == "initialize");
             Assert.Contains(actions, static action => action.Command == "launch");
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                control.ConfirmMissingWindowsDebuggerDidNotLaunchAsync(new RequestId("absolute-debugger-control")));
 
             var stopped = ModernMcpProcessDriver.RequireResult(await control.CallToolRawAsync(
                 "stop_debug",
@@ -88,5 +90,8 @@ public sealed class DebuggerLaunchContractTests
         Assert.Equal("DEBUG_SESSION_NOT_FOUND", error["error"]?.GetValue<string>());
         Assert.False(error.ContainsKey("debugSessionId"));
         Assert.Empty(await driver.ReadNativeActionsAsync());
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            driver.ConfirmMissingWindowsDebuggerDidNotLaunchAsync(new RequestId("wrong-request")));
+        await driver.ConfirmMissingWindowsDebuggerDidNotLaunchAsync(new RequestId("path-only-debugger-refused"));
     }
 }

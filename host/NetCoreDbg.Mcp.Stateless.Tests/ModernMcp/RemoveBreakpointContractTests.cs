@@ -469,6 +469,428 @@ public sealed class RemoveBreakpointContractTests
         Assert.Equal(before, (await driver.ReadNativeActionsAsync()).Count);
     }
 
+    [Theory]
+    [InlineData("omitted")]
+    [InlineData("null")]
+    [InlineData("empty")]
+    [InlineData("ordered")]
+    public async Task ConfigureExceptions_OptionalAndOrderedFilters_ForwardsExactlyOneReplacement(string shape)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionFiltersOptions(), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartSessionAsync(driver, "filters-shape-start");
+        string[] filters = shape == "ordered" ? ["user-unhandled", "adapter-specific", "all", "all", ""] : [];
+        var arguments = ExceptionFiltersArguments(session, filters);
+        if (shape == "omitted")
+        {
+            arguments.Remove("filters");
+        }
+        else if (shape == "null")
+        {
+            arguments["filters"] = null;
+        }
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+
+        AssertExceptionFiltersAcknowledged(await driver.CallToolRawAsync("configure_exceptions", arguments,
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId($"filters-shape-{shape}")), filters, verified: null);
+
+        AssertExceptionFiltersWrite(Assert.Single(await ReadExceptionFilterWritesAsync(driver, before)), filters);
+        var state = await ReadStateAsync(driver, session, "filters-shape-state");
+        Assert.NotEqual("stopped", state["state"]?["event"]?.GetValue<string>());
+    }
+
+    [Theory]
+    [InlineData("absent-body", false)]
+    [InlineData("missing-breakpoints", false)]
+    [InlineData("verified", true)]
+    public async Task ConfigureExceptions_OptionalVerification_ReportsOnlyAdapterBooleansOrNull(string mode, bool hasVerification)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionFiltersOptions(mode));
+        var session = await StartSessionAsync(driver, "filters-verification-start");
+        string[] filters = ["all", "user-unhandled", "all"];
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+
+        AssertExceptionFiltersAcknowledged(await CallExceptionFiltersAsync(driver, session, filters, "filters-verification"),
+            filters, hasVerification ? [true, false, true] : null);
+
+        AssertExceptionFiltersWrite(Assert.Single(await ReadExceptionFilterWritesAsync(driver, before)), filters);
+        _ = await ReadStateAsync(driver, session, "filters-verification-retained");
+    }
+
+    [Theory]
+    [InlineData("omit", "none", false)]
+    [InlineData("empty", "none", false)]
+    [InlineData("supported", "none", true)]
+    [InlineData("empty", "enable-before-initialize", false)]
+    [InlineData("supported", "disable-before-initialize", true)]
+    [InlineData("empty", "enable-after-initialize", true)]
+    [InlineData("supported", "disable-after-initialize", false)]
+    public async Task ConfigureExceptions_InitializeBaselineAndOrderedDelta_DefineAdmission(string baseline, string delta, bool supported)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionFiltersOptions(baseline: baseline, delta: delta));
+        var session = await StartSessionAsync(driver, "filters-baseline-start");
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await ReaderBarrierAsync(driver, session, "filters-baseline-reader", observation.Token);
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+
+        var response = await CallExceptionFiltersAsync(driver, session, ["all"], "filters-baseline");
+        if (supported)
+        {
+            AssertExceptionFiltersAcknowledged(response, ["all"], verified: null);
+            AssertExceptionFiltersWrite(Assert.Single(await ReadExceptionFilterWritesAsync(driver, before)), ["all"]);
+        }
+        else
+        {
+            AssertError(AssertEnvelope(response, isError: true), "dap_exception_filters_unsupported", "DAP_EXCEPTION_FILTERS_UNSUPPORTED");
+            Assert.Empty(await ReadExceptionFilterWritesAsync(driver, before));
+        }
+        _ = await ReadStateAsync(driver, session, "filters-baseline-retained");
+    }
+
+    [Theory]
+    [InlineData("empty", "enable-on-threads", true)]
+    [InlineData("supported", "disable-on-threads", false)]
+    [InlineData("supported", "unrelated-on-threads", true)]
+    public async Task ConfigureExceptions_LiveCapabilityDelta_IsAppliedBeforeFollowingReaderBarrier(string baseline, string delta, bool supported)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionFiltersOptions(baseline: baseline, delta: delta));
+        var session = await StartSessionAsync(driver, "filters-delta-start");
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await ReaderBarrierAsync(driver, session, "filters-delta-reader", observation.Token);
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+
+        var response = await CallExceptionFiltersAsync(driver, session, ["all"], "filters-delta");
+        if (supported)
+        {
+            AssertExceptionFiltersAcknowledged(response, ["all"], verified: null);
+            AssertExceptionFiltersWrite(Assert.Single(await ReadExceptionFilterWritesAsync(driver, before)), ["all"]);
+        }
+        else
+        {
+            AssertError(AssertEnvelope(response, isError: true), "dap_exception_filters_unsupported", "DAP_EXCEPTION_FILTERS_UNSUPPORTED");
+            Assert.Empty(await ReadExceptionFilterWritesAsync(driver, before));
+        }
+    }
+
+    [Fact]
+    public async Task ConfigureExceptions_InvalidArguments_RejectsBeforeDapIoAndKeepsSession()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionFiltersOptions());
+        var session = await StartSessionAsync(driver, "filters-invalid-start");
+        var invalid = new List<JsonObject?> { null, new() };
+        foreach (var value in new JsonNode?[] { null, JsonValue.Create(""), JsonValue.Create(" \t "), JsonValue.Create(17), new JsonArray(), new JsonObject() })
+        {
+            var arguments = ExceptionFiltersArguments(session, []);
+            arguments["debugSessionId"] = value?.DeepClone();
+            invalid.Add(arguments);
+        }
+        foreach (var value in new JsonNode[] { JsonValue.Create("all")!, JsonValue.Create(17)!, JsonValue.Create(true)!, new JsonObject(), new JsonArray(17), new JsonArray((JsonNode?)null), new JsonArray("all", false) })
+        {
+            var arguments = ExceptionFiltersArguments(session, []);
+            arguments["filters"] = value;
+            invalid.Add(arguments);
+        }
+        foreach (var field in new[] { "filterOptions", "exceptionOptions", "unexpected" })
+        {
+            var arguments = ExceptionFiltersArguments(session, []);
+            arguments[field] = new JsonArray();
+            invalid.Add(arguments);
+        }
+        invalid.Add(ExceptionFiltersArguments(session, [new string('x', 256 * 1024)]));
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+
+        for (var index = 0; index < invalid.Count; index++)
+        {
+            var content = AssertEnvelope(await driver.CallToolRawAsync("configure_exceptions", invalid[index],
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId($"filters-invalid-{index}")), isError: true);
+            Assert.Equal("invalid_tool_arguments", content["kind"]?.GetValue<string>());
+            Assert.Equal("INVALID_TOOL_ARGUMENTS", content["error"]?.GetValue<string>());
+            Assert.Equal("configure_exceptions", content["tool"]?.GetValue<string>());
+            Assert.Equal(3, content.Count);
+        }
+        Assert.Equal(before, (await driver.ReadNativeActionsAsync()).Count);
+        AssertExceptionFiltersAcknowledged(await CallExceptionFiltersAsync(driver, session, [], "filters-valid-after-invalid"), [], verified: null);
+    }
+
+    [Fact]
+    public async Task ConfigureExceptions_NonObjectArguments_ReturnInvalidArgumentsBeforeDapIo()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionFiltersOptions());
+        var before = await driver.ReadNativeActionsAsync();
+        var shapes = new[] { "null", "17", "true", "[]", "\"not-an-object\"" };
+        for (var index = 0; index < shapes.Length; index++)
+        {
+            var response = await driver.SendRawRequestAsync("tools/call", new JsonObject
+            {
+                ["name"] = "configure_exceptions",
+                ["arguments"] = JsonNode.Parse(shapes[index]),
+                ["_meta"] = ModernMcpProcessDriver.CurrentMeta(),
+            }, new RequestId($"filters-invalid-shape-{index}"));
+            var content = AssertEnvelope(response, isError: true);
+            Assert.Equal("invalid_tool_arguments", content["kind"]?.GetValue<string>());
+            Assert.Equal("INVALID_TOOL_ARGUMENTS", content["error"]?.GetValue<string>());
+            Assert.Equal("configure_exceptions", content["tool"]?.GetValue<string>());
+        }
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Theory]
+    [InlineData("refused", false)]
+    [InlineData("null-breakpoints", true)]
+    [InlineData("non-object-body", true)]
+    [InlineData("non-array-breakpoints", true)]
+    [InlineData("missing-verified", true)]
+    [InlineData("non-boolean-verified", true)]
+    [InlineData("null-entry", true)]
+    [InlineData("too-few-results", true)]
+    [InlineData("too-many-results", true)]
+    [InlineData("wrong-command", true)]
+    [InlineData("reader-failure", true)]
+    [InlineData("eof", true)]
+    [InlineData("timeout", true)]
+    public async Task ConfigureExceptions_RefusedOrMalformedResponse_RedactsWithoutRetryAndPreservesOrDrains(string mode, bool protocolError)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionFiltersOptions(mode));
+        var session = await StartSessionAsync(driver, "filters-failure-start");
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+
+        var response = await driver.CallToolRawAsync("configure_exceptions", ExceptionFiltersArguments(session, ["all", "user-unhandled"]),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("filters-failure"), timeout: TimeSpan.FromSeconds(mode == "timeout" ? 45 : 10));
+        AssertError(AssertEnvelope(response, isError: true),
+            protocolError ? "dap_exception_filters_protocol_error" : "dap_exception_filters_refused",
+            protocolError ? "DAP_EXCEPTION_FILTERS_PROTOCOL_ERROR" : "DAP_EXCEPTION_FILTERS_REFUSED");
+        AssertExceptionFiltersWrite(Assert.Single(await ReadExceptionFilterWritesAsync(driver, before)), ["all", "user-unhandled"]);
+        if (protocolError)
+        {
+            await AssertSessionNotFoundAsync(driver, session, "filters-failure-retired");
+            var afterDrain = (await driver.ReadNativeActionsAsync()).Count;
+            AssertNotFound(AssertEnvelope(await CallExceptionFiltersAsync(driver, session, [], "filters-failure-reuse"), isError: true));
+            Assert.Equal(afterDrain, (await driver.ReadNativeActionsAsync()).Count);
+        }
+        else
+        {
+            _ = await ReadStateAsync(driver, session, "filters-refusal-retained");
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ConfigureExceptions_RunningOrStopped_DoesNotChangeObservedStateOrSourceBreakpoints(bool stopped)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            FixtureConfiguration: new FixtureConfiguration(ExceptionBreakpointFilters: "supported", LifecycleMode: stopped ? "all-stop" : "all-stop-continued-true")));
+        var session = await StartSessionAsync(driver, "filters-state-start", (SourcePath, 2));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await driver.WaitForFixtureEventAsync(stopped ? "stopped" : "continued", observation.Token);
+        await ReaderBarrierAsync(driver, session, "filters-state-reader", observation.Token);
+        var beforeState = await ReadStateAsync(driver, session, "filters-state-before");
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+
+        AssertExceptionFiltersAcknowledged(await CallExceptionFiltersAsync(driver, session, ["all"], "filters-state"), ["all"], verified: null);
+        var afterState = await ReadStateAsync(driver, session, "filters-state-after");
+        Assert.Equal(beforeState["state"]!.ToJsonString(), afterState["state"]!.ToJsonString());
+        AssertAdded(await CallAsync(driver, "add_breakpoint", session, SourcePath, 6, "filters-state-add"), SourcePath, 6);
+        AssertReplacement(Assert.Single(await ReadReplacementsAsync(driver, before)), SourcePath, [2, 6]);
+        AssertExceptionFiltersWrite(Assert.Single(await ReadExceptionFilterWritesAsync(driver, before)), ["all"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ConfigureExceptions_UnknownOrRetiredSession_ReturnsNotFoundWithoutDapIo(bool retired)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionFiltersOptions());
+        var session = await StartSessionAsync(driver, "filters-retired-start");
+        if (retired)
+        {
+            _ = AssertEnvelope(await driver.CallToolRawAsync("stop_debug", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("filters-retire")), isError: false);
+        }
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+        AssertNotFound(AssertEnvelope(await CallExceptionFiltersAsync(driver, retired ? session : "unknown-opaque-filters-session", [], "filters-not-found"), isError: true));
+        Assert.Equal(before, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Theory]
+    [InlineData("all-stop-exited", "exited")]
+    [InlineData("all-stop-terminated", "terminated")]
+    public async Task ConfigureExceptions_TerminalAdmission_DoesNotWriteOrReopenSession(string lifecycle, string terminal)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            FixtureConfiguration: new FixtureConfiguration(ExceptionBreakpointFilters: "supported", LifecycleMode: lifecycle)));
+        var session = await StartSessionAsync(driver, "filters-terminal-start");
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await driver.WaitForFixtureEventAsync(terminal, observation.Token);
+        await ReaderBarrierAsync(driver, session, "filters-terminal-reader", observation.Token);
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+
+        var rejected = AssertEnvelope(await CallExceptionFiltersAsync(driver, session, ["all"], "filters-terminal"), isError: true);
+        Assert.NotEqual("exception_filters_acknowledged", rejected["kind"]?.GetValue<string>());
+        _ = AssertEnvelope(await CallExceptionFiltersAsync(driver, session, [], "filters-terminal-again"), isError: true);
+        Assert.Empty(await ReadExceptionFilterWritesAsync(driver, before));
+    }
+
+    [Fact]
+    public async Task ConfigureExceptions_CompetingUpdates_WaitsForFirstAcknowledgementBeforeSecondWrite()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionFiltersOptions("hold-first"));
+        var session = await StartSessionAsync(driver, "filters-concurrent-start");
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+        var first = CallExceptionFiltersAsync(driver, session, ["all"], "filters-concurrent-first");
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        try
+        {
+            await driver.WaitForFixtureRecordAsync("exception-filters-response-gated", observation.Token);
+            var second = CallExceptionFiltersAsync(driver, session, ["user-unhandled", "all", "all"], "filters-concurrent-second");
+            await ReaderBarrierAsync(driver, session, "filters-concurrent-reader", observation.Token);
+            Assert.False(first.IsCompleted);
+            Assert.False(second.IsCompleted);
+            AssertExceptionFiltersWrite(Assert.Single(await ReadExceptionFilterWritesAsync(driver, before)), ["all"]);
+            driver.ReleaseNextResponse();
+            var results = await Task.WhenAll(first, second).WaitAsync(observation.Token);
+            AssertExceptionFiltersAcknowledged(results[0], ["all"], [true]);
+            AssertExceptionFiltersAcknowledged(results[1], ["user-unhandled", "all", "all"], [true, false, true]);
+            var writes = await ReadExceptionFilterWritesAsync(driver, before);
+            Assert.Equal(2, writes.Length);
+            AssertExceptionFiltersWrite(writes[0], ["all"]);
+            AssertExceptionFiltersWrite(writes[1], ["user-unhandled", "all", "all"]);
+        }
+        finally
+        {
+            driver.ReleaseNextResponse();
+        }
+    }
+
+    [Fact]
+    public async Task ConfigureExceptions_ReaderOrderedRevocationDuringUpdate_RefusesNextWrite()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionFiltersOptions("hold-first", delta: "disable-on-threads"));
+        var session = await StartSessionAsync(driver, "filters-revoke-start");
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+        var first = CallExceptionFiltersAsync(driver, session, ["all"], "filters-revoke-first");
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        try
+        {
+            await driver.WaitForFixtureRecordAsync("exception-filters-response-gated", observation.Token);
+            await ReaderBarrierAsync(driver, session, "filters-revoke-reader", observation.Token);
+            var second = CallExceptionFiltersAsync(driver, session, ["user-unhandled"], "filters-revoke-second");
+            driver.ReleaseNextResponse();
+            AssertExceptionFiltersAcknowledged(await first.WaitAsync(observation.Token), ["all"], [true]);
+            AssertError(AssertEnvelope(await second.WaitAsync(observation.Token), isError: true),
+                "dap_exception_filters_unsupported", "DAP_EXCEPTION_FILTERS_UNSUPPORTED");
+            AssertExceptionFiltersWrite(Assert.Single(await ReadExceptionFilterWritesAsync(driver, before)), ["all"]);
+            _ = await ReadStateAsync(driver, session, "filters-revoke-retained");
+        }
+        finally
+        {
+            driver.ReleaseNextResponse();
+        }
+    }
+
+    [Fact]
+    public async Task ConfigureExceptions_QueuedCallerCancellation_EmitsNoSecondWriteAndKeepsSession()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionFiltersOptions("hold-first"));
+        var session = await StartSessionAsync(driver, "filters-queued-cancel-start");
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+        var first = CallExceptionFiltersAsync(driver, session, ["all"], "filters-queued-first");
+        using var cancellation = new CancellationTokenSource();
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        try
+        {
+            await driver.WaitForFixtureRecordAsync("exception-filters-response-gated", observation.Token);
+            var queued = driver.CallToolRawAsync("configure_exceptions", ExceptionFiltersArguments(session, ["user-unhandled"]),
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("filters-queued-cancel"), cancellation.Token, timeout: TimeSpan.FromSeconds(10));
+            await ReaderBarrierAsync(driver, session, "filters-queued-reader", observation.Token);
+            Assert.False(queued.IsCompleted);
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => queued);
+            driver.ReleaseNextResponse();
+            AssertExceptionFiltersAcknowledged(await first.WaitAsync(observation.Token), ["all"], [true]);
+            await ReaderBarrierAsync(driver, session, "filters-queued-after-reader", observation.Token);
+            AssertExceptionFiltersWrite(Assert.Single(await ReadExceptionFilterWritesAsync(driver, before)), ["all"]);
+            AssertExceptionFiltersAcknowledged(await CallExceptionFiltersAsync(driver, session, [], "filters-queued-later"), [], []);
+            Assert.Equal(2, (await ReadExceptionFilterWritesAsync(driver, before)).Length);
+        }
+        finally
+        {
+            driver.ReleaseNextResponse();
+        }
+    }
+
+    [Fact]
+    public async Task ConfigureExceptions_PostWriteCancellation_DrainsWithoutRetryBeforeReuse()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionFiltersOptions("hold-first"));
+        var session = await StartSessionAsync(driver, "filters-postwrite-start");
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+        using var cancellation = new CancellationTokenSource();
+        var operation = driver.CallToolRawAsync("configure_exceptions", ExceptionFiltersArguments(session, ["all"]),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("filters-postwrite-cancel"), cancellation.Token, timeout: TimeSpan.FromSeconds(10));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        try
+        {
+            await driver.WaitForFixtureRecordAsync("exception-filters-response-gated", observation.Token);
+            await ReaderBarrierAsync(driver, session, "filters-postwrite-reader", observation.Token);
+            AssertExceptionFiltersWrite(Assert.Single(await ReadExceptionFilterWritesAsync(driver, before)), ["all"]);
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
+            await driver.WaitForFixtureRecordAsync("disconnect-response", observation.Token);
+            await AssertSessionNotFoundAsync(driver, session, "filters-postwrite-retired");
+            driver.ReleaseNextResponse();
+            var afterDrain = (await driver.ReadNativeActionsAsync()).Count;
+            AssertNotFound(AssertEnvelope(await CallExceptionFiltersAsync(driver, session, [], "filters-postwrite-reuse"), isError: true));
+            Assert.Equal(afterDrain, (await driver.ReadNativeActionsAsync()).Count);
+        }
+        finally
+        {
+            driver.ReleaseNextResponse();
+        }
+    }
+
+    private static ModernMcpStartOptions ExceptionFiltersOptions(string responseMode = "absent-body", string baseline = "supported", string delta = "none") => new(
+        FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true, ExceptionBreakpointFilters: baseline,
+            ExceptionFiltersCapabilityDelta: delta, SetExceptionBreakpointsResponseMode: responseMode));
+
+    private static JsonObject ExceptionFiltersArguments(string session, string[] filters) => new()
+    {
+        ["debugSessionId"] = session,
+        ["filters"] = new JsonArray(filters.Select(static filter => (JsonNode)JsonValue.Create(filter)!).ToArray()),
+    };
+
+    private static Task<JsonRpcResponse> CallExceptionFiltersAsync(ModernMcpProcessDriver driver, string session, string[] filters, string requestId) =>
+        driver.CallToolRawAsync("configure_exceptions", ExceptionFiltersArguments(session, filters),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId(requestId), timeout: TimeSpan.FromSeconds(10));
+
+    private static void AssertExceptionFiltersAcknowledged(JsonRpcResponse response, string[] filters, bool[]? verified)
+    {
+        var content = AssertEnvelope(response, isError: false);
+        Assert.Equal("exception_filters_acknowledged", content["kind"]?.GetValue<string>());
+        Assert.Equal(filters, Assert.IsType<JsonArray>(content["filters"]).Select(static entry => entry!.GetValue<string>()));
+        Assert.Equal(3, content.Count);
+        Assert.True(content.ContainsKey("breakpoints"));
+        if (verified is null)
+        {
+            Assert.Null(content["breakpoints"]);
+        }
+        else
+        {
+            var breakpoints = Assert.IsType<JsonArray>(content["breakpoints"]);
+            Assert.Equal(verified, breakpoints.Select(static entry => Assert.IsType<JsonObject>(entry)["verified"]!.GetValue<bool>()));
+            Assert.All(breakpoints, static entry => Assert.Single(Assert.IsType<JsonObject>(entry)));
+        }
+    }
+
+    private static async Task<ModernNativeAction[]> ReadExceptionFilterWritesAsync(ModernMcpProcessDriver driver, int after = 0) =>
+        (await driver.ReadNativeActionsAsync()).Skip(after).Where(static action => action.Command == "setExceptionBreakpoints").ToArray();
+
+    private static void AssertExceptionFiltersWrite(ModernNativeAction action, string[] filters)
+    {
+        var arguments = Assert.IsType<JsonObject>(JsonNode.Parse(Assert.IsType<string>(action.Detail))?["arguments"]);
+        Assert.Single(arguments);
+        Assert.Equal(filters, Assert.IsType<JsonArray>(arguments["filters"]).Select(static entry => entry!.GetValue<string>()));
+    }
+
     private static string SourcePath => Path.Combine(RepositoryLayout.Root,
         "host/NetCoreDbg.Mcp.Stateless.Tests/ModernMcp/RemoveBreakpointContractTests.cs");
 
@@ -539,6 +961,7 @@ public sealed class RemoveBreakpointContractTests
         Assert.Equal("text", text["type"]?.GetValue<string>());
         Assert.Equal(content.ToJsonString(), text["text"]?.GetValue<string>());
         Assert.DoesNotContain("private controlled breakpoint payload", result.ToJsonString());
+        Assert.DoesNotContain("private controlled exception filter payload", result.ToJsonString());
         return content;
     }
 

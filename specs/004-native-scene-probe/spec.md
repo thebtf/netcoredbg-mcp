@@ -135,6 +135,13 @@ through either revision. Removing `/1` requires an explicitly incompatible
 revision after known supported consumers migrate and their compatibility
 obligations are met.
 
+On Windows, candidate capture also requires the opened process object to belong
+to the session's retained debugger job. An unavailable membership check or an
+out-of-job process leaves candidate identity unavailable. Membership does not
+prove that a same-job process is the incarnation originally reported by the DAP
+event if a PID was reused before capture; that attribution remains unresolved.
+This check does not change non-Windows capture or the installed Python route.
+
 The `/1` declaration continues to advertise `/1`; a `/2` declaration contains
 `/2` and may also advertise `/1`. This revision-specific membership replaces
 the `/1`-specific declaration constraint in FR-005 only for `/2`.

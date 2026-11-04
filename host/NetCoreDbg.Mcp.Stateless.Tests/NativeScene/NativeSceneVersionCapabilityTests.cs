@@ -67,6 +67,36 @@ public sealed class NativeSceneVersionCapabilityTests
         });
     }
 
+    [Fact]
+    public async Task Capability_ProcessOutsideSessionJob_RefusesCandidateWithoutRetiringSession()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        // The test runner is alive outside the private job created later for the adapter.
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            FixtureConfiguration: new FixtureConfiguration(
+                SpawnDescendant: true, LifecycleMode: "all-stop", ProcessEventId: Environment.ProcessId)),
+            startupTimeout: TimeSpan.FromSeconds(30));
+        var session = await StartSessionAsync(driver, "foreign-process-start");
+        using (var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+        {
+            await driver.WaitForFixtureEventAsync("process", observation.Token);
+        }
+        await ReaderBarrierAsync(driver, session, "foreign-process-reader-barrier");
+
+        var response = await CapabilityAsync(driver, session, CurrentSchema, "foreign-process-capability");
+        var envelope = ModernMcpProcessDriver.RequireResult(response);
+        Assert.True(envelope["isError"]?.GetValue<bool>() ?? false,
+            $"An out-of-job process was accepted as a candidate: {envelope.ToJsonString()}");
+        var content = Application(response, isError: true);
+        Assert.Equal("tool_error", Text(content["kind"]));
+        Assert.Equal("UNSUPPORTED_CAPABILITY", Text(content["code"]));
+        await AssertLiveAsync(driver, session, "foreign-process-session-remains-live");
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

@@ -1675,8 +1675,8 @@ def register_ui_tools(
             crop_y: Raw-image crop origin Y; requires all crop arguments.
             crop_width: Raw-image crop width; requires all crop arguments.
             crop_height: Raw-image crop height; requires all crop arguments.
-            expected_hwnd: Require this HWND and physical raster size before persisting
-                evidence.
+            expected_hwnd: Capture this HWND; a different returned HWND fails without pixels.
+                A size-only mismatch returns a preview without persisted evidence.
             expected_physical_width: Required raw raster width in physical pixels with
                 expected_hwnd.
             expected_physical_height: Required raw raster height in physical pixels with
@@ -1819,6 +1819,7 @@ def register_ui_tools(
                         strict_target_values = cast(dict[str, int | str], strict_target)
                         bridge_request.update(
                             {
+                                "hwnd": cast(int, strict_target_values["hwnd"]),
                                 "typed_bitblt_fallback": True,
                                 "expected_hwnd": cast(int, strict_target_values["hwnd"]),
                                 "expected_physical_width": cast(int, strict_target_values["width"]),
@@ -1859,6 +1860,17 @@ def register_ui_tools(
                             "falling back to HWND capture"
                         )
                     else:
+                        if (
+                            strict_target_requested
+                            and type(bridge_result.get("hwnd")) is int
+                            and bridge_result["hwnd"] != expected_hwnd
+                        ):
+                            response = build_error_response(
+                                "Bridge screenshot HWND does not match the expected capture target",
+                                state=session.state.state,
+                            )
+                            response["code"] = "PHYSICAL_CAPTURE_MISMATCH"
+                            return response
                         bridge_screenshot = bridge_result
                         try:
                             png_bytes = base64.b64decode(bridge_result["base64"], validate=evidence)
