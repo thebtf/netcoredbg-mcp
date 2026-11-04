@@ -987,6 +987,7 @@ public sealed class GetCallStackContractTests
         var before = await driver.ReadNativeActionsAsync();
         var content = await SetVariableCallAsync(driver, SetVariableArguments(session, context, 1001, name, value), "set-exact");
         Assert.Equal("set_variable_success", content["kind"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
         Assert.Equal(expectedValue, content["value"]?.GetValue<string>());
         Assert.Equal(expectedType, content["type"]?.GetValue<string>());
         Assert.Equal(expectedReference, content["variablesReference"]?.GetValue<int>());
@@ -1053,6 +1054,7 @@ public sealed class GetCallStackContractTests
         var result = await SetVariableCallAsync(driver, arguments, "set-invalid", true);
         Assert.Equal("invalid_tool_arguments", result["kind"]?.GetValue<string>());
         Assert.Equal("INVALID_TOOL_ARGUMENTS", result["error"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(result);
         Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
     }
 
@@ -1064,7 +1066,7 @@ public sealed class GetCallStackContractTests
     [InlineData(true, "disable-on-threads", false)]
     public async Task SetVariable_CapabilityBaselineAndReaderOrderedDelta_ControlAdmission(bool? baseline, string delta, bool supported)
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(SetVariableOptions(baseline, delta));
+        await using var driver = await ModernMcpProcessDriver.StartAsync(SetVariableOptions(baseline, delta), startupTimeout: TimeSpan.FromSeconds(10));
         var session = await StartStoppedSessionAsync(driver, "set-cap-start");
         var context = (await InspectionStackAsync(driver, session, "set-cap-stack"))["inspectionContextId"]!.GetValue<string>();
         if (delta != "none")
@@ -1090,7 +1092,7 @@ public sealed class GetCallStackContractTests
     [Fact]
     public async Task SetVariable_UnknownContext_IsRefusedWithoutWrite()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync(SetVariableOptions(true));
+        await using var driver = await ModernMcpProcessDriver.StartAsync(SetVariableOptions(true), startupTimeout: TimeSpan.FromSeconds(10));
         var session = await StartStoppedSessionAsync(driver, "set-unknown-start");
         var before = await driver.ReadNativeActionsAsync();
         AssertSetVariableFailure(await SetVariableCallAsync(driver, SetVariableArguments(session, "unknown-context", 1001, "x", "1"), "set-unknown", true), "refused");
@@ -1238,6 +1240,7 @@ public sealed class GetCallStackContractTests
     private static void AssertSetVariableFailure(JsonObject content, string outcome)
     {
         Assert.Equal($"DAP_SET_VARIABLE_{outcome.ToUpperInvariant()}", content["error"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
         Assert.DoesNotContain("private", content.ToJsonString(), StringComparison.OrdinalIgnoreCase);
     }
 
