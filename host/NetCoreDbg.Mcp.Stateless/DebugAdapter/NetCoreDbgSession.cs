@@ -680,6 +680,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
 
         var variables = RequireInspectionArray(response.Body, "variables");
+        if (count is > 0 && variables.GetArrayLength() > count.Value)
+        {
+            throw new InvalidDataException("DAP variables response exceeds the requested count.");
+        }
+
         var normalized = new DapVariable[variables.GetArrayLength()];
         var index = 0;
         foreach (var variable in variables.EnumerateArray())

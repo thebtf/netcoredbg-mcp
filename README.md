@@ -76,8 +76,10 @@ variable reference is a leaf. After a step, continuation, or other invalidation,
 fetch a new stack and context: the debugger may reuse numeric references.
 The source-built host accepts optional `start` and `count` and forwards them to
 the adapter. Omitted or null options are omitted from DAP; `count: 0` requests
-all remaining children. Results remain limited to 256 entries and 256 KiB, and
-adapter support determines the page. Variable filtering is not supported: a
+all remaining children. Results remain limited to 256 entries and 256 KiB. If
+an adapter returns more than a positive `count`, the host returns a protocol
+error and closes the session rather than returning a misleading page. The adapter
+still determines which entries it returns. Variable filtering is not supported: a
 real `netcoredbg` 3.1.3-1 run returned an empty `indexed` result for an integer
 array and classified its elements as `named` (Engram issue #547).
 

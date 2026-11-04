@@ -58,7 +58,9 @@ are omitted from the DAP request; zero `count` is sent and requests all remainin
 children. Unknown or invalid fields, including `filter`, fail before DAP I/O.
 The host advertises `supportsVariablePaging` in DAP initialization and sends one
 request, preserving stopped-context admission, refusal, full-response validation,
-256-entry and 256-KiB limits, and drain behavior. The adapter owns paging behavior.
+256-entry and 256-KiB limits, and drain behavior. A response with more entries
+than a positive requested `count` is a protocol error, returns no partial page,
+and drains the session. The adapter still determines which entries it returns.
 
 An earlier candidate also forwarded `filter`, but a real `netcoredbg` 3.1.3-1
 run showed that an integer array's unfiltered page returned `[1]=2, [2]=3` while
@@ -77,9 +79,15 @@ The real debugger's filter mismatch remains a failure, not a passing classificat
 After filter removal, the controlled selection passed 17/20; three existing
 cases were cancelled during SDK discovery before a tool request and then passed
 3/3 in isolation. This is not one 20/20 run, and the startup cause remains
-unknown. A separate source-built MCP run with the real debugger returned
+unknown. Before the count-bound validation, a separate source-built MCP run with
+the real debugger returned
 `[1]=2, [2]=3` for `start: 1, count: 2` and completed public stop (1/1). No GUI
 or physical input was exercised; installed delivery remains unproven.
+
+An adapter response exceeding a positive `count` was accepted before the
+additional validation (RED); after the change, that regression and adjacent
+page/refusal cases passed 8/8 in a separate controlled selection; the explicit
+session-eviction assertion passed 1/1 afterward.
 
 ## Original B2 outcome — historical scope
 An opt-in modern native MCP client with a live, stopped debug session whose DAP initialize response explicitly supports delayed stack-trace loading can explicitly name one opaque session and one thread, receive one bounded normalized page of its DAP frames, and retain the session after a refusal. The installed Python `netcoredbg-mcp` remains the selected default/rollback route and independently proves `PRODUCT_WORKS` as non-selection compatibility.

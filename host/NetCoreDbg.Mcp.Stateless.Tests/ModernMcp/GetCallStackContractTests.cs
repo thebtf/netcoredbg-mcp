@@ -537,6 +537,30 @@ public sealed class GetCallStackContractTests
     }
 
     [Fact]
+    public async Task VariablesPaging_AdapterExceedsRequestedCount_ReturnsProtocolErrorWithoutPartialValues()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(InspectionOptions("get_variables", "success"), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "variables-overcount-start");
+        var context = (await InspectionStackAsync(driver, session, "variables-overcount-stack"))["inspectionContextId"]!.GetValue<string>();
+        var arguments = InspectionArguments(session, context, "variablesReference", 1001);
+        arguments["count"] = 1;
+        var response = await driver.CallToolRawAsync("get_variables", arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId("variables-overcount"));
+        var envelope = ModernMcpProcessDriver.RequireResult(response);
+        if (!(envelope["isError"]?.GetValue<bool>() ?? false))
+        {
+            var stop = AssertApplicationEnvelope(await driver.CallToolRawAsync("stop_debug", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("variables-overcount-stop"), timeout: TimeSpan.FromSeconds(15)), isError: false);
+            Assert.Equal("stop_debug_success", stop["kind"]?.GetValue<string>());
+        }
+        var content = AssertApplicationEnvelope(response, isError: true);
+        AssertInspectionFailure(content, "get_variables", protocolFailure: true);
+        Assert.False(content.ContainsKey("variables"));
+        var state = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("variables-overcount-state")), isError: true);
+        AssertNotFound(state);
+    }
+
+    [Fact]
     public async Task FrameInspection_StepReusesNumericReference_OldContextIsRefusedWithoutIoAndFreshContextWorks()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack());
