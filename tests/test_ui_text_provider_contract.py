@@ -21,6 +21,11 @@ from netcoredbg_mcp.session.manager import SessionManager
 from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
 from netcoredbg_mcp.session.state import DebugState, TransportTerminalSummary
 from netcoredbg_mcp.tools.ui_evidence import register_ui_evidence_tools
+from netcoredbg_mcp.windows_process_owner import (
+    AdmissionStage,
+    WindowsOwnedProcess,
+    _Win32CallError,
+)
 from tests.test_ui_text_input_safety import NoSafeTextSetterBackend, assert_no_hidden_input
 
 _OMITTED = object()
@@ -202,6 +207,9 @@ class ProviderHarness:
         self.session._active_dap_run = self.session._client._run_for_direct_reader().generation
         self.session.state.state = DebugState.RUNNING
         self.session.state.process_id = self.process.pid
+        self.session._provider_target = (
+            self.session.state.activity_epoch, FakeBinding(self.process)
+        )
         monkeypatch.setattr(
             self.session,
             "cancel_pending_stealth_foreground_restore",
@@ -272,15 +280,21 @@ class ProviderHarness:
         # Rebinding/epoch reset is deliberately NOT an observation of process exit.
         self.session._begin_debuggee_epoch(lifecycle_state=DebugState.RUNNING)
         self.session.state.process_id = self.process.pid
+        self.session._provider_target = (
+            self.session.state.activity_epoch, FakeBinding(self.process)
+        )
         self.backend_holder["instance"] = NoSafeTextSetterBackend()
 
-    def bind_process_event(self, monkeypatch):
+    def bind_process_event(self, monkeypatch, *, mode=None):
         client = DAPClient("/unused-in-memory-dap")
         client._process = MagicMock(pid=43, returncode=None)
         run = client._run_for_direct_reader()
         self.session._client = client
         self.session._active_dap_run = run.generation
         monkeypatch.setattr(self.session, "_observe_process", MagicMock())
+        if mode is not None:
+            self.session._clear_provider_target()
+            self.session._bind_debuggee_mode(run.generation, mode)
         self.session._register_event_handlers()
         client._handle_message(
             {
@@ -740,6 +754,121 @@ async def test_replaced_run_with_same_generation_refuses_reserved_dispatch(harne
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reserved", [False, True], ids=["new", "reserved"])
+async def test_unreadable_adapter_owner_refuses_provider_dispatch(
+    harness, monkeypatch, caplog, reserved
+):
+    caplog.set_level("DEBUG", logger="netcoredbg_mcp")
+    client, run = harness.bind_process_event(monkeypatch)
+    api = MagicMock()
+    api.exit_code.return_value = None
+    owner = WindowsOwnedProcess(
+        owner=MagicMock(root_pid=43),
+        api=api,
+        job_handle=1,
+        process_handle=2,
+        stdin=None,
+        stdout=MagicMock(),
+        stderr=MagicMock(),
+        transports=(),
+    )
+    run.process = owner
+    run.owner = owner
+    client._process = owner
+    operation = ControlledOperation(pause_before_dispatch=True)
+    caller = None
+    try:
+        if reserved:
+            harness.runner.operations.append(operation)
+            caller = asyncio.create_task(harness.replace())
+            await asyncio.wait_for(operation.entered.wait(), timeout=1)
+            assert not operation.dispatched.is_set()
+        api.exit_code.side_effect = _Win32CallError(AdmissionStage.DRAIN, 6)
+        assert owner.returncode is None
+        assert run.phase is _RunPhase.ACTIVE
+        assert run.finalizer_task is None
+        assert harness.session.state.state is DebugState.RUNNING
+        assert harness.session.state.transport_terminal is None
+        assert not harness.process.exited
+        if reserved:
+            assert caller is not None
+            operation.allow_dispatch.set()
+            refused = await asyncio.wait_for(caller, timeout=1)
+            assert not operation.dispatched.is_set()
+        else:
+            refused = await harness.replace()
+
+        assert harness.runner.effects == []
+        assert_semantics(refused, status="BLOCKED", effect_state="not_started", verified=False)
+        harness.assert_no_generic_input()
+        assert_private(harness.envelopes, logs=caplog.text)
+    finally:
+        operation.allow_dispatch.set()
+        operation.release.set()
+        if caller is not None:
+            caller.cancel()
+            await asyncio.gather(caller, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_observed_adapter_exit_refuses_new_provider_admission(harness, monkeypatch, caplog):
+    caplog.set_level("DEBUG", logger="netcoredbg_mcp")
+    client, run = harness.bind_process_event(monkeypatch)
+    epoch = harness.session.state.activity_epoch
+    client._process.returncode = 0
+    assert run.phase is _RunPhase.ACTIVE
+    assert run.finalizer_task is None
+    assert harness.session.state.state is DebugState.RUNNING
+    assert harness.session.state.transport_terminal is None
+    assert harness.session.state.activity_epoch is epoch
+    assert harness.session._active_dap_run == run.generation
+    assert not harness.process.exited
+
+    refused = await harness.replace()
+
+    assert harness.runner.effects == []
+    assert_semantics(refused, status="BLOCKED", effect_state="not_started", verified=False)
+    harness.assert_no_generic_input()
+    assert_private(harness.envelopes, logs=caplog.text)
+
+
+@pytest.mark.asyncio
+async def test_observed_adapter_exit_refuses_reserved_provider_dispatch(
+    harness, monkeypatch, caplog
+):
+    caplog.set_level("DEBUG", logger="netcoredbg_mcp")
+    client, run = harness.bind_process_event(monkeypatch)
+    epoch = harness.session.state.activity_epoch
+    operation = ControlledOperation(pause_before_dispatch=True)
+    harness.runner.operations.append(operation)
+    caller = asyncio.create_task(harness.replace())
+    try:
+        await asyncio.wait_for(operation.entered.wait(), timeout=1)
+        assert not operation.dispatched.is_set()
+        client._process.returncode = 0
+        assert run.phase is _RunPhase.ACTIVE
+        assert run.finalizer_task is None
+        assert harness.session.state.state is DebugState.RUNNING
+        assert harness.session.state.transport_terminal is None
+        assert harness.session.state.activity_epoch is epoch
+        assert harness.session._active_dap_run == run.generation
+        assert not harness.process.exited
+        operation.allow_dispatch.set()
+        refused = await asyncio.wait_for(caller, timeout=1)
+
+        assert not operation.dispatched.is_set()
+        assert harness.runner.effects == []
+        assert_semantics(refused, status="BLOCKED", effect_state="not_started", verified=False)
+        harness.assert_no_generic_input()
+        assert_private(harness.envelopes, logs=caplog.text)
+    finally:
+        operation.allow_dispatch.set()
+        operation.release.set()
+        caller.cancel()
+        await asyncio.gather(caller, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_finalizing_run_refuses_new_provider_admission(harness, monkeypatch, caplog):
     caplog.set_level("DEBUG", logger="netcoredbg_mcp")
     client, run = harness.bind_process_event(monkeypatch)
@@ -1092,6 +1221,191 @@ async def test_failed_original_process_wait_does_not_clear_unknown_fence(harness
     assert_semantics(second, status="BLOCKED", effect_state="not_started", verified=False)
     assert len(harness.runner.effects) == 1
     assert not harness.process.exited
+
+
+@pytest.mark.asyncio
+async def test_delayed_launch_process_event_after_pid_reuse_refuses_provider_dispatch(
+    harness, monkeypatch, caplog
+):
+    caplog.set_level("DEBUG", logger="netcoredbg_mcp")
+    original = harness.process
+    original.exited = True
+    harness.process = FakeProcess(creation_time=original.creation_time + 1)
+    assert harness.process.pid == original.pid
+    assert not harness.process.exited
+
+    client, run = harness.bind_process_event(monkeypatch, mode="launch")
+    assert harness.session._debuggee_mode == (run.generation, "launch")
+    assert harness.session.state.process_id == original.pid
+    assert harness.session.state.state is DebugState.RUNNING
+    assert harness.session.state.transport_terminal is None
+    assert harness.session._client is client
+
+    refused = await harness.replace()
+
+    assert harness.runner.effects == []
+    assert_semantics(refused, status="BLOCKED", effect_state="not_started", verified=False)
+    harness.assert_no_generic_input()
+    assert_private(harness.envelopes, logs=caplog.text)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("observation", ["live", "reused", "unavailable"])
+async def test_attach_binds_original_instance_before_async_setup_for_provider_dispatch(
+    harness, monkeypatch, caplog, observation
+):
+    caplog.set_level("DEBUG", logger="netcoredbg_mcp")
+    original = harness.process
+    provider_module = importlib.import_module("netcoredbg_mcp.ui.provider_text")
+    unavailable_attempts = []
+    if observation == "unavailable":
+        def unavailable(pid):
+            unavailable_attempts.append(pid)
+            raise OSError("synthetic process observation failure")
+
+        monkeypatch.setattr(provider_module, "capture_process", unavailable)
+
+    setup_entered = asyncio.Event()
+    allow_setup = asyncio.Event()
+
+    async def wait_for_initialized():
+        setup_entered.set()
+        await allow_setup.wait()
+        return True
+
+    session = harness.session
+    client = session._client
+    monkeypatch.setattr(session._initialized_event, "wait", wait_for_initialized)
+    monkeypatch.setattr(session, "_sync_all_breakpoints", AsyncMock())
+    monkeypatch.setattr(client, "set_exception_breakpoints", AsyncMock())
+    monkeypatch.setattr(client, "attach", AsyncMock(return_value=MagicMock(success=True)))
+    monkeypatch.setattr(
+        client, "configuration_done", AsyncMock(return_value=MagicMock(success=True))
+    )
+    attach_task = asyncio.create_task(session.attach(original.pid))
+    try:
+        await asyncio.wait_for(setup_entered.wait(), timeout=1)
+        captured_before_setup = tuple(harness.handles)
+        unavailable_before_setup = tuple(unavailable_attempts)
+        if observation == "reused":
+            original.exited = True
+            harness.process = FakeProcess(creation_time=original.creation_time + 1)
+            assert harness.process.pid == original.pid
+        allow_setup.set()
+        attached = await asyncio.wait_for(attach_task, timeout=1)
+        assert attached == {"success": True, "processId": original.pid}
+        assert session.state.state is DebugState.RUNNING
+        assert session.state.process_id == original.pid
+        if observation == "unavailable":
+            monkeypatch.setattr(provider_module, "capture_process", harness.capture_process)
+
+        result = await harness.replace()
+
+        if observation == "live":
+            assert_semantics(result, status="PASS", effect_state="completed", verified=True)
+            assert len(harness.runner.effects) == 1
+            assert harness.runner.effects[0]["binding"].process is original
+        else:
+            assert harness.runner.effects == []
+            assert_semantics(result, status="BLOCKED", effect_state="not_started", verified=False)
+        if observation == "unavailable":
+            assert unavailable_before_setup == (original.pid,)
+        else:
+            assert any(binding.process is original for binding in captured_before_setup)
+        harness.assert_no_generic_input()
+        assert_private(harness.envelopes, logs=caplog.text)
+    finally:
+        allow_setup.set()
+        attach_task.cancel()
+        await asyncio.gather(attach_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_attach_waiting_for_lock_closes_previously_captured_target(
+    harness, monkeypatch
+):
+    provider_module = importlib.import_module("netcoredbg_mcp.ui.provider_text")
+    captured = asyncio.Event()
+    old_target = harness.session._provider_target
+
+    def capture(pid):
+        binding = harness.capture_process(pid)
+        captured.set()
+        return binding
+
+    monkeypatch.setattr(provider_module, "capture_process", capture)
+    async with harness.session._lifecycle_lock:
+        task = asyncio.create_task(harness.session.attach(harness.process.pid))
+        try:
+            await asyncio.wait_for(captured.wait(), timeout=1)
+            assert len(harness.handles) == 1
+            assert not harness.handles[0].closed
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert harness.handles[0].closed
+            assert harness.session._provider_target is old_target
+            assert harness.runner.effects == []
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("condition", ["exited", "unreadable"])
+async def test_attach_target_liveness_lost_before_dispatch_refuses_reserved_write(
+    harness, condition, caplog
+):
+    caplog.set_level("DEBUG", logger="netcoredbg_mcp")
+    operation = ControlledOperation(pause_before_dispatch=True)
+    harness.runner.operations.append(operation)
+    caller = asyncio.create_task(harness.replace())
+    try:
+        await asyncio.wait_for(operation.entered.wait(), timeout=1)
+        if condition == "exited":
+            harness.process.exited = True
+        else:
+            harness.process.observation_error = True
+        operation.allow_dispatch.set()
+        refused = await asyncio.wait_for(caller, timeout=1)
+
+        assert not operation.dispatched.is_set()
+        assert harness.runner.effects == []
+        assert_semantics(refused, status="BLOCKED", effect_state="not_started", verified=False)
+        harness.assert_no_generic_input()
+        assert_private(harness.envelopes, logs=caplog.text)
+    finally:
+        operation.allow_dispatch.set()
+        operation.release.set()
+        caller.cancel()
+        await asyncio.gather(caller, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_reused_pid_without_new_session_binding_refuses_provider_admission(
+    harness, monkeypatch, caplog
+):
+    caplog.set_level("DEBUG", logger="netcoredbg_mcp")
+    client, run = harness.bind_process_event(monkeypatch)
+    original = harness.process
+    epoch = harness.session.state.activity_epoch
+    assert harness.session.state.process_id == original.pid
+    original.exited = True
+    harness.process = FakeProcess(creation_time=original.creation_time + 1)
+    assert harness.process.pid == original.pid
+    assert not harness.process.exited
+    assert harness.session.state.activity_epoch is epoch
+    assert harness.session._client is client
+    assert harness.session._active_dap_run == run.generation
+    assert harness.session.state.state is DebugState.RUNNING
+    assert harness.session.state.transport_terminal is None
+
+    refused = await harness.replace()
+
+    assert harness.runner.effects == []
+    assert_semantics(refused, status="BLOCKED", effect_state="not_started", verified=False)
+    harness.assert_no_generic_input()
+    assert_private(harness.envelopes, logs=caplog.text)
 
 
 @pytest.mark.asyncio

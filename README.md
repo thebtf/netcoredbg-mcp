@@ -484,6 +484,13 @@ element identity are refused before the assignment. A DAP run must still be
 active when the request is admitted and immediately before dispatch. NUL and
 unpaired Unicode surrogates are rejected; other text is passed literally.
 
+Provider replacement currently requires an attached debuggee whose exact process
+instance was observed at attach admission and remains live. If that observation
+is unavailable, attach can still succeed, but provider replacement is refused.
+For launched debuggees, a PID-only DAP process event cannot establish the original
+instance, so provider replacement is refused until stronger launch authority exists.
+An exited or unobservable adapter owner also prevents provider dispatch.
+
 The helper makes no explicit keyboard, pointer, or focus calls and does not retry
 the assignment. UI Automation or the application provider can still change focus
 or trigger application behavior; caret, selection, undo, and binding semantics

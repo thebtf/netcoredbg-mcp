@@ -786,6 +786,21 @@ class WindowsOwnedProcess:
             return None
         return self._returncode
 
+    def observe_liveness(self) -> bool | None:
+        """Return live/dead, or None if the retained handle cannot be observed."""
+        if self._returncode is not None:
+            return False
+        if self._process_handle is None:
+            return None
+        try:
+            code = self._api.exit_code(self._process_handle)
+        except _Win32CallError:
+            return None
+        if code is None:
+            return True
+        self._returncode = code
+        return False
+
     @classmethod
     async def launch(
         cls,
@@ -944,23 +959,6 @@ class WindowsOwnedProcess:
             raise _Win32CallError(AdmissionStage.DRAIN, None)
         return self._api.active_processes(self._job_handle)
 
-    def _root_is_active_before_force(self) -> bool | None:
-        """Observe whether the retained root is still active before Job force."""
-
-        if self._returncode is not None:
-            return False
-        handle = self._process_handle
-        if handle is None:
-            return None
-        try:
-            returncode = self._api.exit_code(handle)
-        except _Win32CallError:
-            return None
-        if returncode is None:
-            return True
-        self._returncode = returncode
-        return False
-
     async def drain_after_grace(
         self,
         *,
@@ -1016,7 +1014,7 @@ class WindowsOwnedProcess:
             )
             self._drain_receipt = receipt
             return receipt
-        root_was_forced = self._root_is_active_before_force()
+        root_was_forced = self.observe_liveness()
         try:
             self._api.terminate_job(self._job_handle)
         except _Win32CallError as error:

@@ -474,6 +474,25 @@ class DAPClient:
             or run.phase is not _RunPhase.ACTIVE
         ):
             return None
+        try:
+            if run.owner is not None:
+                if run.owner is not run.process or run.owner.observe_liveness() is not True:
+                    return None
+            elif run.posix_owner is not None:
+                if (
+                    run.posix_owner is not run.process
+                    or run.posix_owner.returncode is not None
+                    or run.posix_owner._control_failed
+                    or run.posix_owner._control_eof
+                    or run.posix_owner._closed
+                ):
+                    return None
+            elif isinstance(run.process, (WindowsOwnedProcess, PosixOwnedProcess)):
+                return None
+            elif run.process.returncode is not None:
+                return None
+        except Exception:
+            return None
         return run
 
     @property

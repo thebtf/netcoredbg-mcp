@@ -338,6 +338,10 @@ async def test_only_ready_dispatched_uncertainty_fences_live_session(monkeypatch
         is_signaled=lambda: False,
         close=MagicMock(),
     )
+    session._provider_target = (
+        session.state.activity_epoch,
+        SimpleNamespace(identity=binding.identity, is_signaled=lambda: False, close=MagicMock()),
+    )
     capture = MagicMock(return_value=binding)
     monkeypatch.setattr(provider_text, "capture_process", capture)
     helper = FakeHelper(asyncio.Event(), banner=banner, lost=True)
@@ -444,6 +448,12 @@ async def test_late_original_completion_cannot_clear_reused_pid_operation(monkey
         is_signaled=lambda: False,
         close=MagicMock(),
     )
+    session._provider_target = (
+        session.state.activity_epoch,
+        SimpleNamespace(
+            identity=original.identity, is_signaled=lambda: original_exited, close=MagicMock()
+        ),
+    )
     bindings = deque([original, replacement])
     monkeypatch.setattr(provider_text, "capture_process", lambda _pid: bindings.popleft())
     entered = [asyncio.Event(), asyncio.Event()]
@@ -470,6 +480,14 @@ async def test_late_original_completion_cannot_clear_reused_pid_operation(monkey
             await caller
         original_receiver = next(iter(session._provider_text_receivers))
         original_exited = True
+        session._begin_debuggee_epoch(lifecycle_state=DebugState.RUNNING)
+        session.state.process_id = 42
+        session._provider_target = (
+            session.state.activity_epoch,
+            SimpleNamespace(
+                identity=replacement.identity, is_signaled=lambda: False, close=MagicMock()
+            ),
+        )
         newer = asyncio.create_task(session.replace_text_provider(selector, "B"))
         await asyncio.wait_for(entered[1].wait(), timeout=1)
         release[0].set()

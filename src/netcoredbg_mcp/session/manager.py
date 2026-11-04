@@ -169,6 +169,41 @@ class SessionManager:
         self._provider_text_operations: dict[tuple[int, str], _ProviderTextOperation] = {}
         self._provider_text_receivers: set[asyncio.Task[dict[str, Any]]] = set()
         self._provider_text_close_pending: set[_ProviderTextOperation] = set()
+        self._provider_target: tuple[object, Any] | None = None
+        self._provider_target_close_pending: list[Any] = []
+
+    def _close_provider_target(self, binding: Any) -> None:
+        try:
+            binding.close()
+        except Exception:
+            self._provider_target_close_pending.append(binding)
+
+    def _clear_provider_target(self) -> None:
+        pending, self._provider_target_close_pending = self._provider_target_close_pending, []
+        for binding in pending:
+            self._close_provider_target(binding)
+        target, self._provider_target = self._provider_target, None
+        if target is not None:
+            self._close_provider_target(target[1])
+
+    def _capture_provider_target(self, pid: int) -> Any | None:
+        binding = None
+        try:
+            binding = provider_text.capture_process(pid)
+            identity = binding.identity
+            if (
+                not isinstance(identity, tuple)
+                or len(identity) != 2
+                or identity[0] != pid
+                or binding.is_signaled() is not False
+            ):
+                self._close_provider_target(binding)
+                return None
+            return binding
+        except Exception:
+            if binding is not None:
+                self._close_provider_target(binding)
+            return None
 
     def _release_provider_text(self, operation: _ProviderTextOperation) -> None:
         identity = operation.binding.identity
@@ -221,6 +256,17 @@ class SessionManager:
             return provider_text.blocked("no_active_session")
         if type(pid) is not int or pid <= 0:
             return provider_text.blocked("process_unavailable")
+        target = self._provider_target
+        try:
+            if (
+                target is None
+                or target[0] is not self._state.activity_epoch
+                or target[1].identity[0] != pid
+                or target[1].is_signaled() is not False
+            ):
+                return provider_text.blocked("process_identity_unavailable")
+        except Exception:
+            return provider_text.blocked("process_identity_unavailable")
         for retired in tuple(self._provider_text_close_pending):
             self._release_provider_text(retired)
 
@@ -241,6 +287,7 @@ class SessionManager:
                 not isinstance(identity, tuple)
                 or len(identity) != 2
                 or identity[0] != pid
+                or identity != target[1].identity
                 or binding.is_signaled() is not False
             ):
                 self._release_provider_text(_ProviderTextOperation(binding))
@@ -260,17 +307,22 @@ class SessionManager:
         adapter_owner = source_client.adapter_cleanup_owner
 
         def owns_session() -> bool:
-            return (
-                self.is_active
-                and self._state.transport_terminal is None
-                and (dap_generation is None or self._stopping_dap_run != dap_generation)
-                and self._state.process_id == pid
-                and self._state.activity_epoch is activity_epoch
-                and self._active_dap_run is dap_generation
-                and self._client is source_client
-                and source_client._active_run_for_generation(dap_generation) is dap_run
-                and source_client.adapter_cleanup_owner is adapter_owner
-            )
+            try:
+                return (
+                    self.is_active
+                    and self._state.transport_terminal is None
+                    and (dap_generation is None or self._stopping_dap_run != dap_generation)
+                    and self._state.process_id == pid
+                    and self._state.activity_epoch is activity_epoch
+                    and self._active_dap_run is dap_generation
+                    and self._client is source_client
+                    and self._provider_target is target
+                    and target[1].is_signaled() is False
+                    and source_client._active_run_for_generation(dap_generation) is dap_run
+                    and source_client.adapter_cleanup_owner is adapter_owner
+                )
+            except Exception:
+                return False
 
         self._provider_text_operations[identity] = operation
 
@@ -532,6 +584,7 @@ class SessionManager:
         lifecycle_state: DebugState | None = None,
     ) -> None:
         """Replace per-debuggee state before a new adapter or debuggee generation."""
+        self._clear_provider_target()
         next_lifecycle_state = self._state.state if lifecycle_state is None else lifecycle_state
         self._state = self._create_session_state(next_lifecycle_state)
         self._output_bytes = 0
@@ -846,6 +899,8 @@ class SessionManager:
 
     def _set_state(self, new_state: DebugState) -> None:
         """Update state and notify listeners."""
+        if new_state in (DebugState.IDLE, DebugState.TERMINATED):
+            self._clear_provider_target()
         old_state = self._state.state
         self._state.state = new_state
         if old_state != new_state:
@@ -2250,8 +2305,18 @@ class SessionManager:
 
     async def attach(self, process_id: int) -> dict[str, Any]:
         """Attach to a running process under the lifecycle serialization gate."""
-        async with self._lifecycle_lock:
-            return await self._attach_locked(process_id)
+        binding = self._capture_provider_target(process_id)
+        try:
+            async with self._lifecycle_lock:
+                result = await self._attach_locked(process_id)
+                if binding is not None:
+                    self._clear_provider_target()
+                    self._provider_target = (self._state.activity_epoch, binding)
+                    binding = None
+                return result
+        finally:
+            if binding is not None:
+                self._close_provider_target(binding)
 
     async def _attach_locked(self, process_id: int) -> dict[str, Any]:
         """Complete attach while the caller holds the lifecycle serialization gate."""
@@ -2306,6 +2371,7 @@ class SessionManager:
         owner = self._client.adapter_owner
         joined_and_drained = False
         cancelled = False
+        self._clear_provider_target()
         self._stopping_dap_run = stopping_generation
         try:
             # The explicit-stop marker suppresses only this generation's terminal
