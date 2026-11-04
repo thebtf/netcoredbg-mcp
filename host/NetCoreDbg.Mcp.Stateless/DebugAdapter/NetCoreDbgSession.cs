@@ -2778,6 +2778,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         try
         {
             using var windowsProcess = OperatingSystem.IsWindows() ? WindowsNativeSceneProcess.Open(processId) : null;
+
+            // Job membership rejects other sessions, but does not prove an incarnation reused within this job.
+            if (windowsProcess is not null
+                && (_processTreeOwnership is not WindowsProcessTreeOwnership windowsOwnership
+                    || !windowsOwnership.Contains(windowsProcess)))
+            {
+                return;
+            }
+
             using var process = windowsProcess is null ? Process.GetProcessById(processId) : null;
             string? executablePath;
             long windowsCreationUtcTicks = 0;
@@ -4014,6 +4023,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         public void Dispose() => _job.Dispose();
 
+        internal bool Contains(SafeProcessHandle process) =>
+            !process.IsInvalid && IsProcessInJob(process, _job, out var inJob) && inJob;
+
         public void Terminate()
         {
             if (!TerminateJobObject(_job.DangerousGetHandle(), 1))
@@ -4319,6 +4331,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsProcessInJob(
+            SafeProcessHandle process, SafeKernelHandle job, [MarshalAs(UnmanagedType.Bool)] out bool result);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern uint ResumeThread(IntPtr thread);
