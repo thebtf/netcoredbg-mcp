@@ -164,6 +164,7 @@ public sealed class ModernProtocolContractTests
     [Theory]
     [InlineData("get_modules")]
     [InlineData("get_progress")]
+    [InlineData("get_loaded_sources")]
     public async Task ToolsList_RuntimeInventory_PublishesRequiredOpaqueSessionOnly(string toolName)
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync(startupTimeout: TimeSpan.FromSeconds(10));
@@ -956,7 +957,7 @@ public sealed class ModernProtocolContractTests
     private static void AssertCatalog(JsonObject result)
     {
         var tools = Assert.IsType<JsonArray>(result["tools"]);
-        Assert.Equal(32, tools.Count);
+        Assert.Equal(33, tools.Count);
         Assert.Equal(
             [
                 "start_debug",
@@ -985,6 +986,7 @@ public sealed class ModernProtocolContractTests
                 "get_exception_info",
                 "get_modules",
                 "get_progress",
+                "get_loaded_sources",
                 "get_ui_probe_capabilities",
                 "capture_visual_evidence",
                 "read_capture_artifact",

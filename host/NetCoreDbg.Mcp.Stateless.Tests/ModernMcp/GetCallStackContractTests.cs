@@ -721,6 +721,26 @@ public sealed class GetCallStackContractTests
     }
 
     [Fact]
+    public async Task GetLoadedSources_UnsupportedAdapter_RefusesWithoutDapWrite()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack(), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "loaded-sources-unsupported-start");
+        var before = await driver.ReadNativeActionsAsync();
+
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_loaded_sources",
+            new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("loaded-sources-unsupported")), isError: true);
+
+        Assert.Equal("dap_loaded_sources_unsupported", content["kind"]?.GetValue<string>());
+        Assert.Equal("DAP_LOADED_SOURCES_UNSUPPORTED", content["error"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+        Assert.Equal("debug_state_success", AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state",
+            new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("loaded-sources-unsupported-state")), isError: false)["kind"]?.GetValue<string>());
+    }
+
+    [Fact]
     public async Task ToolsList_GetExceptionInfo_PublishesClosedExplicitStoppedThreadInputWithoutDapIo()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync(startupTimeout: TimeSpan.FromSeconds(10));

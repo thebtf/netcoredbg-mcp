@@ -164,6 +164,20 @@
       ],
       "additionalProperties": false
     },
+    "getLoadedSourcesArguments": {
+      "type": "object",
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        }
+      },
+      "required": [
+        "debugSessionId"
+      ],
+      "additionalProperties": false
+    },
     "getCallStackArguments": {
       "type": "object",
       "required": [
@@ -1247,6 +1261,125 @@
         },
         "error": {
           "const": "OUTPUT_SEARCH_TOO_LARGE"
+        }
+      },
+      "additionalProperties": false
+    },
+    "loadedSource": {
+      "type": "object",
+      "required": [
+        "name",
+        "path",
+        "sourceReference",
+        "origin",
+        "presentationHint",
+        "adapterData"
+      ],
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourceReference": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "origin": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "presentationHint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "adapterData": {}
+      },
+      "additionalProperties": false
+    },
+    "loadedSourcesSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "sources",
+        "count"
+      ],
+      "properties": {
+        "kind": {
+          "const": "loaded_sources_success"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/loadedSource"
+          }
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapLoadedSourcesUnsupported": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_loaded_sources_unsupported"
+        },
+        "error": {
+          "const": "DAP_LOADED_SOURCES_UNSUPPORTED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapLoadedSourcesRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_loaded_sources_refused"
+        },
+        "error": {
+          "const": "DAP_LOADED_SOURCES_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapLoadedSourcesProtocolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_loaded_sources_protocol_error"
+        },
+        "error": {
+          "const": "DAP_LOADED_SOURCES_PROTOCOL_ERROR"
         }
       },
       "additionalProperties": false
@@ -3058,6 +3191,7 @@
             "get_exception_info",
             "get_modules",
             "get_progress",
+            "get_loaded_sources",
             "step_over",
             "step_into",
             "step_out",
@@ -3114,6 +3248,18 @@
         },
         {
           "$ref": "#/$defs/progressSuccess"
+        },
+        {
+          "$ref": "#/$defs/loadedSourcesSuccess"
+        },
+        {
+          "$ref": "#/$defs/dapLoadedSourcesUnsupported"
+        },
+        {
+          "$ref": "#/$defs/dapLoadedSourcesRefused"
+        },
+        {
+          "$ref": "#/$defs/dapLoadedSourcesProtocolError"
         },
         {
           "$ref": "#/$defs/runtimeInventoryIncomplete"

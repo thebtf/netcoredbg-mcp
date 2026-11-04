@@ -1395,6 +1395,105 @@ public sealed class NetCoreDbgSessionTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task LoadedSources_Cancellation_BeforeHeaderPreservesSessionButPartialHeaderDrains(bool partialHeader)
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SuppressLifecycleEvents: true, SupportsLoadedSourcesRequest: true),
+            "D:\\fixtures\\program.dll", TimeSpan.FromSeconds(10), RequestTimeout, StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var writesBefore = session.DapWriteCalls;
+        if (partialHeader) session.ArmDapWriteAtHeaderEntryBarrier(prefixBytes: 1);
+        else session.ArmDapWriteBeforeHeaderBarrier();
+
+        using var cancellation = new CancellationTokenSource();
+        var operation = session.LoadedSourcesThroughRegistryAsync(cancellation.Token,
+            beforeCancellationInspection: () =>
+            {
+                Assert.Equal(0, session.PendingRequestCount);
+                session.ReleaseDapWriteBarrier();
+                return Task.CompletedTask;
+            },
+            invokeInspection: async invoke =>
+            {
+                try { return await invoke("loaded-sources-cancel", cancellation.Token); }
+                catch (OperationCanceledException) when (!partialHeader && cancellation.IsCancellationRequested)
+                {
+                    Assert.Equal(writesBefore, session.DapWriteCalls);
+                    Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "loadedSources");
+                    session.ReleaseDapWriteBarrier();
+                    var next = await invoke("loaded-sources-after-cancel", observation.Token);
+                    Assert.False(next.IsError == true);
+                    Assert.Equal("loaded_sources_success", Assert.IsType<JsonElement>(next.StructuredContent).GetProperty("kind").GetString());
+                    throw;
+                }
+            });
+        try
+        {
+            if (partialHeader) await session.WaitForDapHeaderEntryAsync(observation.Token);
+            else await session.WaitForDapPreHeaderWriteAsync(observation.Token);
+            cancellation.Cancel();
+            var probe = await operation.WaitAsync(observation.Token);
+            Assert.True(probe.CancellationObserved);
+            Assert.Equal(!partialHeader, probe.TokenRetained);
+            Assert.Equal(!partialHeader, probe.SlotRetained);
+            Assert.Equal(!partialHeader, probe.AdapterAlive);
+            Assert.Equal(0, probe.ActiveRequestCount);
+            var state = Assert.IsType<JsonElement>(probe.Result.StructuredContent);
+            Assert.Equal(partialHeader ? "debug_session_not_found" : "debug_state_success", state.GetProperty("kind").GetString());
+            if (partialHeader)
+            {
+                Assert.Equal(1L, session.ArmedHeaderBytesForwarded);
+                Assert.True(probe.LeaseReleasedBeforeRemoval == true);
+                Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "loadedSources");
+            }
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+            cancellation.Cancel();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
+    [Fact]
+    public async Task LoadedSources_PartialHeaderCancellation_RejectsAnotherAlreadyQueuedDapWrite()
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SuppressLifecycleEvents: true, SupportsLoadedSourcesRequest: true),
+            "D:\\fixtures\\program.dll", TimeSpan.FromSeconds(10), RequestTimeout, StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var writesBefore = session.DapWriteCalls;
+        session.ArmDapWriteAtHeaderEntryBarrier(prefixBytes: 1);
+        using var cancellation = new CancellationTokenSource();
+        var sourceRequest = session.LoadedSourcesThroughRegistryAsync(cancellation.Token,
+            beforeCancellationInspection: () => { session.ReleaseDapWriteBarrier(); return Task.CompletedTask; });
+        Task? queuedRequest = null;
+        try
+        {
+            await session.WaitForDapHeaderEntryAsync(observation.Token);
+            queuedRequest = session.WaitForReaderBarrierAsync(observation.Token);
+            await session.WaitForPendingCommandAsync("threads", observation.Token);
+            cancellation.Cancel();
+            var probe = await sourceRequest.WaitAsync(observation.Token);
+            Assert.True(probe.CancellationObserved);
+            Assert.NotNull(await Record.ExceptionAsync(() => queuedRequest));
+            Assert.Equal(1L, session.ArmedHeaderBytesForwarded);
+            Assert.Equal(writesBefore + 1, session.DapWriteCalls);
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+            cancellation.Cancel();
+            _ = await Record.ExceptionAsync(() => sourceRequest);
+            if (queuedRequest is not null) _ = await Record.ExceptionAsync(() => queuedRequest);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task ExceptionInfo_Cancellation_BeforeHeaderPreservesSessionButPartialHeaderDrains(bool partialHeader)
     {
         await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
