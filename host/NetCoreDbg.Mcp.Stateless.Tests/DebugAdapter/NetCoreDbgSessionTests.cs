@@ -1,6 +1,9 @@
 using System.ComponentModel;
 using System.Collections.Immutable;
 using System.Runtime.InteropServices;
+using System.Reflection;
+using System.Runtime.Loader;
+using System.Security.AccessControl;
 using Microsoft.Win32.SafeHandles;
 using System.Text;
 using System.Text.Json;
@@ -91,6 +94,74 @@ public sealed class NetCoreDbgSessionTests
     [Fact]
     public void UnixProcessGroupOwnership_UsesLiveGuardianTerminationControl() =>
         NetCoreDbgSessionContractDriver.AssertUnixGuardianOwnershipContract();
+
+    [Fact]
+    public async Task WindowsLaunch_RetainsOwnedProcessHandleWhenReopenIsDenied()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        await using var fixture = FixtureProcess.Create(new FixtureConfiguration());
+        var assemblyPath = TestOutputPathResolver.ResolveManagedAssembly(RepositoryLayout.Root,
+            Path.Combine("host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(assemblyPath);
+        var session = Assert.IsAssignableFrom<Type>(assembly.GetType("NetCoreDbg.Mcp.Stateless.DebugAdapter.NetCoreDbgSession"));
+        var ownerType = Assert.IsAssignableFrom<Type>(session.GetNestedType("WindowsProcessTreeOwnership", BindingFlags.NonPublic));
+        var start = Assert.IsAssignableFrom<MethodInfo>(ownerType.GetMethod("Start", BindingFlags.Static | BindingFlags.NonPublic,
+            binder: null, types: [typeof(string), typeof(IReadOnlyList<string>)], modifiers: null));
+        var launch = Assert.IsAssignableFrom<IDisposable>(start.Invoke(null,
+            [fixture.ExecutablePath, new[] { "--controlled-dap-descendant" }]));
+        Process? witness = null;
+        var witnessOwned = false;
+        try
+        {
+            var process = Assert.IsType<Process>(launch.GetType().GetProperty("Process")?.GetValue(launch));
+            var owner = launch.GetType().GetProperty("Ownership")?.GetValue(launch);
+            Assert.NotNull(owner);
+            var job = Assert.IsAssignableFrom<SafeHandle>(ownerType.GetField("_job", BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(owner));
+            witness = Process.GetProcessById(process.Id);
+            var witnessHandle = witness.SafeHandle;
+            Assert.True(IsProcessInJob(witnessHandle, job.DangerousGetHandle(), out var inJob));
+            Assert.True(inJob, "The witness must belong to this exact owned job before its security is changed.");
+            witnessOwned = true;
+
+            var descriptor = new RawSecurityDescriptor("D:P(D;;GA;;;WD)");
+            var bytes = new byte[descriptor.BinaryLength];
+            descriptor.GetBinaryForm(bytes, 0);
+            Assert.True(SetKernelObjectSecurity(witnessHandle, 4, bytes), new Win32Exception(Marshal.GetLastWin32Error()).Message);
+
+            using var unbound = Process.GetProcessById(process.Id);
+            var denial = Record.Exception(() => _ = unbound.SafeHandle);
+            Assert.Equal(5, Assert.IsType<Win32Exception>(denial).NativeErrorCode);
+            Assert.False(process.SafeHandle.IsInvalid);
+        }
+        finally
+        {
+            try
+            {
+                launch.Dispose();
+                if (witnessOwned)
+                {
+                    await witness!.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                }
+            }
+            finally
+            {
+                witness?.Dispose();
+            }
+        }
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsProcessInJob(SafeProcessHandle process, IntPtr job, [MarshalAs(UnmanagedType.Bool)] out bool result);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetKernelObjectSecurity(SafeProcessHandle process, uint securityInformation, byte[] securityDescriptor);
+
 
     [Fact]
     public async Task StartAsync_StartsDebuggerWithExactVscodeInterpreterArgument()
