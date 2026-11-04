@@ -727,6 +727,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             ("start_debug_input_unavailable", "START_DEBUG_PROGRAM_REQUIRED") => true,
             ("start_debug_source_unavailable", "START_DEBUG_SOURCE_UNAVAILABLE") => true,
             ("start_debug_cwd_unavailable", "START_DEBUG_CWD_UNAVAILABLE") => true,
+            ("start_debug_dotnet_unavailable", "START_DEBUG_DOTNET_UNAVAILABLE") => true,
             _ => false,
         };
     }

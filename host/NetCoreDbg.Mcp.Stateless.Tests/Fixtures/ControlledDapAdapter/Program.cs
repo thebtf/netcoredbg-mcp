@@ -12,6 +12,22 @@ using System.Text.Unicode;
 
 if (args.Length == 1 && string.Equals(args[0], "--controlled-dap-descendant", StringComparison.Ordinal))
 {
+    if (Environment.GetEnvironmentVariable("CONTROLLED_DAP_INSPECT_ENV") == "1")
+    {
+        var transcript = Environment.GetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT")
+            ?? throw new InvalidOperationException("The controlled transcript path is required.");
+        var observation = JsonSerializer.Serialize(new
+        {
+            removed = Environment.GetEnvironmentVariable("NCD_LAUNCH_TEST_REMOVE"),
+            unchanged = Environment.GetEnvironmentVariable("NCD_LAUNCH_TEST_INHERITED"),
+            overridden = Environment.GetEnvironmentVariable("NCD_LAUNCH_TEST_VALUE"),
+            added = Environment.GetEnvironmentVariable("NCD_LAUNCH_TEST_NEW"),
+            aliasesEqual = string.Equals(Environment.GetEnvironmentVariable("WINDIR"), Environment.GetEnvironmentVariable("SYSTEMROOT"), StringComparison.Ordinal),
+        });
+        var destination = transcript + ".environment-" + Environment.ProcessId;
+        await File.WriteAllTextAsync(destination + ".tmp", observation);
+        File.Move(destination + ".tmp", destination);
+    }
     await Task.Delay(Timeout.InfiniteTimeSpan);
     return;
 }
@@ -591,6 +607,18 @@ internal sealed class ControlledDapAdapter
                 simpleControlledTree = _options.SpawnDescendant && !_options.SpawnWindowedDescendant
                     && !_options.PublishSecondWindowedDescendantAfterRelease,
             }, cancellationToken);
+        }
+
+        if (Environment.GetEnvironmentVariable("CONTROLLED_DAP_INSPECT_ENV") == "1")
+        {
+            var observed = JsonSerializer.Serialize(new
+            {
+                removed = Environment.GetEnvironmentVariable("NCD_LAUNCH_TEST_REMOVE"),
+                unchanged = Environment.GetEnvironmentVariable("NCD_LAUNCH_TEST_INHERITED"),
+                overridden = Environment.GetEnvironmentVariable("NCD_LAUNCH_TEST_VALUE"),
+                added = Environment.GetEnvironmentVariable("NCD_LAUNCH_TEST_NEW"),
+            });
+            await RecordAsync(new { kind = "environment-observation", arguments = observed }, cancellationToken);
         }
 
         try
@@ -1442,9 +1470,9 @@ internal sealed class ControlledDapAdapter
 
         foreach (var property in environment.EnumerateObject())
         {
-            if (string.IsNullOrWhiteSpace(property.Name) ||
+            if (property.Name.Length == 0 ||
                 property.Value.ValueKind != JsonValueKind.String ||
-                property.Value.GetString() is not { Length: > 0 } value)
+                property.Value.GetString() is not { } value)
             {
                 throw new InvalidDataException("DAP launch environment contains an invalid variable.");
             }

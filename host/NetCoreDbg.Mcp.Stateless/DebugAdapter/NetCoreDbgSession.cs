@@ -374,6 +374,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         RequirePositiveTimeout(initializeTimeout, nameof(initializeTimeout));
         RequirePositiveTimeout(requestTimeout, nameof(requestTimeout));
         RequirePositiveTimeout(stopTimeout, nameof(stopTimeout));
+        var removals = DapLaunchEnvironment.Removals(launchOptions?.Environment);
+        var dapEnvironment = DapLaunchEnvironment.Merge(launchEnvironment, launchOptions?.Environment);
 
         Process? process = null;
         IProcessTreeOwnership? processTreeOwnership = null;
@@ -383,7 +385,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             if (OperatingSystem.IsWindows())
             {
-                windowsLaunch = WindowsProcessTreeOwnership.Start(debuggerPath);
+                using var childEnvironment = WindowsChildEnvironmentBlock.Create(removals, dapEnvironment?.Keys);
+                dapEnvironment = childEnvironment.MatchInheritedSpellings(dapEnvironment);
+                windowsLaunch = WindowsProcessTreeOwnership.Start(debuggerPath, childEnvironment);
                 process = windowsLaunch.Process;
                 session = new NetCoreDbgSession(
                     process,
@@ -397,7 +401,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             }
             else
             {
-                var unixLaunch = UnixProcessGroupOwnership.Start(debuggerPath);
+                var unixLaunch = UnixProcessGroupOwnership.Start(debuggerPath, removals);
                 process = unixLaunch.Process;
                 processTreeOwnership = unixLaunch.Ownership;
                 session = new NetCoreDbgSession(
@@ -410,7 +414,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     processTreeOwnership);
             }
 
-            await session.StartProtocolAsync(programPath, initializeTimeout, launchEnvironment, breakpoints, launchOptions, cancellationToken).ConfigureAwait(false);
+            await session.StartProtocolAsync(programPath, initializeTimeout, dapEnvironment, breakpoints, launchOptions, cancellationToken).ConfigureAwait(false);
             return session;
         }
         catch (Exception startupFailure)
@@ -1402,9 +1406,18 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         await _initialized.Task.WaitAsync(initializeTimeout, cancellationToken).ConfigureAwait(false);
         await ConfigureBreakpointsAsync(breakpoints, cancellationToken).ConfigureAwait(false);
 
-        var launchArguments = new DapLaunchArguments(programPath,
+        var debuggeeProgram = programPath;
+        var debuggeeArguments = launchOptions?.Arguments;
+        if (launchOptions?.DotnetHostPath is { } dotnetHost)
+        {
+            debuggeeProgram = dotnetHost;
+            debuggeeArguments = new string[(launchOptions.Arguments?.Length ?? 0) + 1];
+            debuggeeArguments[0] = programPath;
+            launchOptions.Arguments?.CopyTo(debuggeeArguments, 1);
+        }
+        var launchArguments = new DapLaunchArguments(debuggeeProgram,
             launchEnvironment is { Count: > 0 } ? launchEnvironment : null,
-            launchOptions?.WorkingDirectory, launchOptions?.Arguments, launchOptions?.StopAtEntry);
+            launchOptions?.WorkingDirectory, debuggeeArguments, launchOptions?.StopAtEntry);
         var launch = await BeginRequestAsync(
             "launch",
             launchArguments,
@@ -3920,7 +3933,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         private UnixProcessGroupOwnership(System.IO.Pipes.AnonymousPipeServerStream terminationControl) =>
             _terminationControl = terminationControl;
 
-        public static UnixProcessGroupLaunch Start(string debuggerPath)
+        public static UnixProcessGroupLaunch Start(string debuggerPath, IReadOnlySet<string>? removals)
         {
             var terminationControl = new System.IO.Pipes.AnonymousPipeServerStream(
                 System.IO.Pipes.PipeDirection.Out,
@@ -3947,6 +3960,19 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                 };
+                if (removals is not null)
+                {
+                    foreach (var name in removals) startInfo.Environment.Remove(name);
+                }
+                if (removals?.Contains("PATH") == true)
+                {
+                    if (!useAppHost && !Path.IsPathFullyQualified(startInfo.FileName))
+                        startInfo.FileName = DapLaunchEnvironment.FindExecutable(startInfo.FileName)
+                            ?? throw new InvalidOperationException("The .NET host executable is unavailable.");
+                    if (!Path.IsPathFullyQualified(debuggerPath))
+                        debuggerPath = DapLaunchEnvironment.FindExecutable(debuggerPath)
+                            ?? throw new InvalidOperationException("The debugger executable is unavailable.");
+                }
                 if (!useAppHost)
                 {
                     startInfo.ArgumentList.Add(proxyAssemblyPath);
@@ -3990,6 +4016,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     {
         private const uint CreateNoWindow = 0x08000000;
         private const uint CreateSuspended = 0x00000004;
+        private const uint CreateUnicodeEnvironment = 0x00000400;
         private const uint ExtendedStartupInfoPresent = 0x00080000;
         private const uint HandleFlagInherit = 0x00000001;
         private const uint JobObjectExtendedLimitInformationClass = 9;
@@ -4000,14 +4027,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         private WindowsProcessTreeOwnership(SafeKernelHandle job) => _job = job;
 
-        public static WindowsProcessTreeLaunch Start(string debuggerPath) =>
-            StartCore(debuggerPath, ["--interpreter=vscode"], atomicJobAssignment: false);
+        public static WindowsProcessTreeLaunch Start(string debuggerPath, WindowsChildEnvironmentBlock environment) =>
+            StartCore(debuggerPath, ["--interpreter=vscode"], atomicJobAssignment: false, environment);
 
         internal static WindowsProcessTreeLaunch Start(string executablePath, IReadOnlyList<string> arguments) =>
-            StartCore(executablePath, arguments, atomicJobAssignment: true);
+            StartCore(executablePath, arguments, atomicJobAssignment: true, environment: null);
 
         private static WindowsProcessTreeLaunch StartCore(
-            string executablePath, IReadOnlyList<string> arguments, bool atomicJobAssignment)
+            string executablePath, IReadOnlyList<string> arguments, bool atomicJobAssignment, WindowsChildEnvironmentBlock? environment)
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(executablePath);
             ArgumentNullException.ThrowIfNull(arguments);
@@ -4045,7 +4072,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     childInput.DangerousGetHandle(),
                     childOutput.DangerousGetHandle(),
                     childError.DangerousGetHandle(),
-                    atomicJobAssignment ? job : null);
+                    atomicJobAssignment ? job : null, environment);
 
                 processHandle = processInformation.Process;
                 threadHandle = processInformation.Thread;
@@ -4200,7 +4227,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             IntPtr standardInput,
             IntPtr standardOutput,
             IntPtr standardError,
-            SafeKernelHandle? atomicJob)
+            SafeKernelHandle? atomicJob,
+            WindowsChildEnvironmentBlock? environment)
         {
             IntPtr attributeList = IntPtr.Zero;
             IntPtr inheritedHandleList = IntPtr.Zero;
@@ -4276,8 +4304,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                         IntPtr.Zero,
                         IntPtr.Zero,
                         inheritHandles: true,
-                        CreateNoWindow | CreateSuspended | ExtendedStartupInfoPresent,
-                        IntPtr.Zero,
+                        CreateNoWindow | CreateSuspended | ExtendedStartupInfoPresent | (environment is null ? 0 : CreateUnicodeEnvironment),
+                        environment?.DangerousGetHandle() ?? IntPtr.Zero,
                         currentDirectory: null,
                         ref startupInfo,
                         out var processInformation))
@@ -4295,6 +4323,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 }
 
                 GC.KeepAlive(atomicJob);
+                GC.KeepAlive(environment);
                 if (jobHandleList != IntPtr.Zero)
                 {
                     Marshal.FreeHGlobal(jobHandleList);
@@ -5107,7 +5136,12 @@ internal sealed class DapPauseCanceledException(bool requiresDrain, Exception in
     internal bool RequiresDrain { get; } = requiresDrain;
 }
 
-internal sealed record DapLaunchOptions(string? WorkingDirectory, string[]? Arguments, bool? StopAtEntry);
+internal sealed record DapLaunchOptions(
+    string? WorkingDirectory,
+    string[]? Arguments,
+    bool? StopAtEntry,
+    IReadOnlyDictionary<string, string?>? Environment,
+    string? DotnetHostPath = null);
 
 internal sealed record DapLaunchArguments(
     [property: JsonPropertyName("program")] string Program,

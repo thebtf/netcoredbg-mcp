@@ -430,6 +430,19 @@ internal static class Program
                 }
             }
 
+            if (launchOptions?.Environment is { } environment
+                && environment.TryGetValue("PATH", out var pathOverride) && pathOverride is null
+                && program!.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+            {
+                var dotnetHost = DapLaunchEnvironment.FindExecutable("dotnet");
+                if (dotnetHost is null)
+                {
+                    return Error("start_debug_dotnet_unavailable", "START_DEBUG_DOTNET_UNAVAILABLE");
+                }
+
+                launchOptions = launchOptions with { DotnetHostPath = dotnetHost };
+            }
+
             if (!TryNormalizeBreakpointSources(breakpoints))
             {
                 return Error("start_debug_source_unavailable", "START_DEBUG_SOURCE_UNAVAILABLE");
@@ -2692,7 +2705,7 @@ internal static class Program
                 return true;
             }
 
-            if (arguments.Count > 5 || arguments.Keys.Any(static name => name is not "program" and not "breakpoints" and not "args" and not "cwd" and not "stopAtEntry"))
+            if (arguments.Count > 6 || arguments.Keys.Any(static name => name is not "program" and not "breakpoints" and not "args" and not "cwd" and not "stopAtEntry" and not "env"))
             {
                 return false;
             }
@@ -2744,8 +2757,26 @@ internal static class Program
                 stopAtEntry = stop.GetBoolean();
             }
 
-            if (args is not null || cwd is not null || stopAtEntry is not null)
-                options = new DapLaunchOptions(cwd, args, stopAtEntry);
+            Dictionary<string, string?>? environment = null;
+            if (arguments.TryGetValue("env", out var env) && env.ValueKind != JsonValueKind.Null)
+            {
+                if (env.ValueKind != JsonValueKind.Object) return false;
+                environment = new Dictionary<string, string?>(DapLaunchEnvironment.NameComparer);
+                foreach (var property in env.EnumerateObject())
+                {
+                    var name = property.Name;
+                    if (name.Length == 0 || name.Contains('=') || name.Contains('\0')
+                        || DapLaunchEnvironment.NameComparer.Equals(name, NativeSceneProbeChannel.PipeEnvironmentName)
+                        || DapLaunchEnvironment.NameComparer.Equals(name, NativeSceneProbeChannel.NonceEnvironmentName)
+                        || property.Value.ValueKind is not (JsonValueKind.String or JsonValueKind.Null)) return false;
+                    var value = property.Value.ValueKind == JsonValueKind.Null ? null : property.Value.GetString();
+                    if (value?.Contains('\0') == true) return false;
+                    environment[name] = value;
+                }
+            }
+
+            if (args is not null || cwd is not null || stopAtEntry is not null || environment is { Count: > 0 })
+                options = new DapLaunchOptions(cwd, args, stopAtEntry, environment);
             return true;
         }
 
@@ -3522,7 +3553,7 @@ internal static class Program
         {
             Tools =
             [
-                Tool("start_debug", "Start debugging a program with optional arguments, working directory, stop-at-entry and request-local source breakpoints. Initial breakpoint verification is not a breakpoint-hit report.", """{"type":"object","properties":{"program":{"type":"string","minLength":1},"breakpoints":{"type":"array","maxItems":256,"items":{"type":"object","properties":{"file":{"type":"string","minLength":1},"line":{"type":"integer","minimum":1,"maximum":2147483647}},"required":["file","line"],"additionalProperties":false}},"args":{"type":["array","null"],"items":{"type":"string"}},"cwd":{"type":["string","null"]},"stopAtEntry":{"type":["boolean","null"]}},"additionalProperties":false}"""),
+                Tool("start_debug", "Start debugging a program with optional arguments, working directory, environment overrides, stop-at-entry and request-local source breakpoints. Non-ASCII environment data may be corrupted by some Windows debugger builds. Initial breakpoint verification is not a breakpoint-hit report.", """{"type":"object","properties":{"program":{"type":"string","minLength":1},"breakpoints":{"type":"array","maxItems":256,"items":{"type":"object","properties":{"file":{"type":"string","minLength":1},"line":{"type":"integer","minimum":1,"maximum":2147483647}},"required":["file","line"],"additionalProperties":false}},"args":{"type":["array","null"],"items":{"type":"string"}},"cwd":{"type":["string","null"]},"stopAtEntry":{"type":["boolean","null"]},"env":{"type":["object","null"],"additionalProperties":{"type":["string","null"]}}},"additionalProperties":false}"""),
                 Tool("get_debug_state", "Get the state of a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("stop_debug", "Stop a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("get_threads", "Get threads in a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
