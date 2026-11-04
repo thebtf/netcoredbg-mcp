@@ -91,7 +91,7 @@ internal static class Program
 
                     if (context.JsonRpcMessage is JsonRpcRequest { Method: "tools/call", Params: JsonObject call }
                         && call["name"] is JsonValue toolName && toolName.TryGetValue<string>(out var name)
-                        && name is "pause_execution" or "get_modules" or "get_progress" or "configure_exceptions" or "set_variable"
+                        && name is "pause_execution" or "get_modules" or "get_progress" or "configure_exceptions" or "set_variable" or "search_output"
                         && call.TryGetPropertyValue("arguments", out var rawArguments)
                         && rawArguments is not null
                         && (rawArguments is not JsonObject objectArguments
@@ -223,6 +223,7 @@ internal static class Program
         private const string GetProgress = "get_progress";
         private const string GetOutput = "get_output";
         private const string GetOutputTail = "get_output_tail";
+        private const string SearchOutput = "search_output";
         private const string StepOver = "step_over";
         private const string StepInto = "step_into";
         private const string StepOut = "step_out";
@@ -357,6 +358,7 @@ internal static class Program
                 GetProgress => await GetRuntimeInventoryAsync(request, modules: false, cancellationToken).ConfigureAwait(false),
                 GetOutput => await GetOutputAsync(request, cancellationToken).ConfigureAwait(false),
                 GetOutputTail => await GetOutputAsync(request, cancellationToken, tail: true).ConfigureAwait(false),
+                SearchOutput => await SearchOutputAsync(request, cancellationToken).ConfigureAwait(false),
                 StepOver => await StepOverAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 StepInto => await StepIntoAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 StepOut => await StepOutAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
@@ -686,6 +688,35 @@ internal static class Program
 
             var snapshot = output.Buffer.Snapshot(clear, category);
             return new(SerializedResult(JsonSerializer.Serialize(new { kind = "output_success", output = snapshot }), isError: false));
+        }
+
+        private ValueTask<CallToolResult> SearchOutputAsync(CallToolRequestParams request, CancellationToken cancellationToken)
+        {
+            if (!TryReadOutputSearchArguments(request.Arguments, out var sessionId, out var pattern, out var contextLines, out var category))
+            {
+                return new(InvalidArguments(SearchOutput));
+            }
+
+            OutputLifetime output;
+            lock (_lifetimeGate)
+            {
+                if (!_outputs.TryGetValue(sessionId, out output!))
+                {
+                    return new(NotFound());
+                }
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            var snapshot = output.Buffer.Snapshot(clear: false, category);
+            var result = DapOutputSearch.Search(snapshot, pattern, contextLines, cancellationToken);
+            return new(result.Status switch
+            {
+                DapOutputSearchStatus.Success => SerializedResult(result.SerializedContent!, isError: false),
+                DapOutputSearchStatus.InvalidPattern => Error("output_search_invalid_pattern", "OUTPUT_SEARCH_INVALID_PATTERN"),
+                DapOutputSearchStatus.Timeout => Error("output_search_timeout", "OUTPUT_SEARCH_TIMEOUT"),
+                DapOutputSearchStatus.TooLarge => Error("output_search_too_large", "OUTPUT_SEARCH_TOO_LARGE"),
+                _ => throw new InvalidOperationException("Unexpected output search status."),
+            });
         }
 
         private async ValueTask<CallToolResult> GetRuntimeInventoryAsync(
@@ -2861,6 +2892,49 @@ internal static class Program
             return true;
         }
 
+        private static bool TryReadOutputSearchArguments(
+            IDictionary<string, JsonElement>? arguments,
+            out string sessionId,
+            out string pattern,
+            out long contextLines,
+            out string? category)
+        {
+            sessionId = string.Empty;
+            pattern = string.Empty;
+            contextLines = 2;
+            category = null;
+            if (arguments is null
+                || arguments.Count is < 2 or > 4
+                || arguments.Keys.Any(static name => name is not "debugSessionId" and not "pattern" and not "contextLines" and not "category")
+                || !arguments.TryGetValue("debugSessionId", out var sessionIdElement)
+                || sessionIdElement.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(sessionIdElement.GetString())
+                || !arguments.TryGetValue("pattern", out var patternElement)
+                || patternElement.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+
+            if (arguments.TryGetValue("contextLines", out var contextElement) && !TryReadOutputLineCount(contextElement, out contextLines))
+            {
+                return false;
+            }
+
+            if (arguments.TryGetValue("category", out var categoryElement))
+            {
+                if (categoryElement.ValueKind is not JsonValueKind.String and not JsonValueKind.Null)
+                {
+                    return false;
+                }
+
+                category = categoryElement.GetString();
+            }
+
+            sessionId = sessionIdElement.GetString()!;
+            pattern = patternElement.GetString()!;
+            return true;
+        }
+
         private static bool TryReadOutputLineCount(JsonElement element, out long lines)
         {
             lines = 0;
@@ -3354,6 +3428,8 @@ internal static class Program
                 Tool("ui_get_window_tree", "Read a bounded preorder tree of only the bound debuggee's current main window without activation, focus, input, expansion or resume. Atomicity is unproven; partial/unreadable observations cannot prove absence or uniqueness. This is not Python all-window parity.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"maxDepth":{"type":"integer","minimum":0,"maximum":32,"default":3},"maxChildren":{"type":"integer","minimum":1,"maximum":256,"default":50}},"required":["debugSessionId"],"additionalProperties":false}"""),
                 Tool("get_output", "Read retained debuggee output in DAP reader order. Category matching is case-sensitive. Clear consumes the snapshot only when category is omitted, null or empty; a nonempty category never clears the buffer.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"clear\":{\"type\":\"boolean\",\"default\":false},\"category\":{\"type\":[\"string\",\"null\"],\"default\":null}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("get_output_tail", "Read retained output without clearing it. Filter categories before joining event fragments and splitting Python-style logical lines. Positive lines selects the last N, zero selects all, and negative lines skips the first N.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"lines\":{\"type\":\"integer\",\"default\":50},\"category\":{\"type\":[\"string\",\"null\"],\"default\":null}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
+                Tool("search_output", "Search retained output without clearing it. The pattern uses case-insensitive, culture-invariant .NET regular expressions, not Python regex parity. Category filtering precedes Python-style line splitting. Up to 50 matches and their context are returned with the total count; timeouts and application content over 256 KiB fail without partial results.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"pattern":{"type":"string"},"contextLines":{"type":"integer","default":2},"category":{"type":["string","null"],"default":null}},"required":["debugSessionId","pattern"],"additionalProperties":false}""",
+                    new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, DestructiveHint = false }),
                 Tool("step_into", "Step into one explicitly named stopped thread. Completion requires the correlated acknowledgement and a later exact step stop; inspect the observed stack to establish whether the adapter entered a callee or stepped over.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
                 Tool("step_out", "Step out of one explicitly named stopped thread. Completion requires the correlated acknowledgement and a later exact step stop; inspect the observed stack to establish the caller.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
                 Tool("evaluate_expression", "Evaluate an exact expression in an explicit frame and current inspection context using DAP watch. Expressions may execute code or mutate the debuggee; watch is not read-only. A positive result reference can be expanded with get_variables in the same context. Never automatically retry a failed or unknown outcome.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1},"inspectionContextId":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"},"frameId":{"type":"integer","minimum":-2147483648,"maximum":2147483647},"expression":{"type":"string"}},"required":["debugSessionId","inspectionContextId","frameId","expression"],"additionalProperties":false}""",

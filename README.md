@@ -189,8 +189,8 @@ categories `console`, `stdout`, `stderr`, and `telemetry` are retained, and an
 omitted event category means `console`. Filtering is case-sensitive. A clear
 returns the current snapshot and empties the buffer only when `category` is
 omitted, null, or empty; a nonempty filter never clears it. After automatic
-terminal or reader-failure cleanup, both output tools remain available with the
-same token, while debugger control and UI operations are unavailable. Call
+terminal or reader-failure cleanup, all three output tools remain available with
+the same token, while debugger control and UI operations are unavailable. Call
 `stop_debug` after reading to release the retained buffer; subsequent calls
 return `DEBUG_SESSION_NOT_FOUND`. Retained output is process-local and is lost
 when the host exits. Output not delivered by the adapter cannot be recovered.
@@ -201,13 +201,27 @@ evicting whole oldest events. `NETCOREDBG_MAX_OUTPUT_ENTRY` and
 `NETCOREDBG_MAX_OUTPUT_BYTES` override those limits at host startup; despite the
 latter name, the unit is code points, not encoded bytes. An invalid limit stops
 the host before it serves requests and names the variable on stderr without its
-value. Native `search_output` remains unavailable; Python remains the default.
+value. Python remains the installed default.
 
 `get_output_tail(debugSessionId, lines?, category?)` reads the same buffer
 without clearing it. It filters by category before splitting lines, returns
 `totalLines`, `returnedLines`, and LF-joined `output`, and defaults to the last
 50 lines. For compatibility with the existing Python slicing behavior, `lines: 0`
 returns all lines and a negative `lines: -N` skips the first N lines.
+
+`search_output(debugSessionId, pattern, contextLines?, category?)` searches a
+non-consuming, category-filtered output snapshot. It uses case-insensitive,
+culture-invariant .NET regular expressions; their syntax and Unicode case
+behavior are not Python `re` parity. It counts every matching line and returns
+the first 50 matches with one-based line numbers and context (two lines by
+default). A pattern over 262,142 UTF-16 code units is rejected before parsing
+with `OUTPUT_SEARCH_TOO_LARGE`; other invalid patterns return
+`OUTPUT_SEARCH_INVALID_PATTERN`. A regex match exceeding 100 ms or search work
+exceeding two seconds returns `OUTPUT_SEARCH_TIMEOUT`. Regex construction and
+obtaining the retained snapshot cannot be interrupted by that work budget.
+Serialized application content over 256 KiB returns `OUTPUT_SEARCH_TOO_LARGE`,
+with no partial results or buffer clearing. The surrounding MCP response can be
+larger because it carries both text and structured content.
 
 The source-built stateful host exposes `step_over(debugSessionId, threadId)`,
 `step_into(debugSessionId, threadId)` and `step_out(debugSessionId, threadId)`.

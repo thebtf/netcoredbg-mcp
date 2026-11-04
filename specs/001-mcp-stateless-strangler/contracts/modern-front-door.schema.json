@@ -924,6 +924,35 @@
       ],
       "additionalProperties": false
     },
+    "searchOutputArguments": {
+      "type": "object",
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "contextLines": {
+          "type": "integer",
+          "default": 2
+        },
+        "category": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "debugSessionId",
+        "pattern"
+      ],
+      "additionalProperties": false
+    },
     "breakpointAdded": {
       "type": "object",
       "required": [
@@ -1120,6 +1149,104 @@
         },
         "output": {
           "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "outputSearchSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "pattern",
+        "matchCount",
+        "matches"
+      ],
+      "properties": {
+        "kind": {
+          "const": "output_search_success"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "matchCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "matches": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "required": [
+              "lineNumber",
+              "match",
+              "context"
+            ],
+            "properties": {
+              "lineNumber": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "match": {
+                "type": "string"
+              },
+              "context": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "outputSearchInvalidPattern": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "output_search_invalid_pattern"
+        },
+        "error": {
+          "const": "OUTPUT_SEARCH_INVALID_PATTERN"
+        }
+      },
+      "additionalProperties": false
+    },
+    "outputSearchTimeout": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "output_search_timeout"
+        },
+        "error": {
+          "const": "OUTPUT_SEARCH_TIMEOUT"
+        }
+      },
+      "additionalProperties": false
+    },
+    "outputSearchTooLarge": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "output_search_too_large"
+        },
+        "error": {
+          "const": "OUTPUT_SEARCH_TOO_LARGE"
         }
       },
       "additionalProperties": false
@@ -2943,7 +3070,8 @@
             "ui_invoke_observed",
             "ui_get_window_tree",
             "get_output",
-            "get_output_tail"
+            "get_output_tail",
+            "search_output"
           ]
         }
       },
@@ -3055,6 +3183,18 @@
         },
         {
           "$ref": "#/$defs/outputTailSuccess"
+        },
+        {
+          "$ref": "#/$defs/outputSearchSuccess"
+        },
+        {
+          "$ref": "#/$defs/outputSearchInvalidPattern"
+        },
+        {
+          "$ref": "#/$defs/outputSearchTimeout"
+        },
+        {
+          "$ref": "#/$defs/outputSearchTooLarge"
         },
         {
           "$ref": "#/$defs/uiInvokeToolError"
