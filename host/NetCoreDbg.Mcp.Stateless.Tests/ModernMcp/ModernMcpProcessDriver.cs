@@ -24,6 +24,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
     private readonly FixtureProcess _fixture;
     private readonly string _scratchDirectory;
     private readonly JsonObject? _initialMeta;
+    private readonly string? _debuggerPath;
     private readonly List<ModernMcpRequestObservation> _requests = [];
     private readonly List<string> _standardErrorLines = [];
     private readonly object _gate = new();
@@ -31,11 +32,12 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
     private bool _disposed;
     private Task? _disposeTask;
 
-    private ModernMcpProcessDriver(FixtureProcess fixture, string scratchDirectory, McpClient client, string inertProgramPath, JsonObject? initialMeta)
+    private ModernMcpProcessDriver(FixtureProcess fixture, string scratchDirectory, McpClient client, string inertProgramPath, JsonObject? initialMeta, string? debuggerPath)
     {
         _scratchDirectory = scratchDirectory;
         _fixture = fixture;
         _initialMeta = initialMeta?.DeepClone().AsObject();
+        _debuggerPath = debuggerPath;
         Client = client;
         InertProgramPath = inertProgramPath;
     }
@@ -79,6 +81,10 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             using var operation = CreateBoundedCancellation(cancellationToken, startupTimeout);
             await File.WriteAllBytesAsync(inertProgramPath, [], operation.Token).ConfigureAwait(false);
 
+            var environment = CandidateEnvironment(fixture, inertProgramPath, options.AdditionalEnvironment, options.InheritEnvironmentVariables);
+            var debuggerPath = environment.Keys.Count(static key => string.Equals(key, "NETCOREDBG_PATH", StringComparison.OrdinalIgnoreCase)) == 1
+                && environment.TryGetValue("NETCOREDBG_PATH", out var configuredDebugger) ? configuredDebugger : null;
+
             ModernMcpProcessDriver? driver = null;
             transport = new StdioClientTransport(new StdioClientTransportOptions
             {
@@ -87,7 +93,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                 Name = "netcoredbg-mcp-stateless-modern-contract",
                 WorkingDirectory = RepositoryLayout.Root,
                 InheritEnvironmentVariables = options.InheritEnvironmentVariables,
-                EnvironmentVariables = CandidateEnvironment(fixture, inertProgramPath, options.AdditionalEnvironment, options.InheritEnvironmentVariables),
+                EnvironmentVariables = environment,
                 ShutdownTimeout = TimeSpan.FromSeconds(2),
                 StandardErrorLines = line => driver?.AddStandardErrorLine(line),
             });
@@ -98,7 +104,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                 scratchDirectory,
                 client,
                 inertProgramPath,
-                options.InitialMeta ?? CurrentMeta(formElicitation: !options.DisableFormElicitation));
+                options.InitialMeta ?? CurrentMeta(formElicitation: !options.DisableFormElicitation), debuggerPath);
             client = null;
             transport = null;
             fixture = null;
@@ -112,7 +118,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         }
     }
 
-    internal static async Task<ModernMcpFirstWireDriver> StartFirstWireAsync(CancellationToken cancellationToken = default)
+    internal static async Task<ModernMcpFirstWireDriver> StartFirstWireAsync(CancellationToken cancellationToken = default, FixtureConfiguration? fixtureConfiguration = null)
     {
         var scratchDirectory = ModernMcpScratchDirectory.Create();
         FixtureProcess? fixture = null;
@@ -120,7 +126,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         ITransport? connection = null;
         try
         {
-            fixture = FixtureProcess.Create(new FixtureConfiguration());
+            fixture = FixtureProcess.Create(fixtureConfiguration ?? new FixtureConfiguration());
             var candidate = TestOutputPathResolver.ResolveProcess(Path.Combine(RepositoryLayout.Root, "host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
 
             var inertProgramPath = Path.Combine(scratchDirectory, "controlled-program.dll");
@@ -311,6 +317,44 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             .Where(static entry => entry.Kind is "startup" or "request")
             .Select(static entry => new ModernNativeAction(entry.Kind, entry.Command, entry.RawPayload))
             .ToArray();
+    }
+
+    /// <summary>
+    /// Confirms the existing Windows basename test's no-launch case: the host uses a
+    /// non-null CreateProcess application name in RepositoryLayout.Root, so a missing
+    /// extensionless basename cannot resolve through PATH. An empty transcript alone
+    /// or a generic DEBUG_SESSION_NOT_FOUND result does not establish this.
+    /// </summary>
+    internal async Task ConfirmMissingWindowsDebuggerDidNotLaunchAsync(RequestId id)
+    {
+        var debuggerPath = _debuggerPath;
+        if (!OperatingSystem.IsWindows() || string.IsNullOrWhiteSpace(debuggerPath)
+            || !string.Equals(Path.GetFileName(debuggerPath), debuggerPath, StringComparison.Ordinal)
+            || Path.HasExtension(debuggerPath))
+        {
+            throw new InvalidOperationException("A missing Windows debugger basename is required for no-launch evidence.");
+        }
+        var transcript = await _fixture.ReadTranscriptAsync().ConfigureAwait(false);
+        var applicationPath = Path.Combine(RepositoryLayout.Root, debuggerPath);
+        if (File.Exists(applicationPath) || Directory.Exists(applicationPath)
+            || transcript.Any(static entry => entry.Kind is "startup" or "request"))
+        {
+            throw new InvalidOperationException("The controlled debugger launch cannot be excluded.");
+        }
+        lock (_gate)
+        {
+            var starts = _requests.Where(static request => request.Method == "tools/call"
+                && StringValue(request.Parameters?["name"]) == "start_debug").ToArray();
+            if (_disposed || _clientClosed || starts.Length != 1 || starts[0].Id != id
+                || !IsComplete(starts[0].Result, true)
+                || StringValue(starts[0].Result?["structuredContent"]?["kind"]) != "debug_session_not_found"
+                || StringValue(starts[0].Result?["structuredContent"]?["error"]) != "DEBUG_SESSION_NOT_FOUND"
+                || starts[0].Result?["structuredContent"] is not JsonObject content || content.ContainsKey("debugSessionId"))
+            {
+                throw new InvalidOperationException("The no-launch evidence does not match one completed start request.");
+            }
+            starts[0].NoLaunchConfirmed = true;
+        }
     }
 
     internal async Task WaitForThreadsRequestAsync(CancellationToken cancellationToken = default)
@@ -570,6 +614,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                 {
                     Result = request.Result?.DeepClone().AsObject(),
                     ControlledProcessesExited = request.ControlledProcessesExited,
+                    NoLaunchConfirmed = request.NoLaunchConfirmed,
                 }).ToArray();
         }
 
@@ -592,7 +637,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                     if (!starts.Add(token)) unconfirmed = true;
                     if (request.ControlledProcessesExited) exited.Add(token);
                 }
-                else if (!IsPreLaunchStartResult(result))
+                else if (!IsPreLaunchStartResult(result) && !IsOwnerCleanedStartFailure(result) && !request.NoLaunchConfirmed)
                 {
                     unconfirmed = true;
                 }
@@ -673,6 +718,16 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             ("start_debug_source_unavailable", "START_DEBUG_SOURCE_UNAVAILABLE") => true,
             _ => false,
         };
+    }
+
+    internal static bool IsOwnerCleanedStartFailure(JsonObject? result)
+    {
+        if (!IsComplete(result, true) || result?["structuredContent"] is not JsonObject content
+            || content.ContainsKey("debugSessionId")) return false;
+        // These errors escape StartAsync only after its failed-start cleanup succeeds.
+        return (StringValue(content["kind"]), StringValue(content["error"])) is
+            ("dap_breakpoints_refused", "DAP_BREAKPOINTS_REFUSED") or
+            ("dap_breakpoints_protocol_error", "DAP_BREAKPOINTS_PROTOCOL_ERROR");
     }
 
     private void AddStandardErrorLine(string line)
@@ -923,6 +978,7 @@ internal sealed record ModernMcpRequestObservation(RequestId Id, string Method, 
 {
     internal JsonObject? Result { get; set; }
     internal bool ControlledProcessesExited { get; set; }
+    internal bool NoLaunchConfirmed { get; set; }
 }
 
 

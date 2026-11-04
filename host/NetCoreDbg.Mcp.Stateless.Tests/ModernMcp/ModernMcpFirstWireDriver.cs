@@ -16,6 +16,7 @@ internal sealed class ModernMcpFirstWireDriver : IAsyncDisposable
     private Task? _disposeTask;
     private bool _startUnconfirmed;
     private bool _multipleUnconfirmedStarts;
+    private int _requestInFlight;
 
     internal ModernMcpFirstWireDriver(FixtureProcess fixture, string scratchDirectory, ITransport transport)
     {
@@ -28,7 +29,24 @@ internal sealed class ModernMcpFirstWireDriver : IAsyncDisposable
         string method,
         JsonNode? parameters,
         RequestId id,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, TimeSpan? timeout = null)
+    {
+        if (Interlocked.CompareExchange(ref _requestInFlight, 1, 0) != 0)
+        {
+            throw new InvalidOperationException("The first-wire driver accepts one request at a time.");
+        }
+        try
+        {
+            return await SendFirstRequestCoreAsync(method, parameters, id, cancellationToken, timeout).ConfigureAwait(false);
+        }
+        finally
+        {
+            Volatile.Write(ref _requestInFlight, 0);
+        }
+    }
+
+    private async Task<JsonRpcMessage> SendFirstRequestCoreAsync(
+        string method, JsonNode? parameters, RequestId id, CancellationToken cancellationToken, TimeSpan? timeout)
     {
         var start = method == "tools/call"
             && parameters?["name"] is JsonValue name
@@ -43,7 +61,7 @@ internal sealed class ModernMcpFirstWireDriver : IAsyncDisposable
         }
 
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        deadline.CancelAfter(RequestTimeout);
+        deadline.CancelAfter(timeout ?? RequestTimeout);
         var token = deadline.Token;
 
         await _transport.SendMessageAsync(
@@ -62,7 +80,8 @@ internal sealed class ModernMcpFirstWireDriver : IAsyncDisposable
             {
                 if (start && !priorStartUnconfirmed
                     && incoming is JsonRpcResponse { Result: JsonObject result }
-                    && ModernMcpProcessDriver.IsPreLaunchStartResult(result))
+                    && (ModernMcpProcessDriver.IsPreLaunchStartResult(result)
+                        || ModernMcpProcessDriver.IsOwnerCleanedStartFailure(result)))
                 {
                     _startUnconfirmed = false;
                     _fixture.MarkCleanupConfirmed();
