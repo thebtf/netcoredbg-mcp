@@ -668,10 +668,13 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     internal async Task<DapVariablesResult> GetVariablesAsync(
         string inspectionContextId,
         int variablesReference,
+        string? filter,
+        int? start,
+        int? count,
         CancellationToken cancellationToken)
     {
         var response = await SendInspectionRequestAsync(
-            "variables", new { variablesReference }, inspectionContextId, cancellationToken).ConfigureAwait(false);
+            "variables", new DapVariablesArguments(variablesReference, filter, start, count), inspectionContextId, cancellationToken).ConfigureAwait(false);
         if (response is null || !response.Success || !response.TargetCurrent)
         {
             return DapVariablesResult.Refused;
@@ -1327,6 +1330,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 columnsStartAt1 = true,
                 supportsRunInTerminalRequest = false,
                 supportsVariableType = true,
+                supportsVariablePaging = true,
                 supportsInvalidatedEvent = true,
                 supportsProgressReporting = true,
             },
@@ -5035,6 +5039,12 @@ internal sealed record DapCallStackResult(
         IReadOnlyList<DapStackFrame> frames, uint? totalFrames, string? inspectionContextId = null) =>
         new(false, frames, totalFrames, inspectionContextId);
 }
+
+internal sealed record DapVariablesArguments(
+    [property: JsonPropertyName("variablesReference")] int VariablesReference,
+    [property: JsonPropertyName("filter"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Filter,
+    [property: JsonPropertyName("start"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? Start,
+    [property: JsonPropertyName("count"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? Count);
 
 internal sealed record DapScope(
     [property: JsonPropertyName("name")] string Name,

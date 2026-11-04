@@ -2551,6 +2551,22 @@ internal sealed class ControlledDapAdapter
                     new { name = "tupleVar", value = "(\"test\", 123)", variablesReference = 1002, evaluateName = "private tuple expression" },
                     new { name = "longValue", value = new string('v', 16_385), variablesReference = 0 },
                 ];
+        if (command == "variables" && mode == "paging")
+        {
+            var arguments = root.GetProperty("arguments");
+            var filter = arguments.TryGetProperty("filter", out var filterElement) ? filterElement.GetString() : null;
+            object[] named = [
+                new { name = "Title", value = "fixture", variablesReference = 0 },
+                new { name = "Count", value = "4", variablesReference = 0 },
+            ];
+            object[] indexed = Enumerable.Range(0, 4)
+                .Select(static index => (object)new { name = $"[{index}]", value = index.ToString(CultureInfo.InvariantCulture), variablesReference = 0 }).ToArray();
+            entries = filter switch { "named" => named, "indexed" => indexed, _ => [.. named, .. indexed] };
+            var start = arguments.TryGetProperty("start", out var startElement) ? startElement.GetInt32() : 0;
+            var count = arguments.TryGetProperty("count", out var countElement) ? countElement.GetInt32() : 0;
+            entries = count == 0 ? entries.Skip(start).ToArray() : entries.Skip(start).Take(count).ToArray();
+        }
+
         if (mode == "refused")
         {
             await WriteResponseAsync(sequence, command, new { message = privatePayload }, cancellationToken, success: false);
@@ -2561,7 +2577,7 @@ internal sealed class ControlledDapAdapter
         {
             entries = [entries[0], new { name = privatePayload, value = privatePayload, variablesReference = "not-an-integer" }];
         }
-        else if (mode is not ("success" or "hold" or "hold-then-invalidated"))
+        else if (mode is not ("success" or "paging" or "hold" or "hold-then-invalidated"))
         {
             throw new InvalidOperationException($"Unknown inspection response mode '{mode}'.");
         }
