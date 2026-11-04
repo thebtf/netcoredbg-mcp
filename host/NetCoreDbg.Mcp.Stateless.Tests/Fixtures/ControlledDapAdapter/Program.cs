@@ -567,7 +567,18 @@ internal sealed class ControlledDapAdapter
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
-        await RecordAsync(new { kind = "startup", arguments = JsonSerializer.Serialize(_processArguments), processId = Environment.ProcessId }, cancellationToken);
+        using (var self = Process.GetCurrentProcess())
+        {
+            await RecordAsync(new
+            {
+                kind = "startup",
+                arguments = JsonSerializer.Serialize(_processArguments),
+                processId = Environment.ProcessId,
+                processStartTimeUtcTicks = self.StartTime.ToUniversalTime().Ticks,
+                simpleControlledTree = _options.SpawnDescendant && !_options.SpawnWindowedDescendant
+                    && !_options.PublishSecondWindowedDescendantAfterRelease,
+            }, cancellationToken);
+        }
 
         try
         {
@@ -1102,7 +1113,7 @@ internal sealed class ControlledDapAdapter
         if (_options.SpawnDescendant && _descendant is null)
         {
             _descendant = StartDescendant(_options.SpawnWindowedDescendant);
-            await RecordAsync(new { kind = "descendant", processId = _descendant.Id }, cancellationToken);
+            await RecordAsync(new { kind = "descendant", processId = _descendant.Id, processStartTimeUtcTicks = _descendant.StartTime.ToUniversalTime().Ticks }, cancellationToken);
         }
 
         if (_holdLaunchResponse)

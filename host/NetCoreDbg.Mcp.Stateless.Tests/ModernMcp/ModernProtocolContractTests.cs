@@ -60,7 +60,38 @@ public sealed class ModernProtocolContractTests
             },
             new RequestId("call-first"));
 
-        AssertCompleteStartEnvelope(ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(message)));
+        var result = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(message));
+        AssertCompleteStartEnvelope(result);
+        await driver.StopSingleControlledSessionAsync(Assert.IsType<string>(result["structuredContent"]?["debugSessionId"]?.GetValue<string>()));
+    }
+
+    [Fact]
+    public async Task FirstWire_OverlappingRequests_AreRefusedBeforeDispatch()
+    {
+        var driver = await ModernMcpProcessDriver.StartFirstWireAsync(
+            fixtureConfiguration: new FixtureConfiguration(DelayLaunchResponseForStartupTimeout: true));
+        var primary = await Record.ExceptionAsync(async () =>
+        {
+            var first = driver.SendFirstRequestAsync("tools/call", new JsonObject
+            {
+                ["name"] = "start_debug",
+                ["arguments"] = new JsonObject { ["program"] = ValidProgram },
+                ["_meta"] = ModernMcpProcessDriver.CurrentMeta(),
+            }, new RequestId("overlap-start"), timeout: TimeSpan.FromSeconds(10));
+            Assert.False(first.IsCompleted);
+
+            var secondFailure = await Record.ExceptionAsync(async () => await driver.SendFirstRequestAsync(
+                "tools/list", new JsonObject { ["_meta"] = ModernMcpProcessDriver.CurrentMeta() },
+                new RequestId("overlap-list")));
+            var result = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(await first));
+            AssertCompleteStartEnvelope(result);
+            await driver.StopSingleControlledSessionAsync(Assert.IsType<string>(result["structuredContent"]?["debugSessionId"]?.GetValue<string>()));
+            Assert.IsType<InvalidOperationException>(secondFailure);
+        });
+        var cleanup = await Record.ExceptionAsync(async () => await driver.DisposeAsync());
+        if (primary is not null && cleanup is not null) throw new AggregateException(primary, cleanup);
+        if (primary is not null) throw primary;
+        if (cleanup is not null) throw cleanup;
     }
 
     [Fact]
@@ -269,12 +300,14 @@ public sealed class ModernProtocolContractTests
             retryId);
 
         Assert.NotEqual(initialId, retryId);
-        AssertCompleteStartEnvelope(ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(retry)));
+        var result = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(retry));
+        AssertCompleteStartEnvelope(result);
         if (includeBreakpoints)
         {
             AssertBreakpointRequest(Assert.Single(await driver.ReadNativeActionsAsync(),
                 static action => action.Command == "setBreakpoints"), BreakpointSourcePath, [2]);
         }
+        await driver.StopSingleControlledSessionAsync(Assert.IsType<string>(result["structuredContent"]?["debugSessionId"]?.GetValue<string>()));
     }
 
     [Theory]
