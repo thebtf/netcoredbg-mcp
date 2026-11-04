@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from netcoredbg_mcp.dap.client import DAPClient, DapTerminalTrigger, _RunPhase
 from netcoredbg_mcp.session.manager import SessionManager
 from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
 from netcoredbg_mcp.session.state import DebugState, TransportTerminalSummary
@@ -196,6 +197,9 @@ class ProviderHarness:
         monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", self.backend_factory)
         monkeypatch.setattr("netcoredbg_mcp.session.manager.DAPClient", MagicMock())
         self.session = SessionManager(netcoredbg_path="/unused-in-memory-dap")
+        self.session._client = DAPClient("/unused-in-memory-dap")
+        self.session._client._process = MagicMock(pid=43, returncode=None)
+        self.session._active_dap_run = self.session._client._run_for_direct_reader().generation
         self.session.state.state = DebugState.RUNNING
         self.session.state.process_id = self.process.pid
         monkeypatch.setattr(
@@ -269,6 +273,26 @@ class ProviderHarness:
         self.session._begin_debuggee_epoch(lifecycle_state=DebugState.RUNNING)
         self.session.state.process_id = self.process.pid
         self.backend_holder["instance"] = NoSafeTextSetterBackend()
+
+    def bind_process_event(self, monkeypatch):
+        client = DAPClient("/unused-in-memory-dap")
+        client._process = MagicMock(pid=43, returncode=None)
+        run = client._run_for_direct_reader()
+        self.session._client = client
+        self.session._active_dap_run = run.generation
+        monkeypatch.setattr(self.session, "_observe_process", MagicMock())
+        self.session._register_event_handlers()
+        client._handle_message(
+            {
+                "seq": 1,
+                "type": "event",
+                "event": "process",
+                "body": {"name": "in-memory debuggee", "systemProcessId": self.process.pid},
+            },
+            run,
+        )
+        assert self.session.state.process_name == "in-memory debuggee"
+        return client, run
 
 
 def assert_semantics(result, *, status: str, effect_state: str, verified: bool) -> None:
@@ -663,9 +687,182 @@ async def test_actual_cancellation_propagates_and_only_correlated_completion_rel
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "authority", ["missing-generation", "missing-run", "stale-process", "stale-generation"]
+)
+async def test_unavailable_run_authority_refuses_provider_admission(harness, authority, caplog):
+    caplog.set_level("DEBUG", logger="netcoredbg_mcp")
+    if authority == "missing-generation":
+        harness.session._active_dap_run = None
+    elif authority == "missing-run":
+        harness.session._client._run = None
+    else:
+        harness.session._client._process = MagicMock(pid=44, returncode=None)
+        if authority == "stale-generation":
+            harness.session._client._run_for_direct_reader()
+
+    refused = await harness.replace()
+
+    assert_semantics(refused, status="BLOCKED", effect_state="not_started", verified=False)
+    assert harness.runner.effects == []
+    harness.assert_no_generic_input()
+    assert_private(harness.envelopes, logs=caplog.text)
+
+
+@pytest.mark.asyncio
+async def test_replaced_run_with_same_generation_refuses_reserved_dispatch(harness, caplog):
+    caplog.set_level("DEBUG", logger="netcoredbg_mcp")
+    client = harness.session._client
+    original_run = client._run
+    operation = ControlledOperation(pause_before_dispatch=True)
+    harness.runner.operations.append(operation)
+    caller = asyncio.create_task(harness.replace())
+    try:
+        await asyncio.wait_for(operation.entered.wait(), timeout=1)
+        client._process = MagicMock(pid=44, returncode=None)
+        replacement_run = client._run_for_direct_reader()
+        replacement_run.generation = original_run.generation
+        assert replacement_run is not original_run
+        assert harness.session._active_dap_run == replacement_run.generation
+        operation.allow_dispatch.set()
+        refused = await asyncio.wait_for(caller, timeout=1)
+
+        assert not operation.dispatched.is_set()
+        assert harness.runner.effects == []
+        assert_semantics(refused, status="BLOCKED", effect_state="not_started", verified=False)
+        harness.assert_no_generic_input()
+        assert_private(harness.envelopes, logs=caplog.text)
+    finally:
+        operation.allow_dispatch.set()
+        operation.release.set()
+        caller.cancel()
+        await asyncio.gather(caller, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_finalizing_run_refuses_new_provider_admission(harness, monkeypatch, caplog):
+    caplog.set_level("DEBUG", logger="netcoredbg_mcp")
+    client, run = harness.bind_process_event(monkeypatch)
+    epoch = harness.session.state.activity_epoch
+    finalizer_gate = asyncio.Event()
+
+    async def hold_finalizer(_run):
+        await finalizer_gate.wait()
+
+    monkeypatch.setattr(client, "_finalize_run", hold_finalizer)
+    finalizer, created = client._request_finalization(run, DapTerminalTrigger.STDOUT_EOF)
+    try:
+        assert created and run.phase is _RunPhase.FINALIZING
+        assert harness.session.state.state is DebugState.RUNNING
+        assert harness.session.state.transport_terminal is None
+        assert harness.session.state.activity_epoch is epoch
+        assert harness.session._active_dap_run == run.generation
+        assert harness.session.state.process_id == harness.process.pid
+        refused = await harness.replace()
+
+        assert harness.runner.effects == []
+        assert_semantics(refused, status="BLOCKED", effect_state="not_started", verified=False)
+        harness.assert_no_generic_input()
+        assert_private(harness.envelopes, logs=caplog.text)
+    finally:
+        finalizer.cancel()
+        await asyncio.gather(finalizer, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_finalizing_run_refuses_reserved_provider_dispatch(harness, monkeypatch, caplog):
+    caplog.set_level("DEBUG", logger="netcoredbg_mcp")
+    client, run = harness.bind_process_event(monkeypatch)
+    epoch = harness.session.state.activity_epoch
+    operation = ControlledOperation(pause_before_dispatch=True)
+    harness.runner.operations.append(operation)
+    caller = asyncio.create_task(harness.replace())
+    finalizer = None
+    finalizer_gate = asyncio.Event()
+
+    async def hold_finalizer(_run):
+        await finalizer_gate.wait()
+
+    monkeypatch.setattr(client, "_finalize_run", hold_finalizer)
+    try:
+        await asyncio.wait_for(operation.entered.wait(), timeout=1)
+        assert not operation.dispatched.is_set()
+        finalizer, created = client._request_finalization(run, DapTerminalTrigger.STDOUT_EOF)
+        assert created and run.phase is _RunPhase.FINALIZING
+        assert harness.session.state.state is DebugState.RUNNING
+        assert harness.session.state.transport_terminal is None
+        assert harness.session.state.activity_epoch is epoch
+        assert harness.session._active_dap_run == run.generation
+        assert harness.session.state.process_id == harness.process.pid
+        assert not harness.process.exited
+        operation.allow_dispatch.set()
+        refused = await asyncio.wait_for(caller, timeout=1)
+
+        assert not operation.dispatched.is_set()
+        assert harness.runner.effects == []
+        assert_semantics(refused, status="BLOCKED", effect_state="not_started", verified=False)
+        harness.assert_no_generic_input()
+        assert_private(harness.envelopes, logs=caplog.text)
+    finally:
+        operation.allow_dispatch.set()
+        operation.release.set()
+        caller.cancel()
+        if finalizer is not None:
+            finalizer.cancel()
+        await asyncio.gather(
+            caller, *([finalizer] if finalizer is not None else []), return_exceptions=True
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("effect_state", ["completed", "unknown"])
+async def test_finalizing_run_preserves_post_dispatch_effect_state(
+    harness, monkeypatch, caplog, effect_state
+):
+    caplog.set_level("DEBUG", logger="netcoredbg_mcp")
+    client, run = harness.bind_process_event(monkeypatch)
+    operation = ControlledOperation(pause_after_dispatch=True)
+    harness.runner.operations.append(operation)
+    caller = asyncio.create_task(harness.replace())
+    finalizer = None
+    finalizer_gate = asyncio.Event()
+
+    async def hold_finalizer(_run):
+        await finalizer_gate.wait()
+
+    monkeypatch.setattr(client, "_finalize_run", hold_finalizer)
+    try:
+        await asyncio.wait_for(operation.dispatched.wait(), timeout=1)
+        finalizer, created = client._request_finalization(run, DapTerminalTrigger.STDOUT_EOF)
+        assert created and run.phase is _RunPhase.FINALIZING
+        assert harness.session.state.state is DebugState.RUNNING
+        assert harness.session.state.transport_terminal is None
+        reported = (
+            outcome("PASS", "completed", True)
+            if effect_state == "completed"
+            else outcome("FAIL", "unknown", False)
+        )
+        await harness.runner.finish(operation, reported)
+        result = await asyncio.wait_for(caller, timeout=1)
+
+        assert_semantics(result, status="FAIL", effect_state=effect_state, verified=False)
+        assert len(harness.runner.effects) == 1
+        harness.assert_no_generic_input()
+        assert_private(harness.envelopes, logs=caplog.text)
+    finally:
+        operation.release.set()
+        caller.cancel()
+        if finalizer is not None:
+            finalizer.cancel()
+        await asyncio.gather(
+            caller, *([finalizer] if finalizer is not None else []), return_exceptions=True
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("marker", ["transport-terminal", "stopping-generation"])
 async def test_transport_terminal_or_active_stop_refuses_new_provider_request(harness, marker):
-    harness.session._active_dap_run = object()
+    assert harness.session._active_dap_run is not None
     mark_transport_unavailable(harness.session, marker)
     assert harness.session.state.state == DebugState.RUNNING
     assert harness.session.state.process_id == harness.process.pid
@@ -683,8 +880,7 @@ async def test_transport_terminal_or_active_stop_refuses_new_provider_request(ha
 async def test_transport_terminal_or_active_stop_before_dispatch_refuses_reserved_request(
     harness, marker
 ):
-    generation = object()
-    harness.session._active_dap_run = generation
+    generation = harness.session._active_dap_run
     original_epoch = harness.session.state.activity_epoch
     operation = ControlledOperation(pause_before_dispatch=True)
     harness.runner.operations.append(operation)
@@ -714,8 +910,7 @@ async def test_transport_terminal_or_active_stop_before_dispatch_refuses_reserve
 
 @pytest.mark.asyncio
 async def test_transport_terminal_before_result_cannot_be_reported_as_verified_success(harness):
-    generation = object()
-    harness.session._active_dap_run = generation
+    generation = harness.session._active_dap_run
     original_epoch = harness.session.state.activity_epoch
     operation = ControlledOperation(pause_after_dispatch=True)
     harness.runner.operations.append(operation)

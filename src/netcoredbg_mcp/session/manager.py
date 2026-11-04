@@ -206,8 +206,12 @@ class SessionManager:
         if refused is not None:
             return refused
         pid = self._state.process_id
+        dap_generation = self._active_dap_run
+        source_client = self._client
+        dap_run = source_client._active_run_for_generation(dap_generation)
         if (
             not self.is_active
+            or dap_run is None
             or self._state.transport_terminal is not None
             or (
                 self._active_dap_run is not None
@@ -250,8 +254,9 @@ class SessionManager:
 
         operation = _ProviderTextOperation(binding)
         activity_epoch = self._state.activity_epoch
-        dap_generation = self._active_dap_run
-        source_client = self._client
+        if source_client._active_run_for_generation(dap_generation) is not dap_run:
+            self._release_provider_text(operation)
+            return provider_text.blocked("no_active_session")
         adapter_owner = source_client.adapter_cleanup_owner
 
         def owns_session() -> bool:
@@ -263,6 +268,7 @@ class SessionManager:
                 and self._state.activity_epoch is activity_epoch
                 and self._active_dap_run is dap_generation
                 and self._client is source_client
+                and source_client._active_run_for_generation(dap_generation) is dap_run
                 and source_client.adapter_cleanup_owner is adapter_owner
             )
 

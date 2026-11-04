@@ -463,6 +463,19 @@ class DAPClient:
         run = self._run
         return (run.owner or run.posix_owner) if run is not None else None
 
+    def _active_run_for_generation(self, generation: object | None) -> _DapRun | None:
+        """Return the current run only while its requested generation is active."""
+        run = self._run
+        if (
+            generation is None
+            or run is None
+            or run.process is not self._process
+            or run.generation != generation
+            or run.phase is not _RunPhase.ACTIVE
+        ):
+            return None
+        return run
+
     @property
     def adapter_cleanup_result(self) -> OwnerDrainReceipt | PosixCleanupResult | None:
         """Return native finalizer evidence without converting group results to Job facts."""

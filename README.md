@@ -479,9 +479,10 @@ complete, uniquely matching selector using `automation_id`, `name`, and/or
 Runtime-smoke also accepts `automationId` and `controlType`; conflicting aliases
 are refused. `root_id`, `rootAutomationId`, and XPath are not supported by this
 replacement route. Incomplete or ambiguous searches, unavailable values,
-read-only/password/disabled targets, and stale process or element identities are
-refused before the assignment. NUL and unpaired Unicode surrogates are rejected;
-other text is passed literally.
+read-only/password/disabled targets, and changes to the captured process or
+element identity are refused before the assignment. A DAP run must still be
+active when the request is admitted and immediately before dispatch. NUL and
+unpaired Unicode surrogates are rejected; other text is passed literally.
 
 The helper makes no explicit keyboard, pointer, or focus calls and does not retry
 the assignment. UI Automation or the application provider can still change focus

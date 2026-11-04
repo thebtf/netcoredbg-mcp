@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from netcoredbg_mcp.dap.client import DAPClient
 from netcoredbg_mcp.session.manager import SessionManager
 from netcoredbg_mcp.session.state import DebugState
 from netcoredbg_mcp.ui import provider_text
@@ -325,6 +326,9 @@ async def test_unready_helper_blocks_without_payload_or_dispatch_and_drains_only
 async def test_only_ready_dispatched_uncertainty_fences_live_session(monkeypatch, banner, ready):
     monkeypatch.setattr("netcoredbg_mcp.session.manager.DAPClient", MagicMock())
     session = SessionManager(netcoredbg_path="/unused-in-memory-dap")
+    session._client = DAPClient("/unused-in-memory-dap")
+    session._client._process = MagicMock(pid=43, returncode=None)
+    session._active_dap_run = session._client._run_for_direct_reader().generation
     session.state.state = DebugState.RUNNING
     session.state.process_id = 42
     binding = SimpleNamespace(
@@ -424,6 +428,9 @@ async def test_predispatch_cancellation_retains_launch_and_drains_only_its_helpe
 async def test_late_original_completion_cannot_clear_reused_pid_operation(monkeypatch):
     monkeypatch.setattr("netcoredbg_mcp.session.manager.DAPClient", MagicMock())
     session = SessionManager(netcoredbg_path="/unused-in-memory-dap")
+    session._client = DAPClient("/unused-in-memory-dap")
+    session._client._process = MagicMock(pid=43, returncode=None)
+    session._active_dap_run = session._client._run_for_direct_reader().generation
     session.state.state = DebugState.RUNNING
     session.state.process_id = 42
     original_exited = False
