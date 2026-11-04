@@ -53,9 +53,12 @@ outside this increment. The Python default and rollback route are unchanged.
 
 The source-built host accepts optional nullable `start` and `count` on
 `get_variables`, in addition to the existing required session, context and
-positive reference. Both are nonnegative Int32 values. Missing and null fields
-are omitted from the DAP request; zero `count` is sent and requests all remaining
-children. Unknown or invalid fields, including `filter`, fail before DAP I/O.
+positive reference. Both are nonnegative Int32-valued JSON numbers. Exact
+integral decimal or exponent forms such as `1.0` and `2e0` are accepted without
+floating-point rounding, as required by JSON Schema; nonintegral or out-of-range
+values are refused. Missing and null fields are omitted from the DAP request;
+zero `count` is sent and requests all remaining children. Unknown or invalid
+fields, including `filter`, fail before DAP I/O.
 The host advertises `supportsVariablePaging` in DAP initialization and sends one
 request, preserving stopped-context admission, refusal, full-response validation,
 256-entry and 256-KiB limits, and drain behavior. A response with more entries
@@ -88,6 +91,11 @@ An adapter response exceeding a positive `count` was accepted before the
 additional validation (RED); after the change, that regression and adjacent
 page/refusal cases passed 8/8 in a separate controlled selection; the explicit
 session-eviction assertion passed 1/1 afterward.
+
+The schema review identified that integral decimal/exponent forms were being
+rejected. The new public MCP test failed before the parser change and the focused
+page, boundary and schema selection passed 6/6 afterward. The existing exact
+integer parser is reused; the supplied values are checked against Int32 range.
 
 ## Original B2 outcome — historical scope
 An opt-in modern native MCP client with a live, stopped debug session whose DAP initialize response explicitly supports delayed stack-trace loading can explicitly name one opaque session and one thread, receive one bounded normalized page of its DAP frames, and retain the session after a refusal. The installed Python `netcoredbg-mcp` remains the selected default/rollback route and independently proves `PRODUCT_WORKS` as non-selection compatibility.

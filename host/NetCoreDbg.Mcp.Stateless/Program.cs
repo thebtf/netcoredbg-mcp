@@ -3116,21 +3116,21 @@ internal static class Program
             int? start = null;
             if (arguments.TryGetValue("start", out var startElement) && startElement.ValueKind != JsonValueKind.Null)
             {
-                if (startElement.ValueKind != JsonValueKind.Number || !startElement.TryGetInt32(out var value) || value < 0)
+                if (!TryReadOutputLineCount(startElement, out var value) || value is < 0 or > int.MaxValue)
                 {
                     return false;
                 }
-                start = value;
+                start = (int)value;
             }
 
             int? count = null;
             if (arguments.TryGetValue("count", out var countElement) && countElement.ValueKind != JsonValueKind.Null)
             {
-                if (countElement.ValueKind != JsonValueKind.Number || !countElement.TryGetInt32(out var value) || value < 0)
+                if (!TryReadOutputLineCount(countElement, out var value) || value is < 0 or > int.MaxValue)
                 {
                     return false;
                 }
-                count = value;
+                count = (int)value;
             }
 
             result = new InspectionArguments(sessionIdElement.GetString()!, contextElement.GetString()!, id, start, count);

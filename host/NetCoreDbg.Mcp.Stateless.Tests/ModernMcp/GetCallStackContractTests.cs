@@ -497,6 +497,7 @@ public sealed class GetCallStackContractTests
             ("filter", JsonValue.Create("other")), ("filter", JsonValue.Create(1)),
             ("start", JsonValue.Create(-1)), ("start", JsonValue.Create(1.5)), ("start", JsonValue.Create(2147483648L)),
             ("count", JsonValue.Create(-1)), ("count", JsonValue.Create(1.5)), ("count", JsonValue.Create(2147483648L)),
+            ("start", JsonNode.Parse("1.0000000000000000001")), ("count", JsonNode.Parse("-0.0000000000000000001")),
             ("unknown", JsonValue.Create(1)),
         };
         for (var index = 0; index < cases.Length; index++)
@@ -515,6 +516,45 @@ public sealed class GetCallStackContractTests
         var invalidScopes = await InspectionCallAsync(driver, "get_scopes", scopes, "variables-page-extra-scopes", isError: true);
         Assert.Equal("INVALID_TOOL_ARGUMENTS", invalidScopes["error"]?.GetValue<string>());
         Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Fact]
+    public async Task VariablesPaging_IntegralDecimalAndExponentForms_MatchIntegerSchema()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(InspectionOptions("get_variables", "paging"), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "variables-numeric-start");
+        try
+        {
+            var context = (await InspectionStackAsync(driver, session, "variables-numeric-stack"))["inspectionContextId"]!.GetValue<string>();
+            var before = await driver.ReadNativeActionsAsync();
+            var cases = new[]
+            {
+                (Start: "3.0", Count: "2e0", ExpectedStart: 3, ExpectedCount: 2, Names: new[] { "[1]", "[2]" }),
+                (Start: "30e-1", Count: "2.000", ExpectedStart: 3, ExpectedCount: 2, Names: new[] { "[1]", "[2]" }),
+                (Start: "-0.0", Count: "0e20", ExpectedStart: 0, ExpectedCount: 0, Names: new[] { "Title", "Count", "[0]", "[1]", "[2]", "[3]" }),
+                (Start: "2147483647.0", Count: "1.0", ExpectedStart: int.MaxValue, ExpectedCount: 1, Names: Array.Empty<string>()),
+            };
+            for (var index = 0; index < cases.Length; index++)
+            {
+                var arguments = InspectionArguments(session, context, "variablesReference", 1001);
+                arguments["start"] = JsonNode.Parse(cases[index].Start);
+                arguments["count"] = JsonNode.Parse(cases[index].Count);
+                var result = await InspectionCallAsync(driver, "get_variables", arguments, $"variables-numeric-{index}");
+                Assert.Equal(cases[index].Names, Assert.IsType<JsonArray>(result["variables"]).Select(static item => item!["name"]!.GetValue<string>()));
+            }
+            var writes = (await driver.ReadNativeActionsAsync()).Skip(before.Count).Where(static action => action.Command == "variables").ToArray();
+            Assert.Equal(cases.Length, writes.Length);
+            for (var index = 0; index < cases.Length; index++)
+            {
+                Assert.True(JsonNode.DeepEquals(new JsonObject { ["variablesReference"] = 1001, ["start"] = cases[index].ExpectedStart, ["count"] = cases[index].ExpectedCount }, JsonNode.Parse(writes[index].Detail!)!["arguments"]));
+            }
+        }
+        finally
+        {
+            var stop = AssertApplicationEnvelope(await driver.CallToolRawAsync("stop_debug", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("variables-numeric-stop"), timeout: TimeSpan.FromSeconds(15)), isError: false);
+            Assert.Equal("stop_debug_success", stop["kind"]?.GetValue<string>());
+        }
     }
 
     [Fact]
