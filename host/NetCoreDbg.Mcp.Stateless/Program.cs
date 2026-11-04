@@ -93,7 +93,9 @@ internal static class Program
                         && call["name"] is JsonValue toolName && toolName.TryGetValue<string>(out var name)
                         && name is "pause_execution" or "get_modules" or "get_progress" or "configure_exceptions"
                         && call.TryGetPropertyValue("arguments", out var rawArguments)
-                        && rawArguments is not null and not JsonObject)
+                        && rawArguments is not null
+                        && (rawArguments is not JsonObject objectArguments
+                            || (name == "configure_exceptions" && !CanDeserializeExceptionFilterArguments(objectArguments))))
                     {
                         // Keep malformed tool inputs on the complete application-error path before SDK deserialization.
                         call["arguments"] = null;
@@ -116,6 +118,38 @@ internal static class Program
             });
 
         return builder.Build();
+    }
+
+    private static bool CanDeserializeExceptionFilterArguments(JsonObject arguments)
+    {
+        try
+        {
+            foreach (var (name, value) in arguments)
+            {
+                if (name == "debugSessionId")
+                {
+                    if (value is not JsonValue session || !session.TryGetValue<string>(out _)) return false;
+                }
+                else if (name == "filters")
+                {
+                    if (value is null) continue;
+                    if (value is not JsonArray filters) return false;
+                    foreach (var filter in filters)
+                    {
+                        if (filter is not JsonValue text || !text.TryGetValue<string>(out _)) return false;
+                    }
+                }
+                else
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
     }
 
     private static bool TryReadCancelledRequestId(JsonNode? value, out RequestId requestId)

@@ -90,6 +90,44 @@ public sealed class OutputConfigurationContractTests
         });
     }
 
+    [Theory]
+    [InlineData("session", "\\uD800")]
+    [InlineData("session", "\\uDC00")]
+    [InlineData("filter", "\\uD800")]
+    [InlineData("filter", "\\uDC00")]
+    [InlineData("session-object", "\\uD800")]
+    [InlineData("filter-object", "\\uD800")]
+    [InlineData("unexpected", "\\uD800")]
+    public async Task ConfigureExceptions_UnpairedSurrogate_ReturnsInvalidArguments(string field, string escaped)
+    {
+        await WithHostAsync("100000", "10000000", async (process, standardError, token) =>
+        {
+            var arguments = field switch
+            {
+                "session" => $"{{\"debugSessionId\":\"{escaped}\",\"filters\":[]}}",
+                "filter" => $"{{\"debugSessionId\":\"missing\",\"filters\":[\"{escaped}\"]}}",
+                "session-object" => $"{{\"debugSessionId\":{{\"nested\":\"{escaped}\"}},\"filters\":[]}}",
+                "filter-object" => $"{{\"debugSessionId\":\"missing\",\"filters\":[{{\"nested\":\"{escaped}\"}}]}}",
+                _ => $"{{\"debugSessionId\":\"missing\",\"unexpected\":{{\"nested\":\"{escaped}\"}}}}",
+            };
+            var request = "{\"jsonrpc\":\"2.0\",\"id\":\"unicode\",\"method\":\"tools/call\",\"params\":{\"name\":\"configure_exceptions\",\"arguments\":"
+                + arguments + ",\"_meta\":" + ModernMcpProcessDriver.CurrentMeta().ToJsonString() + "}}";
+            await process.StandardInput.WriteLineAsync(request.AsMemory(), token);
+            await process.StandardInput.FlushAsync(token);
+            var line = await process.StandardOutput.ReadLineAsync(token);
+            Assert.NotNull(line);
+            var response = Assert.IsType<JsonObject>(JsonNode.Parse(line));
+            process.StandardInput.Close();
+            await process.WaitForExitAsync(token);
+            var diagnostic = await standardError.WaitAsync(token);
+            Assert.False(response.ContainsKey("error"), $"{line}\n{diagnostic}");
+            var result = Assert.IsType<JsonObject>(response["result"]);
+            Assert.True(result["isError"]?.GetValue<bool>());
+            Assert.Equal("invalid_tool_arguments", result["structuredContent"]?["kind"]?.GetValue<string>());
+            Assert.Equal("INVALID_TOOL_ARGUMENTS", result["structuredContent"]?["error"]?.GetValue<string>());
+        });
+    }
+
     private static async Task SendDiscoveryAsync(Process process, CancellationToken cancellationToken)
     {
         var request = new JsonObject

@@ -23,6 +23,8 @@ Before product changes, `ToolsList_ConfigureExceptions_PublishesClosedOptionalFi
 
 The public discovery check passed 1/1 after implementation; 49 selected filter, lifecycle and schema cases passed against the controlled adapter. A separate malformed outer-arguments check first produced an MCP protocol error, then passed after routing the input to the existing application-error path; two neighboring inventory cases also passed. Nine selected catalog, source-breakpoint and exception-info cases passed. These observations do not prove real-debugger behavior.
 
+Raw MCP requests containing unpaired UTF-16 surrogate escapes in the session ID or filters first returned JSON-RPC internal errors (4/4). The SDK deserialized the input before the tool parser; after the incoming-boundary repair, 15 raw Unicode, valid-filter, invalid-input and neighboring inventory cases passed. The initial test through the SDK client could not send those invalid strings and is not counted as a server reproduction.
+
 A controlled MCP/DAP consumer is source proof only. A real exception-stop journey through netcoredbg and installed delivery remain separate obligations; do not use an unqualified owned-consumer harness or interact with the operator desktop.
 
 Sources: `docs/dap-protocol/specification.md` SetExceptionBreakpoints request; `src/netcoredbg_mcp/tools/breakpoints.py` and `session/manager.py`. The pinned adapter [`vscodeprotocol.cpp`](https://github.com/thebtf/netcoredbg/blob/a5528f7ef61492a384017c885fb23b51ab90ddde/src/protocols/vscodeprotocol.cpp) advertises `all` and `user-unhandled` filters and supports optional response bodies. This source observation does not prove the installed debugger's current behavior.
