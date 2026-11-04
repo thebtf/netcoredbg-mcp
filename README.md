@@ -74,13 +74,12 @@ frame ID to `get_scopes` and with each returned reference to `get_variables`.
 Keep each numeric ID paired with the context from the same observation; a zero
 variable reference is a leaf. After a step, continuation, or other invalidation,
 fetch a new stack and context: the debugger may reuse numeric references.
-The source-built host accepts optional `filter` (`named` or `indexed`), `start`,
-and `count`, forwarding them to the adapter. Omitted or null options are omitted
-from DAP; `count: 0` requests all remaining children. Results remain limited to
-256 entries and 256 KiB. Adapter behavior is not corrected by the host: with
-`netcoredbg` 3.1.3-1, an observed integer array returned no `indexed` children
-and returned those elements as `named` (Engram issue #547). Do not rely on that filter
-for array classification until the debugger behavior is repaired.
+The source-built host accepts optional `start` and `count` and forwards them to
+the adapter. Omitted or null options are omitted from DAP; `count: 0` requests
+all remaining children. Results remain limited to 256 entries and 256 KiB, and
+adapter support determines the page. Variable filtering is not supported: a
+real `netcoredbg` 3.1.3-1 run returned an empty `indexed` result for an integer
+array and classified its elements as `named` (Engram issue #547).
 
 The source-built stateful host also exposes
 `evaluate_expression(debugSessionId, inspectionContextId, frameId, expression)`.

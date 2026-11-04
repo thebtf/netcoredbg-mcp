@@ -668,13 +668,12 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     internal async Task<DapVariablesResult> GetVariablesAsync(
         string inspectionContextId,
         int variablesReference,
-        string? filter,
         int? start,
         int? count,
         CancellationToken cancellationToken)
     {
         var response = await SendInspectionRequestAsync(
-            "variables", new DapVariablesArguments(variablesReference, filter, start, count), inspectionContextId, cancellationToken).ConfigureAwait(false);
+            "variables", new DapVariablesArguments(variablesReference, start, count), inspectionContextId, cancellationToken).ConfigureAwait(false);
         if (response is null || !response.Success || !response.TargetCurrent)
         {
             return DapVariablesResult.Refused;
@@ -5042,7 +5041,6 @@ internal sealed record DapCallStackResult(
 
 internal sealed record DapVariablesArguments(
     [property: JsonPropertyName("variablesReference")] int VariablesReference,
-    [property: JsonPropertyName("filter"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Filter,
     [property: JsonPropertyName("start"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? Start,
     [property: JsonPropertyName("count"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? Count);
 

@@ -2554,14 +2554,13 @@ internal sealed class ControlledDapAdapter
         if (command == "variables" && mode == "paging")
         {
             var arguments = root.GetProperty("arguments");
-            var filter = arguments.TryGetProperty("filter", out var filterElement) ? filterElement.GetString() : null;
             object[] named = [
                 new { name = "Title", value = "fixture", variablesReference = 0 },
                 new { name = "Count", value = "4", variablesReference = 0 },
             ];
             object[] indexed = Enumerable.Range(0, 4)
                 .Select(static index => (object)new { name = $"[{index}]", value = index.ToString(CultureInfo.InvariantCulture), variablesReference = 0 }).ToArray();
-            entries = filter switch { "named" => named, "indexed" => indexed, _ => [.. named, .. indexed] };
+            entries = [.. named, .. indexed];
             var start = arguments.TryGetProperty("start", out var startElement) ? startElement.GetInt32() : 0;
             var count = arguments.TryGetProperty("count", out var countElement) ? countElement.GetInt32() : 0;
             entries = count == 0 ? entries.Skip(start).ToArray() : entries.Skip(start).Take(count).ToArray();

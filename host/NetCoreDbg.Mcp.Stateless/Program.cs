@@ -1034,7 +1034,7 @@ internal static class Program
                 else
                 {
                     var result = await session.GetVariablesAsync(arguments.InspectionContextId, arguments.Id,
-                        arguments.Filter, arguments.Start, arguments.Count, operation.Token).ConfigureAwait(false);
+                        arguments.Start, arguments.Count, operation.Token).ConfigureAwait(false);
                     if (result.IsRefused)
                     {
                         return Error("dap_variables_refused", "DAP_VARIABLES_REFUSED");
@@ -3097,7 +3097,7 @@ internal static class Program
             var idName = scopes ? "frameId" : "variablesReference";
             if (arguments is null
                 || arguments.Keys.Any(name => name != "debugSessionId" && name != "inspectionContextId" && name != idName
-                    && (scopes || name is not ("filter" or "start" or "count")))
+                    && (scopes || name is not ("start" or "count")))
                 || !arguments.TryGetValue("debugSessionId", out var sessionIdElement)
                 || sessionIdElement.ValueKind != JsonValueKind.String
                 || string.IsNullOrWhiteSpace(sessionIdElement.GetString())
@@ -3111,16 +3111,6 @@ internal static class Program
                 || (!scopes && id <= 0))
             {
                 return false;
-            }
-
-            string? filter = null;
-            if (arguments.TryGetValue("filter", out var filterElement) && filterElement.ValueKind != JsonValueKind.Null)
-            {
-                if (filterElement.ValueKind != JsonValueKind.String || filterElement.GetString() is not ("named" or "indexed"))
-                {
-                    return false;
-                }
-                filter = filterElement.GetString();
             }
 
             int? start = null;
@@ -3143,7 +3133,7 @@ internal static class Program
                 count = value;
             }
 
-            result = new InspectionArguments(sessionIdElement.GetString()!, contextElement.GetString()!, id, filter, start, count);
+            result = new InspectionArguments(sessionIdElement.GetString()!, contextElement.GetString()!, id, start, count);
             return true;
         }
 
@@ -3290,7 +3280,7 @@ internal static class Program
 
         private sealed record ThreadsSuccessContent(string kind, IReadOnlyList<DapThread> threads);
         private sealed record CallStackArguments(string SessionId, int ThreadId, uint StartFrame, uint Levels, bool IncludeInspectionContext);
-        private sealed record InspectionArguments(string SessionId, string InspectionContextId, int Id, string? Filter, int? Start, int? Count);
+        private sealed record InspectionArguments(string SessionId, string InspectionContextId, int Id, int? Start, int? Count);
         private sealed record ScopesSuccessContent(string kind, string inspectionContextId, IReadOnlyList<DapScope> scopes);
         private sealed record VariablesSuccessContent(string kind, string inspectionContextId, IReadOnlyList<DapVariable> variables);
         private sealed record EvaluateArguments(string SessionId, string InspectionContextId, int FrameId, string Expression);
@@ -3353,7 +3343,7 @@ internal static class Program
                 Tool("get_call_stack", "Get a bounded stack-frame page for one stopped thread. Opt in to an opaque stopped-epoch inspection context for get_scopes/get_variables; carry numeric IDs with the context from the same observation, not as proof that an ID was issued.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647},\"startFrame\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295},\"levels\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":256},\"includeInspectionContext\":{\"type\":\"boolean\",\"default\":false}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
                 Tool("step_over", "Step over one explicitly named stopped thread.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
                 Tool("get_scopes", "Get bounded scopes using a frame ID and inspection context from the same stopped observation. The context is process/session-local and expires on execution or inspection invalidation.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"inspectionContextId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"pattern\":\"\\\\S\"},\"frameId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"inspectionContextId\",\"frameId\"],\"additionalProperties\":false}"),
-                Tool("get_variables", "Get bounded variables using a positive variablesReference and inspection context from the same stopped observation. Optional filter and page are sent to the debugger; adapter support determines the result. Zero count requests all remaining children. A returned reference of zero is a leaf.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1},"inspectionContextId":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"},"variablesReference":{"type":"integer","minimum":1,"maximum":2147483647},"filter":{"type":["string","null"],"enum":["named","indexed",null]},"start":{"type":["integer","null"],"minimum":0,"maximum":2147483647},"count":{"type":["integer","null"],"minimum":0,"maximum":2147483647}},"required":["debugSessionId","inspectionContextId","variablesReference"],"additionalProperties":false}"""),
+                Tool("get_variables", "Get bounded variables using a positive variablesReference and inspection context from the same stopped observation. Optional start and count are sent to the debugger; adapter support determines the result. Zero count requests all remaining children. A returned reference of zero is a leaf. Filtering is not supported.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1},"inspectionContextId":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"},"variablesReference":{"type":"integer","minimum":1,"maximum":2147483647},"start":{"type":["integer","null"],"minimum":0,"maximum":2147483647},"count":{"type":["integer","null"],"minimum":0,"maximum":2147483647}},"required":["debugSessionId","inspectionContextId","variablesReference"],"additionalProperties":false}"""),
                 Tool("continue_execution", "Continue execution using an explicitly named stopped thread; the request resumes all threads. Observe the next stop or terminal event for up to 30 seconds. An acknowledged timeout does not itself close the session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
                 Tool("pause_execution", "Request a pause while a session is live, including alongside a committed continue. Nonzero threadId selects that exact thread; omitted, null or zero selects the observed current thread or the first bounded discovered thread. Returns the adapter acknowledgement, not a stopped-state claim. Only a real stopped event authorizes inspection; uncertain writes are never retried.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"threadId":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"required":["debugSessionId"],"additionalProperties":false}"""),
                 Tool("add_breakpoint", "Add a source breakpoint to a live debug session while preserving its requested source breakpoint sets. Verification is an adapter observation, not proof of a hit. Conditions and hit counts are not supported.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"file\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"line\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"file\",\"line\"],\"additionalProperties\":false}"),

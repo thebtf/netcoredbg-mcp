@@ -240,17 +240,6 @@
           "minimum": 1,
           "maximum": 2147483647
         },
-        "filter": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "enum": [
-            "named",
-            "indexed",
-            null
-          ]
-        },
         "start": {
           "type": [
             "integer",
