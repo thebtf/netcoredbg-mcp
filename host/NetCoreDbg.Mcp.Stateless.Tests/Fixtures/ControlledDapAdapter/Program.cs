@@ -140,7 +140,10 @@ internal sealed record AdapterOptions(
     bool? PauseAllThreadsStopped,
     bool? SupportsExceptionInfoRequest,
     string ExceptionInfoResponseMode,
-    string ExceptionInfoCapabilityDelta)
+    string ExceptionInfoCapabilityDelta,
+    string ExceptionBreakpointFilters,
+    string ExceptionFiltersCapabilityDelta,
+    string SetExceptionBreakpointsResponseMode)
 {
     public static AdapterOptions Parse(string[] args, string? environmentOptions)
     {
@@ -181,6 +184,9 @@ internal sealed record AdapterOptions(
         bool? supportsExceptionInfoRequest = null;
         var exceptionInfoResponseMode = "success";
         var exceptionInfoCapabilityDelta = "none";
+        var exceptionBreakpointFilters = "omit";
+        var exceptionFiltersCapabilityDelta = "none";
+        var setExceptionBreakpointsResponseMode = "absent-body";
 
         foreach (var argument in args.Concat(SplitOptions(environmentOptions)))
         {
@@ -304,6 +310,15 @@ internal sealed record AdapterOptions(
                 case var _ when argument.StartsWith("--exception-info-capability-delta=", StringComparison.Ordinal):
                     exceptionInfoCapabilityDelta = argument["--exception-info-capability-delta=".Length..];
                     break;
+                case var _ when argument.StartsWith("--exception-breakpoint-filters=", StringComparison.Ordinal):
+                    exceptionBreakpointFilters = argument["--exception-breakpoint-filters=".Length..];
+                    break;
+                case var _ when argument.StartsWith("--exception-filters-capability-delta=", StringComparison.Ordinal):
+                    exceptionFiltersCapabilityDelta = argument["--exception-filters-capability-delta=".Length..];
+                    break;
+                case var _ when argument.StartsWith("--set-exception-breakpoints-response=", StringComparison.Ordinal):
+                    setExceptionBreakpointsResponseMode = argument["--set-exception-breakpoints-response=".Length..];
+                    break;
                 default:
                     throw new ArgumentException($"Unknown fixture option '{argument}'.", nameof(args));
             }
@@ -346,7 +361,10 @@ internal sealed record AdapterOptions(
             pauseAllThreadsStopped,
             supportsExceptionInfoRequest,
             exceptionInfoResponseMode,
-            exceptionInfoCapabilityDelta);
+            exceptionInfoCapabilityDelta,
+            exceptionBreakpointFilters,
+            exceptionFiltersCapabilityDelta,
+            setExceptionBreakpointsResponseMode);
     }
 
     private static IEnumerable<string> SplitOptions(string? options) =>
@@ -497,6 +515,7 @@ internal sealed class ControlledDapAdapter
     private bool _recordPauseWire;
     private bool _launchCompleted;
     private int _runtimeBreakpointRequests;
+    private int _exceptionFilterRequests;
     private bool _inspectionResponseHeld;
     private bool _inspectionStepped;
     private int _continueRequests;
@@ -693,6 +712,10 @@ internal sealed class ControlledDapAdapter
                         cancellationToken);
                     await RecordAsync(new { kind = "capabilities-event" }, cancellationToken);
                 }
+                if (_options.ExceptionFiltersCapabilityDelta is "enable-before-initialize" or "disable-before-initialize")
+                {
+                    await WriteExceptionFiltersCapabilityAsync(_options.ExceptionFiltersCapabilityDelta == "enable-before-initialize", cancellationToken);
+                }
 
                 await WriteResponseAsync(sequence + 10_000, command, body: null, cancellationToken);
                 await RecordAsync(new { kind = "unmatched-response", requestSequence = sequence + 10_000 }, cancellationToken);
@@ -723,6 +746,10 @@ internal sealed class ControlledDapAdapter
                 {
                     initializeCapabilities["supportsExceptionInfoRequest"] = exceptionInfoSupport;
                 }
+                if (_options.ExceptionBreakpointFilters != "omit")
+                {
+                    initializeCapabilities["exceptionBreakpointFilters"] = ExceptionFilterDescriptors(_options.ExceptionBreakpointFilters == "supported");
+                }
 
                 await WriteResponseAsync(sequence, command, initializeCapabilities, cancellationToken, omitBody: _options.OmitInitializeResponseBody);
                 await RecordAsync(new
@@ -733,6 +760,10 @@ internal sealed class ControlledDapAdapter
                     supportsConfigurationDoneRequest = supportsConfigurationDone,
                     supportsTerminateRequest = supportsTerminate,
                 }, cancellationToken);
+                if (_options.ExceptionFiltersCapabilityDelta is "enable-after-initialize" or "disable-after-initialize")
+                {
+                    await WriteExceptionFiltersCapabilityAsync(_options.ExceptionFiltersCapabilityDelta == "enable-after-initialize", cancellationToken);
+                }
                 if (_options.EnableConfigurationDoneAfterInitialization)
                 {
                     await WaitForConfigurationDoneCapabilityDeltaReleaseAsync(cancellationToken);
@@ -817,6 +848,14 @@ internal sealed class ControlledDapAdapter
                     await WriteEventAsync("capabilities", new { capabilities = new { supportsExceptionInfoRequest = supported } }, cancellationToken);
                     await RecordAsync(new { kind = "exception-info-capabilities-delta-event", supported }, cancellationToken);
                 }
+                if (_options.ExceptionFiltersCapabilityDelta is "enable-on-threads" or "disable-on-threads")
+                {
+                    await WriteExceptionFiltersCapabilityAsync(_options.ExceptionFiltersCapabilityDelta == "enable-on-threads", cancellationToken);
+                }
+                else if (_options.ExceptionFiltersCapabilityDelta == "unrelated-on-threads")
+                {
+                    await WriteEventAsync("capabilities", new { capabilities = new { supportsExceptionInfoRequest = true } }, cancellationToken);
+                }
                 return await HandleThreadsRequestAsync(sequence, cancellationToken);
             case "stackTrace":
                 return await HandleStackTraceRequestAsync(sequence, cancellationToken);
@@ -844,10 +883,98 @@ internal sealed class ControlledDapAdapter
             case "setBreakpoints":
                 await HandleSetBreakpointsRequestAsync(sequence, root, cancellationToken);
                 return false;
+            case "setExceptionBreakpoints":
+                return await HandleSetExceptionBreakpointsRequestAsync(sequence, root, cancellationToken);
             default:
                 await WriteResponseAsync(sequence, command, body: null, cancellationToken);
                 return false;
         }
+    }
+
+    private static object[] ExceptionFilterDescriptors(bool supported) => supported
+        ? [new { filter = "all", label = "All exceptions" }, new { filter = "user-unhandled", label = "User-unhandled exceptions" }]
+        : [];
+
+    private async Task WriteExceptionFiltersCapabilityAsync(bool supported, CancellationToken cancellationToken)
+    {
+        await WriteEventAsync("capabilities", new { capabilities = new { exceptionBreakpointFilters = ExceptionFilterDescriptors(supported) } }, cancellationToken);
+        await RecordAsync(new { kind = "exception-filters-capabilities-delta-event", supported }, cancellationToken);
+    }
+
+    private async Task<bool> HandleSetExceptionBreakpointsRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)
+    {
+        const string privatePayload = "private controlled exception filter payload";
+        var ordinal = ++_exceptionFilterRequests;
+        var mode = _options.SetExceptionBreakpointsResponseMode;
+        var requested = root.GetProperty("arguments").GetProperty("filters").EnumerateArray().ToArray();
+        var results = new JsonArray(requested.Select((_, index) => (JsonNode)new JsonObject
+        {
+            ["verified"] = index % 2 == 0,
+            ["message"] = privatePayload,
+            ["id"] = index + 100,
+        }).ToArray());
+        object? body = new JsonObject { ["breakpoints"] = results };
+        switch (mode)
+        {
+            case "absent-body":
+                await WriteResponseAsync(sequence, "setExceptionBreakpoints", null, cancellationToken, omitBody: true);
+                return false;
+            case "missing-breakpoints":
+                body = new { message = privatePayload };
+                break;
+            case "verified":
+                break;
+            case "refused":
+                await WriteResponseAsync(sequence, "setExceptionBreakpoints", new { message = privatePayload }, cancellationToken, success: false);
+                return false;
+            case "null-breakpoints":
+                body = new JsonObject { ["breakpoints"] = null };
+                break;
+            case "non-object-body":
+                body = new[] { privatePayload };
+                break;
+            case "non-array-breakpoints":
+                body = new { breakpoints = privatePayload };
+                break;
+            case "missing-verified":
+                results[0]!.AsObject().Remove("verified");
+                break;
+            case "non-boolean-verified":
+                results[0]!["verified"] = "true";
+                break;
+            case "null-entry":
+                results[0] = null;
+                break;
+            case "too-few-results":
+                results.RemoveAt(results.Count - 1);
+                break;
+            case "too-many-results":
+                results.Add(new JsonObject { ["verified"] = true });
+                break;
+            case "wrong-command":
+                await WriteResponseAsync(sequence, "setBreakpoints", body, cancellationToken);
+                return false;
+            case "reader-failure":
+                await WriteMalformedDapFrameAsync(cancellationToken);
+                return false;
+            case "eof":
+                return true;
+            case "timeout":
+                await RecordAsync(new { kind = "exception-filters-response-timeout", sequence }, cancellationToken);
+                return false;
+            case "hold-first":
+                if (ordinal != 1)
+                {
+                    break;
+                }
+                await RecordAsync(new { kind = "exception-filters-response-gated", sequence }, cancellationToken);
+                _heldBreakpointsResponse = CompleteHeldBreakpointsResponseAsync(sequence, body, _lifecycleEventsCancellation.Token, "setExceptionBreakpoints");
+                return false;
+            default:
+                throw new InvalidOperationException($"Unknown setExceptionBreakpoints response mode '{mode}'.");
+        }
+        await WriteResponseAsync(sequence, "setExceptionBreakpoints", body, cancellationToken);
+        return false;
     }
 
     private async Task HandleSetBreakpointsRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)
@@ -931,11 +1058,11 @@ internal sealed class ControlledDapAdapter
         await WriteResponseAsync(sequence, "setBreakpoints", body, cancellationToken, success: success);
     }
 
-    private async Task CompleteHeldBreakpointsResponseAsync(int sequence, object? body, CancellationToken cancellationToken)
+    private async Task CompleteHeldBreakpointsResponseAsync(int sequence, object? body, CancellationToken cancellationToken, string command = "setBreakpoints")
     {
         await WaitForNextResponseReleaseAsync(cancellationToken);
         await RecordAsync(new { kind = "runtime-breakpoints-response-releasing", sequence }, cancellationToken);
-        await WriteResponseAsync(sequence, "setBreakpoints", body, cancellationToken);
+        await WriteResponseAsync(sequence, command, body, cancellationToken);
     }
 
     private async Task CompleteLaunchAsync(CancellationToken cancellationToken)

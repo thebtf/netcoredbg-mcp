@@ -84,6 +84,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private bool _supportsTerminate;
     private DapStackTraceCapabilities _stackTraceCapabilities;
     private bool _supportsExceptionInfoRequest;
+    private bool _supportsExceptionFilters;
     private CallStackEligibility? _allThreadsStoppedEligibility;
     private Dictionary<int, CallStackEligibility>? _threadEligibility;
     private HashSet<int>? _invalidatedAllThreadTargets;
@@ -1431,6 +1432,102 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     internal Task<DapBreakpointUpdateResult> RemoveBreakpointAsync(string file, int line, CancellationToken cancellationToken) =>
         UpdateBreakpointAsync(file, line, remove: true, cancellationToken);
 
+    internal async Task<DapBreakpointUpdateResult> ConfigureExceptionsAsync(string[] filters, CancellationToken cancellationToken)
+    {
+        await _breakpointUpdateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        BreakpointUpdate? update = null;
+        PendingRequest? request = null;
+        try
+        {
+            using var deadline = CreateDeadline(_requestTimeout, cancellationToken);
+            await _callStackAdmissionGate.WaitAsync(deadline.Token).ConfigureAwait(false);
+            try
+            {
+                lock (_stateGate)
+                {
+                    if (_breakpointUpdatesClosed || _inspectionClosed || IsRetirementRequested || _executionAdmission == ExecutionAdmission.Closing)
+                    {
+                        return DapBreakpointUpdateResult.Refused;
+                    }
+                    if (!_supportsExceptionFilters)
+                    {
+                        return new DapBreakpointUpdateResult(DapBreakpointUpdateOutcome.Unsupported);
+                    }
+                    update = new BreakpointUpdate(string.Empty, [], -1, 0) { ExceptionFilters = filters };
+                    _activeBreakpointUpdate = update;
+                }
+                request = await BeginRequestAsync("setExceptionBreakpoints", new { filters }, _requestTimeout,
+                    deadline.Token, breakpointUpdate: update).ConfigureAwait(false);
+            }
+            finally
+            {
+                _callStackAdmissionGate.Release();
+            }
+
+            await update.Completion.Task.WaitAsync(deadline.Token).ConfigureAwait(false);
+            lock (_stateGate)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (update.Failure is { } failure)
+                {
+                    throw new InvalidDataException("DAP exception filter update failed.", failure);
+                }
+                var result = update.Result ?? throw new InvalidOperationException("Exception filter update has no result.");
+                update.Finalized = true;
+                if (update.RequiresDrain)
+                {
+                    FenceBreakpointUpdates();
+                }
+                return result with { RequiresDrain = update.RequiresDrain };
+            }
+        }
+        catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
+        {
+            bool requiresDrain;
+            lock (_stateGate)
+            {
+                var outcomeKnown = update is { CommittedWrite: true, Result: not null, Failure: null, RequiresDrain: false };
+                requiresDrain = update is not null && (update.RequiresDrain || (update.WriteStarted && !outcomeKnown));
+                if (update is not null)
+                {
+                    update.Finalized = true;
+                }
+                if (requiresDrain)
+                {
+                    FenceBreakpointUpdates();
+                }
+            }
+            throw new DapBreakpointCanceledException(requiresDrain, exception, cancellationToken);
+        }
+        catch
+        {
+            lock (_stateGate)
+            {
+                if (update is not null)
+                {
+                    update.Finalized = true;
+                }
+                FenceBreakpointUpdates();
+            }
+            throw;
+        }
+        finally
+        {
+            if (request is not null)
+            {
+                RemovePending(request);
+            }
+            lock (_stateGate)
+            {
+                if (ReferenceEquals(_activeBreakpointUpdate, update))
+                {
+                    _activeBreakpointUpdate = null;
+                }
+            }
+            _breakpointUpdateGate.Release();
+        }
+    }
+
     private async Task<DapBreakpointUpdateResult> UpdateBreakpointAsync(string file, int line, bool remove, CancellationToken cancellationToken)
     {
         await _breakpointUpdateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -1897,7 +1994,21 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             stepOver?.MarkWriteStarted();
             continueExecution?.MarkWriteStarted();
             inspectionRequest?.MarkWriteStarted();
-            breakpointUpdate?.MarkWriteStarted();
+            if (breakpointUpdate?.ExceptionFilters is not null)
+            {
+                lock (_stateGate)
+                {
+                    if (IsRetirementRequested || _breakpointUpdatesClosed || _inspectionClosed || _executionAdmission == ExecutionAdmission.Closing)
+                    {
+                        throw new InvalidDataException("DAP exception filter update lost write admission.");
+                    }
+                    breakpointUpdate.MarkWriteStarted();
+                }
+            }
+            else
+            {
+                breakpointUpdate?.MarkWriteStarted();
+            }
             await _input.WriteAsync(header, cancellationToken).ConfigureAwait(false);
             await _input.WriteAsync(payload, cancellationToken).ConfigureAwait(false);
             await _input.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -2020,14 +2131,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private bool FailActiveBreakpointForWrongCorrelation(int requestSequence, string? command)
     {
-        if (!string.Equals(command, "setBreakpoints", StringComparison.Ordinal))
+        if (command is not ("setBreakpoints" or "setExceptionBreakpoints"))
         {
             return false;
         }
 
         lock (_stateGate)
         {
-            if (_activeBreakpointUpdate is not { Finalized: false } update || update.RequestSequence == requestSequence)
+            if (_activeBreakpointUpdate is not { Finalized: false } update || update.RequestSequence == requestSequence
+                || (update.ExceptionFilters is null) != (command == "setBreakpoints"))
             {
                 return false;
             }
@@ -2109,6 +2221,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 if (success.ValueKind == JsonValueKind.False)
                 {
                     update.Complete(DapBreakpointUpdateResult.Refused);
+                }
+                else if (update.ExceptionFilters is { } filters)
+                {
+                    var verified = ReadExceptionFilterResults(body, filters.Length);
+                    update.Complete(new DapBreakpointUpdateResult(DapBreakpointUpdateOutcome.Acknowledged, ExceptionVerification: verified));
                 }
                 else
                 {
@@ -2238,6 +2355,22 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                         lock (_stateGate)
                         {
                             _supportsExceptionInfoRequest = supportsExceptionInfo;
+                        }
+                    }
+                    finally
+                    {
+                        _callStackAdmissionGate.Release();
+                    }
+                }
+                if (capabilities.TryGetProperty("exceptionBreakpointFilters", out _))
+                {
+                    var supportsFilters = ReadExceptionFilterSupport(capabilities);
+                    _callStackAdmissionGate.Wait();
+                    try
+                    {
+                        lock (_stateGate)
+                        {
+                            _supportsExceptionFilters = supportsFilters;
                         }
                     }
                     finally
@@ -2680,6 +2813,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             {
                 _stackTraceCapabilities = default;
                 _supportsExceptionInfoRequest = false;
+                _supportsExceptionFilters = false;
             }
 
             return;
@@ -2694,10 +2828,12 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         _supportsTerminate = ReadOptionalBoolean(body, "supportsTerminateRequest");
         var capabilities = new DapStackTraceCapabilities(ReadOptionalBoolean(body, "supportsDelayedStackTraceLoading"));
         var supportsExceptionInfo = ReadOptionalBoolean(body, "supportsExceptionInfoRequest");
+        var supportsExceptionFilters = ReadExceptionFilterSupport(body);
         lock (_stateGate)
         {
             _stackTraceCapabilities = capabilities;
             _supportsExceptionInfoRequest = supportsExceptionInfo;
+            _supportsExceptionFilters = supportsExceptionFilters;
         }
     }
 
@@ -2864,9 +3000,12 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private void RequestRetirement()
     {
-        if (Interlocked.Exchange(ref _retirementRequested, 1) != 0)
+        lock (_stateGate)
         {
-            return;
+            if (Interlocked.Exchange(ref _retirementRequested, 1) != 0)
+            {
+                return;
+            }
         }
 
         try
@@ -3274,6 +3413,51 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
             offset += read;
         }
+    }
+
+    private static bool ReadExceptionFilterSupport(JsonElement capabilities)
+    {
+        if (!capabilities.TryGetProperty("exceptionBreakpointFilters", out var filters))
+        {
+            return false;
+        }
+        if (filters.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidDataException("DAP exceptionBreakpointFilters must be an array.");
+        }
+        return filters.GetArrayLength() != 0;
+    }
+
+    private static bool[]? ReadExceptionFilterResults(JsonElement body, int expectedCount)
+    {
+        if (body.ValueKind == JsonValueKind.Undefined)
+        {
+            return null;
+        }
+        if (body.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidDataException("DAP exception breakpoint response body must be an object.");
+        }
+        if (!body.TryGetProperty("breakpoints", out var results))
+        {
+            return null;
+        }
+        if (results.ValueKind != JsonValueKind.Array || results.GetArrayLength() != expectedCount)
+        {
+            throw new InvalidDataException("DAP exception breakpoint response count is invalid.");
+        }
+        var verified = new bool[expectedCount];
+        var index = 0;
+        foreach (var result in results.EnumerateArray())
+        {
+            if (result.ValueKind != JsonValueKind.Object || !result.TryGetProperty("verified", out var value)
+                || value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            {
+                throw new InvalidDataException("DAP exception breakpoint verification is invalid.");
+            }
+            verified[index++] = value.GetBoolean();
+        }
+        return verified;
     }
 
     private static bool ReadOptionalBoolean(JsonElement objectElement, string name)
@@ -4477,6 +4661,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         public DapRequestedBreakpoint[] Requested { get; } = requested;
         public int TargetIndex { get; } = targetIndex;
         public int CountDelta { get; } = countDelta;
+        public string[]? ExceptionFilters { get; init; }
         public int RequestSequence => Volatile.Read(ref _requestSequence);
         public bool WriteStarted => Volatile.Read(ref _writeStarted) != 0;
         public bool CommittedWrite => Volatile.Read(ref _committedWrite) != 0;
@@ -4544,6 +4729,8 @@ internal enum DapBreakpointUpdateOutcome
     Removed,
     NotFound,
     Refused,
+    Unsupported,
+    Acknowledged,
     LimitReached,
 }
 
@@ -4551,7 +4738,8 @@ internal sealed record DapBreakpointUpdateResult(
     DapBreakpointUpdateOutcome Outcome,
     bool Verified = false,
     int? ActualLine = null,
-    bool RequiresDrain = false)
+    bool RequiresDrain = false,
+    bool[]? ExceptionVerification = null)
 {
     internal static DapBreakpointUpdateResult Refused { get; } = new(DapBreakpointUpdateOutcome.Refused);
     internal static DapBreakpointUpdateResult NotFound { get; } = new(DapBreakpointUpdateOutcome.NotFound);

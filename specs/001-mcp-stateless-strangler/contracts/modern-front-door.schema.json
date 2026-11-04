@@ -391,6 +391,29 @@
       },
       "additionalProperties": false
     },
+    "configureExceptionsArguments": {
+      "type": "object",
+      "required": [
+        "debugSessionId"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "filters": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "uiInvokeArguments": {
       "type": "object",
       "properties": {
@@ -912,6 +935,44 @@
         },
         "removed": {
           "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "exceptionFiltersAcknowledged": {
+      "type": "object",
+      "required": [
+        "kind",
+        "filters",
+        "breakpoints"
+      ],
+      "properties": {
+        "kind": {
+          "const": "exception_filters_acknowledged"
+        },
+        "filters": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "breakpoints": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "object",
+            "required": [
+              "verified"
+            ],
+            "properties": {
+              "verified": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false
@@ -2584,6 +2645,54 @@
       },
       "additionalProperties": false
     },
+    "dapExceptionFiltersUnsupported": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_exception_filters_unsupported"
+        },
+        "error": {
+          "const": "DAP_EXCEPTION_FILTERS_UNSUPPORTED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapExceptionFiltersRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_exception_filters_refused"
+        },
+        "error": {
+          "const": "DAP_EXCEPTION_FILTERS_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapExceptionFiltersProtocolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_exception_filters_protocol_error"
+        },
+        "error": {
+          "const": "DAP_EXCEPTION_FILTERS_PROTOCOL_ERROR"
+        }
+      },
+      "additionalProperties": false
+    },
     "startDebugSourceUnavailable": {
       "type": "object",
       "required": [
@@ -2682,6 +2791,7 @@
             "pause_execution",
             "add_breakpoint",
             "remove_breakpoint",
+            "configure_exceptions",
             "ui_invoke",
             "ui_invoke_observed",
             "ui_get_window_tree",
@@ -2780,6 +2890,9 @@
         },
         {
           "$ref": "#/$defs/breakpointRemoved"
+        },
+        {
+          "$ref": "#/$defs/exceptionFiltersAcknowledged"
         },
         {
           "$ref": "#/$defs/uiInvokeSuccess"
@@ -2909,6 +3022,15 @@
         },
         {
           "$ref": "#/$defs/dapSetBreakpointsProtocolError"
+        },
+        {
+          "$ref": "#/$defs/dapExceptionFiltersUnsupported"
+        },
+        {
+          "$ref": "#/$defs/dapExceptionFiltersRefused"
+        },
+        {
+          "$ref": "#/$defs/dapExceptionFiltersProtocolError"
         },
         {
           "$ref": "#/$defs/invalidToolArguments"
