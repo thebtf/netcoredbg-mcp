@@ -3799,6 +3799,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 }
 
                 process = Process.GetProcessById(checked((int)processInformation.ProcessId));
+                // Keep the same process instance while the original creation handle still prevents PID reuse.
+                _ = process.SafeHandle;
                 if (ResumeThread(threadHandle) == uint.MaxValue)
                 {
                     throw LastWin32Error("Could not resume the debugger process.");
