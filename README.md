@@ -692,11 +692,18 @@ compare the raw raster, not a derivative:
 ui_take_screenshot(evidence=true, expected_hwnd=..., expected_physical_width=..., expected_physical_height=...)
 ```
 
-The response reports `MATCHED` or `MISMATCH`; only `MATCHED` persists raw
-evidence. `max_width` affects only the preview and HD derivative, never this
-comparison. `ui_resize_window()` reports request-versus-readback
-`target_comparability.status` as `MATCHED`, `MISMATCH`, or `UNAVAILABLE`;
-`resized=true` confirms request completion, not target equality.
+Strict capture targets the supplied `expected_hwnd`, rather than rediscovering a
+window for the same process. The bridge refuses a different resolved HWND before
+raster capture or activation. If a bridge still returns another HWND, the public
+tool returns `PHYSICAL_CAPTURE_MISMATCH` without an image, pixel payload, or
+persisted screenshot. A size-only mismatch for the expected HWND still returns a
+navigation preview with `MISMATCH` and no persisted evidence; only `MATCHED`
+persists raw evidence. Matching HWND and dimensions checks capture provenance,
+not whether the compositor supplied the intended window's pixels. `max_width`
+affects only the preview and HD derivative, never this comparison.
+`ui_resize_window()` reports request-versus-readback `target_comparability.status`
+as `MATCHED`, `MISMATCH`, or `UNAVAILABLE`; `resized=true` confirms request
+completion, not target equality.
 
 Use `ui_take_annotated_screenshot()` to receive Set-of-Mark labels, then pass
 its `generation` to `ui_click_annotated(element_id=..., generation=...)`.

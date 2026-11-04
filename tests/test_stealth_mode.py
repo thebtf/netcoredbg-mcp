@@ -346,6 +346,7 @@ async def test_public_resize_uia_readback_then_evidence_screenshot_at_150_dpi(tm
             "screenshot",
             {
                 "evidence": True,
+                "hwnd": 777,
                 "typed_bitblt_fallback": True,
                 "expected_hwnd": 777,
                 "expected_physical_width": 1536,
@@ -800,6 +801,162 @@ internal sealed class ForeignProcessCaptureTransport : IScreenshotCaptureTranspo
     }
 
     public bool SetForegroundWindow(IntPtr hwnd) => true;
+}
+""",
+        encoding="utf-8",
+    )
+    probe = subprocess.run(
+        ["dotnet", "run", "--project", str(probe_project), "-c", "Release", "--nologo"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert probe.returncode == 0, probe.stdout + probe.stderr
+    assert json.loads(probe.stdout.strip().splitlines()[-1]) == {
+        "printWindowCalls": 0,
+        "activationCalls": 0,
+        "bitBltCalls": 0,
+    }
+
+
+@REQUIRES_WINDOWS_DOTNET
+def test_bridge_strict_evidence_rejects_same_process_wrong_hwnd_before_raster_or_activation(
+    tmp_path,
+) -> None:
+    import subprocess
+
+    probe_project = tmp_path / "BridgeWrongHwndEvidenceProbe.csproj"
+    probe_source = tmp_path / "Program.cs"
+    bridge_project = PROJECT_ROOT / "bridge" / "FlaUIBridge.csproj"
+    probe_project.write_text(
+        """<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>TypedBitBltFallbackBridgeHost</AssemblyName>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="__BRIDGE_PROJECT__" AdditionalProperties="BridgeTestHost=true" />
+  </ItemGroup>
+</Project>
+""".replace("__BRIDGE_PROJECT__", bridge_project.as_posix()),
+        encoding="utf-8",
+    )
+    probe_source.write_text(
+        """using System.Drawing;
+using System.Reflection;
+using System.Text.Json;
+using FlaUIBridge;
+using FlaUIBridge.Commands;
+
+var capture = typeof(ScreenshotCommands).GetMethod(
+    "CaptureEvidenceWithPrintWindow",
+    BindingFlags.NonPublic | BindingFlags.Static)
+    ?? throw new InvalidOperationException("Evidence capture method was not found.");
+var strictTargetType = typeof(ScreenshotCommands).GetNestedType(
+    "StrictCaptureTarget", BindingFlags.NonPublic)
+    ?? throw new InvalidOperationException("Strict capture target type was not found.");
+var strictTarget = Activator.CreateInstance(
+    strictTargetType,
+    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+    binder: null,
+    args: new object[] { 777L, 42U },
+    culture: null);
+var transport = new SameProcessWrongHwndCaptureTransport();
+JsonRpcHandler.ProcessId = 42;
+try
+{
+    using (ScreenshotCommands.PushCaptureTransportForTesting(transport))
+    {
+        var rejected = false;
+        try
+        {
+            _ = capture.Invoke(null, new object?[] { new IntPtr(778), true, strictTarget });
+        }
+        catch (TargetInvocationException exception)
+            when (exception.InnerException is InvalidOperationException rejection &&
+                  !string.IsNullOrWhiteSpace(rejection.Message))
+        {
+            rejected = true;
+        }
+
+        if (!rejected)
+            throw new InvalidOperationException(
+                "Same-process wrong-HWND evidence target was not rejected.");
+        if (transport.PrintWindowCalls != 0 || transport.ActivationCalls != 0 ||
+            transport.BitBltCalls != 0)
+            throw new InvalidOperationException(
+                "Wrong-HWND evidence target was rasterized or activated before refusal.");
+    }
+}
+finally
+{
+    JsonRpcHandler.ProcessId = 0;
+}
+
+Console.WriteLine(JsonSerializer.Serialize(new
+{
+    printWindowCalls = transport.PrintWindowCalls,
+    activationCalls = transport.ActivationCalls,
+    bitBltCalls = transport.BitBltCalls,
+}));
+
+internal sealed class SameProcessWrongHwndCaptureTransport : IScreenshotCaptureTransport
+{
+    public int PrintWindowCalls { get; private set; }
+    public int ActivationCalls { get; private set; }
+    public int BitBltCalls { get; private set; }
+
+    public CaptureSnapshot ReadSnapshot(IntPtr hwnd)
+    {
+        if (hwnd != new IntPtr(777) && hwnd != new IntPtr(778))
+            throw new ArgumentException("Unexpected fake HWND.", nameof(hwnd));
+        return new CaptureSnapshot(0, 0, 8, 8, 0, 0, 8, 8, 96, 42);
+    }
+
+    public Bitmap? CapturePrintWindow(IntPtr hwnd, int width, int height)
+    {
+        PrintWindowCalls++;
+        var bitmap = new Bitmap(width, height);
+        using var graphics = Graphics.FromImage(bitmap);
+        graphics.Clear(Color.White);
+        return bitmap;
+    }
+
+    public Bitmap CaptureBitBlt(IntPtr hwnd, int width, int height)
+    {
+        BitBltCalls++;
+        return new Bitmap(width, height);
+    }
+
+    public IntPtr GetForegroundWindow() => IntPtr.Zero;
+
+    public bool RestoreWindow(IntPtr hwnd)
+    {
+        ActivationCalls++;
+        return true;
+    }
+
+    public ForegroundTransition ActivateForegroundVerified(
+        IntPtr hwnd,
+        uint expectedProcessId,
+        IntPtr requiredForeground,
+        uint requiredForegroundProcessId)
+    {
+        ActivationCalls++;
+        return new ForegroundTransition(true, true);
+    }
+
+    public bool SetForegroundWindow(IntPtr hwnd)
+    {
+        ActivationCalls++;
+        return true;
+    }
 }
 """,
         encoding="utf-8",
@@ -3539,6 +3696,63 @@ async def test_ui_take_screenshot_strict_target_mismatch_returns_preview_without
 
 
 @pytest.mark.asyncio
+async def test_ui_take_screenshot_strict_wrong_hwnd_returns_no_pixels_or_persisted_evidence(
+    tmp_path,
+) -> None:
+    from mcp.types import ImageContent
+    from PIL import Image
+
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), (255, 192, 64)).save(buffer, format="PNG")
+    raw_png = buffer.getvalue()
+    bridge_result = _bridge_lossless_screenshot(raw_png, width=8, height=8, hwnd=778, process_id=42)
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._client = MagicMock()
+    backend._client.call = AsyncMock(return_value=bridge_result)
+    bundle_calls: list[tuple[str, str, str | None, int]] = []
+    session = _stealth_evidence_session(tmp_path, bundle_calls)
+    session.temp_manager.save_screenshot_bundle = MagicMock(
+        wraps=session.temp_manager.save_screenshot_bundle
+    )
+    session.temp_manager.save_screenshot = MagicMock(wraps=session.temp_manager.save_screenshot)
+    registry = ToolRegistry()
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+        response = await registry.tools["ui_take_screenshot"](
+            SimpleNamespace(),
+            evidence=True,
+            format="png",
+            expected_hwnd=777,
+            expected_physical_width=8,
+            expected_physical_height=8,
+        )
+
+    pending = [response]
+    while pending:
+        item = pending.pop()
+        assert not isinstance(item, ImageContent), "Wrong-HWND capture must not expose an image"
+        if isinstance(item, dict):
+            assert not {"base64", "raw_path", "crop_path", "hd_path"}.intersection(item)
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            pending.extend(item)
+        elif isinstance(item, str):
+            assert bridge_result["base64"] not in item
+    assert isinstance(response, dict), response
+    assert response["code"] == "PHYSICAL_CAPTURE_MISMATCH"
+    assert response.get("error"), response
+    session.temp_manager.save_screenshot_bundle.assert_not_called()
+    session.temp_manager.save_screenshot.assert_not_called()
+    assert bundle_calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
 async def test_ui_take_screenshot_strict_physical_target_rejects_inconsistent_raw_bridge_provenance(
     tmp_path,
 ) -> None:
@@ -4089,6 +4303,7 @@ async def test_ui_take_screenshot_strict_black_printwindow_uses_typed_bitblt_fal
         "screenshot",
         {
             "evidence": True,
+            "hwnd": 777,
             "typed_bitblt_fallback": True,
             "expected_hwnd": 777,
             "expected_physical_width": 8,
