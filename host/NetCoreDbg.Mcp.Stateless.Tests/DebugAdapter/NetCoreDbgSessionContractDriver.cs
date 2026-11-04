@@ -99,6 +99,9 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
     public int PendingRequestCount => Assert.IsAssignableFrom<System.Collections.IDictionary>(_pending.GetValue(_session)).Count;
     public int DapWriteCalls => (_dapWriteBarrier
         ?? throw new InvalidOperationException("This session has no deterministic DAP write barrier.")).WriteCalls;
+    public bool IsExecutionClosing => string.Equals(
+        RequirePrivateField(_session.GetType(), "_executionAdmission").GetValue(_session)?.ToString(),
+        "Closing", StringComparison.Ordinal);
 
     public Task WaitForReaderCompletionAsync(CancellationToken cancellationToken) => _readerTask.WaitAsync(cancellationToken);
 
@@ -118,6 +121,17 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         return Assert.IsType<bool>(RequireProperty(result!.GetType(), "IsRefused", typeof(bool)).GetValue(result));
     }
 
+    public async Task<string> GetInspectionContextAsync(CancellationToken cancellationToken)
+    {
+        var method = RequireTaskMethod(_session.GetType(), "GetCallStackAsync",
+            typeof(int), typeof(uint), typeof(uint), typeof(bool), typeof(CancellationToken));
+        var result = await AwaitAsyncResult(method.Invoke(_session, [1, 0u, 20u, true, cancellationToken]),
+            "GetCallStackAsync", cancellationToken);
+        Assert.NotNull(result);
+        Assert.False(Assert.IsType<bool>(result!.GetType().GetProperty("IsRefused")?.GetValue(result)));
+        return Assert.IsType<string>(result.GetType().GetProperty("InspectionContextId")?.GetValue(result));
+    }
+
     public async Task StepOverAsync(int threadId, CancellationToken cancellationToken)
     {
         var stepOverAsync = RequireTaskMethod(_session.GetType(), "StepOverAsync", typeof(int), typeof(CancellationToken));
@@ -125,6 +139,11 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             stepOverAsync.Invoke(_session, [threadId, cancellationToken]),
             "StepOverAsync",
             cancellationToken);
+    }
+    public async Task ContinueAsync(int threadId, CancellationToken cancellationToken)
+    {
+        var method = RequireTaskMethod(_session.GetType(), "ContinueAsync", typeof(int), typeof(CancellationToken));
+        _ = await AwaitAsyncResult(method.Invoke(_session, [threadId, cancellationToken]), "ContinueAsync", CancellationToken.None);
     }
 
     public async Task<bool> AddBreakpointIsAddedAsync(string file, int line, CancellationToken cancellationToken)
@@ -141,6 +160,29 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
     {
         var getThreads = RequireTaskMethod(_session.GetType(), "GetThreadsAsync", typeof(CancellationToken));
         _ = await AwaitAsyncResult(getThreads.Invoke(_session, [cancellationToken]), "GetThreadsAsync", cancellationToken);
+    }
+
+    public async Task<int[]> GetThreadIdsAsync(CancellationToken cancellationToken)
+    {
+        var method = RequireTaskMethod(_session.GetType(), "GetThreadsAsync", typeof(CancellationToken));
+        var result = await AwaitAsyncResult(method.Invoke(_session, [cancellationToken]), "GetThreadsAsync", CancellationToken.None);
+        Assert.NotNull(result);
+        Assert.False(Assert.IsType<bool>(result!.GetType().GetProperty("IsRefused")?.GetValue(result)));
+        var threads = Assert.IsAssignableFrom<System.Collections.IEnumerable>(result.GetType().GetProperty("Threads")?.GetValue(result));
+        return threads.Cast<object>().Select(thread => Assert.IsType<int>(thread.GetType().GetProperty("Id")?.GetValue(thread))).ToArray();
+    }
+
+    public async Task WaitForObservedStopReasonAsync(string reason, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            var observed = State;
+            if (observed.Event == "stopped" && string.Equals(observed.StopReason, reason, StringComparison.Ordinal))
+            {
+                return;
+            }
+            await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken);
+        }
     }
 
     public Task<StepOverRegistryProbe> StepOverThroughRegistryAsync(
@@ -178,6 +220,62 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         InvokeThroughRegistryAsync(threadId, cancellationToken, inspectCancellation: true,
             beforeCancellationInspection: beforeCancellationInspection, inspectCallStack: true);
 
+    public Task<StepOverRegistryProbe> PauseThroughRegistryAsync(
+        int? threadId,
+        CancellationToken cancellationToken,
+        Func<Task>? beforeCancellationInspection = null,
+        Func<Func<string, CancellationToken, Task<ModelContextProtocol.Protocol.CallToolResult>>, Task<ModelContextProtocol.Protocol.CallToolResult>>? invokePause = null,
+        Func<Task>? beforeStop = null,
+        Func<Task>? beforeDispose = null) =>
+        InvokeThroughRegistryAsync(threadId ?? 0, cancellationToken, inspectCancellation: true,
+            beforeCancellationInspection: beforeCancellationInspection, invokeSteps: invokePause,
+            beforeStop: beforeStop, beforeDispose: beforeDispose,
+            pauseExecution: true, omitThreadId: threadId is null);
+
+    public Task<StepOverRegistryProbe> StepPairThroughRegistryAsync(
+        string tool,
+        int threadId,
+        CancellationToken cancellationToken,
+        Func<Task>? beforeCancellationInspection = null) =>
+        InvokeThroughRegistryAsync(threadId, cancellationToken, inspectCancellation: true,
+            beforeCancellationInspection: beforeCancellationInspection, stepTool: tool);
+
+    public Task<StepOverRegistryProbe> EvaluateThroughRegistryAsync(
+        string inspectionContextId,
+        CancellationToken cancellationToken,
+        Func<Task>? beforeCancellationInspection = null,
+        Func<Func<string, CancellationToken, Task<ModelContextProtocol.Protocol.CallToolResult>>, Task<ModelContextProtocol.Protocol.CallToolResult>>? invokeEvaluate = null) =>
+        InvokeThroughRegistryAsync(0, cancellationToken, inspectCancellation: true,
+            beforeCancellationInspection: beforeCancellationInspection, invokeSteps: invokeEvaluate,
+            evaluateContext: inspectionContextId);
+
+    public Task<StepOverRegistryProbe> SetVariableThroughRegistryAsync(
+        string inspectionContextId,
+        CancellationToken cancellationToken,
+        Func<Task>? beforeCancellationInspection = null,
+        Func<Func<string, CancellationToken, Task<ModelContextProtocol.Protocol.CallToolResult>>, Task<ModelContextProtocol.Protocol.CallToolResult>>? invokeSetVariable = null,
+        string variableName = "x") =>
+        InvokeThroughRegistryAsync(0, cancellationToken, inspectCancellation: true,
+            beforeCancellationInspection: beforeCancellationInspection, invokeSteps: invokeSetVariable,
+            setVariableContext: inspectionContextId, setVariableName: variableName);
+
+    public Task<StepOverRegistryProbe> ExceptionInfoThroughRegistryAsync(
+        CancellationToken cancellationToken,
+        Func<Task>? beforeCancellationInspection = null,
+        Func<Func<string, CancellationToken, Task<ModelContextProtocol.Protocol.CallToolResult>>, Task<ModelContextProtocol.Protocol.CallToolResult>>? invokeInspection = null) =>
+        InvokeThroughRegistryAsync(1, cancellationToken, inspectCancellation: true,
+            beforeCancellationInspection: beforeCancellationInspection, invokeSteps: invokeInspection,
+            inspectExceptionInfo: true);
+
+    public Task<StepOverRegistryProbe> ConfigureExceptionsThroughRegistryAsync(
+        string[] filters,
+        CancellationToken cancellationToken,
+        Func<Task>? beforeCancellationInspection = null,
+        Func<Func<string, CancellationToken, Task<ModelContextProtocol.Protocol.CallToolResult>>, Task<ModelContextProtocol.Protocol.CallToolResult>>? invokeConfiguration = null) =>
+        InvokeThroughRegistryAsync(0, cancellationToken, inspectCancellation: true,
+            beforeCancellationInspection: beforeCancellationInspection, invokeSteps: invokeConfiguration,
+            exceptionFilters: filters);
+
     private async Task<StepOverRegistryProbe> InvokeThroughRegistryAsync(
         int threadId,
         CancellationToken cancellationToken,
@@ -189,7 +287,15 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         Action<string?, bool>? afterUsabilityObservation = null,
         bool inspectCallStack = false,
         bool continueExecution = false,
-        (string File, int Line)? breakpoint = null)
+        (string File, int Line)? breakpoint = null,
+        bool pauseExecution = false,
+        bool omitThreadId = false,
+        string? stepTool = null,
+        string? evaluateContext = null,
+        bool inspectExceptionInfo = false,
+        string[]? exceptionFilters = null,
+        string? setVariableContext = null,
+        string setVariableName = "x")
     {
         const string sessionId = "step-over-clock-session";
         var registryType = RequireType(_session.GetType().Assembly, "NetCoreDbg.Mcp.Stateless.Program+DebugSessionRegistry");
@@ -252,24 +358,50 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             Assert.True((bool)addSession!.Invoke(sessions, [sessionId, _session])!);
             Assert.True((bool)addSlot!.Invoke(slots, [sessionId, slot])!);
 
-            var operationMethod = inspectCallStack
-                ? registryType.GetMethod("GetCallStackAsync", BindingFlags.Instance | BindingFlags.NonPublic,
+            var stepMethod = stepTool switch
+            {
+                null => "StepOverAsync",
+                "step_into" => "StepIntoAsync",
+                "step_out" => "StepOutAsync",
+                _ => throw new ArgumentOutOfRangeException(nameof(stepTool)),
+            };
+            var operationMethod = inspectCallStack || evaluateContext is not null || inspectExceptionInfo || setVariableContext is not null
+                ? registryType.GetMethod(setVariableContext is not null ? "SetVariableAsync" : inspectExceptionInfo ? "GetExceptionInfoAsync" : evaluateContext is null ? "GetCallStackAsync" : "EvaluateExpressionAsync", BindingFlags.Instance | BindingFlags.NonPublic,
                     binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(CancellationToken)], modifiers: null)
-                : registryType.GetMethod(breakpoint.HasValue ? "AddBreakpointAsync" : continueExecution ? "ContinueAsync" : "StepOverAsync", BindingFlags.Instance | BindingFlags.NonPublic,
+                : registryType.GetMethod(exceptionFilters is not null ? "ConfigureExceptionsAsync" : pauseExecution ? "PauseAsync" : breakpoint.HasValue ? "AddBreakpointAsync" : continueExecution ? "ContinueAsync" : stepMethod, BindingFlags.Instance | BindingFlags.NonPublic,
                     binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(ModelContextProtocol.Protocol.RequestId), typeof(CancellationToken)], modifiers: null);
             Assert.NotNull(operationMethod);
             var request = new ModelContextProtocol.Protocol.CallToolRequestParams
             {
-                Name = inspectCallStack ? "get_call_stack" : breakpoint.HasValue ? "add_breakpoint" : continueExecution ? "continue_execution" : "step_over",
+                Name = setVariableContext is not null ? "set_variable" : exceptionFilters is not null ? "configure_exceptions" : pauseExecution ? "pause_execution" : inspectCallStack ? "get_call_stack" : inspectExceptionInfo ? "get_exception_info" : evaluateContext is not null ? "evaluate_expression" : breakpoint.HasValue ? "add_breakpoint" : continueExecution ? "continue_execution" : stepTool ?? "step_over",
                 Arguments = new Dictionary<string, JsonElement>
                 {
                     ["debugSessionId"] = JsonSerializer.SerializeToElement(sessionId),
                     ["threadId"] = JsonSerializer.SerializeToElement(threadId),
                 },
             };
+            if (omitThreadId)
+            {
+                request.Arguments.Remove("threadId");
+            }
             if (inspectCallStack)
             {
                 request.Arguments["includeInspectionContext"] = JsonSerializer.SerializeToElement(true);
+            }
+            if (evaluateContext is not null)
+            {
+                request.Arguments.Remove("threadId");
+                request.Arguments["inspectionContextId"] = JsonSerializer.SerializeToElement(evaluateContext);
+                request.Arguments["frameId"] = JsonSerializer.SerializeToElement(1);
+                request.Arguments["expression"] = JsonSerializer.SerializeToElement("6 * 7");
+            }
+            if (setVariableContext is not null)
+            {
+                request.Arguments.Remove("threadId");
+                request.Arguments["inspectionContextId"] = JsonSerializer.SerializeToElement(setVariableContext);
+                request.Arguments["variablesReference"] = JsonSerializer.SerializeToElement(1001);
+                request.Arguments["name"] = JsonSerializer.SerializeToElement(setVariableName);
+                request.Arguments["value"] = JsonSerializer.SerializeToElement("1");
             }
             if (breakpoint is { } targetBreakpoint)
             {
@@ -277,13 +409,18 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                 request.Arguments["file"] = JsonSerializer.SerializeToElement(targetBreakpoint.File);
                 request.Arguments["line"] = JsonSerializer.SerializeToElement(targetBreakpoint.Line);
             }
+            if (exceptionFilters is not null)
+            {
+                request.Arguments.Remove("threadId");
+                request.Arguments["filters"] = JsonSerializer.SerializeToElement(exceptionFilters);
+            }
             Task<ModelContextProtocol.Protocol.CallToolResult> InvokeStep(string requestId, CancellationToken token)
             {
                 var previousRequestId = invokingRequestId.Value;
                 invokingRequestId.Value = requestId;
                 try
                 {
-                    object?[] invocationArguments = inspectCallStack
+                    object?[] invocationArguments = inspectCallStack || evaluateContext is not null || inspectExceptionInfo || setVariableContext is not null
                         ? [request, token]
                         : [request, new ModelContextProtocol.Protocol.RequestId(requestId), token];
                     var invocation = operationMethod!.Invoke(registry, invocationArguments);
@@ -358,6 +495,101 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         {
             _ = await AwaitAsyncResult(RequireAsyncDisposable(registryType).Invoke(registry, []), "DisposeAsync", CancellationToken.None);
         }
+    }
+
+    public async Task WaitForPendingCommandAsync(string command, CancellationToken cancellationToken)
+    {
+        while (!PendingRequests().Any(request =>
+            string.Equals(request.GetType().GetProperty("Command")?.GetValue(request) as string, command, StringComparison.Ordinal)))
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken);
+        }
+    }
+
+    public async Task WaitForPendingResponseAsync(string command, CancellationToken cancellationToken)
+    {
+        await WaitForPendingCommandAsync(command, cancellationToken);
+        var request = Assert.Single(PendingRequests(), entry =>
+            string.Equals(entry.GetType().GetProperty("Command")?.GetValue(entry) as string, command, StringComparison.Ordinal));
+        var completion = request.GetType().GetProperty("Completion")?.GetValue(request);
+        Assert.NotNull(completion);
+        var response = Assert.IsAssignableFrom<Task>(completion!.GetType().GetProperty("Task")?.GetValue(completion));
+        await response.WaitAsync(cancellationToken);
+    }
+
+    public Task GetPendingResponseTask(string command)
+    {
+        var request = Assert.Single(PendingRequests(), entry =>
+            string.Equals(entry.GetType().GetProperty("Command")?.GetValue(entry) as string, command, StringComparison.Ordinal));
+        var completion = request.GetType().GetProperty("Completion")?.GetValue(request);
+        Assert.NotNull(completion);
+        return Assert.IsAssignableFrom<Task>(completion!.GetType().GetProperty("Task")?.GetValue(completion));
+    }
+
+    public void FailPendingAsReaderFailure(IOException failure)
+    {
+        var sessionType = _session.GetType();
+        RequirePrivateField(sessionType, "_readerFailure").SetValue(_session, failure);
+        var failPending = sessionType.GetMethod("FailPending", BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null, types: [typeof(Exception)], modifiers: null);
+        Assert.NotNull(failPending);
+        _ = failPending!.Invoke(_session, [failure]);
+    }
+    public void SimulateReaderFailureMissingPendingRequest(IOException failure) =>
+        RequirePrivateField(_session.GetType(), "_readerFailure").SetValue(_session, failure);
+
+
+    public Task DispatchStaleSetVariableResponseAsync(Action afterDispatch, CancellationToken cancellationToken)
+    {
+        var request = Assert.Single(PendingRequests(), entry =>
+            string.Equals(entry.GetType().GetProperty("Command")?.GetValue(entry) as string, "setVariable", StringComparison.Ordinal));
+        var sequence = Assert.IsType<int>(request.GetType().GetProperty("Sequence")?.GetValue(request));
+        var invalidated = JsonSerializer.SerializeToElement(new
+        {
+            seq = 1_000_001,
+            type = "event",
+            @event = "invalidated",
+            body = new { areas = new[] { "variables" } },
+        });
+        var response = JsonSerializer.SerializeToElement(new
+        {
+            seq = 1_000_002,
+            type = "response",
+            request_seq = sequence,
+            success = true,
+            command = "setVariable",
+            body = new { value = "updated", variablesReference = 1002 },
+        });
+        return DispatchMessagesUnderStateGateAsync([invalidated, response], releaseWriter: false, cancellationToken, afterDispatch);
+    }
+
+    public bool CanCaptureInspectionTarget()
+    {
+        var method = _session.GetType().GetMethod("CaptureCallStackTarget", BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null, types: [typeof(int), typeof(bool)], modifiers: null);
+        Assert.NotNull(method);
+        return method!.Invoke(_session, [1, true]) is not null;
+    }
+
+    private IEnumerable<object> PendingRequests()
+    {
+        var pending = _pending.GetValue(_session)
+            ?? throw new InvalidOperationException("NetCoreDbgSession._pending returned null.");
+        var values = Assert.IsAssignableFrom<System.Collections.IEnumerable>(_pending.FieldType.GetProperty("Values")?.GetValue(pending));
+        return values.Cast<object>();
+    }
+
+    public Task DispatchPauseAcknowledgementThenCancelAsync(int requestSequence, Action cancel, CancellationToken cancellationToken)
+    {
+        var acknowledgement = JsonSerializer.SerializeToElement(new
+        {
+            seq = 1_000_001,
+            type = "response",
+            request_seq = requestSequence,
+            success = true,
+            command = "pause",
+        });
+        return DispatchMessagesUnderStateGateAsync([acknowledgement], releaseWriter: false, cancellationToken, afterDispatch: cancel);
     }
 
     public async Task WaitForPendingNextAsync(CancellationToken cancellationToken)
@@ -443,6 +675,20 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             success = true,
             command = "setBreakpoints",
             body = new { breakpoints = new[] { new { verified = true, line = actualLine } } },
+        });
+        return DispatchMessagesUnderStateGateAsync([acknowledgement], releaseWriter: false, cancellationToken, afterDispatch: cancel);
+    }
+
+    public Task DispatchExceptionFiltersAcknowledgementThenCancelAsync(int requestSequence, Action cancel, CancellationToken cancellationToken)
+    {
+        var acknowledgement = JsonSerializer.SerializeToElement(new
+        {
+            seq = 1_000_001,
+            type = "response",
+            request_seq = requestSequence,
+            success = true,
+            command = "setExceptionBreakpoints",
+            body = new { breakpoints = new[] { new { verified = true } } },
         });
         return DispatchMessagesUnderStateGateAsync([acknowledgement], releaseWriter: false, cancellationToken, afterDispatch: cancel);
     }
@@ -577,12 +823,18 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         ICollection<FixtureTranscriptEntry>? failedTranscript = null)
     {
         var fixture = FixtureProcess.Create(configuration);
+        object? session = null;
         try
         {
             var assembly = LoadProductionAssemblyOrAssert();
             var sessionType = RequireType(assembly, SessionTypeName);
             var stateType = RequireType(assembly, StateTypeName);
-            var startAsync = RequireStaticStartAsync(sessionType);
+            var breakpointType = RequireType(assembly, "NetCoreDbg.Mcp.Stateless.DebugAdapter.DapSourceBreakpoint");
+            var startAsync = sessionType.GetMethod("StartAsync", BindingFlags.Static | BindingFlags.NonPublic,
+                binder: null, types: [typeof(string), typeof(string), typeof(TimeSpan), typeof(TimeSpan), typeof(TimeSpan),
+                    typeof(IReadOnlyDictionary<string, string>), typeof(IReadOnlyList<>).MakeGenericType(breakpointType),
+                    typeof(Action), typeof(CancellationToken)], modifiers: null);
+            Assert.NotNull(startAsync);
             var state = RequireProperty(sessionType, "State", stateType);
             var isUsable = RequireInternalProperty(sessionType, "IsUsable", typeof(bool));
             var readerTask = RequirePrivateTaskField(sessionType, "_readerTask");
@@ -597,15 +849,18 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
 
             using var startupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             startupCancellation.CancelAfter(initializeTimeout + requestTimeout + TimeSpan.FromMilliseconds(500));
-            var started = startAsync.Invoke(null, [
+            var started = startAsync!.Invoke(null, [
                 fixture.ExecutablePath,
                 programPath,
                 initializeTimeout,
                 requestTimeout,
                 stopTimeout,
+                null,
+                Array.CreateInstance(breakpointType, 0),
+                (Action)fixture.MarkCleanupConfirmed,
                 startupCancellation.Token,
             ]);
-            var session = await AwaitAsyncResult(started, "StartAsync", startupCancellation.Token);
+            session = await AwaitAsyncResult(started, "StartAsync", startupCancellation.Token);
             Assert.NotNull(session);
             var activeReaderTask = readerTask.GetValue(session) as Task
                 ?? throw new InvalidOperationException("NetCoreDbgSession._readerTask returned null.");
@@ -613,17 +868,11 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             await fixture.WaitForStartupAsync(startupCancellation.Token);
             return new NetCoreDbgSessionContractDriver(fixture, session, stopAsync, getCallStackAsync, activeWriteGate, pending, state, isUsable, activeReaderTask, disposeAsync);
         }
-        catch
+        catch (Exception failure)
         {
-            if (failedTranscript is not null)
-            {
-                foreach (var entry in await fixture.ReadTranscriptAsync())
-                {
-                    failedTranscript.Add(entry);
-                }
-            }
-
-            await fixture.DisposeAsync();
+            await CaptureFailedTranscriptAsync(fixture, failedTranscript, failure);
+            await DisposeFailedSessionAsync(fixture, session, failure);
+            await fixture.DisposePreservingFailureAsync(failure);
             throw;
         }
     }
@@ -731,31 +980,12 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             await fixture.WaitForStartupAsync(startupCancellation.Token);
             return new NetCoreDbgSessionContractDriver(fixture, session, stopAsync, getCallStackAsync, activeWriteGate, pending, state, isUsable, activeReaderTask, disposeAsync);
         }
-        catch
+        catch (Exception failure)
         {
             gate.Release.TrySetResult(true);
-            if (failedTranscript is not null)
-            {
-                foreach (var entry in await fixture.ReadTranscriptAsync())
-                {
-                    failedTranscript.Add(entry);
-                }
-            }
-
-            if (session is not null)
-            {
-                try
-                {
-                    var disposeAsync = RequireAsyncDisposable(session.GetType());
-                    _ = await AwaitAsyncResult(disposeAsync.Invoke(session, []), "DisposeAsync", CancellationToken.None);
-                }
-                catch
-                {
-                    // Fixture cleanup below owns recovery after a failed deterministic probe.
-                }
-            }
-
-            await fixture.DisposeAsync();
+            await CaptureFailedTranscriptAsync(fixture, failedTranscript, failure);
+            await DisposeFailedSessionAsync(fixture, session, failure);
+            await fixture.DisposePreservingFailureAsync(failure);
             throw;
         }
     }
@@ -848,24 +1078,12 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             await fixture.WaitForStartupAsync(startupCancellation.Token);
             return new NetCoreDbgSessionContractDriver(fixture, session, stopAsync, getCallStackAsync, activeWriteGate, pending, state, isUsable, activeReaderTask, disposeAsync, writeBarrier, preHeaderWriteGate);
         }
-        catch
+        catch (Exception failure)
         {
             writeBarrier?.Release();
             preHeaderWriteGate?.Release();
-            if (session is not null)
-            {
-                try
-                {
-                    var disposeAsync = RequireAsyncDisposable(session.GetType());
-                    _ = await AwaitAsyncResult(disposeAsync.Invoke(session, []), "DisposeAsync", CancellationToken.None);
-                }
-                catch
-                {
-                    // Fixture cleanup below owns recovery after a failed deterministic probe.
-                }
-            }
-
-            await fixture.DisposeAsync();
+            await DisposeFailedSessionAsync(fixture, session, failure);
+            await fixture.DisposePreservingFailureAsync(failure);
             throw;
         }
     }
@@ -878,6 +1096,8 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         var fixture = FixtureProcess.Create(configuration);
+        Task<object>? first = null;
+        Task<object>? second = null;
         try
         {
             var assembly = LoadProductionAssemblyOrAssert();
@@ -901,12 +1121,29 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                     ?? throw new InvalidOperationException("NetCoreDbgSession.StartAsync returned null.");
             }
 
-            var sessions = await Task.WhenAll(Task.Run(StartOneAsync), Task.Run(StartOneAsync));
+            first = Task.Run(StartOneAsync);
+            second = Task.Run(StartOneAsync);
+            var sessions = await Task.WhenAll(first, second);
             return new ConcurrentNetCoreDbgSessionContractDriver(fixture, sessions);
         }
-        catch
+        catch (Exception failure)
         {
-            await fixture.DisposeAsync();
+            foreach (var task in new[] { first, second })
+            {
+                if (task is { IsCompletedSuccessfully: true })
+                {
+                    try
+                    {
+                        await ((IAsyncDisposable)task.Result).DisposeAsync();
+                    }
+                    catch (Exception exception)
+                    {
+                        failure.Data[$"SessionCleanupFailure:{task.Id}"] = exception;
+                    }
+                }
+            }
+
+            await fixture.DisposePreservingFailureAsync(failure);
             throw;
         }
     }
@@ -915,8 +1152,50 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
     public async Task StopAsync(CancellationToken cancellationToken) =>
         _ = await AwaitAsyncResult(_stopAsync.Invoke(_session, [cancellationToken]), "StopAsync", cancellationToken);
 
-    public async Task DisposeSessionAsync() =>
+    public async Task DisposeSessionAsync()
+    {
         _ = await AwaitAsyncResult(_disposeAsync.Invoke(_session, []), "DisposeAsync", CancellationToken.None);
+        _fixture.MarkCleanupConfirmed();
+    }
+
+    private static async Task DisposeFailedSessionAsync(FixtureProcess fixture, object? session, Exception failure)
+    {
+        if (session is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var dispose = RequireAsyncDisposable(session.GetType());
+            _ = await AwaitAsyncResult(dispose.Invoke(session, []), "DisposeAsync", CancellationToken.None);
+            fixture.MarkCleanupConfirmed();
+        }
+        catch (Exception exception)
+        {
+            failure.Data["SessionCleanupFailure"] = exception;
+        }
+    }
+
+    private static async Task CaptureFailedTranscriptAsync(FixtureProcess fixture, ICollection<FixtureTranscriptEntry>? transcript, Exception failure)
+    {
+        if (transcript is null)
+        {
+            return;
+        }
+
+        try
+        {
+            foreach (var entry in await fixture.ReadTranscriptAsync())
+            {
+                transcript.Add(entry);
+            }
+        }
+        catch (Exception exception)
+        {
+            failure.Data["TranscriptReadFailure"] = exception;
+        }
+    }
 
     public Task StopHostedRegistryAsync(CancellationToken cancellationToken)
     {
@@ -955,7 +1234,14 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         return Assert.IsAssignableFrom<Task>(stopAsync!.Invoke(disposer, [cancellationToken]));
     }
 
-    public async Task<HostedThreadsLease> StartHostedThreadsLeaseAsync(CancellationToken cancellationToken)
+    public Task<HostedThreadsLease> StartHostedThreadsLeaseAsync(CancellationToken cancellationToken) =>
+        StartHostedLeaseAsync(cancellationToken);
+
+    public Task<HostedThreadsLease> StartHostedPauseLeaseAsync(int? threadId, CancellationToken cancellationToken) =>
+        StartHostedLeaseAsync(cancellationToken, pauseExecution: true, pauseThreadId: threadId);
+
+    private async Task<HostedThreadsLease> StartHostedLeaseAsync(
+        CancellationToken cancellationToken, bool pauseExecution = false, int? pauseThreadId = null)
     {
         const string sessionId = "host-drain-session";
         var assembly = _session.GetType().Assembly;
@@ -985,12 +1271,20 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         Assert.NotNull(addSession);
         Assert.NotNull(addSlot);
 
+        var admissionClosed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         Action remove = () =>
         {
             _ = removeSlot!.Invoke(slots, [sessionId, null]);
             _ = removeSession!.Invoke(sessions, [sessionId, null]);
+            admissionClosed.TrySetResult(true);
         };
-        Func<CancellationToken, Task> stop = StopAsync;
+        object? slot = null;
+        int? leaseCountAtStop = null;
+        Func<CancellationToken, Task> stop = token =>
+        {
+            leaseCountAtStop = Assert.IsType<int>(RequirePrivateField(slotType, "_leases", typeof(int)).GetValue(slot));
+            return StopAsync(token);
+        };
         Func<ValueTask> dispose = () => new ValueTask(DisposeSessionAsync());
         var slotConstructor = slotType.GetConstructor(
             BindingFlags.Instance | BindingFlags.NonPublic,
@@ -998,7 +1292,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             types: [typeof(TimeSpan), typeof(Func<CancellationToken, Task>), typeof(Func<ValueTask>), typeof(Action)],
             modifiers: null);
         Assert.NotNull(slotConstructor);
-        var slot = slotConstructor!.Invoke([TimeSpan.FromSeconds(2), stop, dispose, remove]);
+        slot = slotConstructor!.Invoke([TimeSpan.FromSeconds(2), stop, dispose, remove]);
         Assert.True((bool)addSession!.Invoke(sessions, [sessionId, _session])!);
         Assert.True((bool)addSlot!.Invoke(slots, [sessionId, slot])!);
 
@@ -1017,28 +1311,34 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             await host.StartAsync(cancellationToken).ConfigureAwait(false);
 
             var getThreadsAsync = registryType.GetMethod(
-                "GetThreadsAsync",
+                pauseExecution ? "PauseAsync" : "GetThreadsAsync",
                 BindingFlags.Instance | BindingFlags.NonPublic,
                 binder: null,
-                types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(CancellationToken)],
+                types: pauseExecution
+                    ? [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(ModelContextProtocol.Protocol.RequestId), typeof(CancellationToken)]
+                    : [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(CancellationToken)],
                 modifiers: null);
             Assert.NotNull(getThreadsAsync);
-            var pending = getThreadsAsync!.Invoke(registry,
-            [
-                new ModelContextProtocol.Protocol.CallToolRequestParams
+            var request = new ModelContextProtocol.Protocol.CallToolRequestParams
+            {
+                Name = pauseExecution ? "pause_execution" : "get_threads",
+                Arguments = new Dictionary<string, JsonElement>
                 {
-                    Name = "get_threads",
-                    Arguments = new Dictionary<string, JsonElement>
-                    {
-                        ["debugSessionId"] = JsonSerializer.SerializeToElement(sessionId),
-                    },
+                    ["debugSessionId"] = JsonSerializer.SerializeToElement(sessionId),
                 },
-                cancellationToken,
-            ]);
+            };
+            if (pauseThreadId.HasValue)
+            {
+                request.Arguments["threadId"] = JsonSerializer.SerializeToElement(pauseThreadId.Value);
+            }
+            object?[] arguments = pauseExecution
+                ? [request, new ModelContextProtocol.Protocol.RequestId("host-pause-lease"), cancellationToken]
+                : [request, cancellationToken];
+            var pending = getThreadsAsync!.Invoke(registry, arguments);
             var asTask = pending?.GetType().GetMethod("AsTask", BindingFlags.Instance | BindingFlags.Public, Type.EmptyTypes);
             Assert.NotNull(asTask);
             var threads = Assert.IsAssignableFrom<Task<ModelContextProtocol.Protocol.CallToolResult>>(asTask!.Invoke(pending, []));
-            return new HostedThreadsLease(host, threads);
+            return new HostedThreadsLease(host, threads, admissionClosed.Task, () => leaseCountAtStop);
         }
         catch
         {
@@ -1105,7 +1405,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             return new RegistryStateProbe(
                 structured.GetProperty("kind").GetString(),
                 (bool)containsKey!.Invoke(sessions, [sessionId])!,
-                !HasExited(processId));
+                !HasExited(processId), result.ResultType, result.IsError == true, structured.Clone());
         }
         finally
         {
@@ -1131,17 +1431,19 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
 
     async ValueTask IAsyncDisposable.DisposeAsync()
     {
-        _fixture.ReleaseGracefulShutdown();
         _dapWriteBarrier?.Release();
         _preHeaderWriteGate?.Release();
         try
         {
+            _fixture.ReleaseGracefulShutdown();
             await DisposeSessionAsync();
         }
-        finally
+        catch (Exception failure)
         {
-            await _fixture.DisposeAsync();
+            await _fixture.DisposePreservingFailureAsync(failure);
+            throw;
         }
+        await _fixture.DisposeAsync();
     }
 
     private static Assembly LoadProductionAssemblyOrAssert()
@@ -1467,11 +1769,18 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             await inner.WriteAsync(buffer, cancellationToken).ConfigureAwait(false);
         }
     }
-    internal sealed class HostedThreadsLease(IHost host, Task<ModelContextProtocol.Protocol.CallToolResult> threads) : IAsyncDisposable
+    internal sealed class HostedThreadsLease(
+        IHost host,
+        Task<ModelContextProtocol.Protocol.CallToolResult> threads,
+        Task admissionClosed,
+        Func<int?> leaseCountAtStop) : IAsyncDisposable
     {
         private bool _stopped;
 
         public Task<ModelContextProtocol.Protocol.CallToolResult> Threads { get; } = threads;
+        public Task<ModelContextProtocol.Protocol.CallToolResult> Operation => Threads;
+        public Task AdmissionClosed => admissionClosed;
+        public int? LeaseCountAtStop => leaseCountAtStop();
 
         public async Task StopAsync(CancellationToken cancellationToken)
         {
@@ -1503,21 +1812,24 @@ internal sealed class ConcurrentNetCoreDbgSessionContractDriver(
 {
     public async ValueTask DisposeAsync()
     {
-        fixture.ReleaseGracefulShutdown();
         try
         {
+            fixture.ReleaseGracefulShutdown();
             await Task.WhenAll(sessions.Select(static session => ((IAsyncDisposable)session).DisposeAsync().AsTask()));
+            fixture.MarkCleanupConfirmed();
         }
-        finally
+        catch (Exception failure)
         {
-            await fixture.DisposeAsync();
+            await fixture.DisposePreservingFailureAsync(failure);
+            throw;
         }
+        await fixture.DisposeAsync();
     }
 }
 
 
 internal sealed record DapSessionSnapshot(string? Event, string? StopReason, int? ExitCode);
-internal sealed record RegistryStateProbe(string? Kind, bool TokenRetained, bool AdapterAlive);
+internal sealed record RegistryStateProbe(string? Kind, bool TokenRetained, bool AdapterAlive, string? ResultType, bool IsError, JsonElement Content);
 internal sealed record StepOverRegistryProbe(
     ModelContextProtocol.Protocol.CallToolResult Result,
     bool TokenRetained,
@@ -1562,7 +1874,19 @@ internal sealed record FixtureConfiguration(
     string NextResponseMode = "success",
     string SetBreakpointsResponseMode = "success",
     string ScopesResponseMode = "success",
-    string VariablesResponseMode = "success")
+    string VariablesResponseMode = "success",
+    string PauseResponseMode = "ack-only",
+    int? PauseEventThreadId = 1,
+    bool? PauseAllThreadsStopped = true,
+    bool? SupportsExceptionInfoRequest = null,
+    string ExceptionInfoResponseMode = "success",
+    string ExceptionInfoCapabilityDelta = "none",
+    string ExceptionBreakpointFilters = "omit",
+    string ExceptionFiltersCapabilityDelta = "none",
+    string SetExceptionBreakpointsResponseMode = "absent-body",
+    bool? SupportsSetVariable = null,
+    string SetVariableCapabilityDelta = "none",
+    int? ProcessEventId = null)
 {
     public string AsEnvironmentValue() => string.Join(
         ';',
@@ -1598,6 +1922,18 @@ internal sealed record FixtureConfiguration(
             $"--set-breakpoints-response={SetBreakpointsResponseMode}",
             $"--scopes-response={ScopesResponseMode}",
             $"--variables-response={VariablesResponseMode}",
+            $"--pause-response={PauseResponseMode}",
+            $"--pause-event-thread-id={PauseEventThreadId?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "omit"}",
+            $"--pause-all-threads-stopped={PauseAllThreadsStopped?.ToString() ?? "omit"}",
+            $"--supports-exception-info={SupportsExceptionInfoRequest?.ToString() ?? "omit"}",
+            $"--exception-info-response={ExceptionInfoResponseMode}",
+            $"--exception-info-capability-delta={ExceptionInfoCapabilityDelta}",
+            $"--exception-breakpoint-filters={ExceptionBreakpointFilters}",
+            $"--exception-filters-capability-delta={ExceptionFiltersCapabilityDelta}",
+            $"--set-exception-breakpoints-response={SetExceptionBreakpointsResponseMode}",
+            $"--supports-set-variable={SupportsSetVariable?.ToString() ?? "omit"}",
+            $"--set-variable-capability-delta={SetVariableCapabilityDelta}",
+            ProcessEventId is { } processEventId ? $"--process-event-id={processEventId.ToString(System.Globalization.CultureInfo.InvariantCulture)}" : null,
         }.Where(static value => value is not null));
 }
 
@@ -1621,12 +1957,12 @@ internal sealed class FixtureProcess : IAsyncDisposable
     private readonly string? _previousNextResponseRelease;
     private readonly string? _previousWindowedDescendantExecutable;
     private readonly string? _previousWindowedDescendantArguments;
-    private readonly HashSet<int> _preExistingAdapterPids;
     private readonly string _executablePath;
-    private const int StartupPollAttempts = 20;
     private static readonly TimeSpan ProcessCleanupTimeout = TimeSpan.FromSeconds(1);
     private bool _adapterStartAttempted;
-    private bool _disposed;
+    private bool _cleanupConfirmed;
+    private readonly object _disposeGate = new();
+    private Task? _disposeTask;
 
     private FixtureProcess(
         string scratchDirectory,
@@ -1647,8 +1983,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
         string? previousThreadsResponseRelease,
         string? previousStackTraceResponseRelease,
         string? previousNextResponseRelease,
-        string? previousWindowedDescendantArguments,
-        HashSet<int> preExistingAdapterPids)
+        string? previousWindowedDescendantArguments)
     {
         _scratchDirectory = scratchDirectory;
         _transcriptPath = transcriptPath;
@@ -1669,7 +2004,6 @@ internal sealed class FixtureProcess : IAsyncDisposable
         _previousWindowedDescendantArguments = previousWindowedDescendantArguments;
         _previousStackTraceResponseRelease = previousStackTraceResponseRelease;
         _previousNextResponseRelease = previousNextResponseRelease;
-        _preExistingAdapterPids = preExistingAdapterPids;
     }
 
     public string ExecutablePath => _executablePath;
@@ -1700,7 +2034,6 @@ internal sealed class FixtureProcess : IAsyncDisposable
         var previousNextResponseRelease = Environment.GetEnvironmentVariable("CONTROLLED_DAP_NEXT_RESPONSE_RELEASE");
         var previousWindowedDescendantExecutable = Environment.GetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE");
         var previousWindowedDescendantArguments = Environment.GetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_ARGUMENTS");
-        var preExistingAdapterPids = ExactAdapterProcessIds(executable);
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT", transcriptPath);
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_OPTIONS", configuration.AsEnvironmentValue());
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_GRACEFUL_RELEASE", releasePath);
@@ -1732,10 +2065,14 @@ internal sealed class FixtureProcess : IAsyncDisposable
             previousThreadsResponseRelease,
             previousStackTraceResponseRelease,
             previousNextResponseRelease,
-            previousWindowedDescendantArguments,
-            preExistingAdapterPids);
+            previousWindowedDescendantArguments);
     }
-    public void MarkAdapterStartAttempted() => _adapterStartAttempted = true;
+    public void MarkAdapterStartAttempted()
+    {
+        _adapterStartAttempted = true;
+        _cleanupConfirmed = false;
+    }
+    public void MarkCleanupConfirmed() => _cleanupConfirmed = true;
 
     public void ReleaseGracefulShutdown() => File.WriteAllText(_releasePath, string.Empty);
     public void ReleaseConfigurationDoneCapabilityDelta() => File.WriteAllText(_configurationDoneCapabilityDeltaReleasePath, string.Empty);
@@ -1743,6 +2080,15 @@ internal sealed class FixtureProcess : IAsyncDisposable
     public void ReleaseThreadsResponse() => File.WriteAllText(_threadsResponseReleasePath, string.Empty);
     public void ReleaseStackTraceResponse() => File.WriteAllText(_stackTraceResponseReleasePath, string.Empty);
     public void ReleaseNextResponse() => File.WriteAllText(_nextResponseReleasePath, string.Empty);
+    public void ReleasePauseResponse() => ReleasePauseControl("pause-response");
+    public void ReleasePauseStoppedEvent() => ReleasePauseControl("pause-stop");
+    public void ReleasePauseStop() => ReleasePauseStoppedEvent();
+    public void ReleaseContinueResponse() => ReleasePauseControl("continue-response");
+    public void ReleaseThreadsResponse(int requestSequence) =>
+        ReleasePauseControl("threads-response-" + requestSequence.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+    private void ReleasePauseControl(string control) =>
+        File.WriteAllText(_transcriptPath + "." + control + ".release", string.Empty);
 
     public async Task WaitForStartupAsync(CancellationToken cancellationToken)
     {
@@ -1756,6 +2102,21 @@ internal sealed class FixtureProcess : IAsyncDisposable
             .Select(FixtureTranscriptEntry.Parse)
             .ToArray();
     }
+
+    public Task WaitForPauseRequestAsync(CancellationToken cancellationToken) =>
+        WaitForDapRequestCountAsync("pause", 1, cancellationToken);
+
+    public Task WaitForDapRequestCountAsync(string command, int count, CancellationToken cancellationToken) => WaitUntilAsync(
+        () => ReadTranscriptLinesSnapshot()
+            .Select(FixtureTranscriptEntry.Parse)
+            .Count(entry => entry.Kind == "request" && entry.Command == command) >= count,
+        cancellationToken);
+
+    public Task WaitForDapResponseAsync(string command, int requestSequence, CancellationToken cancellationToken = default) => WaitUntilAsync(
+        () => ReadTranscriptLinesSnapshot()
+            .Select(FixtureTranscriptEntry.Parse)
+            .Any(entry => entry.Kind == "response" && entry.Command == command && entry.Sequence == requestSequence),
+        cancellationToken);
 
     public Task WaitForThreadsRequestAsync(CancellationToken cancellationToken) => WaitUntilAsync(
         () => ReadTranscriptLinesSnapshot()
@@ -1791,13 +2152,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
         return (await ReadTranscriptAsync()).LastOrDefault(static entry => entry.Kind == "startup")?.ProcessId
             ?? throw new InvalidOperationException("Controlled adapter did not record its process id.");
     }
-    internal async Task TerminateAdapterAsync(CancellationToken cancellationToken = default)
-    {
-        var processId = await GetProcessIdAsync(cancellationToken);
-        await TerminateProcessTreeAsync(processId);
-    }
 
-    internal Task TerminateProcessTreeAsync(int processId) => KillAdapterTreeAsync(processId);
     public async Task<int> WaitForSecondWindowedDescendantPublicationAsync(CancellationToken cancellationToken)
     {
         FixtureTranscriptEntry? published = null;
@@ -1815,14 +2170,29 @@ internal sealed class FixtureProcess : IAsyncDisposable
     }
 
 
-    public async ValueTask DisposeAsync()
+    public async Task DisposePreservingFailureAsync(Exception failure)
     {
-        if (_disposed)
+        try
         {
-            return;
+            await DisposeAsync();
         }
+        catch (Exception exception)
+        {
+            failure.Data["FixtureCleanupFailure"] = exception;
+            throw new AggregateException("Fixture cleanup failed after an earlier failure.", failure, exception);
+        }
+    }
 
-        _disposed = true;
+    public ValueTask DisposeAsync()
+    {
+        lock (_disposeGate)
+        {
+            return new ValueTask(_disposeTask ??= DisposeCoreAsync());
+        }
+    }
+
+    private async Task DisposeCoreAsync()
+    {
         Exception? cleanupFailure = null;
         try
         {
@@ -1839,38 +2209,67 @@ internal sealed class FixtureProcess : IAsyncDisposable
 
         try
         {
-            await KillRecordedAdapterTreeAsync();
-        }
-        catch (Exception exception)
-        {
-            if (cleanupFailure is null)
+            if (!_adapterStartAttempted && !_cleanupConfirmed)
             {
-                cleanupFailure = exception;
+                try
+                {
+                    _adapterStartAttempted = ReadTranscriptLinesSnapshot()
+                        .Select(FixtureTranscriptEntry.Parse)
+                        .Any(static entry => entry.Kind == "startup");
+                }
+                catch (Exception exception)
+                {
+                    cleanupFailure ??= exception;
+                }
+            }
+
+            if (_adapterStartAttempted && !_cleanupConfirmed)
+            {
+                cleanupFailure ??= new InvalidOperationException($"Controlled adapter cleanup is unresolved; scratch retained at '{_scratchDirectory}'.");
+            }
+            else if (cleanupFailure is null)
+            {
+                try
+                {
+                    await DeleteScratchDirectoryAsync();
+                }
+                catch (Exception exception)
+                {
+                    cleanupFailure = exception;
+                }
             }
         }
         finally
         {
-            try
+            void Restore(string name, string? value)
             {
-                await DeleteScratchDirectoryAsync();
+                try
+                {
+                    Environment.SetEnvironmentVariable(name, value);
+                }
+                catch (Exception exception)
+                {
+                    if (cleanupFailure is null)
+                    {
+                        cleanupFailure = exception;
+                    }
+                    else
+                    {
+                        cleanupFailure.Data[$"Restore:{name}"] = exception;
+                    }
+                }
             }
-            catch (Exception exception) when (cleanupFailure is null)
-            {
-                cleanupFailure = exception;
-            }
-            finally
-            {
-                Environment.SetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT", _previousTranscript);
-                Environment.SetEnvironmentVariable("CONTROLLED_DAP_OPTIONS", _previousOptions);
-                Environment.SetEnvironmentVariable("CONTROLLED_DAP_GRACEFUL_RELEASE", _previousRelease);
-                Environment.SetEnvironmentVariable("CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE", _previousConfigurationDoneCapabilityDeltaRelease);
-                Environment.SetEnvironmentVariable("CONTROLLED_DAP_SECOND_WINDOWED_DESCENDANT_RELEASE", _previousSecondWindowedDescendantRelease);
-                Environment.SetEnvironmentVariable("CONTROLLED_DAP_THREADS_RESPONSE_RELEASE", _previousThreadsResponseRelease);
-                Environment.SetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE", _previousWindowedDescendantExecutable);
-                Environment.SetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_ARGUMENTS", _previousWindowedDescendantArguments);
-                Environment.SetEnvironmentVariable("CONTROLLED_DAP_STACK_TRACE_RESPONSE_RELEASE", _previousStackTraceResponseRelease);
-                Environment.SetEnvironmentVariable("CONTROLLED_DAP_NEXT_RESPONSE_RELEASE", _previousNextResponseRelease);
-            }
+
+            Restore("CONTROLLED_DAP_TRANSCRIPT", _previousTranscript);
+            Restore("CONTROLLED_DAP_OPTIONS", _previousOptions);
+            Restore("CONTROLLED_DAP_GRACEFUL_RELEASE", _previousRelease);
+            Restore("CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE", _previousConfigurationDoneCapabilityDeltaRelease);
+            Restore("CONTROLLED_DAP_SECOND_WINDOWED_DESCENDANT_RELEASE", _previousSecondWindowedDescendantRelease);
+            Restore("CONTROLLED_DAP_THREADS_RESPONSE_RELEASE", _previousThreadsResponseRelease);
+            Restore("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE", _previousWindowedDescendantExecutable);
+            Restore("CONTROLLED_DAP_WINDOWED_DESCENDANT_ARGUMENTS", _previousWindowedDescendantArguments);
+            Restore("CONTROLLED_DAP_STACK_TRACE_RESPONSE_RELEASE", _previousStackTraceResponseRelease);
+            Restore("CONTROLLED_DAP_NEXT_RESPONSE_RELEASE", _previousNextResponseRelease);
         }
 
         if (cleanupFailure is not null)
@@ -1879,73 +2278,6 @@ internal sealed class FixtureProcess : IAsyncDisposable
         }
     }
 
-    private async Task KillRecordedAdapterTreeAsync()
-    {
-        var processId = _adapterStartAttempted ? await WaitForRecordedProcessIdAsync() : null;
-        var processIds = processId is { } recorded
-            ? [recorded]
-            : _adapterStartAttempted
-                ? ExactAdapterProcessIds(ExecutablePath).Except(_preExistingAdapterPids).ToArray()
-                : [];
-        foreach (var ownedProcessId in processIds)
-        {
-            await KillAdapterTreeAsync(ownedProcessId);
-        }
-    }
-
-    private static async Task KillAdapterTreeAsync(int processId)
-    {
-        try
-        {
-            using var process = Process.GetProcessById(processId);
-            if (process.HasExited)
-            {
-                return;
-            }
-
-            process.Kill(entireProcessTree: true);
-            using var cancellation = new CancellationTokenSource(ProcessCleanupTimeout);
-            await process.WaitForExitAsync(cancellation.Token);
-            if (!process.HasExited)
-            {
-                throw new InvalidOperationException($"Owned controlled adapter process tree '{processId}' could not be removed.");
-            }
-        }
-        catch (ArgumentException)
-        {
-            // The owned adapter already exited.
-        }
-        catch (OperationCanceledException)
-        {
-            throw new InvalidOperationException($"Owned controlled adapter process tree '{processId}' could not be removed within {ProcessCleanupTimeout}.");
-        }
-    }
-
-    private async Task<int?> WaitForRecordedProcessIdAsync()
-    {
-        for (var attempt = 0; attempt < StartupPollAttempts; attempt++)
-        {
-            try
-            {
-                var processId = ReadTranscriptLinesSnapshot()
-                    .Select(FixtureTranscriptEntry.Parse)
-                    .LastOrDefault(static entry => entry.Kind == "startup")
-                    ?.ProcessId;
-                if (processId is not null)
-                {
-                    return processId;
-                }
-            }
-            catch (FileNotFoundException)
-            {
-                // The adapter may be creating its startup transcript record.
-            }
-
-            await Task.Delay(TimeSpan.FromMilliseconds(25));
-        }
-
-        return null;
-    }
 
     private IReadOnlyList<string> ReadTranscriptLinesSnapshot()
     {
@@ -1991,33 +2323,6 @@ internal sealed class FixtureProcess : IAsyncDisposable
         }
     }
 
-    private static HashSet<int> ExactAdapterProcessIds(string executablePath)
-    {
-        var processIds = new HashSet<int>();
-        foreach (var process in Process.GetProcesses())
-        {
-            using (process)
-            {
-                try
-                {
-                    if (string.Equals(process.MainModule?.FileName, executablePath, StringComparison.OrdinalIgnoreCase))
-                    {
-                        processIds.Add(process.Id);
-                    }
-                }
-                catch (InvalidOperationException)
-                {
-                    // Process exited while being inspected.
-                }
-                catch (System.ComponentModel.Win32Exception)
-                {
-                    // Another user's process cannot be inspected.
-                }
-            }
-        }
-
-        return processIds;
-    }
 
     private static async Task WaitUntilAsync(Func<bool> condition, CancellationToken cancellationToken)
     {
@@ -2035,6 +2340,8 @@ internal sealed record FixtureTranscriptEntry(
     string? Arguments,
     string? RawPayload,
     int? ProcessId,
+    long? ProcessStartTimeUtcTicks,
+    bool? SimpleControlledTree,
     int? ContentLength,
     int? PayloadByteCount,
     string? Stage,
@@ -2049,11 +2356,15 @@ internal sealed record FixtureTranscriptEntry(
         var root = document.RootElement;
         return new FixtureTranscriptEntry(
             root.GetProperty("kind").GetString() ?? throw new InvalidDataException("Fixture transcript kind is absent."),
-            root.TryGetProperty("sequence", out var sequence) ? sequence.GetInt32() : null,
+            root.TryGetProperty("sequence", out var sequence)
+                && sequence.ValueKind == JsonValueKind.Number
+                && sequence.TryGetInt32(out var sequenceValue) ? sequenceValue : null,
             root.TryGetProperty("command", out var command) ? command.GetString() : null,
             root.TryGetProperty("arguments", out var arguments) ? arguments.GetString() : null,
             root.TryGetProperty("rawPayload", out var rawPayload) ? rawPayload.GetString() : null,
             root.TryGetProperty("processId", out var processId) ? processId.GetInt32() : null,
+            root.TryGetProperty("processStartTimeUtcTicks", out var processStartTimeUtcTicks) && processStartTimeUtcTicks.TryGetInt64(out var ticks) ? ticks : null,
+            root.TryGetProperty("simpleControlledTree", out var simpleControlledTree) ? simpleControlledTree.GetBoolean() : null,
             root.TryGetProperty("contentLength", out var contentLength) ? contentLength.GetInt32() : null,
             root.TryGetProperty("payloadByteCount", out var payloadByteCount) ? payloadByteCount.GetInt32() : null,
             root.TryGetProperty("stage", out var stage) ? stage.GetString() : null,

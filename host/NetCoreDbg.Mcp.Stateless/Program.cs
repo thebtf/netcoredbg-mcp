@@ -89,6 +89,18 @@ internal static class Program
                         sessions.CancelUiInvoke(requestId);
                     }
 
+                    if (context.JsonRpcMessage is JsonRpcRequest { Method: "tools/call", Params: JsonObject call }
+                        && call["name"] is JsonValue toolName && toolName.TryGetValue<string>(out var name)
+                        && name is "pause_execution" or "get_modules" or "get_progress" or "configure_exceptions" or "set_variable" or "search_output"
+                        && call.TryGetPropertyValue("arguments", out var rawArguments)
+                        && rawArguments is not null
+                        && (rawArguments is not JsonObject objectArguments
+                            || ((name is "configure_exceptions" or "set_variable") && !CanDeserializeMutationArguments(name, objectArguments))))
+                    {
+                        // Keep malformed tool inputs on the complete application-error path before SDK deserialization.
+                        call["arguments"] = null;
+                    }
+
                     await next(context, cancellationToken).ConfigureAwait(false);
                 });
                 filters.AddOutgoingFilter(next => async (context, cancellationToken) =>
@@ -106,6 +118,42 @@ internal static class Program
             });
 
         return builder.Build();
+    }
+
+    private static bool CanDeserializeMutationArguments(string tool, JsonObject arguments)
+    {
+        try
+        {
+            foreach (var (name, value) in arguments)
+            {
+                if (name == "debugSessionId" || (tool == "set_variable" && name is ("inspectionContextId" or "name" or "value")))
+                {
+                    if (value is not JsonValue text || !text.TryGetValue<string>(out _)) return false;
+                }
+                else if (tool == "set_variable" && name == "variablesReference")
+                {
+                    if (value is not JsonValue reference || !reference.TryGetValue<int>(out _)) return false;
+                }
+                else if (tool == "configure_exceptions" && name == "filters")
+                {
+                    if (value is null) continue;
+                    if (value is not JsonArray filters) return false;
+                    foreach (var filter in filters)
+                    {
+                        if (filter is not JsonValue text || !text.TryGetValue<string>(out _)) return false;
+                    }
+                }
+                else
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
+        {
+            return false;
+        }
     }
 
     private static bool TryReadCancelledRequestId(JsonNode? value, out RequestId requestId)
@@ -168,12 +216,22 @@ internal static class Program
         private const string GetCallStack = "get_call_stack";
         private const string GetScopes = "get_scopes";
         private const string GetVariables = "get_variables";
+        private const string EvaluateExpression = "evaluate_expression";
+        private const string SetVariable = "set_variable";
+        private const string GetExceptionInfo = "get_exception_info";
+        private const string GetModules = "get_modules";
+        private const string GetProgress = "get_progress";
         private const string GetOutput = "get_output";
         private const string GetOutputTail = "get_output_tail";
+        private const string SearchOutput = "search_output";
         private const string StepOver = "step_over";
+        private const string StepInto = "step_into";
+        private const string StepOut = "step_out";
         private const string ContinueExecution = "continue_execution";
+        private const string PauseExecution = "pause_execution";
         private const string AddBreakpoint = "add_breakpoint";
         private const string RemoveBreakpoint = "remove_breakpoint";
+        private const string ConfigureExceptions = "configure_exceptions";
         private const string UiInvoke = "ui_invoke";
         private const string UiInvokeObserved = "ui_invoke_observed";
         private const string UiGetWindowTree = "ui_get_window_tree";
@@ -293,12 +351,22 @@ internal static class Program
                 GetCallStack => await GetCallStackAsync(request, cancellationToken).ConfigureAwait(false),
                 GetScopes => await GetScopesAsync(request, cancellationToken).ConfigureAwait(false),
                 GetVariables => await GetVariablesAsync(request, cancellationToken).ConfigureAwait(false),
+                EvaluateExpression => await EvaluateExpressionAsync(request, cancellationToken).ConfigureAwait(false),
+                SetVariable => await SetVariableAsync(request, cancellationToken).ConfigureAwait(false),
+                GetExceptionInfo => await GetExceptionInfoAsync(request, cancellationToken).ConfigureAwait(false),
+                GetModules => await GetRuntimeInventoryAsync(request, modules: true, cancellationToken).ConfigureAwait(false),
+                GetProgress => await GetRuntimeInventoryAsync(request, modules: false, cancellationToken).ConfigureAwait(false),
                 GetOutput => await GetOutputAsync(request, cancellationToken).ConfigureAwait(false),
                 GetOutputTail => await GetOutputAsync(request, cancellationToken, tail: true).ConfigureAwait(false),
+                SearchOutput => await SearchOutputAsync(request, cancellationToken).ConfigureAwait(false),
                 StepOver => await StepOverAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                StepInto => await StepIntoAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                StepOut => await StepOutAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 ContinueExecution => await ContinueAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                PauseExecution => await PauseAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 AddBreakpoint => await AddBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 RemoveBreakpoint => await RemoveBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                ConfigureExceptions => await ConfigureExceptionsAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 UiInvoke => await UiInvokeAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 UiInvokeObserved => await UiInvokeObservedAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 UiGetWindowTree => await UiGetWindowTreeAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
@@ -622,6 +690,98 @@ internal static class Program
             return new(SerializedResult(JsonSerializer.Serialize(new { kind = "output_success", output = snapshot }), isError: false));
         }
 
+        private ValueTask<CallToolResult> SearchOutputAsync(CallToolRequestParams request, CancellationToken cancellationToken)
+        {
+            if (!TryReadOutputSearchArguments(request.Arguments, out var sessionId, out var pattern, out var contextLines, out var category))
+            {
+                return new(InvalidArguments(SearchOutput));
+            }
+
+            OutputLifetime output;
+            lock (_lifetimeGate)
+            {
+                if (!_outputs.TryGetValue(sessionId, out output!))
+                {
+                    return new(NotFound());
+                }
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            var snapshot = output.Buffer.Snapshot(clear: false, category);
+            var result = DapOutputSearch.Search(snapshot, pattern, contextLines, cancellationToken);
+            return new(result.Status switch
+            {
+                DapOutputSearchStatus.Success => SerializedResult(result.SerializedContent!, isError: false),
+                DapOutputSearchStatus.InvalidPattern => Error("output_search_invalid_pattern", "OUTPUT_SEARCH_INVALID_PATTERN"),
+                DapOutputSearchStatus.Timeout => Error("output_search_timeout", "OUTPUT_SEARCH_TIMEOUT"),
+                DapOutputSearchStatus.TooLarge => Error("output_search_too_large", "OUTPUT_SEARCH_TOO_LARGE"),
+                _ => throw new InvalidOperationException("Unexpected output search status."),
+            });
+        }
+
+        private async ValueTask<CallToolResult> GetRuntimeInventoryAsync(
+            CallToolRequestParams request,
+            bool modules,
+            CancellationToken cancellationToken)
+        {
+            var tool = modules ? GetModules : GetProgress;
+            if (!TryReadSessionId(request.Arguments, out var sessionId, out var hasSessionId) || !hasSessionId)
+            {
+                return InvalidArguments(tool);
+            }
+            if (!_sessions.TryGetValue(sessionId!, out var session) || !_slots.TryGetValue(sessionId!, out var slot))
+            {
+                return NotFound();
+            }
+            var lease = slot.TryAcquire();
+            if (lease is null) return NotFound();
+
+            var closeAfterLease = false;
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!_isUsable(session))
+                {
+                    closeAfterLease = true;
+                    return NotFound();
+                }
+                if (lease.AbortToken.IsCancellationRequested) return NotFound();
+
+                var snapshot = session.GetRuntimeInventory(modules, MaximumSerializedInspectionBytes);
+                return snapshot.Status switch
+                {
+                    DapRuntimeInventoryStatus.Success => SerializedResult(snapshot.SerializedContent!, isError: false),
+                    DapRuntimeInventoryStatus.Incomplete => Result(new
+                    {
+                        kind = "runtime_inventory_incomplete",
+                        error = "RUNTIME_INVENTORY_INCOMPLETE",
+                        tool,
+                    }, isError: true),
+                    DapRuntimeInventoryStatus.TooLarge => Result(new
+                    {
+                        kind = "runtime_inventory_too_large",
+                        error = "RUNTIME_INVENTORY_TOO_LARGE",
+                        tool,
+                    }, isError: true),
+                    _ => throw new InvalidOperationException("Unknown runtime inventory status."),
+                };
+            }
+            finally
+            {
+                lease.Dispose();
+                if (closeAfterLease)
+                {
+                    try
+                    {
+                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            }
+        }
+
         private async ValueTask<CallToolResult> GetThreadsAsync(
             CallToolRequestParams request,
             CancellationToken cancellationToken)
@@ -775,6 +935,82 @@ internal static class Program
             }
         }
 
+        private async ValueTask<CallToolResult> GetExceptionInfoAsync(CallToolRequestParams request, CancellationToken cancellationToken)
+        {
+            if (!TryReadStepOverArguments(request.Arguments, out var arguments))
+            {
+                return InvalidArguments(GetExceptionInfo);
+            }
+            if (!_sessions.TryGetValue(arguments.SessionId, out var session)
+                || !_slots.TryGetValue(arguments.SessionId, out var slot))
+            {
+                await RemoveNativeSceneBindingAsync(arguments.SessionId).ConfigureAwait(false);
+                return NotFound();
+            }
+
+            var lease = slot.TryAcquire();
+            if (lease is null)
+            {
+                return NotFound();
+            }
+
+            var closeAfterLease = false;
+            try
+            {
+                if (!_isUsable(session))
+                {
+                    closeAfterLease = true;
+                    return NotFound();
+                }
+
+                using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.AbortToken);
+                var result = await session.GetExceptionInfoAsync(arguments.ThreadId, operation.Token).ConfigureAwait(false);
+                switch (result.Outcome)
+                {
+                    case DapExceptionInfoOutcome.Unsupported:
+                        return Error("dap_exception_info_unsupported", "DAP_EXCEPTION_INFO_UNSUPPORTED");
+                    case DapExceptionInfoOutcome.Refused:
+                        return Error("dap_exception_info_refused", "DAP_EXCEPTION_INFO_REFUSED");
+                }
+
+                var serialized = JsonSerializer.Serialize(new ExceptionInfoSuccessContent("exception_info_success", result.Body));
+                if (Encoding.UTF8.GetByteCount(serialized) > MaximumSerializedInspectionBytes)
+                {
+                    closeAfterLease = true;
+                    return ExceptionInfoProtocolError();
+                }
+
+                return SerializedResult(serialized, isError: false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                closeAfterLease = session.RequiresInspectionDrain();
+                throw;
+            }
+            catch (Exception)
+            {
+                closeAfterLease = true;
+                return ExceptionInfoProtocolError();
+            }
+            finally
+            {
+                lease.Dispose();
+                if (closeAfterLease)
+                {
+                    try
+                    {
+                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            }
+        }
+
+        private static CallToolResult ExceptionInfoProtocolError() =>
+            Error("dap_exception_info_protocol_error", "DAP_EXCEPTION_INFO_PROTOCOL_ERROR");
+
         private ValueTask<CallToolResult> GetScopesAsync(CallToolRequestParams request, CancellationToken cancellationToken) =>
             GetInspectionAsync(request, scopes: true, cancellationToken);
 
@@ -828,7 +1064,8 @@ internal static class Program
                 }
                 else
                 {
-                    var result = await session.GetVariablesAsync(arguments.InspectionContextId, arguments.Id, operation.Token).ConfigureAwait(false);
+                    var result = await session.GetVariablesAsync(arguments.InspectionContextId, arguments.Id,
+                        arguments.Start, arguments.Count, operation.Token).ConfigureAwait(false);
                     if (result.IsRefused)
                     {
                         return Error("dap_variables_refused", "DAP_VARIABLES_REFUSED");
@@ -871,18 +1108,190 @@ internal static class Program
             }
         }
 
+        private async ValueTask<CallToolResult> EvaluateExpressionAsync(CallToolRequestParams request, CancellationToken cancellationToken)
+        {
+            if (!TryReadEvaluateArguments(request.Arguments, out var arguments))
+            {
+                return InvalidArguments(EvaluateExpression);
+            }
+            if (!_sessions.TryGetValue(arguments.SessionId, out var session)
+                || !_slots.TryGetValue(arguments.SessionId, out var slot))
+            {
+                await RemoveNativeSceneBindingAsync(arguments.SessionId).ConfigureAwait(false);
+                return NotFound();
+            }
+
+            var lease = slot.TryAcquire();
+            if (lease is null)
+            {
+                return NotFound();
+            }
+
+            var closeAfterLease = false;
+            try
+            {
+                if (!_isUsable(session))
+                {
+                    closeAfterLease = true;
+                    return NotFound();
+                }
+
+                using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.AbortToken);
+                var result = await session.EvaluateExpressionAsync(arguments.InspectionContextId, arguments.FrameId,
+                    arguments.Expression, operation.Token).ConfigureAwait(false);
+                switch (result.Outcome)
+                {
+                    case DapEvaluateOutcome.Refused:
+                        return Error("dap_evaluate_refused", "DAP_EVALUATE_REFUSED");
+                    case DapEvaluateOutcome.Failed:
+                        return Error("dap_evaluate_failed", "DAP_EVALUATE_FAILED");
+                    case DapEvaluateOutcome.OutcomeUnknown:
+                        closeAfterLease = true;
+                        return EvaluateOutcomeUnknown();
+                }
+
+                var serialized = JsonSerializer.Serialize(new EvaluateSuccessContent(
+                    "evaluate_success", result.InspectionContextId!, result.Result!, result.Type, result.VariablesReference));
+                if (Encoding.UTF8.GetByteCount(serialized) > MaximumSerializedInspectionBytes)
+                {
+                    closeAfterLease = true;
+                    return EvaluateOutcomeUnknown();
+                }
+                return SerializedResult(serialized, isError: false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                closeAfterLease = session.RequiresInspectionDrain();
+                throw;
+            }
+            catch (Exception)
+            {
+                closeAfterLease = true;
+                return EvaluateOutcomeUnknown();
+            }
+            finally
+            {
+                lease.Dispose();
+                if (closeAfterLease)
+                {
+                    try
+                    {
+                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            }
+        }
+
+        private async ValueTask<CallToolResult> SetVariableAsync(CallToolRequestParams request, CancellationToken cancellationToken)
+        {
+            if (!TryReadSetVariableArguments(request.Arguments, out var arguments))
+            {
+                return InvalidArguments(SetVariable);
+            }
+            if (!_sessions.TryGetValue(arguments.SessionId, out var session)
+                || !_slots.TryGetValue(arguments.SessionId, out var slot))
+            {
+                await RemoveNativeSceneBindingAsync(arguments.SessionId).ConfigureAwait(false);
+                return NotFound();
+            }
+            var lease = slot.TryAcquire();
+            if (lease is null)
+            {
+                return NotFound();
+            }
+            var closeAfterLease = false;
+            try
+            {
+                if (!_isUsable(session))
+                {
+                    closeAfterLease = true;
+                    return NotFound();
+                }
+                using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.AbortToken);
+                var result = await session.SetVariableAsync(arguments.InspectionContextId, arguments.VariablesReference,
+                    arguments.Name, arguments.Value, operation.Token).ConfigureAwait(false);
+                switch (result.Outcome)
+                {
+                    case DapSetVariableOutcome.Unsupported:
+                        return Error("dap_set_variable_unsupported", "DAP_SET_VARIABLE_UNSUPPORTED");
+                    case DapSetVariableOutcome.Refused:
+                        return Error("dap_set_variable_refused", "DAP_SET_VARIABLE_REFUSED");
+                    case DapSetVariableOutcome.Failed:
+                        return Error("dap_set_variable_failed", "DAP_SET_VARIABLE_FAILED");
+                    case DapSetVariableOutcome.OutcomeUnknown:
+                        closeAfterLease = true;
+                        return SetVariableOutcomeUnknown();
+                }
+                return SerializedResult(result.SerializedContent!, isError: false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                closeAfterLease = session.RequiresInspectionDrain();
+                throw;
+            }
+            catch (Exception)
+            {
+                closeAfterLease = true;
+                return SetVariableOutcomeUnknown();
+            }
+            finally
+            {
+                lease.Dispose();
+                if (closeAfterLease)
+                {
+                    try { await slot.CloseAndDrainAsync().ConfigureAwait(false); }
+                    catch (Exception) { }
+                }
+            }
+        }
+
+        private static CallToolResult SetVariableOutcomeUnknown() =>
+            Error("dap_set_variable_outcome_unknown", "DAP_SET_VARIABLE_OUTCOME_UNKNOWN");
+
+        private static CallToolResult EvaluateOutcomeUnknown() =>
+            Error("dap_evaluate_outcome_unknown", "DAP_EVALUATE_OUTCOME_UNKNOWN");
+
         private static CallToolResult InspectionProtocolError(bool scopes) => scopes
             ? Error("dap_scopes_protocol_error", "DAP_SCOPES_PROTOCOL_ERROR")
             : Error("dap_variables_protocol_error", "DAP_VARIABLES_PROTOCOL_ERROR");
 
-        private async ValueTask<CallToolResult> StepOverAsync(
+        private ValueTask<CallToolResult> StepOverAsync(
             CallToolRequestParams request,
             RequestId requestId,
+            CancellationToken cancellationToken) =>
+            StepAsync(request, requestId, DapStepKind.Over, cancellationToken);
+
+        private ValueTask<CallToolResult> StepIntoAsync(
+            CallToolRequestParams request,
+            RequestId requestId,
+            CancellationToken cancellationToken) =>
+            StepAsync(request, requestId, DapStepKind.Into, cancellationToken);
+
+        private ValueTask<CallToolResult> StepOutAsync(
+            CallToolRequestParams request,
+            RequestId requestId,
+            CancellationToken cancellationToken) =>
+            StepAsync(request, requestId, DapStepKind.Out, cancellationToken);
+
+        private async ValueTask<CallToolResult> StepAsync(
+            CallToolRequestParams request,
+            RequestId requestId,
+            DapStepKind kind,
             CancellationToken cancellationToken)
         {
+            var tool = kind switch
+            {
+                DapStepKind.Over => StepOver,
+                DapStepKind.Into => StepInto,
+                DapStepKind.Out => StepOut,
+                _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+            };
             if (!TryReadStepOverArguments(request.Arguments, out var arguments))
             {
-                return InvalidArguments(StepOver);
+                return InvalidArguments(tool);
             }
 
             if (!_sessions.TryGetValue(arguments.SessionId, out var session)
@@ -910,29 +1319,54 @@ internal static class Program
                     return NotFound();
                 }
 
-                var stepOver = await session.StepOverAsync(arguments.ThreadId, operation.Token).ConfigureAwait(false);
+                var stepOver = await (kind switch
+                {
+                    DapStepKind.Into => session.StepIntoAsync(arguments.ThreadId, operation.Token),
+                    DapStepKind.Out => session.StepOutAsync(arguments.ThreadId, operation.Token),
+                    _ => session.StepOverAsync(arguments.ThreadId, operation.Token),
+                }).ConfigureAwait(false);
                 if (stepOver.Outcome == DapStepOverOutcome.Refused)
                 {
-                    return Error("dap_step_over_refused", "DAP_STEP_OVER_REFUSED");
+                    return kind switch
+                    {
+                        DapStepKind.Into => Error("dap_step_into_refused", "DAP_STEP_INTO_REFUSED"),
+                        DapStepKind.Out => Error("dap_step_out_refused", "DAP_STEP_OUT_REFUSED"),
+                        _ => Error("dap_step_over_refused", "DAP_STEP_OVER_REFUSED"),
+                    };
                 }
 
                 if (stepOver.Outcome == DapStepOverOutcome.Succeeded)
                 {
-                    return Result(new StepOverSuccessContent("step_over_success", stepOver.ThreadId), isError: false);
+                    return Result(new StepOverSuccessContent(kind switch
+                    {
+                        DapStepKind.Into => "step_into_success",
+                        DapStepKind.Out => "step_out_success",
+                        _ => "step_over_success",
+                    }, stepOver.ThreadId), isError: false);
                 }
 
                 closeAfterLease = true;
                 if (stepOver.Outcome == DapStepOverOutcome.Terminal)
                 {
-                    return Result(new StepOverTerminalContent("step_over_terminal", stepOver.Terminal!, stepOver.ExitCode), isError: false);
+                    return Result(new StepOverTerminalContent(kind switch
+                    {
+                        DapStepKind.Into => "step_into_terminal",
+                        DapStepKind.Out => "step_out_terminal",
+                        _ => "step_over_terminal",
+                    }, stepOver.Terminal!, stepOver.ExitCode), isError: false);
                 }
 
                 if (stepOver.Outcome == DapStepOverOutcome.TimedOut)
                 {
-                    return Result(new StepOverTimedOutContent("step_over_timed_out", stepOver.ThreadId, 30), isError: false);
+                    return Result(new StepOverTimedOutContent(kind switch
+                    {
+                        DapStepKind.Into => "step_into_timed_out",
+                        DapStepKind.Out => "step_out_timed_out",
+                        _ => "step_over_timed_out",
+                    }, stepOver.ThreadId, 30), isError: false);
                 }
 
-                throw new InvalidOperationException("Unknown step-over outcome.");
+                throw new InvalidOperationException("Unknown step outcome.");
             }
             catch (OperationCanceledException) when (callerCancellation.IsCancellationRequested)
             {
@@ -942,7 +1376,12 @@ internal static class Program
             catch (Exception)
             {
                 closeAfterLease = true;
-                return Error("dap_step_over_protocol_error", "DAP_STEP_OVER_PROTOCOL_ERROR");
+                return kind switch
+                {
+                    DapStepKind.Into => Error("dap_step_into_protocol_error", "DAP_STEP_INTO_PROTOCOL_ERROR"),
+                    DapStepKind.Out => Error("dap_step_out_protocol_error", "DAP_STEP_OUT_PROTOCOL_ERROR"),
+                    _ => Error("dap_step_over_protocol_error", "DAP_STEP_OVER_PROTOCOL_ERROR"),
+                };
             }
             finally
             {
@@ -1028,6 +1467,166 @@ internal static class Program
             {
                 closeAfterLease = true;
                 return Error("dap_continue_protocol_error", "DAP_CONTINUE_PROTOCOL_ERROR");
+            }
+            finally
+            {
+                _stepOverRequests.TryRemove(new KeyValuePair<RequestId, CancellationTokenSource>(requestId, callerCancellation));
+                lease.Dispose();
+                if (closeAfterLease)
+                {
+                    try
+                    {
+                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            }
+        }
+
+        private async ValueTask<CallToolResult> PauseAsync(
+            CallToolRequestParams request,
+            RequestId requestId,
+            CancellationToken cancellationToken)
+        {
+            if (!TryReadPauseArguments(request.Arguments, out var arguments))
+            {
+                return InvalidArguments(PauseExecution);
+            }
+
+            if (!_sessions.TryGetValue(arguments.SessionId, out var session)
+                || !_slots.TryGetValue(arguments.SessionId, out var slot))
+            {
+                await RemoveNativeSceneBindingAsync(arguments.SessionId).ConfigureAwait(false);
+                return NotFound();
+            }
+
+            var lease = slot.TryAcquire();
+            if (lease is null)
+            {
+                return NotFound();
+            }
+
+            var closeAfterLease = false;
+            using var callerCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var operation = CancellationTokenSource.CreateLinkedTokenSource(callerCancellation.Token, lease.AbortToken);
+            _stepOverRequests.TryAdd(requestId, callerCancellation);
+            try
+            {
+                if (!_isUsable(session))
+                {
+                    closeAfterLease = true;
+                    return NotFound();
+                }
+
+                var paused = await session.PauseAsync(arguments.ThreadId, operation.Token).ConfigureAwait(false);
+                closeAfterLease = paused.RequiresDrain;
+                return paused.Outcome switch
+                {
+                    DapPauseOutcome.Acknowledged => Result(new PauseAcknowledgedContent(
+                        "pause_acknowledged", paused.ThreadId!.Value), isError: false),
+                    DapPauseOutcome.Terminal => Result(new PauseTerminalContent(
+                        "pause_terminal", paused.Terminal!, paused.ExitCode), isError: false),
+                    DapPauseOutcome.Refused => Error("dap_pause_refused", "DAP_PAUSE_REFUSED"),
+                    DapPauseOutcome.NoThreads => Error("dap_pause_no_threads", "DAP_PAUSE_NO_THREADS"),
+                    DapPauseOutcome.TimedOut => Error("dap_pause_timeout", "DAP_PAUSE_TIMEOUT"),
+                    DapPauseOutcome.ProtocolError => Error("dap_pause_protocol_error", "DAP_PAUSE_PROTOCOL_ERROR"),
+                    _ => throw new InvalidOperationException("Unknown pause outcome."),
+                };
+            }
+            catch (DapPauseCanceledException exception)
+            {
+                closeAfterLease = exception.RequiresDrain;
+                if (!callerCancellation.IsCancellationRequested && lease.AbortToken.IsCancellationRequested)
+                {
+                    return NotFound();
+                }
+                throw;
+            }
+            catch (OperationCanceledException) when (callerCancellation.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (OperationCanceledException) when (lease.AbortToken.IsCancellationRequested)
+            {
+                return NotFound();
+            }
+            catch (Exception)
+            {
+                closeAfterLease = true;
+                return Error("dap_pause_protocol_error", "DAP_PAUSE_PROTOCOL_ERROR");
+            }
+            finally
+            {
+                _stepOverRequests.TryRemove(new KeyValuePair<RequestId, CancellationTokenSource>(requestId, callerCancellation));
+                lease.Dispose();
+                if (closeAfterLease)
+                {
+                    try
+                    {
+                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            }
+        }
+
+        private async ValueTask<CallToolResult> ConfigureExceptionsAsync(
+            CallToolRequestParams request, RequestId requestId, CancellationToken cancellationToken)
+        {
+            if (!TryReadExceptionFilterArguments(request.Arguments, out var arguments))
+            {
+                return InvalidArguments(ConfigureExceptions);
+            }
+            if (!_sessions.TryGetValue(arguments.SessionId, out var session)
+                || !_slots.TryGetValue(arguments.SessionId, out var slot))
+            {
+                return NotFound();
+            }
+            var lease = slot.TryAcquire();
+            if (lease is null)
+            {
+                return NotFound();
+            }
+            var closeAfterLease = false;
+            using var callerCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var operation = CancellationTokenSource.CreateLinkedTokenSource(callerCancellation.Token, lease.AbortToken);
+            _stepOverRequests.TryAdd(requestId, callerCancellation);
+            try
+            {
+                if (!_isUsable(session))
+                {
+                    closeAfterLease = true;
+                    return NotFound();
+                }
+                var updated = await session.ConfigureExceptionsAsync(arguments.Filters, operation.Token).ConfigureAwait(false);
+                closeAfterLease = updated.RequiresDrain;
+                return updated.Outcome switch
+                {
+                    DapBreakpointUpdateOutcome.Unsupported => Error("dap_exception_filters_unsupported", "DAP_EXCEPTION_FILTERS_UNSUPPORTED"),
+                    DapBreakpointUpdateOutcome.Refused => Error("dap_exception_filters_refused", "DAP_EXCEPTION_FILTERS_REFUSED"),
+                    DapBreakpointUpdateOutcome.Acknowledged => Result(new ExceptionFiltersAcknowledgedContent(
+                        "exception_filters_acknowledged", arguments.Filters,
+                        updated.ExceptionVerification?.Select(static verified => new ExceptionFilterVerification(verified)).ToArray()), isError: false),
+                    _ => throw new InvalidOperationException("Unknown exception filter update outcome."),
+                };
+            }
+            catch (DapBreakpointCanceledException exception) when (callerCancellation.IsCancellationRequested)
+            {
+                closeAfterLease = exception.RequiresDrain;
+                throw;
+            }
+            catch (OperationCanceledException) when (callerCancellation.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                closeAfterLease = true;
+                return Error("dap_exception_filters_protocol_error", "DAP_EXCEPTION_FILTERS_PROTOCOL_ERROR");
             }
             finally
             {
@@ -2149,6 +2748,43 @@ internal static class Program
             }
         }
 
+        private static bool TryReadExceptionFilterArguments(IDictionary<string, JsonElement>? arguments, out ExceptionFilterArguments result)
+        {
+            result = null!;
+            if (arguments is null || arguments.Keys.Any(static name => name is not "debugSessionId" and not "filters")
+                || !arguments.TryGetValue("debugSessionId", out var sessionId)
+                || sessionId.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(sessionId.GetString()))
+            {
+                return false;
+            }
+            string[] filters = [];
+            if (arguments.TryGetValue("filters", out var value) && value.ValueKind != JsonValueKind.Null)
+            {
+                if (value.ValueKind != JsonValueKind.Array)
+                {
+                    return false;
+                }
+                filters = new string[value.GetArrayLength()];
+                var index = 0;
+                foreach (var filter in value.EnumerateArray())
+                {
+                    if (filter.ValueKind != JsonValueKind.String)
+                    {
+                        return false;
+                    }
+                    filters[index++] = filter.GetString()!;
+                }
+            }
+            var filterBytes = JsonSerializer.SerializeToUtf8Bytes(filters).Length;
+            var verificationBytes = filters.Length == 0 ? 0L : (long)filters.Length * "{\"verified\":false}".Length + filters.Length - 1;
+            if (filterBytes + verificationBytes + "{\"kind\":\"exception_filters_acknowledged\",\"filters\":,\"breakpoints\":[]}".Length > MaximumSerializedInspectionBytes)
+            {
+                return false;
+            }
+            result = new ExceptionFilterArguments(sessionId.GetString()!, filters);
+            return true;
+        }
+
         private static bool TryReadBreakpointArguments(
             IDictionary<string, JsonElement>? arguments,
             out BreakpointArguments result)
@@ -2253,6 +2889,49 @@ internal static class Program
             }
 
             sessionId = sessionIdElement.GetString()!;
+            return true;
+        }
+
+        private static bool TryReadOutputSearchArguments(
+            IDictionary<string, JsonElement>? arguments,
+            out string sessionId,
+            out string pattern,
+            out long contextLines,
+            out string? category)
+        {
+            sessionId = string.Empty;
+            pattern = string.Empty;
+            contextLines = 2;
+            category = null;
+            if (arguments is null
+                || arguments.Count is < 2 or > 4
+                || arguments.Keys.Any(static name => name is not "debugSessionId" and not "pattern" and not "contextLines" and not "category")
+                || !arguments.TryGetValue("debugSessionId", out var sessionIdElement)
+                || sessionIdElement.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(sessionIdElement.GetString())
+                || !arguments.TryGetValue("pattern", out var patternElement)
+                || patternElement.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+
+            if (arguments.TryGetValue("contextLines", out var contextElement) && !TryReadOutputLineCount(contextElement, out contextLines))
+            {
+                return false;
+            }
+
+            if (arguments.TryGetValue("category", out var categoryElement))
+            {
+                if (categoryElement.ValueKind is not JsonValueKind.String and not JsonValueKind.Null)
+                {
+                    return false;
+                }
+
+                category = categoryElement.GetString();
+            }
+
+            sessionId = sessionIdElement.GetString()!;
+            pattern = patternElement.GetString()!;
             return true;
         }
 
@@ -2385,6 +3064,35 @@ internal static class Program
 
             return true;
         }
+
+        private static bool TryReadPauseArguments(
+            IDictionary<string, JsonElement>? arguments,
+            out PauseArguments result)
+        {
+            result = null!;
+            if (arguments is null
+                || arguments.Keys.Any(static name => name is not "debugSessionId" and not "threadId")
+                || !arguments.TryGetValue("debugSessionId", out var sessionId)
+                || sessionId.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(sessionId.GetString()))
+            {
+                return false;
+            }
+
+            int? threadId = null;
+            if (arguments.TryGetValue("threadId", out var target) && target.ValueKind != JsonValueKind.Null)
+            {
+                if (target.ValueKind != JsonValueKind.Number || !target.TryGetInt32(out var selected))
+                {
+                    return false;
+                }
+                threadId = selected;
+            }
+
+            result = new PauseArguments(sessionId.GetString()!, threadId);
+            return true;
+        }
+
         private static bool TryReadStepOverArguments(
             IDictionary<string, JsonElement>? arguments,
             out StepOverArguments result)
@@ -2407,6 +3115,53 @@ internal static class Program
             return true;
         }
 
+        private static bool TryReadSetVariableArguments(IDictionary<string, JsonElement>? arguments, out SetVariableArguments result)
+        {
+            result = null!;
+            if (arguments is null || arguments.Count != 5
+                || !arguments.TryGetValue("debugSessionId", out var session)
+                || session.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(session.GetString())
+                || !arguments.TryGetValue("inspectionContextId", out var context)
+                || context.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(context.GetString())
+                || context.GetString()!.Length > 128
+                || !arguments.TryGetValue("variablesReference", out var reference)
+                || reference.ValueKind != JsonValueKind.Number || !reference.TryGetInt32(out var id) || id <= 0
+                || !arguments.TryGetValue("name", out var name) || name.ValueKind != JsonValueKind.String
+                || !arguments.TryGetValue("value", out var value) || value.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+            result = new SetVariableArguments(session.GetString()!, context.GetString()!, id, name.GetString()!, value.GetString()!);
+            return true;
+        }
+
+        private static bool TryReadEvaluateArguments(
+            IDictionary<string, JsonElement>? arguments,
+            out EvaluateArguments result)
+        {
+            result = null!;
+            if (arguments is null
+                || arguments.Count != 4
+                || !arguments.TryGetValue("debugSessionId", out var sessionIdElement)
+                || sessionIdElement.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(sessionIdElement.GetString())
+                || !arguments.TryGetValue("inspectionContextId", out var contextElement)
+                || contextElement.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(contextElement.GetString())
+                || contextElement.GetString()!.Length > 128
+                || !arguments.TryGetValue("frameId", out var frameElement)
+                || frameElement.ValueKind != JsonValueKind.Number
+                || !frameElement.TryGetInt32(out var frameId)
+                || !arguments.TryGetValue("expression", out var expressionElement)
+                || expressionElement.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+
+            result = new EvaluateArguments(sessionIdElement.GetString()!, contextElement.GetString()!, frameId, expressionElement.GetString()!);
+            return true;
+        }
+
         private static bool TryReadInspectionArguments(
             IDictionary<string, JsonElement>? arguments,
             bool scopes,
@@ -2415,7 +3170,8 @@ internal static class Program
             result = null!;
             var idName = scopes ? "frameId" : "variablesReference";
             if (arguments is null
-                || arguments.Count != 3
+                || arguments.Keys.Any(name => name != "debugSessionId" && name != "inspectionContextId" && name != idName
+                    && (scopes || name is not ("start" or "count")))
                 || !arguments.TryGetValue("debugSessionId", out var sessionIdElement)
                 || sessionIdElement.ValueKind != JsonValueKind.String
                 || string.IsNullOrWhiteSpace(sessionIdElement.GetString())
@@ -2431,7 +3187,27 @@ internal static class Program
                 return false;
             }
 
-            result = new InspectionArguments(sessionIdElement.GetString()!, contextElement.GetString()!, id);
+            int? start = null;
+            if (arguments.TryGetValue("start", out var startElement) && startElement.ValueKind != JsonValueKind.Null)
+            {
+                if (!TryReadOutputLineCount(startElement, out var value) || value is < 0 or > int.MaxValue)
+                {
+                    return false;
+                }
+                start = (int)value;
+            }
+
+            int? count = null;
+            if (arguments.TryGetValue("count", out var countElement) && countElement.ValueKind != JsonValueKind.Null)
+            {
+                if (!TryReadOutputLineCount(countElement, out var value) || value is < 0 or > int.MaxValue)
+                {
+                    return false;
+                }
+                count = (int)value;
+            }
+
+            result = new InspectionArguments(sessionIdElement.GetString()!, contextElement.GetString()!, id, start, count);
             return true;
         }
 
@@ -2578,9 +3354,13 @@ internal static class Program
 
         private sealed record ThreadsSuccessContent(string kind, IReadOnlyList<DapThread> threads);
         private sealed record CallStackArguments(string SessionId, int ThreadId, uint StartFrame, uint Levels, bool IncludeInspectionContext);
-        private sealed record InspectionArguments(string SessionId, string InspectionContextId, int Id);
+        private sealed record InspectionArguments(string SessionId, string InspectionContextId, int Id, int? Start, int? Count);
         private sealed record ScopesSuccessContent(string kind, string inspectionContextId, IReadOnlyList<DapScope> scopes);
         private sealed record VariablesSuccessContent(string kind, string inspectionContextId, IReadOnlyList<DapVariable> variables);
+        private sealed record EvaluateArguments(string SessionId, string InspectionContextId, int FrameId, string Expression);
+        private sealed record EvaluateSuccessContent(string kind, string inspectionContextId, string result, string? type, int variablesReference);
+        private sealed record SetVariableArguments(string SessionId, string InspectionContextId, int VariablesReference, string Name, string Value);
+        private sealed record ExceptionInfoSuccessContent(string kind, JsonElement exception);
 
         private sealed record CallStackSuccessContent(
             string kind,
@@ -2604,7 +3384,16 @@ internal static class Program
             string terminal,
             [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? exitCode);
         private sealed record ContinueTimedOutContent(string kind, int threadId, int timeoutSeconds, bool acknowledged);
+        private sealed record PauseArguments(string SessionId, int? ThreadId);
+        private sealed record PauseAcknowledgedContent(string kind, int threadId);
+        private sealed record PauseTerminalContent(
+            string kind,
+            string terminal,
+            [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? exitCode);
         private sealed record BreakpointArguments(string SessionId, string File, int Line);
+        private sealed record ExceptionFilterArguments(string SessionId, string[] Filters);
+        private sealed record ExceptionFilterVerification(bool verified);
+        private sealed record ExceptionFiltersAcknowledgedContent(string kind, string[] filters, ExceptionFilterVerification[]? breakpoints);
         private sealed record BreakpointAddedContent(
             string kind,
             string file,
@@ -2628,26 +3417,42 @@ internal static class Program
                 Tool("get_call_stack", "Get a bounded stack-frame page for one stopped thread. Opt in to an opaque stopped-epoch inspection context for get_scopes/get_variables; carry numeric IDs with the context from the same observation, not as proof that an ID was issued.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647},\"startFrame\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295},\"levels\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":256},\"includeInspectionContext\":{\"type\":\"boolean\",\"default\":false}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
                 Tool("step_over", "Step over one explicitly named stopped thread.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
                 Tool("get_scopes", "Get bounded scopes using a frame ID and inspection context from the same stopped observation. The context is process/session-local and expires on execution or inspection invalidation.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"inspectionContextId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"pattern\":\"\\\\S\"},\"frameId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"inspectionContextId\",\"frameId\"],\"additionalProperties\":false}"),
-                Tool("get_variables", "Get bounded variables using a positive variablesReference and inspection context from the same stopped observation. A returned reference of zero is a leaf, not a valid input.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"inspectionContextId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"pattern\":\"\\\\S\"},\"variablesReference\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"inspectionContextId\",\"variablesReference\"],\"additionalProperties\":false}"),
+                Tool("get_variables", "Get bounded variables using a positive variablesReference and inspection context from the same stopped observation. Optional start and count are sent to the debugger; adapter support determines the result. Zero count requests all remaining children. A returned reference of zero is a leaf. Filtering is not supported.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1},"inspectionContextId":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"},"variablesReference":{"type":"integer","minimum":1,"maximum":2147483647},"start":{"type":["integer","null"],"minimum":0,"maximum":2147483647},"count":{"type":["integer","null"],"minimum":0,"maximum":2147483647}},"required":["debugSessionId","inspectionContextId","variablesReference"],"additionalProperties":false}"""),
                 Tool("continue_execution", "Continue execution using an explicitly named stopped thread; the request resumes all threads. Observe the next stop or terminal event for up to 30 seconds. An acknowledged timeout does not itself close the session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
+                Tool("pause_execution", "Request a pause while a session is live, including alongside a committed continue. Nonzero threadId selects that exact thread; omitted, null or zero selects the observed current thread or the first bounded discovered thread. Returns the adapter acknowledgement, not a stopped-state claim. Only a real stopped event authorizes inspection; uncertain writes are never retried.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"threadId":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"required":["debugSessionId"],"additionalProperties":false}"""),
                 Tool("add_breakpoint", "Add a source breakpoint to a live debug session while preserving its requested source breakpoint sets. Verification is an adapter observation, not proof of a hit. Conditions and hit counts are not supported.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"file\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"line\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"file\",\"line\"],\"additionalProperties\":false}"),
                 Tool("remove_breakpoint", "Remove every requested source breakpoint matching this file and line from a live debug session while preserving the remaining requested order. The source file need not still exist. An absent request returns removed:false without sending setBreakpoints; successful removal confirms adapter acknowledgement, not final Python wire parity.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"file\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"line\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"file\",\"line\"],\"additionalProperties\":false}"),
+                Tool("configure_exceptions", "Replace exception breakpoint filters in a live session. Acknowledgement is not an exception stop; per-filter verification is reported only when supplied by the adapter. Uncertain updates are not retried.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"filters":{"type":["array","null"],"items":{"type":"string"}}},"required":["debugSessionId"],"additionalProperties":false}"""),
                 Tool("ui_invoke", "Invoke one uniquely resolved exact AutomationId in this session's bound debuggee main window using InvokePattern only. Optional expectedTarget compares identities observed by ui_get_window_tree; it cannot select a different target. Success confirms only that the UIA call returned; never automatically retry an unknown outcome.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"automationId":{"type":"string","minLength":1,"maxLength":256,"pattern":"\\S"},"expectedTarget":{"type":"object","properties":{"processIdentity":{"type":"string","minLength":1,"pattern":"\\S"},"hwnd":{"type":"string","minLength":1,"pattern":"\\S"},"rootRuntimeId":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"integer","minimum":-2147483648,"maximum":2147483647}},"elementRuntimeId":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"integer","minimum":-2147483648,"maximum":2147483647}}},"required":["processIdentity","hwnd","rootRuntimeId","elementRuntimeId"],"additionalProperties":false}},"required":["debugSessionId","automationId"],"additionalProperties":false}"""),
                 Tool("ui_invoke_observed", "Invoke one explicitly observed runtime-ID-selected element in the bound debuggee main window using InvokePattern only. Echo target identities from ui_get_window_tree and require the selected element's exact expectedAutomationId; other AutomationIds need not be unique. Complete bounded runtime-ID selection and commit-time checks fail closed. Runtime IDs may be reused and atomicity is unproven; never automatically retry an unknown outcome. No selector or input fallback.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"target":{"type":"object","properties":{"processIdentity":{"type":"string","minLength":1,"pattern":"\\S"},"hwnd":{"type":"string","minLength":1,"pattern":"\\S"},"rootRuntimeId":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"integer","minimum":-2147483648,"maximum":2147483647}},"elementRuntimeId":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"integer","minimum":-2147483648,"maximum":2147483647}}},"required":["processIdentity","hwnd","rootRuntimeId","elementRuntimeId"],"additionalProperties":false},"expectedAutomationId":{"type":"string","minLength":1,"maxLength":256,"pattern":"\\S"}},"required":["debugSessionId","target","expectedAutomationId"],"additionalProperties":false}"""),
                 Tool("ui_get_window_tree", "Read a bounded preorder tree of only the bound debuggee's current main window without activation, focus, input, expansion or resume. Atomicity is unproven; partial/unreadable observations cannot prove absence or uniqueness. This is not Python all-window parity.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"maxDepth":{"type":"integer","minimum":0,"maximum":32,"default":3},"maxChildren":{"type":"integer","minimum":1,"maximum":256,"default":50}},"required":["debugSessionId"],"additionalProperties":false}"""),
                 Tool("get_output", "Read retained debuggee output in DAP reader order. Category matching is case-sensitive. Clear consumes the snapshot only when category is omitted, null or empty; a nonempty category never clears the buffer.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"clear\":{\"type\":\"boolean\",\"default\":false},\"category\":{\"type\":[\"string\",\"null\"],\"default\":null}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("get_output_tail", "Read retained output without clearing it. Filter categories before joining event fragments and splitting Python-style logical lines. Positive lines selects the last N, zero selects all, and negative lines skips the first N.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"lines\":{\"type\":\"integer\",\"default\":50},\"category\":{\"type\":[\"string\",\"null\"],\"default\":null}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
+                Tool("search_output", "Search retained output without clearing it. The pattern uses case-insensitive, culture-invariant .NET regular expressions, not Python regex parity. Category filtering precedes Python-style line splitting. Up to 50 matches and their context are returned with the total count; timeouts and application content over 256 KiB fail without partial results.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"pattern":{"type":"string"},"contextLines":{"type":"integer","default":2},"category":{"type":["string","null"],"default":null}},"required":["debugSessionId","pattern"],"additionalProperties":false}""",
+                    new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, DestructiveHint = false }),
+                Tool("step_into", "Step into one explicitly named stopped thread. Completion requires the correlated acknowledgement and a later exact step stop; inspect the observed stack to establish whether the adapter entered a callee or stepped over.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
+                Tool("step_out", "Step out of one explicitly named stopped thread. Completion requires the correlated acknowledgement and a later exact step stop; inspect the observed stack to establish the caller.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
+                Tool("evaluate_expression", "Evaluate an exact expression in an explicit frame and current inspection context using DAP watch. Expressions may execute code or mutate the debuggee; watch is not read-only. A positive result reference can be expanded with get_variables in the same context. Never automatically retry a failed or unknown outcome.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1},"inspectionContextId":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"},"frameId":{"type":"integer","minimum":-2147483648,"maximum":2147483647},"expression":{"type":"string"}},"required":["debugSessionId","inspectionContextId","frameId","expression"],"additionalProperties":false}""",
+                    new ToolAnnotations { ReadOnlyHint = false, IdempotentHint = false, DestructiveHint = true }),
+                Tool("set_variable", "Set an exact named variable in an explicit container and current inspection context. This may execute code or mutate the debuggee. Old references expire; use the returned context with the new reference. Never automatically retry an uncertain outcome.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"inspectionContextId":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"},"variablesReference":{"type":"integer","minimum":1,"maximum":2147483647},"name":{"type":"string"},"value":{"type":"string"}},"required":["debugSessionId","inspectionContextId","variablesReference","name","value"],"additionalProperties":false}""",
+                    new ToolAnnotations { ReadOnlyHint = false, IdempotentHint = false, DestructiveHint = true }),
+                Tool("get_exception_info", "Get exception information for one explicitly named stopped Int32 thread when the adapter advertises support. Returns the complete current adapter body, including nested details and extension fields, within 256 KiB. A later stop is a different observation; no implicit thread selection, exception cache, combined autopsy or automatic retry.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"threadId":{"type":"integer","minimum":-2147483648,"maximum":2147483647}},"required":["debugSessionId","threadId"],"additionalProperties":false}"""),
+                Tool("get_modules", "Read insertion-ordered module events retained by this live session, preserving numeric and string IDs distinctly. No DAP request or OS module scan is made; unseen events are not inferred. Incomplete retention and snapshots over 256 KiB return fixed errors without truncation or closing the session.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"}},"required":["debugSessionId"],"additionalProperties":false}""",
+                    new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, DestructiveHint = false }),
+                Tool("get_progress", "Read insertion-ordered active progress from this live session's DAP reader. Initialization advertises progress reporting; only reported starts, updates and ends are reflected. No DAP request is made. Incomplete retention and snapshots over 256 KiB return fixed errors without truncation or closing the session.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"}},"required":["debugSessionId"],"additionalProperties":false}""",
+                    new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, DestructiveHint = false }),
                 .. NativeSceneToolDispatcher.ListTools(),
             ],
             TimeToLive = CacheLifetime,
             CacheScope = CacheScope.Public,
         };
 
-        private static Tool Tool(string name, string description, string schema) => new()
+        private static Tool Tool(string name, string description, string schema, ToolAnnotations? annotations = null) => new()
         {
             Name = name,
             Description = description,
             InputSchema = JsonDocument.Parse(schema).RootElement.Clone(),
+            Annotations = annotations,
         };
     }
 

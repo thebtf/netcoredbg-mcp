@@ -886,9 +886,12 @@ try
         }
 
         if (!rejected)
-            throw new InvalidOperationException("Same-process wrong-HWND evidence target was not rejected.");
-        if (transport.PrintWindowCalls != 0 || transport.ActivationCalls != 0 || transport.BitBltCalls != 0)
-            throw new InvalidOperationException("Wrong-HWND evidence target was rasterized or activated before refusal.");
+            throw new InvalidOperationException(
+                "Same-process wrong-HWND evidence target was not rejected.");
+        if (transport.PrintWindowCalls != 0 || transport.ActivationCalls != 0 ||
+            transport.BitBltCalls != 0)
+            throw new InvalidOperationException(
+                "Wrong-HWND evidence target was rasterized or activated before refusal.");
     }
 }
 finally
@@ -3705,9 +3708,7 @@ async def test_ui_take_screenshot_strict_wrong_hwnd_returns_no_pixels_or_persist
     buffer = io.BytesIO()
     Image.new("RGB", (8, 8), (255, 192, 64)).save(buffer, format="PNG")
     raw_png = buffer.getvalue()
-    bridge_result = _bridge_lossless_screenshot(
-        raw_png, width=8, height=8, hwnd=778, process_id=42
-    )
+    bridge_result = _bridge_lossless_screenshot(raw_png, width=8, height=8, hwnd=778, process_id=42)
     backend = FlaUIBackend.__new__(FlaUIBackend)
     backend._process_id = 42
     backend._client = MagicMock()

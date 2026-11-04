@@ -292,6 +292,7 @@ public sealed class RegistryShutdownContractTests
     public async Task ShutdownCancellation_FailedNativeStartupCleanupFault_PreservesCancellationAndExactCleanupFailure()
     {
         Process? adapter = null;
+        FixtureProcess? completedFixture = null;
         var cleanupCompleted = false;
         var cleanupFailure = new IOException("controlled failed-start cleanup sentinel");
         Action afterFailedStartCleanup = () =>
@@ -300,11 +301,13 @@ public sealed class RegistryShutdownContractTests
             ownedAdapter.Refresh();
             Assert.True(ownedAdapter.HasExited, "The failure seam must run only after real owned adapter cleanup completes.");
             cleanupCompleted = true;
+            (completedFixture ?? throw new InvalidOperationException("The owned fixture is unavailable.")).MarkCleanupConfirmed();
             throw cleanupFailure;
         };
         await using var harness = await RegistryHostHarness.CreateAsync(
             new FixtureConfiguration(SuppressLifecycleEvents: true), holdLaunchResponse: true,
             failedStartCleanupCompleted: afterFailedStartCleanup);
+        completedFixture = harness.Fixture;
         using var shutdownCancellation = new CancellationTokenSource();
         using var observation = new CancellationTokenSource(ObservationTimeout);
         var start = harness.CallAsync("start_debug", new JsonObject { ["program"] = harness.ProgramPath },
@@ -339,6 +342,7 @@ public sealed class RegistryShutdownContractTests
                 && cancellation.CancellationToken.IsCancellationRequested);
             Assert.DoesNotContain(await harness.Fixture.ReadTranscriptAsync(), static entry => entry.Kind == "launch-released");
             await AssertStartDidNotPublishAsync(start);
+            harness.AcceptObservedShutdownFailure(Assert.IsAssignableFrom<Exception>(completed.Failure));
         }
         finally
         {
@@ -444,6 +448,9 @@ public sealed class RegistryShutdownContractTests
     {
         private const string LaunchGateVariable = "CONTROLLED_DAP_HOLD_LAUNCH_RESPONSE";
         private const string OutputScriptVariable = "CONTROLLED_DAP_OUTPUT_SCRIPT";
+        private Exception? _acceptedShutdownFailure;
+
+        public void AcceptObservedShutdownFailure(Exception failure) => _acceptedShutdownFailure = failure;
 
         public FixtureProcess Fixture { get; } = fixture;
         public string ProgramPath { get; } = programPath;
@@ -542,15 +549,34 @@ public sealed class RegistryShutdownContractTests
             return ((ValueTask<CallToolResult>)call.Invoke(registry, [context, callerCancellation])!).AsTask();
         }
 
-        public Task StopAsync(CancellationToken cancellationToken) => disposer.StopAsync(cancellationToken);
+        public async Task StopAsync(CancellationToken cancellationToken)
+        {
+            var shutdown = disposer.StopAsync(cancellationToken);
+            try
+            {
+                await shutdown;
+            }
+            catch (OperationCanceledException) when (shutdown.IsCanceled)
+            {
+                Fixture.MarkCleanupConfirmed();
+                throw;
+            }
+            Fixture.MarkCleanupConfirmed();
+        }
 
         public async ValueTask DisposeAsync()
         {
+            var fixtureCleaned = false;
+            Exception? shutdownFailure = null;
             try
             {
                 Fixture.ReleaseThreadsResponse();
                 Fixture.ReleaseStackTraceResponse();
-                await Record.ExceptionAsync(() => StopAsync(CancellationToken.None));
+                var failure = await Record.ExceptionAsync(() => StopAsync(CancellationToken.None));
+                if (failure is not null and not OperationCanceledException && !ReferenceEquals(failure, _acceptedShutdownFailure))
+                {
+                    shutdownFailure = failure;
+                }
             }
             finally
             {
@@ -563,13 +589,19 @@ public sealed class RegistryShutdownContractTests
                     finally
                     {
                         await Fixture.DisposeAsync();
+                        fixtureCleaned = true;
                     }
+                }
+                catch (Exception exception)
+                {
+                    if (shutdownFailure is not null) exception.Data["ShutdownFailure"] = shutdownFailure;
+                    throw;
                 }
                 finally
                 {
                     try
                     {
-                        await ModernMcpScratchDirectory.DeleteAsync(scratchDirectory);
+                        if (fixtureCleaned) await ModernMcpScratchDirectory.DeleteAsync(scratchDirectory);
                     }
                     finally
                     {
@@ -578,6 +610,7 @@ public sealed class RegistryShutdownContractTests
                     }
                 }
             }
+            if (shutdownFailure is not null) throw shutdownFailure;
         }
     }
 }

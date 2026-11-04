@@ -18,8 +18,10 @@ public sealed class TerminalOutputLifetimeContractTests
     [Theory]
     [InlineData("exited", "get_output")]
     [InlineData("exited", "get_output_tail")]
+    [InlineData("exited", "search_output")]
     [InlineData("terminated", "get_output")]
     [InlineData("terminated", "get_output_tail")]
+    [InlineData("terminated", "search_output")]
     public async Task TerminalContinue_AfterNativeCleanup_RetainsOrderedOutputForBothToolsAndOneExplicitStop(
         string terminal, string firstOutputTool)
     {
@@ -89,6 +91,7 @@ public sealed class TerminalOutputLifetimeContractTests
     [Theory]
     [InlineData("get_output")]
     [InlineData("get_output_tail")]
+    [InlineData("search_output")]
     public async Task UnexpectedAdapterEof_WithoutTerminalEvent_RetainsKnownAcceptedMarkerForBothOutputTools(string firstOutputTool)
     {
         await using var driver = await StartDriverAsync(OutputOptions(terminal: null));
@@ -313,6 +316,15 @@ public sealed class TerminalOutputLifetimeContractTests
         {
             await AssertTailAsync(driver, token, expected.TrimEnd('\n'), totalLines, totalLines, id);
         }
+        else if (tool == "search_output")
+        {
+            var arguments = SessionArguments(token);
+            arguments["pattern"] = "^before";
+            var content = AssertEnvelope(await CallAsync(driver, tool, arguments, id));
+            Assert.Equal("output_search_success", content["kind"]?.GetValue<string>());
+            Assert.Equal(3, content["matchCount"]?.GetValue<int>());
+            Assert.Equal("before-stdout", content["matches"]?[0]?["match"]?.GetValue<string>());
+        }
         else
         {
             Assert.Equal(expected, await ReadOutputAsync(driver, token, id));
@@ -386,9 +398,14 @@ public sealed class TerminalOutputLifetimeContractTests
         JsonObject? previous = null;
         foreach (var candidate in new[] { token, "random-unissued-output-handle" })
         {
-            foreach (var tool in new[] { "get_output", "get_output_tail", "stop_debug" })
+            foreach (var tool in new[] { "get_output", "get_output_tail", "search_output", "stop_debug" })
             {
-                var content = AssertEnvelope(await CallAsync(driver, tool, SessionArguments(candidate), $"{id}-{candidate}-{tool}"), isError: true);
+                var arguments = SessionArguments(candidate);
+                if (tool == "search_output")
+                {
+                    arguments["pattern"] = "before";
+                }
+                var content = AssertEnvelope(await CallAsync(driver, tool, arguments, $"{id}-{candidate}-{tool}"), isError: true);
                 AssertNotFound(content);
                 if (previous is not null)
                 {

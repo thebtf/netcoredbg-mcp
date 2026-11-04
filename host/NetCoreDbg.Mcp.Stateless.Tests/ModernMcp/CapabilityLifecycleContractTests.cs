@@ -297,16 +297,20 @@ public sealed class CapabilityLifecycleContractTests
             Meta(),
             new RequestId("stopped-state")))));
 
-        var unavailableToken = await StartAsync(driver, new RequestId("unavailable-start"));
-        var actionsBeforeTermination = await driver.ReadNativeActionsAsync();
-        await driver.TerminateControlledAdapterAsync();
-        AssertNotFound(Structured(await driver.CallToolRawAsync(
-            "get_debug_state",
-            new JsonObject { ["debugSessionId"] = unavailableToken },
-            Meta(),
-            new RequestId("native-unavailable"))));
-        var actionsAfterUnavailableState = await driver.ReadNativeActionsAsync();
-        Assert.Equal(NativeActionCount(actionsBeforeTermination), NativeActionCount(actionsAfterUnavailableState));
+        await using var session = await NetCoreDbgSessionContractDriver.StartAsync(
+            new FixtureConfiguration(SuppressLifecycleEvents: true, ExitAfterLaunchResponse: true),
+            "D:\\fixtures\\program.dll", TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2),
+            TimeSpan.FromMilliseconds(300), CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await session.WaitForReaderCompletionAsync(observation.Token);
+        Assert.False(session.IsUsable);
+        var beforeUnavailableState = await session.Fixture.ReadTranscriptAsync();
+        var unavailable = await session.GetStateThroughRegistryAsync(_ => false);
+        Assert.Equal("complete", unavailable.ResultType);
+        Assert.True(unavailable.IsError);
+        AssertNotFound(Assert.IsType<JsonObject>(JsonNode.Parse(unavailable.Content.GetRawText())));
+        Assert.False(unavailable.TokenRetained);
+        Assert.Equal(beforeUnavailableState.Count, (await session.Fixture.ReadTranscriptAsync()).Count);
     }
 
     [Fact]
@@ -360,11 +364,17 @@ public sealed class CapabilityLifecycleContractTests
     [Fact]
     public async Task ClosingOfficialStdioClient_ReportsBoundedCandidateTransportCompletionOnly()
     {
-        await using var driver = await ModernMcpProcessDriver.StartAsync();
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            FixtureConfiguration: new FixtureConfiguration(SpawnDescendant: true)));
         _ = await StartAsync(driver, new RequestId("close-start"));
+        var transcript = await driver.ReadFixtureTranscriptAsync();
+        var startup = Assert.Single(transcript, static entry => entry.Kind == "startup");
+        var child = Assert.Single(transcript, static entry => entry.Kind == "descendant");
+        using var adapter = System.Diagnostics.Process.GetProcessById(Assert.IsType<int>(startup.ProcessId));
+        using var descendant = System.Diagnostics.Process.GetProcessById(Assert.IsType<int>(child.ProcessId));
 
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-        var completion = await driver.CloseClientAsync(cancellation.Token);
+        var completion = await driver.CloseClientAsync(cancellation.Token, adapter, descendant);
 
         Assert.NotNull(completion);
         Assert.True(completion.ExitCode.HasValue);

@@ -12,6 +12,8 @@ namespace NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
 public sealed class GetCallStackContractTests
 {
     private const string Tool = "get_call_stack";
+    private const string EvaluateTool = "evaluate_expression";
+    private const string ExceptionInfoTool = "get_exception_info";
     private const long MaximumSafeDapInteger = 9_007_199_254_740_991L;
 
     public static TheoryData<string, JsonObject?> InvalidArguments => new()
@@ -432,6 +434,173 @@ public sealed class GetCallStackContractTests
     }
 
     [Fact]
+    public async Task VariablesPaging_Page_ReturnsOnlyRequestedChildren()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(InspectionOptions("get_variables", "paging"), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "variables-page-start");
+        try
+        {
+            var context = (await InspectionStackAsync(driver, session, "variables-page-stack"))["inspectionContextId"]!.GetValue<string>();
+            var before = await driver.ReadNativeActionsAsync();
+
+            var arguments = InspectionArguments(session, context, "variablesReference", 1001);
+            arguments["start"] = 3;
+            arguments["count"] = 2;
+            var page = await InspectionCallAsync(driver, "get_variables", arguments, "variables-page");
+            Assert.Equal("variables_success", page["kind"]?.GetValue<string>());
+            Assert.Equal(new[] { "[1]", "[2]" }, Assert.IsType<JsonArray>(page["variables"]).Select(static item => item!["name"]!.GetValue<string>()));
+
+            var nullArguments = InspectionArguments(session, context, "variablesReference", 1001);
+            nullArguments["start"] = null;
+            nullArguments["count"] = null;
+            var all = await InspectionCallAsync(driver, "get_variables", nullArguments, "variables-null-options");
+            Assert.Equal(new[] { "Title", "Count", "[0]", "[1]", "[2]", "[3]" }, Assert.IsType<JsonArray>(all["variables"]).Select(static item => item!["name"]!.GetValue<string>()));
+
+            var fromTwo = InspectionArguments(session, context, "variablesReference", 1001);
+            fromTwo["start"] = 2;
+            fromTwo["count"] = 0;
+            var remainder = await InspectionCallAsync(driver, "get_variables", fromTwo, "variables-zero-count");
+            Assert.Equal(new[] { "[0]", "[1]", "[2]", "[3]" }, Assert.IsType<JsonArray>(remainder["variables"]).Select(static item => item!["name"]!.GetValue<string>()));
+
+            var beyond = InspectionArguments(session, context, "variablesReference", 1001);
+            beyond["start"] = int.MaxValue;
+            beyond["count"] = 1;
+            var empty = await InspectionCallAsync(driver, "get_variables", beyond, "variables-beyond-end");
+            Assert.Empty(Assert.IsType<JsonArray>(empty["variables"]));
+
+            var requests = (await driver.ReadNativeActionsAsync()).Skip(before.Count).Where(static action => action.Command == "variables").ToArray();
+            Assert.Equal(4, requests.Length);
+            Assert.True(JsonNode.DeepEquals(new JsonObject { ["variablesReference"] = 1001, ["start"] = 3, ["count"] = 2 }, JsonNode.Parse(requests[0].Detail!)!["arguments"]));
+            Assert.True(JsonNode.DeepEquals(new JsonObject { ["variablesReference"] = 1001 }, JsonNode.Parse(requests[1].Detail!)!["arguments"]));
+            Assert.True(JsonNode.DeepEquals(new JsonObject { ["variablesReference"] = 1001, ["start"] = 2, ["count"] = 0 }, JsonNode.Parse(requests[2].Detail!)!["arguments"]));
+            Assert.True(JsonNode.DeepEquals(new JsonObject { ["variablesReference"] = 1001, ["start"] = int.MaxValue, ["count"] = 1 }, JsonNode.Parse(requests[3].Detail!)!["arguments"]));
+            var initialization = Assert.Single(await driver.ReadNativeActionsAsync(), static action => action.Command == "initialize");
+            Assert.True(JsonNode.Parse(initialization.Detail!)!["arguments"]!["supportsVariablePaging"]!.GetValue<bool>());
+        }
+        finally
+        {
+            var stop = AssertApplicationEnvelope(await driver.CallToolRawAsync("stop_debug", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("variables-page-stop"), timeout: TimeSpan.FromSeconds(15)), isError: false);
+            Assert.Equal("stop_debug_success", stop["kind"]?.GetValue<string>());
+        }
+    }
+
+    [Fact]
+    public async Task VariablesPaging_InvalidOptions_AreRejectedBeforeDapIo()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(InspectionOptions("get_variables", "paging"), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "variables-page-invalid-start");
+        var context = (await InspectionStackAsync(driver, session, "variables-page-invalid-stack"))["inspectionContextId"]!.GetValue<string>();
+        var before = await driver.ReadNativeActionsAsync();
+        var cases = new (string Name, JsonNode? Value)[]
+        {
+            ("filter", JsonValue.Create("other")), ("filter", JsonValue.Create(1)),
+            ("start", JsonValue.Create(-1)), ("start", JsonValue.Create(1.5)), ("start", JsonValue.Create(2147483648L)),
+            ("count", JsonValue.Create(-1)), ("count", JsonValue.Create(1.5)), ("count", JsonValue.Create(2147483648L)),
+            ("start", JsonNode.Parse("1.0000000000000000001")), ("count", JsonNode.Parse("-0.0000000000000000001")),
+            ("unknown", JsonValue.Create(1)),
+        };
+        for (var index = 0; index < cases.Length; index++)
+        {
+            var arguments = InspectionArguments(session, context, "variablesReference", 1001);
+            arguments[cases[index].Name] = cases[index].Value;
+            var result = await InspectionCallAsync(driver, "get_variables", arguments, $"variables-page-invalid-{index}", isError: true);
+            Assert.Equal("INVALID_TOOL_ARGUMENTS", result["error"]?.GetValue<string>());
+        }
+        var stale = InspectionArguments(session, "unknown-inspection-context", "variablesReference", 1001);
+        stale["start"] = 1;
+        stale["count"] = 2;
+        AssertInspectionFailure(await InspectionCallAsync(driver, "get_variables", stale, "variables-page-stale", isError: true), "get_variables", protocolFailure: false);
+        var scopes = InspectionArguments(session, context, "frameId", 1);
+        scopes["start"] = 1;
+        var invalidScopes = await InspectionCallAsync(driver, "get_scopes", scopes, "variables-page-extra-scopes", isError: true);
+        Assert.Equal("INVALID_TOOL_ARGUMENTS", invalidScopes["error"]?.GetValue<string>());
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Fact]
+    public async Task VariablesPaging_IntegralDecimalAndExponentForms_MatchIntegerSchema()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(InspectionOptions("get_variables", "paging"), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "variables-numeric-start");
+        try
+        {
+            var context = (await InspectionStackAsync(driver, session, "variables-numeric-stack"))["inspectionContextId"]!.GetValue<string>();
+            var before = await driver.ReadNativeActionsAsync();
+            var cases = new[]
+            {
+                (Start: "3.0", Count: "2e0", ExpectedStart: 3, ExpectedCount: 2, Names: new[] { "[1]", "[2]" }),
+                (Start: "30e-1", Count: "2.000", ExpectedStart: 3, ExpectedCount: 2, Names: new[] { "[1]", "[2]" }),
+                (Start: "-0.0", Count: "0e20", ExpectedStart: 0, ExpectedCount: 0, Names: new[] { "Title", "Count", "[0]", "[1]", "[2]", "[3]" }),
+                (Start: "2147483647.0", Count: "1.0", ExpectedStart: int.MaxValue, ExpectedCount: 1, Names: Array.Empty<string>()),
+            };
+            for (var index = 0; index < cases.Length; index++)
+            {
+                var arguments = InspectionArguments(session, context, "variablesReference", 1001);
+                arguments["start"] = JsonNode.Parse(cases[index].Start);
+                arguments["count"] = JsonNode.Parse(cases[index].Count);
+                var result = await InspectionCallAsync(driver, "get_variables", arguments, $"variables-numeric-{index}");
+                Assert.Equal(cases[index].Names, Assert.IsType<JsonArray>(result["variables"]).Select(static item => item!["name"]!.GetValue<string>()));
+            }
+            var writes = (await driver.ReadNativeActionsAsync()).Skip(before.Count).Where(static action => action.Command == "variables").ToArray();
+            Assert.Equal(cases.Length, writes.Length);
+            for (var index = 0; index < cases.Length; index++)
+            {
+                Assert.True(JsonNode.DeepEquals(new JsonObject { ["variablesReference"] = 1001, ["start"] = cases[index].ExpectedStart, ["count"] = cases[index].ExpectedCount }, JsonNode.Parse(writes[index].Detail!)!["arguments"]));
+            }
+        }
+        finally
+        {
+            var stop = AssertApplicationEnvelope(await driver.CallToolRawAsync("stop_debug", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("variables-numeric-stop"), timeout: TimeSpan.FromSeconds(15)), isError: false);
+            Assert.Equal("stop_debug_success", stop["kind"]?.GetValue<string>());
+        }
+    }
+
+    [Fact]
+    public async Task VariablesPaging_UnprovenFilter_IsRejectedWithoutDapIo()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(InspectionOptions("get_variables", "paging"), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "variables-filter-start");
+        var context = (await InspectionStackAsync(driver, session, "variables-filter-stack"))["inspectionContextId"]!.GetValue<string>();
+        var before = await driver.ReadNativeActionsAsync();
+        var arguments = InspectionArguments(session, context, "variablesReference", 1001);
+        arguments["filter"] = "indexed";
+        var response = await driver.CallToolRawAsync("get_variables", arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId("variables-filter"));
+        var actions = await driver.ReadNativeActionsAsync();
+        var stop = AssertApplicationEnvelope(await driver.CallToolRawAsync("stop_debug", new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("variables-filter-stop"), timeout: TimeSpan.FromSeconds(15)), isError: false);
+        Assert.Equal("stop_debug_success", stop["kind"]?.GetValue<string>());
+        var result = AssertApplicationEnvelope(response, isError: true);
+        Assert.Equal("INVALID_TOOL_ARGUMENTS", result["error"]?.GetValue<string>());
+        Assert.Equal(before.Count, actions.Count);
+    }
+
+    [Fact]
+    public async Task VariablesPaging_AdapterExceedsRequestedCount_ReturnsProtocolErrorWithoutPartialValues()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(InspectionOptions("get_variables", "success"), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "variables-overcount-start");
+        var context = (await InspectionStackAsync(driver, session, "variables-overcount-stack"))["inspectionContextId"]!.GetValue<string>();
+        var arguments = InspectionArguments(session, context, "variablesReference", 1001);
+        arguments["count"] = 1;
+        var response = await driver.CallToolRawAsync("get_variables", arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId("variables-overcount"));
+        var envelope = ModernMcpProcessDriver.RequireResult(response);
+        if (!(envelope["isError"]?.GetValue<bool>() ?? false))
+        {
+            var stop = AssertApplicationEnvelope(await driver.CallToolRawAsync("stop_debug", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("variables-overcount-stop"), timeout: TimeSpan.FromSeconds(15)), isError: false);
+            Assert.Equal("stop_debug_success", stop["kind"]?.GetValue<string>());
+        }
+        var content = AssertApplicationEnvelope(response, isError: true);
+        AssertInspectionFailure(content, "get_variables", protocolFailure: true);
+        Assert.False(content.ContainsKey("variables"));
+        var state = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("variables-overcount-state")), isError: true);
+        AssertNotFound(state);
+    }
+
+    [Fact]
     public async Task FrameInspection_StepReusesNumericReference_OldContextIsRefusedWithoutIoAndFreshContextWorks()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack());
@@ -549,6 +718,1089 @@ public sealed class GetCallStackContractTests
         {
             Assert.Equal("debug_state_success", state["kind"]?.GetValue<string>());
         }
+    }
+
+    [Fact]
+    public async Task ToolsList_GetExceptionInfo_PublishesClosedExplicitStoppedThreadInputWithoutDapIo()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(startupTimeout: TimeSpan.FromSeconds(10));
+        var before = await driver.ReadNativeActionsAsync();
+        var result = ModernMcpProcessDriver.RequireResult(await driver.ListToolsRawAsync(
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("exception-info-catalog")));
+        var tool = Assert.Single(Assert.IsType<JsonArray>(result["tools"]).Select(static item => Assert.IsType<JsonObject>(item)),
+            static item => item["name"]?.GetValue<string>() == ExceptionInfoTool);
+        var schema = Assert.IsType<JsonObject>(tool["inputSchema"]);
+        Assert.Equal("object", schema["type"]?.GetValue<string>());
+        Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
+        Assert.Equal(["debugSessionId", "threadId"], Assert.IsType<JsonArray>(schema["required"]).Select(static item => item?.GetValue<string>()));
+        var properties = Assert.IsType<JsonObject>(schema["properties"]);
+        Assert.Equal(2, properties.Count);
+        Assert.Equal("string", properties["debugSessionId"]?["type"]?.GetValue<string>());
+        Assert.Equal("integer", properties["threadId"]?["type"]?.GetValue<string>());
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Theory]
+    [InlineData(1, "success", "always")]
+    [InlineData(17, "break-never", "never")]
+    [InlineData(int.MinValue, "break-unhandled", "unhandled")]
+    [InlineData(int.MaxValue, "break-userUnhandled", "userUnhandled")]
+    public async Task GetExceptionInfo_AdvertisedStoppedThread_ForwardsExactRequestAndPreservesCompleteNestedBody(int threadId, string mode, string breakMode)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionInfoOptions(mode), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "exception-info-exact-start");
+        await ExceptionInfoReaderBarrierAsync(driver, session, "exception-info-exact-ready");
+        var before = await driver.ReadNativeActionsAsync();
+
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(ExceptionInfoTool, Arguments(session, threadId),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("exception-info-exact")), isError: false);
+
+        Assert.Equal("exception_info_success", content["kind"]?.GetValue<string>());
+        Assert.Equal(2, content.Count);
+        var expected = JsonNode.Parse("""
+            {
+              "exceptionId": "System.InvalidOperationException",
+              "breakMode": "always",
+              "description": "Outer \"failure\"\nЖ",
+              "details": {
+                "message": "Outer failure",
+                "typeName": "InvalidOperationException",
+                "fullTypeName": "System.InvalidOperationException",
+                "evaluateName": "$exception",
+                "stackTrace": "at Controlled.Throw()\nat Controlled.Main()",
+                "formattedDescription": "<b>Outer failure</b>",
+                "source": "ControlledAssembly",
+                "innerException": [{
+                  "message": "Inner failure",
+                  "typeName": "ArgumentException",
+                  "fullTypeName": "System.ArgumentException",
+                  "formattedDescription": "<i>Inner failure</i>",
+                  "source": "ControlledInnerAssembly",
+                  "innerException": [{ "message": "Root cause" }]
+                }]
+              },
+              "adapterExtension": { "code": 17, "tags": ["controlled", "nested"] }
+            }
+            """)!.AsObject();
+        expected["breakMode"] = breakMode;
+        Assert.True(JsonNode.DeepEquals(expected, Assert.IsType<JsonObject>(content["exception"])));
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        AssertSingleExceptionInfoRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), threadId);
+    }
+
+    [Fact]
+    public async Task GetExceptionInfo_MinimalBody_PreservesOmittedOptionalFields()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionInfoOptions("minimal"), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "exception-info-minimal-start");
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(ExceptionInfoTool, Arguments(session, 1),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("exception-info-minimal")), isError: false);
+        Assert.True(JsonNode.DeepEquals(new JsonObject
+        {
+            ["kind"] = "exception_info_success",
+            ["exception"] = new JsonObject { ["exceptionId"] = "ControlledException", ["breakMode"] = "never" },
+        }, content));
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(null)]
+    public async Task GetExceptionInfo_CapabilityFalseOrOmitted_RefusesWithoutDapWriteAndKeepsSession(bool? supported)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionInfoOptions(supported: supported), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "exception-info-unsupported-start");
+        await ExceptionInfoReaderBarrierAsync(driver, session, "exception-info-unsupported-ready");
+        var before = await driver.ReadNativeActionsAsync();
+
+        AssertExceptionInfoFailure(AssertApplicationEnvelope(await driver.CallToolRawAsync(ExceptionInfoTool, Arguments(session, 1),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("exception-info-unsupported")), isError: true), "unsupported");
+
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+        Assert.Equal("debug_state_success", AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state",
+            new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("exception-info-unsupported-state")), isError: false)["kind"]?.GetValue<string>());
+    }
+
+    [Theory]
+    [InlineData(false, "enable-on-threads", true)]
+    [InlineData(null, "enable-on-threads", true)]
+    [InlineData(true, "disable-on-threads", false)]
+    public async Task GetExceptionInfo_CapabilityDelta_ChangesAdmissionInReaderOrder(bool? initialSupport, string delta, bool finalSupport)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionInfoOptions(supported: initialSupport, capabilityDelta: delta), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "exception-info-delta-start");
+        var before = await driver.ReadNativeActionsAsync();
+        var initial = AssertApplicationEnvelope(await driver.CallToolRawAsync(ExceptionInfoTool, Arguments(session, 1),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("exception-info-before-delta")), isError: initialSupport != true);
+        if (initialSupport == true)
+        {
+            Assert.Equal("exception_info_success", initial["kind"]?.GetValue<string>());
+            AssertSingleExceptionInfoRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1);
+        }
+        else
+        {
+            AssertExceptionInfoFailure(initial, "unsupported");
+            Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+        }
+
+        // The correlated threads reply follows the capability delta on the same DAP reader.
+        await ExceptionInfoReaderBarrierAsync(driver, session, "exception-info-delta-barrier");
+        before = await driver.ReadNativeActionsAsync();
+        var updated = AssertApplicationEnvelope(await driver.CallToolRawAsync(ExceptionInfoTool, Arguments(session, 1),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("exception-info-after-delta")), isError: !finalSupport);
+        if (finalSupport)
+        {
+            Assert.Equal("exception_info_success", updated["kind"]?.GetValue<string>());
+            AssertSingleExceptionInfoRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1);
+        }
+        else
+        {
+            AssertExceptionInfoFailure(updated, "unsupported");
+            Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+        }
+    }
+
+    [Theory]
+    [InlineData("missing-arguments")]
+    [InlineData("missing-session")]
+    [InlineData("blank-session")]
+    [InlineData("non-string-session")]
+    [InlineData("missing-thread")]
+    [InlineData("null-thread")]
+    [InlineData("string-thread")]
+    [InlineData("fractional-thread")]
+    [InlineData("thread-above-int32")]
+    [InlineData("thread-below-int32")]
+    [InlineData("extra-field")]
+    public async Task GetExceptionInfo_InvalidInput_RejectsBeforeAnyDapWrite(string scenario)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionInfoOptions(), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "exception-info-invalid-start");
+        JsonObject? arguments = Arguments(session, 1);
+        switch (scenario)
+        {
+            case "missing-arguments": arguments = null; break;
+            case "missing-session": arguments.Remove("debugSessionId"); break;
+            case "blank-session": arguments["debugSessionId"] = " \t"; break;
+            case "non-string-session": arguments["debugSessionId"] = 17; break;
+            case "missing-thread": arguments.Remove("threadId"); break;
+            case "null-thread": arguments["threadId"] = null; break;
+            case "string-thread": arguments["threadId"] = "1"; break;
+            case "fractional-thread": arguments["threadId"] = 1.5; break;
+            case "thread-above-int32": arguments["threadId"] = 2_147_483_648L; break;
+            case "thread-below-int32": arguments["threadId"] = -2_147_483_649L; break;
+            case "extra-field": arguments["inspectionContextId"] = "not-an-input"; break;
+        }
+        var before = await driver.ReadNativeActionsAsync();
+
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(ExceptionInfoTool, arguments,
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId($"exception-info-invalid-{scenario}")), isError: true);
+
+        Assert.Equal("invalid_tool_arguments", content["kind"]?.GetValue<string>());
+        Assert.Equal("INVALID_TOOL_ARGUMENTS", content["error"]?.GetValue<string>());
+        Assert.Equal(ExceptionInfoTool, content["tool"]?.GetValue<string>());
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GetExceptionInfo_UnknownOrRetiredSession_ReturnsNotFoundWithoutDapIo(bool retired)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionInfoOptions(), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = "unknown-opaque-session";
+        if (retired)
+        {
+            session = await StartStoppedSessionAsync(driver, "exception-info-retired-start");
+            AssertApplicationEnvelope(await driver.CallToolRawAsync("stop_debug", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("exception-info-retire")), isError: false);
+        }
+        var before = await driver.ReadNativeActionsAsync();
+
+        AssertNotFound(AssertApplicationEnvelope(await driver.CallToolRawAsync(ExceptionInfoTool, Arguments(session, 1),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("exception-info-not-found")), isError: true));
+
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Theory]
+    [InlineData("partial-stop", 2, false)]
+    [InlineData("all-stop-continued-true", 1, true)]
+    public async Task GetExceptionInfo_NonStoppedOrContinuedTarget_RefusesBeforeDapWrite(string lifecycle, int threadId, bool awaitContinued)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionInfoOptions(lifecycleMode: lifecycle), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "exception-info-admission-start");
+        if (awaitContinued)
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await driver.WaitForFixtureEventAsync("continued", observation.Token);
+        }
+        await ExceptionInfoReaderBarrierAsync(driver, session, "exception-info-admission-barrier");
+        var before = await driver.ReadNativeActionsAsync();
+
+        AssertExceptionInfoFailure(AssertApplicationEnvelope(await driver.CallToolRawAsync(ExceptionInfoTool, Arguments(session, threadId),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("exception-info-admission")), isError: true), "refused");
+
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Theory]
+    [InlineData("hold-then-continued")]
+    [InlineData("hold-then-continued-restop")]
+    public async Task GetExceptionInfo_ResponseAfterReaderOrderedInvalidation_RefusesStaleBodyWithoutRetry(string mode)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionInfoOptions(mode), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "exception-info-held-start");
+        var before = await driver.ReadNativeActionsAsync();
+        var response = driver.CallToolRawAsync(ExceptionInfoTool, Arguments(session, 1), ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("exception-info-held"), timeout: TimeSpan.FromSeconds(35));
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await driver.WaitForFixtureRecordAsync("exception-info-response-gated", observation.Token);
+            await ExceptionInfoReaderBarrierAsync(driver, session, "exception-info-held-barrier", observation.Token);
+            Assert.False(response.IsCompleted, "The exception reply must remain held until invalidation has passed the reader barrier.");
+        }
+        finally
+        {
+            // Reuse the existing shared inspection-response gate, not a new fixture harness.
+            driver.ReleaseStackTraceResponse();
+        }
+
+        AssertExceptionInfoFailure(AssertApplicationEnvelope(await response, isError: true), "refused");
+        AssertSingleExceptionInfoRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1);
+        Assert.Equal("debug_state_success", AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state",
+            new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("exception-info-held-state")), isError: false)["kind"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task GetExceptionInfo_CapabilityRevokedAfterAdmission_PreservesCurrentReplyAndRefusesSubsequentWrite()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionInfoOptions("hold-then-capability-revoked"), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "exception-info-revoked-start");
+        var before = await driver.ReadNativeActionsAsync();
+        var response = driver.CallToolRawAsync(ExceptionInfoTool, Arguments(session, 1), ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("exception-info-revoked-held"), timeout: TimeSpan.FromSeconds(35));
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await driver.WaitForFixtureRecordAsync("exception-info-response-gated", observation.Token);
+            await ExceptionInfoReaderBarrierAsync(driver, session, "exception-info-revoked-barrier", observation.Token);
+            Assert.False(response.IsCompleted, "The admitted reply must remain held until capability revocation has passed the reader barrier.");
+        }
+        finally
+        {
+            driver.ReleaseStackTraceResponse();
+        }
+
+        var content = AssertApplicationEnvelope(await response, isError: false);
+        Assert.Equal("exception_info_success", content["kind"]?.GetValue<string>());
+        var exception = Assert.IsType<JsonObject>(content["exception"]);
+        Assert.Equal("System.InvalidOperationException", exception["exceptionId"]?.GetValue<string>());
+        Assert.Equal("always", exception["breakMode"]?.GetValue<string>());
+        Assert.Equal("Outer \"failure\"\nЖ", exception["description"]?.GetValue<string>());
+        Assert.Equal("<b>Outer failure</b>", exception["details"]?["formattedDescription"]?.GetValue<string>());
+        Assert.Equal("ControlledAssembly", exception["details"]?["source"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        AssertSingleExceptionInfoRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1);
+        var afterReply = await driver.ReadNativeActionsAsync();
+
+        AssertExceptionInfoFailure(AssertApplicationEnvelope(await driver.CallToolRawAsync(ExceptionInfoTool, Arguments(session, 1),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("exception-info-revoked-next")), isError: true), "unsupported");
+
+        Assert.Equal(afterReply.Count, (await driver.ReadNativeActionsAsync()).Count);
+        Assert.Equal("debug_state_success", AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state",
+            new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("exception-info-revoked-state")), isError: false)["kind"]?.GetValue<string>());
+    }
+
+    [Theory]
+    [InlineData("refused", false)]
+    [InlineData("non-object-body", true)]
+    [InlineData("missing-id", true)]
+    [InlineData("non-string-id", true)]
+    [InlineData("missing-break-mode", true)]
+    [InlineData("invalid-break-mode", true)]
+    [InlineData("non-string-description", true)]
+    [InlineData("null-description", true)]
+    [InlineData("non-object-details", true)]
+    [InlineData("null-details", true)]
+    [InlineData("oversized", true)]
+    [InlineData("wrong-command", true)]
+    [InlineData("timeout", true)]
+    public async Task GetExceptionInfo_RefusalOrProtocolError_RedactsWithoutRetryAndPreservesOrDrainsSession(string mode, bool protocolError)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionInfoOptions(mode), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "exception-info-failure-start");
+        var before = await driver.ReadNativeActionsAsync();
+
+        var response = await driver.CallToolRawAsync(ExceptionInfoTool, Arguments(session, 1), ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("exception-info-failure"), timeout: TimeSpan.FromSeconds(35));
+
+        AssertExceptionInfoFailure(AssertApplicationEnvelope(response, isError: true), protocolError ? "protocol_error" : "refused");
+        var state = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("exception-info-failure-state")), isError: protocolError);
+        if (protocolError)
+        {
+            AssertNotFound(state);
+        }
+        else
+        {
+            Assert.Equal("debug_state_success", state["kind"]?.GetValue<string>());
+        }
+        var actions = (await driver.ReadNativeActionsAsync()).Skip(before.Count).ToArray();
+        AssertSingleExceptionInfoRequest(actions, 1);
+        Assert.Equal(protocolError ? 1 : 0, actions.Count(static action => action.Command == "disconnect"));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task GetExceptionInfo_CompleteSerializedByteLimit_IncludesEnvelopeEscapingAndRejectsOnlyAboveLimit(int excessBytes)
+    {
+        const int limit = 256 * 1024;
+        const string suffix = "\"\nЖ";
+        var expected = new JsonObject
+        {
+            ["kind"] = "exception_info_success",
+            ["exception"] = new JsonObject { ["exceptionId"] = "ControlledException", ["breakMode"] = "always", ["description"] = suffix },
+        };
+        var size = limit - Encoding.UTF8.GetByteCount(expected.ToJsonString()) + excessBytes;
+        await using var driver = await ModernMcpProcessDriver.StartAsync(ExceptionInfoOptions($"sized:{size}"), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "exception-info-boundary-start");
+        var before = await driver.ReadNativeActionsAsync();
+
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(ExceptionInfoTool, Arguments(session, 1),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("exception-info-boundary"), timeout: TimeSpan.FromSeconds(35)), isError: excessBytes != 0);
+
+        AssertSingleExceptionInfoRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1);
+        if (excessBytes == 0)
+        {
+            expected["exception"]!["description"] = new string('x', size) + suffix;
+            Assert.True(JsonNode.DeepEquals(expected, content));
+            Assert.Equal(limit, Encoding.UTF8.GetByteCount(content.ToJsonString()));
+            StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        }
+        else
+        {
+            AssertExceptionInfoFailure(content, "protocol_error");
+            AssertNotFound(AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("exception-info-boundary-state")), isError: true));
+        }
+    }
+
+    private static ModernMcpStartOptions ExceptionInfoOptions(string mode = "success", bool? supported = true, string capabilityDelta = "none", string lifecycleMode = "all-stop") => new(
+        DisableFormElicitation: true,
+        FixtureConfiguration: new FixtureConfiguration(
+            LifecycleMode: lifecycleMode,
+            SupportsExceptionInfoRequest: supported,
+            ExceptionInfoResponseMode: mode,
+            ExceptionInfoCapabilityDelta: capabilityDelta));
+
+    private static async Task ExceptionInfoReaderBarrierAsync(ModernMcpProcessDriver driver, string session, string requestId, CancellationToken cancellationToken = default)
+    {
+        var result = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_threads", new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId(requestId), cancellationToken), isError: false);
+        Assert.Equal("threads_success", result["kind"]?.GetValue<string>());
+    }
+
+    private static void AssertSingleExceptionInfoRequest(IEnumerable<ModernNativeAction> actions, int threadId)
+    {
+        var request = Assert.Single(actions, static action => action.Command == "exceptionInfo");
+        Assert.True(JsonNode.DeepEquals(new JsonObject { ["threadId"] = threadId }, JsonNode.Parse(request.Detail!)!["arguments"]));
+    }
+
+    private static void AssertExceptionInfoFailure(JsonObject content, string outcome)
+    {
+        Assert.Equal($"dap_exception_info_{outcome}", content["kind"]?.GetValue<string>());
+        Assert.Equal($"DAP_EXCEPTION_INFO_{outcome.ToUpperInvariant()}", content["error"]?.GetValue<string>());
+        Assert.Equal(2, content.Count);
+        Assert.DoesNotContain("private", content.ToJsonString(), StringComparison.OrdinalIgnoreCase);
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+    }
+
+    [Fact]
+    public async Task ToolsList_SetVariable_PublishesExplicitClosedMutationInput()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(startupTimeout: TimeSpan.FromSeconds(10));
+        var result = ModernMcpProcessDriver.RequireResult(await driver.ListToolsRawAsync(
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("set-variable-catalog")));
+        var tool = Assert.Single(Assert.IsType<JsonArray>(result["tools"]).Select(static item => Assert.IsType<JsonObject>(item)),
+                static item => item["name"]?.GetValue<string>() == "set_variable");
+        var schema = Assert.IsType<JsonObject>(tool["inputSchema"]);
+        Assert.Equal("object", schema["type"]?.GetValue<string>());
+        Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
+        var fields = new[] { "debugSessionId", "inspectionContextId", "name", "value", "variablesReference" };
+        Assert.Equal(fields, Assert.IsType<JsonArray>(schema["required"]).Select(static item => item!.GetValue<string>()).Order(StringComparer.Ordinal));
+        var properties = Assert.IsType<JsonObject>(schema["properties"]);
+        Assert.Equal(fields, properties.Select(static item => item.Key).Order(StringComparer.Ordinal));
+        foreach (var field in new[] { "debugSessionId", "inspectionContextId", "name", "value" })
+        {
+            Assert.Equal("string", properties[field]?["type"]?.GetValue<string>());
+        }
+        Assert.Equal("integer", properties["variablesReference"]?["type"]?.GetValue<string>());
+        Assert.False(tool["annotations"]?["readOnlyHint"]?.GetValue<bool>() ?? false);
+        Assert.False(tool["annotations"]?["idempotentHint"]?.GetValue<bool>() ?? false);
+    }
+
+    [Theory]
+    [InlineData("  имя\t", " \"雪\"\r\n", "updated", "tuple", 1002)]
+    [InlineData("fixture:optional", "", "untyped", null, 0)]
+    public async Task SetVariable_CurrentContext_ForwardsExactArgumentsAndRotatesContext(
+            string name, string value, string expectedValue, string? expectedType, int expectedReference)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(SetVariableOptions(true), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "set-exact-start");
+        var context = (await InspectionStackAsync(driver, session, "set-exact-stack"))["inspectionContextId"]!.GetValue<string>();
+        var before = await driver.ReadNativeActionsAsync();
+        var content = await SetVariableCallAsync(driver, SetVariableArguments(session, context, 1001, name, value), "set-exact");
+        Assert.Equal("set_variable_success", content["kind"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        Assert.Equal(expectedValue, content["value"]?.GetValue<string>());
+        Assert.Equal(expectedType, content["type"]?.GetValue<string>());
+        Assert.Equal(expectedReference, content["variablesReference"]?.GetValue<int>());
+        var fresh = Assert.IsType<string>(content["inspectionContextId"]?.GetValue<string>());
+        Assert.False(string.IsNullOrWhiteSpace(fresh));
+        Assert.NotEqual(context, fresh);
+        AssertSetVariableRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1001, name, value);
+
+        var after = await driver.ReadNativeActionsAsync();
+        var stale = await InspectionCallAsync(driver, "get_variables", InspectionArguments(session, context, "variablesReference", 1001), "set-old-read", isError: true);
+        AssertInspectionFailure(stale, "get_variables", protocolFailure: false);
+        AssertSetVariableFailure(await SetVariableCallAsync(driver, SetVariableArguments(session, context, 1001, name, value), "set-old-write", true), "refused");
+        Assert.Equal(after.Count, (await driver.ReadNativeActionsAsync()).Count);
+        if (expectedReference > 0)
+        {
+            var nested = await InspectionCallAsync(driver, "get_variables", InspectionArguments(session, fresh, "variablesReference", expectedReference), "set-new-read");
+            Assert.Equal("variables_success", nested["kind"]?.GetValue<string>());
+            Assert.Equal(fresh, nested["inspectionContextId"]?.GetValue<string>());
+            Assert.Equal("Item1", nested["variables"]?[0]?["name"]?.GetValue<string>());
+        }
+        await driver.StopSingleControlledSessionAsync(session);
+    }
+
+    [Theory]
+    [InlineData("missing-session")]
+    [InlineData("blank-session")]
+    [InlineData("missing-context")]
+    [InlineData("blank-context")]
+    [InlineData("missing-reference")]
+    [InlineData("zero-reference")]
+    [InlineData("negative-reference")]
+    [InlineData("fractional-reference")]
+    [InlineData("overflow-reference")]
+    [InlineData("missing-name")]
+    [InlineData("null-name")]
+    [InlineData("missing-value")]
+    [InlineData("non-string-value")]
+    [InlineData("extra")]
+    public async Task SetVariable_InvalidInput_IsRejectedBeforeDapIo(string scenario)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(SetVariableOptions(true));
+        var session = await StartStoppedSessionAsync(driver, "set-invalid-start");
+        var context = (await InspectionStackAsync(driver, session, "set-invalid-stack"))["inspectionContextId"]!.GetValue<string>();
+        var arguments = SetVariableArguments(session, context, 1001, "x", "1");
+        switch (scenario)
+        {
+            case "missing-session": arguments.Remove("debugSessionId"); break;
+            case "blank-session": arguments["debugSessionId"] = " \t"; break;
+            case "missing-context": arguments.Remove("inspectionContextId"); break;
+            case "blank-context": arguments["inspectionContextId"] = " \t"; break;
+            case "missing-reference": arguments.Remove("variablesReference"); break;
+            case "zero-reference": arguments["variablesReference"] = 0; break;
+            case "negative-reference": arguments["variablesReference"] = -1; break;
+            case "fractional-reference": arguments["variablesReference"] = 1.5; break;
+            case "overflow-reference": arguments["variablesReference"] = (long)int.MaxValue + 1; break;
+            case "missing-name": arguments.Remove("name"); break;
+            case "null-name": arguments["name"] = null; break;
+            case "missing-value": arguments.Remove("value"); break;
+            case "non-string-value": arguments["value"] = 42; break;
+            case "extra": arguments["unexpected"] = true; break;
+            default: throw new ArgumentOutOfRangeException(nameof(scenario));
+        }
+        var before = await driver.ReadNativeActionsAsync();
+        var result = await SetVariableCallAsync(driver, arguments, "set-invalid", true);
+        Assert.Equal("invalid_tool_arguments", result["kind"]?.GetValue<string>());
+        Assert.Equal("INVALID_TOOL_ARGUMENTS", result["error"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(result);
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Theory]
+    [InlineData(null, "none", false)]
+    [InlineData(false, "none", false)]
+    [InlineData(true, "none", true)]
+    [InlineData(false, "enable-on-threads", true)]
+    [InlineData(true, "disable-on-threads", false)]
+    public async Task SetVariable_CapabilityBaselineAndReaderOrderedDelta_ControlAdmission(bool? baseline, string delta, bool supported)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(SetVariableOptions(baseline, delta), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "set-cap-start");
+        var context = (await InspectionStackAsync(driver, session, "set-cap-stack"))["inspectionContextId"]!.GetValue<string>();
+        if (delta != "none")
+        {
+            var barrier = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_threads", new JsonObject { ["debugSessionId"] = session },
+                    ModernMcpProcessDriver.CurrentMeta(), new RequestId("set-cap-barrier")), isError: false);
+            Assert.Equal("threads_success", barrier["kind"]?.GetValue<string>());
+        }
+        var before = await driver.ReadNativeActionsAsync();
+        var result = await SetVariableCallAsync(driver, SetVariableArguments(session, context, 1001, "x", "1"), "set-cap", !supported);
+        if (supported)
+        {
+            Assert.Equal("set_variable_success", result["kind"]?.GetValue<string>());
+            AssertSetVariableRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1001, "x", "1");
+        }
+        else
+        {
+            AssertSetVariableFailure(result, "unsupported");
+            Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+        }
+    }
+
+    [Fact]
+    public async Task SetVariable_UnknownContext_IsRefusedWithoutWrite()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(SetVariableOptions(true), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "set-unknown-start");
+        var before = await driver.ReadNativeActionsAsync();
+        AssertSetVariableFailure(await SetVariableCallAsync(driver, SetVariableArguments(session, "unknown-context", 1001, "x", "1"), "set-unknown", true), "refused");
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Fact]
+    public async Task SetVariable_ConcurrentOldContextRead_RefusesReplyAfterMutation()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            DisableFormElicitation: true,
+            FixtureConfiguration: new FixtureConfiguration(SupportsDelayedStackTraceLoading: true,
+                LifecycleMode: "all-stop", SupportsSetVariable: true, VariablesResponseMode: "hold")));
+        var session = await StartStoppedSessionAsync(driver, "set-race-start");
+        var context = (await InspectionStackAsync(driver, session, "set-race-stack"))["inspectionContextId"]!.GetValue<string>();
+        var before = await driver.ReadNativeActionsAsync();
+        var read = driver.CallToolRawAsync("get_variables", InspectionArguments(session, context, "variablesReference", 1001),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("set-race-read"), timeout: TimeSpan.FromSeconds(35));
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await driver.WaitForFixtureRecordAsync("inspection-response-gated", observation.Token);
+            Assert.False(read.IsCompleted);
+            var updated = await SetVariableCallAsync(driver, SetVariableArguments(session, context, 1001, "x", "1"), "set-race-write");
+            Assert.Equal("set_variable_success", updated["kind"]?.GetValue<string>());
+            var fresh = Assert.IsType<string>(updated["inspectionContextId"]?.GetValue<string>());
+            Assert.NotEqual(context, fresh);
+            Assert.False(read.IsCompleted);
+            driver.ReleaseStackTraceResponse();
+            var stale = AssertApplicationEnvelope(await read, isError: true);
+            AssertInspectionFailure(stale, "get_variables", protocolFailure: false);
+            Assert.False(stale.ContainsKey("variables"));
+            var nested = await InspectionCallAsync(driver, "get_variables",
+                InspectionArguments(session, fresh, "variablesReference", 1002), "set-race-fresh");
+            Assert.Equal("variables_success", nested["kind"]?.GetValue<string>());
+            Assert.Equal(fresh, nested["inspectionContextId"]?.GetValue<string>());
+            var actions = (await driver.ReadNativeActionsAsync()).Skip(before.Count).ToArray();
+            Assert.Equal(["variables", "setVariable", "variables"], actions.Select(static action => action.Command));
+            AssertSetVariableRequest(actions, 1001, "x", "1");
+        }
+        finally
+        {
+            driver.ReleaseStackTraceResponse();
+        }
+    }
+
+    [Theory]
+    [InlineData("fixture:negative", "failed", false)]
+    [InlineData("fixture:malformed", "outcome_unknown", true)]
+    [InlineData("fixture:oversized", "outcome_unknown", true)]
+    [InlineData("fixture:wrong-command", "outcome_unknown", true)]
+    [InlineData("fixture:timeout", "outcome_unknown", true)]
+    public async Task SetVariable_NegativeOrInvalidReply_InvalidatesContextAndNeverRetries(string name, string outcome, bool drained)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(SetVariableOptions(true), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "set-failure-start");
+        var context = (await InspectionStackAsync(driver, session, "set-failure-stack"))["inspectionContextId"]!.GetValue<string>();
+        var before = await driver.ReadNativeActionsAsync();
+        var response = await driver.CallToolRawAsync("set_variable", SetVariableArguments(session, context, 1001, name, "1"),
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("set-failure"), timeout: TimeSpan.FromSeconds(35));
+        AssertSetVariableFailure(AssertApplicationEnvelope(response, isError: true), outcome);
+        AssertSetVariableRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1001, name, "1");
+        var state = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("set-failure-state")), isError: drained);
+        if (drained)
+        {
+            AssertNotFound(state);
+        }
+        else
+        {
+            Assert.Equal("debug_state_success", state["kind"]?.GetValue<string>());
+            var stale = await InspectionCallAsync(driver, "get_variables", InspectionArguments(session, context, "variablesReference", 1001), "set-failure-old", true);
+            AssertInspectionFailure(stale, "get_variables", protocolFailure: false);
+        }
+    }
+
+    [Fact]
+    public async Task SetVariable_ReplyAfterInvalidation_ReturnsUnknownAndDrains()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(SetVariableOptions(true));
+        var session = await StartStoppedSessionAsync(driver, "set-held-start");
+        var context = (await InspectionStackAsync(driver, session, "set-held-stack"))["inspectionContextId"]!.GetValue<string>();
+        var before = await driver.ReadNativeActionsAsync();
+        var operation = driver.CallToolRawAsync("set_variable", SetVariableArguments(session, context, 1001, "fixture:hold-invalidated", "1"),
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("set-held"), timeout: TimeSpan.FromSeconds(35));
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await driver.WaitForFixtureRecordAsync("set-variable-response-gated", observation.Token);
+            var barrier = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_threads", new JsonObject { ["debugSessionId"] = session },
+                    ModernMcpProcessDriver.CurrentMeta(), new RequestId("set-held-barrier"), observation.Token), isError: false);
+            Assert.Equal("threads_success", barrier["kind"]?.GetValue<string>());
+            Assert.False(operation.IsCompleted);
+        }
+        finally { driver.ReleaseStackTraceResponse(); }
+        AssertSetVariableFailure(AssertApplicationEnvelope(await operation, isError: true), "outcome_unknown");
+        AssertSetVariableRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1001, "fixture:hold-invalidated", "1");
+        AssertNotFound(AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("set-held-state")), isError: true));
+    }
+
+    [Fact]
+    public async Task SetVariable_PostWriteCancellation_DrainsWithoutRetry()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(SetVariableOptions(true));
+        var session = await StartStoppedSessionAsync(driver, "set-cancel-start");
+        var context = (await InspectionStackAsync(driver, session, "set-cancel-stack"))["inspectionContextId"]!.GetValue<string>();
+        using var adapter = System.Diagnostics.Process.GetProcessById(await driver.ReadAdapterProcessIdAsync());
+        using var cancellation = new CancellationTokenSource();
+        var before = await driver.ReadNativeActionsAsync();
+        var operation = driver.CallToolRawAsync("set_variable", SetVariableArguments(session, context, 1001, "fixture:hold", "1"),
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("set-cancel"), cancellation.Token, timeout: TimeSpan.FromSeconds(35));
+        using (var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+        {
+            await driver.WaitForFixtureRecordAsync("set-variable-response-gated", observation.Token);
+            Assert.False(operation.IsCompleted);
+        }
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
+        using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await driver.WaitForFixtureRecordAsync("disconnect-response", cleanup.Token);
+        await adapter.WaitForExitAsync(cleanup.Token);
+        AssertSetVariableRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1001, "fixture:hold", "1");
+        AssertNotFound(AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("set-cancel-state"), cleanup.Token), isError: true));
+    }
+
+    private static ModernMcpStartOptions SetVariableOptions(bool? supported, string delta = "none") => new(
+            DisableFormElicitation: true,
+            FixtureConfiguration: new FixtureConfiguration(SupportsDelayedStackTraceLoading: true, LifecycleMode: "all-stop",
+                    SupportsSetVariable: supported, SetVariableCapabilityDelta: delta));
+
+    private static JsonObject SetVariableArguments(string session, string context, int reference, string name, string value) => new()
+    {
+        ["debugSessionId"] = session,
+        ["inspectionContextId"] = context,
+        ["variablesReference"] = reference,
+        ["name"] = name,
+        ["value"] = value,
+    };
+
+    private static async Task<JsonObject> SetVariableCallAsync(ModernMcpProcessDriver driver, JsonObject arguments, string id, bool isError = false) =>
+            AssertApplicationEnvelope(await driver.CallToolRawAsync("set_variable", arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId(id)), isError);
+
+    private static void AssertSetVariableFailure(JsonObject content, string outcome)
+    {
+        Assert.Equal($"DAP_SET_VARIABLE_{outcome.ToUpperInvariant()}", content["error"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        Assert.DoesNotContain("private", content.ToJsonString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void AssertSetVariableRequest(IEnumerable<ModernNativeAction> actions, int reference, string name, string value)
+    {
+        var request = Assert.Single(actions, static action => action.Command == "setVariable");
+        var arguments = JsonNode.Parse(request.Detail!)!["arguments"];
+        Assert.True(JsonNode.DeepEquals(new JsonObject { ["variablesReference"] = reference, ["name"] = name, ["value"] = value }, arguments));
+    }
+
+    [Fact]
+    public async Task ToolsList_EvaluateExpression_PublishesExplicitClosedInputWithoutReadOnlyOrIdempotentClaims()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(startupTimeout: TimeSpan.FromSeconds(10));
+        var before = await driver.ReadNativeActionsAsync();
+        var result = ModernMcpProcessDriver.RequireResult(await driver.ListToolsRawAsync(
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("evaluate-catalog")));
+        var tool = Assert.Single(Assert.IsType<JsonArray>(result["tools"]).Select(static item => Assert.IsType<JsonObject>(item)),
+            static item => item["name"]?.GetValue<string>() == EvaluateTool);
+        var schema = Assert.IsType<JsonObject>(tool["inputSchema"]);
+        Assert.Equal("object", schema["type"]?.GetValue<string>());
+        Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
+        var fields = new[] { "debugSessionId", "expression", "frameId", "inspectionContextId" };
+        Assert.Equal(fields, Assert.IsType<JsonArray>(schema["required"]).Select(static item => item!.GetValue<string>()).Order(StringComparer.Ordinal));
+        var properties = Assert.IsType<JsonObject>(schema["properties"]);
+        Assert.Equal(fields, properties.Select(static item => item.Key).Order(StringComparer.Ordinal));
+        foreach (var field in new[] { "debugSessionId", "inspectionContextId", "expression" })
+        {
+            Assert.Equal("string", properties[field]?["type"]?.GetValue<string>());
+        }
+        Assert.Equal("integer", properties["frameId"]?["type"]?.GetValue<string>());
+        Assert.False(tool["annotations"]?["readOnlyHint"]?.GetValue<bool>() ?? false);
+        Assert.False(tool["annotations"]?["idempotentHint"]?.GetValue<bool>() ?? false);
+        Assert.True(tool["annotations"]?["destructiveHint"]?.GetValue<bool>() ?? true);
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Theory]
+    [InlineData("6 * 7", "42", "int")]
+    [InlineData(" \t6 * 7\r\n", "42", "int")]
+    [InlineData("fixture:missing-type", "untyped", null)]
+    [InlineData("fixture:null-type", "untyped", null)]
+    [InlineData("fixture:empty-result", "", "string")]
+    public async Task EvaluateExpression_CurrentContext_ForwardsExactWatchRequestAndNormalizesResult(string expression, string expectedResult, string? expectedType)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack(), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "evaluate-exact-start");
+        var stack = await InspectionStackAsync(driver, session, "evaluate-exact-stack");
+        var context = stack["inspectionContextId"]!.GetValue<string>();
+        // The stopped epoch is not a capability proving that a numeric frame was previously issued.
+        const int frame = 17;
+        var before = await driver.ReadNativeActionsAsync();
+
+        var content = await InspectionCallAsync(driver, EvaluateTool, EvaluationArguments(session, context, frame, expression), "evaluate-exact");
+
+        Assert.True(JsonNode.DeepEquals(new JsonObject
+        {
+            ["kind"] = "evaluate_success",
+            ["inspectionContextId"] = context,
+            ["result"] = expectedResult,
+            ["type"] = expectedType,
+            ["variablesReference"] = 0,
+        }, content));
+        AssertSingleEvaluateRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), frame, expression);
+    }
+
+    [Fact]
+    public async Task EvaluateExpression_StructuredResult_ExpandsNestedReferenceInSameInspectionContext()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack(), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "evaluate-nested-start");
+        var stack = await InspectionStackAsync(driver, session, "evaluate-nested-stack");
+        var context = stack["inspectionContextId"]!.GetValue<string>();
+        var frame = Assert.IsType<JsonArray>(stack["frames"])[0]!["id"]!.GetValue<int>();
+        var before = await driver.ReadNativeActionsAsync();
+
+        var content = await InspectionCallAsync(driver, EvaluateTool, EvaluationArguments(session, context, frame, "tupleVar"), "evaluate-nested");
+
+        Assert.True(JsonNode.DeepEquals(new JsonObject
+        {
+            ["kind"] = "evaluate_success",
+            ["inspectionContextId"] = context,
+            ["result"] = "(\"test\", 123)",
+            ["type"] = "(string, int)",
+            ["variablesReference"] = 1002,
+        }, content));
+        var nested = await InspectionCallAsync(driver, "get_variables",
+            InspectionArguments(session, context, "variablesReference", content["variablesReference"]!.GetValue<int>()), "evaluate-nested-variables");
+        Assert.Equal("variables_success", nested["kind"]?.GetValue<string>());
+        Assert.Equal(context, nested["inspectionContextId"]?.GetValue<string>());
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse("[{\"name\":\"Item1\",\"value\":\"\\\"test\\\"\",\"type\":\"string\",\"variablesReference\":0},{\"name\":\"Item2\",\"value\":\"123\",\"type\":\"int\",\"variablesReference\":0}]"), nested["variables"]));
+        var actions = (await driver.ReadNativeActionsAsync()).Skip(before.Count).ToArray();
+        Assert.Equal(["evaluate", "variables"], actions.Select(static action => action.Command));
+        AssertSingleEvaluateRequest(actions, frame, "tupleVar");
+        Assert.True(JsonNode.DeepEquals(new JsonObject { ["variablesReference"] = 1002 }, JsonNode.Parse(actions[1].Detail!)!["arguments"]));
+    }
+
+    [Theory]
+    [InlineData("missing-session")]
+    [InlineData("missing-context")]
+    [InlineData("missing-frame")]
+    [InlineData("missing-expression")]
+    [InlineData("null-context")]
+    [InlineData("empty-context")]
+    [InlineData("fractional-frame")]
+    [InlineData("overflow-frame")]
+    [InlineData("null-expression")]
+    [InlineData("non-string-expression")]
+    [InlineData("extra-field")]
+    public async Task EvaluateExpression_InvalidInput_ReturnsInvalidArgumentsWithoutDapIo(string scenario)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack(), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, $"evaluate-invalid-{scenario}-start");
+        var stack = await InspectionStackAsync(driver, session, $"evaluate-invalid-{scenario}-stack");
+        var arguments = EvaluationArguments(session, stack["inspectionContextId"]!.GetValue<string>(), 1, "6 * 7");
+        switch (scenario)
+        {
+            case "missing-session": arguments.Remove("debugSessionId"); break;
+            case "missing-context": arguments.Remove("inspectionContextId"); break;
+            case "missing-frame": arguments.Remove("frameId"); break;
+            case "missing-expression": arguments.Remove("expression"); break;
+            case "null-context": arguments["inspectionContextId"] = null; break;
+            case "empty-context": arguments["inspectionContextId"] = string.Empty; break;
+            case "fractional-frame": arguments["frameId"] = 1.5; break;
+            case "overflow-frame": arguments["frameId"] = (long)int.MaxValue + 1; break;
+            case "null-expression": arguments["expression"] = null; break;
+            case "non-string-expression": arguments["expression"] = 42; break;
+            case "extra-field": arguments["context"] = "repl"; break;
+            default: throw new ArgumentOutOfRangeException(nameof(scenario));
+        }
+        var before = await driver.ReadNativeActionsAsync();
+
+        var invalid = await InspectionCallAsync(driver, EvaluateTool, arguments, $"evaluate-invalid-{scenario}", isError: true);
+
+        Assert.Equal("invalid_tool_arguments", invalid["kind"]?.GetValue<string>());
+        Assert.Equal("INVALID_TOOL_ARGUMENTS", invalid["error"]?.GetValue<string>());
+        Assert.Equal(EvaluateTool, invalid["tool"]?.GetValue<string>());
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Fact]
+    public async Task EvaluateExpression_UnknownContext_RefusesBeforeAnyDapWriteAndKeepsSession()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack(), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "evaluate-unknown-context-start");
+        var before = await driver.ReadNativeActionsAsync();
+
+        var refused = await InspectionCallAsync(driver, EvaluateTool,
+            EvaluationArguments(session, "unknown-inspection-context", 1, "6 * 7"), "evaluate-unknown-context", isError: true);
+
+        AssertEvaluationFailure(refused, "refused");
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+        Assert.Equal("debug_state_success", AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state",
+            new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("evaluate-unknown-context-state")), isError: false)["kind"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task EvaluateExpression_StaleContextAfterStep_RefusesWithoutWriteAndFreshContextWorks()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack(), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "evaluate-stale-start");
+        var stack = await InspectionStackAsync(driver, session, "evaluate-stale-old-stack");
+        var oldContext = stack["inspectionContextId"]!.GetValue<string>();
+        var frame = Assert.IsType<JsonArray>(stack["frames"])[0]!["id"]!.GetValue<int>();
+        var step = AssertApplicationEnvelope(await driver.CallToolRawAsync("step_over", Arguments(session, 1),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("evaluate-stale-step")), isError: false);
+        Assert.Equal("step_over_success", step["kind"]?.GetValue<string>());
+        var freshStack = await InspectionStackAsync(driver, session, "evaluate-stale-fresh-stack");
+        var context = freshStack["inspectionContextId"]!.GetValue<string>();
+        Assert.NotEqual(oldContext, context);
+        Assert.Equal(frame, Assert.IsType<JsonArray>(freshStack["frames"])[0]!["id"]!.GetValue<int>());
+        var before = await driver.ReadNativeActionsAsync();
+
+        AssertEvaluationFailure(await InspectionCallAsync(driver, EvaluateTool,
+            EvaluationArguments(session, oldContext, frame, "6 * 7"), "evaluate-stale-old", isError: true), "refused");
+
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+        var fresh = await InspectionCallAsync(driver, EvaluateTool, EvaluationArguments(session, context, frame, "6 * 7"), "evaluate-stale-fresh");
+        Assert.Equal("evaluate_success", fresh["kind"]?.GetValue<string>());
+        Assert.Equal("42", fresh["result"]?.GetValue<string>());
+        Assert.Equal(context, fresh["inspectionContextId"]?.GetValue<string>());
+        AssertSingleEvaluateRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), frame, "6 * 7");
+    }
+
+    [Fact]
+    public async Task EvaluateExpression_NegativeDapResponse_ReturnsFailedNotRefusedAndDoesNotRetry()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack(), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "evaluate-negative-start");
+        var stack = await InspectionStackAsync(driver, session, "evaluate-negative-stack");
+        var context = stack["inspectionContextId"]!.GetValue<string>();
+        var before = await driver.ReadNativeActionsAsync();
+
+        var failure = await InspectionCallAsync(driver, EvaluateTool,
+            EvaluationArguments(session, context, 1, "fixture:negative"), "evaluate-negative", isError: true);
+
+        AssertEvaluationFailure(failure, "failed");
+        AssertSingleEvaluateRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1, "fixture:negative");
+        Assert.Equal("debug_state_success", AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state",
+            new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("evaluate-negative-state")), isError: false)["kind"]?.GetValue<string>());
+    }
+
+    [Theory]
+    [InlineData("fixture:hold-then-invalidated")]
+    [InlineData("fixture:hold-then-continued-restop")]
+    public async Task EvaluateExpression_ResponseAfterContextInvalidation_ReturnsRedactedUnknownOutcomeWithoutRetry(string expression)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack(), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "evaluate-held-start");
+        var stack = await InspectionStackAsync(driver, session, "evaluate-held-stack");
+        var context = stack["inspectionContextId"]!.GetValue<string>();
+        var before = await driver.ReadNativeActionsAsync();
+        var response = driver.CallToolRawAsync(EvaluateTool, EvaluationArguments(session, context, 1, expression),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("evaluate-held"), timeout: TimeSpan.FromSeconds(35));
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await driver.WaitForFixtureRecordAsync("evaluate-response-gated", observation.Token);
+            var barrier = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_threads", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("evaluate-held-reader-barrier"), observation.Token), isError: false);
+            Assert.Equal("threads_success", barrier["kind"]?.GetValue<string>());
+            Assert.False(response.IsCompleted, "The evaluation reply must remain held until the invalidating event has passed the reader barrier.");
+        }
+        finally
+        {
+            driver.ReleaseStackTraceResponse();
+        }
+
+        AssertEvaluationFailure(AssertApplicationEnvelope(await response, isError: true), "outcome_unknown");
+        AssertSingleEvaluateRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1, expression);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task EvaluateExpression_SerializedByteBoundary_IncludesEscapingAndDrainsOnlyAboveLimit(int excessBytes)
+    {
+        const int limit = 256 * 1024;
+        const string suffix = "\"\nЖ";
+        await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack(), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, $"evaluate-boundary-{excessBytes}-start");
+        var stack = await InspectionStackAsync(driver, session, $"evaluate-boundary-{excessBytes}-stack");
+        var context = stack["inspectionContextId"]!.GetValue<string>();
+        var template = new JsonObject
+        {
+            ["kind"] = "evaluate_success",
+            ["inspectionContextId"] = context,
+            ["result"] = suffix,
+            ["type"] = "string",
+            ["variablesReference"] = 0,
+        };
+        var count = limit - Encoding.UTF8.GetByteCount(template.ToJsonString()) + excessBytes;
+        var expression = $"fixture:sized:{count}";
+        var before = await driver.ReadNativeActionsAsync();
+        var response = await driver.CallToolRawAsync(EvaluateTool, EvaluationArguments(session, context, 1, expression),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId($"evaluate-boundary-{excessBytes}"), timeout: TimeSpan.FromSeconds(35));
+        var content = AssertApplicationEnvelope(response, isError: excessBytes != 0);
+        AssertSingleEvaluateRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1, expression);
+        if (excessBytes == 0)
+        {
+            Assert.Equal("evaluate_success", content["kind"]?.GetValue<string>());
+            Assert.Equal(new string('x', count) + suffix, content["result"]?.GetValue<string>());
+            Assert.Equal(limit, Encoding.UTF8.GetByteCount(content.ToJsonString()));
+        }
+        else
+        {
+            AssertEvaluationFailure(content, "outcome_unknown");
+            AssertNotFound(AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("evaluate-boundary-state")), isError: true));
+        }
+    }
+
+    [Theory]
+    [InlineData("fixture:missing-result")]
+    [InlineData("fixture:non-string-result")]
+    [InlineData("fixture:non-string-type")]
+    [InlineData("fixture:missing-reference")]
+    [InlineData("fixture:negative-reference")]
+    [InlineData("fixture:fractional-reference")]
+    [InlineData("fixture:oversized-result")]
+    [InlineData("fixture:wrong-command")]
+    [InlineData("fixture:timeout")]
+    public async Task EvaluateExpression_PostWriteProtocolFailure_ReturnsUnknownOutcomeAndDrainsWithoutRetry(string expression)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack(), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "evaluate-protocol-start");
+        var stack = await InspectionStackAsync(driver, session, "evaluate-protocol-stack");
+        var context = stack["inspectionContextId"]!.GetValue<string>();
+        var before = await driver.ReadNativeActionsAsync();
+
+        var response = await driver.CallToolRawAsync(EvaluateTool, EvaluationArguments(session, context, 1, expression),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("evaluate-protocol"), timeout: TimeSpan.FromSeconds(35));
+
+        AssertEvaluationFailure(AssertApplicationEnvelope(response, isError: true), "outcome_unknown");
+        AssertNotFound(AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("evaluate-protocol-state")), isError: true));
+        var actions = (await driver.ReadNativeActionsAsync()).Skip(before.Count).ToArray();
+        AssertSingleEvaluateRequest(actions, 1, expression);
+        Assert.Single(actions, static action => action.Command == "disconnect");
+    }
+
+    [Fact]
+    public async Task EvaluateExpression_CommittedWriteCancellation_DrainsSessionAndInvalidatesInspectionContext()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack(), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "evaluate-cancel-start");
+        var stack = await InspectionStackAsync(driver, session, "evaluate-cancel-stack");
+        var context = stack["inspectionContextId"]!.GetValue<string>();
+        using var adapter = System.Diagnostics.Process.GetProcessById(await driver.ReadAdapterProcessIdAsync());
+        using var cancellation = new CancellationTokenSource();
+        var before = await driver.ReadNativeActionsAsync();
+        var operation = driver.CallToolRawAsync(EvaluateTool, EvaluationArguments(session, context, 1, "fixture:hold"),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("evaluate-cancel"), cancellation.Token, timeout: TimeSpan.FromSeconds(35));
+        using (var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+        {
+            await driver.WaitForFixtureRecordAsync("evaluate-response-gated", observation.Token);
+            var barrier = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_threads", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("evaluate-cancel-reader-barrier"), observation.Token), isError: false);
+            Assert.Equal("threads_success", barrier["kind"]?.GetValue<string>());
+            Assert.False(operation.IsCompleted, "The adapter consumed the evaluate request, but its reply must still be held before cancellation.");
+        }
+
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
+        using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await driver.WaitForFixtureRecordAsync("disconnect-response", cleanup.Token);
+        await adapter.WaitForExitAsync(cleanup.Token);
+        AssertNotFound(AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("evaluate-cancel-state"), cleanup.Token), isError: true));
+        var beforeReuse = await driver.ReadNativeActionsAsync();
+        AssertNotFound(AssertApplicationEnvelope(await driver.CallToolRawAsync(EvaluateTool, EvaluationArguments(session, context, 1, "6 * 7"),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("evaluate-cancel-reuse"), cleanup.Token), isError: true));
+        Assert.Equal(beforeReuse.Count, (await driver.ReadNativeActionsAsync()).Count);
+        var actions = (await driver.ReadNativeActionsAsync()).Skip(before.Count).ToArray();
+        AssertSingleEvaluateRequest(actions, 1, "fixture:hold");
+        Assert.Single(actions, static action => action.Command == "terminate");
+        Assert.Single(actions, static action => action.Command == "disconnect");
+    }
+
+    [Fact]
+    public async Task EvaluateExpression_ExplicitStopAbortsHeldEvaluationAndRetiresSession()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack(), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "evaluate-stop-start");
+        var stack = await InspectionStackAsync(driver, session, "evaluate-stop-stack");
+        var context = stack["inspectionContextId"]!.GetValue<string>();
+        using var adapter = System.Diagnostics.Process.GetProcessById(await driver.ReadAdapterProcessIdAsync());
+        var before = await driver.ReadNativeActionsAsync();
+        var evaluation = driver.CallToolRawAsync(EvaluateTool, EvaluationArguments(session, context, 1, "fixture:hold"),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("evaluate-stop-held"), timeout: TimeSpan.FromSeconds(35));
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureRecordAsync("evaluate-response-gated", observation.Token);
+            Assert.False(evaluation.IsCompleted);
+            var stop = driver.CallToolRawAsync("stop_debug", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("evaluate-stop"), timeout: TimeSpan.FromSeconds(15));
+
+            var outcome = AssertApplicationEnvelope(await evaluation.WaitAsync(observation.Token), isError: true);
+            AssertEvaluationFailure(outcome, "outcome_unknown");
+            Assert.Equal("complete", ModernMcpProcessDriver.RequireResult(await stop.WaitAsync(observation.Token))["resultType"]?.GetValue<string>());
+            await adapter.WaitForExitAsync(observation.Token);
+            AssertNotFound(AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("evaluate-stop-state"), observation.Token), isError: true));
+            AssertSingleEvaluateRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1, "fixture:hold");
+        }
+        finally
+        {
+            driver.ReleaseStackTraceResponse();
+        }
+    }
+
+    private static JsonObject EvaluationArguments(string session, string context, int frame, string expression)
+    {
+        var arguments = InspectionArguments(session, context, "frameId", frame);
+        arguments["expression"] = expression;
+        return arguments;
+    }
+
+    private static void AssertSingleEvaluateRequest(IEnumerable<ModernNativeAction> actions, int frame, string expression)
+    {
+        var request = Assert.Single(actions, static action => action.Command == "evaluate");
+        var arguments = JsonNode.Parse(request.Detail!)!["arguments"];
+        Assert.True(JsonNode.DeepEquals(new JsonObject { ["expression"] = expression, ["frameId"] = frame, ["context"] = "watch" }, arguments));
+    }
+
+    private static void AssertEvaluationFailure(JsonObject content, string outcome)
+    {
+        Assert.Equal($"dap_evaluate_{outcome}", content["kind"]?.GetValue<string>());
+        Assert.Equal($"DAP_EVALUATE_{outcome.ToUpperInvariant()}", content["error"]?.GetValue<string>());
+        Assert.Equal(2, content.Count);
+        Assert.DoesNotContain("private", content.ToJsonString(), StringComparison.OrdinalIgnoreCase);
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
     }
 
     private static ModernMcpStartOptions InspectionOptions(string tool, string mode) => new(

@@ -226,10 +226,39 @@ public sealed class StructuredContentSchemaParityTests
     }
 
     [Theory]
+    [InlineData("supported", "absent-body", "exception_filters_acknowledged")]
+    [InlineData("supported", "verified", "exception_filters_acknowledged")]
+    [InlineData("empty", "absent-body", "dap_exception_filters_unsupported")]
+    [InlineData("supported", "refused", "dap_exception_filters_refused")]
+    [InlineData("supported", "missing-verified", "dap_exception_filters_protocol_error")]
+    public async Task LiveHost_ConfigureExceptionsStructuredContentMatchesSchema(string baseline, string mode, string expectedKind)
+    {
+        var schema = LoadSchema();
+        var definitions = Assert.IsType<JsonObject>(schema["$defs"]);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true,
+                ExceptionBreakpointFilters: baseline, SetExceptionBreakpointsResponseMode: mode)));
+        var meta = ModernMcpProcessDriver.CurrentMeta();
+        var start = Structured(await driver.CallToolRawAsync("start_debug", new JsonObject { ["program"] = driver.InertProgramPath },
+            meta, new RequestId("filters-schema-start")));
+        var session = Assert.IsType<string>(start["debugSessionId"]?.GetValue<string>());
+        var arguments = new JsonObject { ["debugSessionId"] = session, ["filters"] = new JsonArray("all", "all") };
+        ValidateObject(definitions, Assert.IsType<JsonObject>(definitions["configureExceptionsArguments"]), arguments);
+        var content = Structured(await driver.CallToolRawAsync("configure_exceptions", arguments, meta, new RequestId("filters-schema-call")));
+        Assert.Equal(expectedKind, content["kind"]?.GetValue<string>());
+        ValidateVariant(schema, content);
+    }
+
+    [Theory]
     [InlineData("ui_invoke", "uiInvokeArguments")]
     [InlineData("ui_invoke_observed", "uiInvokeObservedArguments")]
     [InlineData("get_output", "getOutputArguments")]
     [InlineData("get_output_tail", "getOutputTailArguments")]
+    [InlineData("search_output", "searchOutputArguments")]
+    [InlineData("get_modules", "getModulesArguments")]
+    [InlineData("get_progress", "getProgressArguments")]
+    [InlineData("configure_exceptions", "configureExceptionsArguments")]
+    [InlineData("get_variables", "getVariablesArguments")]
     public async Task LiveHost_InvokeAndOutputInputSchemas_MatchAdvertisedArguments(string toolName, string definitionName)
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync();
@@ -240,7 +269,13 @@ public sealed class StructuredContentSchemaParityTests
             item => item["name"]?.GetValue<string>() == toolName);
         var advertised = Assert.IsType<JsonObject>(tool["inputSchema"]);
         var definitions = Assert.IsType<JsonObject>(LoadSchema()["$defs"]);
-        var application = Assert.IsType<JsonObject>(definitions[definitionName]);
+        var application = Assert.IsType<JsonObject>(definitions[definitionName]).DeepClone().AsObject();
+        if (toolName == "get_variables")
+        {
+            var context = Assert.IsType<JsonObject>(definitions["inspectionContextId"]).DeepClone().AsObject();
+            context.Remove("description");
+            application["properties"]!["inspectionContextId"] = context;
+        }
 
         Assert.True(JsonNode.DeepEquals(advertised, application),
             $"The application input schema for {toolName} must match its live tools/list inputSchema. Advertised: {advertised}; application: {application}.");
@@ -431,19 +466,34 @@ public sealed class StructuredContentSchemaParityTests
     private static void ValidateObject(JsonObject definitions, JsonObject schema, JsonObject content)
     {
         Assert.Equal("object", schema["type"]?.GetValue<string>());
-        Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
 
-        var required = Assert.IsType<JsonArray>(schema["required"])
-            .Select(static property => Assert.IsType<string>(property?.GetValue<string>()))
-            .Order()
-            .ToArray();
-        var properties = Assert.IsType<JsonObject>(schema["properties"]);
-        Assert.All(content, property => Assert.True(properties.ContainsKey(property.Key)));
+        var exceptionBody = definitions["exceptionInfoSuccess"]?["properties"]?["exception"];
+        var allowsAdditionalProperties = ReferenceEquals(schema, exceptionBody)
+            || ReferenceEquals(schema, exceptionBody?["properties"]?["details"]);
+        if (allowsAdditionalProperties)
+        {
+            Assert.True(schema["additionalProperties"]?.GetValue<bool>() ?? false);
+        }
+        else
+        {
+            Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
+        }
+        var requiredNode = allowsAdditionalProperties ? schema["required"] as JsonArray : Assert.IsType<JsonArray>(schema["required"]);
+        var required = requiredNode?.Select(static property => Assert.IsType<string>(property?.GetValue<string>()))
+            ?? Enumerable.Empty<string>();
+        var properties = allowsAdditionalProperties ? schema["properties"] as JsonObject : Assert.IsType<JsonObject>(schema["properties"]);
         Assert.All(required, property => Assert.True(content.ContainsKey(property)));
 
         foreach (var property in content)
         {
-            ValidateValue(definitions, Assert.IsType<JsonObject>(properties[property.Key]), property.Value);
+            if (properties?[property.Key] is JsonObject propertySchema)
+            {
+                ValidateValue(definitions, propertySchema, property.Value);
+            }
+            else
+            {
+                Assert.True(allowsAdditionalProperties, $"Unexpected property '{property.Key}' in a closed object.");
+            }
         }
     }
 
@@ -533,6 +583,17 @@ public sealed class StructuredContentSchemaParityTests
                 Assert.True(number <= maximum.GetValue<long>());
             }
         }
+        else if (value is JsonValue fractionalValue && fractionalValue.TryGetValue<double>(out var fractionalNumber))
+        {
+            if (schema["minimum"] is JsonValue minimum)
+            {
+                Assert.True(fractionalNumber >= minimum.GetValue<double>());
+            }
+            if (schema["maximum"] is JsonValue maximum)
+            {
+                Assert.True(fractionalNumber <= maximum.GetValue<double>());
+            }
+        }
     }
 
     private static bool MatchesSchema(JsonObject definitions, JsonObject schema, JsonNode? value)
@@ -559,6 +620,7 @@ public sealed class StructuredContentSchemaParityTests
         "null" => value is null,
         "string" => value is JsonValue json && json.TryGetValue<string>(out _),
         "integer" => value is JsonValue json && json.TryGetValue<long>(out _),
+        "number" => value is JsonValue json && json.TryGetValue<double>(out var number) && double.IsFinite(number),
         "boolean" => value is JsonValue json && json.TryGetValue<bool>(out _),
         "array" => value is JsonArray,
         "object" => value is JsonObject,
