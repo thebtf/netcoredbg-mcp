@@ -125,6 +125,23 @@ This native path neither infers a thread nor updates Python's exception cache
 or provides `get_exception_context`. Python remains the installed default;
 real-debugger exception-stop and installed-delivery proof remain separate.
 
+The source-built stateful host also accepts
+`configure_exceptions(debugSessionId, filters?)` while a session is running or
+stopped. Omitted or null `filters` replaces the adapter's filters with an empty
+list; supplied strings retain their order and duplicates. The host sends one DAP
+`setExceptionBreakpoints` request only when the adapter advertises exception
+filters. An acknowledgement is not an exception stop: `breakpoints` is null
+when the adapter omits verification, or contains only its per-filter `verified`
+values when supplied.
+
+Unsupported adapters return `DAP_EXCEPTION_FILTERS_UNSUPPORTED` before a write.
+A negative response returns `DAP_EXCEPTION_FILTERS_REFUSED` and does not prove
+the adapter left its previous filters unchanged. Malformed or failed exchanges
+return `DAP_EXCEPTION_FILTERS_PROTOCOL_ERROR` and drain the session. Cancellation
+before writer handoff sends nothing; a potentially written but unconfirmed update
+drains without retry. Python remains the installed default; a real-debugger
+exception-stop journey and installed delivery are not yet proven for this path.
+
 The source-built stateful host exposes `get_modules(debugSessionId)` and
 `get_progress(debugSessionId)`. Each accepts only a required, nonblank opaque
 session token and reads a snapshot retained by the existing DAP reader without

@@ -226,12 +226,37 @@ public sealed class StructuredContentSchemaParityTests
     }
 
     [Theory]
+    [InlineData("supported", "absent-body", "exception_filters_acknowledged")]
+    [InlineData("supported", "verified", "exception_filters_acknowledged")]
+    [InlineData("empty", "absent-body", "dap_exception_filters_unsupported")]
+    [InlineData("supported", "refused", "dap_exception_filters_refused")]
+    [InlineData("supported", "missing-verified", "dap_exception_filters_protocol_error")]
+    public async Task LiveHost_ConfigureExceptionsStructuredContentMatchesSchema(string baseline, string mode, string expectedKind)
+    {
+        var schema = LoadSchema();
+        var definitions = Assert.IsType<JsonObject>(schema["$defs"]);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true,
+                ExceptionBreakpointFilters: baseline, SetExceptionBreakpointsResponseMode: mode)));
+        var meta = ModernMcpProcessDriver.CurrentMeta();
+        var start = Structured(await driver.CallToolRawAsync("start_debug", new JsonObject { ["program"] = driver.InertProgramPath },
+            meta, new RequestId("filters-schema-start")));
+        var session = Assert.IsType<string>(start["debugSessionId"]?.GetValue<string>());
+        var arguments = new JsonObject { ["debugSessionId"] = session, ["filters"] = new JsonArray("all", "all") };
+        ValidateObject(definitions, Assert.IsType<JsonObject>(definitions["configureExceptionsArguments"]), arguments);
+        var content = Structured(await driver.CallToolRawAsync("configure_exceptions", arguments, meta, new RequestId("filters-schema-call")));
+        Assert.Equal(expectedKind, content["kind"]?.GetValue<string>());
+        ValidateVariant(schema, content);
+    }
+
+    [Theory]
     [InlineData("ui_invoke", "uiInvokeArguments")]
     [InlineData("ui_invoke_observed", "uiInvokeObservedArguments")]
     [InlineData("get_output", "getOutputArguments")]
     [InlineData("get_output_tail", "getOutputTailArguments")]
     [InlineData("get_modules", "getModulesArguments")]
     [InlineData("get_progress", "getProgressArguments")]
+    [InlineData("configure_exceptions", "configureExceptionsArguments")]
     public async Task LiveHost_InvokeAndOutputInputSchemas_MatchAdvertisedArguments(string toolName, string definitionName)
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync();

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The source-built native stateful host adds `configure_exceptions(debugSessionId, filters?)` for serialized DAP exception-filter replacement in running or stopped sessions. Reader-ordered capability admission, optional per-filter verification, redacted errors and uncertain-write drain preserve the session lifecycle without automatic retries. Python remains the installed default; real-debugger and installed-delivery proof remain separate.
 - The source-built native stateful host adds session-local `get_output` for retained DAP output, with ordered concatenation, category filtering, atomic whole-buffer clearing, and configurable Unicode-code-point retention limits. Invalid limits stop the host at startup with a value-free diagnostic. Native search and the installed Python default are unchanged.
 - The source-built native stateful host adds read-only `get_output_tail` over the same retained output, with category-first filtering and Python-compatible line splitting and signed slicing. It reports total and returned line counts without clearing the buffer.
 - The source-built Windows stateful host adds `ui_invoke` for a unique AutomationId in the bound debuggee's main window. The isolated one-shot helper uses UIA InvokePattern without physical-input fallback; uncertain dispatched outcomes are reported without retry. This action requires Windows 10 / Server 2016 or newer, and Python remains the default.

@@ -1,0 +1,28 @@
+# Native Exception Filter Configuration
+
+Status: implemented and exercised with a controlled DAP adapter; real-debugger and installed-delivery proof remain pending. This additive source slice starts from runtime-inventory candidate `a4981bc1498cb3c31ae3b4a2bbdead493368a0b1`; Python remains the installed default and rollback. It does not establish complete Python parity or completion of the migration.
+
+## Consumer outcome
+
+A native MCP client can ask a live debug session to replace its exception-breakpoint filters, then use the existing stop observation and `get_exception_info` to investigate an exception. An adapter acknowledgement is not proof that an exception has occurred or that every individual filter was verified.
+
+## Contract
+
+- Add `configure_exceptions(debugSessionId, filters?)` to the existing stateful host. The session ID is required and nonblank; omitted or null `filters` means an empty list, matching the Python tool. A supplied list contains strings and is forwarded in order, including duplicates; reject other shapes and unknown fields before DAP I/O. Use the existing request/serialization limits rather than silently truncating the list. Unknown or retired sessions retain the existing not-found result.
+- Track whether the adapter advertised one or more `exceptionBreakpointFilters` in the initialize response and subsequent capabilities events, in reader order. If absent or empty at admission, return fixed `DAP_EXCEPTION_FILTERS_UNSUPPORTED` without a DAP write. The advertised list defines adapter support; do not invent local filter-name aliases or silently drop requested strings.
+- Send exactly one DAP `setExceptionBreakpoints` with `filters` and no `filterOptions` or `exceptionOptions`. Calls may be made while the session is running or stopped. Serialize competing filter updates through one session-owned gate; capability revocation, terminal/retirement fencing, request registration and actual writing must have an explicit ordering. Do not retry automatically after refusal, cancellation or uncertain delivery.
+- A positive correlated response returns `kind: exception_filters_acknowledged` with the requested `filters` and `breakpoints`: null when the optional response body or array is omitted, otherwise one `{verified: boolean}` per requested filter in adapter order. Do not expose adapter diagnostic messages, invent per-filter verification or report a stopped state. A negative response returns fixed `DAP_EXCEPTION_FILTERS_REFUSED`; it does not guarantee that the adapter left its previous filters unchanged. Malformed optional breakpoint data, EOF, timeout or protocol failure returns fixed `DAP_EXCEPTION_FILTERS_PROTOCOL_ERROR` and drains through the existing lease-release-before-close owner.
+- Cancellation before writer handoff preserves the usable session and emits no DAP request. After a possible partial or committed write without a correlated, valid acknowledgement, the effect is uncertain: fence and drain, release the lease before joining cleanup, and never retry. A fully written request with a validated acknowledgement may retain the session. A later terminal event or capability update cannot reopen a fenced session.
+- Do not change Python, the published preview, UI input, default selection or release state. Conditions, exception options, implicit session selection, Python's legacy result envelope and full parity remain separate migration obligations.
+
+## Proof and owners
+
+Extend the existing session request/lifecycle and breakpoint owners, the native registry/catalog, `modern-front-door.schema.json`, existing controlled DAP fixture and existing modern MCP/session tests. First add a test-only public discovery regression and observe it fail on the base. Then cover omitted/null/empty and ordered filters, unsupported capability and reader-ordered deltas, positive responses with absent and present verification data, negative/malformed replies, competing updates, stale/terminal admission, cancellation before and after write, and unchanged source-breakpoint and inspection behavior. Reuse existing tests and fixtures only; do not create a new verification harness or test suite.
+
+Before product changes, `ToolsList_ConfigureExceptions_PublishesClosedOptionalFiltersInput` built and failed 1/1 because the catalog contained no `configure_exceptions` entry. This is a controlled source-process observation, not installed or real-debugger proof.
+
+The public discovery check passed 1/1 after implementation; 49 selected filter, lifecycle and schema cases passed against the controlled adapter. A separate malformed outer-arguments check first produced an MCP protocol error, then passed after routing the input to the existing application-error path; two neighboring inventory cases also passed. Nine selected catalog, source-breakpoint and exception-info cases passed. These observations do not prove real-debugger behavior.
+
+A controlled MCP/DAP consumer is source proof only. A real exception-stop journey through netcoredbg and installed delivery remain separate obligations; do not use an unqualified owned-consumer harness or interact with the operator desktop.
+
+Sources: `docs/dap-protocol/specification.md` SetExceptionBreakpoints request; `src/netcoredbg_mcp/tools/breakpoints.py` and `session/manager.py`. The pinned adapter [`vscodeprotocol.cpp`](https://github.com/thebtf/netcoredbg/blob/a5528f7ef61492a384017c885fb23b51ab90ddde/src/protocols/vscodeprotocol.cpp) advertises `all` and `user-unhandled` filters and supports optional response bodies. This source observation does not prove the installed debugger's current behavior.

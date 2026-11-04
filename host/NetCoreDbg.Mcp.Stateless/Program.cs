@@ -91,7 +91,7 @@ internal static class Program
 
                     if (context.JsonRpcMessage is JsonRpcRequest { Method: "tools/call", Params: JsonObject call }
                         && call["name"] is JsonValue toolName && toolName.TryGetValue<string>(out var name)
-                        && name is "pause_execution" or "get_modules" or "get_progress"
+                        && name is "pause_execution" or "get_modules" or "get_progress" or "configure_exceptions"
                         && call.TryGetPropertyValue("arguments", out var rawArguments)
                         && rawArguments is not null and not JsonObject)
                     {
@@ -191,6 +191,7 @@ internal static class Program
         private const string PauseExecution = "pause_execution";
         private const string AddBreakpoint = "add_breakpoint";
         private const string RemoveBreakpoint = "remove_breakpoint";
+        private const string ConfigureExceptions = "configure_exceptions";
         private const string UiInvoke = "ui_invoke";
         private const string UiInvokeObserved = "ui_invoke_observed";
         private const string UiGetWindowTree = "ui_get_window_tree";
@@ -323,6 +324,7 @@ internal static class Program
                 PauseExecution => await PauseAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 AddBreakpoint => await AddBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 RemoveBreakpoint => await RemoveBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                ConfigureExceptions => await ConfigureExceptionsAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 UiInvoke => await UiInvokeAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 UiInvokeObserved => await UiInvokeObservedAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                 UiGetWindowTree => await UiGetWindowTreeAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
@@ -1416,6 +1418,77 @@ internal static class Program
             {
                 closeAfterLease = true;
                 return Error("dap_pause_protocol_error", "DAP_PAUSE_PROTOCOL_ERROR");
+            }
+            finally
+            {
+                _stepOverRequests.TryRemove(new KeyValuePair<RequestId, CancellationTokenSource>(requestId, callerCancellation));
+                lease.Dispose();
+                if (closeAfterLease)
+                {
+                    try
+                    {
+                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            }
+        }
+
+        private async ValueTask<CallToolResult> ConfigureExceptionsAsync(
+            CallToolRequestParams request, RequestId requestId, CancellationToken cancellationToken)
+        {
+            if (!TryReadExceptionFilterArguments(request.Arguments, out var arguments))
+            {
+                return InvalidArguments(ConfigureExceptions);
+            }
+            if (!_sessions.TryGetValue(arguments.SessionId, out var session)
+                || !_slots.TryGetValue(arguments.SessionId, out var slot))
+            {
+                return NotFound();
+            }
+            var lease = slot.TryAcquire();
+            if (lease is null)
+            {
+                return NotFound();
+            }
+            var closeAfterLease = false;
+            using var callerCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var operation = CancellationTokenSource.CreateLinkedTokenSource(callerCancellation.Token, lease.AbortToken);
+            _stepOverRequests.TryAdd(requestId, callerCancellation);
+            try
+            {
+                if (!_isUsable(session))
+                {
+                    closeAfterLease = true;
+                    return NotFound();
+                }
+                var updated = await session.ConfigureExceptionsAsync(arguments.Filters, operation.Token).ConfigureAwait(false);
+                closeAfterLease = updated.RequiresDrain;
+                return updated.Outcome switch
+                {
+                    DapBreakpointUpdateOutcome.Unsupported => Error("dap_exception_filters_unsupported", "DAP_EXCEPTION_FILTERS_UNSUPPORTED"),
+                    DapBreakpointUpdateOutcome.Refused => Error("dap_exception_filters_refused", "DAP_EXCEPTION_FILTERS_REFUSED"),
+                    DapBreakpointUpdateOutcome.Acknowledged => Result(new ExceptionFiltersAcknowledgedContent(
+                        "exception_filters_acknowledged", arguments.Filters,
+                        updated.ExceptionVerification?.Select(static verified => new ExceptionFilterVerification(verified)).ToArray()), isError: false),
+                    _ => throw new InvalidOperationException("Unknown exception filter update outcome."),
+                };
+            }
+            catch (DapBreakpointCanceledException exception) when (callerCancellation.IsCancellationRequested)
+            {
+                closeAfterLease = exception.RequiresDrain;
+                throw;
+            }
+            catch (OperationCanceledException) when (callerCancellation.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                closeAfterLease = true;
+                return Error("dap_exception_filters_protocol_error", "DAP_EXCEPTION_FILTERS_PROTOCOL_ERROR");
             }
             finally
             {
@@ -2537,6 +2610,43 @@ internal static class Program
             }
         }
 
+        private static bool TryReadExceptionFilterArguments(IDictionary<string, JsonElement>? arguments, out ExceptionFilterArguments result)
+        {
+            result = null!;
+            if (arguments is null || arguments.Keys.Any(static name => name is not "debugSessionId" and not "filters")
+                || !arguments.TryGetValue("debugSessionId", out var sessionId)
+                || sessionId.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(sessionId.GetString()))
+            {
+                return false;
+            }
+            string[] filters = [];
+            if (arguments.TryGetValue("filters", out var value) && value.ValueKind != JsonValueKind.Null)
+            {
+                if (value.ValueKind != JsonValueKind.Array)
+                {
+                    return false;
+                }
+                filters = new string[value.GetArrayLength()];
+                var index = 0;
+                foreach (var filter in value.EnumerateArray())
+                {
+                    if (filter.ValueKind != JsonValueKind.String)
+                    {
+                        return false;
+                    }
+                    filters[index++] = filter.GetString()!;
+                }
+            }
+            var filterBytes = JsonSerializer.SerializeToUtf8Bytes(filters).Length;
+            var verificationBytes = filters.Length == 0 ? 0L : (long)filters.Length * "{\"verified\":false}".Length + filters.Length - 1;
+            if (filterBytes + verificationBytes + "{\"kind\":\"exception_filters_acknowledged\",\"filters\":,\"breakpoints\":[]}".Length > MaximumSerializedInspectionBytes)
+            {
+                return false;
+            }
+            result = new ExceptionFilterArguments(sessionId.GetString()!, filters);
+            return true;
+        }
+
         private static bool TryReadBreakpointArguments(
             IDictionary<string, JsonElement>? arguments,
             out BreakpointArguments result)
@@ -3058,6 +3168,9 @@ internal static class Program
             string terminal,
             [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? exitCode);
         private sealed record BreakpointArguments(string SessionId, string File, int Line);
+        private sealed record ExceptionFilterArguments(string SessionId, string[] Filters);
+        private sealed record ExceptionFilterVerification(bool verified);
+        private sealed record ExceptionFiltersAcknowledgedContent(string kind, string[] filters, ExceptionFilterVerification[]? breakpoints);
         private sealed record BreakpointAddedContent(
             string kind,
             string file,
@@ -3086,6 +3199,7 @@ internal static class Program
                 Tool("pause_execution", "Request a pause while a session is live, including alongside a committed continue. Nonzero threadId selects that exact thread; omitted, null or zero selects the observed current thread or the first bounded discovered thread. Returns the adapter acknowledgement, not a stopped-state claim. Only a real stopped event authorizes inspection; uncertain writes are never retried.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"threadId":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"required":["debugSessionId"],"additionalProperties":false}"""),
                 Tool("add_breakpoint", "Add a source breakpoint to a live debug session while preserving its requested source breakpoint sets. Verification is an adapter observation, not proof of a hit. Conditions and hit counts are not supported.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"file\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"line\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"file\",\"line\"],\"additionalProperties\":false}"),
                 Tool("remove_breakpoint", "Remove every requested source breakpoint matching this file and line from a live debug session while preserving the remaining requested order. The source file need not still exist. An absent request returns removed:false without sending setBreakpoints; successful removal confirms adapter acknowledgement, not final Python wire parity.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"file\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"line\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"file\",\"line\"],\"additionalProperties\":false}"),
+                Tool("configure_exceptions", "Replace exception breakpoint filters in a live session. Acknowledgement is not an exception stop; per-filter verification is reported only when supplied by the adapter. Uncertain updates are not retried.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"filters":{"type":["array","null"],"items":{"type":"string"}}},"required":["debugSessionId"],"additionalProperties":false}"""),
                 Tool("ui_invoke", "Invoke one uniquely resolved exact AutomationId in this session's bound debuggee main window using InvokePattern only. Optional expectedTarget compares identities observed by ui_get_window_tree; it cannot select a different target. Success confirms only that the UIA call returned; never automatically retry an unknown outcome.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"automationId":{"type":"string","minLength":1,"maxLength":256,"pattern":"\\S"},"expectedTarget":{"type":"object","properties":{"processIdentity":{"type":"string","minLength":1,"pattern":"\\S"},"hwnd":{"type":"string","minLength":1,"pattern":"\\S"},"rootRuntimeId":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"integer","minimum":-2147483648,"maximum":2147483647}},"elementRuntimeId":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"integer","minimum":-2147483648,"maximum":2147483647}}},"required":["processIdentity","hwnd","rootRuntimeId","elementRuntimeId"],"additionalProperties":false}},"required":["debugSessionId","automationId"],"additionalProperties":false}"""),
                 Tool("ui_invoke_observed", "Invoke one explicitly observed runtime-ID-selected element in the bound debuggee main window using InvokePattern only. Echo target identities from ui_get_window_tree and require the selected element's exact expectedAutomationId; other AutomationIds need not be unique. Complete bounded runtime-ID selection and commit-time checks fail closed. Runtime IDs may be reused and atomicity is unproven; never automatically retry an unknown outcome. No selector or input fallback.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"target":{"type":"object","properties":{"processIdentity":{"type":"string","minLength":1,"pattern":"\\S"},"hwnd":{"type":"string","minLength":1,"pattern":"\\S"},"rootRuntimeId":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"integer","minimum":-2147483648,"maximum":2147483647}},"elementRuntimeId":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"integer","minimum":-2147483648,"maximum":2147483647}}},"required":["processIdentity","hwnd","rootRuntimeId","elementRuntimeId"],"additionalProperties":false},"expectedAutomationId":{"type":"string","minLength":1,"maxLength":256,"pattern":"\\S"}},"required":["debugSessionId","target","expectedAutomationId"],"additionalProperties":false}"""),
                 Tool("ui_get_window_tree", "Read a bounded preorder tree of only the bound debuggee's current main window without activation, focus, input, expansion or resume. Atomicity is unproven; partial/unreadable observations cannot prove absence or uniqueness. This is not Python all-window parity.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"maxDepth":{"type":"integer","minimum":0,"maximum":32,"default":3},"maxChildren":{"type":"integer","minimum":1,"maximum":256,"default":50}},"required":["debugSessionId"],"additionalProperties":false}"""),

@@ -257,6 +257,15 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             beforeCancellationInspection: beforeCancellationInspection, invokeSteps: invokeInspection,
             inspectExceptionInfo: true);
 
+    public Task<StepOverRegistryProbe> ConfigureExceptionsThroughRegistryAsync(
+        string[] filters,
+        CancellationToken cancellationToken,
+        Func<Task>? beforeCancellationInspection = null,
+        Func<Func<string, CancellationToken, Task<ModelContextProtocol.Protocol.CallToolResult>>, Task<ModelContextProtocol.Protocol.CallToolResult>>? invokeConfiguration = null) =>
+        InvokeThroughRegistryAsync(0, cancellationToken, inspectCancellation: true,
+            beforeCancellationInspection: beforeCancellationInspection, invokeSteps: invokeConfiguration,
+            exceptionFilters: filters);
+
     private async Task<StepOverRegistryProbe> InvokeThroughRegistryAsync(
         int threadId,
         CancellationToken cancellationToken,
@@ -273,7 +282,8 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         bool omitThreadId = false,
         string? stepTool = null,
         string? evaluateContext = null,
-        bool inspectExceptionInfo = false)
+        bool inspectExceptionInfo = false,
+        string[]? exceptionFilters = null)
     {
         const string sessionId = "step-over-clock-session";
         var registryType = RequireType(_session.GetType().Assembly, "NetCoreDbg.Mcp.Stateless.Program+DebugSessionRegistry");
@@ -346,12 +356,12 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             var operationMethod = inspectCallStack || evaluateContext is not null || inspectExceptionInfo
                 ? registryType.GetMethod(inspectExceptionInfo ? "GetExceptionInfoAsync" : evaluateContext is null ? "GetCallStackAsync" : "EvaluateExpressionAsync", BindingFlags.Instance | BindingFlags.NonPublic,
                     binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(CancellationToken)], modifiers: null)
-                : registryType.GetMethod(pauseExecution ? "PauseAsync" : breakpoint.HasValue ? "AddBreakpointAsync" : continueExecution ? "ContinueAsync" : stepMethod, BindingFlags.Instance | BindingFlags.NonPublic,
+                : registryType.GetMethod(exceptionFilters is not null ? "ConfigureExceptionsAsync" : pauseExecution ? "PauseAsync" : breakpoint.HasValue ? "AddBreakpointAsync" : continueExecution ? "ContinueAsync" : stepMethod, BindingFlags.Instance | BindingFlags.NonPublic,
                     binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(ModelContextProtocol.Protocol.RequestId), typeof(CancellationToken)], modifiers: null);
             Assert.NotNull(operationMethod);
             var request = new ModelContextProtocol.Protocol.CallToolRequestParams
             {
-                Name = pauseExecution ? "pause_execution" : inspectCallStack ? "get_call_stack" : inspectExceptionInfo ? "get_exception_info" : evaluateContext is not null ? "evaluate_expression" : breakpoint.HasValue ? "add_breakpoint" : continueExecution ? "continue_execution" : stepTool ?? "step_over",
+                Name = exceptionFilters is not null ? "configure_exceptions" : pauseExecution ? "pause_execution" : inspectCallStack ? "get_call_stack" : inspectExceptionInfo ? "get_exception_info" : evaluateContext is not null ? "evaluate_expression" : breakpoint.HasValue ? "add_breakpoint" : continueExecution ? "continue_execution" : stepTool ?? "step_over",
                 Arguments = new Dictionary<string, JsonElement>
                 {
                     ["debugSessionId"] = JsonSerializer.SerializeToElement(sessionId),
@@ -378,6 +388,11 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                 request.Arguments.Remove("threadId");
                 request.Arguments["file"] = JsonSerializer.SerializeToElement(targetBreakpoint.File);
                 request.Arguments["line"] = JsonSerializer.SerializeToElement(targetBreakpoint.Line);
+            }
+            if (exceptionFilters is not null)
+            {
+                request.Arguments.Remove("threadId");
+                request.Arguments["filters"] = JsonSerializer.SerializeToElement(exceptionFilters);
             }
             Task<ModelContextProtocol.Protocol.CallToolResult> InvokeStep(string requestId, CancellationToken token)
             {
@@ -586,6 +601,20 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             success = true,
             command = "setBreakpoints",
             body = new { breakpoints = new[] { new { verified = true, line = actualLine } } },
+        });
+        return DispatchMessagesUnderStateGateAsync([acknowledgement], releaseWriter: false, cancellationToken, afterDispatch: cancel);
+    }
+
+    public Task DispatchExceptionFiltersAcknowledgementThenCancelAsync(int requestSequence, Action cancel, CancellationToken cancellationToken)
+    {
+        var acknowledgement = JsonSerializer.SerializeToElement(new
+        {
+            seq = 1_000_001,
+            type = "response",
+            request_seq = requestSequence,
+            success = true,
+            command = "setExceptionBreakpoints",
+            body = new { breakpoints = new[] { new { verified = true } } },
         });
         return DispatchMessagesUnderStateGateAsync([acknowledgement], releaseWriter: false, cancellationToken, afterDispatch: cancel);
     }
@@ -1739,7 +1768,10 @@ internal sealed record FixtureConfiguration(
     bool? PauseAllThreadsStopped = true,
     bool? SupportsExceptionInfoRequest = null,
     string ExceptionInfoResponseMode = "success",
-    string ExceptionInfoCapabilityDelta = "none")
+    string ExceptionInfoCapabilityDelta = "none",
+    string ExceptionBreakpointFilters = "omit",
+    string ExceptionFiltersCapabilityDelta = "none",
+    string SetExceptionBreakpointsResponseMode = "absent-body")
 {
     public string AsEnvironmentValue() => string.Join(
         ';',
@@ -1781,6 +1813,9 @@ internal sealed record FixtureConfiguration(
             $"--supports-exception-info={SupportsExceptionInfoRequest?.ToString() ?? "omit"}",
             $"--exception-info-response={ExceptionInfoResponseMode}",
             $"--exception-info-capability-delta={ExceptionInfoCapabilityDelta}",
+            $"--exception-breakpoint-filters={ExceptionBreakpointFilters}",
+            $"--exception-filters-capability-delta={ExceptionFiltersCapabilityDelta}",
+            $"--set-exception-breakpoints-response={SetExceptionBreakpointsResponseMode}",
         }.Where(static value => value is not null));
 }
 
