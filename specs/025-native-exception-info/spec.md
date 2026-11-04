@@ -1,6 +1,6 @@
 # Native Exception Information
 
-Status: implemented and exercised with a controlled DAP adapter; integration, a real debugger and installed delivery remain pending. This additive source slice starts from `c5473501b9fc5b8e763f5a94f4ef5c32cf047fee`; Python remains the installed default and rollback. It does not establish complete Python parity or completion of the migration.
+Status: source integrated via PR #394 at `9732184ecf8af20944deacad5e3421def3a287f7` after controlled DAP checks; a real debugger and installed delivery remain pending. This additive source slice started from `c5473501b9fc5b8e763f5a94f4ef5c32cf047fee`; Python remains the installed default and rollback. It does not establish complete Python parity or completion of the migration.
 
 ## Consumer outcome
 

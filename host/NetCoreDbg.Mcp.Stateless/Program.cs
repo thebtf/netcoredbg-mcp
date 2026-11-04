@@ -91,7 +91,7 @@ internal static class Program
 
                     if (context.JsonRpcMessage is JsonRpcRequest { Method: "tools/call", Params: JsonObject call }
                         && call["name"] is JsonValue toolName && toolName.TryGetValue<string>(out var name)
-                        && name == "pause_execution"
+                        && name is "pause_execution" or "get_modules" or "get_progress"
                         && call.TryGetPropertyValue("arguments", out var rawArguments)
                         && rawArguments is not null and not JsonObject)
                     {
@@ -180,6 +180,8 @@ internal static class Program
         private const string GetVariables = "get_variables";
         private const string EvaluateExpression = "evaluate_expression";
         private const string GetExceptionInfo = "get_exception_info";
+        private const string GetModules = "get_modules";
+        private const string GetProgress = "get_progress";
         private const string GetOutput = "get_output";
         private const string GetOutputTail = "get_output_tail";
         private const string StepOver = "step_over";
@@ -310,6 +312,8 @@ internal static class Program
                 GetVariables => await GetVariablesAsync(request, cancellationToken).ConfigureAwait(false),
                 EvaluateExpression => await EvaluateExpressionAsync(request, cancellationToken).ConfigureAwait(false),
                 GetExceptionInfo => await GetExceptionInfoAsync(request, cancellationToken).ConfigureAwait(false),
+                GetModules => await GetRuntimeInventoryAsync(request, modules: true, cancellationToken).ConfigureAwait(false),
+                GetProgress => await GetRuntimeInventoryAsync(request, modules: false, cancellationToken).ConfigureAwait(false),
                 GetOutput => await GetOutputAsync(request, cancellationToken).ConfigureAwait(false),
                 GetOutputTail => await GetOutputAsync(request, cancellationToken, tail: true).ConfigureAwait(false),
                 StepOver => await StepOverAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
@@ -640,6 +644,69 @@ internal static class Program
 
             var snapshot = output.Buffer.Snapshot(clear, category);
             return new(SerializedResult(JsonSerializer.Serialize(new { kind = "output_success", output = snapshot }), isError: false));
+        }
+
+        private async ValueTask<CallToolResult> GetRuntimeInventoryAsync(
+            CallToolRequestParams request,
+            bool modules,
+            CancellationToken cancellationToken)
+        {
+            var tool = modules ? GetModules : GetProgress;
+            if (!TryReadSessionId(request.Arguments, out var sessionId, out var hasSessionId) || !hasSessionId)
+            {
+                return InvalidArguments(tool);
+            }
+            if (!_sessions.TryGetValue(sessionId!, out var session) || !_slots.TryGetValue(sessionId!, out var slot))
+            {
+                return NotFound();
+            }
+            var lease = slot.TryAcquire();
+            if (lease is null) return NotFound();
+
+            var closeAfterLease = false;
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!_isUsable(session))
+                {
+                    closeAfterLease = true;
+                    return NotFound();
+                }
+                if (lease.AbortToken.IsCancellationRequested) return NotFound();
+
+                var snapshot = session.GetRuntimeInventory(modules, MaximumSerializedInspectionBytes);
+                return snapshot.Status switch
+                {
+                    DapRuntimeInventoryStatus.Success => SerializedResult(snapshot.SerializedContent!, isError: false),
+                    DapRuntimeInventoryStatus.Incomplete => Result(new
+                    {
+                        kind = "runtime_inventory_incomplete",
+                        error = "RUNTIME_INVENTORY_INCOMPLETE",
+                        tool,
+                    }, isError: true),
+                    DapRuntimeInventoryStatus.TooLarge => Result(new
+                    {
+                        kind = "runtime_inventory_too_large",
+                        error = "RUNTIME_INVENTORY_TOO_LARGE",
+                        tool,
+                    }, isError: true),
+                    _ => throw new InvalidOperationException("Unknown runtime inventory status."),
+                };
+            }
+            finally
+            {
+                lease.Dispose();
+                if (closeAfterLease)
+                {
+                    try
+                    {
+                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            }
         }
 
         private async ValueTask<CallToolResult> GetThreadsAsync(
@@ -3029,6 +3096,10 @@ internal static class Program
                 Tool("evaluate_expression", "Evaluate an exact expression in an explicit frame and current inspection context using DAP watch. Expressions may execute code or mutate the debuggee; watch is not read-only. A positive result reference can be expanded with get_variables in the same context. Never automatically retry a failed or unknown outcome.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1},"inspectionContextId":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"},"frameId":{"type":"integer","minimum":-2147483648,"maximum":2147483647},"expression":{"type":"string"}},"required":["debugSessionId","inspectionContextId","frameId","expression"],"additionalProperties":false}""",
                     new ToolAnnotations { ReadOnlyHint = false, IdempotentHint = false, DestructiveHint = true }),
                 Tool("get_exception_info", "Get exception information for one explicitly named stopped Int32 thread when the adapter advertises support. Returns the complete current adapter body, including nested details and extension fields, within 256 KiB. A later stop is a different observation; no implicit thread selection, exception cache, combined autopsy or automatic retry.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"threadId":{"type":"integer","minimum":-2147483648,"maximum":2147483647}},"required":["debugSessionId","threadId"],"additionalProperties":false}"""),
+                Tool("get_modules", "Read insertion-ordered module events retained by this live session, preserving numeric and string IDs distinctly. No DAP request or OS module scan is made; unseen events are not inferred. Incomplete retention and snapshots over 256 KiB return fixed errors without truncation or closing the session.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"}},"required":["debugSessionId"],"additionalProperties":false}""",
+                    new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, DestructiveHint = false }),
+                Tool("get_progress", "Read insertion-ordered active progress from this live session's DAP reader. Initialization advertises progress reporting; only reported starts, updates and ends are reflected. No DAP request is made. Incomplete retention and snapshots over 256 KiB return fixed errors without truncation or closing the session.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"}},"required":["debugSessionId"],"additionalProperties":false}""",
+                    new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, DestructiveHint = false }),
                 .. NativeSceneToolDispatcher.ListTools(),
             ],
             TimeToLive = CacheLifetime,

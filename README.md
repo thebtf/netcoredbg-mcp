@@ -125,6 +125,40 @@ This native path neither infers a thread nor updates Python's exception cache
 or provides `get_exception_context`. Python remains the installed default;
 real-debugger exception-stop and installed-delivery proof remain separate.
 
+The source-built stateful host exposes `get_modules(debugSessionId)` and
+`get_progress(debugSessionId)`. Each accepts only a required, nonblank opaque
+session token and reads a snapshot retained by the existing DAP reader without
+sending a DAP request. Startup events are included. These tools are available
+only while the native session registry entry is live; unlike retained output,
+they do not remain available after automatic session retirement.
+
+`get_modules` returns `kind: "modules_success"`, `modules` and `count`.
+Numeric and string module IDs remain distinct. A `new` event adds only an
+unknown ID, `changed` replaces only a known entry, and `removed` removes it.
+Entries preserve insertion order and expose `id`, `name`, nullable `path`,
+nullable `version`, `isOptimized` (false when omitted), and nullable
+`symbolStatus`. Removing and later reintroducing an ID places it at the end.
+
+Initialization advertises `supportsProgressReporting: true`. `get_progress`
+returns `kind: "progress_success"`, `progress` and `count` for active operations.
+Starts create or replace entries; updates change only supplied non-null message
+and percentage fields for known IDs; ends remove entries. Entries preserve
+insertion order and expose `progressId`, `title`, nullable `message`, nullable
+`percentage`, `cancellable` (false when omitted), and monotonic `startedAt`
+seconds. Replacing a start resets its optional fields and timestamp.
+
+Each inventory independently retains at most 16 MiB of its normalized UTF-8 JSON
+array, including escaping. A malformed relevant event or retention overflow
+latches a fixed, redacted `runtime_inventory_incomplete` error for that tool;
+later events cannot restore a provably complete inventory. A complete serialized
+success content over 256 KiB returns `runtime_inventory_too_large` without
+truncation. Both errors leave the debug session, neighboring inventory and
+output usable. These are snapshots of received events, not an OS module scan,
+an atomic debuggee snapshot or proof that the adapter reported every operation.
+No retry, cached-resource notification or Python snake_case alias is added.
+Python remains the installed default and rollback; the preview channel,
+real-debugger event completeness and installed-delivery proof are unchanged.
+
 The source-built stateful host exposes `get_output(debugSessionId, clear?,
 category?)` for retained DAP output. It concatenates events in reader order;
 categories `console`, `stdout`, `stderr`, and `telemetry` are retained, and an

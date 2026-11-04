@@ -52,6 +52,19 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private readonly TaskCompletionSource<bool> _initialized = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly object _stateGate = new();
     private readonly DapOutputBuffer _outputBuffer = new();
+    private readonly object _runtimeInventoryGate = new();
+    private readonly Dictionary<RuntimeModuleId, LinkedListNode<RuntimeModuleEntry>> _modules = [];
+    private readonly LinkedList<RuntimeModuleEntry> _moduleOrder = [];
+    private readonly Dictionary<string, LinkedListNode<RuntimeProgressEntry>> _progress = new(StringComparer.Ordinal);
+    private readonly LinkedList<RuntimeProgressEntry> _progressOrder = [];
+    private long _moduleBytes;
+    private long _progressBytes;
+    private bool _modulesIncomplete;
+    private bool _progressIncomplete;
+    private static readonly int ModuleEntrySyntaxBytes = "{\"id\":,\"name\":,\"path\":,\"version\":,\"isOptimized\":,\"symbolStatus\":}".Length;
+    private static readonly int ProgressEntrySyntaxBytes = "{\"progressId\":,\"title\":,\"message\":,\"percentage\":,\"cancellable\":,\"startedAt\":}".Length;
+    private static readonly int ModulesSnapshotSyntaxBytes = "{\"kind\":\"modules_success\",\"modules\":[],\"count\":}".Length;
+    private static readonly int ProgressSnapshotSyntaxBytes = "{\"kind\":\"progress_success\",\"progress\":[],\"count\":}".Length;
     private readonly object _cleanupGate = new();
     private readonly Task _readerTask;
     private readonly CancellationTokenSource _forceCleanup = new();
@@ -136,6 +149,116 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     internal (long TotalLines, long ReturnedLines, string Output) GetOutputTail(long lines, string? category) => _outputBuffer.Tail(lines, category);
     internal DapOutputBuffer OutputBuffer => _outputBuffer;
+
+    internal DapRuntimeInventorySnapshot GetRuntimeInventory(bool modules, int maximumSerializedBytes)
+    {
+        lock (_runtimeInventoryGate)
+        {
+            if (modules ? _modulesIncomplete : _progressIncomplete)
+            {
+                return new(DapRuntimeInventoryStatus.Incomplete);
+            }
+
+            var count = modules ? _modules.Count : _progress.Count;
+            var bytes = (modules ? ModulesSnapshotSyntaxBytes + _moduleBytes : ProgressSnapshotSyntaxBytes + _progressBytes)
+                + Math.Max(0, count - 1) + RuntimeIntegerBytes(count);
+            if (bytes > maximumSerializedBytes)
+            {
+                return new(DapRuntimeInventoryStatus.TooLarge);
+            }
+
+            // Encoded fields and incremental sizes are retained at ingestion. Only an
+            // admitted, bounded snapshot traverses the inventory, under the reader's gate.
+            using var stream = new MemoryStream((int)bytes);
+            using (var writer = new Utf8JsonWriter(stream))
+            {
+                writer.WriteStartObject();
+                writer.WriteString("kind", modules ? "modules_success" : "progress_success");
+                writer.WriteStartArray(modules ? "modules" : "progress");
+                if (modules)
+                {
+                    foreach (var entry in _moduleOrder)
+                    {
+                        writer.WriteStartObject();
+                        if (entry.Id.Text is null) writer.WriteNumber("id", entry.Id.Number);
+                        else writer.WriteString("id", entry.EncodedId!.Value);
+                        WriteRuntimeText(writer, "name", entry.Name);
+                        WriteRuntimeText(writer, "path", entry.Path);
+                        WriteRuntimeText(writer, "version", entry.Version);
+                        writer.WriteBoolean("isOptimized", entry.IsOptimized);
+                        WriteRuntimeText(writer, "symbolStatus", entry.SymbolStatus);
+                        writer.WriteEndObject();
+                    }
+                }
+                else
+                {
+                    foreach (var entry in _progressOrder)
+                    {
+                        writer.WriteStartObject();
+                        WriteRuntimeText(writer, "progressId", entry.Id);
+                        WriteRuntimeText(writer, "title", entry.Title);
+                        WriteRuntimeText(writer, "message", entry.Message);
+                        if (entry.Percentage is { } percentage) writer.WriteNumber("percentage", percentage);
+                        else writer.WriteNull("percentage");
+                        writer.WriteBoolean("cancellable", entry.Cancellable);
+                        writer.WriteNumber("startedAt", entry.StartedAt);
+                        writer.WriteEndObject();
+                    }
+                }
+                writer.WriteEndArray();
+                writer.WriteNumber("count", count);
+                writer.WriteEndObject();
+            }
+
+            if (stream.Length > maximumSerializedBytes)
+            {
+                return new(DapRuntimeInventoryStatus.TooLarge);
+            }
+            return new(DapRuntimeInventoryStatus.Success, Encoding.UTF8.GetString(stream.GetBuffer(), 0, (int)stream.Length));
+        }
+    }
+
+    private static void WriteRuntimeText(Utf8JsonWriter writer, string name, JsonEncodedText? value)
+    {
+        if (value is { } text) writer.WriteString(name, text);
+        else writer.WriteNull(name);
+    }
+
+    private static int RuntimeTextBytes(JsonEncodedText? value) => value is { } text ? text.EncodedUtf8Bytes.Length + 2 : 4;
+
+    private static int RuntimeIntegerBytes(long value)
+    {
+        Span<char> buffer = stackalloc char[20];
+        _ = value.TryFormat(buffer, out var written, provider: CultureInfo.InvariantCulture);
+        return written;
+    }
+
+    private static int RuntimeNumberBytes(double value)
+    {
+        Span<char> buffer = stackalloc char[32];
+        _ = value.TryFormat(buffer, out var written, provider: CultureInfo.InvariantCulture);
+        return written;
+    }
+
+    private readonly record struct RuntimeModuleId(long Number, string? Text);
+
+    private sealed record RuntimeModuleEntry(RuntimeModuleId Id, JsonEncodedText? EncodedId, JsonEncodedText Name,
+        JsonEncodedText? Path, JsonEncodedText? Version, bool IsOptimized, JsonEncodedText? SymbolStatus)
+    {
+        internal long Bytes => ModuleEntrySyntaxBytes
+            + (Id.Text is null ? RuntimeIntegerBytes(Id.Number) : RuntimeTextBytes(EncodedId))
+            + RuntimeTextBytes(Name) + RuntimeTextBytes(Path) + RuntimeTextBytes(Version)
+            + (IsOptimized ? 4 : 5) + RuntimeTextBytes(SymbolStatus);
+    }
+
+    private sealed record RuntimeProgressEntry(JsonEncodedText Id, JsonEncodedText Title, string? MessageText,
+        JsonEncodedText? Message, double? Percentage, bool Cancellable, double StartedAt)
+    {
+        internal long Bytes => ProgressEntrySyntaxBytes + RuntimeTextBytes(Id) + RuntimeTextBytes(Title)
+            + RuntimeTextBytes(Message) + (Percentage is { } percentage ? RuntimeNumberBytes(percentage) : 4)
+            + (Cancellable ? 4 : 5) + RuntimeNumberBytes(StartedAt);
+    }
+
     internal bool IsRetirementRequested => Volatile.Read(ref _retirementRequested) != 0;
     internal event Action<NetCoreDbgSession>? RetirementRequested;
 
@@ -1152,6 +1275,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 supportsRunInTerminalRequest = false,
                 supportsVariableType = true,
                 supportsInvalidatedEvent = true,
+                supportsProgressReporting = true,
             },
             initializeTimeout,
             cancellationToken).ConfigureAwait(false);
@@ -2077,6 +2201,12 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             case "output":
                 HandleOutputEvent(body);
                 break;
+            case "module":
+            case "progressStart":
+            case "progressUpdate":
+            case "progressEnd":
+                HandleRuntimeInventoryEvent(eventName, body);
+                break;
             case "initialized":
                 if (_initializeResponseObserved)
                 {
@@ -2136,6 +2266,167 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 break;
         }
     }
+
+    private void HandleRuntimeInventoryEvent(string eventName, JsonElement body)
+    {
+        var modules = eventName == "module";
+        lock (_runtimeInventoryGate)
+        {
+            if (modules ? _modulesIncomplete : _progressIncomplete) return;
+            try
+            {
+                if (modules) UpdateModuleInventory(body);
+                else UpdateProgressInventory(eventName, body);
+            }
+            catch (Exception exception) when (exception is InvalidDataException or InvalidOperationException
+                or ArgumentException or JsonException or OverflowException)
+            {
+                // A lost transition cannot be repaired by later events. Release its
+                // retained values, latch only this inventory, and keep the reader usable.
+                InvalidateRuntimeInventory(modules);
+            }
+        }
+    }
+
+    private void InvalidateRuntimeInventory(bool modules)
+    {
+        if (modules)
+        {
+            _modulesIncomplete = true;
+            _modules.Clear();
+            _moduleOrder.Clear();
+            _moduleBytes = 0;
+        }
+        else
+        {
+            _progressIncomplete = true;
+            _progress.Clear();
+            _progressOrder.Clear();
+            _progressBytes = 0;
+        }
+    }
+
+    private void UpdateModuleInventory(JsonElement body)
+    {
+        var reason = RequireString(body, "reason");
+        if (reason is not "new" and not "changed" and not "removed"
+            || !body.TryGetProperty("module", out var module) || module.ValueKind != JsonValueKind.Object
+            || !module.TryGetProperty("id", out var idElement))
+        {
+            throw new InvalidDataException("Malformed module transition.");
+        }
+
+        RuntimeModuleId id;
+        if (idElement.ValueKind == JsonValueKind.String) id = new(0, idElement.GetString()!);
+        else if (idElement.ValueKind == JsonValueKind.Number && idElement.TryGetInt64(out var number)) id = new(number, null);
+        else throw new InvalidDataException("Malformed module identifier.");
+
+        _modules.TryGetValue(id, out var previous);
+        if (reason == "removed")
+        {
+            if (previous is not null)
+            {
+                _moduleBytes -= previous.Value.Bytes;
+                _moduleOrder.Remove(previous);
+                _modules.Remove(id);
+            }
+            return;
+        }
+
+        var name = RequireString(module, "name");
+        var path = ReadRuntimeOptionalString(module, "path");
+        var version = ReadRuntimeOptionalString(module, "version");
+        var optimized = ReadOptionalBoolean(module, "isOptimized");
+        var symbols = ReadRuntimeOptionalString(module, "symbolStatus");
+        if (reason == "new" ? previous is not null : previous is null) return;
+
+        var entry = new RuntimeModuleEntry(id, EncodeRuntimeOptionalText(id.Text), JsonEncodedText.Encode(name),
+            EncodeRuntimeOptionalText(path), EncodeRuntimeOptionalText(version), optimized, EncodeRuntimeOptionalText(symbols));
+        var nextBytes = _moduleBytes - (previous?.Value.Bytes ?? 0) + entry.Bytes;
+        var nextCount = _modules.Count + (previous is null ? 1 : 0);
+        if (RuntimeArrayBytes(nextBytes, nextCount) > MaximumPayloadBytes)
+        {
+            InvalidateRuntimeInventory(modules: true);
+            return;
+        }
+        if (previous is null) _modules.Add(id, _moduleOrder.AddLast(entry));
+        else previous.Value = entry;
+        _moduleBytes = nextBytes;
+    }
+
+    private void UpdateProgressInventory(string eventName, JsonElement body)
+    {
+        var id = RequireString(body, "progressId");
+        _progress.TryGetValue(id, out var previous);
+        if (eventName == "progressEnd")
+        {
+            if (previous is not null)
+            {
+                _progressBytes -= previous.Value.Bytes;
+                _progressOrder.Remove(previous);
+                _progress.Remove(id);
+            }
+            return;
+        }
+
+        var message = ReadRuntimeOptionalString(body, "message");
+        var percentage = ReadRuntimeOptionalPercentage(body);
+        RuntimeProgressEntry entry;
+        if (eventName == "progressStart")
+        {
+            var title = RequireString(body, "title");
+            var cancellable = ReadOptionalBoolean(body, "cancellable");
+            entry = new RuntimeProgressEntry(JsonEncodedText.Encode(id), JsonEncodedText.Encode(title),
+                message, EncodeRuntimeOptionalText(message), percentage, cancellable, Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency);
+        }
+        else
+        {
+            if (previous is null) return;
+            var prior = previous.Value;
+            var messageChanged = message is not null && !string.Equals(message, prior.MessageText, StringComparison.Ordinal);
+            if (!messageChanged && (percentage is null || percentage == prior.Percentage)) return;
+            entry = prior with
+            {
+                MessageText = messageChanged ? message : prior.MessageText,
+                Message = messageChanged ? JsonEncodedText.Encode(message!) : prior.Message,
+                Percentage = percentage ?? prior.Percentage,
+            };
+        }
+
+        var nextBytes = _progressBytes - (previous?.Value.Bytes ?? 0) + entry.Bytes;
+        var nextCount = _progress.Count + (previous is null ? 1 : 0);
+        if (RuntimeArrayBytes(nextBytes, nextCount) > MaximumPayloadBytes)
+        {
+            InvalidateRuntimeInventory(modules: false);
+            return;
+        }
+        if (previous is null) _progress.Add(id, _progressOrder.AddLast(entry));
+        else previous.Value = entry;
+        _progressBytes = nextBytes;
+    }
+
+    private static long RuntimeArrayBytes(long entryBytes, int count) => entryBytes + Math.Max(0, count - 1) + 2;
+
+    private static JsonEncodedText? EncodeRuntimeOptionalText(string? value) => value is null ? null : JsonEncodedText.Encode(value);
+
+    private static string? ReadRuntimeOptionalString(JsonElement body, string name)
+    {
+        if (!body.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null) return null;
+        if (value.ValueKind != JsonValueKind.String) throw new InvalidDataException("Malformed runtime inventory text.");
+        return value.GetString();
+    }
+
+    private static double? ReadRuntimeOptionalPercentage(JsonElement body)
+    {
+        if (!body.TryGetProperty("percentage", out var value) || value.ValueKind == JsonValueKind.Null) return null;
+        if (value.ValueKind != JsonValueKind.Number || !value.TryGetDouble(out var percentage)
+            || !double.IsFinite(percentage) || percentage is < 0 or > 100)
+        {
+            throw new InvalidDataException("Malformed runtime inventory percentage.");
+        }
+        return percentage;
+    }
+
 
     private void HandleOutputEvent(JsonElement body)
     {
@@ -4434,3 +4725,7 @@ internal sealed record DapEvaluateResult(
     internal static DapEvaluateResult Failed { get; } = new(DapEvaluateOutcome.Failed);
     internal static DapEvaluateResult OutcomeUnknown { get; } = new(DapEvaluateOutcome.OutcomeUnknown);
 }
+
+internal enum DapRuntimeInventoryStatus { Success, Incomplete, TooLarge }
+
+internal readonly record struct DapRuntimeInventorySnapshot(DapRuntimeInventoryStatus Status, string? SerializedContent = null);

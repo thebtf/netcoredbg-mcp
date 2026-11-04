@@ -136,6 +136,34 @@
       },
       "additionalProperties": false
     },
+    "getModulesArguments": {
+      "type": "object",
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        }
+      },
+      "required": [
+        "debugSessionId"
+      ],
+      "additionalProperties": false
+    },
+    "getProgressArguments": {
+      "type": "object",
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        }
+      },
+      "required": [
+        "debugSessionId"
+      ],
+      "additionalProperties": false
+    },
     "getCallStackArguments": {
       "type": "object",
       "required": [
@@ -983,6 +1011,185 @@
         },
         "output": {
           "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "runtimeModule": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "path",
+        "version",
+        "isOptimized",
+        "symbolStatus"
+      ],
+      "properties": {
+        "id": {
+          "type": [
+            "integer",
+            "string"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isOptimized": {
+          "type": "boolean"
+        },
+        "symbolStatus": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "modulesSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "modules",
+        "count"
+      ],
+      "properties": {
+        "kind": {
+          "const": "modules_success"
+        },
+        "modules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runtimeModule"
+          }
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "runtimeProgress": {
+      "type": "object",
+      "required": [
+        "progressId",
+        "title",
+        "message",
+        "percentage",
+        "cancellable",
+        "startedAt"
+      ],
+      "properties": {
+        "progressId": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "percentage": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "cancellable": {
+          "type": "boolean"
+        },
+        "startedAt": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "progressSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "progress",
+        "count"
+      ],
+      "properties": {
+        "kind": {
+          "const": "progress_success"
+        },
+        "progress": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runtimeProgress"
+          }
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "runtimeInventoryIncomplete": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error",
+        "tool"
+      ],
+      "properties": {
+        "kind": {
+          "const": "runtime_inventory_incomplete"
+        },
+        "error": {
+          "const": "RUNTIME_INVENTORY_INCOMPLETE"
+        },
+        "tool": {
+          "enum": [
+            "get_modules",
+            "get_progress"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "runtimeInventoryTooLarge": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error",
+        "tool"
+      ],
+      "properties": {
+        "kind": {
+          "const": "runtime_inventory_too_large"
+        },
+        "error": {
+          "const": "RUNTIME_INVENTORY_TOO_LARGE"
+        },
+        "tool": {
+          "enum": [
+            "get_modules",
+            "get_progress"
+          ]
         }
       },
       "additionalProperties": false
@@ -2466,6 +2673,8 @@
             "get_variables",
             "evaluate_expression",
             "get_exception_info",
+            "get_modules",
+            "get_progress",
             "step_over",
             "step_into",
             "step_out",
@@ -2511,6 +2720,18 @@
         },
         {
           "$ref": "#/$defs/exceptionInfoSuccess"
+        },
+        {
+          "$ref": "#/$defs/modulesSuccess"
+        },
+        {
+          "$ref": "#/$defs/progressSuccess"
+        },
+        {
+          "$ref": "#/$defs/runtimeInventoryIncomplete"
+        },
+        {
+          "$ref": "#/$defs/runtimeInventoryTooLarge"
         },
         {
           "$ref": "#/$defs/stepOverSuccess"

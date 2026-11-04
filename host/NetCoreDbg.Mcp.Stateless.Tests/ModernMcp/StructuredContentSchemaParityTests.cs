@@ -230,6 +230,8 @@ public sealed class StructuredContentSchemaParityTests
     [InlineData("ui_invoke_observed", "uiInvokeObservedArguments")]
     [InlineData("get_output", "getOutputArguments")]
     [InlineData("get_output_tail", "getOutputTailArguments")]
+    [InlineData("get_modules", "getModulesArguments")]
+    [InlineData("get_progress", "getProgressArguments")]
     public async Task LiveHost_InvokeAndOutputInputSchemas_MatchAdvertisedArguments(string toolName, string definitionName)
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync();
@@ -548,6 +550,17 @@ public sealed class StructuredContentSchemaParityTests
                 Assert.True(number <= maximum.GetValue<long>());
             }
         }
+        else if (value is JsonValue fractionalValue && fractionalValue.TryGetValue<double>(out var fractionalNumber))
+        {
+            if (schema["minimum"] is JsonValue minimum)
+            {
+                Assert.True(fractionalNumber >= minimum.GetValue<double>());
+            }
+            if (schema["maximum"] is JsonValue maximum)
+            {
+                Assert.True(fractionalNumber <= maximum.GetValue<double>());
+            }
+        }
     }
 
     private static bool MatchesSchema(JsonObject definitions, JsonObject schema, JsonNode? value)
@@ -574,6 +587,7 @@ public sealed class StructuredContentSchemaParityTests
         "null" => value is null,
         "string" => value is JsonValue json && json.TryGetValue<string>(out _),
         "integer" => value is JsonValue json && json.TryGetValue<long>(out _),
+        "number" => value is JsonValue json && json.TryGetValue<double>(out var number) && double.IsFinite(number),
         "boolean" => value is JsonValue json && json.TryGetValue<bool>(out _),
         "array" => value is JsonArray,
         "object" => value is JsonObject,
