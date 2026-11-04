@@ -49,6 +49,54 @@ limited to 256 entries and each complete success `structuredContent` to 256 KiB.
 Variable paging, filters, evaluation, mutation, and full Python parity remain
 outside this increment. The Python default and rollback route are unchanged.
 
+## Variable paging amendment
+
+The source-built host accepts optional nullable `start` and `count` on
+`get_variables`, in addition to the existing required session, context and
+positive reference. Both are nonnegative Int32-valued JSON numbers. Exact
+integral decimal or exponent forms such as `1.0` and `2e0` are accepted without
+floating-point rounding, as required by JSON Schema; nonintegral or out-of-range
+values are refused. Missing and null fields are omitted from the DAP request;
+zero `count` is sent and requests all remaining children. Unknown or invalid
+fields, including `filter`, fail before DAP I/O.
+The host advertises `supportsVariablePaging` in DAP initialization and sends one
+request, preserving stopped-context admission, refusal, full-response validation,
+256-entry and 256-KiB limits, and drain behavior. A response with more entries
+than a positive requested `count` is a protocol error, returns no partial page,
+and drains the session. The adapter still determines which entries it returns.
+
+An earlier candidate also forwarded `filter`, but a real `netcoredbg` 3.1.3-1
+run showed that an integer array's unfiltered page returned `[1]=2, [2]=3` while
+`indexed` with the same page returned no children and `named` returned all three
+elements. Engram issue #547 tracks this unresolved consumer-visible limitation;
+the source-built host refuses the filter until correct behavior can be established.
+Python remains the installed default.
+
+Before implementation, the public MCP page request failed on the unmodified host.
+The earlier filter-forwarding candidate passed 19/19 controlled checks; a later
+selection passed 18/19, with the remaining SDK discovery cancellation passing 1/1
+in isolation. Those results predate filter removal. A new controlled refusal test
+failed against the filter-forwarding candidate before the filter was removed.
+The real debugger's filter mismatch remains a failure, not a passing classification.
+
+After filter removal, the controlled selection passed 17/20; three existing
+cases were cancelled during SDK discovery before a tool request and then passed
+3/3 in isolation. This is not one 20/20 run, and the startup cause remains
+unknown. Before the count-bound validation, a separate source-built MCP run with
+the real debugger returned
+`[1]=2, [2]=3` for `start: 1, count: 2` and completed public stop (1/1). No GUI
+or physical input was exercised; installed delivery remains unproven.
+
+An adapter response exceeding a positive `count` was accepted before the
+additional validation (RED); after the change, that regression and adjacent
+page/refusal cases passed 8/8 in a separate controlled selection; the explicit
+session-eviction assertion passed 1/1 afterward.
+
+The schema review identified that integral decimal/exponent forms were being
+rejected. The new public MCP test failed before the parser change and the focused
+page, boundary and schema selection passed 6/6 afterward. The existing exact
+integer parser is reused; the supplied values are checked against Int32 range.
+
 ## Original B2 outcome — historical scope
 An opt-in modern native MCP client with a live, stopped debug session whose DAP initialize response explicitly supports delayed stack-trace loading can explicitly name one opaque session and one thread, receive one bounded normalized page of its DAP frames, and retain the session after a refusal. The installed Python `netcoredbg-mcp` remains the selected default/rollback route and independently proves `PRODUCT_WORKS` as non-selection compatibility.
 

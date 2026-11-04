@@ -239,6 +239,22 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 2147483647
+        },
+        "start": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 2147483647
         }
       },
       "additionalProperties": false

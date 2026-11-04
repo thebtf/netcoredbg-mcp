@@ -257,6 +257,7 @@ public sealed class StructuredContentSchemaParityTests
     [InlineData("get_modules", "getModulesArguments")]
     [InlineData("get_progress", "getProgressArguments")]
     [InlineData("configure_exceptions", "configureExceptionsArguments")]
+    [InlineData("get_variables", "getVariablesArguments")]
     public async Task LiveHost_InvokeAndOutputInputSchemas_MatchAdvertisedArguments(string toolName, string definitionName)
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync();
@@ -267,7 +268,13 @@ public sealed class StructuredContentSchemaParityTests
             item => item["name"]?.GetValue<string>() == toolName);
         var advertised = Assert.IsType<JsonObject>(tool["inputSchema"]);
         var definitions = Assert.IsType<JsonObject>(LoadSchema()["$defs"]);
-        var application = Assert.IsType<JsonObject>(definitions[definitionName]);
+        var application = Assert.IsType<JsonObject>(definitions[definitionName]).DeepClone().AsObject();
+        if (toolName == "get_variables")
+        {
+            var context = Assert.IsType<JsonObject>(definitions["inspectionContextId"]).DeepClone().AsObject();
+            context.Remove("description");
+            application["properties"]!["inspectionContextId"] = context;
+        }
 
         Assert.True(JsonNode.DeepEquals(advertised, application),
             $"The application input schema for {toolName} must match its live tools/list inputSchema. Advertised: {advertised}; application: {application}.");

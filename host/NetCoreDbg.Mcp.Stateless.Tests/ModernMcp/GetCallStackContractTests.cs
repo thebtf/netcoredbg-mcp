@@ -434,6 +434,173 @@ public sealed class GetCallStackContractTests
     }
 
     [Fact]
+    public async Task VariablesPaging_Page_ReturnsOnlyRequestedChildren()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(InspectionOptions("get_variables", "paging"), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "variables-page-start");
+        try
+        {
+            var context = (await InspectionStackAsync(driver, session, "variables-page-stack"))["inspectionContextId"]!.GetValue<string>();
+            var before = await driver.ReadNativeActionsAsync();
+
+            var arguments = InspectionArguments(session, context, "variablesReference", 1001);
+            arguments["start"] = 3;
+            arguments["count"] = 2;
+            var page = await InspectionCallAsync(driver, "get_variables", arguments, "variables-page");
+            Assert.Equal("variables_success", page["kind"]?.GetValue<string>());
+            Assert.Equal(new[] { "[1]", "[2]" }, Assert.IsType<JsonArray>(page["variables"]).Select(static item => item!["name"]!.GetValue<string>()));
+
+            var nullArguments = InspectionArguments(session, context, "variablesReference", 1001);
+            nullArguments["start"] = null;
+            nullArguments["count"] = null;
+            var all = await InspectionCallAsync(driver, "get_variables", nullArguments, "variables-null-options");
+            Assert.Equal(new[] { "Title", "Count", "[0]", "[1]", "[2]", "[3]" }, Assert.IsType<JsonArray>(all["variables"]).Select(static item => item!["name"]!.GetValue<string>()));
+
+            var fromTwo = InspectionArguments(session, context, "variablesReference", 1001);
+            fromTwo["start"] = 2;
+            fromTwo["count"] = 0;
+            var remainder = await InspectionCallAsync(driver, "get_variables", fromTwo, "variables-zero-count");
+            Assert.Equal(new[] { "[0]", "[1]", "[2]", "[3]" }, Assert.IsType<JsonArray>(remainder["variables"]).Select(static item => item!["name"]!.GetValue<string>()));
+
+            var beyond = InspectionArguments(session, context, "variablesReference", 1001);
+            beyond["start"] = int.MaxValue;
+            beyond["count"] = 1;
+            var empty = await InspectionCallAsync(driver, "get_variables", beyond, "variables-beyond-end");
+            Assert.Empty(Assert.IsType<JsonArray>(empty["variables"]));
+
+            var requests = (await driver.ReadNativeActionsAsync()).Skip(before.Count).Where(static action => action.Command == "variables").ToArray();
+            Assert.Equal(4, requests.Length);
+            Assert.True(JsonNode.DeepEquals(new JsonObject { ["variablesReference"] = 1001, ["start"] = 3, ["count"] = 2 }, JsonNode.Parse(requests[0].Detail!)!["arguments"]));
+            Assert.True(JsonNode.DeepEquals(new JsonObject { ["variablesReference"] = 1001 }, JsonNode.Parse(requests[1].Detail!)!["arguments"]));
+            Assert.True(JsonNode.DeepEquals(new JsonObject { ["variablesReference"] = 1001, ["start"] = 2, ["count"] = 0 }, JsonNode.Parse(requests[2].Detail!)!["arguments"]));
+            Assert.True(JsonNode.DeepEquals(new JsonObject { ["variablesReference"] = 1001, ["start"] = int.MaxValue, ["count"] = 1 }, JsonNode.Parse(requests[3].Detail!)!["arguments"]));
+            var initialization = Assert.Single(await driver.ReadNativeActionsAsync(), static action => action.Command == "initialize");
+            Assert.True(JsonNode.Parse(initialization.Detail!)!["arguments"]!["supportsVariablePaging"]!.GetValue<bool>());
+        }
+        finally
+        {
+            var stop = AssertApplicationEnvelope(await driver.CallToolRawAsync("stop_debug", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("variables-page-stop"), timeout: TimeSpan.FromSeconds(15)), isError: false);
+            Assert.Equal("stop_debug_success", stop["kind"]?.GetValue<string>());
+        }
+    }
+
+    [Fact]
+    public async Task VariablesPaging_InvalidOptions_AreRejectedBeforeDapIo()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(InspectionOptions("get_variables", "paging"), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "variables-page-invalid-start");
+        var context = (await InspectionStackAsync(driver, session, "variables-page-invalid-stack"))["inspectionContextId"]!.GetValue<string>();
+        var before = await driver.ReadNativeActionsAsync();
+        var cases = new (string Name, JsonNode? Value)[]
+        {
+            ("filter", JsonValue.Create("other")), ("filter", JsonValue.Create(1)),
+            ("start", JsonValue.Create(-1)), ("start", JsonValue.Create(1.5)), ("start", JsonValue.Create(2147483648L)),
+            ("count", JsonValue.Create(-1)), ("count", JsonValue.Create(1.5)), ("count", JsonValue.Create(2147483648L)),
+            ("start", JsonNode.Parse("1.0000000000000000001")), ("count", JsonNode.Parse("-0.0000000000000000001")),
+            ("unknown", JsonValue.Create(1)),
+        };
+        for (var index = 0; index < cases.Length; index++)
+        {
+            var arguments = InspectionArguments(session, context, "variablesReference", 1001);
+            arguments[cases[index].Name] = cases[index].Value;
+            var result = await InspectionCallAsync(driver, "get_variables", arguments, $"variables-page-invalid-{index}", isError: true);
+            Assert.Equal("INVALID_TOOL_ARGUMENTS", result["error"]?.GetValue<string>());
+        }
+        var stale = InspectionArguments(session, "unknown-inspection-context", "variablesReference", 1001);
+        stale["start"] = 1;
+        stale["count"] = 2;
+        AssertInspectionFailure(await InspectionCallAsync(driver, "get_variables", stale, "variables-page-stale", isError: true), "get_variables", protocolFailure: false);
+        var scopes = InspectionArguments(session, context, "frameId", 1);
+        scopes["start"] = 1;
+        var invalidScopes = await InspectionCallAsync(driver, "get_scopes", scopes, "variables-page-extra-scopes", isError: true);
+        Assert.Equal("INVALID_TOOL_ARGUMENTS", invalidScopes["error"]?.GetValue<string>());
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Fact]
+    public async Task VariablesPaging_IntegralDecimalAndExponentForms_MatchIntegerSchema()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(InspectionOptions("get_variables", "paging"), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "variables-numeric-start");
+        try
+        {
+            var context = (await InspectionStackAsync(driver, session, "variables-numeric-stack"))["inspectionContextId"]!.GetValue<string>();
+            var before = await driver.ReadNativeActionsAsync();
+            var cases = new[]
+            {
+                (Start: "3.0", Count: "2e0", ExpectedStart: 3, ExpectedCount: 2, Names: new[] { "[1]", "[2]" }),
+                (Start: "30e-1", Count: "2.000", ExpectedStart: 3, ExpectedCount: 2, Names: new[] { "[1]", "[2]" }),
+                (Start: "-0.0", Count: "0e20", ExpectedStart: 0, ExpectedCount: 0, Names: new[] { "Title", "Count", "[0]", "[1]", "[2]", "[3]" }),
+                (Start: "2147483647.0", Count: "1.0", ExpectedStart: int.MaxValue, ExpectedCount: 1, Names: Array.Empty<string>()),
+            };
+            for (var index = 0; index < cases.Length; index++)
+            {
+                var arguments = InspectionArguments(session, context, "variablesReference", 1001);
+                arguments["start"] = JsonNode.Parse(cases[index].Start);
+                arguments["count"] = JsonNode.Parse(cases[index].Count);
+                var result = await InspectionCallAsync(driver, "get_variables", arguments, $"variables-numeric-{index}");
+                Assert.Equal(cases[index].Names, Assert.IsType<JsonArray>(result["variables"]).Select(static item => item!["name"]!.GetValue<string>()));
+            }
+            var writes = (await driver.ReadNativeActionsAsync()).Skip(before.Count).Where(static action => action.Command == "variables").ToArray();
+            Assert.Equal(cases.Length, writes.Length);
+            for (var index = 0; index < cases.Length; index++)
+            {
+                Assert.True(JsonNode.DeepEquals(new JsonObject { ["variablesReference"] = 1001, ["start"] = cases[index].ExpectedStart, ["count"] = cases[index].ExpectedCount }, JsonNode.Parse(writes[index].Detail!)!["arguments"]));
+            }
+        }
+        finally
+        {
+            var stop = AssertApplicationEnvelope(await driver.CallToolRawAsync("stop_debug", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("variables-numeric-stop"), timeout: TimeSpan.FromSeconds(15)), isError: false);
+            Assert.Equal("stop_debug_success", stop["kind"]?.GetValue<string>());
+        }
+    }
+
+    [Fact]
+    public async Task VariablesPaging_UnprovenFilter_IsRejectedWithoutDapIo()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(InspectionOptions("get_variables", "paging"), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "variables-filter-start");
+        var context = (await InspectionStackAsync(driver, session, "variables-filter-stack"))["inspectionContextId"]!.GetValue<string>();
+        var before = await driver.ReadNativeActionsAsync();
+        var arguments = InspectionArguments(session, context, "variablesReference", 1001);
+        arguments["filter"] = "indexed";
+        var response = await driver.CallToolRawAsync("get_variables", arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId("variables-filter"));
+        var actions = await driver.ReadNativeActionsAsync();
+        var stop = AssertApplicationEnvelope(await driver.CallToolRawAsync("stop_debug", new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("variables-filter-stop"), timeout: TimeSpan.FromSeconds(15)), isError: false);
+        Assert.Equal("stop_debug_success", stop["kind"]?.GetValue<string>());
+        var result = AssertApplicationEnvelope(response, isError: true);
+        Assert.Equal("INVALID_TOOL_ARGUMENTS", result["error"]?.GetValue<string>());
+        Assert.Equal(before.Count, actions.Count);
+    }
+
+    [Fact]
+    public async Task VariablesPaging_AdapterExceedsRequestedCount_ReturnsProtocolErrorWithoutPartialValues()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(InspectionOptions("get_variables", "success"), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "variables-overcount-start");
+        var context = (await InspectionStackAsync(driver, session, "variables-overcount-stack"))["inspectionContextId"]!.GetValue<string>();
+        var arguments = InspectionArguments(session, context, "variablesReference", 1001);
+        arguments["count"] = 1;
+        var response = await driver.CallToolRawAsync("get_variables", arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId("variables-overcount"));
+        var envelope = ModernMcpProcessDriver.RequireResult(response);
+        if (!(envelope["isError"]?.GetValue<bool>() ?? false))
+        {
+            var stop = AssertApplicationEnvelope(await driver.CallToolRawAsync("stop_debug", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("variables-overcount-stop"), timeout: TimeSpan.FromSeconds(15)), isError: false);
+            Assert.Equal("stop_debug_success", stop["kind"]?.GetValue<string>());
+        }
+        var content = AssertApplicationEnvelope(response, isError: true);
+        AssertInspectionFailure(content, "get_variables", protocolFailure: true);
+        Assert.False(content.ContainsKey("variables"));
+        var state = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("variables-overcount-state")), isError: true);
+        AssertNotFound(state);
+    }
+
+    [Fact]
     public async Task FrameInspection_StepReusesNumericReference_OldContextIsRefusedWithoutIoAndFreshContextWorks()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack());

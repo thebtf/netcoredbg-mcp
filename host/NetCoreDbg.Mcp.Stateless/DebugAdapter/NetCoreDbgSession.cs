@@ -668,16 +668,23 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     internal async Task<DapVariablesResult> GetVariablesAsync(
         string inspectionContextId,
         int variablesReference,
+        int? start,
+        int? count,
         CancellationToken cancellationToken)
     {
         var response = await SendInspectionRequestAsync(
-            "variables", new { variablesReference }, inspectionContextId, cancellationToken).ConfigureAwait(false);
+            "variables", new DapVariablesArguments(variablesReference, start, count), inspectionContextId, cancellationToken).ConfigureAwait(false);
         if (response is null || !response.Success || !response.TargetCurrent)
         {
             return DapVariablesResult.Refused;
         }
 
         var variables = RequireInspectionArray(response.Body, "variables");
+        if (count is > 0 && variables.GetArrayLength() > count.Value)
+        {
+            throw new InvalidDataException("DAP variables response exceeds the requested count.");
+        }
+
         var normalized = new DapVariable[variables.GetArrayLength()];
         var index = 0;
         foreach (var variable in variables.EnumerateArray())
@@ -1327,6 +1334,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 columnsStartAt1 = true,
                 supportsRunInTerminalRequest = false,
                 supportsVariableType = true,
+                supportsVariablePaging = true,
                 supportsInvalidatedEvent = true,
                 supportsProgressReporting = true,
             },
@@ -5035,6 +5043,11 @@ internal sealed record DapCallStackResult(
         IReadOnlyList<DapStackFrame> frames, uint? totalFrames, string? inspectionContextId = null) =>
         new(false, frames, totalFrames, inspectionContextId);
 }
+
+internal sealed record DapVariablesArguments(
+    [property: JsonPropertyName("variablesReference")] int VariablesReference,
+    [property: JsonPropertyName("start"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? Start,
+    [property: JsonPropertyName("count"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? Count);
 
 internal sealed record DapScope(
     [property: JsonPropertyName("name")] string Name,
