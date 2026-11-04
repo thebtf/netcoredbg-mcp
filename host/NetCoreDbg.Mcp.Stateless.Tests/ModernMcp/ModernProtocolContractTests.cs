@@ -923,7 +923,7 @@ public sealed class ModernProtocolContractTests
     private static void AssertCatalog(JsonObject result)
     {
         var tools = Assert.IsType<JsonArray>(result["tools"]);
-        Assert.Equal(30, tools.Count);
+        Assert.Equal(31, tools.Count);
         Assert.Equal(
             [
                 "start_debug",
@@ -947,6 +947,7 @@ public sealed class ModernProtocolContractTests
                 "step_into",
                 "step_out",
                 "evaluate_expression",
+                "set_variable",
                 "get_exception_info",
                 "get_modules",
                 "get_progress",

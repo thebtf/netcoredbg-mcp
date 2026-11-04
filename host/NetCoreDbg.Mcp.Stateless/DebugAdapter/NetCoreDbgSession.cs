@@ -84,6 +84,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private bool _supportsTerminate;
     private DapStackTraceCapabilities _stackTraceCapabilities;
     private bool _supportsExceptionInfoRequest;
+    private bool _supportsSetVariable;
     private bool _supportsExceptionFilters;
     private CallStackEligibility? _allThreadsStoppedEligibility;
     private Dictionary<int, CallStackEligibility>? _threadEligibility;
@@ -717,6 +718,57 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             ? RequireInspectionName(response.Body, "type") : null;
         return new DapEvaluateResult(DapEvaluateOutcome.Success, response.InspectionContextId!, result, type,
             RequireVariablesReference(response.Body));
+    }
+
+    internal async Task<DapSetVariableResult> SetVariableAsync(
+        string inspectionContextId, int variablesReference, string name, string value, CancellationToken cancellationToken)
+    {
+        PendingRequest request;
+        await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            lock (_stateGate)
+            {
+                if (_inspectionClosed || !StringComparer.Ordinal.Equals(_inspectionContextId, inspectionContextId))
+                {
+                    return DapSetVariableResult.Refused;
+                }
+                if (!_supportsSetVariable)
+                {
+                    return DapSetVariableResult.Unsupported;
+                }
+            }
+            request = await BeginRequestAsync("setVariable", new { variablesReference, name, value }, _requestTimeout,
+                cancellationToken, inspectionContextId: inspectionContextId).ConfigureAwait(false);
+        }
+        finally
+        {
+            _callStackAdmissionGate.Release();
+        }
+
+        try
+        {
+            var response = await WaitForResponseAsync(request, _requestTimeout, cancellationToken).ConfigureAwait(false);
+            if (!response.TargetCurrent)
+            {
+                return DapSetVariableResult.OutcomeUnknown;
+            }
+            if (!response.Success)
+            {
+                return DapSetVariableResult.Failed;
+            }
+            return new DapSetVariableResult(DapSetVariableOutcome.Success, response.SerializedContent);
+        }
+        catch (Exception) when (request.WriteStarted)
+        {
+            Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
+            InvalidateInspectionContext(close: true);
+            throw;
+        }
+        finally
+        {
+            RemovePending(request);
+        }
     }
 
     internal bool RequiresInspectionDrain() => Volatile.Read(ref _inspectionWriteDrainRequired) != 0;
@@ -1896,7 +1948,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
         catch (Exception exception)
         {
-            if (exception is OperationCanceledException && request.InspectionContextId is not null && request.WriteStarted)
+            if (request.InspectionContextId is not null && request.WriteStarted
+                && (exception is OperationCanceledException || request.Command == "setVariable"))
             {
                 Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
                 lock (_stateGate)
@@ -1993,7 +2046,22 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             }
             stepOver?.MarkWriteStarted();
             continueExecution?.MarkWriteStarted();
-            inspectionRequest?.MarkWriteStarted();
+            if (inspectionRequest is { Command: "setVariable" } mutation)
+            {
+                lock (_stateGate)
+                {
+                    if (Volatile.Read(ref _readerFailure) is not null || IsRetirementRequested || _inspectionClosed
+                        || !StringComparer.Ordinal.Equals(_inspectionContextId, mutation.InspectionContextId))
+                    {
+                        throw new InvalidDataException("DAP variable update lost write admission.");
+                    }
+                    mutation.MarkWriteStarted();
+                }
+            }
+            else
+            {
+                inspectionRequest?.MarkWriteStarted();
+            }
             if (breakpointUpdate?.ExceptionFilters is not null)
             {
                 lock (_stateGate)
@@ -2046,7 +2114,12 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             if (failure is not null)
             {
-                Volatile.Write(ref _readerFailure, failure);
+                lock (_stateGate)
+                {
+                    Volatile.Write(ref _readerFailure, failure);
+                    _inspectionContextId = null;
+                    _inspectionClosed = true;
+                }
                 _initialized.TrySetException(failure);
                 FailPending(failure);
                 lock (_stateGate)
@@ -2081,7 +2154,19 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         switch (type)
         {
             case "response":
-                HandleResponse(message);
+                if (message.TryGetProperty("request_seq", out var requestSequence)
+                    && requestSequence.TryGetInt32(out var sequence)
+                    && _pending.TryGetValue(sequence, out var pending)
+                    && pending.Command == "setVariable")
+                {
+                    _callStackAdmissionGate.Wait();
+                    try { HandleResponse(message); }
+                    finally { _callStackAdmissionGate.Release(); }
+                }
+                else
+                {
+                    HandleResponse(message);
+                }
                 break;
             case "event":
                 HandleEvent(message);
@@ -2298,8 +2383,53 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             var targetCurrent = (request.StackTraceTarget is not { } target || IsCallStackTargetCurrent(target))
                 && (request.InspectionContextId is null
                     || (!_inspectionClosed && StringComparer.Ordinal.Equals(_inspectionContextId, request.InspectionContextId)));
+            var responseContext = request.InspectionContextId;
+            string? serializedContent = null;
+            if (request.Command == "setVariable")
+            {
+                try
+                {
+                    if (RequireInt32(message, "seq") <= 0)
+                    {
+                        throw new InvalidDataException("DAP setVariable response sequence must be positive.");
+                    }
+                    _inspectionContextId = null;
+                    if (!targetCurrent)
+                    {
+                        _inspectionClosed = true;
+                        Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
+                    }
+                    else if (success.ValueKind == JsonValueKind.True)
+                    {
+                        var value = RequireString(body, "value");
+                        var type = body.TryGetProperty("type", out var typeElement) && typeElement.ValueKind != JsonValueKind.Null
+                            ? RequireString(body, "type") : null;
+                        var reference = body.TryGetProperty("variablesReference", out _) ? RequireVariablesReference(body) : 0;
+                        responseContext = GetOrCreateInspectionContext();
+                        serializedContent = JsonSerializer.Serialize(new
+                        {
+                            kind = "set_variable_success",
+                            inspectionContextId = responseContext,
+                            value,
+                            type,
+                            variablesReference = reference,
+                        });
+                        if (Encoding.UTF8.GetByteCount(serializedContent) > 256 * 1024)
+                        {
+                            throw new InvalidDataException("DAP setVariable result exceeds the inspection response bound.");
+                        }
+                    }
+                }
+                catch
+                {
+                    _inspectionContextId = null;
+                    _inspectionClosed = true;
+                    Interlocked.Exchange(ref _inspectionWriteDrainRequired, 1);
+                    throw;
+                }
+            }
             request.Completion.TrySetResult(new DapResponse(body, success.ValueKind == JsonValueKind.True,
-                targetCurrent, request.InspectionContextId));
+                targetCurrent, responseContext, serializedContent));
         }
     }
 
@@ -2345,6 +2475,22 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 if (capabilities.TryGetProperty("supportsConfigurationDoneRequest", out _))
                 {
                     _supportsConfigurationDone = ReadOptionalBoolean(capabilities, "supportsConfigurationDoneRequest");
+                }
+                if (capabilities.TryGetProperty("supportsSetVariable", out _))
+                {
+                    var supported = ReadOptionalBoolean(capabilities, "supportsSetVariable");
+                    _callStackAdmissionGate.Wait();
+                    try
+                    {
+                        lock (_stateGate)
+                        {
+                            _supportsSetVariable = supported;
+                        }
+                    }
+                    finally
+                    {
+                        _callStackAdmissionGate.Release();
+                    }
                 }
                 if (capabilities.TryGetProperty("supportsExceptionInfoRequest", out _))
                 {
@@ -2814,6 +2960,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 _stackTraceCapabilities = default;
                 _supportsExceptionInfoRequest = false;
                 _supportsExceptionFilters = false;
+                _supportsSetVariable = false;
             }
 
             return;
@@ -2828,12 +2975,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         _supportsTerminate = ReadOptionalBoolean(body, "supportsTerminateRequest");
         var capabilities = new DapStackTraceCapabilities(ReadOptionalBoolean(body, "supportsDelayedStackTraceLoading"));
         var supportsExceptionInfo = ReadOptionalBoolean(body, "supportsExceptionInfoRequest");
+        var supportsSetVariable = ReadOptionalBoolean(body, "supportsSetVariable");
         var supportsExceptionFilters = ReadExceptionFilterSupport(body);
         lock (_stateGate)
         {
             _stackTraceCapabilities = capabilities;
             _supportsExceptionInfoRequest = supportsExceptionInfo;
             _supportsExceptionFilters = supportsExceptionFilters;
+            _supportsSetVariable = supportsSetVariable;
         }
     }
 
@@ -3529,6 +3678,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private void FailRequest(PendingRequest request, Exception failure)
     {
+        if (request.Command == "setVariable")
+        {
+            lock (_stateGate)
+            {
+                _inspectionContextId = null;
+                _inspectionClosed = true;
+            }
+        }
         if (request.Pause is { } pause)
         {
             lock (_stateGate)
@@ -3799,6 +3956,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 }
 
                 process = Process.GetProcessById(checked((int)processInformation.ProcessId));
+                // Keep the same process instance while the original creation handle still prevents PID reuse.
+                _ = process.SafeHandle;
                 if (ResumeThread(threadHandle) == uint.MaxValue)
                 {
                     throw LastWin32Error("Could not resume the debugger process.");
@@ -4639,7 +4798,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         bool SupportsPaging,
         string? InspectionContextId = null);
 
-    private sealed record DapResponse(JsonElement Body, bool Success, bool TargetCurrent = true, string? InspectionContextId = null);
+    private sealed record DapResponse(JsonElement Body, bool Success, bool TargetCurrent = true, string? InspectionContextId = null, string? SerializedContent = null);
 
     private sealed record DapSetBreakpointsArguments(
         [property: JsonPropertyName("source")] DapBreakpointSource Source,
@@ -4912,6 +5071,16 @@ internal sealed record DapEvaluateResult(
     internal static DapEvaluateResult Refused { get; } = new(DapEvaluateOutcome.Refused);
     internal static DapEvaluateResult Failed { get; } = new(DapEvaluateOutcome.Failed);
     internal static DapEvaluateResult OutcomeUnknown { get; } = new(DapEvaluateOutcome.OutcomeUnknown);
+}
+
+internal enum DapSetVariableOutcome { Success, Unsupported, Refused, Failed, OutcomeUnknown }
+
+internal sealed record DapSetVariableResult(DapSetVariableOutcome Outcome, string? SerializedContent = null)
+{
+    internal static DapSetVariableResult Unsupported { get; } = new(DapSetVariableOutcome.Unsupported);
+    internal static DapSetVariableResult Refused { get; } = new(DapSetVariableOutcome.Refused);
+    internal static DapSetVariableResult Failed { get; } = new(DapSetVariableOutcome.Failed);
+    internal static DapSetVariableResult OutcomeUnknown { get; } = new(DapSetVariableOutcome.OutcomeUnknown);
 }
 
 internal enum DapRuntimeInventoryStatus { Success, Incomplete, TooLarge }
