@@ -1885,7 +1885,8 @@ internal sealed record FixtureConfiguration(
     string ExceptionFiltersCapabilityDelta = "none",
     string SetExceptionBreakpointsResponseMode = "absent-body",
     bool? SupportsSetVariable = null,
-    string SetVariableCapabilityDelta = "none")
+    string SetVariableCapabilityDelta = "none",
+    int? ProcessEventId = null)
 {
     public string AsEnvironmentValue() => string.Join(
         ';',
@@ -1932,6 +1933,7 @@ internal sealed record FixtureConfiguration(
             $"--set-exception-breakpoints-response={SetExceptionBreakpointsResponseMode}",
             $"--supports-set-variable={SupportsSetVariable?.ToString() ?? "omit"}",
             $"--set-variable-capability-delta={SetVariableCapabilityDelta}",
+            ProcessEventId is { } processEventId ? $"--process-event-id={processEventId.ToString(System.Globalization.CultureInfo.InvariantCulture)}" : null,
         }.Where(static value => value is not null));
 }
 

@@ -145,7 +145,8 @@ internal sealed record AdapterOptions(
     string ExceptionFiltersCapabilityDelta,
     string SetExceptionBreakpointsResponseMode,
     bool? SupportsSetVariable,
-    string SetVariableCapabilityDelta)
+    string SetVariableCapabilityDelta,
+    int? ProcessEventId)
 {
     public static AdapterOptions Parse(string[] args, string? environmentOptions)
     {
@@ -191,6 +192,7 @@ internal sealed record AdapterOptions(
         var setExceptionBreakpointsResponseMode = "absent-body";
         bool? supportsSetVariable = null;
         var setVariableCapabilityDelta = "none";
+        int? processEventId = null;
 
         foreach (var argument in args.Concat(SplitOptions(environmentOptions)))
         {
@@ -300,6 +302,9 @@ internal sealed record AdapterOptions(
                 case var _ when argument.StartsWith("--set-variable-capability-delta=", StringComparison.Ordinal):
                     setVariableCapabilityDelta = argument["--set-variable-capability-delta=".Length..];
                     break;
+                case var _ when argument.StartsWith("--process-event-id=", StringComparison.Ordinal):
+                    processEventId = int.Parse(argument["--process-event-id=".Length..], CultureInfo.InvariantCulture);
+                    break;
                 case var _ when argument.StartsWith("--pause-response=", StringComparison.Ordinal):
                     pauseResponseMode = argument["--pause-response=".Length..];
                     break;
@@ -377,7 +382,8 @@ internal sealed record AdapterOptions(
             exceptionFiltersCapabilityDelta,
             setExceptionBreakpointsResponseMode,
             supportsSetVariable,
-            setVariableCapabilityDelta);
+            setVariableCapabilityDelta,
+            processEventId);
     }
 
     private static IEnumerable<string> SplitOptions(string? options) =>
@@ -1181,7 +1187,7 @@ internal sealed class ControlledDapAdapter
                 new
                 {
                     name = "controlled-dap-descendant",
-                    systemProcessId = descendant.Id,
+                    systemProcessId = _options.ProcessEventId ?? descendant.Id,
                     isLocalProcess = true,
                     startMethod = "launch",
                 },
