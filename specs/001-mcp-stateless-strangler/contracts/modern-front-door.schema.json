@@ -15,7 +15,7 @@
       "minLength": 1,
       "maxLength": 128,
       "pattern": "\\S",
-      "description": "Opaque process/session-local stopped-epoch token, obtained only from a successful get_call_stack with includeInspectionContext=true. Carry each numeric ID with the context from the same observation; the token does not prove that the numeric ID was ever issued. Execution, stopped replacement, terminal, invalidated, thread-exit, reader failure and cleanup invalidate the inspection epoch session-wide."
+      "description": "Opaque process/session-local stopped-epoch token, obtained from get_call_stack with includeInspectionContext=true or from a successful set_variable. A mutation replaces the previous context. Carry each numeric ID with the context from the same observation; the token does not prove that the numeric ID was ever issued. Execution, stopped replacement, terminal, invalidated, thread-exit, reader failure and cleanup invalidate the inspection epoch session-wide."
     },
     "lifecycleState": {
       "type": "object",
@@ -268,6 +268,38 @@
         "expression": {
           "type": "string",
           "description": "Forwarded exactly once, unchanged, with the explicit frameId and DAP context watch. No automatic retry or implicit frame selection."
+        }
+      },
+      "additionalProperties": false
+    },
+    "setVariableArguments": {
+      "type": "object",
+      "required": [
+        "debugSessionId",
+        "inspectionContextId",
+        "variablesReference",
+        "name",
+        "value"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "inspectionContextId": {
+          "$ref": "#/$defs/inspectionContextId"
+        },
+        "variablesReference": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
         }
       },
       "additionalProperties": false
@@ -1824,6 +1856,40 @@
       },
       "additionalProperties": false
     },
+    "setVariableSuccess": {
+      "type": "object",
+      "description": "The complete serialized result is bounded to 262144 UTF-8 bytes. The returned context replaces the old context; mutation is not read-only or idempotent.",
+      "required": [
+        "kind",
+        "inspectionContextId",
+        "value",
+        "type",
+        "variablesReference"
+      ],
+      "properties": {
+        "kind": {
+          "const": "set_variable_success"
+        },
+        "inspectionContextId": {
+          "$ref": "#/$defs/inspectionContextId"
+        },
+        "value": {
+          "type": "string"
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "variablesReference": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        }
+      },
+      "additionalProperties": false
+    },
     "stepOverSuccess": {
       "type": "object",
       "required": [
@@ -2389,6 +2455,70 @@
       },
       "additionalProperties": false
     },
+    "dapSetVariableUnsupported": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_set_variable_unsupported"
+        },
+        "error": {
+          "const": "DAP_SET_VARIABLE_UNSUPPORTED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapSetVariableRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_set_variable_refused"
+        },
+        "error": {
+          "const": "DAP_SET_VARIABLE_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapSetVariableFailed": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_set_variable_failed"
+        },
+        "error": {
+          "const": "DAP_SET_VARIABLE_FAILED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapSetVariableOutcomeUnknown": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_set_variable_outcome_unknown"
+        },
+        "error": {
+          "const": "DAP_SET_VARIABLE_OUTCOME_UNKNOWN"
+        }
+      },
+      "additionalProperties": false
+    },
     "dapStepOverRefused": {
       "type": "object",
       "required": [
@@ -2781,6 +2911,7 @@
             "get_scopes",
             "get_variables",
             "evaluate_expression",
+            "set_variable",
             "get_exception_info",
             "get_modules",
             "get_progress",
@@ -2827,6 +2958,9 @@
         },
         {
           "$ref": "#/$defs/evaluateSuccess"
+        },
+        {
+          "$ref": "#/$defs/setVariableSuccess"
         },
         {
           "$ref": "#/$defs/exceptionInfoSuccess"
@@ -2965,6 +3099,18 @@
         },
         {
           "$ref": "#/$defs/dapEvaluateOutcomeUnknown"
+        },
+        {
+          "$ref": "#/$defs/dapSetVariableUnsupported"
+        },
+        {
+          "$ref": "#/$defs/dapSetVariableRefused"
+        },
+        {
+          "$ref": "#/$defs/dapSetVariableFailed"
+        },
+        {
+          "$ref": "#/$defs/dapSetVariableOutcomeUnknown"
         },
         {
           "$ref": "#/$defs/dapStepOverRefused"

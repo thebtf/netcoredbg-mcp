@@ -249,6 +249,16 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             beforeCancellationInspection: beforeCancellationInspection, invokeSteps: invokeEvaluate,
             evaluateContext: inspectionContextId);
 
+    public Task<StepOverRegistryProbe> SetVariableThroughRegistryAsync(
+        string inspectionContextId,
+        CancellationToken cancellationToken,
+        Func<Task>? beforeCancellationInspection = null,
+        Func<Func<string, CancellationToken, Task<ModelContextProtocol.Protocol.CallToolResult>>, Task<ModelContextProtocol.Protocol.CallToolResult>>? invokeSetVariable = null,
+        string variableName = "x") =>
+        InvokeThroughRegistryAsync(0, cancellationToken, inspectCancellation: true,
+            beforeCancellationInspection: beforeCancellationInspection, invokeSteps: invokeSetVariable,
+            setVariableContext: inspectionContextId, setVariableName: variableName);
+
     public Task<StepOverRegistryProbe> ExceptionInfoThroughRegistryAsync(
         CancellationToken cancellationToken,
         Func<Task>? beforeCancellationInspection = null,
@@ -283,7 +293,9 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         string? stepTool = null,
         string? evaluateContext = null,
         bool inspectExceptionInfo = false,
-        string[]? exceptionFilters = null)
+        string[]? exceptionFilters = null,
+        string? setVariableContext = null,
+        string setVariableName = "x")
     {
         const string sessionId = "step-over-clock-session";
         var registryType = RequireType(_session.GetType().Assembly, "NetCoreDbg.Mcp.Stateless.Program+DebugSessionRegistry");
@@ -353,15 +365,15 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                 "step_out" => "StepOutAsync",
                 _ => throw new ArgumentOutOfRangeException(nameof(stepTool)),
             };
-            var operationMethod = inspectCallStack || evaluateContext is not null || inspectExceptionInfo
-                ? registryType.GetMethod(inspectExceptionInfo ? "GetExceptionInfoAsync" : evaluateContext is null ? "GetCallStackAsync" : "EvaluateExpressionAsync", BindingFlags.Instance | BindingFlags.NonPublic,
+            var operationMethod = inspectCallStack || evaluateContext is not null || inspectExceptionInfo || setVariableContext is not null
+                ? registryType.GetMethod(setVariableContext is not null ? "SetVariableAsync" : inspectExceptionInfo ? "GetExceptionInfoAsync" : evaluateContext is null ? "GetCallStackAsync" : "EvaluateExpressionAsync", BindingFlags.Instance | BindingFlags.NonPublic,
                     binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(CancellationToken)], modifiers: null)
                 : registryType.GetMethod(exceptionFilters is not null ? "ConfigureExceptionsAsync" : pauseExecution ? "PauseAsync" : breakpoint.HasValue ? "AddBreakpointAsync" : continueExecution ? "ContinueAsync" : stepMethod, BindingFlags.Instance | BindingFlags.NonPublic,
                     binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(ModelContextProtocol.Protocol.RequestId), typeof(CancellationToken)], modifiers: null);
             Assert.NotNull(operationMethod);
             var request = new ModelContextProtocol.Protocol.CallToolRequestParams
             {
-                Name = exceptionFilters is not null ? "configure_exceptions" : pauseExecution ? "pause_execution" : inspectCallStack ? "get_call_stack" : inspectExceptionInfo ? "get_exception_info" : evaluateContext is not null ? "evaluate_expression" : breakpoint.HasValue ? "add_breakpoint" : continueExecution ? "continue_execution" : stepTool ?? "step_over",
+                Name = setVariableContext is not null ? "set_variable" : exceptionFilters is not null ? "configure_exceptions" : pauseExecution ? "pause_execution" : inspectCallStack ? "get_call_stack" : inspectExceptionInfo ? "get_exception_info" : evaluateContext is not null ? "evaluate_expression" : breakpoint.HasValue ? "add_breakpoint" : continueExecution ? "continue_execution" : stepTool ?? "step_over",
                 Arguments = new Dictionary<string, JsonElement>
                 {
                     ["debugSessionId"] = JsonSerializer.SerializeToElement(sessionId),
@@ -383,6 +395,14 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                 request.Arguments["frameId"] = JsonSerializer.SerializeToElement(1);
                 request.Arguments["expression"] = JsonSerializer.SerializeToElement("6 * 7");
             }
+            if (setVariableContext is not null)
+            {
+                request.Arguments.Remove("threadId");
+                request.Arguments["inspectionContextId"] = JsonSerializer.SerializeToElement(setVariableContext);
+                request.Arguments["variablesReference"] = JsonSerializer.SerializeToElement(1001);
+                request.Arguments["name"] = JsonSerializer.SerializeToElement(setVariableName);
+                request.Arguments["value"] = JsonSerializer.SerializeToElement("1");
+            }
             if (breakpoint is { } targetBreakpoint)
             {
                 request.Arguments.Remove("threadId");
@@ -400,7 +420,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                 invokingRequestId.Value = requestId;
                 try
                 {
-                    object?[] invocationArguments = inspectCallStack || evaluateContext is not null || inspectExceptionInfo
+                    object?[] invocationArguments = inspectCallStack || evaluateContext is not null || inspectExceptionInfo || setVariableContext is not null
                         ? [request, token]
                         : [request, new ModelContextProtocol.Protocol.RequestId(requestId), token];
                     var invocation = operationMethod!.Invoke(registry, invocationArguments);
@@ -495,6 +515,60 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         Assert.NotNull(completion);
         var response = Assert.IsAssignableFrom<Task>(completion!.GetType().GetProperty("Task")?.GetValue(completion));
         await response.WaitAsync(cancellationToken);
+    }
+
+    public Task GetPendingResponseTask(string command)
+    {
+        var request = Assert.Single(PendingRequests(), entry =>
+            string.Equals(entry.GetType().GetProperty("Command")?.GetValue(entry) as string, command, StringComparison.Ordinal));
+        var completion = request.GetType().GetProperty("Completion")?.GetValue(request);
+        Assert.NotNull(completion);
+        return Assert.IsAssignableFrom<Task>(completion!.GetType().GetProperty("Task")?.GetValue(completion));
+    }
+
+    public void FailPendingAsReaderFailure(IOException failure)
+    {
+        var sessionType = _session.GetType();
+        RequirePrivateField(sessionType, "_readerFailure").SetValue(_session, failure);
+        var failPending = sessionType.GetMethod("FailPending", BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null, types: [typeof(Exception)], modifiers: null);
+        Assert.NotNull(failPending);
+        _ = failPending!.Invoke(_session, [failure]);
+    }
+    public void SimulateReaderFailureMissingPendingRequest(IOException failure) =>
+        RequirePrivateField(_session.GetType(), "_readerFailure").SetValue(_session, failure);
+
+
+    public Task DispatchStaleSetVariableResponseAsync(Action afterDispatch, CancellationToken cancellationToken)
+    {
+        var request = Assert.Single(PendingRequests(), entry =>
+            string.Equals(entry.GetType().GetProperty("Command")?.GetValue(entry) as string, "setVariable", StringComparison.Ordinal));
+        var sequence = Assert.IsType<int>(request.GetType().GetProperty("Sequence")?.GetValue(request));
+        var invalidated = JsonSerializer.SerializeToElement(new
+        {
+            seq = 1_000_001,
+            type = "event",
+            @event = "invalidated",
+            body = new { areas = new[] { "variables" } },
+        });
+        var response = JsonSerializer.SerializeToElement(new
+        {
+            seq = 1_000_002,
+            type = "response",
+            request_seq = sequence,
+            success = true,
+            command = "setVariable",
+            body = new { value = "updated", variablesReference = 1002 },
+        });
+        return DispatchMessagesUnderStateGateAsync([invalidated, response], releaseWriter: false, cancellationToken, afterDispatch);
+    }
+
+    public bool CanCaptureInspectionTarget()
+    {
+        var method = _session.GetType().GetMethod("CaptureCallStackTarget", BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null, types: [typeof(int), typeof(bool)], modifiers: null);
+        Assert.NotNull(method);
+        return method!.Invoke(_session, [1, true]) is not null;
     }
 
     private IEnumerable<object> PendingRequests()
@@ -1809,7 +1883,9 @@ internal sealed record FixtureConfiguration(
     string ExceptionInfoCapabilityDelta = "none",
     string ExceptionBreakpointFilters = "omit",
     string ExceptionFiltersCapabilityDelta = "none",
-    string SetExceptionBreakpointsResponseMode = "absent-body")
+    string SetExceptionBreakpointsResponseMode = "absent-body",
+    bool? SupportsSetVariable = null,
+    string SetVariableCapabilityDelta = "none")
 {
     public string AsEnvironmentValue() => string.Join(
         ';',
@@ -1854,6 +1930,8 @@ internal sealed record FixtureConfiguration(
             $"--exception-breakpoint-filters={ExceptionBreakpointFilters}",
             $"--exception-filters-capability-delta={ExceptionFiltersCapabilityDelta}",
             $"--set-exception-breakpoints-response={SetExceptionBreakpointsResponseMode}",
+            $"--supports-set-variable={SupportsSetVariable?.ToString() ?? "omit"}",
+            $"--set-variable-capability-delta={SetVariableCapabilityDelta}",
         }.Where(static value => value is not null));
 }
 

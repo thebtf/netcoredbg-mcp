@@ -952,6 +952,306 @@ public sealed class GetCallStackContractTests
     }
 
     [Fact]
+    public async Task ToolsList_SetVariable_PublishesExplicitClosedMutationInput()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(startupTimeout: TimeSpan.FromSeconds(10));
+        var result = ModernMcpProcessDriver.RequireResult(await driver.ListToolsRawAsync(
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("set-variable-catalog")));
+        var tool = Assert.Single(Assert.IsType<JsonArray>(result["tools"]).Select(static item => Assert.IsType<JsonObject>(item)),
+                static item => item["name"]?.GetValue<string>() == "set_variable");
+        var schema = Assert.IsType<JsonObject>(tool["inputSchema"]);
+        Assert.Equal("object", schema["type"]?.GetValue<string>());
+        Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
+        var fields = new[] { "debugSessionId", "inspectionContextId", "name", "value", "variablesReference" };
+        Assert.Equal(fields, Assert.IsType<JsonArray>(schema["required"]).Select(static item => item!.GetValue<string>()).Order(StringComparer.Ordinal));
+        var properties = Assert.IsType<JsonObject>(schema["properties"]);
+        Assert.Equal(fields, properties.Select(static item => item.Key).Order(StringComparer.Ordinal));
+        foreach (var field in new[] { "debugSessionId", "inspectionContextId", "name", "value" })
+        {
+            Assert.Equal("string", properties[field]?["type"]?.GetValue<string>());
+        }
+        Assert.Equal("integer", properties["variablesReference"]?["type"]?.GetValue<string>());
+        Assert.False(tool["annotations"]?["readOnlyHint"]?.GetValue<bool>() ?? false);
+        Assert.False(tool["annotations"]?["idempotentHint"]?.GetValue<bool>() ?? false);
+    }
+
+    [Theory]
+    [InlineData("  имя\t", " \"雪\"\r\n", "updated", "tuple", 1002)]
+    [InlineData("fixture:optional", "", "untyped", null, 0)]
+    public async Task SetVariable_CurrentContext_ForwardsExactArgumentsAndRotatesContext(
+            string name, string value, string expectedValue, string? expectedType, int expectedReference)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(SetVariableOptions(true), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "set-exact-start");
+        var context = (await InspectionStackAsync(driver, session, "set-exact-stack"))["inspectionContextId"]!.GetValue<string>();
+        var before = await driver.ReadNativeActionsAsync();
+        var content = await SetVariableCallAsync(driver, SetVariableArguments(session, context, 1001, name, value), "set-exact");
+        Assert.Equal("set_variable_success", content["kind"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        Assert.Equal(expectedValue, content["value"]?.GetValue<string>());
+        Assert.Equal(expectedType, content["type"]?.GetValue<string>());
+        Assert.Equal(expectedReference, content["variablesReference"]?.GetValue<int>());
+        var fresh = Assert.IsType<string>(content["inspectionContextId"]?.GetValue<string>());
+        Assert.False(string.IsNullOrWhiteSpace(fresh));
+        Assert.NotEqual(context, fresh);
+        AssertSetVariableRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1001, name, value);
+
+        var after = await driver.ReadNativeActionsAsync();
+        var stale = await InspectionCallAsync(driver, "get_variables", InspectionArguments(session, context, "variablesReference", 1001), "set-old-read", isError: true);
+        AssertInspectionFailure(stale, "get_variables", protocolFailure: false);
+        AssertSetVariableFailure(await SetVariableCallAsync(driver, SetVariableArguments(session, context, 1001, name, value), "set-old-write", true), "refused");
+        Assert.Equal(after.Count, (await driver.ReadNativeActionsAsync()).Count);
+        if (expectedReference > 0)
+        {
+            var nested = await InspectionCallAsync(driver, "get_variables", InspectionArguments(session, fresh, "variablesReference", expectedReference), "set-new-read");
+            Assert.Equal("variables_success", nested["kind"]?.GetValue<string>());
+            Assert.Equal(fresh, nested["inspectionContextId"]?.GetValue<string>());
+            Assert.Equal("Item1", nested["variables"]?[0]?["name"]?.GetValue<string>());
+        }
+        await driver.StopSingleControlledSessionAsync(session);
+    }
+
+    [Theory]
+    [InlineData("missing-session")]
+    [InlineData("blank-session")]
+    [InlineData("missing-context")]
+    [InlineData("blank-context")]
+    [InlineData("missing-reference")]
+    [InlineData("zero-reference")]
+    [InlineData("negative-reference")]
+    [InlineData("fractional-reference")]
+    [InlineData("overflow-reference")]
+    [InlineData("missing-name")]
+    [InlineData("null-name")]
+    [InlineData("missing-value")]
+    [InlineData("non-string-value")]
+    [InlineData("extra")]
+    public async Task SetVariable_InvalidInput_IsRejectedBeforeDapIo(string scenario)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(SetVariableOptions(true));
+        var session = await StartStoppedSessionAsync(driver, "set-invalid-start");
+        var context = (await InspectionStackAsync(driver, session, "set-invalid-stack"))["inspectionContextId"]!.GetValue<string>();
+        var arguments = SetVariableArguments(session, context, 1001, "x", "1");
+        switch (scenario)
+        {
+            case "missing-session": arguments.Remove("debugSessionId"); break;
+            case "blank-session": arguments["debugSessionId"] = " \t"; break;
+            case "missing-context": arguments.Remove("inspectionContextId"); break;
+            case "blank-context": arguments["inspectionContextId"] = " \t"; break;
+            case "missing-reference": arguments.Remove("variablesReference"); break;
+            case "zero-reference": arguments["variablesReference"] = 0; break;
+            case "negative-reference": arguments["variablesReference"] = -1; break;
+            case "fractional-reference": arguments["variablesReference"] = 1.5; break;
+            case "overflow-reference": arguments["variablesReference"] = (long)int.MaxValue + 1; break;
+            case "missing-name": arguments.Remove("name"); break;
+            case "null-name": arguments["name"] = null; break;
+            case "missing-value": arguments.Remove("value"); break;
+            case "non-string-value": arguments["value"] = 42; break;
+            case "extra": arguments["unexpected"] = true; break;
+            default: throw new ArgumentOutOfRangeException(nameof(scenario));
+        }
+        var before = await driver.ReadNativeActionsAsync();
+        var result = await SetVariableCallAsync(driver, arguments, "set-invalid", true);
+        Assert.Equal("invalid_tool_arguments", result["kind"]?.GetValue<string>());
+        Assert.Equal("INVALID_TOOL_ARGUMENTS", result["error"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(result);
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Theory]
+    [InlineData(null, "none", false)]
+    [InlineData(false, "none", false)]
+    [InlineData(true, "none", true)]
+    [InlineData(false, "enable-on-threads", true)]
+    [InlineData(true, "disable-on-threads", false)]
+    public async Task SetVariable_CapabilityBaselineAndReaderOrderedDelta_ControlAdmission(bool? baseline, string delta, bool supported)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(SetVariableOptions(baseline, delta), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "set-cap-start");
+        var context = (await InspectionStackAsync(driver, session, "set-cap-stack"))["inspectionContextId"]!.GetValue<string>();
+        if (delta != "none")
+        {
+            var barrier = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_threads", new JsonObject { ["debugSessionId"] = session },
+                    ModernMcpProcessDriver.CurrentMeta(), new RequestId("set-cap-barrier")), isError: false);
+            Assert.Equal("threads_success", barrier["kind"]?.GetValue<string>());
+        }
+        var before = await driver.ReadNativeActionsAsync();
+        var result = await SetVariableCallAsync(driver, SetVariableArguments(session, context, 1001, "x", "1"), "set-cap", !supported);
+        if (supported)
+        {
+            Assert.Equal("set_variable_success", result["kind"]?.GetValue<string>());
+            AssertSetVariableRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1001, "x", "1");
+        }
+        else
+        {
+            AssertSetVariableFailure(result, "unsupported");
+            Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+        }
+    }
+
+    [Fact]
+    public async Task SetVariable_UnknownContext_IsRefusedWithoutWrite()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(SetVariableOptions(true), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "set-unknown-start");
+        var before = await driver.ReadNativeActionsAsync();
+        AssertSetVariableFailure(await SetVariableCallAsync(driver, SetVariableArguments(session, "unknown-context", 1001, "x", "1"), "set-unknown", true), "refused");
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Fact]
+    public async Task SetVariable_ConcurrentOldContextRead_RefusesReplyAfterMutation()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            DisableFormElicitation: true,
+            FixtureConfiguration: new FixtureConfiguration(SupportsDelayedStackTraceLoading: true,
+                LifecycleMode: "all-stop", SupportsSetVariable: true, VariablesResponseMode: "hold")));
+        var session = await StartStoppedSessionAsync(driver, "set-race-start");
+        var context = (await InspectionStackAsync(driver, session, "set-race-stack"))["inspectionContextId"]!.GetValue<string>();
+        var before = await driver.ReadNativeActionsAsync();
+        var read = driver.CallToolRawAsync("get_variables", InspectionArguments(session, context, "variablesReference", 1001),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("set-race-read"), timeout: TimeSpan.FromSeconds(35));
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await driver.WaitForFixtureRecordAsync("inspection-response-gated", observation.Token);
+            Assert.False(read.IsCompleted);
+            var updated = await SetVariableCallAsync(driver, SetVariableArguments(session, context, 1001, "x", "1"), "set-race-write");
+            Assert.Equal("set_variable_success", updated["kind"]?.GetValue<string>());
+            var fresh = Assert.IsType<string>(updated["inspectionContextId"]?.GetValue<string>());
+            Assert.NotEqual(context, fresh);
+            Assert.False(read.IsCompleted);
+            driver.ReleaseStackTraceResponse();
+            var stale = AssertApplicationEnvelope(await read, isError: true);
+            AssertInspectionFailure(stale, "get_variables", protocolFailure: false);
+            Assert.False(stale.ContainsKey("variables"));
+            var nested = await InspectionCallAsync(driver, "get_variables",
+                InspectionArguments(session, fresh, "variablesReference", 1002), "set-race-fresh");
+            Assert.Equal("variables_success", nested["kind"]?.GetValue<string>());
+            Assert.Equal(fresh, nested["inspectionContextId"]?.GetValue<string>());
+            var actions = (await driver.ReadNativeActionsAsync()).Skip(before.Count).ToArray();
+            Assert.Equal(["variables", "setVariable", "variables"], actions.Select(static action => action.Command));
+            AssertSetVariableRequest(actions, 1001, "x", "1");
+        }
+        finally
+        {
+            driver.ReleaseStackTraceResponse();
+        }
+    }
+
+    [Theory]
+    [InlineData("fixture:negative", "failed", false)]
+    [InlineData("fixture:malformed", "outcome_unknown", true)]
+    [InlineData("fixture:oversized", "outcome_unknown", true)]
+    [InlineData("fixture:wrong-command", "outcome_unknown", true)]
+    [InlineData("fixture:timeout", "outcome_unknown", true)]
+    public async Task SetVariable_NegativeOrInvalidReply_InvalidatesContextAndNeverRetries(string name, string outcome, bool drained)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(SetVariableOptions(true), startupTimeout: TimeSpan.FromSeconds(10));
+        var session = await StartStoppedSessionAsync(driver, "set-failure-start");
+        var context = (await InspectionStackAsync(driver, session, "set-failure-stack"))["inspectionContextId"]!.GetValue<string>();
+        var before = await driver.ReadNativeActionsAsync();
+        var response = await driver.CallToolRawAsync("set_variable", SetVariableArguments(session, context, 1001, name, "1"),
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("set-failure"), timeout: TimeSpan.FromSeconds(35));
+        AssertSetVariableFailure(AssertApplicationEnvelope(response, isError: true), outcome);
+        AssertSetVariableRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1001, name, "1");
+        var state = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("set-failure-state")), isError: drained);
+        if (drained)
+        {
+            AssertNotFound(state);
+        }
+        else
+        {
+            Assert.Equal("debug_state_success", state["kind"]?.GetValue<string>());
+            var stale = await InspectionCallAsync(driver, "get_variables", InspectionArguments(session, context, "variablesReference", 1001), "set-failure-old", true);
+            AssertInspectionFailure(stale, "get_variables", protocolFailure: false);
+        }
+    }
+
+    [Fact]
+    public async Task SetVariable_ReplyAfterInvalidation_ReturnsUnknownAndDrains()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(SetVariableOptions(true));
+        var session = await StartStoppedSessionAsync(driver, "set-held-start");
+        var context = (await InspectionStackAsync(driver, session, "set-held-stack"))["inspectionContextId"]!.GetValue<string>();
+        var before = await driver.ReadNativeActionsAsync();
+        var operation = driver.CallToolRawAsync("set_variable", SetVariableArguments(session, context, 1001, "fixture:hold-invalidated", "1"),
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("set-held"), timeout: TimeSpan.FromSeconds(35));
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await driver.WaitForFixtureRecordAsync("set-variable-response-gated", observation.Token);
+            var barrier = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_threads", new JsonObject { ["debugSessionId"] = session },
+                    ModernMcpProcessDriver.CurrentMeta(), new RequestId("set-held-barrier"), observation.Token), isError: false);
+            Assert.Equal("threads_success", barrier["kind"]?.GetValue<string>());
+            Assert.False(operation.IsCompleted);
+        }
+        finally { driver.ReleaseStackTraceResponse(); }
+        AssertSetVariableFailure(AssertApplicationEnvelope(await operation, isError: true), "outcome_unknown");
+        AssertSetVariableRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1001, "fixture:hold-invalidated", "1");
+        AssertNotFound(AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("set-held-state")), isError: true));
+    }
+
+    [Fact]
+    public async Task SetVariable_PostWriteCancellation_DrainsWithoutRetry()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(SetVariableOptions(true));
+        var session = await StartStoppedSessionAsync(driver, "set-cancel-start");
+        var context = (await InspectionStackAsync(driver, session, "set-cancel-stack"))["inspectionContextId"]!.GetValue<string>();
+        using var adapter = System.Diagnostics.Process.GetProcessById(await driver.ReadAdapterProcessIdAsync());
+        using var cancellation = new CancellationTokenSource();
+        var before = await driver.ReadNativeActionsAsync();
+        var operation = driver.CallToolRawAsync("set_variable", SetVariableArguments(session, context, 1001, "fixture:hold", "1"),
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("set-cancel"), cancellation.Token, timeout: TimeSpan.FromSeconds(35));
+        using (var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+        {
+            await driver.WaitForFixtureRecordAsync("set-variable-response-gated", observation.Token);
+            Assert.False(operation.IsCompleted);
+        }
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
+        using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await driver.WaitForFixtureRecordAsync("disconnect-response", cleanup.Token);
+        await adapter.WaitForExitAsync(cleanup.Token);
+        AssertSetVariableRequest((await driver.ReadNativeActionsAsync()).Skip(before.Count), 1001, "fixture:hold", "1");
+        AssertNotFound(AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = session },
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId("set-cancel-state"), cleanup.Token), isError: true));
+    }
+
+    private static ModernMcpStartOptions SetVariableOptions(bool? supported, string delta = "none") => new(
+            DisableFormElicitation: true,
+            FixtureConfiguration: new FixtureConfiguration(SupportsDelayedStackTraceLoading: true, LifecycleMode: "all-stop",
+                    SupportsSetVariable: supported, SetVariableCapabilityDelta: delta));
+
+    private static JsonObject SetVariableArguments(string session, string context, int reference, string name, string value) => new()
+    {
+        ["debugSessionId"] = session,
+        ["inspectionContextId"] = context,
+        ["variablesReference"] = reference,
+        ["name"] = name,
+        ["value"] = value,
+    };
+
+    private static async Task<JsonObject> SetVariableCallAsync(ModernMcpProcessDriver driver, JsonObject arguments, string id, bool isError = false) =>
+            AssertApplicationEnvelope(await driver.CallToolRawAsync("set_variable", arguments, ModernMcpProcessDriver.CurrentMeta(), new RequestId(id)), isError);
+
+    private static void AssertSetVariableFailure(JsonObject content, string outcome)
+    {
+        Assert.Equal($"DAP_SET_VARIABLE_{outcome.ToUpperInvariant()}", content["error"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        Assert.DoesNotContain("private", content.ToJsonString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void AssertSetVariableRequest(IEnumerable<ModernNativeAction> actions, int reference, string name, string value)
+    {
+        var request = Assert.Single(actions, static action => action.Command == "setVariable");
+        var arguments = JsonNode.Parse(request.Detail!)!["arguments"];
+        Assert.True(JsonNode.DeepEquals(new JsonObject { ["variablesReference"] = reference, ["name"] = name, ["value"] = value }, arguments));
+    }
+
+    [Fact]
     public async Task ToolsList_EvaluateExpression_PublishesExplicitClosedInputWithoutReadOnlyOrIdempotentClaims()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync(startupTimeout: TimeSpan.FromSeconds(10));

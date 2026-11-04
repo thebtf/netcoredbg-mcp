@@ -1177,6 +1177,224 @@ public sealed class NetCoreDbgSessionTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task SetVariable_Cancellation_BeforeHeaderPreservesContextButPartialHeaderDrains(bool partialHeader)
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SupportsDelayedStackTraceLoading: true, LifecycleMode: "all-stop", SupportsSetVariable: true),
+            "D:\\fixtures\\program.dll", TimeSpan.FromSeconds(10), RequestTimeout, StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var context = await session.GetInspectionContextAsync(observation.Token);
+        var writesBefore = session.DapWriteCalls;
+        if (partialHeader)
+        {
+            session.ArmDapWriteAtHeaderEntryBarrier(prefixBytes: 1);
+        }
+        else
+        {
+            session.ArmDapWriteBeforeHeaderBarrier();
+        }
+
+        using var cancellation = new CancellationTokenSource();
+        var operation = session.SetVariableThroughRegistryAsync(context, cancellation.Token,
+            beforeCancellationInspection: () =>
+            {
+                Assert.Equal(0, session.PendingRequestCount);
+                session.ReleaseDapWriteBarrier();
+                return Task.CompletedTask;
+            },
+            invokeSetVariable: async invoke =>
+            {
+                try
+                {
+                    return await invoke("set-cancel", cancellation.Token);
+                }
+                catch (OperationCanceledException) when (!partialHeader && cancellation.IsCancellationRequested)
+                {
+                    Assert.Equal(0, session.PendingRequestCount);
+                    Assert.Equal(writesBefore, session.DapWriteCalls);
+                    Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "setVariable");
+                    session.ReleaseDapWriteBarrier();
+                    var next = await invoke("set-after-cancel", observation.Token);
+                    Assert.False(next.IsError == true);
+                    var result = Assert.IsType<JsonElement>(next.StructuredContent);
+                    Assert.Equal("set_variable_success", result.GetProperty("kind").GetString());
+                    Assert.NotEqual(context, result.GetProperty("inspectionContextId").GetString());
+                    Assert.Equal("updated", result.GetProperty("value").GetString());
+                    throw;
+                }
+            });
+        try
+        {
+            if (partialHeader)
+            {
+                await session.WaitForDapHeaderEntryAsync(observation.Token);
+            }
+            else
+            {
+                await session.WaitForDapPreHeaderWriteAsync(observation.Token);
+            }
+            cancellation.Cancel();
+            var probe = await operation.WaitAsync(observation.Token);
+            Assert.True(probe.CancellationObserved);
+            Assert.Equal(!partialHeader, probe.TokenRetained);
+            Assert.Equal(!partialHeader, probe.SlotRetained);
+            Assert.Equal(!partialHeader, probe.AdapterAlive);
+            Assert.Equal(0, probe.ActiveRequestCount);
+            var state = Assert.IsType<JsonElement>(probe.Result.StructuredContent);
+            Assert.Equal(partialHeader ? "debug_session_not_found" : "debug_state_success", state.GetProperty("kind").GetString());
+            var mutations = (await session.Fixture.ReadTranscriptAsync()).Where(static entry => entry.Command == "setVariable");
+            if (partialHeader)
+            {
+                Assert.Equal(1, session.ArmedHeaderUnderlyingWriteCalls);
+                Assert.Equal(1L, session.ArmedHeaderBytesForwarded);
+                Assert.True(probe.LeaseReleasedBeforeRemoval == true);
+                Assert.Null(probe.RetainedThreadsResult);
+                Assert.Empty(mutations);
+            }
+            else
+            {
+                Assert.Null(probe.LeaseReleasedBeforeRemoval);
+                Assert.Equal("threads_success", Assert.IsType<JsonElement>(probe.RetainedThreadsResult!.StructuredContent).GetProperty("kind").GetString());
+                Assert.Single(mutations);
+            }
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+            cancellation.Cancel();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
+    [Fact]
+    public async Task SetVariable_StaleReply_FencesNewInspectionBeforeRegistryDrain()
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SupportsDelayedStackTraceLoading: true, LifecycleMode: "all-stop", SupportsSetVariable: true),
+            "D:\\fixtures\\program.dll", TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(15), StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var context = await session.GetInspectionContextAsync(observation.Token);
+        var operation = session.SetVariableThroughRegistryAsync(context, observation.Token, variableName: "fixture:hold");
+        try
+        {
+            await session.Fixture.WaitForTranscriptKindAsync("set-variable-response-gated", observation.Token);
+            Assert.False(operation.IsCompleted);
+            await session.DispatchStaleSetVariableResponseAsync(
+                () => Assert.False(session.CanCaptureInspectionTarget(),
+                    "A stale mutation reply must fence new inspection before its completion is published."),
+                observation.Token);
+            var probe = await operation.WaitAsync(observation.Token);
+            var content = Assert.IsType<JsonElement>(probe.Result.StructuredContent);
+            Assert.Equal("DAP_SET_VARIABLE_OUTCOME_UNKNOWN", content.GetProperty("error").GetString());
+            Assert.True(probe.LeaseReleasedBeforeRemoval == true);
+            Assert.Single(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "setVariable");
+        }
+        finally
+        {
+            session.Fixture.ReleaseStackTraceResponse();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
+    [Fact]
+    public async Task SetVariable_ReaderFailureBeforeWriterHandoff_SendsNoMutationBytes()
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SupportsDelayedStackTraceLoading: true, LifecycleMode: "all-stop", SupportsSetVariable: true),
+            "D:\\fixtures\\program.dll", TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(15), StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var context = await session.GetInspectionContextAsync(observation.Token);
+        var writesBefore = session.DapWriteCalls;
+        session.ArmDapWriteBeforeHeaderBarrier();
+        var operation = session.SetVariableThroughRegistryAsync(context, observation.Token);
+        try
+        {
+            await session.WaitForDapPreHeaderWriteAsync(observation.Token);
+            var pending = session.GetPendingResponseTask("setVariable");
+            Assert.False(pending.IsCompleted);
+            var readerFailure = new IOException("controlled DAP reader failure");
+            session.FailPendingAsReaderFailure(readerFailure);
+            var failure = await Assert.ThrowsAnyAsync<IOException>(async () => await pending.WaitAsync(observation.Token));
+            Assert.Same(readerFailure, failure);
+            Assert.False(observation.IsCancellationRequested);
+            Assert.False(operation.IsCompleted);
+            session.ReleaseDapWriteBarrier();
+            var probe = await operation.WaitAsync(observation.Token);
+            Assert.Equal(writesBefore, session.DapWriteCalls);
+            Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "setVariable");
+            var content = Assert.IsType<JsonElement>(probe.Result.StructuredContent);
+            Assert.Equal("DAP_SET_VARIABLE_OUTCOME_UNKNOWN", content.GetProperty("error").GetString());
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
+    [Fact]
+    public async Task SetVariable_ReaderFailureMissedByPendingSweep_SendsNoMutationBytes()
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SupportsDelayedStackTraceLoading: true, LifecycleMode: "all-stop", SupportsSetVariable: true),
+            "D:\\fixtures\\program.dll", TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(15), StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var context = await session.GetInspectionContextAsync(observation.Token);
+        var writesBefore = session.DapWriteCalls;
+        session.ArmDapWriteBeforeHeaderBarrier();
+        var operation = session.SetVariableThroughRegistryAsync(context, observation.Token);
+        try
+        {
+            await session.WaitForDapPreHeaderWriteAsync(observation.Token);
+            // This state is reachable when the reader's pending sweep finishes before registration.
+            session.SimulateReaderFailureMissingPendingRequest(new IOException("controlled DAP reader failure"));
+            session.ReleaseDapWriteBarrier();
+            var probe = await operation.WaitAsync(observation.Token);
+            Assert.Equal(writesBefore, session.DapWriteCalls);
+            Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "setVariable");
+            var content = Assert.IsType<JsonElement>(probe.Result.StructuredContent);
+            Assert.Equal("DAP_SET_VARIABLE_OUTCOME_UNKNOWN", content.GetProperty("error").GetString());
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
+    [Theory]
+    [InlineData("fixture:invalid-seq")]
+    [InlineData("fixture:missing-seq")]
+    public async Task SetVariable_InvalidResponseSequence_ReportsUnknownAndDrains(string name)
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SupportsDelayedStackTraceLoading: true, LifecycleMode: "all-stop", SupportsSetVariable: true),
+            "D:\\fixtures\\program.dll", TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(15), StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var context = await session.GetInspectionContextAsync(observation.Token);
+
+        var probe = await session.SetVariableThroughRegistryAsync(context, observation.Token, variableName: name);
+
+        Assert.True(probe.Result.IsError == true);
+        var content = Assert.IsType<JsonElement>(probe.Result.StructuredContent);
+        Assert.Equal("DAP_SET_VARIABLE_OUTCOME_UNKNOWN", content.GetProperty("error").GetString());
+        Assert.True(probe.LeaseReleasedBeforeRemoval == true);
+        Assert.Single(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "setVariable");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task ExceptionInfo_Cancellation_BeforeHeaderPreservesSessionButPartialHeaderDrains(bool partialHeader)
     {
         await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(

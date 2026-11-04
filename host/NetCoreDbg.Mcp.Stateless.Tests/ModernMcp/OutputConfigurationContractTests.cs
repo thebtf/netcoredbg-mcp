@@ -151,6 +151,90 @@ public sealed class OutputConfigurationContractTests
         });
     }
 
+    [Theory]
+    [InlineData("session", "\\uD800")]
+    [InlineData("context", "\\uDC00")]
+    [InlineData("name", "\\uD800")]
+    [InlineData("value", "\\uDC00")]
+    [InlineData("nested", "\\uD800")]
+    [InlineData("duplicate", "")]
+    [InlineData("outer", "")]
+    public async Task SetVariable_MalformedWireArguments_ReturnInvalidArguments(string field, string escaped)
+    {
+        await WithHostAsync("100000", "10000000", async (process, standardError, token) =>
+        {
+            var session = field == "session" ? escaped : "missing";
+            var context = field == "context" ? escaped : "context";
+            var name = field == "name" ? escaped : "x";
+            var value = field == "value" ? escaped : "1";
+            var arguments = $"{{\"debugSessionId\":\"{session}\",\"inspectionContextId\":\"{context}\",\"variablesReference\":1,\"name\":\"{name}\",\"value\":\"{value}\"";
+            arguments += field switch
+            {
+                "nested" => $",\"unexpected\":{{\"nested\":\"{escaped}\"}}}}",
+                "duplicate" => ",\"value\":\"2\"}",
+                _ => "}",
+            };
+            if (field == "outer") arguments = "[]";
+            var request = "{\"jsonrpc\":\"2.0\",\"id\":\"mutation-input\",\"method\":\"tools/call\",\"params\":{\"name\":\"set_variable\",\"arguments\":"
+                + arguments + ",\"_meta\":" + ModernMcpProcessDriver.CurrentMeta().ToJsonString() + "}}";
+            await process.StandardInput.WriteLineAsync(request.AsMemory(), token);
+            await process.StandardInput.FlushAsync(token);
+            var line = await process.StandardOutput.ReadLineAsync(token);
+            Assert.NotNull(line);
+            var response = Assert.IsType<JsonObject>(JsonNode.Parse(line));
+            process.StandardInput.Close();
+            await process.WaitForExitAsync(token);
+            var diagnostic = await standardError.WaitAsync(token);
+            Assert.False(response.ContainsKey("error"), $"{line}\n{diagnostic}");
+            var result = Assert.IsType<JsonObject>(response["result"]);
+            Assert.True(result["isError"]?.GetValue<bool>());
+            Assert.Equal("invalid_tool_arguments", result["structuredContent"]?["kind"]?.GetValue<string>());
+            Assert.Equal("INVALID_TOOL_ARGUMENTS", result["structuredContent"]?["error"]?.GetValue<string>());
+        });
+    }
+
+    [Theory]
+    [InlineData("", "", 1)]
+    [InlineData("雪", "line\nvalue", int.MaxValue)]
+    public async Task SetVariable_ValidWireArguments_ReachSessionLookup(string name, string value, int reference)
+    {
+        await WithHostAsync("100000", "10000000", async (process, standardError, token) =>
+        {
+            var request = new JsonObject
+            {
+                ["jsonrpc"] = "2.0",
+                ["id"] = "mutation-valid",
+                ["method"] = "tools/call",
+                ["params"] = new JsonObject
+                {
+                    ["name"] = "set_variable",
+                    ["arguments"] = new JsonObject
+                    {
+                        ["debugSessionId"] = "missing",
+                        ["inspectionContextId"] = "context",
+                        ["variablesReference"] = reference,
+                        ["name"] = name,
+                        ["value"] = value,
+                    },
+                    ["_meta"] = ModernMcpProcessDriver.CurrentMeta(),
+                },
+            };
+            await process.StandardInput.WriteLineAsync(request.ToJsonString().AsMemory(), token);
+            await process.StandardInput.FlushAsync(token);
+            var line = await process.StandardOutput.ReadLineAsync(token);
+            Assert.NotNull(line);
+            var response = Assert.IsType<JsonObject>(JsonNode.Parse(line));
+            process.StandardInput.Close();
+            await process.WaitForExitAsync(token);
+            var diagnostic = await standardError.WaitAsync(token);
+            Assert.False(response.ContainsKey("error"), $"{line}\n{diagnostic}");
+            var result = Assert.IsType<JsonObject>(response["result"]);
+            Assert.True(result["isError"]?.GetValue<bool>());
+            Assert.Equal("debug_session_not_found", result["structuredContent"]?["kind"]?.GetValue<string>());
+            Assert.Equal("DEBUG_SESSION_NOT_FOUND", result["structuredContent"]?["error"]?.GetValue<string>());
+        });
+    }
+
     private static async Task SendDiscoveryAsync(Process process, CancellationToken cancellationToken)
     {
         var request = new JsonObject
@@ -218,7 +302,7 @@ public sealed class OutputConfigurationContractTests
                     {
                         try
                         {
-                            process.Kill(entireProcessTree: true);
+                            process.Kill();
                         }
                         catch (InvalidOperationException) when (process.HasExited)
                         {

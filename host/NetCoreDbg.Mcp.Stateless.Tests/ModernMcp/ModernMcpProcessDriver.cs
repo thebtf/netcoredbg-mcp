@@ -227,6 +227,15 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             cancellationToken,
             timeout);
 
+    internal async Task StopSingleControlledSessionAsync(string sessionId)
+    {
+        Assert.Single(await _fixture.ReadTranscriptAsync(), static entry => entry.Kind == "startup");
+        var result = RequireResult(await CallToolRawAsync("stop_debug", new JsonObject { ["debugSessionId"] = sessionId },
+            CurrentMeta(), new RequestId("controlled-cleanup")));
+        Assert.False(result["isError"]?.GetValue<bool>() ?? false);
+        Assert.Equal("stop_debug_success", result["structuredContent"]?["kind"]?.GetValue<string>());
+    }
+
     internal async Task<JsonRpcResponse> SendRawRequestAsync(
         string method,
         JsonNode? parameters,

@@ -143,7 +143,9 @@ internal sealed record AdapterOptions(
     string ExceptionInfoCapabilityDelta,
     string ExceptionBreakpointFilters,
     string ExceptionFiltersCapabilityDelta,
-    string SetExceptionBreakpointsResponseMode)
+    string SetExceptionBreakpointsResponseMode,
+    bool? SupportsSetVariable,
+    string SetVariableCapabilityDelta)
 {
     public static AdapterOptions Parse(string[] args, string? environmentOptions)
     {
@@ -187,6 +189,8 @@ internal sealed record AdapterOptions(
         var exceptionBreakpointFilters = "omit";
         var exceptionFiltersCapabilityDelta = "none";
         var setExceptionBreakpointsResponseMode = "absent-body";
+        bool? supportsSetVariable = null;
+        var setVariableCapabilityDelta = "none";
 
         foreach (var argument in args.Concat(SplitOptions(environmentOptions)))
         {
@@ -289,6 +293,13 @@ internal sealed record AdapterOptions(
                 case var _ when argument.StartsWith("--variables-response=", StringComparison.Ordinal):
                     variablesResponseMode = argument["--variables-response=".Length..];
                     break;
+                case var _ when argument.StartsWith("--supports-set-variable=", StringComparison.Ordinal):
+                    var setVariableSupport = argument["--supports-set-variable=".Length..];
+                    supportsSetVariable = setVariableSupport == "omit" ? null : bool.Parse(setVariableSupport);
+                    break;
+                case var _ when argument.StartsWith("--set-variable-capability-delta=", StringComparison.Ordinal):
+                    setVariableCapabilityDelta = argument["--set-variable-capability-delta=".Length..];
+                    break;
                 case var _ when argument.StartsWith("--pause-response=", StringComparison.Ordinal):
                     pauseResponseMode = argument["--pause-response=".Length..];
                     break;
@@ -364,7 +375,9 @@ internal sealed record AdapterOptions(
             exceptionInfoCapabilityDelta,
             exceptionBreakpointFilters,
             exceptionFiltersCapabilityDelta,
-            setExceptionBreakpointsResponseMode);
+            setExceptionBreakpointsResponseMode,
+            supportsSetVariable,
+            setVariableCapabilityDelta);
     }
 
     private static IEnumerable<string> SplitOptions(string? options) =>
@@ -757,6 +770,10 @@ internal sealed class ControlledDapAdapter
                 {
                     initializeCapabilities["supportsExceptionInfoRequest"] = exceptionInfoSupport;
                 }
+                if (_options.SupportsSetVariable is { } setVariableSupport)
+                {
+                    initializeCapabilities["supportsSetVariable"] = setVariableSupport;
+                }
                 if (_options.ExceptionBreakpointFilters != "omit")
                 {
                     initializeCapabilities["exceptionBreakpointFilters"] = ExceptionFilterDescriptors(_options.ExceptionBreakpointFilters == "supported");
@@ -853,6 +870,12 @@ internal sealed class ControlledDapAdapter
 
                 return false;
             case "threads":
+                if (_options.SetVariableCapabilityDelta is "enable-on-threads" or "disable-on-threads")
+                {
+                    var supported = _options.SetVariableCapabilityDelta == "enable-on-threads";
+                    await WriteEventAsync("capabilities", new { capabilities = new { supportsSetVariable = supported } }, cancellationToken);
+                    await RecordAsync(new { kind = "set-variable-capabilities-delta-event", supported }, cancellationToken);
+                }
                 if (_options.ExceptionInfoCapabilityDelta is "enable-on-threads" or "disable-on-threads")
                 {
                     var supported = _options.ExceptionInfoCapabilityDelta == "enable-on-threads";
@@ -876,6 +899,9 @@ internal sealed class ControlledDapAdapter
                 return false;
             case "evaluate":
                 await HandleEvaluateRequestAsync(sequence, root, cancellationToken);
+                return false;
+            case "setVariable":
+                await HandleSetVariableRequestAsync(sequence, root, cancellationToken);
                 return false;
             case "exceptionInfo":
                 await HandleExceptionInfoRequestAsync(sequence, cancellationToken);
@@ -2442,6 +2468,64 @@ internal sealed class ControlledDapAdapter
         await WriteResponseAsync(sequence, "evaluate", body, cancellationToken);
     }
 
+    private async Task HandleSetVariableRequestAsync(int sequence, JsonElement root, CancellationToken cancellationToken)
+    {
+        var name = root.GetProperty("arguments").GetProperty("name").GetString();
+        const string privatePayload = "private controlled mutation payload";
+        switch (name)
+        {
+            case "fixture:negative":
+                await WriteResponseAsync(sequence, "setVariable", new { message = privatePayload }, cancellationToken, success: false);
+                return;
+            case "fixture:malformed":
+                await WriteResponseAsync(sequence, "setVariable", new { value = privatePayload, variablesReference = -1 }, cancellationToken);
+                return;
+            case "fixture:invalid-seq":
+                await WriteMessageAsync(new
+                {
+                    seq = "invalid",
+                    type = "response",
+                    request_seq = sequence,
+                    command = "setVariable",
+                    success = true,
+                    body = new { value = privatePayload }
+                }, cancellationToken);
+                return;
+            case "fixture:missing-seq":
+                await WriteMessageAsync(new
+                {
+                    type = "response",
+                    request_seq = sequence,
+                    command = "setVariable",
+                    success = true,
+                    body = new { value = privatePayload }
+                }, cancellationToken);
+                return;
+            case "fixture:oversized":
+                await WriteResponseAsync(sequence, "setVariable", new { value = new string('x', 1_000_000) }, cancellationToken);
+                return;
+            case "fixture:wrong-command":
+                await WriteResponseAsync(sequence, "variables", new { value = privatePayload }, cancellationToken);
+                return;
+            case "fixture:timeout":
+                return;
+            case "fixture:hold-invalidated":
+                await WriteEventAsync("invalidated", new { areas = new[] { "variables" }, threadId = 1 }, cancellationToken);
+                goto case "fixture:hold";
+            case "fixture:hold":
+                await RecordAsync(new { kind = "set-variable-response-gated", sequence }, cancellationToken);
+                _heldInspectionResponse = CompleteHeldInspectionResponseAsync(sequence, "setVariable",
+                    new { value = "updated", type = "tuple", variablesReference = 1002 }, _lifecycleEventsCancellation.Token);
+                return;
+            case "fixture:optional":
+                await WriteResponseAsync(sequence, "setVariable", new { value = "untyped" }, cancellationToken);
+                return;
+            default:
+                await WriteResponseAsync(sequence, "setVariable", new { value = "updated", type = "tuple", variablesReference = 1002 }, cancellationToken);
+                return;
+        }
+    }
+
     private async Task HandleInspectionRequestAsync(int sequence, string command, JsonElement root, CancellationToken cancellationToken)
     {
         const string privatePayload = "private controlled inspection payload";
@@ -2471,16 +2555,19 @@ internal sealed class ControlledDapAdapter
         {
             entries = [entries[0], new { name = privatePayload, value = privatePayload, variablesReference = "not-an-integer" }];
         }
-        else if (mode is not ("success" or "hold-then-invalidated"))
+        else if (mode is not ("success" or "hold" or "hold-then-invalidated"))
         {
             throw new InvalidOperationException($"Unknown inspection response mode '{mode}'.");
         }
 
         var body = new Dictionary<string, object?> { [command] = entries };
-        if (mode == "hold-then-invalidated" && !_inspectionResponseHeld)
+        if ((mode is "hold" or "hold-then-invalidated") && !_inspectionResponseHeld)
         {
             _inspectionResponseHeld = true;
-            await WriteEventAsync("invalidated", new { areas = new[] { "variables" }, threadId = 1 }, cancellationToken);
+            if (mode == "hold-then-invalidated")
+            {
+                await WriteEventAsync("invalidated", new { areas = new[] { "variables" }, threadId = 1 }, cancellationToken);
+            }
             await RecordAsync(new { kind = "inspection-response-gated", command }, cancellationToken);
             _heldInspectionResponse = CompleteHeldInspectionResponseAsync(sequence, command, body, _lifecycleEventsCancellation.Token);
             return;
