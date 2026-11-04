@@ -251,8 +251,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             + (IsOptimized ? 4 : 5) + RuntimeTextBytes(SymbolStatus);
     }
 
-    private sealed record RuntimeProgressEntry(JsonEncodedText Id, JsonEncodedText Title, JsonEncodedText? Message,
-        double? Percentage, bool Cancellable, double StartedAt)
+    private sealed record RuntimeProgressEntry(JsonEncodedText Id, JsonEncodedText Title, string? MessageText,
+        JsonEncodedText? Message, double? Percentage, bool Cancellable, double StartedAt)
     {
         internal long Bytes => ProgressEntrySyntaxBytes + RuntimeTextBytes(Id) + RuntimeTextBytes(Title)
             + RuntimeTextBytes(Message) + (Percentage is { } percentage ? RuntimeNumberBytes(percentage) : 4)
@@ -2377,16 +2377,18 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             var title = RequireString(body, "title");
             var cancellable = ReadOptionalBoolean(body, "cancellable");
             entry = new RuntimeProgressEntry(JsonEncodedText.Encode(id), JsonEncodedText.Encode(title),
-                EncodeRuntimeOptionalText(message), percentage, cancellable, Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency);
+                message, EncodeRuntimeOptionalText(message), percentage, cancellable, Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency);
         }
         else
         {
             if (previous is null) return;
             var prior = previous.Value;
-            if ((message is null || message == prior.Message?.Value) && (percentage is null || percentage == prior.Percentage)) return;
+            var messageChanged = message is not null && !string.Equals(message, prior.MessageText, StringComparison.Ordinal);
+            if (!messageChanged && (percentage is null || percentage == prior.Percentage)) return;
             entry = prior with
             {
-                Message = message is null || message == prior.Message?.Value ? prior.Message : JsonEncodedText.Encode(message),
+                MessageText = messageChanged ? message : prior.MessageText,
+                Message = messageChanged ? JsonEncodedText.Encode(message!) : prior.Message,
                 Percentage = percentage ?? prior.Percentage,
             };
         }

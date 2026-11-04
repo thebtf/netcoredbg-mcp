@@ -923,6 +923,30 @@ public sealed class OutputContractTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public async Task GetProgress_UpdateDistinguishesNewlineFromLiteralEscape()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(InventoryEvent("progressStart", new JsonObject
+            {
+                ["progressId"] = "edge",
+                ["title"] = "working",
+                ["message"] = "\n",
+            })),
+            batches: new JsonArray(Batch(InventoryEvent("progressUpdate", new JsonObject
+            {
+                ["progressId"] = "edge",
+                ["message"] = "\\n",
+            })))));
+        var token = await StartSessionAsync(driver, "progress-escape-start");
+        var initial = Assert.Single(Assert.IsType<JsonArray>((await ReadInventoryAsync(driver, token, "get_progress", "progress-escape-before"))["progress"]));
+        Assert.Equal("\n", initial?["message"]?.GetValue<string>());
+
+        await AdvanceOutputAsync(driver, token, "progress-escape-barrier");
+        var updated = Assert.Single(Assert.IsType<JsonArray>((await ReadInventoryAsync(driver, token, "get_progress", "progress-escape-after"))["progress"]));
+        Assert.Equal("\\n", updated?["message"]?.GetValue<string>());
+    }
+
+    [Fact]
     public async Task GetProgress_PercentageBoundaries_AcceptsZeroFractionAndOneHundred()
     {
         await using var driver = await StartTailDriverAsync(OutputOptions(
