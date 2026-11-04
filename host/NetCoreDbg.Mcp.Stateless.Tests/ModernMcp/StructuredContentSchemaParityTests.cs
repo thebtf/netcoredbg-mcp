@@ -257,6 +257,7 @@ public sealed class StructuredContentSchemaParityTests
     [InlineData("search_output", "searchOutputArguments")]
     [InlineData("get_modules", "getModulesArguments")]
     [InlineData("get_progress", "getProgressArguments")]
+    [InlineData("get_loaded_sources", "getLoadedSourcesArguments")]
     [InlineData("configure_exceptions", "configureExceptionsArguments")]
     [InlineData("get_variables", "getVariablesArguments")]
     public async Task LiveHost_InvokeAndOutputInputSchemas_MatchAdvertisedArguments(string toolName, string definitionName)
@@ -499,6 +500,8 @@ public sealed class StructuredContentSchemaParityTests
 
     private static void ValidateValue(JsonObject definitions, JsonObject schema, JsonNode? value)
     {
+        if (schema.Count == 0) return;
+
         if (schema["$ref"] is JsonValue reference)
         {
             ValidateValue(definitions, ResolveReference(definitions, reference.GetValue<string>()), value);

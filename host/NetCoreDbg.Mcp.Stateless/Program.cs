@@ -91,7 +91,7 @@ internal static class Program
 
                     if (context.JsonRpcMessage is JsonRpcRequest { Method: "tools/call", Params: JsonObject call }
                         && call["name"] is JsonValue toolName && toolName.TryGetValue<string>(out var name)
-                        && name is "pause_execution" or "get_modules" or "get_progress" or "configure_exceptions" or "set_variable" or "search_output"
+                        && name is "pause_execution" or "get_modules" or "get_progress" or "get_loaded_sources" or "configure_exceptions" or "set_variable" or "search_output"
                         && call.TryGetPropertyValue("arguments", out var rawArguments)
                         && rawArguments is not null
                         && (rawArguments is not JsonObject objectArguments
@@ -221,6 +221,7 @@ internal static class Program
         private const string GetExceptionInfo = "get_exception_info";
         private const string GetModules = "get_modules";
         private const string GetProgress = "get_progress";
+        private const string GetLoadedSources = "get_loaded_sources";
         private const string GetOutput = "get_output";
         private const string GetOutputTail = "get_output_tail";
         private const string SearchOutput = "search_output";
@@ -356,6 +357,7 @@ internal static class Program
                 GetExceptionInfo => await GetExceptionInfoAsync(request, cancellationToken).ConfigureAwait(false),
                 GetModules => await GetRuntimeInventoryAsync(request, modules: true, cancellationToken).ConfigureAwait(false),
                 GetProgress => await GetRuntimeInventoryAsync(request, modules: false, cancellationToken).ConfigureAwait(false),
+                GetLoadedSources => await GetLoadedSourcesAsync(request, cancellationToken).ConfigureAwait(false),
                 GetOutput => await GetOutputAsync(request, cancellationToken).ConfigureAwait(false),
                 GetOutputTail => await GetOutputAsync(request, cancellationToken, tail: true).ConfigureAwait(false),
                 SearchOutput => await SearchOutputAsync(request, cancellationToken).ConfigureAwait(false),
@@ -778,6 +780,66 @@ internal static class Program
                     catch (Exception)
                     {
                     }
+                }
+            }
+        }
+
+        private async ValueTask<CallToolResult> GetLoadedSourcesAsync(CallToolRequestParams request, CancellationToken cancellationToken)
+        {
+            if (!TryReadSessionId(request.Arguments, out var sessionId, out var hasSessionId) || !hasSessionId)
+            {
+                return InvalidArguments(GetLoadedSources);
+            }
+            if (!_sessions.TryGetValue(sessionId!, out var session) || !_slots.TryGetValue(sessionId!, out var slot))
+            {
+                return NotFound();
+            }
+            var lease = slot.TryAcquire();
+            if (lease is null) return NotFound();
+
+            var closeAfterLease = false;
+            try
+            {
+                if (!_isUsable(session))
+                {
+                    closeAfterLease = true;
+                    return NotFound();
+                }
+
+                using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.AbortToken);
+                var result = await session.GetLoadedSourcesAsync(operation.Token).ConfigureAwait(false);
+                if (result.Outcome == DapLoadedSourcesOutcome.Unsupported)
+                    return Error("dap_loaded_sources_unsupported", "DAP_LOADED_SOURCES_UNSUPPORTED");
+                if (result.Outcome == DapLoadedSourcesOutcome.Refused)
+                    return Error("dap_loaded_sources_refused", "DAP_LOADED_SOURCES_REFUSED");
+                if (result.Outcome != DapLoadedSourcesOutcome.Success || result.Sources is null)
+                    throw new InvalidOperationException("Unexpected loadedSources outcome.");
+
+                var serialized = JsonSerializer.Serialize(new { kind = "loaded_sources_success", sources = result.Sources, count = result.Sources.Count });
+                if (Encoding.UTF8.GetByteCount(serialized) > MaximumSerializedInspectionBytes)
+                {
+                    closeAfterLease = true;
+                    return Error("dap_loaded_sources_protocol_error", "DAP_LOADED_SOURCES_PROTOCOL_ERROR");
+                }
+                return SerializedResult(serialized, isError: false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                closeAfterLease = session.RequiresLoadedSourcesDrain();
+                throw;
+            }
+            catch (Exception)
+            {
+                closeAfterLease = true;
+                return Error("dap_loaded_sources_protocol_error", "DAP_LOADED_SOURCES_PROTOCOL_ERROR");
+            }
+            finally
+            {
+                lease.Dispose();
+                if (closeAfterLease)
+                {
+                    try { await slot.CloseAndDrainAsync().ConfigureAwait(false); }
+                    catch (Exception) { }
                 }
             }
         }
@@ -3440,6 +3502,8 @@ internal static class Program
                 Tool("get_modules", "Read insertion-ordered module events retained by this live session, preserving numeric and string IDs distinctly. No DAP request or OS module scan is made; unseen events are not inferred. Incomplete retention and snapshots over 256 KiB return fixed errors without truncation or closing the session.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"}},"required":["debugSessionId"],"additionalProperties":false}""",
                     new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, DestructiveHint = false }),
                 Tool("get_progress", "Read insertion-ordered active progress from this live session's DAP reader. Initialization advertises progress reporting; only reported starts, updates and ends are reflected. No DAP request is made. Incomplete retention and snapshots over 256 KiB return fixed errors without truncation or closing the session.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"}},"required":["debugSessionId"],"additionalProperties":false}""",
+                    new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, DestructiveHint = false }),
+                Tool("get_loaded_sources", "Request the current loaded-source snapshot when the adapter advertises support. Duplicate normalized source identities replace earlier entries. The result is a snapshot, not a live event cache, and content above 256 KiB fails without partial results.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"}},"required":["debugSessionId"],"additionalProperties":false}""",
                     new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, DestructiveHint = false }),
                 .. NativeSceneToolDispatcher.ListTools(),
             ],

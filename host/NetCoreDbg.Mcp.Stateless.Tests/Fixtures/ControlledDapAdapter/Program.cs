@@ -146,7 +146,8 @@ internal sealed record AdapterOptions(
     string SetExceptionBreakpointsResponseMode,
     bool? SupportsSetVariable,
     string SetVariableCapabilityDelta,
-    int? ProcessEventId)
+    int? ProcessEventId,
+    bool? SupportsLoadedSourcesRequest)
 {
     public static AdapterOptions Parse(string[] args, string? environmentOptions)
     {
@@ -193,6 +194,7 @@ internal sealed record AdapterOptions(
         bool? supportsSetVariable = null;
         var setVariableCapabilityDelta = "none";
         int? processEventId = null;
+        bool? supportsLoadedSourcesRequest = null;
 
         foreach (var argument in args.Concat(SplitOptions(environmentOptions)))
         {
@@ -320,6 +322,10 @@ internal sealed record AdapterOptions(
                     var exceptionSupport = argument["--supports-exception-info=".Length..];
                     supportsExceptionInfoRequest = exceptionSupport == "omit" ? null : bool.Parse(exceptionSupport);
                     break;
+                case var _ when argument.StartsWith("--supports-loaded-sources=", StringComparison.Ordinal):
+                    var loadedSourcesSupport = argument["--supports-loaded-sources=".Length..];
+                    supportsLoadedSourcesRequest = loadedSourcesSupport == "omit" ? null : bool.Parse(loadedSourcesSupport);
+                    break;
                 case var _ when argument.StartsWith("--exception-info-response=", StringComparison.Ordinal):
                     exceptionInfoResponseMode = argument["--exception-info-response=".Length..];
                     break;
@@ -383,7 +389,8 @@ internal sealed record AdapterOptions(
             setExceptionBreakpointsResponseMode,
             supportsSetVariable,
             setVariableCapabilityDelta,
-            processEventId);
+            processEventId,
+            supportsLoadedSourcesRequest);
     }
 
     private static IEnumerable<string> SplitOptions(string? options) =>
@@ -776,6 +783,10 @@ internal sealed class ControlledDapAdapter
                 {
                     initializeCapabilities["supportsExceptionInfoRequest"] = exceptionInfoSupport;
                 }
+                if (_options.SupportsLoadedSourcesRequest is { } loadedSourcesSupport)
+                {
+                    initializeCapabilities["supportsLoadedSourcesRequest"] = loadedSourcesSupport;
+                }
                 if (_options.SupportsSetVariable is { } setVariableSupport)
                 {
                     initializeCapabilities["supportsSetVariable"] = setVariableSupport;
@@ -911,6 +922,21 @@ internal sealed class ControlledDapAdapter
                 return false;
             case "exceptionInfo":
                 await HandleExceptionInfoRequestAsync(sequence, cancellationToken);
+                return false;
+            case "loadedSources":
+                var loadedSources = _outputScript.ValueKind == JsonValueKind.Object
+                    && _outputScript.TryGetProperty("loadedSources", out var sourceBody)
+                    && sourceBody.ValueKind != JsonValueKind.Null
+                    ? (object)sourceBody : new { sources = Array.Empty<object>() };
+                if (_outputScript.ValueKind == JsonValueKind.Object
+                    && _outputScript.TryGetProperty("loadedSourcesGeneratedLength", out var generatedLength)
+                    && generatedLength.ValueKind == JsonValueKind.Number)
+                {
+                    loadedSources = new { sources = new[] { new { name = new string('x', generatedLength.GetInt32()) } } };
+                }
+                var loadedSourcesRefused = _outputScript.ValueKind == JsonValueKind.Object
+                    && _outputScript.TryGetProperty("loadedSourcesRefused", out var refused) && refused.GetBoolean();
+                await WriteResponseAsync(sequence, command, loadedSources, cancellationToken, success: !loadedSourcesRefused);
                 return false;
             case "next":
                 return await HandleNextRequestAsync(sequence, root, cancellationToken);

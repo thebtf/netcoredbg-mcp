@@ -84,6 +84,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private bool _supportsTerminate;
     private DapStackTraceCapabilities _stackTraceCapabilities;
     private bool _supportsExceptionInfoRequest;
+    private bool _supportsLoadedSourcesRequest;
     private bool _supportsSetVariable;
     private bool _supportsExceptionFilters;
     private CallStackEligibility? _allThreadsStoppedEligibility;
@@ -92,6 +93,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private string? _inspectionContextId;
     private bool _inspectionClosed;
     private int _inspectionWriteDrainRequired;
+    private int _loadedSourcesWriteDrainRequired;
     private StepOverRecord? _activeStepOver;
     private int _stepOverDrainRequired;
     private ContinueRecord? _activeContinue;
@@ -144,7 +146,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             }
         }
     }
-    internal bool IsUsable => !IsRetirementRequested && !_readerTask.IsCompleted && !HasExited();
+    internal bool IsUsable => !IsRetirementRequested && Volatile.Read(ref _loadedSourcesWriteDrainRequired) == 0 && !_readerTask.IsCompleted && !HasExited();
     internal IReadOnlyList<DapInitialBreakpoint> InitialBreakpoints { get; private set; } = Array.Empty<DapInitialBreakpoint>();
 
     internal string GetOutput(bool clear, string? category) => _outputBuffer.Snapshot(clear, category);
@@ -633,6 +635,39 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             RemovePending(request);
         }
     }
+
+    internal async Task<DapLoadedSourcesResult> GetLoadedSourcesAsync(CancellationToken cancellationToken)
+    {
+        PendingRequest request;
+        await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            lock (_stateGate)
+            {
+                if (!_supportsLoadedSourcesRequest) return DapLoadedSourcesResult.Unsupported;
+            }
+
+            request = await BeginRequestAsync("loadedSources", new { }, _requestTimeout, cancellationToken, trackLoadedSourcesWrite: true).ConfigureAwait(false);
+        }
+        finally
+        {
+            _callStackAdmissionGate.Release();
+        }
+
+        try
+        {
+            var response = await WaitForResponseAsync(request, _requestTimeout, cancellationToken).ConfigureAwait(false);
+            return response.Success
+                ? new DapLoadedSourcesResult(DapLoadedSourcesOutcome.Success, DapLoadedSources.Parse(response.Body))
+                : DapLoadedSourcesResult.Refused;
+        }
+        finally
+        {
+            RemovePending(request);
+        }
+    }
+
+    internal bool RequiresLoadedSourcesDrain() => Volatile.Read(ref _loadedSourcesWriteDrainRequired) != 0;
 
     internal async Task<DapScopesResult> GetScopesAsync(
         string inspectionContextId,
@@ -1915,7 +1950,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         string? inspectionContextId = null,
         ContinueRecord? continueExecution = null,
         BreakpointUpdate? breakpointUpdate = null,
-        PauseRecord? pause = null)
+        PauseRecord? pause = null,
+        bool trackLoadedSourcesWrite = false)
     {
         if (Volatile.Read(ref _readerFailure) is { } readerFailure)
         {
@@ -1951,7 +1987,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 command,
                 arguments,
             }, deadline?.Token ?? cancellationToken, stepOver,
-                request.InspectionContextId is null && pause is null ? null : request, continueExecution, breakpointUpdate).ConfigureAwait(false);
+                request.InspectionContextId is null && pause is null && !trackLoadedSourcesWrite ? null : request, continueExecution, breakpointUpdate).ConfigureAwait(false);
             return request;
         }
         catch (Exception exception)
@@ -2040,6 +2076,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         await _writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            if (Volatile.Read(ref _loadedSourcesWriteDrainRequired) != 0)
+            {
+                throw new IOException("The DAP stream has an incomplete loadedSources request.");
+            }
             await (_preHeaderWriteGate?.Invoke(cancellationToken) ?? Task.CompletedTask).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             if (inspectionRequest?.Pause is { } pause)
@@ -2092,6 +2132,12 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             breakpointUpdate?.CommitWrite();
             stepOver?.Commit(_requestTimeout, _stepOverTimeProvider);
             continueExecution?.Commit(_stepOverTimeProvider);
+        }
+        catch when (inspectionRequest is { Command: "loadedSources", WriteStarted: true, CommittedWrite: false })
+        {
+            // Fence queued writers before releasing the gate after an incomplete frame.
+            Interlocked.Exchange(ref _loadedSourcesWriteDrainRequired, 1);
+            throw;
         }
         finally
         {
@@ -2510,6 +2556,19 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                         {
                             _supportsExceptionInfoRequest = supportsExceptionInfo;
                         }
+                    }
+                    finally
+                    {
+                        _callStackAdmissionGate.Release();
+                    }
+                }
+                if (capabilities.TryGetProperty("supportsLoadedSourcesRequest", out _))
+                {
+                    var supported = ReadOptionalBoolean(capabilities, "supportsLoadedSourcesRequest");
+                    _callStackAdmissionGate.Wait();
+                    try
+                    {
+                        lock (_stateGate) { _supportsLoadedSourcesRequest = supported; }
                     }
                     finally
                     {
@@ -2976,6 +3035,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             {
                 _stackTraceCapabilities = default;
                 _supportsExceptionInfoRequest = false;
+                _supportsLoadedSourcesRequest = false;
                 _supportsExceptionFilters = false;
                 _supportsSetVariable = false;
             }
@@ -2993,11 +3053,13 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         var capabilities = new DapStackTraceCapabilities(ReadOptionalBoolean(body, "supportsDelayedStackTraceLoading"));
         var supportsExceptionInfo = ReadOptionalBoolean(body, "supportsExceptionInfoRequest");
         var supportsSetVariable = ReadOptionalBoolean(body, "supportsSetVariable");
+        var supportsLoadedSources = ReadOptionalBoolean(body, "supportsLoadedSourcesRequest");
         var supportsExceptionFilters = ReadExceptionFilterSupport(body);
         lock (_stateGate)
         {
             _stackTraceCapabilities = capabilities;
             _supportsExceptionInfoRequest = supportsExceptionInfo;
+            _supportsLoadedSourcesRequest = supportsLoadedSources;
             _supportsExceptionFilters = supportsExceptionFilters;
             _supportsSetVariable = supportsSetVariable;
         }

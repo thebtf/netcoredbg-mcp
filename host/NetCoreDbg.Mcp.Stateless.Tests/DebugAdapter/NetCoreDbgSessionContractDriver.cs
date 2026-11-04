@@ -267,6 +267,14 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             beforeCancellationInspection: beforeCancellationInspection, invokeSteps: invokeInspection,
             inspectExceptionInfo: true);
 
+    public Task<StepOverRegistryProbe> LoadedSourcesThroughRegistryAsync(
+        CancellationToken cancellationToken,
+        Func<Task>? beforeCancellationInspection = null,
+        Func<Func<string, CancellationToken, Task<ModelContextProtocol.Protocol.CallToolResult>>, Task<ModelContextProtocol.Protocol.CallToolResult>>? invokeInspection = null) =>
+        InvokeThroughRegistryAsync(0, cancellationToken, inspectCancellation: true,
+            beforeCancellationInspection: beforeCancellationInspection, invokeSteps: invokeInspection,
+            inspectLoadedSources: true);
+
     public Task<StepOverRegistryProbe> ConfigureExceptionsThroughRegistryAsync(
         string[] filters,
         CancellationToken cancellationToken,
@@ -293,6 +301,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         string? stepTool = null,
         string? evaluateContext = null,
         bool inspectExceptionInfo = false,
+        bool inspectLoadedSources = false,
         string[]? exceptionFilters = null,
         string? setVariableContext = null,
         string setVariableName = "x")
@@ -365,22 +374,22 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                 "step_out" => "StepOutAsync",
                 _ => throw new ArgumentOutOfRangeException(nameof(stepTool)),
             };
-            var operationMethod = inspectCallStack || evaluateContext is not null || inspectExceptionInfo || setVariableContext is not null
-                ? registryType.GetMethod(setVariableContext is not null ? "SetVariableAsync" : inspectExceptionInfo ? "GetExceptionInfoAsync" : evaluateContext is null ? "GetCallStackAsync" : "EvaluateExpressionAsync", BindingFlags.Instance | BindingFlags.NonPublic,
+            var operationMethod = inspectCallStack || evaluateContext is not null || inspectExceptionInfo || inspectLoadedSources || setVariableContext is not null
+                ? registryType.GetMethod(inspectLoadedSources ? "GetLoadedSourcesAsync" : setVariableContext is not null ? "SetVariableAsync" : inspectExceptionInfo ? "GetExceptionInfoAsync" : evaluateContext is null ? "GetCallStackAsync" : "EvaluateExpressionAsync", BindingFlags.Instance | BindingFlags.NonPublic,
                     binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(CancellationToken)], modifiers: null)
                 : registryType.GetMethod(exceptionFilters is not null ? "ConfigureExceptionsAsync" : pauseExecution ? "PauseAsync" : breakpoint.HasValue ? "AddBreakpointAsync" : continueExecution ? "ContinueAsync" : stepMethod, BindingFlags.Instance | BindingFlags.NonPublic,
                     binder: null, types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(ModelContextProtocol.Protocol.RequestId), typeof(CancellationToken)], modifiers: null);
             Assert.NotNull(operationMethod);
             var request = new ModelContextProtocol.Protocol.CallToolRequestParams
             {
-                Name = setVariableContext is not null ? "set_variable" : exceptionFilters is not null ? "configure_exceptions" : pauseExecution ? "pause_execution" : inspectCallStack ? "get_call_stack" : inspectExceptionInfo ? "get_exception_info" : evaluateContext is not null ? "evaluate_expression" : breakpoint.HasValue ? "add_breakpoint" : continueExecution ? "continue_execution" : stepTool ?? "step_over",
+                Name = inspectLoadedSources ? "get_loaded_sources" : setVariableContext is not null ? "set_variable" : exceptionFilters is not null ? "configure_exceptions" : pauseExecution ? "pause_execution" : inspectCallStack ? "get_call_stack" : inspectExceptionInfo ? "get_exception_info" : evaluateContext is not null ? "evaluate_expression" : breakpoint.HasValue ? "add_breakpoint" : continueExecution ? "continue_execution" : stepTool ?? "step_over",
                 Arguments = new Dictionary<string, JsonElement>
                 {
                     ["debugSessionId"] = JsonSerializer.SerializeToElement(sessionId),
                     ["threadId"] = JsonSerializer.SerializeToElement(threadId),
                 },
             };
-            if (omitThreadId)
+            if (omitThreadId || inspectLoadedSources)
             {
                 request.Arguments.Remove("threadId");
             }
@@ -420,7 +429,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                 invokingRequestId.Value = requestId;
                 try
                 {
-                    object?[] invocationArguments = inspectCallStack || evaluateContext is not null || inspectExceptionInfo || setVariableContext is not null
+                    object?[] invocationArguments = inspectCallStack || evaluateContext is not null || inspectExceptionInfo || inspectLoadedSources || setVariableContext is not null
                         ? [request, token]
                         : [request, new ModelContextProtocol.Protocol.RequestId(requestId), token];
                     var invocation = operationMethod!.Invoke(registry, invocationArguments);
@@ -1886,7 +1895,8 @@ internal sealed record FixtureConfiguration(
     string SetExceptionBreakpointsResponseMode = "absent-body",
     bool? SupportsSetVariable = null,
     string SetVariableCapabilityDelta = "none",
-    int? ProcessEventId = null)
+    int? ProcessEventId = null,
+    bool? SupportsLoadedSourcesRequest = null)
 {
     public string AsEnvironmentValue() => string.Join(
         ';',
@@ -1926,6 +1936,7 @@ internal sealed record FixtureConfiguration(
             $"--pause-event-thread-id={PauseEventThreadId?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "omit"}",
             $"--pause-all-threads-stopped={PauseAllThreadsStopped?.ToString() ?? "omit"}",
             $"--supports-exception-info={SupportsExceptionInfoRequest?.ToString() ?? "omit"}",
+            $"--supports-loaded-sources={SupportsLoadedSourcesRequest?.ToString() ?? "omit"}",
             $"--exception-info-response={ExceptionInfoResponseMode}",
             $"--exception-info-capability-delta={ExceptionInfoCapabilityDelta}",
             $"--exception-breakpoint-filters={ExceptionBreakpointFilters}",

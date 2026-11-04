@@ -970,6 +970,164 @@ public sealed class OutputContractTests(ITestOutputHelper output)
         Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
     }
 
+    [Fact]
+    public async Task GetLoadedSources_AdvertisedAdapter_ReturnsNormalizedDistinctSources()
+    {
+        var sourceBody = new JsonObject
+        {
+            ["sources"] = new JsonArray(
+                new JsonObject { ["name"] = "old", ["path"] = "src/child/../Marker.cs", ["sourceReference"] = 7 },
+                new JsonObject { ["name"] = "virtual", ["sourceReference"] = 42 },
+                new JsonObject { ["name"] = "Marker.cs", ["path"] = "src/Marker.cs", ["origin"] = "generated", ["adapterData"] = new JsonObject { ["key"] = "value" } }),
+        };
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(InventoryEvent("capabilities", new JsonObject
+            {
+                ["capabilities"] = new JsonObject { ["supportsLoadedSourcesRequest"] = true },
+            })), loadedSources: sourceBody));
+        var session = await StartSessionAsync(driver, "loaded-sources-supported-start");
+        var before = await driver.ReadNativeActionsAsync();
+
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_loaded_sources",
+            new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("loaded-sources-supported")), isError: false);
+
+        Assert.Equal("loaded_sources_success", content["kind"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        Assert.Equal(2, content["count"]?.GetValue<int>());
+        var sources = Assert.IsType<JsonArray>(content["sources"]);
+        Assert.Equal("Marker.cs", sources[0]?["name"]?.GetValue<string>());
+        Assert.Equal("src/Marker.cs", sources[0]?["path"]?.GetValue<string>());
+        Assert.Equal("generated", sources[0]?["origin"]?.GetValue<string>());
+        Assert.Equal("value", sources[0]?["adapterData"]?["key"]?.GetValue<string>());
+        Assert.Null(sources[0]?["sourceReference"]);
+        Assert.Equal("virtual", sources[1]?["name"]?.GetValue<string>());
+        Assert.Equal(42, sources[1]?["sourceReference"]?.GetValue<int>());
+        Assert.Null(sources[1]?["path"]);
+        Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before.Count), static action => action.Command == "loadedSources");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GetLoadedSources_AdapterFailure_DoesNotLeakOrReturnPartialSources(bool refused)
+    {
+        var body = refused
+            ? new JsonObject { ["message"] = "private-adapter-detail" }
+            : new JsonObject { ["sources"] = new JsonArray("private-adapter-detail") };
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(InventoryEvent("capabilities", new JsonObject
+            {
+                ["capabilities"] = new JsonObject { ["supportsLoadedSourcesRequest"] = true },
+            })), loadedSources: body, loadedSourcesRefused: refused));
+        var session = await StartSessionAsync(driver, "loaded-sources-failure-start");
+
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_loaded_sources",
+            new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("loaded-sources-failure")), isError: true);
+
+        Assert.Equal(refused ? "dap_loaded_sources_refused" : "dap_loaded_sources_protocol_error", content["kind"]?.GetValue<string>());
+        Assert.DoesNotContain("private-adapter-detail", content.ToJsonString());
+        Assert.False(content.ContainsKey("sources"));
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        var state = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state",
+            new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("loaded-sources-failure-state")), isError: !refused);
+        Assert.Equal(refused ? "debug_state_success" : "debug_session_not_found", state["kind"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task GetLoadedSources_ReaderOrderedCapabilityRevocation_StopsSubsequentDapWrites()
+    {
+        var enabled = InventoryEvent("capabilities", new JsonObject
+        {
+            ["capabilities"] = new JsonObject { ["supportsLoadedSourcesRequest"] = true },
+        });
+        var disabled = InventoryEvent("capabilities", new JsonObject
+        {
+            ["capabilities"] = new JsonObject { ["supportsLoadedSourcesRequest"] = false },
+        });
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(enabled), batches: new JsonArray(Batch(disabled))));
+        var session = await StartSessionAsync(driver, "loaded-sources-revoked-start");
+        var arguments = new JsonObject { ["debugSessionId"] = session };
+        var first = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_loaded_sources", arguments,
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("loaded-sources-before-revocation")), isError: false);
+        Assert.Equal("loaded_sources_success", first["kind"]?.GetValue<string>());
+
+        await AdvanceOutputAsync(driver, session, "loaded-sources-revocation-barrier");
+        var before = await driver.ReadNativeActionsAsync();
+        var after = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_loaded_sources", arguments,
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("loaded-sources-after-revocation")), isError: true);
+        Assert.Equal("dap_loaded_sources_unsupported", after["kind"]?.GetValue<string>());
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Fact]
+    public async Task GetLoadedSources_InvalidArgumentsAndUnknownSession_SendNoDapRequest()
+    {
+        await using var driver = await StartTailDriverAsync(OutputOptions());
+        var session = await StartSessionAsync(driver, "loaded-sources-invalid-start");
+        var before = await driver.ReadNativeActionsAsync();
+        var invalid = new JsonNode?[]
+        {
+            null,
+            new JsonArray(),
+            new JsonObject(),
+            new JsonObject { ["debugSessionId"] = " " },
+            new JsonObject { ["debugSessionId"] = 12 },
+            new JsonObject { ["debugSessionId"] = session, ["extra"] = true },
+        };
+        for (var index = 0; index < invalid.Length; index++)
+        {
+            var content = AssertApplicationEnvelope(await driver.SendRawRequestAsync("tools/call", new JsonObject
+            {
+                ["name"] = "get_loaded_sources",
+                ["arguments"] = invalid[index]?.DeepClone(),
+                ["_meta"] = ModernMcpProcessDriver.CurrentMeta(),
+            }, new RequestId($"loaded-sources-invalid-{index}")), isError: true);
+            Assert.Equal("invalid_tool_arguments", content["kind"]?.GetValue<string>());
+            Assert.Equal("get_loaded_sources", content["tool"]?.GetValue<string>());
+            StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        }
+        var missing = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_loaded_sources",
+            new JsonObject { ["debugSessionId"] = "unknown" }, ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("loaded-sources-missing")), isError: true);
+        Assert.Equal("debug_session_not_found", missing["kind"]?.GetValue<string>());
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task GetLoadedSources_SerializedContentLimit_AcceptsExactLimitAndRefusesExcess(int excess)
+    {
+        const int limit = 256 * 1024;
+        var template = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            kind = "loaded_sources_success",
+            sources = new[] { new { name = "", path = (string?)null, sourceReference = (int?)null,
+                origin = (string?)null, presentationHint = (string?)null, adapterData = (object?)null } },
+            count = 1,
+        });
+        var length = limit - System.Text.Encoding.UTF8.GetByteCount(template) + excess;
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(InventoryEvent("capabilities", new JsonObject
+            {
+                ["capabilities"] = new JsonObject { ["supportsLoadedSourcesRequest"] = true },
+            })), loadedSourcesGeneratedLength: length));
+        var session = await StartSessionAsync(driver, "loaded-sources-limit-start");
+
+        var content = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_loaded_sources",
+            new JsonObject { ["debugSessionId"] = session }, ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("loaded-sources-limit"), timeout: TimeSpan.FromSeconds(15)), isError: excess != 0);
+
+        Assert.Equal(excess == 0 ? "loaded_sources_success" : "dap_loaded_sources_protocol_error", content["kind"]?.GetValue<string>());
+        if (excess == 0) Assert.Equal(limit, System.Text.Encoding.UTF8.GetByteCount(content.ToJsonString()));
+        else Assert.False(content.ContainsKey("sources"));
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+    }
+
     [Theory]
     [InlineData("get_modules", "modules")]
     [InlineData("get_progress", "progress")]
@@ -1470,7 +1628,10 @@ public sealed class OutputContractTests(ITestOutputHelper output)
         JsonArray? launch = null,
         JsonArray? batches = null,
         int? maximumEntry = 100_000,
-        int? maximumTotal = 10_000_000) => new(
+        int? maximumTotal = 10_000_000,
+        JsonObject? loadedSources = null,
+        bool loadedSourcesRefused = false,
+        int? loadedSourcesGeneratedLength = null) => new(
         DisableFormElicitation: true,
         FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
         AdditionalEnvironment: new Dictionary<string, string?>
@@ -1479,6 +1640,9 @@ public sealed class OutputContractTests(ITestOutputHelper output)
             {
                 ["launch"] = launch ?? new JsonArray(),
                 ["threads"] = batches ?? new JsonArray(),
+                ["loadedSources"] = loadedSources?.DeepClone(),
+                ["loadedSourcesRefused"] = loadedSourcesRefused,
+                ["loadedSourcesGeneratedLength"] = loadedSourcesGeneratedLength,
             }.ToJsonString(),
             ["NETCOREDBG_MAX_OUTPUT_ENTRY"] = maximumEntry?.ToString(CultureInfo.InvariantCulture),
             ["NETCOREDBG_MAX_OUTPUT_BYTES"] = maximumTotal?.ToString(CultureInfo.InvariantCulture),

@@ -183,6 +183,22 @@ No retry, cached-resource notification or Python snake_case alias is added.
 Python remains the installed default and rollback; the preview channel,
 real-debugger event completeness and installed-delivery proof are unchanged.
 
+The source-built stateful host exposes `get_loaded_sources(debugSessionId)`.
+It sends one DAP `loadedSources` request only when the adapter advertises
+`supportsLoadedSourcesRequest`; a capability change controls later requests.
+Success returns a deduplicated snapshot with `name`, `path`, `sourceReference`,
+`origin`, `presentationHint`, and `adapterData`. Duplicate normalized identities
+replace the earlier value without changing its order. Windows identity comparison
+uses .NET invariant lowercase and is not established as full Python Unicode parity.
+The tool does not maintain the Python live `loadedSource` event view or publish
+its resource updates, so it is not a complete Python cutover replacement.
+
+Unsupported and refused requests return distinct fixed errors; malformed,
+timed-out or over-256-KiB application results return a redacted protocol error
+and drain the session. Cancellation before a DAP write retains the session; a
+partially written request is drained. The locally exercised netcoredbg did not
+advertise the capability. Python remains the installed default and rollback.
+
 The source-built stateful host exposes `get_output(debugSessionId, clear?,
 category?)` for retained DAP output. It concatenates events in reader order;
 categories `console`, `stdout`, `stderr`, and `telemetry` are retained, and an
