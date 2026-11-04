@@ -1170,8 +1170,10 @@ internal sealed class ControlledDapAdapter
             await WriteOutputEntriesAsync(launchOutput, cancellationToken);
         }
 
-        _launchCompleted = true;
-        await WriteResponseAsync(launch.Document.RootElement.GetProperty("seq").GetInt32(), "launch", body: null, cancellationToken);
+        var launchRefused = _outputScript.ValueKind == JsonValueKind.Object
+            && _outputScript.TryGetProperty("launchRefused", out var refusal) && refusal.GetBoolean();
+        _launchCompleted = !launchRefused;
+        await WriteResponseAsync(launch.Document.RootElement.GetProperty("seq").GetInt32(), "launch", body: null, cancellationToken, success: !launchRefused);
         await RecordAsync(new { kind = "launch-released" }, cancellationToken);
         if (_options.ExitAfterLaunchResponse)
         {
@@ -1187,7 +1189,7 @@ internal sealed class ControlledDapAdapter
             return;
         }
 
-        if (!_options.SuppressLifecycleEvents)
+        if (!launchRefused && !_options.SuppressLifecycleEvents)
         {
             _lifecycleEvents ??= EmitLifecycleEventsAsync(_lifecycleEventsCancellation.Token);
         }

@@ -39,6 +39,22 @@ bundle the opt-in .NET preview executable. Corrected preview delivery is separat
 B3 native `step_over`, the native step pair and Native Scene Probe work remain
 modern-host source-only and add no tools to the Python catalog.
 
+The source-built stateful host accepts `args`, `cwd`, and `stopAtEntry` in
+`start_debug`. String arguments are sent to DAP in order, including empty
+strings; an explicit empty array is retained. Omitted or null options are not
+sent, and an empty `cwd` is treated as omitted. When omitted, the adapter chooses
+its own working-directory default; this is not a claim of Python's launch
+defaults. The adapter's successful launch acknowledgement does not prove the
+program is still running. A negative launch response returns `DAP_LAUNCH_REFUSED`
+only after failed-start cleanup succeeds; no session token is returned.
+An explicit nonempty `cwd` must name an existing directory before the adapter
+starts, or the host returns `START_DEBUG_CWD_UNAVAILABLE` without a token.
+Relative paths are checked from the host working directory. This is a point-in-time
+check, not a pinned directory identity or proof that the debuggee later used it.
+
+This source-only path does not yet provide Python's complete pre-build,
+launch-profile or user environment behavior. Python remains the installed default.
+
 In the source-built stateful host, `start_debug` also accepts an optional
 `breakpoints` array of up to 256 `{file, line}` entries. Each source file must
 exist; relative paths resolve from the host's working directory, and lines are

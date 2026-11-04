@@ -250,6 +250,7 @@ public sealed class StructuredContentSchemaParityTests
     }
 
     [Theory]
+    [InlineData("start_debug", "startDebugArguments")]
     [InlineData("ui_invoke", "uiInvokeArguments")]
     [InlineData("ui_invoke_observed", "uiInvokeObservedArguments")]
     [InlineData("get_output", "getOutputArguments")]
@@ -271,6 +272,10 @@ public sealed class StructuredContentSchemaParityTests
         var advertised = Assert.IsType<JsonObject>(tool["inputSchema"]);
         var definitions = Assert.IsType<JsonObject>(LoadSchema()["$defs"]);
         var application = Assert.IsType<JsonObject>(definitions[definitionName]).DeepClone().AsObject();
+        if (toolName == "start_debug")
+        {
+            application["properties"]!["breakpoints"]!["items"] = definitions["sourceBreakpoint"]!.DeepClone();
+        }
         if (toolName == "get_variables")
         {
             var context = Assert.IsType<JsonObject>(definitions["inspectionContextId"]).DeepClone().AsObject();

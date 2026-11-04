@@ -386,9 +386,15 @@ internal static class Program
             CancellationToken cancellationToken)
         {
             if (!TryReadProgram(context.Params.Arguments, out var program, out var hasProgram)
-                || !TryReadBreakpoints(context.Params.Arguments, out var breakpoints))
+                || !TryReadBreakpoints(context.Params.Arguments, out var breakpoints)
+                || !TryReadLaunchOptions(context.Params.Arguments, out var launchOptions))
             {
                 return InvalidArguments(StartDebug);
+            }
+
+            if (launchOptions?.WorkingDirectory is { } workingDirectory && !Directory.Exists(workingDirectory))
+            {
+                return Error("start_debug_cwd_unavailable", "START_DEBUG_CWD_UNAVAILABLE");
             }
 
             if (!hasProgram)
@@ -464,6 +470,7 @@ internal static class Program
                     binding.ProbeLaunchEnvironment,
                     breakpoints,
                     _failedStartCleanupCompleted,
+                    launchOptions,
                     startupCancellation.Token).ConfigureAwait(false);
                 binding.AttachSession(session);
                 var output = new OutputLifetime(session.OutputBuffer);
@@ -540,6 +547,7 @@ internal static class Program
             }
             catch (Exception exception)
             {
+                var cleanupComplete = true;
                 if (exception is DapStartupCleanupException)
                 {
                     RecordStartCleanupFailure(exception);
@@ -559,6 +567,7 @@ internal static class Program
                     catch (Exception cleanupFailure)
                     {
                         RecordStartCleanupFailure(cleanupFailure);
+                        cleanupComplete = false;
                     }
                 }
                 else
@@ -569,6 +578,7 @@ internal static class Program
                     }
                     catch (Exception)
                     {
+                        cleanupComplete = false;
                     }
                 }
 
@@ -577,7 +587,9 @@ internal static class Program
                     throw;
                 }
 
-                return exception is DapBreakpointsException breakpointFailure
+                return exception is DapLaunchRefusedException && cleanupComplete
+                    ? Error("dap_launch_refused", "DAP_LAUNCH_REFUSED")
+                    : exception is DapBreakpointsException breakpointFailure
                     ? breakpointFailure.IsRefused
                         ? Error("dap_breakpoints_refused", "DAP_BREAKPOINTS_REFUSED")
                         : Error("dap_breakpoints_protocol_error", "DAP_BREAKPOINTS_PROTOCOL_ERROR")
@@ -2680,7 +2692,7 @@ internal static class Program
                 return true;
             }
 
-            if (arguments.Count > 2 || arguments.Keys.Any(static name => name is not "program" and not "breakpoints"))
+            if (arguments.Count > 5 || arguments.Keys.Any(static name => name is not "program" and not "breakpoints" and not "args" and not "cwd" and not "stopAtEntry"))
             {
                 return false;
             }
@@ -2696,6 +2708,44 @@ internal static class Program
                 return false;
             }
 
+            return true;
+        }
+
+        private static bool TryReadLaunchOptions(IDictionary<string, JsonElement>? arguments, out DapLaunchOptions? options)
+        {
+            options = null;
+            if (arguments is null) return true;
+
+            string[]? args = null;
+            if (arguments.TryGetValue("args", out var argumentList) && argumentList.ValueKind != JsonValueKind.Null)
+            {
+                if (argumentList.ValueKind != JsonValueKind.Array) return false;
+                args = new string[argumentList.GetArrayLength()];
+                var index = 0;
+                foreach (var argument in argumentList.EnumerateArray())
+                {
+                    if (argument.ValueKind != JsonValueKind.String) return false;
+                    args[index++] = argument.GetString()!;
+                }
+            }
+
+            string? cwd = null;
+            if (arguments.TryGetValue("cwd", out var directory) && directory.ValueKind != JsonValueKind.Null)
+            {
+                if (directory.ValueKind != JsonValueKind.String) return false;
+                cwd = directory.GetString();
+                if (cwd?.Length == 0) cwd = null;
+            }
+
+            bool? stopAtEntry = null;
+            if (arguments.TryGetValue("stopAtEntry", out var stop) && stop.ValueKind != JsonValueKind.Null)
+            {
+                if (stop.ValueKind is not JsonValueKind.True and not JsonValueKind.False) return false;
+                stopAtEntry = stop.GetBoolean();
+            }
+
+            if (args is not null || cwd is not null || stopAtEntry is not null)
+                options = new DapLaunchOptions(cwd, args, stopAtEntry);
             return true;
         }
 
@@ -3472,7 +3522,7 @@ internal static class Program
         {
             Tools =
             [
-                Tool("start_debug", "Start debugging a program with optional request-local source breakpoints. Initial breakpoint verification is not a breakpoint-hit report.", "{\"type\":\"object\",\"properties\":{\"program\":{\"type\":\"string\",\"minLength\":1},\"breakpoints\":{\"type\":\"array\",\"maxItems\":256,\"items\":{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\",\"minLength\":1},\"line\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647}},\"required\":[\"file\",\"line\"],\"additionalProperties\":false}}},\"additionalProperties\":false}"),
+                Tool("start_debug", "Start debugging a program with optional arguments, working directory, stop-at-entry and request-local source breakpoints. Initial breakpoint verification is not a breakpoint-hit report.", """{"type":"object","properties":{"program":{"type":"string","minLength":1},"breakpoints":{"type":"array","maxItems":256,"items":{"type":"object","properties":{"file":{"type":"string","minLength":1},"line":{"type":"integer","minimum":1,"maximum":2147483647}},"required":["file","line"],"additionalProperties":false}},"args":{"type":["array","null"],"items":{"type":"string"}},"cwd":{"type":["string","null"]},"stopAtEntry":{"type":["boolean","null"]}},"additionalProperties":false}"""),
                 Tool("get_debug_state", "Get the state of a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("stop_debug", "Stop a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("get_threads", "Get threads in a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),

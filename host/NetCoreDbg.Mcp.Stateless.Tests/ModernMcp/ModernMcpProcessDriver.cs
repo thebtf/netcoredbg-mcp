@@ -20,6 +20,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
 {
     internal const string CurrentProtocolVersion = "2026-07-28";
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(10);
 
     private readonly FixtureProcess _fixture;
     private readonly string _scratchDirectory;
@@ -78,7 +79,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             var candidate = TestOutputPathResolver.ResolveProcess(Path.Combine(RepositoryLayout.Root, "host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
 
             var inertProgramPath = Path.Combine(scratchDirectory, "controlled-program.dll");
-            using var operation = CreateBoundedCancellation(cancellationToken, startupTimeout);
+            using var operation = CreateBoundedCancellation(cancellationToken, startupTimeout ?? StartupTimeout);
             await File.WriteAllBytesAsync(inertProgramPath, [], operation.Token).ConfigureAwait(false);
 
             var environment = CandidateEnvironment(fixture, inertProgramPath, options.AdditionalEnvironment, options.InheritEnvironmentVariables);
@@ -725,6 +726,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             ("invalid_tool_arguments", "INVALID_TOOL_ARGUMENTS") => StringValue(content["tool"]) == "start_debug",
             ("start_debug_input_unavailable", "START_DEBUG_PROGRAM_REQUIRED") => true,
             ("start_debug_source_unavailable", "START_DEBUG_SOURCE_UNAVAILABLE") => true,
+            ("start_debug_cwd_unavailable", "START_DEBUG_CWD_UNAVAILABLE") => true,
             _ => false,
         };
     }
@@ -736,7 +738,8 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         // These errors escape StartAsync only after its failed-start cleanup succeeds.
         return (StringValue(content["kind"]), StringValue(content["error"])) is
             ("dap_breakpoints_refused", "DAP_BREAKPOINTS_REFUSED") or
-            ("dap_breakpoints_protocol_error", "DAP_BREAKPOINTS_PROTOCOL_ERROR");
+            ("dap_breakpoints_protocol_error", "DAP_BREAKPOINTS_PROTOCOL_ERROR") or
+            ("dap_launch_refused", "DAP_LAUNCH_REFUSED");
     }
 
     private void AddStandardErrorLine(string line)

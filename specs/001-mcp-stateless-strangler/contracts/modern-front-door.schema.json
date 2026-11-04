@@ -64,6 +64,27 @@
           "items": {
             "$ref": "#/$defs/sourceBreakpoint"
           }
+        },
+        "args": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stopAtEntry": {
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "additionalProperties": false
@@ -3099,6 +3120,22 @@
       },
       "additionalProperties": false
     },
+    "startDebugCwdUnavailable": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_cwd_unavailable"
+        },
+        "error": {
+          "const": "START_DEBUG_CWD_UNAVAILABLE"
+        }
+      },
+      "additionalProperties": false
+    },
     "startDebugSourceUnavailable": {
       "type": "object",
       "required": [
@@ -3111,6 +3148,22 @@
         },
         "error": {
           "const": "START_DEBUG_SOURCE_UNAVAILABLE"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapLaunchRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_launch_refused"
+        },
+        "error": {
+          "const": "DAP_LAUNCH_REFUSED"
         }
       },
       "additionalProperties": false
@@ -3452,6 +3505,12 @@
         },
         {
           "$ref": "#/$defs/startDebugSourceUnavailable"
+        },
+        {
+          "$ref": "#/$defs/startDebugCwdUnavailable"
+        },
+        {
+          "$ref": "#/$defs/dapLaunchRefused"
         },
         {
           "$ref": "#/$defs/dapBreakpointsRefused"

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The source-built native `start_debug` forwards optional arguments, working directory and stop-at-entry to DAP, rejecting an unavailable explicit working directory before adapter launch. A negative launch response no longer returns a successful session; confirmed failed-start cleanup yields `DAP_LAUNCH_REFUSED`. Python launch defaults, pre-build, profiles and user environment are not yet fully migrated.
 - The source-built native stateful host adds capability-gated `get_loaded_sources` snapshots with bounded application content and redacted refusal/protocol errors. It does not yet maintain Python's live source-event view or resource notifications, and Windows Unicode identity parity is unproven; Python remains the installed default.
 - The source-built native stateful host adds read-only `search_output` over retained, category-filtered output, with a full match count, up to 50 matches and bounded context. It uses .NET regular expressions, not Python `re` parity; invalid patterns, timeouts and application content over 256 KiB return fixed errors without clearing the buffer. Python remains the installed default.
 - Source-built native `get_variables` accepts optional paging fields and advertises DAP variable paging. A real `netcoredbg` run returned the requested unfiltered array page. Filtering remains unsupported after that debugger misclassified the same array for `indexed`/`named` filters (Engram #547). Python remains the installed default.
