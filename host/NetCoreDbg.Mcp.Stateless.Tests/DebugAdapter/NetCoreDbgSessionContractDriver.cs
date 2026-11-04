@@ -749,12 +749,18 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         ICollection<FixtureTranscriptEntry>? failedTranscript = null)
     {
         var fixture = FixtureProcess.Create(configuration);
+        object? session = null;
         try
         {
             var assembly = LoadProductionAssemblyOrAssert();
             var sessionType = RequireType(assembly, SessionTypeName);
             var stateType = RequireType(assembly, StateTypeName);
-            var startAsync = RequireStaticStartAsync(sessionType);
+            var breakpointType = RequireType(assembly, "NetCoreDbg.Mcp.Stateless.DebugAdapter.DapSourceBreakpoint");
+            var startAsync = sessionType.GetMethod("StartAsync", BindingFlags.Static | BindingFlags.NonPublic,
+                binder: null, types: [typeof(string), typeof(string), typeof(TimeSpan), typeof(TimeSpan), typeof(TimeSpan),
+                    typeof(IReadOnlyDictionary<string, string>), typeof(IReadOnlyList<>).MakeGenericType(breakpointType),
+                    typeof(Action), typeof(CancellationToken)], modifiers: null);
+            Assert.NotNull(startAsync);
             var state = RequireProperty(sessionType, "State", stateType);
             var isUsable = RequireInternalProperty(sessionType, "IsUsable", typeof(bool));
             var readerTask = RequirePrivateTaskField(sessionType, "_readerTask");
@@ -769,15 +775,18 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
 
             using var startupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             startupCancellation.CancelAfter(initializeTimeout + requestTimeout + TimeSpan.FromMilliseconds(500));
-            var started = startAsync.Invoke(null, [
+            var started = startAsync!.Invoke(null, [
                 fixture.ExecutablePath,
                 programPath,
                 initializeTimeout,
                 requestTimeout,
                 stopTimeout,
+                null,
+                Array.CreateInstance(breakpointType, 0),
+                (Action)fixture.MarkCleanupConfirmed,
                 startupCancellation.Token,
             ]);
-            var session = await AwaitAsyncResult(started, "StartAsync", startupCancellation.Token);
+            session = await AwaitAsyncResult(started, "StartAsync", startupCancellation.Token);
             Assert.NotNull(session);
             var activeReaderTask = readerTask.GetValue(session) as Task
                 ?? throw new InvalidOperationException("NetCoreDbgSession._readerTask returned null.");
@@ -785,17 +794,11 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             await fixture.WaitForStartupAsync(startupCancellation.Token);
             return new NetCoreDbgSessionContractDriver(fixture, session, stopAsync, getCallStackAsync, activeWriteGate, pending, state, isUsable, activeReaderTask, disposeAsync);
         }
-        catch
+        catch (Exception failure)
         {
-            if (failedTranscript is not null)
-            {
-                foreach (var entry in await fixture.ReadTranscriptAsync())
-                {
-                    failedTranscript.Add(entry);
-                }
-            }
-
-            await fixture.DisposeAsync();
+            await CaptureFailedTranscriptAsync(fixture, failedTranscript, failure);
+            await DisposeFailedSessionAsync(fixture, session, failure);
+            await fixture.DisposePreservingFailureAsync(failure);
             throw;
         }
     }
@@ -903,31 +906,12 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             await fixture.WaitForStartupAsync(startupCancellation.Token);
             return new NetCoreDbgSessionContractDriver(fixture, session, stopAsync, getCallStackAsync, activeWriteGate, pending, state, isUsable, activeReaderTask, disposeAsync);
         }
-        catch
+        catch (Exception failure)
         {
             gate.Release.TrySetResult(true);
-            if (failedTranscript is not null)
-            {
-                foreach (var entry in await fixture.ReadTranscriptAsync())
-                {
-                    failedTranscript.Add(entry);
-                }
-            }
-
-            if (session is not null)
-            {
-                try
-                {
-                    var disposeAsync = RequireAsyncDisposable(session.GetType());
-                    _ = await AwaitAsyncResult(disposeAsync.Invoke(session, []), "DisposeAsync", CancellationToken.None);
-                }
-                catch
-                {
-                    // Fixture cleanup below owns recovery after a failed deterministic probe.
-                }
-            }
-
-            await fixture.DisposeAsync();
+            await CaptureFailedTranscriptAsync(fixture, failedTranscript, failure);
+            await DisposeFailedSessionAsync(fixture, session, failure);
+            await fixture.DisposePreservingFailureAsync(failure);
             throw;
         }
     }
@@ -1020,24 +1004,12 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             await fixture.WaitForStartupAsync(startupCancellation.Token);
             return new NetCoreDbgSessionContractDriver(fixture, session, stopAsync, getCallStackAsync, activeWriteGate, pending, state, isUsable, activeReaderTask, disposeAsync, writeBarrier, preHeaderWriteGate);
         }
-        catch
+        catch (Exception failure)
         {
             writeBarrier?.Release();
             preHeaderWriteGate?.Release();
-            if (session is not null)
-            {
-                try
-                {
-                    var disposeAsync = RequireAsyncDisposable(session.GetType());
-                    _ = await AwaitAsyncResult(disposeAsync.Invoke(session, []), "DisposeAsync", CancellationToken.None);
-                }
-                catch
-                {
-                    // Fixture cleanup below owns recovery after a failed deterministic probe.
-                }
-            }
-
-            await fixture.DisposeAsync();
+            await DisposeFailedSessionAsync(fixture, session, failure);
+            await fixture.DisposePreservingFailureAsync(failure);
             throw;
         }
     }
@@ -1050,6 +1022,8 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         var fixture = FixtureProcess.Create(configuration);
+        Task<object>? first = null;
+        Task<object>? second = null;
         try
         {
             var assembly = LoadProductionAssemblyOrAssert();
@@ -1073,12 +1047,29 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                     ?? throw new InvalidOperationException("NetCoreDbgSession.StartAsync returned null.");
             }
 
-            var sessions = await Task.WhenAll(Task.Run(StartOneAsync), Task.Run(StartOneAsync));
+            first = Task.Run(StartOneAsync);
+            second = Task.Run(StartOneAsync);
+            var sessions = await Task.WhenAll(first, second);
             return new ConcurrentNetCoreDbgSessionContractDriver(fixture, sessions);
         }
-        catch
+        catch (Exception failure)
         {
-            await fixture.DisposeAsync();
+            foreach (var task in new[] { first, second })
+            {
+                if (task is { IsCompletedSuccessfully: true })
+                {
+                    try
+                    {
+                        await ((IAsyncDisposable)task.Result).DisposeAsync();
+                    }
+                    catch (Exception exception)
+                    {
+                        failure.Data[$"SessionCleanupFailure:{task.Id}"] = exception;
+                    }
+                }
+            }
+
+            await fixture.DisposePreservingFailureAsync(failure);
             throw;
         }
     }
@@ -1087,8 +1078,50 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
     public async Task StopAsync(CancellationToken cancellationToken) =>
         _ = await AwaitAsyncResult(_stopAsync.Invoke(_session, [cancellationToken]), "StopAsync", cancellationToken);
 
-    public async Task DisposeSessionAsync() =>
+    public async Task DisposeSessionAsync()
+    {
         _ = await AwaitAsyncResult(_disposeAsync.Invoke(_session, []), "DisposeAsync", CancellationToken.None);
+        _fixture.MarkCleanupConfirmed();
+    }
+
+    private static async Task DisposeFailedSessionAsync(FixtureProcess fixture, object? session, Exception failure)
+    {
+        if (session is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var dispose = RequireAsyncDisposable(session.GetType());
+            _ = await AwaitAsyncResult(dispose.Invoke(session, []), "DisposeAsync", CancellationToken.None);
+            fixture.MarkCleanupConfirmed();
+        }
+        catch (Exception exception)
+        {
+            failure.Data["SessionCleanupFailure"] = exception;
+        }
+    }
+
+    private static async Task CaptureFailedTranscriptAsync(FixtureProcess fixture, ICollection<FixtureTranscriptEntry>? transcript, Exception failure)
+    {
+        if (transcript is null)
+        {
+            return;
+        }
+
+        try
+        {
+            foreach (var entry in await fixture.ReadTranscriptAsync())
+            {
+                transcript.Add(entry);
+            }
+        }
+        catch (Exception exception)
+        {
+            failure.Data["TranscriptReadFailure"] = exception;
+        }
+    }
 
     public Task StopHostedRegistryAsync(CancellationToken cancellationToken)
     {
@@ -1298,7 +1331,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             return new RegistryStateProbe(
                 structured.GetProperty("kind").GetString(),
                 (bool)containsKey!.Invoke(sessions, [sessionId])!,
-                !HasExited(processId));
+                !HasExited(processId), result.ResultType, result.IsError == true, structured.Clone());
         }
         finally
         {
@@ -1324,17 +1357,19 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
 
     async ValueTask IAsyncDisposable.DisposeAsync()
     {
-        _fixture.ReleaseGracefulShutdown();
         _dapWriteBarrier?.Release();
         _preHeaderWriteGate?.Release();
         try
         {
+            _fixture.ReleaseGracefulShutdown();
             await DisposeSessionAsync();
         }
-        finally
+        catch (Exception failure)
         {
-            await _fixture.DisposeAsync();
+            await _fixture.DisposePreservingFailureAsync(failure);
+            throw;
         }
+        await _fixture.DisposeAsync();
     }
 
     private static Assembly LoadProductionAssemblyOrAssert()
@@ -1703,21 +1738,24 @@ internal sealed class ConcurrentNetCoreDbgSessionContractDriver(
 {
     public async ValueTask DisposeAsync()
     {
-        fixture.ReleaseGracefulShutdown();
         try
         {
+            fixture.ReleaseGracefulShutdown();
             await Task.WhenAll(sessions.Select(static session => ((IAsyncDisposable)session).DisposeAsync().AsTask()));
+            fixture.MarkCleanupConfirmed();
         }
-        finally
+        catch (Exception failure)
         {
-            await fixture.DisposeAsync();
+            await fixture.DisposePreservingFailureAsync(failure);
+            throw;
         }
+        await fixture.DisposeAsync();
     }
 }
 
 
 internal sealed record DapSessionSnapshot(string? Event, string? StopReason, int? ExitCode);
-internal sealed record RegistryStateProbe(string? Kind, bool TokenRetained, bool AdapterAlive);
+internal sealed record RegistryStateProbe(string? Kind, bool TokenRetained, bool AdapterAlive, string? ResultType, bool IsError, JsonElement Content);
 internal sealed record StepOverRegistryProbe(
     ModelContextProtocol.Protocol.CallToolResult Result,
     bool TokenRetained,
@@ -1839,12 +1877,12 @@ internal sealed class FixtureProcess : IAsyncDisposable
     private readonly string? _previousNextResponseRelease;
     private readonly string? _previousWindowedDescendantExecutable;
     private readonly string? _previousWindowedDescendantArguments;
-    private readonly HashSet<int> _preExistingAdapterPids;
     private readonly string _executablePath;
-    private const int StartupPollAttempts = 20;
     private static readonly TimeSpan ProcessCleanupTimeout = TimeSpan.FromSeconds(1);
     private bool _adapterStartAttempted;
-    private bool _disposed;
+    private bool _cleanupConfirmed;
+    private readonly object _disposeGate = new();
+    private Task? _disposeTask;
 
     private FixtureProcess(
         string scratchDirectory,
@@ -1865,8 +1903,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
         string? previousThreadsResponseRelease,
         string? previousStackTraceResponseRelease,
         string? previousNextResponseRelease,
-        string? previousWindowedDescendantArguments,
-        HashSet<int> preExistingAdapterPids)
+        string? previousWindowedDescendantArguments)
     {
         _scratchDirectory = scratchDirectory;
         _transcriptPath = transcriptPath;
@@ -1887,7 +1924,6 @@ internal sealed class FixtureProcess : IAsyncDisposable
         _previousWindowedDescendantArguments = previousWindowedDescendantArguments;
         _previousStackTraceResponseRelease = previousStackTraceResponseRelease;
         _previousNextResponseRelease = previousNextResponseRelease;
-        _preExistingAdapterPids = preExistingAdapterPids;
     }
 
     public string ExecutablePath => _executablePath;
@@ -1918,7 +1954,6 @@ internal sealed class FixtureProcess : IAsyncDisposable
         var previousNextResponseRelease = Environment.GetEnvironmentVariable("CONTROLLED_DAP_NEXT_RESPONSE_RELEASE");
         var previousWindowedDescendantExecutable = Environment.GetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE");
         var previousWindowedDescendantArguments = Environment.GetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_ARGUMENTS");
-        var preExistingAdapterPids = ExactAdapterProcessIds(executable);
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT", transcriptPath);
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_OPTIONS", configuration.AsEnvironmentValue());
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_GRACEFUL_RELEASE", releasePath);
@@ -1950,10 +1985,14 @@ internal sealed class FixtureProcess : IAsyncDisposable
             previousThreadsResponseRelease,
             previousStackTraceResponseRelease,
             previousNextResponseRelease,
-            previousWindowedDescendantArguments,
-            preExistingAdapterPids);
+            previousWindowedDescendantArguments);
     }
-    public void MarkAdapterStartAttempted() => _adapterStartAttempted = true;
+    public void MarkAdapterStartAttempted()
+    {
+        _adapterStartAttempted = true;
+        _cleanupConfirmed = false;
+    }
+    public void MarkCleanupConfirmed() => _cleanupConfirmed = true;
 
     public void ReleaseGracefulShutdown() => File.WriteAllText(_releasePath, string.Empty);
     public void ReleaseConfigurationDoneCapabilityDelta() => File.WriteAllText(_configurationDoneCapabilityDeltaReleasePath, string.Empty);
@@ -2033,13 +2072,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
         return (await ReadTranscriptAsync()).LastOrDefault(static entry => entry.Kind == "startup")?.ProcessId
             ?? throw new InvalidOperationException("Controlled adapter did not record its process id.");
     }
-    internal async Task TerminateAdapterAsync(CancellationToken cancellationToken = default)
-    {
-        var processId = await GetProcessIdAsync(cancellationToken);
-        await TerminateProcessTreeAsync(processId);
-    }
 
-    internal Task TerminateProcessTreeAsync(int processId) => KillAdapterTreeAsync(processId);
     public async Task<int> WaitForSecondWindowedDescendantPublicationAsync(CancellationToken cancellationToken)
     {
         FixtureTranscriptEntry? published = null;
@@ -2057,14 +2090,29 @@ internal sealed class FixtureProcess : IAsyncDisposable
     }
 
 
-    public async ValueTask DisposeAsync()
+    public async Task DisposePreservingFailureAsync(Exception failure)
     {
-        if (_disposed)
+        try
         {
-            return;
+            await DisposeAsync();
         }
+        catch (Exception exception)
+        {
+            failure.Data["FixtureCleanupFailure"] = exception;
+            throw new AggregateException("Fixture cleanup failed after an earlier failure.", failure, exception);
+        }
+    }
 
-        _disposed = true;
+    public ValueTask DisposeAsync()
+    {
+        lock (_disposeGate)
+        {
+            return new ValueTask(_disposeTask ??= DisposeCoreAsync());
+        }
+    }
+
+    private async Task DisposeCoreAsync()
+    {
         Exception? cleanupFailure = null;
         try
         {
@@ -2081,38 +2129,67 @@ internal sealed class FixtureProcess : IAsyncDisposable
 
         try
         {
-            await KillRecordedAdapterTreeAsync();
-        }
-        catch (Exception exception)
-        {
-            if (cleanupFailure is null)
+            if (!_adapterStartAttempted && !_cleanupConfirmed)
             {
-                cleanupFailure = exception;
+                try
+                {
+                    _adapterStartAttempted = ReadTranscriptLinesSnapshot()
+                        .Select(FixtureTranscriptEntry.Parse)
+                        .Any(static entry => entry.Kind == "startup");
+                }
+                catch (Exception exception)
+                {
+                    cleanupFailure ??= exception;
+                }
+            }
+
+            if (_adapterStartAttempted && !_cleanupConfirmed)
+            {
+                cleanupFailure ??= new InvalidOperationException($"Controlled adapter cleanup is unresolved; scratch retained at '{_scratchDirectory}'.");
+            }
+            else if (cleanupFailure is null)
+            {
+                try
+                {
+                    await DeleteScratchDirectoryAsync();
+                }
+                catch (Exception exception)
+                {
+                    cleanupFailure = exception;
+                }
             }
         }
         finally
         {
-            try
+            void Restore(string name, string? value)
             {
-                await DeleteScratchDirectoryAsync();
+                try
+                {
+                    Environment.SetEnvironmentVariable(name, value);
+                }
+                catch (Exception exception)
+                {
+                    if (cleanupFailure is null)
+                    {
+                        cleanupFailure = exception;
+                    }
+                    else
+                    {
+                        cleanupFailure.Data[$"Restore:{name}"] = exception;
+                    }
+                }
             }
-            catch (Exception exception) when (cleanupFailure is null)
-            {
-                cleanupFailure = exception;
-            }
-            finally
-            {
-                Environment.SetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT", _previousTranscript);
-                Environment.SetEnvironmentVariable("CONTROLLED_DAP_OPTIONS", _previousOptions);
-                Environment.SetEnvironmentVariable("CONTROLLED_DAP_GRACEFUL_RELEASE", _previousRelease);
-                Environment.SetEnvironmentVariable("CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE", _previousConfigurationDoneCapabilityDeltaRelease);
-                Environment.SetEnvironmentVariable("CONTROLLED_DAP_SECOND_WINDOWED_DESCENDANT_RELEASE", _previousSecondWindowedDescendantRelease);
-                Environment.SetEnvironmentVariable("CONTROLLED_DAP_THREADS_RESPONSE_RELEASE", _previousThreadsResponseRelease);
-                Environment.SetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE", _previousWindowedDescendantExecutable);
-                Environment.SetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_ARGUMENTS", _previousWindowedDescendantArguments);
-                Environment.SetEnvironmentVariable("CONTROLLED_DAP_STACK_TRACE_RESPONSE_RELEASE", _previousStackTraceResponseRelease);
-                Environment.SetEnvironmentVariable("CONTROLLED_DAP_NEXT_RESPONSE_RELEASE", _previousNextResponseRelease);
-            }
+
+            Restore("CONTROLLED_DAP_TRANSCRIPT", _previousTranscript);
+            Restore("CONTROLLED_DAP_OPTIONS", _previousOptions);
+            Restore("CONTROLLED_DAP_GRACEFUL_RELEASE", _previousRelease);
+            Restore("CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE", _previousConfigurationDoneCapabilityDeltaRelease);
+            Restore("CONTROLLED_DAP_SECOND_WINDOWED_DESCENDANT_RELEASE", _previousSecondWindowedDescendantRelease);
+            Restore("CONTROLLED_DAP_THREADS_RESPONSE_RELEASE", _previousThreadsResponseRelease);
+            Restore("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE", _previousWindowedDescendantExecutable);
+            Restore("CONTROLLED_DAP_WINDOWED_DESCENDANT_ARGUMENTS", _previousWindowedDescendantArguments);
+            Restore("CONTROLLED_DAP_STACK_TRACE_RESPONSE_RELEASE", _previousStackTraceResponseRelease);
+            Restore("CONTROLLED_DAP_NEXT_RESPONSE_RELEASE", _previousNextResponseRelease);
         }
 
         if (cleanupFailure is not null)
@@ -2121,73 +2198,6 @@ internal sealed class FixtureProcess : IAsyncDisposable
         }
     }
 
-    private async Task KillRecordedAdapterTreeAsync()
-    {
-        var processId = _adapterStartAttempted ? await WaitForRecordedProcessIdAsync() : null;
-        var processIds = processId is { } recorded
-            ? [recorded]
-            : _adapterStartAttempted
-                ? ExactAdapterProcessIds(ExecutablePath).Except(_preExistingAdapterPids).ToArray()
-                : [];
-        foreach (var ownedProcessId in processIds)
-        {
-            await KillAdapterTreeAsync(ownedProcessId);
-        }
-    }
-
-    private static async Task KillAdapterTreeAsync(int processId)
-    {
-        try
-        {
-            using var process = Process.GetProcessById(processId);
-            if (process.HasExited)
-            {
-                return;
-            }
-
-            process.Kill(entireProcessTree: true);
-            using var cancellation = new CancellationTokenSource(ProcessCleanupTimeout);
-            await process.WaitForExitAsync(cancellation.Token);
-            if (!process.HasExited)
-            {
-                throw new InvalidOperationException($"Owned controlled adapter process tree '{processId}' could not be removed.");
-            }
-        }
-        catch (ArgumentException)
-        {
-            // The owned adapter already exited.
-        }
-        catch (OperationCanceledException)
-        {
-            throw new InvalidOperationException($"Owned controlled adapter process tree '{processId}' could not be removed within {ProcessCleanupTimeout}.");
-        }
-    }
-
-    private async Task<int?> WaitForRecordedProcessIdAsync()
-    {
-        for (var attempt = 0; attempt < StartupPollAttempts; attempt++)
-        {
-            try
-            {
-                var processId = ReadTranscriptLinesSnapshot()
-                    .Select(FixtureTranscriptEntry.Parse)
-                    .LastOrDefault(static entry => entry.Kind == "startup")
-                    ?.ProcessId;
-                if (processId is not null)
-                {
-                    return processId;
-                }
-            }
-            catch (FileNotFoundException)
-            {
-                // The adapter may be creating its startup transcript record.
-            }
-
-            await Task.Delay(TimeSpan.FromMilliseconds(25));
-        }
-
-        return null;
-    }
 
     private IReadOnlyList<string> ReadTranscriptLinesSnapshot()
     {
@@ -2233,33 +2243,6 @@ internal sealed class FixtureProcess : IAsyncDisposable
         }
     }
 
-    private static HashSet<int> ExactAdapterProcessIds(string executablePath)
-    {
-        var processIds = new HashSet<int>();
-        foreach (var process in Process.GetProcesses())
-        {
-            using (process)
-            {
-                try
-                {
-                    if (string.Equals(process.MainModule?.FileName, executablePath, StringComparison.OrdinalIgnoreCase))
-                    {
-                        processIds.Add(process.Id);
-                    }
-                }
-                catch (InvalidOperationException)
-                {
-                    // Process exited while being inspected.
-                }
-                catch (System.ComponentModel.Win32Exception)
-                {
-                    // Another user's process cannot be inspected.
-                }
-            }
-        }
-
-        return processIds;
-    }
 
     private static async Task WaitUntilAsync(Func<bool> condition, CancellationToken cancellationToken)
     {
@@ -2277,6 +2260,8 @@ internal sealed record FixtureTranscriptEntry(
     string? Arguments,
     string? RawPayload,
     int? ProcessId,
+    long? ProcessStartTimeUtcTicks,
+    bool? SimpleControlledTree,
     int? ContentLength,
     int? PayloadByteCount,
     string? Stage,
@@ -2298,6 +2283,8 @@ internal sealed record FixtureTranscriptEntry(
             root.TryGetProperty("arguments", out var arguments) ? arguments.GetString() : null,
             root.TryGetProperty("rawPayload", out var rawPayload) ? rawPayload.GetString() : null,
             root.TryGetProperty("processId", out var processId) ? processId.GetInt32() : null,
+            root.TryGetProperty("processStartTimeUtcTicks", out var processStartTimeUtcTicks) && processStartTimeUtcTicks.TryGetInt64(out var ticks) ? ticks : null,
+            root.TryGetProperty("simpleControlledTree", out var simpleControlledTree) ? simpleControlledTree.GetBoolean() : null,
             root.TryGetProperty("contentLength", out var contentLength) ? contentLength.GetInt32() : null,
             root.TryGetProperty("payloadByteCount", out var payloadByteCount) ? payloadByteCount.GetInt32() : null,
             root.TryGetProperty("stage", out var stage) ? stage.GetString() : null,
