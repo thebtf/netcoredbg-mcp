@@ -29,6 +29,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
     private readonly object _gate = new();
     private bool _clientClosed;
     private bool _disposed;
+    private Task? _disposeTask;
 
     private ModernMcpProcessDriver(FixtureProcess fixture, string scratchDirectory, McpClient client, string inertProgramPath, JsonObject? initialMeta)
     {
@@ -156,6 +157,10 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         JsonObject? meta = null,
         CancellationToken cancellationToken = default)
     {
+        if (name is "start_debug" or "stop_debug")
+        {
+            throw new InvalidOperationException("Lifecycle tests must use CallToolRawAsync so cleanup can bind the actual request.");
+        }
         var effectiveMeta = meta ?? _initialMeta;
         var requestOptions = effectiveMeta is null
             ? null
@@ -222,16 +227,17 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         RequestId id,
         CancellationToken cancellationToken = default,
         TimeSpan? timeout = null)
+        => await SendObservedRequestAsync(method, parameters, id, cancellationToken, timeout, disposing: false).ConfigureAwait(false);
+
+    private async Task<JsonRpcResponse> SendObservedRequestAsync(
+        string method, JsonNode? parameters, RequestId id, CancellationToken cancellationToken, TimeSpan? timeout, bool disposing)
     {
-        lock (_gate)
-        {
-            _requests.Add(new ModernMcpRequestObservation(id, method, parameters?.DeepClone()));
-        }
+        var observation = ObserveRequest(id, method, parameters, disposing);
 
         using var operation = CreateBoundedCancellation(cancellationToken, timeout);
         try
         {
-            return await Client.SendRequestAsync(
+            var response = await Client.SendRequestAsync(
                 new JsonRpcRequest
                 {
                     Id = id,
@@ -239,16 +245,60 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                     Params = parameters?.DeepClone(),
                 },
                 operation.Token).ConfigureAwait(false);
+            CompleteObservation(observation, response.Result as JsonObject);
+            return response;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            await Client.SendNotificationAsync(
-                NotificationMethods.CancelledNotification,
-                new CancelledNotificationParams { RequestId = id },
-                cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                await Client.SendNotificationAsync(
+                    NotificationMethods.CancelledNotification,
+                    new CancelledNotificationParams { RequestId = id },
+                    cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // Preserve the cancelled request's original exception.
+            }
             throw;
         }
     }
+
+    private ModernMcpRequestObservation ObserveRequest(RequestId id, string method, JsonNode? parameters, bool disposing = false)
+    {
+        var observation = new ModernMcpRequestObservation(id, method, parameters?.DeepClone());
+        lock (_gate)
+        {
+            var name = method == "tools/call" ? StringValue(parameters?["name"]) : null;
+            if (_disposed && !disposing && (name is "start_debug" or "stop_debug"))
+            {
+                throw new ObjectDisposedException(nameof(ModernMcpProcessDriver));
+            }
+            if (name == "start_debug")
+            {
+                _fixture.MarkAdapterStartAttempted();
+            }
+            _requests.Add(observation);
+        }
+        return observation;
+    }
+
+    private void CompleteObservation(ModernMcpRequestObservation observation, JsonObject? result)
+    {
+        if (observation.Method != "tools/call"
+            || StringValue(observation.Parameters?["name"]) is not ("start_debug" or "stop_debug"))
+        {
+            return;
+        }
+        lock (_gate)
+        {
+            observation.Result = result?.DeepClone().AsObject();
+        }
+    }
+
+    private static string? StringValue(JsonNode? node) =>
+        node is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
 
     internal static JsonObject RequireResult(JsonRpcResponse response) =>
         Assert.IsType<JsonObject>(response.Result);
@@ -348,16 +398,44 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         return await _fixture.WaitForSecondWindowedDescendantPublicationAsync(operation.Token).ConfigureAwait(false);
     }
 
-    internal Task TerminateControlledAdapterAsync(CancellationToken cancellationToken = default) =>
-        _fixture.TerminateAdapterAsync(cancellationToken);
 
 
     /// <summary>
     /// Disposes the official client and returns its public stdio completion receipt.
     /// No SDK-internal process reflection or bespoke process launch is used.
     /// </summary>
-    internal async Task<StdioClientCompletionDetails> CloseClientAsync(CancellationToken cancellationToken = default)
+    internal async Task<StdioClientCompletionDetails> CloseClientAsync(
+        CancellationToken cancellationToken = default, Process? adapterWitness = null, Process? descendantWitness = null)
     {
+        ModernMcpRequestObservation? observedStart = null;
+        if (adapterWitness is not null || descendantWitness is not null)
+        {
+            if (_clientClosed || adapterWitness is null || descendantWitness is null)
+            {
+                throw new InvalidOperationException("Both live controlled-process witnesses are required before client closure.");
+            }
+            lock (_gate)
+            {
+                var starts = _requests.Where(static request => request.Method == "tools/call"
+                    && StringValue(request.Parameters?["name"]) == "start_debug").ToArray();
+                if (starts.Length != 1 || !IsComplete(starts[0].Result, false)
+                    || StringValue(starts[0].Result?["structuredContent"]?["kind"]) != "start_debug_success"
+                    || string.IsNullOrWhiteSpace(StringValue(starts[0].Result?["structuredContent"]?["debugSessionId"])))
+                {
+                    throw new InvalidOperationException("A single successful controlled start is required for exit evidence.");
+                }
+                observedStart = starts[0];
+            }
+            var transcript = await _fixture.ReadTranscriptAsync().ConfigureAwait(false);
+            var startup = transcript.Single(static entry => entry.Kind == "startup");
+            var descendant = transcript.Single(static entry => entry.Kind == "descendant");
+            if (startup.SimpleControlledTree != true || transcript.Any(static entry => entry.Kind == "second-windowed-descendant-published"))
+            {
+                throw new InvalidOperationException("The fixture does not describe one controlled adapter and descendant.");
+            }
+            ValidateWitness(adapterWitness, startup);
+            ValidateWitness(descendantWitness, descendant);
+        }
         if (!_clientClosed)
         {
             _clientClosed = true;
@@ -367,7 +445,22 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         var completion = await Client.Completion.WaitAsync(cancellationToken).ConfigureAwait(false);
         var stdioCompletion = Assert.IsType<StdioClientCompletionDetails>(completion);
         ProcessId = stdioCompletion.ProcessId;
+        if (observedStart is not null)
+        {
+            await Task.WhenAll(adapterWitness!.WaitForExitAsync(cancellationToken), descendantWitness!.WaitForExitAsync(cancellationToken)).ConfigureAwait(false);
+            lock (_gate) observedStart.ControlledProcessesExited = true;
+        }
         return stdioCompletion;
+    }
+
+    private static void ValidateWitness(Process process, FixtureTranscriptEntry entry)
+    {
+        var handle = process.SafeHandle;
+        if (handle.IsInvalid || entry.ProcessId != process.Id || entry.ProcessStartTimeUtcTicks is not { } expectedStart
+            || process.StartTime.ToUniversalTime().Ticks != expectedStart || process.HasExited)
+        {
+            throw new InvalidOperationException("The controlled process witness does not match a live fixture instance.");
+        }
     }
 
     internal async Task<ModernMcpTransportClosure> WaitForTransportClosureAsync(TimeSpan timeout)
@@ -390,15 +483,32 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        if (_disposed)
+        lock (_gate)
         {
-            return;
+            if (_disposeTask is null)
+            {
+                _disposed = true;
+                _disposeTask = DisposeCoreAsync();
+            }
+            return new ValueTask(_disposeTask);
+        }
+    }
+
+    private async Task DisposeCoreAsync()
+    {
+        var cleanupFailures = new List<Exception>();
+        var cleanupConfirmed = false;
+        try
+        {
+            cleanupConfirmed = await StopKnownSessionsAsync().ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            cleanupFailures.Add(exception);
         }
 
-        _disposed = true;
-        Exception? cleanupFailure = null;
         try
         {
             if (!_clientClosed)
@@ -409,31 +519,160 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         }
         catch (Exception exception)
         {
-            cleanupFailure = exception;
+            cleanupFailures.Add(exception);
         }
 
+        if (cleanupConfirmed)
+        {
+            _fixture.MarkCleanupConfirmed();
+        }
         try
         {
             await _fixture.DisposeAsync().ConfigureAwait(false);
         }
-        catch (Exception exception) when (cleanupFailure is null)
+        catch (Exception exception)
         {
-            cleanupFailure = exception;
+            cleanupFailures.Add(exception);
         }
 
-        try
+        if (cleanupConfirmed && cleanupFailures.Count == 0)
         {
-            await ModernMcpScratchDirectory.DeleteAsync(_scratchDirectory).ConfigureAwait(false);
-        }
-        catch (Exception exception) when (cleanupFailure is null)
-        {
-            cleanupFailure = exception;
+            try
+            {
+                await ModernMcpScratchDirectory.DeleteAsync(_scratchDirectory).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                cleanupFailures.Add(exception);
+            }
         }
 
-        if (cleanupFailure is not null)
+        if (!cleanupConfirmed)
         {
-            throw cleanupFailure;
+            cleanupFailures.Add(new InvalidOperationException($"Modern MCP cleanup is unresolved; scratch retained at '{_scratchDirectory}'."));
         }
+        if (cleanupFailures.Count > 0)
+        {
+            throw new AggregateException("Modern MCP cleanup failed.", cleanupFailures);
+        }
+    }
+
+    private async Task<bool> StopKnownSessionsAsync()
+    {
+        ModernMcpRequestObservation[] history;
+        lock (_gate)
+        {
+            history = _requests
+                .Where(static request => request.Method == "tools/call"
+                    && StringValue(request.Parameters?["name"]) is ("start_debug" or "stop_debug"))
+                .Select(static request => new ModernMcpRequestObservation(
+                    request.Id, request.Method, request.Parameters?.DeepClone())
+                {
+                    Result = request.Result?.DeepClone().AsObject(),
+                    ControlledProcessesExited = request.ControlledProcessesExited,
+                }).ToArray();
+        }
+
+        var starts = new HashSet<string>(StringComparer.Ordinal);
+        var exited = new HashSet<string>(StringComparer.Ordinal);
+        var stops = new Dictionary<string, bool>(StringComparer.Ordinal);
+        var unconfirmed = false;
+        List<Exception>? failures = null;
+        foreach (var request in history)
+        {
+            var name = StringValue(request.Parameters?["name"]);
+            if (name == "start_debug")
+            {
+                var result = request.Result;
+                var content = result?["structuredContent"] as JsonObject;
+                var token = StringValue(content?["debugSessionId"]);
+                if (IsComplete(result, false) && StringValue(content?["kind"]) == "start_debug_success"
+                    && content?["state"] is JsonObject && !string.IsNullOrWhiteSpace(token))
+                {
+                    if (!starts.Add(token)) unconfirmed = true;
+                    if (request.ControlledProcessesExited) exited.Add(token);
+                }
+                else if (!IsPreLaunchStartResult(result))
+                {
+                    unconfirmed = true;
+                }
+            }
+            else if (name == "stop_debug")
+            {
+                var token = StringValue(request.Parameters?["arguments"]?["debugSessionId"]);
+                if (!string.IsNullOrWhiteSpace(token))
+                {
+                    var success = IsStopSuccess(request.Result);
+                    if (success || !stops.ContainsKey(token)) stops[token] = success;
+                }
+            }
+        }
+
+        foreach (var token in starts)
+        {
+            if (exited.Contains(token)) continue;
+            if (stops.TryGetValue(token, out var success))
+            {
+                if (!success) unconfirmed = true;
+                continue;
+            }
+            if (_clientClosed)
+            {
+                unconfirmed = true;
+                continue;
+            }
+
+            try
+            {
+                var response = await SendObservedRequestAsync("tools/call", new JsonObject
+                {
+                    ["name"] = "stop_debug",
+                    ["arguments"] = new JsonObject { ["debugSessionId"] = token },
+                    ["_meta"] = _initialMeta?.DeepClone(),
+                }, new RequestId($"cleanup-{Guid.NewGuid():N}"), CancellationToken.None, null, disposing: true).ConfigureAwait(false);
+                if (!IsStopSuccess(response.Result as JsonObject)) unconfirmed = true;
+            }
+            catch (Exception exception)
+            {
+                (failures ??= []).Add(exception);
+                unconfirmed = true;
+            }
+        }
+        if (failures is not null)
+        {
+            throw new AggregateException("Could not stop all known debug sessions.", failures);
+        }
+        return !unconfirmed;
+    }
+
+    private static bool IsComplete(JsonObject? result, bool isError)
+    {
+        if (StringValue(result?["resultType"]) != "complete") return false;
+        var error = result?["isError"];
+        return error is null ? !isError : error is JsonValue value && value.TryGetValue<bool>(out var actual) && actual == isError;
+    }
+
+    private static bool IsStopSuccess(JsonObject? result) =>
+        IsComplete(result, false) && StringValue(result?["structuredContent"]?["kind"]) == "stop_debug_success"
+        && result?["structuredContent"]?["state"] is JsonObject;
+
+    internal static bool IsPreLaunchStartResult(JsonObject? result)
+    {
+        if (StringValue(result?["resultType"]) == "input_required"
+            && result?["isError"] is null && result?["structuredContent"] is null
+            && result?["inputRequests"] is JsonObject requests && requests.Count > 0)
+        {
+            return true;
+        }
+        if (!IsComplete(result, true) || result?["structuredContent"] is not JsonObject content
+            || content.ContainsKey("debugSessionId")) return false;
+        return (StringValue(content["kind"]), StringValue(content["error"])) switch
+        {
+            ("invalid_tool_arguments", "INVALID_TOOL_ARGUMENTS") => StringValue(content["tool"]) == "start_debug",
+            ("start_debug_input_unavailable", "START_DEBUG_PROGRAM_REQUIRED") => true,
+            ("start_debug_source_unavailable", "START_DEBUG_SOURCE_UNAVAILABLE") => true,
+            _ => false,
+        };
     }
 
     private void AddStandardErrorLine(string line)
@@ -680,7 +919,11 @@ internal sealed record ModernMcpStartOptions(
 /// <summary>Kind is the controlled transcript kind: <c>startup</c> or <c>request</c>.</summary>
 internal sealed record ModernNativeAction(string Kind, string? Command, string? Detail);
 
-internal sealed record ModernMcpRequestObservation(RequestId Id, string Method, JsonNode? Parameters);
+internal sealed record ModernMcpRequestObservation(RequestId Id, string Method, JsonNode? Parameters)
+{
+    internal JsonObject? Result { get; set; }
+    internal bool ControlledProcessesExited { get; set; }
+}
 
 
 internal sealed record ModernMcpTransportClosure(

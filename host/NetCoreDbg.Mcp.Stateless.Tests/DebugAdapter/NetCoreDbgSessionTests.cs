@@ -95,6 +95,53 @@ public sealed class NetCoreDbgSessionTests
     public void UnixProcessGroupOwnership_UsesLiveGuardianTerminationControl() =>
         NetCoreDbgSessionContractDriver.AssertUnixGuardianOwnershipContract();
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FixtureDispose_UnconfirmedStart_PreservesTranscriptAndReportsUnresolvedCleanup(bool recordStartup)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var fixture = FixtureProcess.Create(new FixtureConfiguration());
+        var transcriptPath = Assert.IsType<string>(Environment.GetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT"));
+        var scratchDirectory = Assert.IsType<string>(Path.GetDirectoryName(transcriptPath));
+        try
+        {
+            if (recordStartup) File.WriteAllText(transcriptPath, "{\"kind\":\"startup\",\"processId\":0}\n");
+            fixture.MarkAdapterStartAttempted();
+
+            var failure = await Record.ExceptionAsync(async () => await fixture.DisposeAsync());
+
+            Assert.True(File.Exists(transcriptPath), "Unconfirmed cleanup must retain its transcript.");
+            Assert.IsType<InvalidOperationException>(failure);
+            var repeated = await Record.ExceptionAsync(async () => await fixture.DisposeAsync());
+            Assert.Same(failure, repeated);
+            var startupFailure = new InvalidDataException("controlled startup failure");
+            var combined = await Assert.ThrowsAsync<AggregateException>(() => fixture.DisposePreservingFailureAsync(startupFailure));
+            Assert.Same(startupFailure, combined.InnerExceptions[0]);
+            Assert.Same(failure, combined.InnerExceptions[1]);
+        }
+        finally
+        {
+            try
+            {
+                await fixture.DisposeAsync();
+            }
+            catch (InvalidOperationException)
+            {
+            }
+            finally
+            {
+                if (Directory.Exists(scratchDirectory))
+                {
+                    Directory.Delete(scratchDirectory, recursive: true);
+                }
+            }
+        }
+    }
     [Fact]
     public async Task WindowsLaunch_RetainsOwnedProcessHandleWhenReopenIsDenied()
     {
@@ -274,7 +321,8 @@ public sealed class NetCoreDbgSessionTests
             }
         }
 
-        Assert.IsType<InvalidDataException>(malformedFailure);
+        var malformed = Assert.IsType<InvalidDataException>(malformedFailure);
+        Assert.False(malformed.Data.Contains("FixtureCleanupFailure"), "Failed startup must not hide unconfirmed fixture cleanup.");
         Assert.Contains(malformedTranscript, entry => entry.Kind == "capabilities-event");
         Assert.DoesNotContain(malformedTranscript, entry => entry.Kind == "request" && entry.Command == "launch");
 
@@ -1836,10 +1884,7 @@ public sealed class NetCoreDbgSessionTests
         }
         finally
         {
-            if (descendant is { } processId)
-            {
-                await fixture.TerminateProcessTreeAsync(processId);
-            }
+            await session.DisposeSessionAsync();
         }
     }
 

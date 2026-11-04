@@ -60,7 +60,9 @@ public sealed class ModernProtocolContractTests
             },
             new RequestId("call-first"));
 
-        AssertCompleteStartEnvelope(ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(message)));
+        var result = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(message));
+        AssertCompleteStartEnvelope(result);
+        await driver.StopSingleControlledSessionAsync(Assert.IsType<string>(result["structuredContent"]?["debugSessionId"]?.GetValue<string>()));
     }
 
     [Fact]
@@ -269,12 +271,14 @@ public sealed class ModernProtocolContractTests
             retryId);
 
         Assert.NotEqual(initialId, retryId);
-        AssertCompleteStartEnvelope(ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(retry)));
+        var result = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(retry));
+        AssertCompleteStartEnvelope(result);
         if (includeBreakpoints)
         {
             AssertBreakpointRequest(Assert.Single(await driver.ReadNativeActionsAsync(),
                 static action => action.Command == "setBreakpoints"), BreakpointSourcePath, [2]);
         }
+        await driver.StopSingleControlledSessionAsync(Assert.IsType<string>(result["structuredContent"]?["debugSessionId"]?.GetValue<string>()));
     }
 
     [Theory]
