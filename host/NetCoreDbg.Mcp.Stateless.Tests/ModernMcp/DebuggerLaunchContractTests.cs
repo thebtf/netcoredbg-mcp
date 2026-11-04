@@ -9,6 +9,115 @@ namespace NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
 [Trait("Coverage", "Exclude")]
 public sealed class DebuggerLaunchContractTests
 {
+    [Fact]
+    public async Task StartDebug_EnvironmentRemoval_IsolatedToOwnedAdapterAndSession()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            FixtureConfiguration: new FixtureConfiguration(SpawnDescendant: true),
+            AdditionalEnvironment: new Dictionary<string, string?>
+            {
+                ["CONTROLLED_DAP_INSPECT_ENV"] = "1",
+                ["NCD_LAUNCH_TEST_REMOVE"] = "parent-remove",
+                ["NCD_LAUNCH_TEST_INHERITED"] = "parent-keep",
+                ["NCD_LAUNCH_TEST_VALUE"] = "parent-old",
+            }), startupTimeout: TimeSpan.FromSeconds(10));
+        var removeName = OperatingSystem.IsWindows() ? "ncd_launch_test_remove" : "NCD_LAUNCH_TEST_REMOVE";
+        var first = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync("start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["env"] = new JsonObject { [removeName] = null, ["NCD_LAUNCH_TEST_VALUE"] = "child-new", ["NCD_LAUNCH_TEST_NEW"] = "" },
+        }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("launch-env-first")));
+        Assert.False(first["isError"]?.GetValue<bool>() ?? true, "Valid environment overrides must start a session.");
+        var firstId = Assert.IsType<string>(first["structuredContent"]?["debugSessionId"]?.GetValue<string>());
+        var second = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync("start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+        }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("launch-env-second")));
+        Assert.False(second["isError"]?.GetValue<bool>() ?? true);
+        var secondId = Assert.IsType<string>(second["structuredContent"]?["debugSessionId"]?.GetValue<string>());
+
+        var observations = (await driver.ReadFixtureTranscriptAsync()).Where(static entry => entry.Kind == "environment-observation").ToArray();
+        Assert.Equal(2, observations.Length);
+        using var isolated = System.Text.Json.JsonDocument.Parse(observations[0].Arguments!);
+        using var inherited = System.Text.Json.JsonDocument.Parse(observations[1].Arguments!);
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, isolated.RootElement.GetProperty("removed").ValueKind);
+        Assert.Equal("parent-keep", isolated.RootElement.GetProperty("unchanged").GetString());
+        Assert.Equal("parent-old", isolated.RootElement.GetProperty("overridden").GetString());
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, isolated.RootElement.GetProperty("added").ValueKind);
+        Assert.Equal("parent-remove", inherited.RootElement.GetProperty("removed").GetString());
+        Assert.Equal("parent-old", inherited.RootElement.GetProperty("overridden").GetString());
+        var launches = (await driver.ReadNativeActionsAsync()).Where(static action => action.Command == "launch").ToArray();
+        Assert.Equal(2, launches.Length);
+        using var firstLaunch = System.Text.Json.JsonDocument.Parse(launches[0].Detail!);
+        var overrides = firstLaunch.RootElement.GetProperty("arguments").GetProperty("env");
+        Assert.Equal("child-new", overrides.GetProperty("NCD_LAUNCH_TEST_VALUE").GetString());
+        Assert.Equal("", overrides.GetProperty("NCD_LAUNCH_TEST_NEW").GetString());
+        Assert.False(overrides.TryGetProperty(removeName, out _));
+        var descendants = (await driver.ReadFixtureTranscriptAsync()).Where(static entry => entry.Kind == "descendant").ToArray();
+        Assert.Equal(2, descendants.Length);
+        using var isolatedChild = await ReadDescendantEnvironmentAsync(Assert.IsType<int>(descendants[0].ProcessId));
+        using var inheritedChild = await ReadDescendantEnvironmentAsync(Assert.IsType<int>(descendants[1].ProcessId));
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, isolatedChild.RootElement.GetProperty("removed").ValueKind);
+        Assert.Equal("parent-keep", isolatedChild.RootElement.GetProperty("unchanged").GetString());
+        Assert.Equal("child-new", isolatedChild.RootElement.GetProperty("overridden").GetString());
+        Assert.Equal("", isolatedChild.RootElement.GetProperty("added").GetString());
+        Assert.Equal("parent-remove", inheritedChild.RootElement.GetProperty("removed").GetString());
+        Assert.Equal("parent-old", inheritedChild.RootElement.GetProperty("overridden").GetString());
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, inheritedChild.RootElement.GetProperty("added").ValueKind);
+        foreach (var id in new[] { firstId, secondId })
+        {
+            var stopped = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync("stop_debug",
+                new JsonObject { ["debugSessionId"] = id }, ModernMcpProcessDriver.CurrentMeta(), new RequestId($"launch-env-stop-{(id == firstId ? 1 : 2)}")));
+            Assert.False(stopped["isError"]?.GetValue<bool>() ?? true);
+        }
+    }
+    [Fact]
+    public async Task StartDebug_WindowsInheritedAliases_AreSynchronizedInDebuggee()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var windowsRoot = Assert.IsType<string>(Environment.GetEnvironmentVariable("SYSTEMROOT"));
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            FixtureConfiguration: new FixtureConfiguration(SpawnDescendant: true),
+            AdditionalEnvironment: new Dictionary<string, string?>
+            {
+                ["CONTROLLED_DAP_INSPECT_ENV"] = "1",
+                ["WINDIR"] = windowsRoot.ToUpperInvariant(),
+                ["SYSTEMROOT"] = windowsRoot.ToLowerInvariant(),
+            }), startupTimeout: TimeSpan.FromSeconds(10));
+        var response = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync("start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["env"] = new JsonObject { ["NCD_LAUNCH_TEST_VALUE"] = "child-new" },
+        }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("launch-env-aliases")));
+        Assert.False(response["isError"]?.GetValue<bool>() ?? true);
+        var id = Assert.IsType<string>(response["structuredContent"]?["debugSessionId"]?.GetValue<string>());
+        var descendant = Assert.Single(await driver.ReadFixtureTranscriptAsync(), static entry => entry.Kind == "descendant");
+        using var environment = await ReadDescendantEnvironmentAsync(Assert.IsType<int>(descendant.ProcessId));
+        Assert.True(environment.RootElement.GetProperty("aliasesEqual").GetBoolean());
+        await driver.StopSingleControlledSessionAsync(id);
+    }
+
+
+    [Fact]
+    public async Task StartDebug_RemovedPathWithoutDotnet_RejectsBeforeAdapterStarts()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            AdditionalEnvironment: new Dictionary<string, string?> { ["PATH"] = "" }),
+            startupTimeout: TimeSpan.FromSeconds(10));
+        var response = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync("start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["env"] = new JsonObject { ["PATH"] = null },
+        }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("launch-no-dotnet")));
+        Assert.True(response["isError"]?.GetValue<bool>() ?? false);
+        var content = Assert.IsType<JsonObject>(response["structuredContent"]);
+        Assert.Equal("start_debug_dotnet_unavailable", content["kind"]?.GetValue<string>());
+        Assert.Equal("START_DEBUG_DOTNET_UNAVAILABLE", content["error"]?.GetValue<string>());
+        Assert.False(content.ContainsKey("debugSessionId"));
+        StructuredContentSchemaParityTests.AssertMatchesSchema(content);
+        Assert.Empty(await driver.ReadNativeActionsAsync());
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -87,6 +196,15 @@ public sealed class DebuggerLaunchContractTests
             new JsonObject { ["args"] = new JsonArray((JsonNode?)null) },
             new JsonObject { ["cwd"] = 12 },
             new JsonObject { ["stopAtEntry"] = "true" },
+            new JsonObject { ["env"] = "not-an-object" },
+            new JsonObject { ["env"] = new JsonObject { ["BAD"] = 12 } },
+            new JsonObject { ["env"] = new JsonObject { [""] = "value" } },
+            new JsonObject { ["env"] = new JsonObject { ["BAD=NAME"] = "value" } },
+            new JsonObject { ["env"] = new JsonObject { ["BAD\0NAME"] = "value" } },
+            new JsonObject { ["env"] = new JsonObject { ["VALID_NAME"] = "bad\0value" } },
+            new JsonObject { ["env"] = new JsonObject { ["NETCOREDBG_MCP_NATIVE_SCENE_PROBE_PIPE"] = "value" } },
+            new JsonObject { ["env"] = new JsonObject { ["NETCOREDBG_MCP_NATIVE_SCENE_PROBE_NONCE"] = null } },
+            new JsonObject { ["env"] = new JsonObject { [OperatingSystem.IsWindows() ? "netcoredbg_mcp_native_scene_probe_pipe" : "NETCOREDBG_MCP_NATIVE_SCENE_PROBE_PIPE"] = "value" } },
         };
         for (var index = 0; index < cases.Length; index++)
         {
@@ -109,6 +227,7 @@ public sealed class DebuggerLaunchContractTests
             ["args"] = null,
             ["cwd"] = null,
             ["stopAtEntry"] = null,
+            ["env"] = null,
         }, ModernMcpProcessDriver.CurrentMeta(), new RequestId("launch-options-null")));
         Assert.False(started["isError"]?.GetValue<bool>() ?? true, "Null launch options must retain the existing launch behavior.");
         var session = Assert.IsType<string>(started["structuredContent"]?["debugSessionId"]?.GetValue<string>());
@@ -254,4 +373,13 @@ public sealed class DebuggerLaunchContractTests
             driver.ConfirmMissingWindowsDebuggerDidNotLaunchAsync(new RequestId("wrong-request")));
         await driver.ConfirmMissingWindowsDebuggerDidNotLaunchAsync(new RequestId("path-only-debugger-refused"));
     }
+    private static async Task<System.Text.Json.JsonDocument> ReadDescendantEnvironmentAsync(int processId)
+    {
+        var transcript = Assert.IsType<string>(Environment.GetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT"));
+        var path = transcript + ".environment-" + processId;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        while (!File.Exists(path)) await Task.Delay(25, timeout.Token);
+        return System.Text.Json.JsonDocument.Parse(await File.ReadAllTextAsync(path, timeout.Token));
+    }
+
 }

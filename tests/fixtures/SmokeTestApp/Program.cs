@@ -518,6 +518,19 @@ public class Program
         {
             Console.WriteLine($"SMOKE_LAUNCH_ARGS={System.Text.Json.JsonSerializer.Serialize(args)}");
             Console.WriteLine($"SMOKE_LAUNCH_CWD={Environment.CurrentDirectory}");
+            if (args.Contains("--launch-env-test"))
+            {
+                Console.WriteLine($"SMOKE_LAUNCH_ENV={System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    Removed = Environment.GetEnvironmentVariable("NCD_LAUNCH_TEST_REMOVE"),
+                    Unchanged = Environment.GetEnvironmentVariable("NCD_LAUNCH_TEST_INHERITED"),
+                    Overridden = Environment.GetEnvironmentVariable("NCD_LAUNCH_TEST_VALUE"),
+                    Added = Environment.GetEnvironmentVariable("NCD_LAUNCH_TEST_NEW"),
+                    Unicode = Environment.GetEnvironmentVariable("NCD_LAUNCH_TEST_ЮНИКОД"),
+                    AliasesEqual = string.Equals(Environment.GetEnvironmentVariable("WINDIR"), Environment.GetEnvironmentVariable("SYSTEMROOT"), StringComparison.Ordinal),
+                    HasPath = Environment.GetEnvironmentVariable("PATH") is not null,
+                })}");
+            }
         }
 
         switch (scenario)

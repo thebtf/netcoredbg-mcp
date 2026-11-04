@@ -85,6 +85,18 @@
             "boolean",
             "null"
           ]
+        },
+        "env": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
         }
       },
       "additionalProperties": false
@@ -3136,6 +3148,22 @@
       },
       "additionalProperties": false
     },
+    "startDebugDotnetUnavailable": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_dotnet_unavailable"
+        },
+        "error": {
+          "const": "START_DEBUG_DOTNET_UNAVAILABLE"
+        }
+      },
+      "additionalProperties": false
+    },
     "startDebugSourceUnavailable": {
       "type": "object",
       "required": [
@@ -3508,6 +3536,9 @@
         },
         {
           "$ref": "#/$defs/startDebugCwdUnavailable"
+        },
+        {
+          "$ref": "#/$defs/startDebugDotnetUnavailable"
         },
         {
           "$ref": "#/$defs/dapLaunchRefused"

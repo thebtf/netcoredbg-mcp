@@ -52,8 +52,23 @@ starts, or the host returns `START_DEBUG_CWD_UNAVAILABLE` without a token.
 Relative paths are checked from the host working directory. This is a point-in-time
 check, not a pinned directory identity or proof that the debuggee later used it.
 
+The optional `env` object passes string values, including empty strings, to the
+debugger for the debuggee; a `null` value removes that name from the owned adapter
+and its debuggee. It does not change the host environment or another session.
+Names cannot be empty or contain `=` or NUL; values cannot contain NUL. Names
+are case-insensitive on Windows and case-sensitive on Unix. The internal
+`NETCOREDBG_MCP_NATIVE_SCENE_PROBE_PIPE` and
+`NETCOREDBG_MCP_NATIVE_SCENE_PROBE_NONCE` names are reserved and cannot be set
+or removed. When removing `PATH` for a DLL, the host resolves `dotnet` from its
+own PATH first; if unavailable, it returns `START_DEBUG_DOTNET_UNAVAILABLE`
+before starting the adapter.
+
+The local netcoredbg 3.1.3-1 on Windows code page 1251 corrupted non-ASCII
+environment names and values in both the native and installed Python paths
+(Engram #551). Do not assume Unicode environment parity from this option.
+
 This source-only path does not yet provide Python's complete pre-build,
-launch-profile or user environment behavior. Python remains the installed default.
+launch-profile or launch-default behavior. Python remains the installed default.
 
 In the source-built stateful host, `start_debug` also accepts an optional
 `breakpoints` array of up to 256 `{file, line}` entries. Each source file must
