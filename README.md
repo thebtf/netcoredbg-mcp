@@ -291,8 +291,10 @@ It sends one DAP `loadedSources` request only when the adapter advertises
 `supportsLoadedSourcesRequest`; a capability change controls later requests.
 Success returns a deduplicated snapshot with `name`, `path`, `sourceReference`,
 `origin`, `presentationHint`, and `adapterData`. Duplicate normalized identities
-replace the earlier value without changing its order. Windows identity comparison
-uses .NET invariant lowercase and is not established as full Python Unicode parity.
+replace the earlier value without changing its order. Windows identities use fixed
+Unicode 15.1 default lowercase, including contextual and expanding mappings. This
+matches the Unicode profile of the observed Python 3.13 installation; behavior
+for installations using other Python Unicode versions is not yet established.
 `get_debug_state` exposes the session's reader-ordered `loadedSources` map and
 `loadedSourcesComplete` flag. Events update the map; successful snapshots replace
 it before later events are applied. A malformed event or a view exceeding 256
