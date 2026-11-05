@@ -50,7 +50,7 @@ The source-built stateful host has an experimental, explicitly selected
 only `start_debug`, `get_debug_state`, `get_threads`, `get_call_stack`,
 `get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`,
 `add_breakpoint`, `remove_breakpoint`, `configure_exceptions`, `get_exception_info`,
-`get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`,
+`get_stop_context`, `get_exception_context`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
 `get_output`, `get_output_tail`, `stop_debug`, `find_code_symbol`,
 `find_code_references`, and `get_source_context`. Debug operations use implicit
@@ -58,6 +58,18 @@ session binding and selected Python-style response envelopes.
 Without the flag the native catalog and explicit session contract are unchanged.
 This mode does not use the Python backend and
 does not change the installed Python default or provide full #552 compatibility.
+
+The legacy context tools return Python-style `data` envelopes from one native
+stopped epoch. Stop context includes up to five frames, 15 first-scope locals,
+retained output entries and observed hit counts; pending or incomplete hit
+observations return an error. Exception context includes at most 20 frames and
+up to 20 variables from each available scope of up to five frames. Exception
+information requires adapter support. Both responses are
+bounded to 256 KiB and fail instead of returning partial or stale data. Unlike
+the modern tool, legacy `max_inner_exceptions` defaults to 5: evaluation may
+run debuggee code and requires mux ownership. Set it to 0 to avoid evaluation.
+An uncertain evaluation is not retried. Native refusal, size and paging limits
+are not full Python parity.
 
 The three native code-search tools work before and during a session. Their
 Python-style envelopes report the current observed state at response time.

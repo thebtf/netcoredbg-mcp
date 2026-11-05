@@ -351,6 +351,7 @@ internal static class Program
         private bool _legacyStarting;
         private bool _legacyStopping;
         private bool _legacyHasOwner;
+        private int _legacyCompositeEvaluations;
         private string? _legacySessionId;
         private string? _legacyOwner;
         private long _legacyOwnerActivity;
@@ -641,7 +642,7 @@ internal static class Program
             if (name is not (StartDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
                 or PauseExecution or ContinueExecution or StopDebug or GetOutput or GetOutputTail
                 or AddBreakpoint or RemoveBreakpoint or ListBreakpoints or ClearBreakpoints or GetScopes or GetVariables or EvaluateExpression
-                or SetVariable or ConfigureExceptions or GetExceptionInfo or GetModules or GetProgress or GetLoadedSources or GetStepInTargets))
+                or SetVariable or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets))
                 return UnknownTool(name);
             var arguments = context.Params.Arguments is null
                 ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
@@ -681,6 +682,7 @@ internal static class Program
             var lifecycleHeld = false;
             var gateHeld = false;
             var breakpointHeld = false;
+            var compositeEvaluationHeld = false;
             try
             {
                 if (name is StartDebug or StopDebug)
@@ -701,8 +703,11 @@ internal static class Program
                     && clearOption.ValueKind == JsonValueKind.True
                     && (!arguments.TryGetValue("category", out var categoryOption) || categoryOption.ValueKind == JsonValueKind.Null
                         || (categoryOption.ValueKind == JsonValueKind.String && categoryOption.GetString() == string.Empty));
+                var compositeMayEvaluate = name == GetExceptionContext
+                    && (!arguments.TryGetValue("max_inner_exceptions", out var innerDepth)
+                        || !TryReadOutputLineCount(innerDepth, out var depth) || depth != 0);
                 var mutation = name is StartDebug or StopDebug or StepOver or StepInto or StepOut or PauseExecution
-                    or ContinueExecution or AddBreakpoint or RemoveBreakpoint or ClearBreakpoints or EvaluateExpression or SetVariable or ConfigureExceptions or GetStepInTargets || consumesOutput;
+                    or ContinueExecution or AddBreakpoint or RemoveBreakpoint or ClearBreakpoints or EvaluateExpression or SetVariable or ConfigureExceptions or GetStepInTargets || consumesOutput || compositeMayEvaluate;
                 var raw = context.JsonRpcRequest.Params as JsonObject;
                 var mux = raw?["_meta"]?["muxSessionId"];
                 if (mux is not null && (mux is not JsonValue muxValue || !muxValue.TryGetValue<string>(out _)))
@@ -722,7 +727,7 @@ internal static class Program
                         System.Globalization.CultureInfo.InvariantCulture, out timeout) || !double.IsFinite(timeout) || timeout < 0))
                         return LegacyError("Invalid NETCOREDBG_SESSION_TIMEOUT.");
                     if (_legacyHasOwner && _legacyOwner is not null && _legacyBreakpointSessionId != _legacySessionId
-                        && Stopwatch.GetElapsedTime(_legacyOwnerActivity).TotalSeconds > timeout)
+                        && _legacyCompositeEvaluations == 0 && Stopwatch.GetElapsedTime(_legacyOwnerActivity).TotalSeconds > timeout)
                     {
                         _legacyHasOwner = false;
                         _legacyOwner = null;
@@ -989,6 +994,8 @@ internal static class Program
                 if (name == GetExceptionInfo && arguments.TryGetValue("thread_id", out var exceptionThread)
                     && TryReadOutputLineCount(exceptionThread, out var exceptionThreadNumber) && exceptionThreadNumber == 0)
                     arguments["thread_id"] = JsonSerializer.SerializeToElement<int?>(null);
+                if (name == GetExceptionContext && !arguments.ContainsKey("max_inner_exceptions"))
+                    arguments["max_inner_exceptions"] = JsonSerializer.SerializeToElement(5);
                 var stackRevision = _legacyInspectionRevision;
                 if (name is GetCallStack or StepOver or StepInto or StepOut or PauseExecution or ContinueExecution or StopDebug)
                 {
@@ -1040,13 +1047,13 @@ internal static class Program
                 var inspectionContext = name is GetScopes or GetVariables or EvaluateExpression or GetStepInTargets ? _legacyInspectionContextId : null;
                 NetCoreDbgSession? inspectionSession = null;
                 if (name is GetCallStack or GetScopes or GetVariables or EvaluateExpression or SetVariable or GetExceptionInfo
-                    or GetStepInTargets or GetModules or GetProgress or GetLoadedSources || targetedStep)
+                    or GetStepInTargets or GetModules or GetProgress or GetLoadedSources or GetStopContext or GetExceptionContext || targetedStep)
                 {
                     if (!_sessions.TryGetValue(sessionId, out inspectionSession))
                         return LegacyError("No active debug session.");
                 }
-                var exceptionContext = name == GetExceptionInfo ? inspectionSession!.CaptureStoppedContext() : null;
-                if (name == GetExceptionInfo && exceptionContext is null)
+                var exceptionContext = name is GetExceptionInfo or GetStopContext or GetExceptionContext ? inspectionSession!.CaptureStoppedContext() : null;
+                if (name is (GetExceptionInfo or GetStopContext or GetExceptionContext) && exceptionContext is null)
                     return LegacyError("No current stopped context.");
                 var request = LegacyRequest(name, sessionId, arguments);
                 if (name == StopDebug)
@@ -1092,6 +1099,11 @@ internal static class Program
                     _legacyResources.Publish(idleGeneration);
                     return LegacyResponse(new { success = true });
                 }
+                if (compositeMayEvaluate)
+                {
+                    _legacyCompositeEvaluations++;
+                    compositeEvaluationHeld = true;
+                }
                 _legacyGate.Release();
                 gateHeld = false;
                 var result = name switch
@@ -1110,6 +1122,8 @@ internal static class Program
                     SetVariable => await SetVariableAsync(request, cancellationToken).ConfigureAwait(false),
                     ConfigureExceptions => await ConfigureExceptionsAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                     GetExceptionInfo => await GetExceptionInfoAsync(request, cancellationToken).ConfigureAwait(false),
+                    GetStopContext => await GetCompositeContextAsync(request, false, cancellationToken, legacy: true, expectedContext: exceptionContext!.Value.Context).ConfigureAwait(false),
+                    GetExceptionContext => await GetCompositeContextAsync(request, true, cancellationToken, legacy: true, expectedContext: exceptionContext!.Value.Context).ConfigureAwait(false),
                     GetModules => await GetRuntimeInventoryAsync(request, modules: true, cancellationToken).ConfigureAwait(false),
                     GetProgress => await GetRuntimeInventoryAsync(request, modules: false, cancellationToken).ConfigureAwait(false),
                     GetLoadedSources => await GetLoadedSourcesAsync(request, cancellationToken).ConfigureAwait(false),
@@ -1122,8 +1136,8 @@ internal static class Program
                 await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
                 gateHeld = true;
                 if (!string.Equals(_legacySessionId, sessionId, StringComparison.Ordinal))
-                    return name is GetCallStack or GetScopes or GetVariables or EvaluateExpression or SetVariable or GetExceptionInfo or GetStepInTargets
-                        ? LegacyInspectionChanged(name)
+                    return name is GetCallStack or GetScopes or GetVariables or EvaluateExpression or SetVariable or GetExceptionInfo or GetStopContext or GetExceptionContext or GetStepInTargets
+                        ? LegacyInspectionChanged(compositeMayEvaluate ? EvaluateExpression : name)
                         : LegacyError(consumesOutput ? "Output may have been cleared; do not retry automatically."
                             : name == ConfigureExceptions ? "Exception filters may have changed; do not retry automatically."
                             : targetedStep ? "Step outcome is unknown; it may have executed. Do not retry automatically."
@@ -1140,6 +1154,14 @@ internal static class Program
                 }
                 if (result.IsError == true || result.StructuredContent is not { } content)
                 {
+                    if (compositeMayEvaluate && result.StructuredContent is { } compositeFailure
+                        && compositeFailure.TryGetProperty("error", out var compositeCode)
+                        && compositeCode.GetString() is "DEBUG_CONTEXT_EVALUATION_UNKNOWN" or "DEBUG_CONTEXT_STALE")
+                        return LegacyError("Evaluation outcome is unknown; it may have executed. Do not retry automatically.", "unknown");
+                    if (compositeMayEvaluate && result.StructuredContent is { } evaluationFailure
+                        && evaluationFailure.TryGetProperty("error", out var evaluationCode)
+                        && evaluationCode.GetString() == "DEBUG_CONTEXT_EVALUATION_FAILED")
+                        return LegacyError("Evaluation failed and may have executed. Do not retry automatically.", observedState);
                     if (name is AddBreakpoint or RemoveBreakpoint)
                     {
                         if (result.StructuredContent is { } breakpointFailure
@@ -1258,6 +1280,38 @@ internal static class Program
                         return LegacyInspectionChanged(name);
                     return LegacyResponse(content.GetProperty("exception"), ProjectLegacyState(captured.State).State);
                 }
+                if (name is GetStopContext or GetExceptionContext)
+                {
+                    if (inspectionSession is null || exceptionContext is not { } captured || stackRevision != _legacyInspectionRevision
+                        || !_sessions.TryGetValue(sessionId, out var currentSession) || !ReferenceEquals(currentSession, inspectionSession)
+                        || captured.State.CurrentThreadId is not { } stoppedThread
+                        || !inspectionSession.IsStoppedContextCurrent(stoppedThread, captured.Context)
+                        || content.GetProperty("inspectionContextId").GetString() != captured.Context)
+                        return compositeMayEvaluate ? LegacyInspectionChanged(EvaluateExpression) : LegacyInspectionChanged(name);
+                    long? hitCount = null;
+                    if (name == GetStopContext && content.GetProperty("frames") is { } frameList && frameList.GetArrayLength() > 0)
+                    {
+                        var first = frameList[0];
+                        if (first.GetProperty("source").ValueKind == JsonValueKind.String && first.GetProperty("line").TryGetInt32(out var line) && line > 0)
+                        {
+                            var path = first.GetProperty("source").GetString()!;
+                            if (!NetCoreDbgSession.TryNormalizeLegacyBreakpointSource(path, out var source, requireExistingFile: false))
+                                return LegacyError("Breakpoint hit count source is unavailable.", "stopped");
+                            hitCount = WithLegacyBreakpointState<long?>(() =>
+                            {
+                                if (!LegacyBreakpointObservationsComplete() || !inspectionSession.LegacyHitCountsComplete) return null;
+                                var requested = _legacyBreakpoints.FirstOrDefault(item => _legacyBreakpointPathComparer.Equals(item.File, source)
+                                    && (item.Line == line || (_legacyBreakpointObservations.TryGetValue(item.Incarnation, out var observation) && observation.DapLine == line)));
+                                return inspectionSession.GetLegacyHitCount(source, requested.File is null ? line : requested.Line);
+                            });
+                            if (hitCount is null) return LegacyError("Breakpoint hit counts are pending or unavailable.", "stopped");
+                        }
+                    }
+                    var mapped = LegacyCompositeResult(content, name == GetExceptionContext, hitCount);
+                    if (!inspectionSession.IsStoppedContextCurrent(stoppedThread, captured.Context))
+                        return compositeMayEvaluate ? LegacyInspectionChanged(EvaluateExpression) : LegacyInspectionChanged(name);
+                    return mapped;
+                }
                 if (name == AddBreakpoint && kind == "breakpoint_added")
                 {
                     return LegacyResponse(new { file = content.GetProperty("file"), line = content.GetProperty("line"), condition = (string?)null, verified = content.GetProperty("verified") }, observedState);
@@ -1293,6 +1347,16 @@ internal static class Program
             }
             finally
             {
+                if (compositeEvaluationHeld)
+                {
+                    if (!gateHeld)
+                    {
+                        await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                        gateHeld = true;
+                    }
+                    _legacyCompositeEvaluations--;
+                    if (_legacyOwner is not null) _legacyOwnerActivity = Stopwatch.GetTimestamp();
+                }
                 if (breakpointHeld)
                 {
                     if (!gateHeld)
@@ -1410,6 +1474,8 @@ internal static class Program
                     SetVariable => key is not ("variables_reference" or "name" or "value"),
                     ConfigureExceptions => key != "filters",
                     GetExceptionInfo => key != "thread_id",
+                    GetStopContext => key is not ("include_variables" or "include_output_tail"),
+                    GetExceptionContext => key is not ("max_frames" or "include_variables_for_frames" or "max_inner_exceptions"),
                     StepOver or StepOut or PauseExecution or ContinueExecution => key != "thread_id",
                     StepInto => key is not ("thread_id" or "target_id"),
                     GetOutput => key is not ("clear" or "category"),
@@ -1470,6 +1536,79 @@ internal static class Program
             "running" => ["get_debug_state", "pause_execution", "get_output", "get_output_tail", "stop_debug"],
             _ => ["get_debug_state", "get_output", "get_output_tail", "stop_debug"],
         };
+
+        private static CallToolResult LegacyCompositeResult(JsonElement content, bool exception, long? hitCount)
+        {
+            static object[] Variables(JsonElement locals) => locals.EnumerateArray().Select(static value => (object)new
+            {
+                name = value.GetProperty("name"),
+                value = value.GetProperty("value"),
+                type = value.GetProperty("type")
+            }).ToArray();
+            var frames = content.GetProperty("frames");
+            object data;
+            if (exception)
+            {
+                var mappedFrames = new List<Dictionary<string, object?>>();
+                var scopes = content.GetProperty("scopeVariables");
+                var index = 0;
+                foreach (var frame in frames.EnumerateArray())
+                {
+                    var mapped = new Dictionary<string, object?>
+                    {
+                        ["index"] = index,
+                        ["id"] = frame.GetProperty("id"),
+                        ["name"] = frame.GetProperty("name"),
+                        ["source"] = frame.GetProperty("source"),
+                        ["line"] = frame.GetProperty("line"),
+                        ["column"] = frame.GetProperty("column")
+                    };
+                    if (scopes[index].ValueKind == JsonValueKind.Object)
+                    {
+                        var variables = new Dictionary<string, object>();
+                        foreach (var scope in scopes[index].EnumerateObject())
+                            variables[scope.Name] = Variables(scope.Value);
+                        mapped["variables"] = variables;
+                    }
+                    mappedFrames.Add(mapped);
+                    index++;
+                }
+                data = new
+                {
+                    threadId = content.GetProperty("threadId"),
+                    exception = content.GetProperty("exception"),
+                    frames = mappedFrames,
+                    totalFrames = mappedFrames.Count,
+                    innerExceptions = content.GetProperty("innerExceptions")
+                };
+            }
+            else
+            {
+                var mapped = new Dictionary<string, object?>
+                {
+                    ["state"] = "stopped",
+                    ["reason"] = content.GetProperty("reason"),
+                    ["threadId"] = content.GetProperty("threadId"),
+                    ["description"] = content.TryGetProperty("description", out var description) ? description : null,
+                    ["text"] = content.TryGetProperty("text", out var text) ? text : null,
+                    ["frames"] = frames.EnumerateArray().Select(static frame => new
+                    {
+                        id = frame.GetProperty("id"),
+                        name = frame.GetProperty("name"),
+                        source = frame.GetProperty("source"),
+                        line = frame.GetProperty("line")
+                    }).ToArray()
+                };
+                if (hitCount is { } count) mapped["hitCount"] = count;
+                if (content.TryGetProperty("locals", out var locals)) mapped["locals"] = Variables(locals);
+                if (content.TryGetProperty("recentOutput", out var output)) mapped["recentOutput"] = output;
+                if (content.TryGetProperty("exception", out var info)) mapped["exception"] = info;
+                data = mapped;
+            }
+            var result = LegacyResponse(data, "stopped");
+            return result.StructuredContent is { } resultContent && Encoding.UTF8.GetByteCount(resultContent.GetRawText()) <= MaximumSerializedInspectionBytes
+                ? result : LegacyError("DEBUG_CONTEXT_TOO_LARGE", "stopped");
+        }
 
         private CallToolResult LegacyResponse(object data) => LegacyResponse(data, LegacySnapshot().State);
 
@@ -2391,7 +2530,7 @@ internal static class Program
             }
         }
 
-        private async ValueTask<CallToolResult> GetCompositeContextAsync(CallToolRequestParams request, bool exceptionContext, CancellationToken cancellationToken)
+        private async ValueTask<CallToolResult> GetCompositeContextAsync(CallToolRequestParams request, bool exceptionContext, CancellationToken cancellationToken, bool legacy = false, string? expectedContext = null)
         {
             var tool = exceptionContext ? GetExceptionContext : GetStopContext;
             if (!TryReadCompositeArguments(request.Arguments, exceptionContext, out var args))
@@ -2408,6 +2547,8 @@ internal static class Program
                 using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.AbortToken);
                 var captured = session.CaptureStoppedContext();
                 if (captured is null) return Error("debug_context_unavailable", "DEBUG_CONTEXT_UNAVAILABLE");
+                if (expectedContext is not null && !StringComparer.Ordinal.Equals(captured.Value.Context, expectedContext))
+                    return Error("debug_context_stale", "DEBUG_CONTEXT_STALE");
                 var (state, context, description, text) = captured.Value;
                 var threadId = state.CurrentThreadId!.Value;
                 CallToolResult InspectionRefusal() => session.IsStoppedContextCurrent(threadId, context)
@@ -2417,6 +2558,7 @@ internal static class Program
                     return Error("debug_context_not_exception", "DEBUG_CONTEXT_NOT_EXCEPTION");
                 var frameData = new List<object>();
                 var inner = new List<object>();
+                var scopeVariables = new List<object?>();
                 var content = new Dictionary<string, object?>
                 {
                     ["kind"] = exceptionContext ? "exception_context_success" : "stop_context_success",
@@ -2436,6 +2578,7 @@ internal static class Program
                 }
                 if (state.StopReason == "exception") content["exception"] = new Dictionary<string, object?>();
                 using var budget = new CompositeByteCounter(content);
+                if (legacy && exceptionContext) { budget.AddProperty("scopeVariables", scopeVariables); content["scopeVariables"] = scopeVariables; }
                 if (!exceptionContext && args.OutputEntries > 0)
                 {
                     var output = (List<object>)content["recentOutput"]!;
@@ -2469,11 +2612,12 @@ internal static class Program
                             ["source"] = frame.Source,
                             ["line"] = frame.Line,
                             ["column"] = frame.Column,
-                            ["locals"] = index < args.VariableFrames ? Array.Empty<DapVariable>() : null
+                            ["locals"] = index < args.VariableFrames && !legacy ? Array.Empty<DapVariable>() : null
                         }
                         : frame;
                     budget.Append(item, frameData.Count == 0);
                     frameData.Add(item);
+                    if (legacy && exceptionContext) { budget.Append(null, scopeVariables.Count == 0); scopeVariables.Add(null); }
                 }
                 for (var index = 0; index < frames.Length; index++)
                 {
@@ -2482,13 +2626,32 @@ internal static class Program
                     {
                         var scopes = await session.GetScopesAsync(context, frames[index].Id, operation.Token).ConfigureAwait(false);
                         if (scopes.IsRefused) return InspectionRefusal();
+                        if (legacy && exceptionContext)
+                        {
+                            var groups = new Dictionary<string, object?>(StringComparer.Ordinal);
+                            var sizes = new Dictionary<string, int>(StringComparer.Ordinal);
+                            budget.Replace(4, groups);
+                            scopeVariables[index] = groups;
+                            foreach (var groupScope in scopes.Scopes)
+                            {
+                                if (groupScope.VariablesReference <= 0) continue;
+                                var result = await session.GetVariablesAsync(context, groupScope.VariablesReference, 0, 20, operation.Token).ConfigureAwait(false);
+                                if (result.IsRefused) return InspectionRefusal();
+                                var values = result.Variables.Count > 20 ? result.Variables.Take(20).ToArray() : result.Variables;
+                                sizes[groupScope.Name] = sizes.TryGetValue(groupScope.Name, out var previousSize)
+                                    ? budget.Replace(previousSize, values)
+                                    : budget.AddProperty(groupScope.Name, values, groups.Count == 0);
+                                groups[groupScope.Name] = values;
+                            }
+                            continue;
+                        }
                         var scope = scopes.Scopes.FirstOrDefault(static item => item.VariablesReference > 0);
                         if (scope is null) variables = Array.Empty<DapVariable>();
                         else
                         {
-                            var result = await session.GetVariablesAsync(context, scope.VariablesReference, 0, 20, operation.Token).ConfigureAwait(false);
+                            var result = await session.GetVariablesAsync(context, scope.VariablesReference, 0, legacy && !exceptionContext ? 15 : 20, operation.Token).ConfigureAwait(false);
                             if (result.IsRefused) return InspectionRefusal();
-                            variables = result.Variables;
+                            variables = legacy && !exceptionContext && result.Variables.Count > 15 ? result.Variables.Take(15).ToArray() : result.Variables;
                         }
                     }
                     if (index < args.VariableFrames)
@@ -2613,21 +2776,26 @@ internal static class Program
                 _total += _bytes;
             }
 
-            internal void AddProperty(string name, object? value)
+            internal int AddProperty(string name, object? value, bool first = false)
             {
                 _bytes = 0;
                 _limit = MaximumSerializedInspectionBytes - _total;
-                var first = false;
-                Property(name, value, ref first);
+                if (!first) Add(1);
+                String(name);
+                Add(1);
+                var valueStart = _bytes;
+                Value(value);
                 _total += _bytes;
+                return _bytes - valueStart;
             }
 
-            internal void Replace(int previousSize, object? value)
+            internal int Replace(int previousSize, object? value)
             {
                 _bytes = 0;
                 _limit = MaximumSerializedInspectionBytes - _total + previousSize;
                 Value(value);
                 _total += _bytes - previousSize;
+                return _bytes;
             }
 
             public void Dispose() => _writer.Dispose();
@@ -5490,6 +5658,8 @@ internal static class Program
                 Tool("set_variable", "Set a variable in the selected stopped context; select a fresh stack afterwards. Uncertain writes must not be retried automatically.", """{"type":"object","properties":{"variables_reference":{"type":"integer","minimum":1,"maximum":2147483647},"name":{"type":"string"},"value":{"type":"string"}},"required":["variables_reference","name","value"],"additionalProperties":false}"""),
                 Tool("configure_exceptions", "Replace exception filters with owner permission. Omitted or null filters select an empty list.", """{"type":"object","properties":{"filters":{"type":["array","null"],"items":{"type":"string"}}},"additionalProperties":false}"""),
                 Tool("get_exception_info", "Read exception information for the observed stopped context and optional thread.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),
+                Tool("get_stop_context", "Read the implicit stopped context with bounded frames, first-scope locals, observed breakpoint hit counts and recent output. Pending or unavailable hit counts are refused.", """{"type":"object","properties":{"include_variables":{"type":"boolean"},"include_output_tail":{"type":"integer","minimum":0,"maximum":100}},"additionalProperties":false}"""),
+                Tool("get_exception_context", "Read the implicit exception context. Inner exception evaluation defaults to depth 5, may execute code and requires mux ownership; uncertain outcomes are not retried. Only the first available scope per frame is included.", """{"type":"object","properties":{"max_frames":{"type":"integer","minimum":1,"maximum":20},"include_variables_for_frames":{"type":"integer","minimum":0,"maximum":5},"max_inner_exceptions":{"type":"integer","minimum":0,"maximum":5}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = false, IdempotentHint = false, DestructiveHint = true }),
                 Tool("get_modules", "Read the bounded module event inventory for the implicit session.", """{"type":"object","properties":{},"additionalProperties":false}"""),
                 Tool("get_progress", "Read the bounded progress event inventory for the implicit session.", """{"type":"object","properties":{},"additionalProperties":false}"""),
                 Tool("get_loaded_sources", "Query and refresh loaded sources when the debugger supports it.", """{"type":"object","properties":{},"additionalProperties":false}"""),

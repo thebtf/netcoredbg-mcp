@@ -51,7 +51,7 @@ B3 native `step_over` и Native Scene Probe остаются исходника�
 только `start_debug`, `get_debug_state`, `get_threads`, `get_call_stack`,
 `get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`,
 `add_breakpoint`, `remove_breakpoint`, `configure_exceptions`, `get_exception_info`,
-`get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`,
+`get_stop_context`, `get_exception_context`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
 `get_output`, `get_output_tail`, `stop_debug`, `find_code_symbol`,
 `find_code_references` и `get_source_context`. Debug-команды используют неявную
@@ -59,6 +59,17 @@ B3 native `step_over` и Native Scene Probe остаются исходника�
 Без флага native API не меняется. Python backend не используется, установленный
 Python остаётся вариантом по умолчанию; это не
 полная совместимость #552.
+
+Legacy-инструменты контекста возвращают ответ `data` в стиле Python для одной
+эпохи остановки. Контекст остановки содержит до пяти кадров, 15 переменных
+первой области, сохранённый вывод и наблюдаемый счётчик попаданий. Если подсчёт
+ещё не завершён или недоступен, возвращается ошибка. Контекст исключения
+содержит до 20 кадров и до 20 переменных каждой доступной области не более чем
+для пяти кадров. Нужна поддержка exceptionInfo отладчиком. Ответ ограничен
+256 КиБ; устаревшие и частичные данные не выдаются.
+В отличие от современного инструмента, `max_inner_exceptions` по умолчанию равен
+5. Вычисление может запускать код программы и требует владения mux. Укажи 0,
+чтобы не выполнять вычисление. Неопределённый результат не повторяется.
 
 Три native-инструмента поиска работают до запуска и во время сессии. Их ответы
 в стиле Python содержат состояние, наблюдаемое при формировании ответа. Заданный

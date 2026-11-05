@@ -2566,6 +2566,10 @@ internal sealed class ControlledDapAdapter
         switch (expression)
         {
             case "$exception.InnerException":
+                if (_options.VariablesResponseMode == "context-evaluation-invalidated")
+                {
+                    await WriteEventAsync("invalidated", new { areas = new[] { "variables" }, threadId = 1 }, cancellationToken);
+                }
                 body = new { result = "null", variablesReference = 0 };
                 break;
             case "6 * 7":
