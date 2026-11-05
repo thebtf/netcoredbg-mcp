@@ -99,7 +99,7 @@ synchronize. A blocked transport can delay any response, but debugger start, sto
 and shutdown do not wait for notification delivery internally.
 Output reads return the current retained buffer, including an empty idle buffer;
 thread reads issue a native threads request and report errors when unavailable.
-`debug://state` and complete resource parity remain open.
+`debug://state` is supported; complete resource parity remains open.
 A second start is refused until the bound session is stopped. An observed DAP
 exit or termination and its observed exit code remain visible until explicit
 stop, including while cleanup is in progress; failed cleanup or a retirement
@@ -113,8 +113,8 @@ if another client selects a stack, select your own stack again. Untagged callers
 cannot be distinguished from each other. Execution also invalidates the selection;
 select a fresh stack before inspecting again. Numeric frame and variable IDs are
 not tracked as previously issued: after reselection a reused numeric ID cannot
-be distinguished from an old one. Conditional and hit-count breakpoints and
-non-null variable filters are rejected; variable paging is nonnegative. Unlike
+be distinguished from an old one. Non-null variable filters are rejected;
+variable paging is nonnegative. Unlike
 Python, evaluation is subject to mux mutation ownership because expressions can
 change the debuggee. Uncertain evaluation and breakpoint writes are not retried.
 If the stopped context changes before a stack, scope, variable or evaluation
@@ -122,8 +122,12 @@ response is published, the legacy route returns an error instead of mixing
 epochs. A dispatched evaluation may already have executed; an unknown outcome
 must not be retried automatically.
 
-Unconditional source-line breakpoints can be added or removed while idle. The
-host keeps up to 256 requested locations for its lifetime and reapplies them on
+Source-line breakpoints can be added or removed while idle. Optional `condition`
+and `hit_condition` are retained with the requested location and applied only if
+the adapter advertises the corresponding DAP capability. An unsupported option
+returns an error; deferred intent prevents launch until changed or supported.
+The aggregate serialized condition and hit-condition values are limited to 252 KiB.
+The host keeps up to 256 requested locations for its lifetime and reapplies them on
 each start; an idle add reports `verified: false`. A validated, admitted active
 change enters the desired set before dispatch, and a concurrent breakpoint update
 is refused rather than queued. Stop remains available during an update; new starts
@@ -136,7 +140,7 @@ Sources for adds must exist. Paths are relative to the host's startup working
 directory and existing links are resolved, but lexical `..` is collapsed before
 link resolution and dangling links are not resolved, unlike Python `realpath`.
 `list_breakpoints`, `clear_breakpoints` and the subscribable
-`debug://breakpoints` resource cover these unconditional source locations only.
+`debug://breakpoints` resource cover these source locations only.
 Verification and adjusted lines come from DAP acknowledgements and matching
 breakpoint events; a matched removal event removes the requested entry. If IDs
 are missing, reused or exceed the observation limit, listing and resource reads
@@ -149,7 +153,7 @@ its original line. If several requested points share the stopped effective line,
 attribution is unavailable rather than assigned arbitrarily. Counts reset on stop;
 pending or unavailable attribution returns an error. Clear records all requested removals first;
 on a file-set refusal or uncertain result it stops dispatching further files and
-does not retry automatically. Conditional and function breakpoints remain unsupported.
+does not retry automatically. Function breakpoints remain unsupported.
 
 `set_variable` requires mux ownership and the calling client's selected stopped
 context. After an admitted attempt, select a fresh stack before inspecting or
