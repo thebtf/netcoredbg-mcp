@@ -197,7 +197,10 @@ internal sealed record AdapterOptions(
     bool? SupportsSetVariable,
     string SetVariableCapabilityDelta,
     int? ProcessEventId,
-    bool? SupportsLoadedSourcesRequest)
+    bool? SupportsLoadedSourcesRequest,
+    bool? SupportsStepTargets,
+    string StepTargetsMode,
+    string StepTargetsDelta)
 {
     public static AdapterOptions Parse(string[] args, string? environmentOptions)
     {
@@ -245,6 +248,9 @@ internal sealed record AdapterOptions(
         var setVariableCapabilityDelta = "none";
         int? processEventId = null;
         bool? supportsLoadedSourcesRequest = null;
+        bool? supportsStepTargets = null;
+        var stepTargetsMode = "success";
+        var stepTargetsDelta = "none";
 
         foreach (var argument in args.Concat(SplitOptions(environmentOptions)))
         {
@@ -376,6 +382,16 @@ internal sealed record AdapterOptions(
                     var loadedSourcesSupport = argument["--supports-loaded-sources=".Length..];
                     supportsLoadedSourcesRequest = loadedSourcesSupport == "omit" ? null : bool.Parse(loadedSourcesSupport);
                     break;
+                case var _ when argument.StartsWith("--supports-step-targets=", StringComparison.Ordinal):
+                    var stepTargetsSupport = argument["--supports-step-targets=".Length..];
+                    supportsStepTargets = stepTargetsSupport == "omit" ? null : bool.Parse(stepTargetsSupport);
+                    break;
+                case var _ when argument.StartsWith("--step-targets-mode=", StringComparison.Ordinal):
+                    stepTargetsMode = argument["--step-targets-mode=".Length..];
+                    break;
+                case var _ when argument.StartsWith("--step-targets-delta=", StringComparison.Ordinal):
+                    stepTargetsDelta = argument["--step-targets-delta=".Length..];
+                    break;
                 case var _ when argument.StartsWith("--exception-info-response=", StringComparison.Ordinal):
                     exceptionInfoResponseMode = argument["--exception-info-response=".Length..];
                     break;
@@ -440,7 +456,7 @@ internal sealed record AdapterOptions(
             supportsSetVariable,
             setVariableCapabilityDelta,
             processEventId,
-            supportsLoadedSourcesRequest);
+            supportsLoadedSourcesRequest, supportsStepTargets, stepTargetsMode, stepTargetsDelta);
     }
 
     private static IEnumerable<string> SplitOptions(string? options) =>
@@ -845,6 +861,8 @@ internal sealed class ControlledDapAdapter
                 {
                     initializeCapabilities["supportsExceptionInfoRequest"] = exceptionInfoSupport;
                 }
+                if (_options.SupportsStepTargets is { } stepTargetsSupport)
+                    initializeCapabilities["supportsStepInTargetsRequest"] = stepTargetsSupport;
                 if (_options.SupportsLoadedSourcesRequest is { } loadedSourcesSupport)
                 {
                     initializeCapabilities["supportsLoadedSourcesRequest"] = loadedSourcesSupport;
@@ -961,6 +979,8 @@ internal sealed class ControlledDapAdapter
                     await WriteEventAsync("capabilities", new { capabilities = new { supportsExceptionInfoRequest = supported } }, cancellationToken);
                     await RecordAsync(new { kind = "exception-info-capabilities-delta-event", supported }, cancellationToken);
                 }
+                if (_options.StepTargetsDelta is "enable-on-threads" or "disable-on-threads")
+                    await WriteEventAsync("capabilities", new { capabilities = new { supportsStepInTargetsRequest = _options.StepTargetsDelta == "enable-on-threads" } }, cancellationToken);
                 if (_options.ExceptionFiltersCapabilityDelta is "enable-on-threads" or "disable-on-threads")
                 {
                     await WriteExceptionFiltersCapabilityAsync(_options.ExceptionFiltersCapabilityDelta == "enable-on-threads", cancellationToken);
@@ -984,6 +1004,19 @@ internal sealed class ControlledDapAdapter
                 return false;
             case "exceptionInfo":
                 await HandleExceptionInfoRequestAsync(sequence, cancellationToken);
+                return false;
+            case "stepInTargets":
+                var targetsBody = new JsonObject { ["targets"] = new JsonArray(new JsonObject { ["id"] = 42, ["label"] = "Call", ["line"] = 3, ["column"] = 1 }) };
+                if (_options.StepTargetsMode == "stale")
+                {
+                    await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
+                    await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken, "step-targets-restopped");
+                    await RecordAsync(new { kind = "step-targets-response-gated", sequence }, cancellationToken);
+                    _heldInspectionResponse = CompleteHeldInspectionResponseAsync(sequence, command, targetsBody, _lifecycleEventsCancellation.Token);
+                    return false;
+                }
+                if (_options.StepTargetsMode == "malformed") targetsBody["targets"] = new JsonArray(new JsonObject { ["id"] = 1 });
+                await WriteResponseAsync(sequence, command, targetsBody, cancellationToken, success: _options.StepTargetsMode != "refused");
                 return false;
             case "loadedSources":
                 var loadedSources = _outputScript.ValueKind == JsonValueKind.Object

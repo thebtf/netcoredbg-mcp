@@ -667,10 +667,98 @@
       ]
     },
     "stepIntoArguments": {
-      "$ref": "#/$defs/stepOverArguments"
+      "type": "object",
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "threadId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "thread_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "targetId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "target_id": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "inspectionContextId": {
+          "$ref": "#/$defs/inspectionContextId"
+        }
+      },
+      "required": [
+        "debugSessionId"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "threadId",
+              "thread_id"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "targetId",
+              "target_id"
+            ]
+          }
+        },
+        {
+          "if": {
+            "anyOf": [
+              {
+                "required": [
+                  "targetId"
+                ]
+              },
+              {
+                "required": [
+                  "target_id"
+                ]
+              }
+            ]
+          },
+          "then": {
+            "required": [
+              "inspectionContextId"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "inspectionContextId"
+              ]
+            }
+          }
+        }
+      ]
     },
     "stepOutArguments": {
       "$ref": "#/$defs/stepOverArguments"
+    },
+    "getStepInTargetsArguments": {
+      "$ref": "#/$defs/getScopesArguments"
     },
     "continueArguments": {
       "type": "object",
@@ -2271,6 +2359,113 @@
       },
       "additionalProperties": false
     },
+    "stepInTargetsSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "inspectionContextId",
+        "targets"
+      ],
+      "properties": {
+        "kind": {
+          "const": "step_in_targets_success"
+        },
+        "inspectionContextId": {
+          "$ref": "#/$defs/inspectionContextId"
+        },
+        "targets": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "label"
+            ],
+            "properties": {
+              "id": {
+                "type": "integer",
+                "minimum": -2147483648,
+                "maximum": 2147483647
+              },
+              "label": {
+                "type": "string"
+              },
+              "line": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              "column": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              "endLine": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              "endColumn": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapStepTargetsUnsupported": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_step_targets_unsupported"
+        },
+        "error": {
+          "const": "DAP_STEP_TARGETS_UNSUPPORTED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapStepTargetsRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_step_targets_refused"
+        },
+        "error": {
+          "const": "DAP_STEP_TARGETS_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapStepTargetsProtocolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_step_targets_protocol_error"
+        },
+        "error": {
+          "const": "DAP_STEP_TARGETS_PROTOCOL_ERROR"
+        }
+      },
+      "additionalProperties": false
+    },
     "callStackSuccess": {
       "type": "object",
       "required": [
@@ -3776,6 +3971,7 @@
             "stop_debug",
             "get_threads",
             "get_call_stack",
+            "get_step_in_targets",
             "get_scopes",
             "get_variables",
             "evaluate_expression",
@@ -3966,6 +4162,18 @@
         },
         {
           "$ref": "#/$defs/callStackSuccess"
+        },
+        {
+          "$ref": "#/$defs/stepInTargetsSuccess"
+        },
+        {
+          "$ref": "#/$defs/dapStepTargetsUnsupported"
+        },
+        {
+          "$ref": "#/$defs/dapStepTargetsRefused"
+        },
+        {
+          "$ref": "#/$defs/dapStepTargetsProtocolError"
         },
         {
           "$ref": "#/$defs/scopesSuccess"

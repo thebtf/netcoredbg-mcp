@@ -246,6 +246,126 @@ public sealed class GetCallStackContractTests
         Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
     }
 
+    [Fact]
+    public async Task StepTargets_SupportedQueryAndTargetedStep_ValidateInputsBeforeWrite()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            DisableFormElicitation: true, FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", SupportsStepTargets: true)));
+        var session = await StartStoppedSessionAsync(driver, "targets-start");
+        var stack = await InspectionStackAsync(driver, session, "targets-stack");
+        var context = stack["inspectionContextId"]!.GetValue<string>();
+        var query = InspectionArguments(session, context, "frameId", 1);
+        query["frameId"] = JsonNode.Parse("1e0");
+        var result = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_step_in_targets", query,
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("targets-query")), false);
+        Assert.Equal("step_in_targets_success", result["kind"]?.GetValue<string>());
+        Assert.Equal(42, Assert.Single(Assert.IsType<JsonArray>(result["targets"]))!["id"]!.GetValue<int>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(result);
+        var before = await driver.ReadNativeActionsAsync();
+        var inexact = InspectionArguments(session, context, "frameId", 1);
+        inexact["frameId"] = JsonNode.Parse("1.0000000000000000001");
+        var invalidQuery = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_step_in_targets", inexact,
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("targets-inexact")), true);
+        Assert.Equal("invalid_tool_arguments", invalidQuery["kind"]?.GetValue<string>());
+        foreach (var args in new[] {
+            new JsonObject { ["debugSessionId"] = session, ["targetId"] = 42 },
+            new JsonObject { ["debugSessionId"] = session, ["targetId"] = 42, ["target_id"] = 42, ["inspectionContextId"] = context },
+            new JsonObject { ["debugSessionId"] = session, ["targetId"] = 42, ["inspectionContextId"] = "stale" },
+        })
+        {
+            var rejected = AssertApplicationEnvelope(await driver.CallToolRawAsync("step_into", args,
+                ModernMcpProcessDriver.CurrentMeta(), new RequestId(Guid.NewGuid().ToString("N"))), true);
+            Assert.Contains(rejected["kind"]!.GetValue<string>(), new[] { "invalid_tool_arguments", "dap_step_into_refused" });
+        }
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+        var stepped = AssertApplicationEnvelope(await driver.CallToolRawAsync("step_into",
+            new JsonObject { ["debugSessionId"] = session, ["target_id"] = 42, ["inspectionContextId"] = context },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("targets-step")), false);
+        Assert.Equal("step_into_success", stepped["kind"]?.GetValue<string>());
+        var write = Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before.Count), static action => action.Command == "stepIn");
+        Assert.True(JsonNode.DeepEquals(new JsonObject { ["threadId"] = 1, ["targetId"] = 42 }, JsonNode.Parse(write.Detail!)!["arguments"]));
+        var current = (await InspectionStackAsync(driver, session, "targets-restack"))["inspectionContextId"]!.GetValue<string>();
+        var nextBefore = await driver.ReadNativeActionsAsync();
+        var explicitStep = AssertApplicationEnvelope(await driver.CallToolRawAsync("step_into",
+            new JsonObject { ["debugSessionId"] = session, ["threadId"] = 1, ["targetId"] = 123, ["inspectionContextId"] = current },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("targets-explicit")), false);
+        Assert.Equal("step_into_success", explicitStep["kind"]?.GetValue<string>());
+        var secondWrite = Assert.Single((await driver.ReadNativeActionsAsync()).Skip(nextBefore.Count), static action => action.Command == "stepIn");
+        Assert.True(JsonNode.DeepEquals(new JsonObject { ["threadId"] = 1, ["targetId"] = 123 }, JsonNode.Parse(secondWrite.Detail!)!["arguments"]));
+    }
+
+    [Fact]
+    public async Task StepTargets_UnsupportedCapability_RefusesQueryAndTargetedStepWithoutWrite()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            DisableFormElicitation: true, FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", SupportsStepTargets: false)));
+        var session = await StartStoppedSessionAsync(driver, "targets-unsupported-start");
+        var context = (await InspectionStackAsync(driver, session, "targets-unsupported-stack"))["inspectionContextId"]!.GetValue<string>();
+        var before = await driver.ReadNativeActionsAsync();
+        var query = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_step_in_targets", InspectionArguments(session, context, "frameId", 1),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("targets-unsupported-query")), true);
+        var step = AssertApplicationEnvelope(await driver.CallToolRawAsync("step_into", new JsonObject { ["debugSessionId"] = session, ["targetId"] = 42, ["inspectionContextId"] = context },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("targets-unsupported-step")), true);
+        Assert.Equal("dap_step_targets_unsupported", query["kind"]?.GetValue<string>());
+        Assert.Equal("dap_step_targets_unsupported", step["kind"]?.GetValue<string>());
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Fact]
+    public async Task StepTargets_ResponseAfterRestop_RefusesStaleTargets()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            DisableFormElicitation: true, FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", SupportsStepTargets: true, StepTargetsMode: "stale")));
+        var session = await StartStoppedSessionAsync(driver, "targets-stale-start");
+        var context = (await InspectionStackAsync(driver, session, "targets-stale-stack"))["inspectionContextId"]!.GetValue<string>();
+        var pending = driver.CallToolRawAsync("get_step_in_targets", InspectionArguments(session, context, "frameId", 1),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("targets-stale"), timeout: TimeSpan.FromSeconds(35));
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await driver.WaitForFixtureRecordAsync("step-targets-response-gated", observation.Token);
+            await ExceptionInfoReaderBarrierAsync(driver, session, "targets-stale-barrier", observation.Token);
+            driver.ReleaseStackTraceResponse();
+            var result = AssertApplicationEnvelope(await pending, true);
+            Assert.Equal("dap_step_targets_refused", result["kind"]?.GetValue<string>());
+        }
+        finally { driver.ReleaseStackTraceResponse(); }
+    }
+
+
+    [Fact]
+    public async Task StepTargets_CapabilityEventEnablesQueriesInReaderOrder()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            DisableFormElicitation: true, FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", SupportsStepTargets: false, StepTargetsDelta: "enable-on-threads")));
+        var session = await StartStoppedSessionAsync(driver, "targets-delta-start");
+        var context = (await InspectionStackAsync(driver, session, "targets-delta-stack"))["inspectionContextId"]!.GetValue<string>();
+        var args = InspectionArguments(session, context, "frameId", 1);
+        var before = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_step_in_targets", args,
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("targets-delta-before")), true);
+        Assert.Equal("dap_step_targets_unsupported", before["kind"]?.GetValue<string>());
+        await ExceptionInfoReaderBarrierAsync(driver, session, "targets-delta-barrier");
+        var after = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_step_in_targets", args,
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("targets-delta-after")), false);
+        Assert.Equal("step_in_targets_success", after["kind"]?.GetValue<string>());
+    }
+
+    [Theory]
+    [InlineData("refused", "dap_step_targets_refused")]
+    [InlineData("malformed", "dap_step_targets_protocol_error")]
+    public async Task StepTargets_NegativeAndMalformedReplies_AreDistinct(string mode, string expected)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            DisableFormElicitation: true, FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", SupportsStepTargets: true, StepTargetsMode: mode)));
+        var session = await StartStoppedSessionAsync(driver, $"targets-{mode}-start");
+        var context = (await InspectionStackAsync(driver, session, $"targets-{mode}-stack"))["inspectionContextId"]!.GetValue<string>();
+        var result = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_step_in_targets", InspectionArguments(session, context, "frameId", 1),
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId($"targets-{mode}")), true);
+        Assert.Equal(expected, result["kind"]?.GetValue<string>());
+        StructuredContentSchemaParityTests.AssertMatchesSchema(result);
+    }
+
+
     [Theory]
     [InlineData("omitted")]
     [InlineData("null")]

@@ -243,6 +243,7 @@ internal static class Program
         private const string GetThreads = "get_threads";
         private const string GetCallStack = "get_call_stack";
         private const string GetScopes = "get_scopes";
+        private const string GetStepInTargets = "get_step_in_targets";
         private const string GetVariables = "get_variables";
         private const string EvaluateExpression = "evaluate_expression";
         private const string SetVariable = "set_variable";
@@ -390,6 +391,7 @@ internal static class Program
                 GetThreads => await GetThreadsAsync(request, cancellationToken).ConfigureAwait(false),
                 GetCallStack => await GetCallStackAsync(request, cancellationToken).ConfigureAwait(false),
                 GetScopes => await GetScopesAsync(request, cancellationToken).ConfigureAwait(false),
+                GetStepInTargets => await GetStepInTargetsAsync(request, cancellationToken).ConfigureAwait(false),
                 GetVariables => await GetVariablesAsync(request, cancellationToken).ConfigureAwait(false),
                 EvaluateExpression => await EvaluateExpressionAsync(request, cancellationToken).ConfigureAwait(false),
                 SetVariable => await SetVariableAsync(request, cancellationToken).ConfigureAwait(false),
@@ -1586,6 +1588,35 @@ internal static class Program
         private static CallToolResult ExceptionInfoProtocolError() =>
             Error("dap_exception_info_protocol_error", "DAP_EXCEPTION_INFO_PROTOCOL_ERROR");
 
+        private async ValueTask<CallToolResult> GetStepInTargetsAsync(CallToolRequestParams request, CancellationToken cancellationToken)
+        {
+            if (!TryReadStepTargetArguments(request.Arguments, out var args)) return InvalidArguments(GetStepInTargets);
+            if (!_sessions.TryGetValue(args.SessionId, out var session) || !_slots.TryGetValue(args.SessionId, out var slot)) return NotFound();
+            var lease = slot.TryAcquire();
+            if (lease is null) return NotFound();
+            var close = false;
+            try
+            {
+                if (!_isUsable(session)) { close = true; return NotFound(); }
+                using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.AbortToken);
+                var result = await session.GetStepInTargetsAsync(args.InspectionContextId, args.Id, operation.Token).ConfigureAwait(false);
+                if (result.Outcome == DapStepTargetsOutcome.Unsupported) return Error("dap_step_targets_unsupported", "DAP_STEP_TARGETS_UNSUPPORTED");
+                if (result.Outcome == DapStepTargetsOutcome.Refused) return Error("dap_step_targets_refused", "DAP_STEP_TARGETS_REFUSED");
+                var serialized = JsonSerializer.Serialize(new { kind = "step_in_targets_success", inspectionContextId = args.InspectionContextId, targets = result.Targets });
+                if (Encoding.UTF8.GetByteCount(serialized) > MaximumSerializedInspectionBytes)
+                { close = true; return Error("dap_step_targets_protocol_error", "DAP_STEP_TARGETS_PROTOCOL_ERROR"); }
+                return SerializedResult(serialized, false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            { close = session.RequiresInspectionDrain(); throw; }
+            catch (Exception) { close = true; return Error("dap_step_targets_protocol_error", "DAP_STEP_TARGETS_PROTOCOL_ERROR"); }
+            finally
+            {
+                lease.Dispose();
+                if (close) { try { await slot.CloseAndDrainAsync().ConfigureAwait(false); } catch (Exception) { } }
+            }
+        }
+
         private ValueTask<CallToolResult> GetScopesAsync(CallToolRequestParams request, CancellationToken cancellationToken) =>
             GetInspectionAsync(request, scopes: true, cancellationToken);
 
@@ -1864,7 +1895,7 @@ internal static class Program
                 DapStepKind.Out => StepOut,
                 _ => throw new ArgumentOutOfRangeException(nameof(kind)),
             };
-            if (!TryReadContinueArguments(request.Arguments, out var arguments))
+            if (!TryReadTargetedStepArguments(request.Arguments, kind == DapStepKind.Into, out var arguments))
             {
                 return InvalidArguments(tool);
             }
@@ -1894,7 +1925,11 @@ internal static class Program
                     return NotFound();
                 }
 
-                var stepOver = await session.StepForOptionalThreadAsync(arguments.ThreadId, kind, operation.Token).ConfigureAwait(false);
+                var stepOver = arguments.TargetId is { } target
+                    ? await session.StepIntoTargetAsync(arguments.ThreadId, target, arguments.InspectionContextId!, operation.Token).ConfigureAwait(false)
+                    : await session.StepForOptionalThreadAsync(arguments.ThreadId, kind, operation.Token).ConfigureAwait(false);
+                if (stepOver.Outcome == DapStepOverOutcome.Unsupported)
+                    return Error("dap_step_targets_unsupported", "DAP_STEP_TARGETS_UNSUPPORTED");
                 if (stepOver.Outcome == DapStepOverOutcome.Refused)
                 {
                     return kind switch
@@ -3806,6 +3841,29 @@ internal static class Program
             return true;
         }
 
+        private static bool TryReadTargetedStepArguments(IDictionary<string, JsonElement>? input, bool allowTarget, out TargetedStepArguments result)
+        {
+            result = null!;
+            if (input is null || input.Keys.Any(key => key is not ("debugSessionId" or "threadId" or "thread_id" or "targetId" or "target_id" or "inspectionContextId"))
+                || !input.TryGetValue("debugSessionId", out var session) || session.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(session.GetString()) || !TryReadOptionalThread(input, out var thread)
+                || !TryGetAliased(input, "targetId", "target_id", out var target)) return false;
+            int? targetId = null;
+            if (target.ValueKind != JsonValueKind.Undefined)
+            {
+                if (!allowTarget || !TryReadOutputLineCount(target, out var number) || number is < int.MinValue or > int.MaxValue) return false;
+                targetId = (int)number;
+            }
+            string? context = null;
+            if (input.TryGetValue("inspectionContextId", out var element))
+            {
+                if (element.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(context = element.GetString()) || context.Length > 128) return false;
+            }
+            if ((targetId is null) != (context is null)) return false;
+            result = new TargetedStepArguments(session.GetString()!, thread, targetId, context);
+            return true;
+        }
+
         private static bool TryReadSetVariableArguments(IDictionary<string, JsonElement>? arguments, out SetVariableArguments result)
         {
             result = null!;
@@ -3850,6 +3908,21 @@ internal static class Program
             }
 
             result = new EvaluateArguments(sessionIdElement.GetString()!, contextElement.GetString()!, frameId, expressionElement.GetString()!);
+            return true;
+        }
+
+        private static bool TryReadStepTargetArguments(IDictionary<string, JsonElement>? arguments, out InspectionArguments result)
+        {
+            result = null!;
+            if (arguments is null || arguments.Count != 3
+                || arguments.Keys.Any(static key => key is not ("debugSessionId" or "inspectionContextId" or "frameId"))
+                || !arguments.TryGetValue("debugSessionId", out var session) || session.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(session.GetString())
+                || !arguments.TryGetValue("inspectionContextId", out var context) || context.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(context.GetString()) || context.GetString()!.Length > 128
+                || !arguments.TryGetValue("frameId", out var frame) || !TryReadOutputLineCount(frame, out var id)
+                || id is < int.MinValue or > int.MaxValue) return false;
+            result = new InspectionArguments(session.GetString()!, context.GetString()!, (int)id, null, null);
             return true;
         }
 
@@ -4120,6 +4193,7 @@ internal static class Program
         private sealed record CompositeArguments(string SessionId, int MaxFrames, int VariableFrames, int OutputEntries, int InnerExceptions);
         private sealed record CallStackArguments(string SessionId, int? ThreadId, uint StartFrame, uint Levels, bool IncludeInspectionContext);
         private sealed record InspectionArguments(string SessionId, string InspectionContextId, int Id, int? Start, int? Count);
+        private sealed record TargetedStepArguments(string SessionId, int? ThreadId, int? TargetId, string? InspectionContextId);
         private sealed record ScopesSuccessContent(string kind, string inspectionContextId, IReadOnlyList<DapScope> scopes);
         private sealed record VariablesSuccessContent(string kind, string inspectionContextId, IReadOnlyList<DapVariable> variables);
         private sealed record EvaluateArguments(string SessionId, string InspectionContextId, int FrameId, string Expression);
@@ -4197,7 +4271,7 @@ internal static class Program
                 Tool("get_output_tail", "Read retained output without clearing it. Filter categories before joining event fragments and splitting Python-style logical lines. Positive lines selects the last N, zero selects all, and negative lines skips the first N.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"lines\":{\"type\":\"integer\",\"default\":50},\"category\":{\"type\":[\"string\",\"null\"],\"default\":null}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("search_output", "Search retained output without clearing it. The pattern uses case-insensitive, culture-invariant .NET regular expressions, not Python regex parity. Category filtering precedes Python-style line splitting. Up to 50 matches and their context are returned with the total count; timeouts and application content over 256 KiB fail without partial results.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"pattern":{"type":"string"},"contextLines":{"type":"integer","default":2},"category":{"type":["string","null"],"default":null}},"required":["debugSessionId","pattern"],"additionalProperties":false}""",
                     new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, DestructiveHint = false }),
-                Tool("step_into", "Step into an explicit or current observed stopped thread. Completion requires acknowledgement and a later exact step stop; inspect the stack to see whether the adapter entered a callee.", OptionalStoppedThreadSchema),
+                Tool("step_into", "Step into a stopped thread; an optional targetId requires the current inspectionContextId and adapter capability. Numeric IDs are not verified as previously issued.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1},"threadId":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647},"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647},"targetId":{"type":"integer","minimum":-2147483648,"maximum":2147483647},"target_id":{"type":"integer","minimum":-2147483648,"maximum":2147483647},"inspectionContextId":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"}},"required":["debugSessionId"],"additionalProperties":false,"allOf":[{"not":{"required":["threadId","thread_id"]}},{"not":{"required":["targetId","target_id"]}},{"if":{"anyOf":[{"required":["targetId"]},{"required":["target_id"]}]},"then":{"required":["inspectionContextId"]},"else":{"not":{"required":["inspectionContextId"]}}}]}"""),
                 Tool("step_out", "Step out of an explicit or current observed stopped thread. Completion requires acknowledgement and a later exact step stop; inspect the stack to establish the caller.", OptionalStoppedThreadSchema),
                 Tool("evaluate_expression", "Evaluate an exact expression in an explicit frame and current inspection context using DAP watch. Expressions may execute code or mutate the debuggee; watch is not read-only. A positive result reference can be expanded with get_variables in the same context. Never automatically retry a failed or unknown outcome.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1},"inspectionContextId":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"},"frameId":{"type":"integer","minimum":-2147483648,"maximum":2147483647},"expression":{"type":"string"}},"required":["debugSessionId","inspectionContextId","frameId","expression"],"additionalProperties":false}""",
                     new ToolAnnotations { ReadOnlyHint = false, IdempotentHint = false, DestructiveHint = true }),
@@ -4218,6 +4292,7 @@ internal static class Program
                 NativeCodeSearchCatalog.Definition("find_code_symbol"),
                 NativeCodeSearchCatalog.Definition("find_code_references"),
                 NativeCodeSearchCatalog.Definition("get_source_context"),
+                Tool("get_step_in_targets", "Get bounded adapter step-in targets for an explicit frame and current inspection context when supported. IDs are adapter observations, not proof of later validity.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1},"inspectionContextId":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"},"frameId":{"type":"integer","minimum":-2147483648,"maximum":2147483647}},"required":["debugSessionId","inspectionContextId","frameId"],"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = true, IdempotentHint = true, DestructiveHint = false }),
             ],
             TimeToLive = CacheLifetime,
             CacheScope = CacheScope.Public,
