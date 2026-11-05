@@ -169,6 +169,12 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         _ = await AwaitAsyncResult(method.Invoke(_session, [null, Enum.Parse(kind, "Over"), cancellationToken]), "StepForOptionalThreadAsync", CancellationToken.None);
     }
 
+    public async Task StepIntoTargetAsync(string context, int targetId, CancellationToken cancellationToken)
+    {
+        var method = RequireTaskMethod(_session.GetType(), "StepIntoTargetAsync", typeof(int?), typeof(int), typeof(string), typeof(CancellationToken));
+        _ = await AwaitAsyncResult(method.Invoke(_session, [null, targetId, context, cancellationToken]), "StepIntoTargetAsync", CancellationToken.None);
+    }
+
     public async Task<bool> AddBreakpointIsAddedAsync(string file, int line, CancellationToken cancellationToken)
     {
         var add = RequireTaskMethod(_session.GetType(), "AddBreakpointAsync", typeof(string), typeof(int), typeof(CancellationToken));
@@ -1919,7 +1925,10 @@ internal sealed record FixtureConfiguration(
     bool? SupportsSetVariable = null,
     string SetVariableCapabilityDelta = "none",
     int? ProcessEventId = null,
-    bool? SupportsLoadedSourcesRequest = null)
+    bool? SupportsLoadedSourcesRequest = null,
+    bool? SupportsStepTargets = null,
+    string StepTargetsMode = "success",
+    string StepTargetsDelta = "none")
 {
     public string AsEnvironmentValue() => string.Join(
         ';',
@@ -1960,6 +1969,9 @@ internal sealed record FixtureConfiguration(
             $"--pause-all-threads-stopped={PauseAllThreadsStopped?.ToString() ?? "omit"}",
             $"--supports-exception-info={SupportsExceptionInfoRequest?.ToString() ?? "omit"}",
             $"--supports-loaded-sources={SupportsLoadedSourcesRequest?.ToString() ?? "omit"}",
+            $"--supports-step-targets={SupportsStepTargets?.ToString() ?? "omit"}",
+            $"--step-targets-mode={StepTargetsMode}",
+            $"--step-targets-delta={StepTargetsDelta}",
             $"--exception-info-response={ExceptionInfoResponseMode}",
             $"--exception-info-capability-delta={ExceptionInfoCapabilityDelta}",
             $"--exception-breakpoint-filters={ExceptionBreakpointFilters}",

@@ -353,9 +353,21 @@ larger because it carries both text and structured content.
 
 The source-built stateful host exposes `step_over`, `step_into`, and `step_out`
 with the required opaque `debugSessionId` and an optional stopped-thread ID.
-Invalid or extra arguments cause no DAP I/O. Each admitted call sends exactly
-one DAP `next`, `stepIn` or `stepOut`, respectively, with only `{threadId}`;
-step targets beyond the chosen thread are not supported.
+Invalid or extra arguments cause no DAP I/O. Each admitted call sends one DAP
+`next`, `stepIn` or `stepOut`, respectively. A targeted `step_into` also sends
+the supplied `targetId`.
+
+`get_step_in_targets(debugSessionId, inspectionContextId, frameId)` requires the
+current stopped inspection context and adapter `supportsStepInTargetsRequest`.
+It returns at most 256 validated targets and 256 KiB of serialized content.
+Pass `targetId` (or `target_id`, not both) and the same current context to
+`step_into`. The host validates the epoch and capability at admission but does not
+track whether a numeric target was previously issued. A later stop invalidates
+the context; uncertain writes are never retried. Unsupported capability and
+refused/stale requests are distinct. Unlike this native path, Python sends the
+query without a capability check and returns an empty list on a negative DAP
+response. No real targeted-step proof or full Python parity is claimed.
+
 
 A correlated positive acknowledgement is not a completed step. Success requires
 a later `stopped(reason: "step")` event for that exact thread. Pre-acknowledgement,

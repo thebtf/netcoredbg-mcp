@@ -720,6 +720,49 @@ public sealed class NetCoreDbgSessionTests
         }
     }
 
+    [Fact]
+    public async Task StepIntoTarget_ContinuedAndRestopCannotOvertakeAdmittedWrite()
+    {
+        await using var session = await StartAsync(new FixtureConfiguration(
+            LifecycleMode: "all-stop-held-continued-restop", NextResponseMode: "hold", SupportsStepTargets: true));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var cancellation = new CancellationTokenSource();
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var context = await session.GetInspectionContextAsync(observation.Token);
+        await session.HoldDapWriteAsync(observation.Token);
+        var writeHeld = true;
+        var operation = session.StepIntoTargetAsync(context, 42, cancellation.Token);
+        try
+        {
+            await session.WaitForPendingCommandAsync("stepIn", observation.Token);
+            session.Fixture.ReleaseGracefulShutdown();
+            await session.Fixture.WaitForEventAsync("continued", observation.Token);
+            await session.Fixture.WaitForTranscriptKindAsync("admission-restopped-event", observation.Token);
+            Assert.NotEqual("admission-restop", session.State.StopReason);
+            Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "stepIn");
+            session.ReleaseDapWrite();
+            writeHeld = false;
+            await session.Fixture.WaitForTranscriptKindAsync("next-response-gated", observation.Token);
+            await session.WaitForObservedStopReasonAsync("admission-restop", observation.Token);
+            var request = Assert.Single(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "stepIn");
+            using var arguments = JsonDocument.Parse(Assert.IsType<string>(request.Arguments));
+            Assert.Equal(1, arguments.RootElement.GetProperty("threadId").GetInt32());
+            Assert.Equal(42, arguments.RootElement.GetProperty("targetId").GetInt32());
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation.WaitAsync(observation.Token));
+            Assert.True(session.IsExecutionClosing);
+        }
+        finally
+        {
+            if (writeHeld) session.ReleaseDapWrite();
+            cancellation.Cancel();
+            session.Fixture.ReleaseNextResponse();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
+
 
 
 

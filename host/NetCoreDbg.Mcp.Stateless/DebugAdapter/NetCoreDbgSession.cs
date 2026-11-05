@@ -90,6 +90,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private bool _supportsTerminate;
     private DapStackTraceCapabilities _stackTraceCapabilities;
     private bool _supportsExceptionInfoRequest;
+    private bool _supportsStepInTargetsRequest;
     private bool _supportsLoadedSourcesRequest;
     private bool _supportsSetVariable;
     private bool _supportsExceptionFilters;
@@ -803,6 +804,47 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     internal bool RequiresLoadedSourcesDrain() => Volatile.Read(ref _loadedSourcesWriteDrainRequired) != 0;
 
+    internal async Task<DapStepTargetsResult> GetStepInTargetsAsync(string inspectionContextId, int frameId, CancellationToken cancellationToken)
+    {
+        PendingRequest request;
+        await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            lock (_stateGate)
+            {
+                if (!_supportsStepInTargetsRequest) return new(DapStepTargetsOutcome.Unsupported, null);
+                if (_inspectionClosed || !StringComparer.Ordinal.Equals(_inspectionContextId, inspectionContextId))
+                    return new(DapStepTargetsOutcome.Refused, null);
+            }
+            request = await BeginRequestAsync("stepInTargets", new { frameId }, _requestTimeout, cancellationToken,
+                inspectionContextId: inspectionContextId).ConfigureAwait(false);
+        }
+        finally { _callStackAdmissionGate.Release(); }
+
+        try
+        {
+            var response = await WaitForResponseAsync(request, _requestTimeout, cancellationToken).ConfigureAwait(false);
+            if (!response.Success || !response.TargetCurrent) return new(DapStepTargetsOutcome.Refused, null);
+            var entries = RequireInspectionArray(response.Body, "targets");
+            var targets = new DapStepTarget[entries.GetArrayLength()];
+            var index = 0;
+            foreach (var entry in entries.EnumerateArray())
+            {
+                int? Position(string name)
+                {
+                    if (!entry.TryGetProperty(name, out var value)) return null;
+                    if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out var number) || number < 0)
+                        throw new InvalidDataException("DAP step target position is invalid.");
+                    return number;
+                }
+                targets[index++] = new DapStepTarget(RequireInt32(entry, "id"), RequireInspectionName(entry, "label"),
+                    Position("line"), Position("column"), Position("endLine"), Position("endColumn"));
+            }
+            return new(DapStepTargetsOutcome.Success, targets);
+        }
+        finally { RemovePending(request); }
+    }
+
     internal async Task<DapScopesResult> GetScopesAsync(
         string inspectionContextId,
         int frameId,
@@ -1213,7 +1255,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     internal Task<DapStepOverResult> StepForOptionalThreadAsync(int? threadId, DapStepKind kind, CancellationToken cancellationToken) =>
         StepAsync(threadId, kind, cancellationToken);
 
-    private async Task<DapStepOverResult> StepAsync(int? threadId, DapStepKind kind, CancellationToken cancellationToken)
+    internal Task<DapStepOverResult> StepIntoTargetAsync(int? threadId, int targetId, string inspectionContextId, CancellationToken cancellationToken) =>
+        StepAsync(threadId, DapStepKind.Into, cancellationToken, targetId, inspectionContextId);
+
+    private async Task<DapStepOverResult> StepAsync(int? threadId, DapStepKind kind, CancellationToken cancellationToken,
+        int? targetId = null, string? inspectionContextId = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!TryAdmitExecution())
@@ -1232,6 +1278,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 int selectedThreadId;
                 lock (_stateGate)
                 {
+                    if (targetId is not null && !_supportsStepInTargetsRequest) return DapStepOverResult.Unsupported;
+                    if (targetId is not null && (_inspectionClosed || !StringComparer.Ordinal.Equals(_inspectionContextId, inspectionContextId)))
+                        return DapStepOverResult.Refused;
                     var selected = threadId ?? _state.CurrentThreadId;
                     if (_inspectionClosed || (threadId is null && _state.Event != "stopped")
                         || selected is not { } resolved || !HasStepOverAuthority(resolved))
@@ -1249,7 +1298,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
                 request = await BeginRequestAsync(
                     active.Command,
-                    new { threadId = selectedThreadId },
+                    targetId is null ? new { threadId = selectedThreadId } : (object)new { threadId = selectedThreadId, targetId = targetId.Value },
                     _requestTimeout,
                     cancellationToken,
                     stepOver: active).ConfigureAwait(false);
@@ -2740,6 +2789,13 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                         _callStackAdmissionGate.Release();
                     }
                 }
+                if (capabilities.TryGetProperty("supportsStepInTargetsRequest", out _))
+                {
+                    var supported = ReadOptionalBoolean(capabilities, "supportsStepInTargetsRequest");
+                    _callStackAdmissionGate.Wait();
+                    try { lock (_stateGate) { _supportsStepInTargetsRequest = supported; } }
+                    finally { _callStackAdmissionGate.Release(); }
+                }
                 if (capabilities.TryGetProperty("supportsLoadedSourcesRequest", out _))
                 {
                     var supported = ReadOptionalBoolean(capabilities, "supportsLoadedSourcesRequest");
@@ -3213,6 +3269,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             {
                 _stackTraceCapabilities = default;
                 _supportsExceptionInfoRequest = false;
+                _supportsStepInTargetsRequest = false;
                 _supportsLoadedSourcesRequest = false;
                 _supportsExceptionFilters = false;
                 _supportsSetVariable = false;
@@ -3230,6 +3287,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         _supportsTerminate = ReadOptionalBoolean(body, "supportsTerminateRequest");
         var capabilities = new DapStackTraceCapabilities(ReadOptionalBoolean(body, "supportsDelayedStackTraceLoading"));
         var supportsExceptionInfo = ReadOptionalBoolean(body, "supportsExceptionInfoRequest");
+        var supportsStepInTargets = ReadOptionalBoolean(body, "supportsStepInTargetsRequest");
         var supportsSetVariable = ReadOptionalBoolean(body, "supportsSetVariable");
         var supportsLoadedSources = ReadOptionalBoolean(body, "supportsLoadedSourcesRequest");
         var supportsExceptionFilters = ReadExceptionFilterSupport(body);
@@ -3237,6 +3295,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             _stackTraceCapabilities = capabilities;
             _supportsExceptionInfoRequest = supportsExceptionInfo;
+            _supportsStepInTargetsRequest = supportsStepInTargets;
             _supportsLoadedSourcesRequest = supportsLoadedSources;
             _supportsExceptionFilters = supportsExceptionFilters;
             _supportsSetVariable = supportsSetVariable;
@@ -5287,6 +5346,7 @@ internal enum DapStepKind
 internal enum DapStepOverOutcome
 {
     Refused,
+    Unsupported,
     Succeeded,
     Terminal,
     TimedOut,
@@ -5299,6 +5359,7 @@ internal sealed record DapStepOverResult(
     int? ExitCode = null)
 {
     internal static DapStepOverResult Refused { get; } = new(DapStepOverOutcome.Refused, 0);
+    internal static DapStepOverResult Unsupported { get; } = new(DapStepOverOutcome.Unsupported, 0);
     internal static DapStepOverResult Succeeded(int threadId) => new(DapStepOverOutcome.Succeeded, threadId);
     internal static DapStepOverResult ForTerminal(string terminal, int? exitCode) => new(DapStepOverOutcome.Terminal, 0, terminal, exitCode);
     internal static DapStepOverResult TimedOut(int threadId) => new(DapStepOverOutcome.TimedOut, threadId);
@@ -5421,6 +5482,16 @@ internal sealed record DapScopesResult(bool IsRefused, string? InspectionContext
 {
     internal static DapScopesResult Refused { get; } = new(true, null, Array.Empty<DapScope>());
 }
+
+internal enum DapStepTargetsOutcome { Success, Unsupported, Refused }
+internal sealed record DapStepTargetsResult(DapStepTargetsOutcome Outcome, IReadOnlyList<DapStepTarget>? Targets);
+internal sealed record DapStepTarget(
+    [property: JsonPropertyName("id")] int Id,
+    [property: JsonPropertyName("label")] string Label,
+    [property: JsonPropertyName("line"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? Line,
+    [property: JsonPropertyName("column"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? Column,
+    [property: JsonPropertyName("endLine"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? EndLine,
+    [property: JsonPropertyName("endColumn"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? EndColumn);
 
 internal sealed record DapVariablesResult(bool IsRefused, string? InspectionContextId, IReadOnlyList<DapVariable> Variables)
 {

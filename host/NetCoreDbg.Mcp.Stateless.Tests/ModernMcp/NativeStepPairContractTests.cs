@@ -68,7 +68,7 @@ public sealed class NativeStepPairContractTests
         Assert.Equal(new[] { "debugSessionId" },
             Assert.IsType<JsonArray>(schema["required"]).Select(static value => value?.GetValue<string>()));
         var properties = Assert.IsType<JsonObject>(schema["properties"]);
-        Assert.Equal(3, properties.Count);
+        Assert.Equal(tool == "step_into" ? 6 : 3, properties.Count);
         Assert.Equal("string", properties["debugSessionId"]?["type"]?.GetValue<string>());
         Assert.Equal(1, properties["debugSessionId"]?["minLength"]?.GetValue<int>());
         Assert.Equal(new[] { "integer", "null" }, Assert.IsType<JsonArray>(properties["threadId"]?["type"]).Select(static value => value?.GetValue<string>()));
