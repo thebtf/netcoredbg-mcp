@@ -288,6 +288,9 @@ internal static class Program
         private const string GetModules = "get_modules";
         private const string GetProgress = "get_progress";
         private const string GetLoadedSources = "get_loaded_sources";
+        private const string ReadMemory = "read_memory";
+        private const string Disassemble = "disassemble";
+        private const string GetLocations = "get_locations";
         private const string GetOutput = "get_output";
         private const string GetOutputTail = "get_output_tail";
         private const string SearchOutput = "search_output";
@@ -737,7 +740,7 @@ internal static class Program
             if (name is not (StartDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
                 or PauseExecution or ContinueExecution or StopDebug or GetOutput or GetOutputTail
                 or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or GetScopes or GetVariables or EvaluateExpression
-                or SetVariable or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets
+                or SetVariable or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets or ReadMemory or Disassemble or GetLocations
                 or "create_snapshot" or "list_snapshots" or "diff_snapshots" or "analyze_collection" or "summarize_object"))
                 return UnknownTool(name);
             var arguments = context.Params.Arguments is null
@@ -1346,6 +1349,18 @@ internal static class Program
                 }
                 _legacyGate.Release();
                 gateHeld = false;
+                if (name is ReadMemory or Disassemble or GetLocations)
+                {
+                    var memory = await LegacyMemoryInspectionAsync(name, sessionId, arguments, cancellationToken).ConfigureAwait(false);
+                    await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                    gateHeld = true;
+                    if (!StringComparer.Ordinal.Equals(_legacySessionId, sessionId)) return LegacyInspectionChanged(name);
+                    var state = LegacySnapshot(sessionId).State;
+                    if (memory.Context is not null && (!_sessions.TryGetValue(sessionId, out var current) ||
+                        !ReferenceEquals(current, memory.Session) || current.CaptureInspectionState(memory.Context) is null))
+                        return LegacyInspectionChanged(name);
+                    return memory.Error is not null ? LegacyError(memory.Error, state) : LegacyBoundedUtilityResponse(memory.Data!, state);
+                }
                 var result = name switch
                 {
                     GetThreads => await GetThreadsAsync(request, cancellationToken).ConfigureAwait(false),
@@ -1783,6 +1798,9 @@ internal static class Program
                     GetStepInTargets => key != "frame_id",
                     GetVariables => key is not ("variables_reference" or "filter" or "start" or "count"),
                     EvaluateExpression => key is not ("expression" or "frame_id"),
+                    ReadMemory => key is not ("memory_reference" or "offset" or "count"),
+                    Disassemble => key is not ("memory_reference" or "offset" or "instruction_offset" or "instruction_count" or "resolve_symbols"),
+                    GetLocations => key != "location_reference",
                     SetVariable => key is not ("variables_reference" or "name" or "value"),
                     ConfigureExceptions => key != "filters",
                     GetExceptionInfo => key != "thread_id",
@@ -1824,6 +1842,183 @@ internal static class Program
             var result = LegacyResponse(data, state);
             return result.StructuredContent is { } body && Encoding.UTF8.GetByteCount(body.GetRawText()) <= MaximumSerializedInspectionBytes
                 ? result : LegacyError("Inspection result exceeds 256 KiB.", state);
+        }
+
+        private async Task<(object? Data, string? Error, string? Context, NetCoreDbgSession? Session)> LegacyMemoryInspectionAsync(
+            string name, string sessionId, Dictionary<string, JsonElement> arguments, CancellationToken cancellationToken)
+        {
+            static bool Number(Dictionary<string, JsonElement> values, string key, int fallback, out int value)
+            {
+                value = fallback;
+                return !values.TryGetValue(key, out var element) || (element.ValueKind == JsonValueKind.Number && element.TryGetInt32(out value));
+            }
+            var memoryReference = "";
+            if (name != GetLocations && (!arguments.TryGetValue("memory_reference", out var reference) ||
+                reference.ValueKind != JsonValueKind.String || string.IsNullOrEmpty(memoryReference = reference.GetString()!) ||
+                Encoding.UTF8.GetByteCount(memoryReference) > MaximumSerializedInspectionBytes))
+                return (null, "memory_reference is required and must fit the inspection limit.", null, null);
+            if (!Number(arguments, "offset", 0, out var offset) || !Number(arguments, "count", 0, out var count) ||
+                !Number(arguments, "instruction_offset", 0, out var instructionOffset) ||
+                !Number(arguments, "instruction_count", 64, out var instructionCount) ||
+                !Number(arguments, "location_reference", 0, out var locationReference) ||
+                (name == ReadMemory && count < 0) || (name == Disassemble && instructionCount <= 0) ||
+                (name == GetLocations && locationReference <= 0))
+                return (null, "Invalid memory inspection argument.", null, null);
+            var resolveSymbols = true;
+            if (arguments.TryGetValue("resolve_symbols", out var resolve))
+            {
+                if (resolve.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return (null, "Invalid resolve_symbols.", null, null);
+                resolveSymbols = resolve.GetBoolean();
+            }
+            if (!_sessions.TryGetValue(sessionId, out var session) || !_slots.TryGetValue(sessionId, out var slot))
+                return (null, "No active debug session.", null, null);
+            var lease = slot.TryAcquire();
+            if (lease is null) return (null, "No active debug session.", null, null);
+            var closeAfterLease = false;
+            try
+            {
+                if (!_isUsable(session)) { closeAfterLease = true; return (null, "No active debug session.", null, null); }
+                var command = name == ReadMemory ? "readMemory" : name == Disassemble ? "disassemble" : "locations";
+                object dapArguments = name switch
+                {
+                    ReadMemory => new { memoryReference, offset, count },
+                    Disassemble => new { memoryReference, offset, instructionOffset, instructionCount, resolveSymbols },
+                    _ => new { locationReference },
+                };
+                using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.AbortToken);
+                var result = await session.ReadMemoryInspectionAsync(command, dapArguments, name == ReadMemory && count == 0, operation.Token).ConfigureAwait(false);
+                if (result.Status == "unsupported")
+                {
+                    var capability = name == ReadMemory ? "supportsReadMemoryRequest" : name == Disassemble ? "supportsDisassembleRequest" : "supportsLocationsRequest";
+                    return (null, $"Adapter does not support {command}. This feature requires {capability}: true.", null, session);
+                }
+                if (result.Status == "stale") return (null, "Inspection context changed before the operation completed.", null, session);
+                if (result.Status == "refused") return (null, $"Adapter refused {command}.", null, session);
+                if (result.Status == "empty") return (new { address = "", unreadable_bytes = 0, data = "" }, null, result.Context, session);
+                var body = result.Body;
+                object data;
+                if (name == ReadMemory)
+                {
+                    var address = body.TryGetProperty("address", out var a) ? a.GetString() : "";
+                    var unreadable = body.TryGetProperty("unreadableBytes", out var u) ? u.GetInt64() : 0;
+                    var bytes = body.TryGetProperty("data", out var d) ? d.GetString() : "";
+                    if (address is null || bytes is null || unreadable < 0 || unreadable > NetCoreDbgSession.MaximumSafeDapInteger || !IsValidMemoryBase64(bytes)) throw new InvalidDataException("Invalid readMemory response.");
+                    data = new { address, unreadable_bytes = unreadable, data = bytes };
+                }
+                else if (name == Disassemble)
+                {
+                    var instructions = body.TryGetProperty("instructions", out var i) ? i : JsonSerializer.SerializeToElement(Array.Empty<object>());
+                    if (instructions.ValueKind != JsonValueKind.Array || instructions.GetArrayLength() > instructionCount) throw new InvalidDataException("Invalid disassemble response.");
+                    foreach (var instruction in instructions.EnumerateArray()) ValidateDisassembledInstruction(instruction);
+                    data = new { instructions };
+                }
+                else
+                {
+                    JsonElement? Field(string key) => body.TryGetProperty(key, out var value) ? value : null;
+                    var source = Field("source") ?? JsonSerializer.SerializeToElement(new { });
+                    if (Field("source") is not null) ValidateMemorySource(source, requireLocation: true);
+                    ValidateMemoryCoordinates(body);
+                    data = new { source, line = Field("line"), column = Field("column"), end_line = Field("endLine"), end_column = Field("endColumn"), endLine = Field("endLine"), endColumn = Field("endColumn") };
+                }
+                return (data, null, result.Context, session);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                closeAfterLease = session.RequiresInspectionDrain();
+                throw;
+            }
+            catch (Exception)
+            {
+                closeAfterLease = true;
+                return (null, "Memory inspection failed or returned an invalid or oversized response.", null, session);
+            }
+            finally
+            {
+                lease.Dispose();
+                if (closeAfterLease) { try { await slot.CloseAndDrainAsync().ConfigureAwait(false); } catch (Exception) { } }
+            }
+        }
+
+        private static readonly string[] MemoryPositionFields = ["line", "column", "endLine", "endColumn"];
+        private static readonly string[] MemoryInstructionStringFields = ["instructionBytes", "symbol", "presentationHint"];
+        private static readonly string[] MemorySourceStringFields = ["name", "path", "origin", "presentationHint"];
+
+        private static bool IsValidMemoryBase64(string text)
+        {
+            var symbols = 0;
+            var padding = 0;
+            foreach (var character in text)
+            {
+                if (character is ' ' or '\t' or '\r' or '\n') continue;
+                symbols++;
+                if (character == '=') { if (++padding > 2) return false; continue; }
+                if (padding != 0 || !(character is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9' or '+' or '/'))
+                    return false;
+            }
+            return symbols % 4 == 0 && (padding == 0 || symbols >= 4);
+        }
+
+        private static void ValidateMemoryCoordinates(JsonElement value)
+        {
+            foreach (var field in MemoryPositionFields)
+            {
+                if (value.TryGetProperty(field, out var position) &&
+                    (position.ValueKind != JsonValueKind.Number || !position.TryGetInt64(out var number) || number < 1 || number > NetCoreDbgSession.MaximumSafeDapInteger))
+                    throw new InvalidDataException("Invalid DAP source position.");
+            }
+        }
+
+        private static void ValidateDisassembledInstruction(JsonElement instruction)
+        {
+            if (instruction.ValueKind != JsonValueKind.Object ||
+                !instruction.TryGetProperty("address", out var address) || address.ValueKind != JsonValueKind.String ||
+                !instruction.TryGetProperty("instruction", out var text) || text.ValueKind != JsonValueKind.String)
+                throw new InvalidDataException("Invalid DAP instruction.");
+            foreach (var field in MemoryInstructionStringFields)
+                if (instruction.TryGetProperty(field, out var value) && value.ValueKind != JsonValueKind.String)
+                    throw new InvalidDataException("Invalid DAP instruction field.");
+            if (instruction.TryGetProperty("presentationHint", out var hint) && hint.GetString() is not ("normal" or "invalid"))
+                throw new InvalidDataException("Invalid DAP instruction hint.");
+            if (instruction.TryGetProperty("location", out var location)) ValidateMemorySource(location, requireLocation: false);
+            ValidateMemoryCoordinates(instruction);
+        }
+
+        private static void ValidateMemorySource(JsonElement source, bool requireLocation)
+        {
+            if (source.ValueKind != JsonValueKind.Object) throw new InvalidDataException("Invalid DAP source.");
+            foreach (var field in MemorySourceStringFields)
+                if (source.TryGetProperty(field, out var value) && value.ValueKind != JsonValueKind.String)
+                    throw new InvalidDataException("Invalid DAP source field.");
+            if (source.TryGetProperty("presentationHint", out var hint) && hint.GetString() is not ("normal" or "emphasize" or "deemphasize"))
+                throw new InvalidDataException("Invalid DAP source hint.");
+            var hasReference = false;
+            if (source.TryGetProperty("sourceReference", out var reference))
+            {
+                if (reference.ValueKind != JsonValueKind.Number || !reference.TryGetInt32(out var number) || number < 0)
+                    throw new InvalidDataException("Invalid DAP source reference.");
+                hasReference = number > 0;
+            }
+            if (requireLocation && !hasReference && (!source.TryGetProperty("path", out var path) || string.IsNullOrEmpty(path.GetString())))
+                throw new InvalidDataException("DAP location source has no path or reference.");
+            if (source.TryGetProperty("sources", out var sources))
+            {
+                if (sources.ValueKind != JsonValueKind.Array) throw new InvalidDataException("Invalid DAP related sources.");
+                foreach (var related in sources.EnumerateArray()) ValidateMemorySource(related, requireLocation: false);
+            }
+            if (source.TryGetProperty("checksums", out var checksums))
+            {
+                if (checksums.ValueKind != JsonValueKind.Array) throw new InvalidDataException("Invalid DAP source checksums.");
+                foreach (var checksum in checksums.EnumerateArray())
+                {
+                    if (checksum.ValueKind != JsonValueKind.Object || !checksum.TryGetProperty("algorithm", out var algorithm) ||
+                        algorithm.ValueKind != JsonValueKind.String || algorithm.GetString() is not ("MD5" or "SHA1" or "SHA256" or "timestamp") ||
+                        !checksum.TryGetProperty("checksum", out var content) || content.ValueKind != JsonValueKind.String)
+                        throw new InvalidDataException("Invalid DAP source checksum.");
+                    foreach (var digit in content.GetString()!)
+                        if (digit is not (>= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F'))
+                            throw new InvalidDataException("Invalid DAP source checksum value.");
+                }
+            }
         }
 
         private CallToolResult LegacyStoredSnapshots(string name, Dictionary<string, JsonElement> arguments)
@@ -6199,6 +6394,9 @@ internal static class Program
                 Tool("get_modules", "Read the bounded module event inventory for the implicit session.", """{"type":"object","properties":{},"additionalProperties":false}"""),
                 Tool("get_progress", "Read the bounded progress event inventory for the implicit session.", """{"type":"object","properties":{},"additionalProperties":false}"""),
                 Tool("get_loaded_sources", "Query and refresh loaded sources when the debugger supports it.", """{"type":"object","properties":{},"additionalProperties":false}"""),
+                Tool("read_memory", "Read memory when the adapter advertises supportsReadMemoryRequest; count defaults to zero.", """{"type":"object","properties":{"memory_reference":{"type":"string","minLength":1},"offset":{"type":"integer","minimum":-2147483648,"maximum":2147483647,"default":0},"count":{"type":"integer","minimum":0,"maximum":2147483647,"default":0}},"required":["memory_reference"],"additionalProperties":false}"""),
+                Tool("disassemble", "Disassemble memory when the adapter advertises supportsDisassembleRequest.", """{"type":"object","properties":{"memory_reference":{"type":"string","minLength":1},"offset":{"type":"integer","minimum":-2147483648,"maximum":2147483647,"default":0},"instruction_offset":{"type":"integer","minimum":-2147483648,"maximum":2147483647,"default":0},"instruction_count":{"type":"integer","minimum":1,"maximum":2147483647,"default":64},"resolve_symbols":{"type":"boolean","default":true}},"required":["memory_reference"],"additionalProperties":false}"""),
+                Tool("get_locations", "Resolve a location reference when the adapter advertises supportsLocationsRequest.", """{"type":"object","properties":{"location_reference":{"type":"integer","minimum":1,"maximum":2147483647}},"required":["location_reference"],"additionalProperties":false}"""),
                 Tool("get_step_in_targets", "Query targets for the selected stopped frame; mux ownership is required.", """{"type":"object","properties":{"frame_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),
                 Tool("step_over", "Step one stopped thread; uncertain outcomes are not retried.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"]}},"additionalProperties":false}"""),
                 Tool("step_into", "Step into using a stopped thread; target_id requires the selected stopped context. Uncertain outcomes are not retried.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647},"target_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),

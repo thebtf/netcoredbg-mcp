@@ -52,7 +52,7 @@ B3 native `step_over` и Native Scene Probe остаются исходника�
 `get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`,
 `add_breakpoint`, `remove_breakpoint`, `add_function_breakpoint`, `remove_function_breakpoint`, `list_breakpoints`, `clear_breakpoints`, `configure_exceptions`, `get_exception_info`,
 `get_stop_context`, `get_exception_context`, `create_snapshot`, `list_snapshots`,
-`diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`,
+`diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`, `read_memory`, `disassemble`, `get_locations`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
 `get_output`, `get_output_tail`, `stop_debug`, `find_code_symbol`,
 `find_code_references` и `get_source_context`. Debug-команды используют неявную
@@ -73,6 +73,15 @@ Python остаётся вариантом по умолчанию; это не
 соответствующих DAP-возможностей. Неопределённую запись автоматически не повторяют.
 Если активны точки функций и исходного кода, общий breakpoint stop может сделать
 счётчики попаданий исходного кода недоступными вместо неверного приписывания.
+
+Для трёх инструментов инспекции памяти нужна соответствующая capability DAP.
+При нулевом `count` инструмент `read_memory` возвращает пустые данные только
+после проверки capability. Вызов не требует остановки сессии, но изменение её
+состояния делает ожидающий ответ недействительным. Ответ ограничен 256 КиБ:
+при неверных данных или превышении лимита возвращается ошибка без частичного
+результата. Числовые входные данные ограничены знаковыми 32-битными числами.
+Стек и переменные не получают новые ссылки. Поддержку адаптера и проверку
+потребителя нужно подтверждать отдельно.
 
 Legacy-инструменты контекста возвращают ответ `data` в стиле Python для одной
 эпохи остановки. Контекст остановки содержит до пяти кадров, 15 переменных

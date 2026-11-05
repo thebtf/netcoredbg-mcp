@@ -51,7 +51,7 @@ only `start_debug`, `get_debug_state`, `get_threads`, `get_call_stack`,
 `get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`,
 `add_breakpoint`, `remove_breakpoint`, `add_function_breakpoint`, `remove_function_breakpoint`, `list_breakpoints`, `clear_breakpoints`, `configure_exceptions`, `get_exception_info`,
 `get_stop_context`, `get_exception_context`, `create_snapshot`, `list_snapshots`,
-`diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`,
+`diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`, `read_memory`, `disassemble`, `get_locations`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
 `get_output`, `get_output_tail`, `stop_debug`, `find_code_symbol`,
 `find_code_references`, and `get_source_context`. Debug operations use implicit
@@ -72,6 +72,14 @@ hit conditions are passed to the adapter; it may ignore them without the
 corresponding DAP capabilities. An uncertain write is not retried automatically.
 When function and source breakpoints are both active, a generic breakpoint stop
 can make source hit counts unavailable rather than attributing it incorrectly.
+
+The three memory inspection tools require their corresponding DAP capabilities.
+`read_memory` with a zero count returns empty data only after the capability
+check. Reads are not restricted to stopped sessions, but a lifecycle change
+invalidates an in-flight result. Responses are bounded to 256 KiB and invalid
+or oversized responses fail rather than return partial data. Numeric inputs
+are limited to signed 32-bit integers. Stack and variable projections do not
+expose new references. Adapter support and consumer verification are separate.
 
 The legacy context tools return Python-style `data` envelopes from one native
 stopped epoch. Stop context includes up to five frames, 15 first-scope locals,

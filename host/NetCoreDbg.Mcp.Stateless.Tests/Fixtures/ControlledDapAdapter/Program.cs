@@ -1013,6 +1013,41 @@ internal sealed class ControlledDapAdapter
             case "exceptionInfo":
                 await HandleExceptionInfoRequestAsync(sequence, cancellationToken);
                 return false;
+            case "readMemory":
+            case "disassemble":
+            case "locations":
+                var memoryMode = _outputScript.ValueKind == JsonValueKind.Object
+                    && _outputScript.TryGetProperty("memoryInspectionMode", out var memoryModeElement)
+                    ? memoryModeElement.GetString() : null;
+                object memoryBody = command switch
+                {
+                    "readMemory" => new { address = "0x1238", unreadableBytes = 2, data = "AQID" },
+                    "disassemble" => new
+                    {
+                        instructions = new[]
+                    {
+                        new { address = "0x1234", instructionBytes = "55", instruction = memoryMode == "large" ? new string('x', 270_000) : "push rbp", symbol = "main", presentationHint = "normal" },
+                        new { address = "0x1235", instructionBytes = "90", instruction = "nop", symbol = "next", presentationHint = "normal" },
+                    }
+                    },
+                    _ => new { source = new { path = "C:/src/Program.cs", name = "Program.cs" }, line = 12, column = 3, endLine = 13, endColumn = 8 },
+                };
+                if (memoryMode == "invalid-read") memoryBody = new { address = "0x1234", data = "!!!" };
+                else if (memoryMode == "invalid-disassemble") memoryBody = new { instructions = new object[] { false } };
+                else if (memoryMode == "invalid-locations") memoryBody = new { source = new { path = "C:/src/Program.cs" }, line = new { bad = true }, column = -1 };
+                else if (memoryMode == "wide-location") memoryBody = new { source = new { path = "C:/src/Program.cs" }, line = 1, column = 2_147_483_648L };
+                else if (memoryMode == "wide-instruction") memoryBody = new { instructions = new[] { new { address = "0x1234", instruction = "nop", column = 2_147_483_648L } } };
+                else if (memoryMode == "wide-unreadable") memoryBody = new { address = "0x1234", unreadableBytes = 2_147_483_648L, data = "" };
+                if (memoryMode == "stale")
+                {
+                    await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
+                    await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken, "memory-inspection-restopped");
+                    await RecordAsync(new { kind = "memory-inspection-response-gated", sequence }, cancellationToken);
+                    _heldInspectionResponse = CompleteHeldInspectionResponseAsync(sequence, command, memoryBody, _lifecycleEventsCancellation.Token);
+                    return false;
+                }
+                await WriteResponseAsync(sequence, command, memoryBody, cancellationToken);
+                return false;
             case "stepInTargets":
                 var targetsBody = new JsonObject { ["targets"] = new JsonArray(new JsonObject { ["id"] = 42, ["label"] = "Call", ["line"] = 3, ["column"] = 1 }) };
                 if (_options.StepTargetsMode == "stale")
