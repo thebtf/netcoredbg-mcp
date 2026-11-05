@@ -5,8 +5,10 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
+using NetCoreDbg.Mcp.Host.Tests;
 using NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter;
 using Xunit;
 
@@ -17,6 +19,238 @@ namespace NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
 public sealed class RegistryShutdownContractTests
 {
     private static readonly TimeSpan ObservationTimeout = TimeSpan.FromSeconds(5);
+
+    [Fact]
+    public async Task LegacyResources_BlockedDeliveryCarriesClearAndDoesNotHoldLifecycle()
+    {
+        var script = new JsonObject
+        {
+            ["threads"] = new JsonArray(new JsonObject
+            {
+                ["entries"] = new JsonArray(new JsonObject { ["category"] = "stdout", ["output"] = "before-clear\n" }),
+            })
+        };
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(LifecycleMode: "all-stop"), outputScript: script);
+        harness.EnableLegacyCompat();
+        var channel = new DuplexChannel();
+        using var updates = new SemaphoreSlim(0);
+        var serverOptions = new McpServerOptions
+        {
+            ServerInfo = new Implementation { Name = "resource-regression", Version = "1.0.0" },
+            Capabilities = new ServerCapabilities { Resources = new ResourcesCapability { Subscribe = true } },
+            Handlers = new McpServerHandlers
+            {
+                ReadResourceHandler = (context, token) => harness.ReadResourceAsync(context.Params.Uri, token),
+                SubscribeToResourcesHandler = (context, token) => harness.SubscribeResourceAsync(context.Server, context.Params.Uri, token),
+            },
+        };
+        await using var resourceServer = McpServer.Create(channel.CreateServerTransport(), serverOptions);
+        _ = resourceServer.RunAsync();
+        var clientOptions = new McpClientOptions
+        {
+            ProtocolVersion = "2025-11-25",
+            Handlers = new McpClientHandlers
+            {
+                NotificationHandlers = [new(NotificationMethods.ResourceUpdatedNotification, (notification, _) =>
+                {
+                    if (notification.Params?["uri"]?.GetValue<string>() == "debug://output") updates.Release();
+                    return ValueTask.CompletedTask;
+                })],
+            },
+        };
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        await using var client = await McpClient.CreateAsync(channel.CreateClientTransport(), clientOptions, cancellationToken: observation.Token);
+        async Task<JsonObject> RequestAsync(string method, string id) => ModernMcpProcessDriver.RequireResult(await client.SendRequestAsync(
+            new JsonRpcRequest { Id = new RequestId(id), Method = method, Params = new JsonObject { ["uri"] = "debug://output" } }, observation.Token));
+        _ = await RequestAsync("resources/subscribe", "resource-subscribe");
+        var active = false;
+        var gateHeld = false;
+        try
+        {
+            var started = Content(await harness.CallLegacyAsync("start_debug", new JsonObject
+            {
+                ["program"] = harness.ProgramPath,
+                ["pre_build"] = false,
+                ["stop_at_entry"] = true,
+            }, "resource-gated-start").WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.True(started["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            _ = await harness.CallLegacyAsync("get_threads", new JsonObject(), "resource-gated-output");
+            Assert.True(await updates.WaitAsync(TimeSpan.FromSeconds(10)), "The subscriber must observe the initial output.");
+            var before = await RequestAsync("resources/read", "resource-before-clear");
+            Assert.Equal("before-clear\n", before["contents"]?[0]?["text"]?.GetValue<string>());
+
+            await harness.ResourceSendGate.WaitAsync(observation.Token);
+            gateHeld = true;
+            while (updates.Wait(0)) { }
+            var cleared = Content(await harness.CallLegacyAsync("get_output", new JsonObject { ["clear"] = true }, "resource-gated-clear"));
+            Assert.Equal("before-clear\n", cleared["data"]?["output"]?.GetValue<string>());
+            var stopped = Content(await harness.CallLegacyAsync("stop_debug", new JsonObject(), "resource-gated-stop").WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.True(stopped["data"]?["success"]?.GetValue<bool>());
+            active = false;
+            Environment.SetEnvironmentVariable("CONTROLLED_DAP_OUTPUT_SCRIPT", new JsonObject
+            {
+                ["launch"] = new JsonArray(new JsonObject { ["category"] = "stdout", ["output"] = "failed-launch\n" }),
+                ["launchRefused"] = true,
+            }.ToJsonString());
+            var failed = Content(await harness.CallLegacyAsync("start_debug", new JsonObject
+            {
+                ["program"] = harness.ProgramPath,
+                ["pre_build"] = false,
+                ["stop_at_entry"] = true,
+            }, "resource-gated-failed-start").WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.NotNull(failed["error"]);
+            Assert.Equal("idle", Content(await harness.CallLegacyAsync("get_debug_state", new JsonObject(), "resource-gated-failed-idle"))["state"]?.GetValue<string>());
+            Assert.False(updates.Wait(0), "No invalidation can be delivered while the send gate is held.");
+            harness.ResourceSendGate.Release();
+            gateHeld = false;
+            Assert.True(await updates.WaitAsync(TimeSpan.FromSeconds(10)), "The subscriber must receive the carried output invalidation after the failed start.");
+            var after = await RequestAsync("resources/read", "resource-after-failed-start");
+            Assert.Equal(string.Empty, after["contents"]?[0]?["text"]?.GetValue<string>());
+            Assert.False(await updates.WaitAsync(TimeSpan.FromSeconds(1)), "The refused launch must not publish its output.");
+        }
+        finally
+        {
+            if (gateHeld) harness.ResourceSendGate.Release();
+            if (active) await Record.ExceptionAsync(async () => await harness.CallLegacyAsync("stop_debug", new JsonObject(), "resource-gated-cleanup").WaitAsync(TimeSpan.FromSeconds(10)));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyState_NaturalExitRemainsTerminalUntilExplicitStop()
+    {
+        var script = new JsonObject
+        {
+            ["continue"] = new JsonObject { ["entries"] = new JsonArray(), ["terminal"] = "exited" },
+        };
+        await using var harness = await RegistryHostHarness.CreateAsync(
+            new FixtureConfiguration(SupportsTerminate: false, LifecycleMode: "all-stop", ExitCode: 23), outputScript: script);
+        using var observation = new CancellationTokenSource(ObservationTimeout);
+        var started = false;
+        var stopped = false;
+        try
+        {
+            var launch = Content(await harness.CallLegacyAsync("start_debug", new JsonObject
+            {
+                ["program"] = harness.ProgramPath,
+                ["pre_build"] = false,
+                ["stop_at_entry"] = true,
+            }, "legacy-terminal-start"));
+            Assert.True(launch["data"]?["success"]?.GetValue<bool>());
+            started = true;
+            var token = harness.LegacySessionId;
+            await harness.Fixture.WaitForEventAsync("stopped", observation.Token);
+            Assert.Equal("threads_success", Content(await harness.CallAsync("get_threads", SessionArguments(token), "legacy-terminal-reader-barrier"))["kind"]?.GetValue<string>());
+
+            var continued = Content(await harness.CallLegacyAsync("continue_execution", new JsonObject(), "legacy-terminal-continue").WaitAsync(ObservationTimeout));
+            Assert.Equal("terminated", continued["state"]?.GetValue<string>());
+            Assert.Equal(23, continued["exit_code"]?.GetValue<int>());
+            var retired = await harness.CallAsync("get_threads", SessionArguments(token), "legacy-terminal-retired");
+            Assert.True(retired.IsError == true);
+            Assert.Equal("DEBUG_SESSION_NOT_FOUND", Content(retired)["error"]?.GetValue<string>());
+
+            var terminal = Content(await harness.CallLegacyAsync("get_debug_state", new JsonObject(), "legacy-terminal-state"));
+            Assert.Equal("terminated", terminal["state"]?.GetValue<string>());
+            Assert.Equal("terminated", terminal["data"]?["state"]?.GetValue<string>());
+            Assert.Equal("terminated", terminal["data"]?["execState"]?.GetValue<string>());
+            Assert.Equal(23, terminal["data"]?["exitCode"]?.GetValue<int>());
+
+            var stop = Content(await harness.CallLegacyAsync("stop_debug", new JsonObject(), "legacy-terminal-stop"));
+            Assert.True(stop["data"]?["success"]?.GetValue<bool>());
+            stopped = true;
+            var idle = Content(await harness.CallLegacyAsync("get_debug_state", new JsonObject(), "legacy-terminal-idle"));
+            Assert.Equal("idle", idle["state"]?.GetValue<string>());
+            Assert.Equal("idle", idle["data"]?["state"]?.GetValue<string>());
+            Assert.Null(idle["data"]?["exitCode"]);
+        }
+        finally
+        {
+            if (started && !stopped)
+                await Record.ExceptionAsync(async () => await harness.CallLegacyAsync("stop_debug", new JsonObject(), "legacy-terminal-cleanup").WaitAsync(ObservationTimeout));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyState_ObservedExitRemainsTerminalWhileCleanupIsHeld()
+    {
+        var script = new JsonObject
+        {
+            ["continue"] = new JsonObject { ["entries"] = new JsonArray(), ["terminal"] = "exited" },
+            ["disconnect"] = new JsonObject { ["entries"] = new JsonArray(), ["waitForRelease"] = true },
+        };
+        await using var harness = await RegistryHostHarness.CreateAsync(
+            new FixtureConfiguration(SupportsTerminate: false, LifecycleMode: "all-stop", ExitCode: 23), outputScript: script);
+        using var observation = new CancellationTokenSource(ObservationTimeout);
+        Task<CallToolResult>? continued = null;
+        var started = false;
+        try
+        {
+            var launch = Content(await harness.CallLegacyAsync("start_debug", new JsonObject
+            {
+                ["program"] = harness.ProgramPath,
+                ["pre_build"] = false,
+                ["stop_at_entry"] = true,
+            }, "legacy-held-terminal-start"));
+            Assert.True(launch["data"]?["success"]?.GetValue<bool>());
+            started = true;
+            var token = harness.LegacySessionId;
+            await harness.Fixture.WaitForEventAsync("stopped", observation.Token);
+            Assert.Equal("threads_success", Content(await harness.CallAsync("get_threads", SessionArguments(token), "legacy-held-terminal-reader"))["kind"]?.GetValue<string>());
+            continued = harness.CallLegacyAsync("continue_execution", new JsonObject(), "legacy-held-terminal-continue");
+            await harness.Fixture.WaitForTranscriptKindAsync("output-disconnect-gated", observation.Token);
+            Assert.False(continued.IsCompleted);
+            var retired = await harness.CallAsync("get_threads", SessionArguments(token), "legacy-held-terminal-retired");
+            Assert.True(retired.IsError == true);
+            Assert.Equal("DEBUG_SESSION_NOT_FOUND", Content(retired)["error"]?.GetValue<string>());
+            var state = Content(await harness.CallLegacyAsync("get_debug_state", new JsonObject(), "legacy-held-terminal-state"));
+            Assert.Equal("terminated", state["state"]?.GetValue<string>());
+            Assert.Equal(23, state["data"]?["exitCode"]?.GetValue<int>());
+        }
+        finally
+        {
+            harness.Fixture.ReleaseThreadsResponse();
+            if (continued is not null) await Record.ExceptionAsync(async () => await continued.WaitAsync(ObservationTimeout));
+            if (started) await Record.ExceptionAsync(async () => await harness.CallLegacyAsync("stop_debug", new JsonObject(), "legacy-held-terminal-cleanup").WaitAsync(ObservationTimeout));
+        }
+    }
+
+    [Fact]
+    public async Task LegacyState_UnexpectedAdapterEofDoesNotInventTermination()
+    {
+        var script = new JsonObject
+        {
+            ["continue"] = new JsonObject { ["entries"] = new JsonArray(), ["eof"] = true },
+        };
+        await using var harness = await RegistryHostHarness.CreateAsync(
+            new FixtureConfiguration(SupportsTerminate: false, LifecycleMode: "all-stop"), outputScript: script);
+        using var observation = new CancellationTokenSource(ObservationTimeout);
+        var started = false;
+        try
+        {
+            var launch = Content(await harness.CallLegacyAsync("start_debug", new JsonObject
+            {
+                ["program"] = harness.ProgramPath,
+                ["pre_build"] = false,
+                ["stop_at_entry"] = true,
+            }, "legacy-eof-start"));
+            Assert.True(launch["data"]?["success"]?.GetValue<bool>());
+            started = true;
+            var token = harness.LegacySessionId;
+            await harness.Fixture.WaitForEventAsync("stopped", observation.Token);
+            Assert.Equal("threads_success", Content(await harness.CallAsync("get_threads", SessionArguments(token), "legacy-eof-reader"))["kind"]?.GetValue<string>());
+            var continued = Content(await harness.CallLegacyAsync("continue_execution", new JsonObject(), "legacy-eof-continue").WaitAsync(ObservationTimeout));
+            Assert.NotNull(continued["error"]);
+            var retired = await harness.CallAsync("get_threads", SessionArguments(token), "legacy-eof-retired");
+            Assert.True(retired.IsError == true);
+            var state = Content(await harness.CallLegacyAsync("get_debug_state", new JsonObject(), "legacy-eof-state"));
+            Assert.Equal("unknown", state["state"]?.GetValue<string>());
+            Assert.Null(state["data"]?["exitCode"]);
+        }
+        finally
+        {
+            if (started) await Record.ExceptionAsync(async () => await harness.CallLegacyAsync("stop_debug", new JsonObject(), "legacy-eof-cleanup").WaitAsync(ObservationTimeout));
+        }
+    }
 
     [Theory]
     [InlineData("get_call_stack", false)]
@@ -557,6 +791,21 @@ public sealed class RegistryShutdownContractTests
         public string ProgramPath { get; } = programPath;
         public SemaphoreSlim LegacyGate => Assert.IsType<SemaphoreSlim>(registry.GetType()
             .GetField("_legacyGate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(registry));
+        public SemaphoreSlim ResourceSendGate
+        {
+            get
+            {
+                var owner = registry.GetType().GetField("_legacyResources", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(registry)!;
+                return Assert.IsType<SemaphoreSlim>(owner.GetType().GetField("_sendGate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(owner));
+            }
+        }
+        public void EnableLegacyCompat() => registry.GetType().GetProperty("LegacyCompat", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(registry, true);
+        public ValueTask<ReadResourceResult> ReadResourceAsync(string uri, CancellationToken cancellationToken) =>
+            (ValueTask<ReadResourceResult>)registry.GetType().GetMethod("ReadLegacyResourceAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(registry, [uri, cancellationToken])!;
+        public ValueTask<EmptyResult> SubscribeResourceAsync(McpServer resourceServer, string uri, CancellationToken cancellationToken) =>
+            (ValueTask<EmptyResult>)registry.GetType().GetMethod("SubscribeLegacyResourceAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(registry, [resourceServer, uri, true, cancellationToken])!;
         public string LegacySessionId => Assert.IsType<string>(registry.GetType()
             .GetField("_legacySessionId", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(registry));
 

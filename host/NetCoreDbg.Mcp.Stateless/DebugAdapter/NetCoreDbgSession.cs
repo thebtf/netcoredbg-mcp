@@ -115,6 +115,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private readonly Task? _initializeResponseContinuationRelease;
     private readonly Func<CancellationToken, Task>? _preHeaderWriteGate;
     private readonly TimeProvider _stepOverTimeProvider;
+    private readonly Action<string>? _resourceEventObserver;
     private NetCoreDbgSession(
         Process process,
         Stream input,
@@ -126,7 +127,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         TaskCompletionSource<bool>? initializeResponseContinuationReached = null,
         Task? initializeResponseContinuationRelease = null,
         Func<CancellationToken, Task>? preHeaderWriteGate = null,
-        TimeProvider? stepOverTimeProvider = null)
+        TimeProvider? stepOverTimeProvider = null,
+        Action<string>? resourceEventObserver = null)
     {
         _process = process;
         _input = input;
@@ -139,6 +141,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         _initializeResponseContinuationRelease = initializeResponseContinuationRelease;
         _preHeaderWriteGate = preHeaderWriteGate;
         _stepOverTimeProvider = stepOverTimeProvider ?? TimeProvider.System;
+        _resourceEventObserver = resourceEventObserver;
         _readerTask = ReadMessagesAsync();
         _stderrTask = DrainStandardErrorAsync();
     }
@@ -482,7 +485,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         IReadOnlyList<DapSourceBreakpoint> breakpoints,
         Action? failedStartCleanupCompleted,
         DapLaunchOptions? launchOptions,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, Action<string>? resourceEventObserver = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(debuggerPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(programPath);
@@ -511,7 +514,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     windowsLaunch.Error,
                     requestTimeout,
                     stopTimeout,
-                    windowsLaunch.Ownership);
+                    windowsLaunch.Ownership, resourceEventObserver: resourceEventObserver);
                 windowsLaunch = null;
             }
             else
@@ -526,7 +529,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     process.StandardError.BaseStream,
                     requestTimeout,
                     stopTimeout,
-                    processTreeOwnership);
+                    processTreeOwnership, resourceEventObserver: resourceEventObserver);
             }
 
             await session.StartProtocolAsync(programPath, initializeTimeout, dapEnvironment, breakpoints, launchOptions, cancellationToken).ConfigureAwait(false);
@@ -2733,7 +2736,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 CaptureNativeSceneTargetIdentity(body);
                 break;
             case "output":
-                HandleOutputEvent(body);
+                if (HandleOutputEvent(body))
+                {
+                    try { _resourceEventObserver?.Invoke("output"); }
+                    catch (Exception) { }
+                }
                 break;
             case "loadedSource":
                 HandleLoadedSourceEvent(body);
@@ -2853,6 +2860,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             case "terminated":
                 HandleTerminalEvent(message, eventName, body);
                 break;
+        }
+        if (eventName is "thread" or "stopped" or "continued" or "exited" or "terminated")
+        {
+            try { _resourceEventObserver?.Invoke(eventName); }
+            catch (Exception) { }
         }
     }
 
@@ -3017,11 +3029,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     }
 
 
-    private void HandleOutputEvent(JsonElement body)
+    private bool HandleOutputEvent(JsonElement body)
     {
         if (body.ValueKind != JsonValueKind.Object)
         {
-            return;
+            return false;
         }
 
         var category = "console";
@@ -3029,22 +3041,22 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             if (!TryDecodeOutputString(categoryElement, out category))
             {
-                return;
+                return false;
             }
 
             if (category is not "console" and not "stdout" and not "stderr" and not "telemetry")
             {
-                return;
+                return false;
             }
         }
 
         var text = string.Empty;
         if (body.TryGetProperty("output", out var outputElement) && !TryDecodeOutputString(outputElement, out text))
         {
-            return;
+            return false;
         }
 
-        _outputBuffer.Append(text, category);
+        return _outputBuffer.Append(text, category);
     }
 
     private static bool TryDecodeOutputString(JsonElement element, out string text)

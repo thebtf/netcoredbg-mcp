@@ -9,6 +9,7 @@ using System.Text.Json.Serialization;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using NetCoreDbg.Mcp.Host;
@@ -84,7 +85,7 @@ internal static class Program
         builder.Services.AddHostedService(_ => new SessionDisposer(sessions));
         var projectSearch = new NativeCodeSearch(sessions.ProjectRootResolver, sessions.ShutdownToken, useModernResultEnvelope: true);
 
-        builder.Services.AddMcpServer(options =>
+        var mcp = builder.Services.AddMcpServer(options =>
             {
                 // Negotiate initialize-era clients and per-request modern clients independently.
                 options.ProtocolVersion = null;
@@ -92,6 +93,7 @@ internal static class Program
                 options.Capabilities = new ServerCapabilities
                 {
                     Tools = new ToolsCapability { ListChanged = false },
+                    Resources = sessions.LegacyCompat ? new ResourcesCapability { Subscribe = true, ListChanged = false } : null,
                     Experimental = sessions.LegacyCompat
                         ? new Dictionary<string, object> { ["x-mux"] = JsonSerializer.SerializeToElement(new { sharing = "isolated" }) }
                         : null,
@@ -155,6 +157,20 @@ internal static class Program
                     await next(context, cancellationToken).ConfigureAwait(false);
                 });
             });
+
+        if (sessions.LegacyCompat)
+        {
+            mcp.WithListResourcesHandler((_, _) => ValueTask.FromResult(new ListResourcesResult
+            {
+                Resources = [
+                    new Resource { Name = "debug_output_resource", Uri = "debug://output", MimeType = "text/plain" },
+                    new Resource { Name = "debug_threads_resource", Uri = "debug://threads", MimeType = "application/json" },
+                ],
+            }))
+            .WithReadResourceHandler((context, cancellationToken) => sessions.ReadLegacyResourceAsync(context.Params.Uri, cancellationToken))
+            .WithSubscribeToResourcesHandler((context, cancellationToken) => sessions.SubscribeLegacyResourceAsync(context.Server, context.Params.Uri, true, cancellationToken))
+            .WithUnsubscribeFromResourcesHandler((context, cancellationToken) => sessions.SubscribeLegacyResourceAsync(context.Server, context.Params.Uri, false, cancellationToken));
+        }
 
         return builder.Build();
     }
@@ -329,6 +345,231 @@ internal static class Program
         private string? _legacyInspectionMuxId;
         private int? _legacyCurrentFrameId;
         private long _legacyInspectionRevision;
+        private readonly LegacyResourceOwner _legacyResources = new();
+
+        private sealed class LegacyResourceOwner
+        {
+            private readonly object _gate = new();
+            private readonly SemaphoreSlim _sendGate = new(1, 1);
+            private readonly HashSet<string> _subscriptions = new(StringComparer.Ordinal);
+            private McpServer? _server;
+            private Generation? _current;
+            private int _carry;
+            private bool _dispatching;
+            private bool _closed;
+
+            internal sealed class Generation(LegacyResourceOwner owner)
+            {
+                internal int Pending;
+                internal bool Published;
+                internal int InFlight;
+                internal string? SessionId;
+                internal void Observe(string eventName) => owner.Signal(this, eventName == "output" ? 1 : 2);
+            }
+
+            internal Generation Begin()
+            {
+                lock (_gate)
+                {
+                    if (_current is { } previous) _carry |= previous.Pending | previous.InFlight;
+                    var generation = new Generation(this);
+                    _current = generation;
+                    return generation;
+                }
+            }
+
+            internal void Discard(Generation generation)
+            {
+                lock (_gate)
+                {
+                    if (_closed || !ReferenceEquals(_current, generation)) return;
+                    var idle = new Generation(this) { Published = true, Pending = _carry };
+                    _carry = 0;
+                    _current = idle;
+                    Schedule();
+                }
+            }
+
+            internal void Publish(Generation generation, string? sessionId = null)
+            {
+                lock (_gate)
+                {
+                    if (!ReferenceEquals(_current, generation) || _closed) return;
+                    generation.SessionId = sessionId;
+                    generation.Pending |= _carry;
+                    _carry = 0;
+                    generation.Published = true;
+                    if (_subscriptions.Contains("debug://threads")) generation.Pending |= 2;
+                    Schedule();
+                }
+            }
+
+            internal void SignalSession(string sessionId, string name)
+            {
+                lock (_gate)
+                {
+                    if (_current is { Published: true } current && StringComparer.Ordinal.Equals(current.SessionId, sessionId))
+                        SignalLocked(current, name == "output" ? 1 : 2);
+                }
+            }
+
+            private void Signal(Generation generation, int bits)
+            {
+                lock (_gate) SignalLocked(generation, bits);
+            }
+
+            private void SignalLocked(Generation generation, int bits)
+            {
+                if (_closed || !ReferenceEquals(_current, generation)) return;
+                var uri = bits == 1 ? "debug://output" : "debug://threads";
+                if (!_subscriptions.Contains(uri)) return;
+                generation.Pending |= bits;
+                if (generation.Published) Schedule();
+            }
+
+            private void Schedule()
+            {
+                if (_dispatching) return;
+                _dispatching = true;
+                _ = Task.Run(DispatchAsync);
+            }
+
+            private async Task DispatchAsync()
+            {
+                while (true)
+                {
+                    await _sendGate.WaitAsync().ConfigureAwait(false);
+                    try
+                    {
+                        McpServer? server;
+                        string? uri;
+                        Generation generation;
+                        int bit;
+                        lock (_gate)
+                        {
+                            if (_closed || _current is not { Published: true } current || current.Pending == 0)
+                            {
+                                _dispatching = false;
+                                return;
+                            }
+                            generation = current;
+                            bit = (generation.Pending & 1) != 0 ? 1 : 2;
+                            generation.Pending &= ~bit;
+                            uri = bit == 1 ? "debug://output" : "debug://threads";
+                            server = _subscriptions.Contains(uri) ? _server : null;
+                            generation.InFlight = server is null ? 0 : bit;
+                        }
+                        if (server is not null)
+                        {
+                            try
+                            {
+                                await server.SendNotificationAsync(NotificationMethods.ResourceUpdatedNotification, new ResourceUpdatedNotificationParams { Uri = uri }, cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                            }
+                            catch (Exception) { }
+                            finally { lock (_gate) generation.InFlight = 0; }
+                        }
+                    }
+                    finally { _sendGate.Release(); }
+                }
+            }
+
+            internal async ValueTask<EmptyResult> SubscribeAsync(McpServer server, string uri, bool subscribe, CancellationToken cancellationToken)
+            {
+                if (uri is not ("debug://output" or "debug://threads"))
+                    throw new McpProtocolException($"Unknown resource: {uri}", McpErrorCode.InvalidParams);
+                if (!await _sendGate.WaitAsync(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false))
+                    throw new McpProtocolException("Resource notification delivery is busy.", McpErrorCode.InvalidRequest);
+                try
+                {
+                    lock (_gate)
+                    {
+                        if (_closed)
+                            throw new McpProtocolException("Resource connection unavailable.", McpErrorCode.InvalidRequest);
+                        _server = server;
+                        if (subscribe) _subscriptions.Add(uri);
+                        else
+                        {
+                            _subscriptions.Remove(uri);
+                            _carry &= uri == "debug://output" ? ~1 : ~2;
+                            if (_current is { } current) current.Pending &= uri == "debug://output" ? ~1 : ~2;
+                        }
+                    }
+                    return new EmptyResult();
+                }
+                finally { _sendGate.Release(); }
+            }
+
+            internal Generation? Retire()
+            {
+                Generation? previous;
+                lock (_gate)
+                {
+                    previous = _current;
+                    if (previous is not null) _carry |= previous.Pending | previous.InFlight;
+                    _current = null;
+                }
+                return previous;
+            }
+
+            internal void Restore(Generation? generation)
+            {
+                if (generation is null) return;
+                lock (_gate)
+                {
+                    if (_closed || _current is not null) return;
+                    generation.Pending |= _carry;
+                    _carry = 0;
+                    _current = generation;
+                    SignalLocked(generation, 1);
+                    if (generation.Published && generation.Pending != 0) Schedule();
+                    SignalLocked(generation, 2);
+                }
+            }
+
+            internal Task CloseAsync()
+            {
+                lock (_gate) { _closed = true; _current = null; _carry = 0; _subscriptions.Clear(); _server = null; }
+                return Task.CompletedTask;
+            }
+        }
+
+        internal ValueTask<EmptyResult> SubscribeLegacyResourceAsync(McpServer server, string uri, bool subscribe, CancellationToken cancellationToken) =>
+            _legacyResources.SubscribeAsync(server, uri, subscribe, cancellationToken);
+
+        internal Task CloseLegacyResourcesAsync() => _legacyResources.CloseAsync();
+
+        internal async ValueTask<ReadResourceResult> ReadLegacyResourceAsync(string uri, CancellationToken cancellationToken)
+        {
+            if (uri is not ("debug://output" or "debug://threads"))
+                throw new McpProtocolException($"Unknown resource: {uri}", McpErrorCode.InvalidParams);
+            await _legacyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            string? sessionId;
+            try
+            {
+                sessionId = _legacySessionId;
+                if (sessionId is null)
+                {
+                    if (uri == "debug://threads") throw new McpProtocolException("No active debug session.", McpErrorCode.InvalidRequest);
+                    return new ReadResourceResult { Contents = [new TextResourceContents { Uri = uri, MimeType = "text/plain", Text = string.Empty }] };
+                }
+            }
+            finally { _legacyGate.Release(); }
+            var request = LegacyRequest(uri == "debug://output" ? GetOutput : GetThreads, sessionId, null);
+            var result = uri == "debug://output"
+                ? await GetOutputAsync(request, cancellationToken).ConfigureAwait(false)
+                : await GetThreadsAsync(request, cancellationToken).ConfigureAwait(false);
+            await _legacyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                if (_legacySessionId != sessionId || _legacyStopping)
+                    throw new McpProtocolException("Debug session changed before resource read completed.", McpErrorCode.InvalidRequest);
+                if (result.IsError == true || result.StructuredContent is not { } content)
+                    throw new McpProtocolException("Resource read failed.", McpErrorCode.InvalidRequest);
+                var text = uri == "debug://output" ? content.GetProperty("output").GetString()! : content.GetProperty("threads").GetRawText();
+                return new ReadResourceResult { Contents = [new TextResourceContents { Uri = uri, MimeType = uri == "debug://output" ? "text/plain" : "application/json", Text = text }] };
+            }
+            finally { _legacyGate.Release(); }
+        }
 
         internal async ValueTask<CallToolResult> CallLegacyAsync(RequestContext<CallToolRequestParams> context, CancellationToken cancellationToken)
         {
@@ -413,9 +654,12 @@ internal static class Program
                     gateHeld = false;
                     CallToolResult started;
                     var startCompleted = false;
+                    LegacyResourceOwner.Generation? generation = null;
                     try
                     {
-                        started = await StartAsync(context, cancellationToken, arguments).ConfigureAwait(false);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        generation = _legacyResources.Begin();
+                        started = await StartAsync(context, cancellationToken, arguments, generation.Observe).ConfigureAwait(false);
                         startCompleted = true;
                     }
                     finally
@@ -423,12 +667,14 @@ internal static class Program
                         await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
                         gateHeld = true;
                         _legacyStarting = false;
+                        if (!startCompleted && generation is not null) _legacyResources.Discard(generation);
                         if (!startCompleted) { _legacyHasOwner = false; _legacyOwner = null; }
                     }
                     if (started.IsError == true || started.StructuredContent is not { } startContent
                         || !startContent.TryGetProperty("debugSessionId", out var tokenElement)
                         || tokenElement.GetString() is not { } token)
                     {
+                        _legacyResources.Discard(generation!);
                         _legacyHasOwner = false;
                         _legacyOwner = null;
                         return LegacyNativeError(started);
@@ -436,6 +682,7 @@ internal static class Program
                     _legacySessionId = token;
                     if (cancellationToken.IsCancellationRequested)
                     {
+                        _legacyResources.Discard(generation!);
                         _legacyStopping = true;
                         _legacyGate.Release();
                         gateHeld = false;
@@ -455,6 +702,7 @@ internal static class Program
                         }
                         cancellationToken.ThrowIfCancellationRequested();
                     }
+                    _legacyResources.Publish(generation!, token);
                     return LegacyResponse(new { success = true, program = program.GetString() });
                 }
                 if (name == GetDebugState)
@@ -592,20 +840,31 @@ internal static class Program
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     _legacyStopping = true;
+                    OutputLifetime? retiringOutput;
+                    lock (_lifetimeGate) _outputs.TryGetValue(sessionId, out retiringOutput);
                     _legacyGate.Release();
                     gateHeld = false;
                     CallToolResult stopped;
-                    try { stopped = await StopAsync(request, CancellationToken.None).ConfigureAwait(false); }
+                    LegacyResourceOwner.Generation? retired = null;
+                    try
+                    {
+                        retired = _legacyResources.Retire();
+                        stopped = await StopAsync(request, CancellationToken.None).ConfigureAwait(false);
+                    }
                     finally
                     {
                         await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
                         gateHeld = true;
                         _legacyStopping = false;
                     }
-                    if (stopped.IsError == true) return LegacyNativeError(stopped);
+                    if (stopped.IsError == true) { _legacyResources.Restore(retired); return LegacyNativeError(stopped); }
                     _legacySessionId = null;
                     _legacyHasOwner = false;
                     _legacyOwner = null;
+                    var idleGeneration = _legacyResources.Begin();
+                    if (retiringOutput?.Buffer.Snapshot(false, null).Length > 0) idleGeneration.Observe("output");
+                    idleGeneration.Observe("thread");
+                    _legacyResources.Publish(idleGeneration);
                     return LegacyResponse(new { success = true });
                 }
                 _legacyGate.Release();
@@ -702,10 +961,14 @@ internal static class Program
                         return LegacyResponse(new { sources = content.GetProperty("sources"), count = content.GetProperty("count") }, observedState);
                 }
                 if (name == GetStepInTargets && kind == "step_in_targets_success")
-                    return LegacyResponse(new { targets = content.GetProperty("targets").EnumerateArray().Select(static item => new
+                    return LegacyResponse(new
                     {
-                        id = item.GetProperty("id"), label = item.GetProperty("label"),
-                    }).ToArray() }, observedState);
+                        targets = content.GetProperty("targets").EnumerateArray().Select(static item => new
+                        {
+                            id = item.GetProperty("id"),
+                            label = item.GetProperty("label"),
+                        }).ToArray()
+                    }, observedState);
                 if (targetedStep && (stackRevision != _legacyInspectionRevision
                     || (kind == "step_into_success" && (inspectionSession is null
                         || !_sessions.TryGetValue(sessionId, out var stepSession) || !ReferenceEquals(stepSession, inspectionSession)))))
@@ -840,8 +1103,18 @@ internal static class Program
 
         private (string State, int? ThreadId, string? Reason, int? ExitCode) LegacySnapshot(string sessionId)
         {
-            if (!_sessions.TryGetValue(sessionId, out var session)) return ("unknown", null, null, null);
-            return ProjectLegacyState(session.State);
+            if (_sessions.TryGetValue(sessionId, out var session)) return ProjectLegacyState(session.State);
+            lock (_lifetimeGate)
+            {
+                if (_outputs.TryGetValue(sessionId, out var output))
+                {
+                    var cleanup = output.Cleanup.Task;
+                    if (cleanup.IsFaulted || cleanup.IsCanceled) return ("unknown", null, null, null);
+                    var state = cleanup.IsCompletedSuccessfully ? cleanup.Result : output.RetirementState;
+                    if (state?.Event is "exited" or "terminated") return ProjectLegacyState(state);
+                }
+            }
+            return ("unknown", null, null, null);
         }
 
         private static (string State, int? ThreadId, string? Reason, int? ExitCode) ProjectLegacyState(DapSessionState state)
@@ -1026,7 +1299,7 @@ internal static class Program
 
         private async ValueTask<CallToolResult> StartAsync(
             RequestContext<CallToolRequestParams> context,
-            CancellationToken cancellationToken, IDictionary<string, JsonElement>? argumentsOverride = null)
+            CancellationToken cancellationToken, IDictionary<string, JsonElement>? argumentsOverride = null, Action<string>? resourceObserver = null)
         {
             var arguments = argumentsOverride ?? context.Params.Arguments;
             if (!TryReadProgram(arguments, out var program, out var hasProgram)
@@ -1227,7 +1500,7 @@ internal static class Program
                     breakpoints,
                     _failedStartCleanupCompleted,
                     launchOptions,
-                    startupCancellation.Token).ConfigureAwait(false);
+                    startupCancellation.Token, resourceObserver).ConfigureAwait(false);
                 binding.AttachSession(session);
                 var output = new OutputLifetime(session.OutputBuffer);
                 SessionSlot? slot = null;
@@ -1469,6 +1742,8 @@ internal static class Program
             }
 
             var snapshot = output.Buffer.Snapshot(clear, category);
+            if (LegacyCompat && clear && string.IsNullOrEmpty(category) && snapshot.Length != 0)
+                _legacyResources.SignalSession(sessionId, "output");
             return new(SerializedResult(JsonSerializer.Serialize(new { kind = "output_success", output = snapshot }), isError: false));
         }
 
@@ -3436,6 +3711,8 @@ internal static class Program
         {
             lock (_lifetimeGate)
             {
+                var state = session.State;
+                if (state.Event is "exited" or "terminated") output.RetirementState = state;
                 _slots.TryRemove(new KeyValuePair<string, SessionSlot>(token, slot));
                 _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(token, session));
                 _nativeSceneBindings.TryRemove(new KeyValuePair<string, NativeSceneSessionBinding>(token, binding));
@@ -3491,6 +3768,7 @@ internal static class Program
         {
             internal DapOutputBuffer Buffer { get; } = buffer;
             internal TaskCompletionSource<DapSessionState> Cleanup { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            internal DapSessionState? RetirementState { get; set; }
         }
 
         private async ValueTask DisposeSlotResourcesAsync(
@@ -4946,6 +5224,10 @@ internal static class Program
     {
         public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
-        public Task StopAsync(CancellationToken cancellationToken) => sessions.DisposeAsync(cancellationToken).AsTask();
+        public async Task StopAsync(CancellationToken cancellationToken)
+        {
+            await sessions.CloseLegacyResourcesAsync().ConfigureAwait(false);
+            await sessions.DisposeAsync(cancellationToken).ConfigureAwait(false);
+        }
     }
 }
