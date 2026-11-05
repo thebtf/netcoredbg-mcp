@@ -45,6 +45,37 @@ remain native, not the Python tool contract; legacy-client cutover, resources,
 and full catalog parity are still open (Engram #552). The separate published
 read-only preview retains its modern-only protocol boundary.
 
+The source-built stateful host has an experimental, explicitly selected
+`--legacy-compat` mode for a **single process-local console session**. It exposes
+only `start_debug`, `get_debug_state`, `get_threads`, `get_call_stack`,
+`step_over`, `continue_execution`, and `stop_debug`; calls use implicit session binding and selected
+Python-style response envelopes. Without the flag the native catalog and explicit
+session contract are unchanged. This mode does not use the Python backend and
+does not change the installed Python default or provide full #552 compatibility.
+
+Mux mutation admission uses `_meta.muxSessionId`; reads remain available while
+execution waits, and the opt-in mode advertises `experimental.x-mux` with
+`sharing: isolated`. An untagged start owns its session until confirmed stop;
+tagged callers cannot claim it. All untagged calls are indistinguishable; this is
+not client authentication. Conversely, untagged mutations are refused while an
+identified mux owner exists, unlike Python. An identified owner may expire
+after `NETCOREDBG_SESSION_TIMEOUT` seconds (default 60), but never during an
+in-flight start or stop. Rejected starts do not acquire ownership. `stop_debug`
+waits for an in-flight start, including pre-build, and cannot interrupt it; the
+start request's cancellation route remains available. MCP resources are not
+advertised. A second start is refused until the bound session is stopped;
+unknown, retired or pending-execution state
+is reported as `unknown` when native evidence does not establish a state. State
+fields, stack source context, application-type detection, notifications,
+terminal and timeout results, and Python's full action hints are not equivalent.
+Stack pages are limited to
+256 frames. `stealth_mode=true` and unrecognized arguments are rejected. Python's
+`pre_build=true` default is retained, but native pre-build requires an explicit
+`build_project`; use `pre_build=false` for an existing binary. Native launch
+profile, environment and process cleanup limitations still apply. This source
+mode requires separate consumer verification before any cutover.
+
+
 The source-built stateful host accepts `args`, `cwd`, and `stopAtEntry` in
 `start_debug`. String arguments are sent to DAP in order, including empty
 strings; an explicit empty array is retained. Omitted or null options are not
