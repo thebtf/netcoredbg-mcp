@@ -132,7 +132,7 @@ internal static class Program
                         && call.TryGetPropertyValue("arguments", out var rawArguments)
                         && rawArguments is not null
                         && (rawArguments is not JsonObject objectArguments
-                            || ((name is "configure_exceptions" or "set_variable") && !CanDeserializeMutationArguments(name, objectArguments))))
+                            || ((name is "configure_exceptions" or "set_variable") && !CanDeserializeMutationArguments(name, objectArguments, sessions.LegacyCompat))))
                     {
                         // Keep malformed tool inputs on the complete application-error path before SDK deserialization.
                         call["arguments"] = null;
@@ -157,7 +157,7 @@ internal static class Program
         return builder.Build();
     }
 
-    private static bool CanDeserializeMutationArguments(string tool, JsonObject arguments)
+    private static bool CanDeserializeMutationArguments(string tool, JsonObject arguments, bool legacyCompat)
     {
         try
         {
@@ -170,6 +170,10 @@ internal static class Program
                 else if (tool == "set_variable" && name == "variablesReference")
                 {
                     if (value is not JsonValue reference || !reference.TryGetValue<int>(out _)) return false;
+                }
+                else if (legacyCompat && tool == "set_variable" && name == "variables_reference")
+                {
+                    if (value is not JsonValue reference || reference.GetValueKind() != JsonValueKind.Number) return false;
                 }
                 else if (tool == "configure_exceptions" && name == "filters")
                 {
@@ -329,7 +333,8 @@ internal static class Program
             var name = context.Params.Name;
             if (name is not (StartDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
                 or PauseExecution or ContinueExecution or StopDebug or GetOutput or GetOutputTail
-                or AddBreakpoint or RemoveBreakpoint or GetScopes or GetVariables or EvaluateExpression))
+                or AddBreakpoint or RemoveBreakpoint or GetScopes or GetVariables or EvaluateExpression
+                or SetVariable or ConfigureExceptions or GetExceptionInfo))
                 return UnknownTool(name);
             var arguments = context.Params.Arguments is null
                 ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
@@ -352,7 +357,7 @@ internal static class Program
                     && (!arguments.TryGetValue("category", out var categoryOption) || categoryOption.ValueKind == JsonValueKind.Null
                         || (categoryOption.ValueKind == JsonValueKind.String && categoryOption.GetString() == string.Empty));
                 var mutation = name is StartDebug or StopDebug or StepOver or StepInto or StepOut or PauseExecution
-                    or ContinueExecution or AddBreakpoint or RemoveBreakpoint or EvaluateExpression || consumesOutput;
+                    or ContinueExecution or AddBreakpoint or RemoveBreakpoint or EvaluateExpression or SetVariable or ConfigureExceptions || consumesOutput;
                 var raw = context.JsonRpcRequest.Params as JsonObject;
                 var mux = raw?["_meta"]?["muxSessionId"];
                 if (mux is not null && (mux is not JsonValue muxValue || !muxValue.TryGetValue<string>(out _)))
@@ -490,6 +495,9 @@ internal static class Program
                         arguments["threadId"] = JsonSerializer.SerializeToElement((int)threadNumber);
                     else return LegacyError("Invalid thread_id.");
                 }
+                if (name == GetExceptionInfo && arguments.TryGetValue("thread_id", out var exceptionThread)
+                    && TryReadOutputLineCount(exceptionThread, out var exceptionThreadNumber) && exceptionThreadNumber == 0)
+                    arguments["thread_id"] = JsonSerializer.SerializeToElement<int?>(null);
                 var stackRevision = _legacyInspectionRevision;
                 if (name is GetCallStack or StepOver or StepInto or StepOut or PauseExecution or ContinueExecution or StopDebug)
                 {
@@ -513,14 +521,14 @@ internal static class Program
                         return LegacyError("Invalid breakpoint line.");
                     arguments["line"] = JsonSerializer.SerializeToElement((int)lineNumber);
                 }
-                if (name is GetScopes or GetVariables or EvaluateExpression)
+                if (name is GetScopes or GetVariables or EvaluateExpression or SetVariable)
                 {
                     if (_legacyInspectionSessionId != sessionId || _legacyInspectionContextId is null || _legacyCurrentFrameId is null
                         || !StringComparer.Ordinal.Equals(_legacyInspectionMuxId, muxId))
                         return LegacyError("Call get_call_stack for the current stopped context first.");
-                    if (name == GetVariables)
+                    if (name is GetVariables or SetVariable)
                     {
-                        if (arguments.TryGetValue("filter", out var filter) && filter.ValueKind != JsonValueKind.Null)
+                        if (name == GetVariables && arguments.TryGetValue("filter", out var filter) && filter.ValueKind != JsonValueKind.Null)
                             return LegacyError("Variable filtering is not supported.");
                         arguments.Remove("filter");
                         if (!arguments.Remove("variables_reference", out var reference)
@@ -541,14 +549,25 @@ internal static class Program
                         arguments["frameId"] = JsonSerializer.SerializeToElement(selectedFrame);
                     }
                     arguments["inspectionContextId"] = JsonSerializer.SerializeToElement(_legacyInspectionContextId);
+                    if (name == SetVariable)
+                    {
+                        _legacyInspectionSessionId = null;
+                        _legacyInspectionContextId = null;
+                        _legacyInspectionMuxId = null;
+                        _legacyCurrentFrameId = null;
+                        stackRevision = ++_legacyInspectionRevision;
+                    }
                 }
                 var inspectionContext = name is GetScopes or GetVariables or EvaluateExpression ? _legacyInspectionContextId : null;
                 NetCoreDbgSession? inspectionSession = null;
-                if (name is GetCallStack or GetScopes or GetVariables or EvaluateExpression)
+                if (name is GetCallStack or GetScopes or GetVariables or EvaluateExpression or SetVariable or GetExceptionInfo)
                 {
                     if (!_sessions.TryGetValue(sessionId, out inspectionSession))
                         return LegacyError("No active debug session.");
                 }
+                var exceptionContext = name == GetExceptionInfo ? inspectionSession!.CaptureStoppedContext() : null;
+                if (name == GetExceptionInfo && exceptionContext is null)
+                    return LegacyError("No current stopped context.");
                 var request = LegacyRequest(name, sessionId, arguments);
                 if (name == StopDebug)
                 {
@@ -585,6 +604,9 @@ internal static class Program
                     GetScopes => await GetScopesAsync(request, cancellationToken).ConfigureAwait(false),
                     GetVariables => await GetVariablesAsync(request, cancellationToken).ConfigureAwait(false),
                     EvaluateExpression => await EvaluateExpressionAsync(request, cancellationToken).ConfigureAwait(false),
+                    SetVariable => await SetVariableAsync(request, cancellationToken).ConfigureAwait(false),
+                    ConfigureExceptions => await ConfigureExceptionsAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
+                    GetExceptionInfo => await GetExceptionInfoAsync(request, cancellationToken).ConfigureAwait(false),
                     AddBreakpoint => await AddBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                     RemoveBreakpoint => await RemoveBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                     ContinueExecution => await ContinueAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
@@ -593,9 +615,11 @@ internal static class Program
                 await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
                 gateHeld = true;
                 if (!string.Equals(_legacySessionId, sessionId, StringComparison.Ordinal))
-                    return name is GetCallStack or GetScopes or GetVariables or EvaluateExpression
+                    return name is GetCallStack or GetScopes or GetVariables or EvaluateExpression or SetVariable or GetExceptionInfo
                         ? LegacyInspectionChanged(name)
-                        : LegacyError(consumesOutput ? "Output may have been cleared; do not retry automatically." : "Debug session changed before operation completed.", "unknown");
+                        : LegacyError(consumesOutput ? "Output may have been cleared; do not retry automatically."
+                            : name == ConfigureExceptions ? "Exception filters may have changed; do not retry automatically."
+                            : "Debug session changed before operation completed.", "unknown");
                 var observedState = LegacySnapshot(sessionId).State;
                 if (name is GetScopes or GetVariables or EvaluateExpression)
                 {
@@ -606,7 +630,17 @@ internal static class Program
                     observedState = ProjectLegacyState(capturedState).State;
                 }
                 if (result.IsError == true || result.StructuredContent is not { } content)
+                {
+                    if (name == SetVariable && result.StructuredContent is { } failure
+                        && failure.TryGetProperty("error", out var failureCode)
+                        && failureCode.GetString() == "DAP_SET_VARIABLE_OUTCOME_UNKNOWN")
+                        return LegacyInspectionChanged(name);
+                    if (name == ConfigureExceptions && result.StructuredContent is { } filterFailure
+                        && filterFailure.TryGetProperty("error", out var filterCode)
+                        && filterCode.GetString() == "DAP_EXCEPTION_FILTERS_PROTOCOL_ERROR")
+                        return LegacyError("Exception filters may have changed; do not retry automatically.", "unknown");
                     return LegacyNativeError(result, observedState);
+                }
                 var kind = content.GetProperty("kind").GetString();
                 if (name == GetThreads && kind == "threads_success") return LegacyResponse(content.GetProperty("threads"), observedState);
                 if (name == GetCallStack && kind == "call_stack_success")
@@ -638,6 +672,27 @@ internal static class Program
                 if (name == GetVariables && kind == "variables_success") return LegacyResponse(content.GetProperty("variables"), observedState);
                 if (name == EvaluateExpression && kind == "evaluate_success")
                     return LegacyResponse(new { result = content.GetProperty("result"), type = content.GetProperty("type"), variablesReference = content.GetProperty("variablesReference") }, observedState);
+                if (name == SetVariable && kind == "set_variable_success")
+                {
+                    if (stackRevision != _legacyInspectionRevision || inspectionSession is null
+                        || !_sessions.TryGetValue(sessionId, out var currentSession) || !ReferenceEquals(currentSession, inspectionSession)
+                        || !content.TryGetProperty("inspectionContextId", out var updatedContext)
+                        || updatedContext.ValueKind != JsonValueKind.String || updatedContext.GetString() is not { } contextId
+                        || inspectionSession.CaptureInspectionState(contextId) is not { } updatedState)
+                        return LegacyInspectionChanged(name);
+                    return LegacyResponse(new { value = content.GetProperty("value"), type = content.GetProperty("type"), variablesReference = content.GetProperty("variablesReference") }, ProjectLegacyState(updatedState).State);
+                }
+                if (name == ConfigureExceptions && kind == "exception_filters_acknowledged")
+                    return LegacyResponse(new { filters = content.GetProperty("filters"), configured = true }, observedState);
+                if (name == GetExceptionInfo && kind == "exception_info_success")
+                {
+                    if (stackRevision != _legacyInspectionRevision || inspectionSession is null || exceptionContext is not { } captured
+                        || !_sessions.TryGetValue(sessionId, out var currentSession) || !ReferenceEquals(currentSession, inspectionSession)
+                        || captured.State.CurrentThreadId is not { } stoppedThread
+                        || !inspectionSession.IsStoppedContextCurrent(stoppedThread, captured.Context))
+                        return LegacyInspectionChanged(name);
+                    return LegacyResponse(content.GetProperty("exception"), ProjectLegacyState(captured.State).State);
+                }
                 if (name == AddBreakpoint && kind == "breakpoint_added")
                     return LegacyResponse(new { file = content.GetProperty("file"), line = content.GetProperty("line"), condition = (string?)null, verified = content.GetProperty("verified") }, observedState);
                 if (name == RemoveBreakpoint && kind == "breakpoint_removed")
@@ -687,6 +742,9 @@ internal static class Program
                     GetScopes => key != "frame_id",
                     GetVariables => key is not ("variables_reference" or "filter" or "start" or "count"),
                     EvaluateExpression => key is not ("expression" or "frame_id"),
+                    SetVariable => key is not ("variables_reference" or "name" or "value"),
+                    ConfigureExceptions => key != "filters",
+                    GetExceptionInfo => key != "thread_id",
                     StepOver or StepOut or PauseExecution or ContinueExecution => key != "thread_id",
                     StepInto => key is not ("thread_id" or "target_id"),
                     GetOutput => key is not ("clear" or "category"),
@@ -749,8 +807,8 @@ internal static class Program
             Result(new { error, state, next_actions = LegacyActions(state), message = $"Error: {error}" }, false);
 
         private static CallToolResult LegacyInspectionChanged(string tool) => LegacyError(
-            tool == EvaluateExpression
-                ? "Evaluation outcome is unknown; it may have executed. Do not retry automatically."
+            tool is EvaluateExpression or SetVariable
+                ? $"{(tool == SetVariable ? "Variable mutation" : "Evaluation")} outcome is unknown; it may have executed. Do not retry automatically."
                 : "Stopped inspection context changed before the operation completed.", "unknown");
 
         private CallToolResult LegacyNativeError(CallToolResult result) => LegacyNativeError(result, LegacySnapshot().State);
@@ -4733,6 +4791,9 @@ internal static class Program
                 Tool("get_scopes", "Get scopes for the current stopped stack frame, or an explicit frame ID. Select a fresh stack after execution.", """{"type":"object","properties":{"frame_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),
                 Tool("get_variables", "Get variables for a reference in the current stopped context. Filtering is unsupported; paging is nonnegative.", """{"type":"object","properties":{"variables_reference":{"type":"integer","minimum":1,"maximum":2147483647},"filter":{"type":"null"},"start":{"type":["integer","null"],"minimum":0,"maximum":2147483647},"count":{"type":["integer","null"],"minimum":0,"maximum":2147483647}},"required":["variables_reference"],"additionalProperties":false}"""),
                 Tool("evaluate_expression", "Evaluate in the current stopped context. Expressions may mutate the debuggee; mux ownership is required and uncertain writes are not retried.", """{"type":"object","properties":{"expression":{"type":"string"},"frame_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"required":["expression"],"additionalProperties":false}"""),
+                Tool("set_variable", "Set a variable in the selected stopped context; select a fresh stack afterwards. Uncertain writes must not be retried automatically.", """{"type":"object","properties":{"variables_reference":{"type":"integer","minimum":1,"maximum":2147483647},"name":{"type":"string"},"value":{"type":"string"}},"required":["variables_reference","name","value"],"additionalProperties":false}"""),
+                Tool("configure_exceptions", "Replace exception filters with owner permission. Omitted or null filters select an empty list.", """{"type":"object","properties":{"filters":{"type":["array","null"],"items":{"type":"string"}}},"additionalProperties":false}"""),
+                Tool("get_exception_info", "Read exception information for the observed stopped context and optional thread.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),
                 Tool("step_over", "Step one stopped thread; uncertain outcomes are not retried.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"]}},"additionalProperties":false}"""),
                 Tool("step_into", "Step into using a stopped thread. Non-null target_id is unsupported; uncertain outcomes are not retried.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647},"target_id":{"type":"null"}},"additionalProperties":false}"""),
                 Tool("step_out", "Step out using a stopped thread; uncertain outcomes are not retried.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),
