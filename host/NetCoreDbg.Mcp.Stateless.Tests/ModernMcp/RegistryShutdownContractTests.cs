@@ -253,6 +253,49 @@ public sealed class RegistryShutdownContractTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LegacyBreakpoint_CancelBeforeAck_RetainsAdmittedIntentOnRestart(bool remove)
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(
+            LifecycleMode: "all-stop", SetBreakpointsResponseMode: "hold-first-runtime"));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var caller = new CancellationTokenSource();
+        var active = false;
+        Task<CallToolResult>? pending = null;
+        try
+        {
+            var source = harness.ProgramPath;
+            Assert.False(Content(await harness.CallLegacyAsync("add_breakpoint", new JsonObject { ["file"] = source, ["line"] = 2 }, "cancel-unknown-idle"))["data"]?["verified"]?.GetValue<bool>());
+            if (remove)
+                Assert.False(Content(await harness.CallLegacyAsync("add_breakpoint", new JsonObject { ["file"] = source, ["line"] = 6 }, "cancel-unknown-idle-6"))["data"]?["verified"]?.GetValue<bool>());
+            var launch = new JsonObject { ["program"] = source, ["pre_build"] = false, ["stop_at_entry"] = true };
+            Assert.True(Content(await harness.CallLegacyAsync("start_debug", launch, "cancel-unknown-start"))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            pending = harness.CallLegacyAsync(remove ? "remove_breakpoint" : "add_breakpoint", new JsonObject { ["file"] = source, ["line"] = remove ? 2 : 6 }, "cancel-unknown-update", caller.Token);
+            await harness.Fixture.WaitForTranscriptKindAsync("runtime-breakpoints-response-gated", observation.Token);
+            caller.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await pending.WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.True(Content(await harness.CallLegacyAsync("stop_debug", new JsonObject(), "cancel-unknown-stop"))["data"]?["success"]?.GetValue<bool>());
+            active = false;
+            var beforeRestart = (await harness.Fixture.ReadTranscriptAsync()).Count;
+            Assert.True(Content(await harness.CallLegacyAsync("start_debug", launch, "cancel-unknown-restart"))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            var replay = Assert.Single((await harness.Fixture.ReadTranscriptAsync()).Skip(beforeRestart),
+                static entry => entry.Kind == "request" && entry.Command == "setBreakpoints");
+            using var message = JsonDocument.Parse(Assert.IsType<string>(replay.RawPayload));
+            Assert.Equal(remove ? new[] { 6 } : new[] { 2, 6 }, message.RootElement.GetProperty("arguments").GetProperty("breakpoints")
+                .EnumerateArray().Select(static breakpoint => breakpoint.GetProperty("line").GetInt32()));
+        }
+        finally
+        {
+            harness.Fixture.ReleaseNextResponse();
+            if (pending is not null) await Record.ExceptionAsync(async () => await pending.WaitAsync(TimeSpan.FromSeconds(10)));
+            if (active) await Record.ExceptionAsync(async () => await harness.CallLegacyAsync("stop_debug", new JsonObject(), "cancel-unknown-cleanup").WaitAsync(ObservationTimeout));
+        }
+    }
+
+    [Theory]
     [InlineData("get_call_stack", false)]
     [InlineData("get_call_stack", true)]
     [InlineData("get_scopes", false)]
