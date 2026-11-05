@@ -189,7 +189,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         JsonObject? meta = null,
         CancellationToken cancellationToken = default)
     {
-        if (name is "start_debug" or "stop_debug")
+        if (name is "start_debug" or "stop_debug" or "restart_debug" or "terminate_debug")
         {
             throw new InvalidOperationException("Lifecycle tests must use CallToolRawAsync so cleanup can bind the actual request.");
         }
@@ -312,7 +312,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         lock (_gate)
         {
             var name = method == "tools/call" ? StringValue(parameters?["name"]) : null;
-            if (_disposed && !disposing && (name is "start_debug" or "stop_debug"))
+            if (_disposed && !disposing && (name is "start_debug" or "stop_debug" or "restart_debug" or "terminate_debug"))
             {
                 throw new ObjectDisposedException(nameof(ModernMcpProcessDriver));
             }
@@ -320,7 +320,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             {
                 _fixture.MarkAdapterStartAttempted();
             }
-            if (name is "start_debug" or "stop_debug") observation.StartedOrder = ++_lifecycleOrder;
+            if (name is "start_debug" or "stop_debug" or "restart_debug" or "terminate_debug") observation.StartedOrder = ++_lifecycleOrder;
             _requests.Add(observation);
         }
         return observation;
@@ -329,7 +329,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
     private void CompleteObservation(ModernMcpRequestObservation observation, JsonObject? result)
     {
         if (observation.Method != "tools/call"
-            || StringValue(observation.Parameters?["name"]) is not ("start_debug" or "stop_debug"))
+            || StringValue(observation.Parameters?["name"]) is not ("start_debug" or "stop_debug" or "restart_debug" or "terminate_debug"))
         {
             return;
         }
@@ -645,7 +645,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         {
             history = _requests
                 .Where(static request => request.Method == "tools/call"
-                    && StringValue(request.Parameters?["name"]) is ("start_debug" or "stop_debug"))
+                    && StringValue(request.Parameters?["name"]) is ("start_debug" or "stop_debug" or "restart_debug" or "terminate_debug"))
                 .Select(static request => new ModernMcpRequestObservation(
                     request.Id, request.Method, request.Parameters?.DeepClone())
                 {
@@ -761,6 +761,39 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                     lastTransition = request.CompletedOrder;
                 }
                 else return false;
+            }
+            else if (name == "restart_debug")
+            {
+                if (!IsComplete(request.Result, false) || request.CompletedOrder == 0) return false;
+                if (StringValue(payload?["error"]) is "No previous launch configuration for restart"
+                    or "Cannot rebuild on restart: no build_project in saved configuration"
+                    or "Debug session is owned by another agent.") continue;
+                if (StringValue(payload?["error"]) == "START_DEBUG_BUILD_FAILED" && StringValue(payload?["state"]) == "idle"
+                    && request.StartedOrder > lastTransition
+                    && (active is null || JsonNode.DeepEquals(active.Parameters?["_meta"], request.Parameters?["_meta"])))
+                {
+                    active = null;
+                    lastTransition = request.CompletedOrder;
+                    continue;
+                }
+                if (payload?["data"]?["success"]?.GetValue<bool>() != true || payload["error"] is not null
+                    || request.StartedOrder <= lastTransition
+                    || (active is not null && !JsonNode.DeepEquals(active.Parameters?["_meta"], request.Parameters?["_meta"]))) return false;
+                active = request;
+                lastTransition = request.CompletedOrder;
+            }
+            else if (name == "terminate_debug" && (!IsComplete(request.Result, false) || request.CompletedOrder == 0))
+            {
+                return false;
+            }
+            else if (name == "terminate_debug" && IsComplete(request.Result, false)
+                && StringValue(payload?["state"]) == "idle" && StringValue(payload?["data"]?["state"]) == "idle"
+                && StringValue(payload?["message"]) == "Adapter does not support terminate; used disconnect instead.")
+            {
+                if (active is null || request.StartedOrder <= lastTransition || request.CompletedOrder == 0
+                    || !JsonNode.DeepEquals(active.Parameters?["_meta"], request.Parameters?["_meta"])) return false;
+                active = null;
+                lastTransition = request.CompletedOrder;
             }
             else if (name == "stop_debug")
             {

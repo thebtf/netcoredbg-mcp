@@ -54,12 +54,18 @@ B3 native `step_over` и Native Scene Probe остаются исходника�
 `get_stop_context`, `get_exception_context`, `create_snapshot`, `list_snapshots`,
 `diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`, `read_memory`, `disassemble`, `get_locations`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
-`get_output`, `get_output_tail`, `stop_debug`, `find_code_symbol`,
+`get_output`, `get_output_tail`, `stop_debug`, `restart_debug`, `terminate_debug`, `find_code_symbol`,
 `find_code_references` и `get_source_context`. Debug-команды используют неявную
 привязку сессии и отдельные форматы ответов в стиле Python.
 Без флага native API не меняется. Python backend не используется, установленный
 Python остаётся вариантом по умолчанию; это не
 полная совместимость #552.
+
+`restart_debug` сохраняет параметры последнего успешного запуска. По умолчанию
+`rebuild=true` требует сохранённый `build_project`. При `rebuild=false`
+сохраняется исходное значение `pre_build`. `terminate_debug` отправляет DAP
+terminate только при поддержке адаптера и ждёт событие завершения. Иначе он
+использует disconnect. Неопределённый результат автоматически не повторяется.
 
 Точки останова функций хранятся в процессе host между stop и start. Общий
 `list_breakpoints` возвращает их в `__function_breakpoints__`; список с фильтром

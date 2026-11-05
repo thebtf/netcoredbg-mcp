@@ -112,6 +112,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private int _outgoingSequence;
     private bool _supportsConfigurationDone;
     private bool _supportsTerminate;
+    private bool _legacyTerminateDispatched;
+    private TaskCompletionSource<bool>? _legacyTermination;
     private DapStackTraceCapabilities _stackTraceCapabilities;
     private bool _supportsExceptionInfoRequest;
     private bool _supportsStepInTargetsRequest;
@@ -632,6 +634,85 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             static state => ((CancellationTokenSource)state!).Cancel(), _forceCleanup);
         await EnsureCleanupAsync().ConfigureAwait(false);
     }
+    internal async Task<string> TerminateLegacyAsync(CancellationToken cancellationToken)
+    {
+        PendingRequest? request = null;
+        TaskCompletionSource<bool>? terminal = null;
+        var acknowledged = false;
+        var outcome = "unknown";
+        await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            lock (_stateGate)
+            {
+                if (!_supportsTerminate) return "unsupported";
+                if (_legacyTerminateDispatched || _executionAdmission != ExecutionAdmission.Available || _inspectionClosed || IsRetirementRequested)
+                    return "unknown";
+                _legacyTerminateDispatched = true;
+                _executionAdmission = ExecutionAdmission.Closing;
+                terminal = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _legacyTermination = terminal;
+            }
+            await BeginRequestAsync("terminate", new { restart = false }, _requestTimeout,
+                cancellationToken, trackLoadedSourcesWrite: true, requestCreated: created => request = created).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is IOException or InvalidDataException or OperationCanceledException or TimeoutException)
+        {
+            lock (_stateGate)
+            {
+                if (request is null || !request.WriteStarted)
+                {
+                    _legacyTerminateDispatched = false;
+                    if (!_inspectionClosed && !IsRetirementRequested && _executionAdmission == ExecutionAdmission.Closing)
+                        _executionAdmission = ExecutionAdmission.Available;
+                }
+                if (ReferenceEquals(_legacyTermination, terminal)) _legacyTermination = null;
+            }
+            return "unknown";
+        }
+        finally { _callStackAdmissionGate.Release(); }
+
+        try
+        {
+            var response = WaitForResponseAsync(request!, _requestTimeout, cancellationToken);
+            _ = response.ContinueWith(static task => _ = task.Exception, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            var first = await Task.WhenAny(response, terminal!.Task).WaitAsync(cancellationToken).ConfigureAwait(false);
+            if (first == terminal.Task && await terminal.Task.ConfigureAwait(false))
+            {
+                outcome = "terminated";
+            }
+            else
+            {
+                _ = await response.ConfigureAwait(false);
+                acknowledged = true;
+                try
+                {
+                    outcome = await terminal.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false) ? "terminated" : "unknown";
+                }
+                catch (TimeoutException) { outcome = "timeout"; }
+            }
+        }
+        catch (Exception exception) when (exception is IOException or InvalidDataException or OperationCanceledException or TimeoutException)
+        {
+            outcome = "unknown";
+        }
+        finally
+        {
+            if (request is not null) RemovePending(request);
+            lock (_stateGate)
+            {
+                acknowledged |= request?.Completion.Task.IsCompletedSuccessfully == true;
+                if (_state.Event is "exited" or "terminated") outcome = "terminated";
+                else if (acknowledged && !_inspectionClosed && !IsRetirementRequested && Volatile.Read(ref _readerFailure) is null
+                    && _executionAdmission == ExecutionAdmission.Closing)
+                    _executionAdmission = ExecutionAdmission.Available;
+                if (ReferenceEquals(_legacyTermination, terminal)) _legacyTermination = null;
+            }
+        }
+        return outcome;
+    }
+
 
     internal async Task<DapThreadsResult> GetThreadsAsync(CancellationToken cancellationToken)
     {
@@ -2641,7 +2722,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         BreakpointUpdate? breakpointUpdate = null,
         PauseRecord? pause = null,
         bool trackLoadedSourcesWrite = false,
-        InitialBreakpointRequest? initialBreakpoints = null)
+        InitialBreakpointRequest? initialBreakpoints = null,
+        Action<PendingRequest>? requestCreated = null)
     {
         if (Volatile.Read(ref _readerFailure) is { } readerFailure)
         {
@@ -2654,6 +2736,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         breakpointUpdate?.SetRequestSequence(sequence);
         var request = new PendingRequest(sequence, command, stackTraceTarget, stepOver,
             inspectionContextId ?? stackTraceTarget?.InspectionContextId, continueExecution, breakpointUpdate, pause, initialBreakpoints);
+        requestCreated?.Invoke(request);
         if (pause is not null)
         {
             lock (_stateGate)
@@ -2695,7 +2778,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
             RemovePending(request);
             request.Completion.TrySetException(exception);
-            if (pause is not null)
+            if (pause is not null || command == "terminate")
             {
                 _ = request.Completion.Task.Exception;
             }
@@ -2823,7 +2906,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             stepOver?.Commit(_requestTimeout, _stepOverTimeProvider);
             continueExecution?.Commit(_stepOverTimeProvider);
         }
-        catch when (inspectionRequest is { Command: "loadedSources", WriteStarted: true, CommittedWrite: false })
+        catch when (inspectionRequest is { Command: "loadedSources" or "terminate", WriteStarted: true, CommittedWrite: false })
         {
             // Fence queued writers before releasing the gate after an incomplete frame.
             Interlocked.Exchange(ref _loadedSourcesWriteDrainRequired, 1);
@@ -2863,6 +2946,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     Volatile.Write(ref _readerFailure, failure);
                     _inspectionContextId = null;
                     _inspectionClosed = true;
+                    _legacyTermination?.TrySetResult(false);
                 }
                 _initialized.TrySetException(failure);
                 FailPending(failure);
@@ -3291,7 +3375,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 }
                 if (capabilities.TryGetProperty("supportsTerminateRequest", out _))
                 {
-                    _supportsTerminate = ReadOptionalBoolean(capabilities, "supportsTerminateRequest");
+                    _callStackAdmissionGate.Wait();
+                    try { lock (_stateGate) _supportsTerminate = ReadOptionalBoolean(capabilities, "supportsTerminateRequest"); }
+                    finally { _callStackAdmissionGate.Release(); }
                 }
 
                 if (capabilities.TryGetProperty("supportsConfigurationDoneRequest", out _))
@@ -4096,6 +4182,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 _activePause?.ObserveTerminal(eventName, _state.ExitCode);
                 _activeStepOver?.ObserveTerminal(eventName, _state.ExitCode);
                 _activeContinue?.ObserveTerminal(eventName, _state.ExitCode);
+                _legacyTermination?.TrySetResult(true);
                 _breakpointUpdatesClosed = true;
                 _activeBreakpointUpdate?.ObserveFailure(new InvalidDataException("The debug session terminated during breakpoint update."));
             }
@@ -4282,7 +4369,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             if (!HasExited() && !_forceCleanup.IsCancellationRequested)
             {
-                if (_supportsTerminate)
+                if (_supportsTerminate && !_legacyTerminateDispatched)
                 {
                     await TrySendCleanupRequestAsync("terminate", new { restart = false }).ConfigureAwait(false);
                 }

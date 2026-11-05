@@ -275,6 +275,8 @@ internal static class Program
         private const string StartDebug = "start_debug";
         private const string GetDebugState = "get_debug_state";
         private const string StopDebug = "stop_debug";
+        private const string RestartDebug = "restart_debug";
+        private const string TerminateDebug = "terminate_debug";
         private const string GetThreads = "get_threads";
         private const string GetCallStack = "get_call_stack";
         private const string GetScopes = "get_scopes";
@@ -364,6 +366,9 @@ internal static class Program
         private bool _legacyHasOwner;
         private int _legacyCompositeEvaluations;
         private string? _legacySessionId;
+        private Dictionary<string, JsonElement>? _legacyLaunchConfig;
+        private LegacyResolvedLaunch? _legacyResolvedLaunch;
+        private sealed record LegacyResolvedLaunch(string ProjectRoot, string Program, DapLaunchProfileResult Profile);
         private string? _legacyOwner;
         private long _legacyOwnerActivity;
         private string? _legacyInspectionSessionId;
@@ -738,7 +743,7 @@ internal static class Program
         {
             var name = context.Params.Name;
             if (name is not (StartDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
-                or PauseExecution or ContinueExecution or StopDebug or GetOutput or GetOutputTail
+                or PauseExecution or ContinueExecution or StopDebug or RestartDebug or TerminateDebug or GetOutput or GetOutputTail
                 or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints or GetScopes or GetVariables or EvaluateExpression
                 or SetVariable or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets or ReadMemory or Disassemble or GetLocations
                 or "create_snapshot" or "list_snapshots" or "diff_snapshots" or "analyze_collection" or "summarize_object"))
@@ -784,7 +789,7 @@ internal static class Program
             var compositeEvaluationHeld = false;
             try
             {
-                if (name is StartDebug or StopDebug)
+                if (name is StartDebug or StopDebug or RestartDebug or TerminateDebug)
                 {
                     await _legacyLifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
                     lifecycleHeld = true;
@@ -796,7 +801,7 @@ internal static class Program
                 if (name is (AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ListBreakpoints or ClearBreakpoints) && breakpointGeneration != _legacySessionGeneration)
                     return LegacyError("Debug session changed before breakpoint admission.", "unknown");
                 if (_legacyBreakpointSessionId is not null
-                    && (name == StartDebug || (name is (AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints) && _legacySessionId is null)))
+                    && (name is StartDebug or RestartDebug || (name is (AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints) && _legacySessionId is null)))
                     return LegacyError("A breakpoint update is still settling.");
                 var consumesOutput = name == GetOutput && arguments.TryGetValue("clear", out var clearOption)
                     && clearOption.ValueKind == JsonValueKind.True
@@ -805,7 +810,7 @@ internal static class Program
                 var compositeMayEvaluate = name == GetExceptionContext
                     && (!arguments.TryGetValue("max_inner_exceptions", out var innerDepth)
                         || !TryReadOutputLineCount(innerDepth, out var depth) || depth != 0);
-                var mutation = name is StartDebug or StopDebug or StepOver or StepInto or StepOut or PauseExecution
+                var mutation = name is StartDebug or StopDebug or RestartDebug or TerminateDebug or StepOver or StepInto or StepOut or PauseExecution
                     or ContinueExecution or AddBreakpoint or RemoveBreakpoint or AddFunctionBreakpoint or RemoveFunctionBreakpoint or ClearBreakpoints or EvaluateExpression or SetVariable or ConfigureExceptions or GetStepInTargets
                     or "create_snapshot" or "analyze_collection" or "summarize_object" || consumesOutput || compositeMayEvaluate;
                 var raw = context.JsonRpcRequest.Params as JsonObject;
@@ -1047,6 +1052,65 @@ internal static class Program
                     });
                     if (admission is not null) return admission;
                 }
+                var restarting = name == RestartDebug;
+                if (restarting)
+                {
+                    if (arguments.TryGetValue("rebuild", out var rebuildValue) && rebuildValue.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                        return LegacyError("Invalid rebuild.");
+                    var rebuild = !arguments.TryGetValue("rebuild", out rebuildValue) || rebuildValue.ValueKind == JsonValueKind.True;
+                    if (_legacyLaunchConfig is null) return LegacyError("No previous launch configuration for restart");
+                    if (rebuild && (!_legacyLaunchConfig.TryGetValue("build_project", out var project)
+                        || project.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(project.GetString())))
+                        return LegacyError("Cannot rebuild on restart: no build_project in saved configuration");
+                    var restartArguments = new Dictionary<string, JsonElement>(_legacyLaunchConfig, StringComparer.Ordinal);
+                    if (rebuild) restartArguments["pre_build"] = JsonSerializer.SerializeToElement(true);
+                    if (_legacySessionId is { } previous)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        _legacySessionGeneration++;
+                        _legacyStopping = true;
+                        _legacyInspectionSessionId = null;
+                        _legacyInspectionContextId = null;
+                        _legacyInspectionMuxId = null;
+                        _legacyCurrentFrameId = null;
+                        _legacyInspectionRevision++;
+                        var breakpointSession = _legacyBreakpointObserverSession;
+                        _legacyGate.Release();
+                        gateHeld = false;
+                        CallToolResult stopped;
+                        LegacyResourceOwner.Generation? retired = null;
+                        try
+                        {
+                            retired = _legacyResources.Retire();
+                            stopped = await StopAsync(LegacyRequest(StopDebug, previous, null), CancellationToken.None).ConfigureAwait(false);
+                        }
+                        finally
+                        {
+                            await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                            gateHeld = true;
+                            _legacyStopping = false;
+                        }
+                        if (stopped.IsError == true) { _legacyResources.Restore(retired); return LegacyNativeError(stopped); }
+                        if (breakpointSession is not null)
+                            breakpointSession.WithLegacyBreakpointLock(() =>
+                            {
+                                ReconcileLegacyBreakpointObservations(breakpointSession);
+                                _legacyBreakpointObservationsIncomplete = _legacyBreakpoints.Count != 0 && !breakpointSession.LegacyBreakpointEventsComplete;
+                                return true;
+                            });
+                        foreach (var key in _legacyBreakpointObservations.Keys.ToArray())
+                            _legacyBreakpointObservations[key] = _legacyBreakpointObservations[key] with { HitCount = 0 };
+                        _legacySessionId = null;
+                        _legacyBreakpointObserverSession = null;
+                        _legacyHasOwner = false;
+                        _legacyOwner = null;
+                        var idleGeneration = _legacyResources.Begin();
+                        idleGeneration.Observe("thread");
+                        _legacyResources.Publish(idleGeneration);
+                    }
+                    arguments = restartArguments;
+                    name = StartDebug;
+                }
                 if (name == StartDebug)
                 {
                     if (!arguments.TryGetValue("program", out var program) || program.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(program.GetString()))
@@ -1062,6 +1126,7 @@ internal static class Program
                         return LegacyError("Invalid stop_at_entry.");
                     if (!arguments.ContainsKey("pre_build")) arguments["pre_build"] = JsonSerializer.SerializeToElement(true);
                     if (!arguments.ContainsKey("stop_at_entry")) arguments["stop_at_entry"] = JsonSerializer.SerializeToElement(false);
+                    var launchConfig = new Dictionary<string, JsonElement>(arguments, StringComparer.Ordinal);
                     arguments["justMyCode"] = JsonSerializer.SerializeToElement(false);
                     arguments["breakpoints"] = JsonSerializer.SerializeToElement(_legacyBreakpoints.Select(static breakpoint => new { file = breakpoint.File, line = breakpoint.Line }).ToArray());
                     for (var index = 0; index < _legacyFunctionBreakpoints.Count; index++)
@@ -1077,11 +1142,13 @@ internal static class Program
                     CallToolResult started;
                     var startCompleted = false;
                     LegacyResourceOwner.Generation? generation = null;
+                    LegacyResolvedLaunch? resolvedLaunch = null;
                     try
                     {
                         cancellationToken.ThrowIfCancellationRequested();
                         generation = _legacyResources.Begin();
-                        started = await StartAsync(context, cancellationToken, arguments, generation.Observe, breakpointOptions, _legacyFunctionBreakpoints.ToArray()).ConfigureAwait(false);
+                        started = await StartAsync(context, cancellationToken, arguments, generation.Observe, breakpointOptions,
+                            _legacyFunctionBreakpoints.ToArray(), restarting ? _legacyResolvedLaunch : null, value => resolvedLaunch = value).ConfigureAwait(false);
                         startCompleted = true;
                     }
                     finally
@@ -1130,6 +1197,8 @@ internal static class Program
                     }
                     _legacyBreakpointObservationsIncomplete = false;
                     _legacyResources.Publish(generation!, token);
+                    _legacyLaunchConfig = launchConfig;
+                    _legacyResolvedLaunch = resolvedLaunch;
                     return LegacyResponse(new { success = true, program = program.GetString() });
                 }
                 if (name == GetDebugState)
@@ -1208,6 +1277,49 @@ internal static class Program
                     });
                 }
                 if (_legacySessionId is not { } sessionId) return LegacyError("No active debug session.");
+                var terminateFallback = false;
+                if (name == TerminateDebug)
+                {
+                    if (!_sessions.TryGetValue(sessionId, out var terminatingSession) || !_slots.TryGetValue(sessionId, out var terminatingSlot))
+                        return LegacyError("No active debug session.");
+                    using var lease = terminatingSlot.TryAcquire();
+                    if (lease is null) return LegacyError("No active debug session.");
+                    _legacyStopping = true;
+                    _legacyGate.Release();
+                    gateHeld = false;
+                    string outcome;
+                    try
+                    {
+                        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.AbortToken);
+                        outcome = await terminatingSession.TerminateLegacyAsync(linked.Token).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                        gateHeld = true;
+                        _legacyStopping = false;
+                    }
+                    if (_legacySessionId != sessionId)
+                        return LegacyError("Terminate outcome is unknown; do not retry automatically.", "unknown");
+                    if (outcome == "unsupported")
+                    {
+                        lease.Dispose();
+                        terminateFallback = true;
+                        name = StopDebug;
+                    }
+                    else
+                    {
+                        _legacyInspectionSessionId = null;
+                        _legacyInspectionContextId = null;
+                        _legacyInspectionMuxId = null;
+                        _legacyCurrentFrameId = null;
+                        _legacyInspectionRevision++;
+                        var observed = outcome == "terminated" ? "terminated" : LegacySnapshot(sessionId).State;
+                        if (outcome == "unknown") return LegacyError("Terminate outcome is unknown; do not retry automatically.", observed);
+                        var message = outcome == "timeout" ? "Terminate sent but program did not exit within 10s." : "Program terminated gracefully.";
+                        return LegacyResponseWithMessage(new { state = observed }, observed, message);
+                    }
+                }
                 var targetedStep = false;
                 if (name == StepInto && arguments.Remove("target_id", out var target) && target.ValueKind != JsonValueKind.Null)
                 {
@@ -1340,7 +1452,9 @@ internal static class Program
                     if (retiringOutput?.Buffer.Snapshot(false, null).Length > 0) idleGeneration.Observe("output");
                     idleGeneration.Observe("thread");
                     _legacyResources.Publish(idleGeneration);
-                    return LegacyResponse(new { success = true });
+                    return terminateFallback
+                        ? LegacyResponseWithMessage(new { state = "idle" }, "idle", "Adapter does not support terminate; used disconnect instead.")
+                        : LegacyResponse(new { success = true });
                 }
                 if (compositeMayEvaluate)
                 {
@@ -1788,6 +1902,7 @@ internal static class Program
                 var invalid = name switch
                 {
                     StartDebug => key is not ("program" or "cwd" or "args" or "env" or "launch_profile" or "stop_at_entry" or "pre_build" or "build_project" or "build_configuration" or "stealth_mode"),
+                    RestartDebug => key != "rebuild",
                     GetCallStack => key is not ("thread_id" or "levels"),
                     AddBreakpoint => key is not ("file" or "line" or "condition" or "hit_condition"),
                     RemoveBreakpoint => key is not ("file" or "line"),
@@ -2303,6 +2418,9 @@ internal static class Program
         private static CallToolResult LegacyResponse(object data, string state) =>
             Result(new { state, next_actions = LegacyActions(state), message = state == "idle" ? "No active debug session." : "Debug session state observed.", data }, false);
 
+        private static CallToolResult LegacyResponseWithMessage(object data, string state, string message) =>
+            Result(new { state, next_actions = LegacyActions(state), message, data }, false);
+
         private CallToolResult LegacyError(string error) => LegacyError(error, LegacySnapshot().State);
 
         private static CallToolResult LegacyError(string error, string state) =>
@@ -2459,7 +2577,8 @@ internal static class Program
 
         private async ValueTask<CallToolResult> StartAsync(
             RequestContext<CallToolRequestParams> context,
-            CancellationToken cancellationToken, IDictionary<string, JsonElement>? argumentsOverride = null, Action<string>? resourceObserver = null, LegacyRequestedLine[]? breakpointOptions = null, LegacyFunctionBreakpoint[]? functionBreakpoints = null)
+            CancellationToken cancellationToken, IDictionary<string, JsonElement>? argumentsOverride = null, Action<string>? resourceObserver = null, LegacyRequestedLine[]? breakpointOptions = null,
+            LegacyFunctionBreakpoint[]? functionBreakpoints = null, LegacyResolvedLaunch? resolvedLaunch = null, Action<LegacyResolvedLaunch>? captureResolvedLaunch = null)
         {
             var arguments = argumentsOverride ?? context.Params.Arguments;
             if (!TryReadProgram(arguments, out var program, out var hasProgram)
@@ -2469,6 +2588,12 @@ internal static class Program
                 || !TryReadPreBuildArguments(arguments, out var preBuild))
             {
                 return InvalidArguments(StartDebug);
+            }
+            if (resolvedLaunch is not null)
+            {
+                projectRoot = resolvedLaunch.ProjectRoot;
+                program = resolvedLaunch.Program;
+                hasProgram = true;
             }
             if (breakpointOptions is not null)
             {
@@ -2596,13 +2721,17 @@ internal static class Program
                         return Error("start_debug_project_unavailable", "START_DEBUG_PROJECT_UNAVAILABLE");
                 }
                 DapLaunchProfileResult profile;
-                try
+                if (resolvedLaunch is not null) profile = resolvedLaunch.Profile;
+                else
                 {
-                    profile = await DapLaunchProfile.ResolveAsync(projectRoot, profileName, launchOptions?.Environment, startupCancellation.Token).ConfigureAwait(false);
-                }
-                catch (DapLaunchProfileException)
-                {
-                    return Error("start_debug_launch_profile_invalid", "START_DEBUG_LAUNCH_PROFILE_INVALID");
+                    try
+                    {
+                        profile = await DapLaunchProfile.ResolveAsync(projectRoot, profileName, launchOptions?.Environment, startupCancellation.Token).ConfigureAwait(false);
+                    }
+                    catch (DapLaunchProfileException)
+                    {
+                        return Error("start_debug_launch_profile_invalid", "START_DEBUG_LAUNCH_PROFILE_INVALID");
+                    }
                 }
 
                 if (preBuild.Enabled)
@@ -2704,6 +2833,7 @@ internal static class Program
                 {
                     OnRetirementRequested(token, session);
                 }
+                captureResolvedLaunch?.Invoke(new LegacyResolvedLaunch(projectRoot, program!, profile));
 
                 var metadata = profile.Metadata;
                 return Result(new StartDebugSuccessContent(
@@ -6371,6 +6501,8 @@ internal static class Program
             Tools =
             [
                 Tool("start_debug", "Start one implicit native session. pre_build defaults to true and requires build_project; stealth_mode true is unsupported.", """{"type":"object","properties":{"program":{"type":"string","minLength":1},"cwd":{"type":["string","null"]},"args":{"type":["array","null"],"items":{"type":"string"}},"env":{"type":["object","null"]},"launch_profile":{"type":["string","null"]},"stop_at_entry":{"type":"boolean"},"pre_build":{"type":"boolean"},"build_project":{"type":["string","null"]},"build_configuration":{"type":"string","enum":["Debug","Release"]},"stealth_mode":{"const":false}},"required":["program"],"additionalProperties":false}"""),
+                Tool("restart_debug", "Restart with the saved launch configuration; rebuild defaults to true and requires build_project.", """{"type":"object","properties":{"rebuild":{"type":"boolean","default":true}},"additionalProperties":false}"""),
+                Tool("terminate_debug", "Terminate the owned debuggee or disconnect if terminate is unsupported.", """{"type":"object","properties":{},"additionalProperties":false}""", new ToolAnnotations { DestructiveHint = true }),
                 Tool("get_debug_state", "Read observed implicit session state; unavailable fields are omitted.", """{"type":"object","properties":{},"additionalProperties":false}"""),
                 Tool("get_threads", "Get threads from the implicit session.", """{"type":"object","properties":{},"additionalProperties":false}"""),
                 Tool("get_call_stack", "Read up to 256 frames from a stopped thread.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"]},"levels":{"type":"integer","minimum":1,"maximum":256}},"additionalProperties":false}"""),
