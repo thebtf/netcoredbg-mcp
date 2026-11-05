@@ -49,7 +49,8 @@ The source-built stateful host has an experimental, explicitly selected
 `--legacy-compat` mode for a **single process-local console session**. It exposes
 only `start_debug`, `get_debug_state`, `get_threads`, `get_call_stack`,
 `get_scopes`, `get_variables`, `evaluate_expression`, `add_breakpoint`,
-`remove_breakpoint`, `step_over`, `continue_execution`, and `stop_debug`. Calls
+`remove_breakpoint`, `step_over`, `step_into`, `step_out`, `pause_execution`,
+`continue_execution`, `get_output`, `get_output_tail`, and `stop_debug`. Calls
 use implicit session binding and selected Python-style response envelopes.
 Without the flag the native catalog and explicit session contract are unchanged.
 This mode does not use the Python backend and
@@ -84,6 +85,19 @@ If the stopped context changes before a stack, scope, variable or evaluation
 response is published, the legacy route returns an error instead of mixing
 epochs. A dispatched evaluation may already have executed; an unknown outcome
 must not be retried automatically.
+
+Legacy `step_into` and `step_out` use the current observed stopped thread when
+omitted; non-null `target_id` is rejected. A successful pause acknowledges the
+request, not a stopped event. State may remain `unknown` until the debugger
+confirms a transition, for example with a continue acknowledgement or DAP event.
+Uncertain execution writes are not retried.
+Output is empty before start and after stop; output observed before natural
+termination remains available until stop while the implicit session is retained.
+Filtered `get_output(clear=true)` does not clear; clearing the entire buffer
+requires mux ownership, unlike Python. Native retention defaults to 100,000
+Unicode code points per event and 10,000,000 in total, truncating oversized
+entries and evicting oldest entries. Tail line counts are limited to signed
+64-bit integers. These limits and native event delivery can differ from Python.
 
 Stack pages are limited to
 256 frames. `stealth_mode=true` and unrecognized arguments are rejected. Python's
