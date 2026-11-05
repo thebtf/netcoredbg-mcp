@@ -813,6 +813,47 @@ public sealed class NetCoreDbgSessionTests
         Assert.Single(transcript, static entry => entry.Command == "disconnect");
     }
 
+    [Fact]
+    public async Task LegacyTerminate_CancellationBeforeHeader_DoesNotReserveDispatch()
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithDapWriteBarrierAsync(
+            new FixtureConfiguration(SupportsTerminate: true, LifecycleMode: "all-stop"),
+            "D:\\fixtures\\program.dll", InitializeTimeout, RequestTimeout, StopTimeout, CancellationToken.None);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        var field = typeof(NetCoreDbgSessionContractDriver).GetField("_session", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        var target = Assert.IsAssignableFrom<object>(field.GetValue(session));
+        var method = target.GetType().GetMethod("TerminateLegacyAsync", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        Task<string> Terminate(CancellationToken token) => Assert.IsAssignableFrom<Task<string>>(method.Invoke(target, [token]));
+        using var cancellation = new CancellationTokenSource();
+        using var retryCancellation = new CancellationTokenSource();
+        session.ArmDapWriteBeforeHeaderBarrier();
+        var operation = Terminate(cancellation.Token);
+        Task<string>? retry = null;
+        try
+        {
+            await session.WaitForDapPreHeaderWriteAsync(observation.Token);
+            cancellation.Cancel();
+            _ = await Record.ExceptionAsync(async () => await operation.WaitAsync(observation.Token));
+            Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "terminate");
+            Assert.False(session.IsExecutionClosing);
+            session.ReleaseDapWriteBarrier();
+            retry = Terminate(retryCancellation.Token);
+            await session.Fixture.WaitForDapRequestCountAsync("terminate", 1, observation.Token);
+            Assert.Single(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "terminate");
+        }
+        finally
+        {
+            session.ReleaseDapWriteBarrier();
+            cancellation.Cancel();
+            retryCancellation.Cancel();
+            if (retry is not null) await Record.ExceptionAsync(async () => await retry.WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+    }
+
     [Theory]
     [InlineData("write-gate")]
     [InlineData("pre-header")]
