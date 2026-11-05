@@ -1879,6 +1879,8 @@ internal static class Program
             {
                 if (!_isUsable(session)) { closeAfterLease = true; return (null, "No active debug session.", null, null); }
                 var command = name == ReadMemory ? "readMemory" : name == Disassemble ? "disassemble" : "locations";
+                var inspectionCommand = name == ReadMemory ? MemoryInspectionCommand.ReadMemory
+                    : name == Disassemble ? MemoryInspectionCommand.Disassemble : MemoryInspectionCommand.Locations;
                 object dapArguments = name switch
                 {
                     ReadMemory => new { memoryReference, offset, count },
@@ -1886,7 +1888,7 @@ internal static class Program
                     _ => new { locationReference },
                 };
                 using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.AbortToken);
-                var result = await session.ReadMemoryInspectionAsync(command, dapArguments, name == ReadMemory && count == 0, operation.Token).ConfigureAwait(false);
+                var result = await session.ReadMemoryInspectionAsync(inspectionCommand, dapArguments, name == ReadMemory && count == 0, operation.Token).ConfigureAwait(false);
                 if (result.Status == "unsupported")
                 {
                     var capability = name == ReadMemory ? "supportsReadMemoryRequest" : name == Disassemble ? "supportsDisassembleRequest" : "supportsLocationsRequest";

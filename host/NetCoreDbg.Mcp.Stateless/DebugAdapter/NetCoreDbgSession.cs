@@ -15,6 +15,8 @@ using NetCoreDbg.Mcp.Stateless.NativeScene;
 
 namespace NetCoreDbg.Mcp.Stateless.DebugAdapter;
 
+internal enum MemoryInspectionCommand { ReadMemory, Disassemble, Locations }
+
 internal sealed class NetCoreDbgSession : IAsyncDisposable
 {
     private const int MaximumHeaderBytes = 16 * 1024;
@@ -858,8 +860,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     internal bool RequiresLoadedSourcesDrain() => Volatile.Read(ref _loadedSourcesWriteDrainRequired) != 0;
 
     internal async Task<(string Status, JsonElement Body, string? Context)> ReadMemoryInspectionAsync(
-        string command, object arguments, bool emptyRead, CancellationToken cancellationToken)
+        MemoryInspectionCommand operation, object arguments, bool emptyRead, CancellationToken cancellationToken)
     {
+        var command = operation switch
+        {
+            MemoryInspectionCommand.ReadMemory => "readMemory",
+            MemoryInspectionCommand.Disassemble => "disassemble",
+            MemoryInspectionCommand.Locations => "locations",
+            _ => throw new ArgumentOutOfRangeException(nameof(operation)),
+        };
         PendingRequest request;
         string context;
         await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -867,11 +876,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             lock (_stateGate)
             {
-                var supported = command switch
+                var supported = operation switch
                 {
-                    "readMemory" => _supportsReadMemoryRequest,
-                    "disassemble" => _supportsDisassembleRequest,
-                    "locations" => _supportsLocationsRequest,
+                    MemoryInspectionCommand.ReadMemory => _supportsReadMemoryRequest,
+                    MemoryInspectionCommand.Disassemble => _supportsDisassembleRequest,
+                    MemoryInspectionCommand.Locations => _supportsLocationsRequest,
                     _ => false,
                 };
                 if (!supported) return ("unsupported", default, null);
