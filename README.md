@@ -165,10 +165,17 @@ size bounds still apply.
 
 `get_modules` and `get_progress` read bounded, reader-observed event inventories;
 incomplete or oversized inventories return errors. `get_loaded_sources` asks the
-adapter and refreshes the native live-source view when supported. This does not
-expose that source view through a legacy state resource or its notifications. The legacy
-progress response retains Python's snake-case and camel-case ID/time aliases;
-the expanded response is also size-limited.
+adapter and refreshes the native live-source view when supported. The legacy
+`debug://state` resource exposes the observed state and connection-scoped update
+notifications. Thread data is null until observed or after a thread transition;
+active debuggee liveness is unknown rather than inferred from a PID. Reads fail
+when an inventory is incomplete, unavailable or exceeds the 256 KiB resource
+limit, or while a session transition is in progress. The independently captured
+inventories are not an atomic debuggee snapshot. Native progress retains Python's
+snake-case and camel-case ID/time aliases. Full resource parity remains open.
+Memory-event offsets must be integers between -9,007,199,254,740,991 and
+9,007,199,254,740,991; counts must be between zero and that positive limit.
+Invalid supplied fields make the state resource unavailable rather than zeroing them.
 
 `get_step_in_targets` requires mux ownership and the calling client's selected
 stopped frame and context. Omitted, null or zero `frame_id` uses that frame.

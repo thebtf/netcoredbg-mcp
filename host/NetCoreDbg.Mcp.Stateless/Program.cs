@@ -168,6 +168,7 @@ internal static class Program
                     new Resource { Name = "debug_output_resource", Uri = "debug://output", MimeType = "text/plain" },
                     new Resource { Name = "debug_threads_resource", Uri = "debug://threads", MimeType = "application/json" },
                     new Resource { Name = "debug_breakpoints_resource", Uri = "debug://breakpoints", MimeType = "application/json" },
+                    new Resource { Name = "debug_state_resource", Uri = "debug://state", MimeType = "application/json" },
                 ],
             }))
             .WithReadResourceHandler((context, cancellationToken) => sessions.ReadLegacyResourceAsync(context.Params.Uri, cancellationToken))
@@ -379,7 +380,7 @@ internal static class Program
                 internal bool Published;
                 internal int InFlight;
                 internal string? SessionId;
-                internal void Observe(string eventName) => owner.Signal(this, eventName == "output" ? 1 : eventName == "breakpoint" ? 4 : 2);
+                internal void Observe(string eventName) => owner.Signal(this, eventName == "state" ? 8 : eventName == "output" ? 1 : eventName == "breakpoint" ? 4 : 2);
             }
 
             internal Generation Begin()
@@ -415,6 +416,7 @@ internal static class Program
                     _carry = 0;
                     generation.Published = true;
                     if (_subscriptions.Contains("debug://threads")) generation.Pending |= 2;
+                    if (_subscriptions.Contains("debug://state")) generation.Pending |= 8;
                     Schedule();
                 }
             }
@@ -424,7 +426,7 @@ internal static class Program
                 lock (_gate)
                 {
                     if (_current is { Published: true } current && StringComparer.Ordinal.Equals(current.SessionId, sessionId))
-                        SignalLocked(current, name == "output" ? 1 : name == "breakpoint" ? 4 : 2);
+                        SignalLocked(current, name == "state" ? 8 : name == "output" ? 1 : name == "breakpoint" ? 4 : 2);
                 }
             }
 
@@ -446,7 +448,7 @@ internal static class Program
             private void SignalLocked(Generation generation, int bits)
             {
                 if (_closed || !ReferenceEquals(_current, generation)) return;
-                var uri = bits == 1 ? "debug://output" : bits == 2 ? "debug://threads" : "debug://breakpoints";
+                var uri = bits == 1 ? "debug://output" : bits == 2 ? "debug://threads" : bits == 4 ? "debug://breakpoints" : "debug://state";
                 if (!_subscriptions.Contains(uri)) return;
                 generation.Pending |= bits;
                 if (generation.Published) Schedule();
@@ -478,9 +480,9 @@ internal static class Program
                                 return;
                             }
                             generation = current;
-                            bit = (generation.Pending & 1) != 0 ? 1 : (generation.Pending & 2) != 0 ? 2 : 4;
+                            bit = (generation.Pending & 1) != 0 ? 1 : (generation.Pending & 2) != 0 ? 2 : (generation.Pending & 4) != 0 ? 4 : 8;
                             generation.Pending &= ~bit;
-                            uri = bit == 1 ? "debug://output" : bit == 2 ? "debug://threads" : "debug://breakpoints";
+                            uri = bit == 1 ? "debug://output" : bit == 2 ? "debug://threads" : bit == 4 ? "debug://breakpoints" : "debug://state";
                             server = _subscriptions.Contains(uri) ? _server : null;
                             generation.InFlight = server is null ? 0 : bit;
                         }
@@ -500,7 +502,7 @@ internal static class Program
 
             internal async ValueTask<EmptyResult> SubscribeAsync(McpServer server, string uri, bool subscribe, CancellationToken cancellationToken)
             {
-                if (uri is not ("debug://output" or "debug://threads" or "debug://breakpoints"))
+                if (uri is not ("debug://output" or "debug://threads" or "debug://breakpoints" or "debug://state"))
                     throw new McpProtocolException($"Unknown resource: {uri}", McpErrorCode.InvalidParams);
                 if (!await _sendGate.WaitAsync(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false))
                     throw new McpProtocolException("Resource notification delivery is busy.", McpErrorCode.InvalidRequest);
@@ -515,7 +517,7 @@ internal static class Program
                         else
                         {
                             _subscriptions.Remove(uri);
-                            var bit = uri == "debug://output" ? 1 : uri == "debug://threads" ? 2 : 4;
+                            var bit = uri == "debug://output" ? 1 : uri == "debug://threads" ? 2 : uri == "debug://breakpoints" ? 4 : 8;
                             _carry &= ~bit;
                             if (_current is { } current) current.Pending &= ~bit;
                         }
@@ -549,6 +551,7 @@ internal static class Program
                     SignalLocked(generation, 1);
                     if (generation.Published && generation.Pending != 0) Schedule();
                     SignalLocked(generation, 2);
+                    SignalLocked(generation, 8);
                 }
             }
 
@@ -566,12 +569,17 @@ internal static class Program
 
         internal async ValueTask<ReadResourceResult> ReadLegacyResourceAsync(string uri, CancellationToken cancellationToken)
         {
-            if (uri is not ("debug://output" or "debug://threads" or "debug://breakpoints"))
+            if (uri is not ("debug://output" or "debug://threads" or "debug://breakpoints" or "debug://state"))
                 throw new McpProtocolException($"Unknown resource: {uri}", McpErrorCode.InvalidParams);
             await _legacyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             string? sessionId;
             try
             {
+                if (uri == "debug://state")
+                {
+                    var text = SerializeLegacyResourceState();
+                    return new ReadResourceResult { Contents = [new TextResourceContents { Uri = uri, MimeType = "application/json", Text = text }] };
+                }
                 if (uri == "debug://breakpoints")
                 {
                     var snapshot = WithLegacyBreakpointState(() =>
@@ -605,6 +613,86 @@ internal static class Program
                 return new ReadResourceResult { Contents = [new TextResourceContents { Uri = uri, MimeType = uri == "debug://output" ? "text/plain" : "application/json", Text = text }] };
             }
             finally { _legacyGate.Release(); }
+        }
+
+        private string SerializeLegacyResourceState()
+        {
+            if (_legacyStarting || _legacyStopping)
+                throw new McpProtocolException("Debug session transition is in progress.", McpErrorCode.InvalidRequest);
+            var idle = _legacySessionId is null;
+            lock (_lifetimeGate)
+            {
+                if (_startCleanupFailure is not null)
+                    throw new McpProtocolException("Debug session cleanup is unconfirmed.", McpErrorCode.InvalidRequest);
+            }
+            NetCoreDbgSession? session = null;
+            if (!idle && (!_sessions.TryGetValue(_legacySessionId!, out session) || !_isUsable(session)))
+                throw new McpProtocolException("Debug session state is unavailable.", McpErrorCode.InvalidRequest);
+
+            var state = idle ? default : session!.GetLegacyResourceState();
+            if (!idle && !state.Complete)
+                throw new McpProtocolException("Loaded source state is incomplete.", McpErrorCode.InvalidRequest);
+            if (!idle && !state.DetailsComplete)
+                throw new McpProtocolException("Debug event details are incomplete.", McpErrorCode.InvalidRequest);
+            JsonNode modules = new JsonArray();
+            var progress = new JsonObject();
+            if (!idle)
+            {
+                var moduleSnapshot = session!.GetRuntimeInventory(true, MaximumSerializedInspectionBytes);
+                var progressSnapshot = session.GetRuntimeInventory(false, MaximumSerializedInspectionBytes);
+                if (moduleSnapshot.Status != DapRuntimeInventoryStatus.Success || progressSnapshot.Status != DapRuntimeInventoryStatus.Success)
+                    throw new McpProtocolException("Runtime inventory state is unavailable or too large.", McpErrorCode.InvalidRequest);
+                modules = JsonNode.Parse(moduleSnapshot.SerializedContent!)!["modules"]!.DeepClone();
+                foreach (var entry in JsonNode.Parse(progressSnapshot.SerializedContent!)!["progress"]!.AsArray())
+                {
+                    var item = entry!.DeepClone().AsObject();
+                    var id = item["progressId"]!.GetValue<string>();
+                    item["progress_id"] = id;
+                    item["started_at"] = item["startedAt"]!.DeepClone();
+                    progress[id] = item;
+                }
+            }
+            var lifecycle = idle ? (State: "idle", ThreadId: (int?)null, Reason: (string?)null, ExitCode: (int?)null)
+                : ProjectLegacyState(state.State);
+            var execution = lifecycle.State == "stopped" ? lifecycle.Reason switch
+            {
+                "breakpoint" or "function breakpoint" or "data breakpoint" or "entry" => "stopped-at-breakpoint",
+                "exception" => "stopped-at-exception",
+                "step" => "stepping",
+                "pause" => "stopped-at-pause",
+                _ => "stopped-other",
+            } : lifecycle.State;
+            var frame = !idle && _legacyInspectionSessionId == _legacySessionId && _legacyInspectionContextId is { } context
+                && session!.CaptureInspectionState(context) is not null ? _legacyCurrentFrameId : null;
+            var payload = new
+            {
+                state = lifecycle.State,
+                execState = execution,
+                currentThreadId = lifecycle.ThreadId,
+                stopReason = lifecycle.Reason,
+                threads = idle ? Array.Empty<DapThread>() : state.Threads,
+                threadCount = idle ? 0 : (int?)state.Threads?.Length,
+                currentFrameId = frame,
+                exitCode = lifecycle.ExitCode,
+                exceptionInfo = idle ? null : state.ExceptionInfo,
+                processId = idle ? null : state.ProcessId,
+                processName = idle ? null : state.ProcessName,
+                debuggeePid = idle ? null : state.ProcessId,
+                debuggeeAlive = idle ? (bool?)false : null,
+                lastResumeAt = idle ? null : state.LastResumeAt,
+                lastStopAt = idle ? null : state.LastStopAt,
+                modules,
+                loadedSources = idle ? new Dictionary<string, DapLoadedSource>() : state.Sources,
+                activeProgress = progress,
+                stopDescription = idle ? null : state.Description,
+                stopText = idle ? null : state.Text,
+                lastInvalidation = idle ? null : state.Invalidation,
+                lastMemoryEvent = idle ? null : state.MemoryEvent,
+            };
+            var serialized = JsonSerializer.Serialize(payload);
+            if (Encoding.UTF8.GetByteCount(serialized) > MaximumSerializedInspectionBytes)
+                throw new McpProtocolException("Debug state resource is too large.", McpErrorCode.InvalidRequest);
+            return serialized;
         }
 
         internal async ValueTask<CallToolResult> CallLegacySearchAsync(
@@ -1247,6 +1335,7 @@ internal static class Program
                         _legacyInspectionContextId = stackContext;
                         _legacyInspectionMuxId = muxId;
                         _legacyCurrentFrameId = frames[0].GetProperty("id").GetInt32();
+                        _legacyResources.SignalSession(sessionId, "state");
                     }
                     return LegacyResponse(new { frames }, observedState);
                 }

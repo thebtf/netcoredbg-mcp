@@ -2226,6 +2226,260 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
+    public async Task LegacyCompat_StateResource_FullContinuedClearsStopDetails()
+    {
+        var script = new JsonObject
+        {
+            ["launch"] = new JsonArray(new JsonObject
+            {
+                ["event"] = "stopped",
+                ["body"] = new JsonObject
+                {
+                    ["reason"] = "breakpoint",
+                    ["threadId"] = 1,
+                    ["allThreadsStopped"] = true,
+                    ["description"] = "stop description",
+                    ["text"] = "stop text",
+                }
+            }),
+            ["threads"] = new JsonArray(new JsonObject
+            {
+                ["entries"] = new JsonArray(new JsonObject
+                {
+                    ["event"] = "continued",
+                    ["body"] = new JsonObject { ["threadId"] = 1, ["allThreadsContinued"] = true },
+                })
+            }),
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }), startupTimeout: TimeSpan.FromSeconds(10));
+        var owner = new JsonObject { ["muxSessionId"] = "state-continue-owner" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            var before = await ReadLegacyStateResourceAsync(driver, "state-before-full-continue");
+            Assert.Equal("breakpoint", before["stopReason"]?.GetValue<string>());
+            Assert.Equal("stop description", before["stopDescription"]?.GetValue<string>());
+            Assert.Equal("stop text", before["stopText"]?.GetValue<string>());
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var after = await ReadLegacyStateResourceAsync(driver, "state-after-full-continue");
+            Assert.Equal("running", after["state"]?.GetValue<string>());
+            Assert.Null(after["stopReason"]);
+            Assert.Null(after["stopDescription"]);
+            Assert.Null(after["stopText"]);
+        }
+        finally { await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
+    }
+
+    [Theory]
+    [InlineData("\"reference\"", "2147483648", "4096", true)]
+    [InlineData("\"reference\"", "\"invalid\"", "4096", false)]
+    [InlineData("\"reference\"", "1.5", "4096", false)]
+    [InlineData("\"reference\"", "9007199254740992", "4096", false)]
+    [InlineData("\"reference\"", "-9007199254740992", "4096", false)]
+    [InlineData("\"reference\"", "1", "\"invalid\"", false)]
+    [InlineData("\"reference\"", "1", "9007199254740992", false)]
+    [InlineData("\"reference\"", "1", "-1", false)]
+    [InlineData("42", "1", "4096", false)]
+    public async Task LegacyCompat_StateResource_MemoryEventPreservesIntegersOrRefusesInvalid(string reference, string offset, string count, bool valid)
+    {
+        var script = new JsonObject
+        {
+            ["launch"] = new JsonArray(new JsonObject
+            {
+                ["event"] = "memory",
+                ["body"] = new JsonObject
+                {
+                    ["memoryReference"] = JsonNode.Parse(reference),
+                    ["offset"] = JsonNode.Parse(offset),
+                    ["count"] = JsonNode.Parse(count),
+                },
+            })
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }), startupTimeout: TimeSpan.FromSeconds(10));
+        var owner = new JsonObject { ["muxSessionId"] = "state-memory-owner" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            if (valid)
+            {
+                var state = await ReadLegacyStateResourceAsync(driver, "state-memory-valid");
+                Assert.Equal(2147483648L, state["lastMemoryEvent"]?["offset"]?.GetValue<long>());
+                Assert.Equal(4096L, state["lastMemoryEvent"]?["count"]?.GetValue<long>());
+            }
+            else
+            {
+                var error = await Assert.ThrowsAsync<McpProtocolException>(async () => await ReadLegacyStateResourceAsync(driver, "state-memory-invalid"));
+                Assert.Equal(McpErrorCode.InvalidRequest, error.ErrorCode);
+            }
+        }
+        finally { await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
+    }
+
+    [Theory]
+    [InlineData("reader-failure")]
+    [InlineData("eof")]
+    public async Task LegacyCompat_StateResource_ReaderFailureNotifiesSubscriberWithoutTerminalEvent(string mode)
+    {
+        using var notifications = new SemaphoreSlim(0);
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true, ThreadsResponseMode: mode),
+            NotificationHandler: (notification, _) =>
+            {
+                if (notification.Params?["uri"]?.GetValue<string>() == "debug://state") notifications.Release();
+                return ValueTask.CompletedTask;
+            }), startupTimeout: TimeSpan.FromSeconds(10));
+        var owner = new JsonObject { ["muxSessionId"] = "state-reader-failure-owner" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            _ = await ReadLegacyStateResourceAsync(driver, "state-before-reader-failure");
+            _ = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("resources/subscribe",
+                new JsonObject { ["uri"] = "debug://state" }, new RequestId("state-reader-failure-subscribe")));
+            Assert.NotNull((await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner))["error"]);
+            Assert.True(await notifications.WaitAsync(TimeSpan.FromSeconds(5)), "A reader failure must invalidate the current subscribed state.");
+            var error = await Assert.ThrowsAsync<McpProtocolException>(async () => await ReadLegacyStateResourceAsync(driver, "state-after-reader-failure"));
+            Assert.Equal(McpErrorCode.InvalidRequest, error.ErrorCode);
+        }
+        finally { await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
+    }
+
+    private static async Task<JsonObject> ReadLegacyStateResourceAsync(ModernMcpProcessDriver driver, string id)
+    {
+        var result = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("resources/read",
+            new JsonObject { ["uri"] = "debug://state" }, new RequestId(id)));
+        return Assert.IsType<JsonObject>(JsonNode.Parse(result["contents"]![0]!["text"]!.GetValue<string>()));
+    }
+
+    [Fact]
+    public async Task LegacyCompat_StateResource_RejectsIncompleteSourceEvents()
+    {
+        var script = new JsonObject
+        {
+            ["launch"] = new JsonArray(new JsonObject
+            {
+                ["event"] = "loadedSource",
+                ["body"] = new JsonObject { ["reason"] = "new", ["source"] = 17 },
+            })
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }),
+            startupTimeout: TimeSpan.FromSeconds(10));
+        var owner = new JsonObject { ["muxSessionId"] = "state-incomplete-owner" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["pre_build"] = false,
+        }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            var error = await Assert.ThrowsAsync<McpProtocolException>(async () => await driver.SendRawRequestAsync(
+                "resources/read", new JsonObject { ["uri"] = "debug://state" }, new RequestId("state-incomplete")));
+            Assert.Equal(McpErrorCode.InvalidRequest, error.ErrorCode);
+            Assert.NotNull((await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner))["data"]);
+        }
+        finally { Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>()); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_StateResource_TracksSourcesThreadsAndSessionReplacement()
+    {
+        using var signal = new SemaphoreSlim(0);
+        static JsonObject Source(string reason, string name) => new()
+        {
+            ["event"] = "loadedSource",
+            ["body"] = new JsonObject
+            {
+                ["reason"] = reason,
+                ["source"] = new JsonObject { ["path"] = "file.cs", ["name"] = name },
+            },
+        };
+        var script = new JsonObject
+        {
+            ["launch"] = new JsonArray(new JsonObject
+            {
+                ["event"] = "stopped",
+                ["body"] = new JsonObject
+                {
+                    ["reason"] = "breakpoint",
+                    ["threadId"] = 1,
+                    ["allThreadsStopped"] = true,
+                }
+            }),
+            ["threads"] = new JsonArray(
+            new JsonObject { ["entries"] = new JsonArray(Source("new", "old"), Source("changed", "new")) },
+            new JsonObject { ["entries"] = new JsonArray(Source("removed", "new")) })
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() },
+            NotificationHandler: (notification, _) =>
+            {
+                if (notification.Params?["uri"]?.GetValue<string>() == "debug://state") signal.Release();
+                return ValueTask.CompletedTask;
+            }), startupTimeout: TimeSpan.FromSeconds(10));
+        async Task<JsonObject> ReadState(string id)
+        {
+            var result = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("resources/read",
+                new JsonObject { ["uri"] = "debug://state" }, new RequestId(id)));
+            Assert.Equal("application/json", result["contents"]?[0]?["mimeType"]?.GetValue<string>());
+            return Assert.IsType<JsonObject>(JsonNode.Parse(result["contents"]![0]!["text"]!.GetValue<string>()));
+        }
+        var initial = await ReadState("state-idle");
+        Assert.Equal("idle", initial["state"]?.GetValue<string>());
+        Assert.Empty(Assert.IsType<JsonObject>(initial["loadedSources"]));
+        _ = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("resources/subscribe",
+            new JsonObject { ["uri"] = "debug://state" }, new RequestId("state-subscribe")));
+        var owner = new JsonObject { ["muxSessionId"] = "state-resource-owner" };
+        var launch = new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false, ["stop_at_entry"] = true };
+        var active = false;
+        try
+        {
+            for (var generation = 0; generation < 2; generation++)
+            {
+                Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", launch, owner))["data"]?["success"]?.GetValue<bool>());
+                active = true;
+                Assert.True(await signal.WaitAsync(TimeSpan.FromSeconds(10)));
+                while (signal.Wait(0)) { }
+                _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+                Assert.True(await signal.WaitAsync(TimeSpan.FromSeconds(10)));
+                var observed = await ReadState($"state-active-{generation}");
+                Assert.Equal("stopped", observed["state"]?.GetValue<string>());
+                Assert.Equal("breakpoint", observed["stopReason"]?.GetValue<string>());
+                Assert.Equal(2, observed["threadCount"]?.GetValue<int>());
+                Assert.Equal("new", observed["loadedSources"]?["path:file.cs"]?["name"]?.GetValue<string>());
+                _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+                Assert.Empty(Assert.IsType<JsonObject>((await ReadState($"state-removed-{generation}"))["loadedSources"]));
+                Assert.True(await signal.WaitAsync(TimeSpan.FromSeconds(10)));
+                Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>());
+                active = false;
+                Assert.Equal("idle", (await ReadState($"state-idle-{generation}"))["state"]?.GetValue<string>());
+                while (signal.Wait(0)) { }
+            }
+            _ = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("resources/unsubscribe",
+                new JsonObject { ["uri"] = "debug://state" }, new RequestId("state-unsubscribe")));
+            while (signal.Wait(0)) { }
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", launch, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            Assert.False(await signal.WaitAsync(TimeSpan.FromSeconds(1)));
+        }
+        finally
+        {
+            if (active) Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>());
+        }
+    }
+
+    [Fact]
     public async Task LegacyCompat_LiveResources_ReadSubscribeAndUnsubscribeObservedEvents()
     {
         var updates = new ConcurrentQueue<string>();
