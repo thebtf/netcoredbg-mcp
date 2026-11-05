@@ -836,7 +836,7 @@ internal static class Program
                             if (!LegacyBreakpointObservationsComplete())
                                 return LegacyError("Breakpoint observations are unavailable; requested breakpoints are retained.");
                             if (_legacyBreakpointObserverSession is { } active && !active.LegacyHitCountsComplete)
-                                return LegacyError("Breakpoint hit counts are pending or unavailable.");
+                                return LegacyError(active.LegacyHitCountsUnavailable ? "Breakpoint hit counts are unavailable." : "Breakpoint hit counts are pending or unavailable.");
                             return LegacyResponse(LegacyBreakpointSnapshot(breakpointFile, includeHits: true));
                         });
                     }
@@ -1390,7 +1390,7 @@ internal static class Program
                             {
                                 if (!LegacyBreakpointObservationsComplete() || !inspectionSession.LegacyHitCountsComplete) return null;
                                 var requested = _legacyBreakpoints.FirstOrDefault(item => _legacyBreakpointPathComparer.Equals(item.File, source)
-                                    && (item.Line == line || (_legacyBreakpointObservations.TryGetValue(item.Incarnation, out var observation) && observation.DapLine == line)));
+                                    && (_legacyBreakpointObservations.TryGetValue(item.Incarnation, out var observation) ? (observation.DapLine ?? item.Line) : item.Line) == line);
                                 return inspectionSession.GetLegacyHitCount(source, requested.File is null ? line : requested.Line);
                             });
                             if (hitCount is null) return LegacyError("Breakpoint hit counts are pending or unavailable.", "stopped");

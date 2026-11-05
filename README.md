@@ -142,9 +142,12 @@ breakpoint events; a matched removal event removes the requested entry. If IDs
 are missing, reused or exceed the observation limit, listing and resource reads
 return an error instead of stale observations, including after stop. Clearing all
 requested entries or a later start with complete observations restores reads.
-Hit counts are derived asynchronously from the current stopped thread's top
-frame and reset on stop. While attribution is pending or unavailable, listing returns
-an error rather than a fabricated count. Clear records all requested removals first;
+Hit counts use the debugger-adjusted line when present, otherwise the requested
+line, and are derived asynchronously from the stopped thread's top frame. Unlike
+Python's first-match behavior, an adjusted breakpoint is not also attributed to
+its original line. If several requested points share the stopped effective line,
+attribution is unavailable rather than assigned arbitrarily. Counts reset on stop;
+pending or unavailable attribution returns an error. Clear records all requested removals first;
 on a file-set refusal or uncertain result it stops dispatching further files and
 does not retry automatically. Conditional and function breakpoints remain unsupported.
 

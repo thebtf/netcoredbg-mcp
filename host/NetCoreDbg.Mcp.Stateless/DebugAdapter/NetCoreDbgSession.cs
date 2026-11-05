@@ -1929,27 +1929,30 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                         _legacyHitCountsIncomplete = true;
                         return;
                     }
+                    LegacyBreakpointObservation? matching = null;
                     foreach (var item in captured)
                     {
-                        if (!item.Removed && _requestedBreakpoints.Comparer.Equals(item.File, source) && (item.Line == frame.Line || item.DapLine == frame.Line))
+                        if (item.Removed || !_requestedBreakpoints.Comparer.Equals(item.File, source) || (item.DapLine ?? item.Line) != frame.Line) continue;
+                        if (matching is not null) { _legacyHitCountsIncomplete = true; return; }
+                        matching = item;
+                    }
+                    if (matching is { } match)
+                    {
+                        if (!_legacyHitCounts.TryGetValue(source, out var counts))
                         {
-                            if (!_legacyHitCounts.TryGetValue(source, out var counts))
-                            {
-                                if (_legacyHitCountLocations >= MaximumBreakpointCount) { _legacyHitCountsIncomplete = true; return; }
-                                _legacyHitCounts[source] = counts = [];
-                            }
-                            if (!counts.TryGetValue(item.Line, out var count))
-                            {
-                                if (_legacyHitCountLocations >= MaximumBreakpointCount) { _legacyHitCountsIncomplete = true; return; }
-                                _legacyHitCountLocations++;
-                            }
-                            counts[item.Line] = checked(count + 1);
-                            if (_legacyBreakpointObservations.TryGetValue(source, out var current))
-                            {
-                                var index = current.FindIndex(entry => entry.Incarnation == item.Incarnation);
-                                if (index >= 0) current[index] = current[index] with { HitCount = counts[item.Line] };
-                            }
-                            return;
+                            if (_legacyHitCountLocations >= MaximumBreakpointCount) { _legacyHitCountsIncomplete = true; return; }
+                            _legacyHitCounts[source] = counts = [];
+                        }
+                        if (!counts.TryGetValue(match.Line, out var count))
+                        {
+                            if (_legacyHitCountLocations >= MaximumBreakpointCount) { _legacyHitCountsIncomplete = true; return; }
+                            _legacyHitCountLocations++;
+                        }
+                        counts[match.Line] = checked(count + 1);
+                        if (_legacyBreakpointObservations.TryGetValue(source, out var current))
+                        {
+                            var index = current.FindIndex(entry => entry.Incarnation == match.Incarnation);
+                            if (index >= 0) current[index] = current[index] with { HitCount = counts[match.Line] };
                         }
                     }
                 }
@@ -1960,6 +1963,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     }
 
     internal bool LegacyHitCountsComplete { get { lock (_stateGate) return !_legacyHitCountsIncomplete && Volatile.Read(ref _legacyHitObservationActive) == 0; } }
+    internal bool LegacyHitCountsUnavailable { get { lock (_stateGate) return _legacyHitCountsIncomplete; } }
 
     internal Task<DapBreakpointUpdateResult> AddBreakpointAsync(string file, int line, CancellationToken cancellationToken) =>
         UpdateBreakpointAsync(file, line, remove: false, cancellationToken);
