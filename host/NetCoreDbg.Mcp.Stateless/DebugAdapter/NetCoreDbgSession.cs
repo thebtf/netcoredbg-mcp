@@ -113,6 +113,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private bool _supportsLoadedSourcesRequest;
     private bool _supportsSetVariable;
     private bool _supportsExceptionFilters;
+    private bool _supportsConditionalBreakpoints;
+    private bool _supportsHitConditionalBreakpoints;
     private CallStackEligibility? _allThreadsStoppedEligibility;
     private Dictionary<int, CallStackEligibility>? _threadEligibility;
     private HashSet<int>? _invalidatedAllThreadTargets;
@@ -1702,14 +1704,28 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 var requested = new DapRequestedBreakpoint[fileBreakpoints.Count];
                 for (var index = 0; index < requested.Length; index++)
                 {
-                    requested[index] = new DapRequestedBreakpoint(fileBreakpoints[index].Line, fileBreakpoints[index].Incarnation);
+                    var entry = fileBreakpoints[index];
+                    requested[index] = new DapRequestedBreakpoint(entry.Line, entry.Incarnation,
+                        string.IsNullOrEmpty(entry.Condition) ? null : entry.Condition,
+                        string.IsNullOrEmpty(entry.HitCondition) ? null : entry.HitCondition, entry.Identity);
                 }
-
-                var response = await SendRequestAcceptingRefusalAsync(
-                    "setBreakpoints",
-                    new DapSetBreakpointsArguments(new DapBreakpointSource(file), requested),
-                    _requestTimeout,
-                    deadline.Token, new InitialBreakpointRequest(file, requested)).ConfigureAwait(false);
+                PendingRequest request;
+                await _callStackAdmissionGate.WaitAsync(deadline.Token).ConfigureAwait(false);
+                try
+                {
+                    lock (_stateGate)
+                    {
+                        if (requested.Any(bp => (!string.IsNullOrEmpty(bp.Condition) && !_supportsConditionalBreakpoints)
+                            || (!string.IsNullOrEmpty(bp.HitCondition) && !_supportsHitConditionalBreakpoints)))
+                            throw new DapBreakpointOptionsUnsupportedException();
+                    }
+                    request = await BeginRequestAsync("setBreakpoints", new DapSetBreakpointsArguments(new DapBreakpointSource(file), requested),
+                        _requestTimeout, deadline.Token, initialBreakpoints: new InitialBreakpointRequest(file, requested)).ConfigureAwait(false);
+                }
+                finally { _callStackAdmissionGate.Release(); }
+                DapResponse response;
+                try { response = await WaitForResponseAsync(request, _requestTimeout, deadline.Token).ConfigureAwait(false); }
+                finally { RemovePending(request); }
                 if (!response.Success)
                 {
                     throw new DapBreakpointsException(isRefused: true);
@@ -1738,6 +1754,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 _requestedBreakpointCount = breakpoints.Count;
                 InitialBreakpoints = initial;
             }
+        }
+        catch (DapBreakpointOptionsUnsupportedException)
+        {
+            throw;
         }
         catch (DapBreakpointsException)
         {
@@ -1799,10 +1819,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             if (id is not { } observedId) _legacyBreakpointEventsIncomplete = true;
             else if (_legacyBreakpointIds.TryGetValue(observedId, out var owner))
             {
-                if (owner != incarnation) _legacyBreakpointEventsIncomplete = true;
+                if (owner != requested[index - 1].Identity) _legacyBreakpointEventsIncomplete = true;
             }
             else if (_legacyBreakpointIds.Count >= 4096) _legacyBreakpointEventsIncomplete = true;
-            else _legacyBreakpointIds[observedId] = incarnation;
+            else _legacyBreakpointIds[observedId] = requested[index - 1].Identity;
             next.Add(new LegacyBreakpointObservation(file, line, incarnation, observation.Verified,
                 observation.ActualLine == line ? null : observation.ActualLine, id, count, false));
         }
@@ -2100,9 +2120,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                         requested = new DapRequestedBreakpoint[requestedLines.Length];
                         for (var index = 0; index < requestedLines.Length; index++)
                         {
-                            requested[index] = new DapRequestedBreakpoint(requestedLines[index].Line, requestedLines[index].Incarnation);
+                            var entry = requestedLines[index];
+                            requested[index] = new DapRequestedBreakpoint(entry.Line, entry.Incarnation,
+                                string.IsNullOrEmpty(entry.Condition) ? null : entry.Condition,
+                                string.IsNullOrEmpty(entry.HitCondition) ? null : entry.HitCondition, entry.Identity);
                             if (!remove && requestedLines[index].Line == line) targetIndex = index;
                         }
+                        if (requested.Any(bp => (!string.IsNullOrEmpty(bp.Condition) && !_supportsConditionalBreakpoints)
+                            || (!string.IsNullOrEmpty(bp.HitCondition) && !_supportsHitConditionalBreakpoints)))
+                            return new DapBreakpointUpdateResult(DapBreakpointUpdateOutcome.Unsupported);
                     }
                     else if (remove)
                     {
@@ -3043,6 +3069,21 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 {
                     _supportsConfigurationDone = ReadOptionalBoolean(capabilities, "supportsConfigurationDoneRequest");
                 }
+                if (capabilities.TryGetProperty("supportsConditionalBreakpoints", out _) || capabilities.TryGetProperty("supportsHitConditionalBreakpoints", out _))
+                {
+                    _callStackAdmissionGate.Wait();
+                    try
+                    {
+                        lock (_stateGate)
+                        {
+                            if (capabilities.TryGetProperty("supportsConditionalBreakpoints", out _))
+                                _supportsConditionalBreakpoints = ReadOptionalBoolean(capabilities, "supportsConditionalBreakpoints");
+                            if (capabilities.TryGetProperty("supportsHitConditionalBreakpoints", out _))
+                                _supportsHitConditionalBreakpoints = ReadOptionalBoolean(capabilities, "supportsHitConditionalBreakpoints");
+                        }
+                    }
+                    finally { _callStackAdmissionGate.Release(); }
+                }
                 if (capabilities.TryGetProperty("supportsSetVariable", out _))
                 {
                     var supported = ReadOptionalBoolean(capabilities, "supportsSetVariable");
@@ -3622,6 +3663,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         var supportsSetVariable = ReadOptionalBoolean(body, "supportsSetVariable");
         var supportsLoadedSources = ReadOptionalBoolean(body, "supportsLoadedSourcesRequest");
         var supportsExceptionFilters = ReadExceptionFilterSupport(body);
+        var supportsConditional = ReadOptionalBoolean(body, "supportsConditionalBreakpoints");
+        var supportsHitConditional = ReadOptionalBoolean(body, "supportsHitConditionalBreakpoints");
         lock (_stateGate)
         {
             _stackTraceCapabilities = capabilities;
@@ -3630,6 +3673,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             _supportsLoadedSourcesRequest = supportsLoadedSources;
             _supportsExceptionFilters = supportsExceptionFilters;
             _supportsSetVariable = supportsSetVariable;
+            _supportsConditionalBreakpoints = supportsConditional;
+            _supportsHitConditionalBreakpoints = supportsHitConditional;
         }
     }
 
@@ -5585,7 +5630,12 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private sealed record DapBreakpointSource([property: JsonPropertyName("path")] string Path);
 
-    private readonly record struct DapRequestedBreakpoint([property: JsonPropertyName("line")] int Line, [property: JsonIgnore] long Incarnation = 0);
+    private readonly record struct DapRequestedBreakpoint(
+        [property: JsonPropertyName("line")] int Line,
+        [property: JsonIgnore] long Incarnation = 0,
+        [property: JsonPropertyName("condition"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Condition = null,
+        [property: JsonPropertyName("hitCondition"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? HitCondition = null,
+        [property: JsonIgnore] long Identity = 0);
     private sealed record InitialBreakpointRequest(string File, DapRequestedBreakpoint[] Requested);
 
     private readonly record struct DapBreakpointObservation(bool Verified, int? ActualLine);
@@ -5651,8 +5701,10 @@ internal sealed class DapStartupCleanupException(Exception startupFailure, Excep
 
 internal sealed class DapLaunchRefusedException() : Exception("DAP launch request was refused.");
 
-internal readonly record struct DapSourceBreakpoint(int Index, string File, int Line, long Incarnation = 0);
-internal readonly record struct LegacyRequestedLine(int Line, long Incarnation);
+internal readonly record struct DapSourceBreakpoint(int Index, string File, int Line, long Incarnation = 0, string? Condition = null, string? HitCondition = null, long Identity = 0);
+internal readonly record struct LegacyRequestedLine(int Line, long Incarnation, string? Condition = null, string? HitCondition = null, long Identity = 0);
+
+internal sealed class DapBreakpointOptionsUnsupportedException() : Exception("DAP breakpoint options are unsupported.");
 
 internal readonly record struct DapInitialBreakpoint(
     [property: JsonPropertyName("index")] int Index,

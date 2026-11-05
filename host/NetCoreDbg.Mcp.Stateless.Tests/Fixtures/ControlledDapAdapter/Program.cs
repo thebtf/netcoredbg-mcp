@@ -621,6 +621,7 @@ internal sealed class ControlledDapAdapter
     private int _outgoingSequence = 1;
     private bool _initializedEventSent;
     private int _nextBreakpointId = 1;
+    private readonly Dictionary<(string File, int Line), int> _stableBreakpointIds = [];
     private readonly List<(int Id, int Line)> _initiallyUnverifiedBreakpoints = [];
 
     public ControlledDapAdapter(AdapterOptions options, string transcriptPath, string[] processArguments)
@@ -874,6 +875,13 @@ internal sealed class ControlledDapAdapter
                 if (_options.ExceptionBreakpointFilters != "omit")
                 {
                     initializeCapabilities["exceptionBreakpointFilters"] = ExceptionFilterDescriptors(_options.ExceptionBreakpointFilters == "supported");
+                }
+                if (_outputScript.ValueKind == JsonValueKind.Object
+                    && _outputScript.TryGetProperty("breakpointCapabilities", out var breakpointCapabilities)
+                    && breakpointCapabilities.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var capability in breakpointCapabilities.EnumerateObject())
+                        initializeCapabilities[capability.Name] = capability.Value.Clone();
                 }
 
                 await WriteResponseAsync(sequence, command, initializeCapabilities, cancellationToken, omitBody: _options.OmitInitializeResponseBody);
@@ -1162,6 +1170,7 @@ internal sealed class ControlledDapAdapter
             "mixed-missing-id" => "mixed",
             "crossed-lines" => "success",
             "same-effective-line" => "success",
+            "stable-id" => "success",
             "refuse-first-runtime" => runtimeOrdinal == 1 ? "refused" : "success",
             "missing-verified-first-runtime" => runtimeOrdinal == 1 ? "missing-verified" : "success",
             "too-few-results-first-runtime" => runtimeOrdinal == 1 ? "too-few-results" : "success",
@@ -1172,7 +1181,18 @@ internal sealed class ControlledDapAdapter
         var breakpoints = requested.Select((entry, index) =>
         {
             var line = entry.GetProperty("line").GetInt32();
-            var id = _nextBreakpointId++;
+            int id;
+            if (_options.SetBreakpointsResponseMode == "stable-id")
+            {
+                var file = root.GetProperty("arguments").GetProperty("source").GetProperty("path").GetString()!;
+                var key = (file, line);
+                if (!_stableBreakpointIds.TryGetValue(key, out id))
+                {
+                    id = _nextBreakpointId++;
+                    _stableBreakpointIds.Add(key, id);
+                }
+            }
+            else id = _nextBreakpointId++;
             var breakpoint = new Dictionary<string, object?>
             {
                 ["id"] = id,

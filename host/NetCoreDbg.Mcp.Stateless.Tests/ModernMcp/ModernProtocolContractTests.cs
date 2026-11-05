@@ -879,6 +879,166 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
+    public async Task LegacyCompat_SourceBreakpointOptions_PersistAndRequireAdapterCapabilities()
+    {
+        var script = new JsonObject
+        {
+            ["breakpointCapabilities"] = new JsonObject
+            {
+                ["supportsConditionalBreakpoints"] = true,
+                ["supportsHitConditionalBreakpoints"] = true,
+            }
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }), startupTimeout: TimeSpan.FromSeconds(10));
+        var owner = new JsonObject { ["muxSessionId"] = "source-options-owner" };
+        var file = BreakpointSourcePath;
+        JsonObject Add(string condition, string hit) => new() { ["file"] = file, ["line"] = 2, ["condition"] = condition, ["hit_condition"] = hit };
+        var offline = await LegacyConsoleCallAsync(driver, "add_breakpoint", Add("i == 5", "3"), owner);
+        Assert.Equal("i == 5", offline["data"]?["condition"]?.GetValue<string>());
+        var launch = new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false };
+        var active = false;
+        try
+        {
+            for (var cycle = 0; cycle < 2; cycle++)
+            {
+                var before = (await driver.ReadNativeActionsAsync()).Count;
+                Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", launch, owner))["data"]?["success"]?.GetValue<bool>());
+                active = true;
+                var request = Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "setBreakpoints");
+                var breakpoint = JsonNode.Parse(request.Detail!)!["arguments"]!["breakpoints"]![0]!;
+                Assert.Equal(cycle == 0 ? "i == 5" : "i > 2", breakpoint["condition"]?.GetValue<string>());
+                Assert.Equal(cycle == 0 ? "3" : "4", breakpoint["hitCondition"]?.GetValue<string>());
+                if (cycle == 0)
+                {
+                    Assert.True((await LegacyConsoleCallAsync(driver, "add_breakpoint", Add("i > 2", "4"), owner))["data"]?["verified"]?.GetValue<bool>());
+                    var latest = (await driver.ReadNativeActionsAsync()).Last(static action => action.Command == "setBreakpoints");
+                    var changed = JsonNode.Parse(latest.Detail!)!["arguments"]!["breakpoints"]![0]!;
+                    Assert.Equal("i > 2", changed["condition"]?.GetValue<string>());
+                    Assert.Equal("4", changed["hitCondition"]?.GetValue<string>());
+                }
+                Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>());
+                active = false;
+            }
+        }
+        finally { if (active) await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_SourceBreakpointOptions_StableAdapterIdRemainsInspectableAfterUpdate()
+    {
+        var script = new JsonObject { ["breakpointCapabilities"] = new JsonObject { ["supportsConditionalBreakpoints"] = true } };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true, SetBreakpointsResponseMode: "stable-id"),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }));
+        var owner = new JsonObject { ["muxSessionId"] = "stable-breakpoint-owner" };
+        var source = Path.GetFullPath(BreakpointSourcePath);
+        JsonObject Point(string condition) => new() { ["file"] = source, ["line"] = 2, ["condition"] = condition };
+        _ = await LegacyConsoleCallAsync(driver, "add_breakpoint", Point("i == 1"), owner);
+        var active = false;
+        try
+        {
+            Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject { ["program"] = driver.InertProgramPath, ["pre_build"] = false }, owner))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            Assert.True((await LegacyConsoleCallAsync(driver, "add_breakpoint", Point("i == 2"), owner))["data"]?["verified"]?.GetValue<bool>());
+            var list = await LegacyConsoleCallAsync(driver, "list_breakpoints", new JsonObject { ["file"] = source }, owner);
+            var entry = Assert.Single(Assert.IsType<JsonArray>(list["data"]?[source]));
+            Assert.Equal("i == 2", entry?["condition"]?.GetValue<string>());
+            Assert.True(entry?["verified"]?.GetValue<bool>());
+            var response = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("resources/read",
+                new JsonObject { ["uri"] = "debug://breakpoints" }, new RequestId(Guid.NewGuid().ToString("N"))));
+            var resource = Assert.IsType<JsonObject>(JsonNode.Parse(response["contents"]![0]!["text"]!.GetValue<string>()));
+            Assert.Equal("i == 2", resource[source]?[0]?["condition"]?.GetValue<string>());
+            Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>());
+            active = false;
+            var retained = await LegacyConsoleCallAsync(driver, "list_breakpoints", new JsonObject { ["file"] = source }, owner);
+            Assert.Equal("i == 2", retained["data"]?[source]?[0]?["condition"]?.GetValue<string>());
+        }
+        finally { if (active) await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_HitConditionWithoutCapability_RefusesDeferredLaunch()
+    {
+        var script = new JsonObject { ["breakpointCapabilities"] = new JsonObject { ["supportsConditionalBreakpoints"] = true } };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }), startupTimeout: TimeSpan.FromSeconds(10));
+        var owner = new JsonObject { ["muxSessionId"] = "deferred-hit-owner" };
+        Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject
+        {
+            ["file"] = BreakpointSourcePath,
+            ["line"] = 2,
+            ["hit_condition"] = "3",
+        }, owner))["data"]);
+        var start = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["pre_build"] = false,
+        }, owner);
+        Assert.Equal("DAP_BREAKPOINT_OPTIONS_UNSUPPORTED", start["error"]?.GetValue<string>());
+        Assert.DoesNotContain(await driver.ReadNativeActionsAsync(), static action => action.Command is "setBreakpoints" or "launch");
+    }
+
+    [Fact]
+    public async Task LegacyCompat_HitConditionWithoutCapability_RefusesLiveUpdate()
+    {
+        var script = new JsonObject { ["breakpointCapabilities"] = new JsonObject { ["supportsConditionalBreakpoints"] = true } };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }), startupTimeout: TimeSpan.FromSeconds(10));
+        var owner = new JsonObject { ["muxSessionId"] = "live-hit-owner" };
+        Assert.True((await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["pre_build"] = false,
+        }, owner))["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var rejected = await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject
+            {
+                ["file"] = BreakpointSourcePath,
+                ["line"] = 2,
+                ["hit_condition"] = "3",
+            }, owner);
+            Assert.Contains("does not advertise support", rejected["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), static action => action.Command == "setBreakpoints");
+        }
+        finally { await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_BreakpointOptions_RejectOversizeWithoutReplacingIntent()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true)), startupTimeout: TimeSpan.FromSeconds(10));
+        var owner = new JsonObject { ["muxSessionId"] = "bounded-source-options" };
+        var initial = await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject
+        {
+            ["file"] = BreakpointSourcePath,
+            ["line"] = 2,
+            ["condition"] = "i == 5",
+        }, owner);
+        Assert.NotNull(initial["data"]);
+        var rejected = await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject
+        {
+            ["file"] = BreakpointSourcePath,
+            ["line"] = 2,
+            ["condition"] = new string('x', 256 * 1024),
+        }, owner);
+        Assert.NotNull(rejected["error"]);
+        var listed = await LegacyConsoleCallAsync(driver, "list_breakpoints", new JsonObject(), owner);
+        Assert.Equal("i == 5", listed["data"]?[Path.GetFullPath(BreakpointSourcePath)]?[0]?["condition"]?.GetValue<string>());
+    }
+
+    [Fact]
     public async Task LegacyCompat_BreakpointInspection_IdleListClearAndSubscription()
     {
         using var updates = new SemaphoreSlim(0);
@@ -1307,7 +1467,7 @@ public sealed class ModernProtocolContractTests
         Assert.False((await LegacyConsoleCallAsync(driver, "add_breakpoint", Location(6), owner))["data"]?["verified"]?.GetValue<bool>());
         Assert.True((await LegacyConsoleCallAsync(driver, "remove_breakpoint", Location(6), owner))["data"]?["removed"]?.GetValue<bool>());
         Assert.False((await LegacyConsoleCallAsync(driver, "remove_breakpoint", Location(6), owner))["data"]?["removed"]?.GetValue<bool>());
-        Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject { ["file"] = source, ["line"] = 4, ["condition"] = "x" }, owner))["error"]);
+        Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject { ["file"] = source, ["line"] = 4, ["condition"] = 123 }, owner))["error"]);
         Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_breakpoint", Location(0), owner))["error"]);
         Assert.NotNull((await LegacyConsoleCallAsync(driver, "add_breakpoint", new JsonObject { ["file"] = source + ".missing", ["line"] = 1 }, owner))["error"]);
 

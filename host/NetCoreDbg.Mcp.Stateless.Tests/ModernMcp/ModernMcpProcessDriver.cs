@@ -755,9 +755,9 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                     lastTransition = request.CompletedOrder;
                 }
                 else if (IsComplete(request.Result, false) && payload?["state"]?.GetValue<string>() == "idle"
-                    && StringValue(payload["error"]) == "DAP_LAUNCH_REFUSED")
+                    && StringValue(payload["error"]) is "DAP_LAUNCH_REFUSED" or "DAP_BREAKPOINT_OPTIONS_UNSUPPORTED")
                 {
-                    // The native launch-refused result is emitted only after its owned failed-start cleanup succeeds.
+                    // These results are emitted only after owned failed-start cleanup succeeds.
                     lastTransition = request.CompletedOrder;
                 }
                 else return false;
