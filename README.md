@@ -163,6 +163,14 @@ never retried. Each option also accepts its Python snake_case spelling, but not
 both spellings in one call. These native results do not include Python hit counts
 or all scopes; Python remains the installed default.
 
+In the source-built native host, `get_call_stack` and `continue_execution`
+accept omitted or null `threadId` to select the currently observed stopped
+thread. `thread_id` is an alternative spelling; supplying both is invalid.
+An explicit integer, including zero, still selects that exact thread. If no
+current stopped thread is available, the operation is refused without a DAP
+request. The explicit `debugSessionId` is still required; this is not Python
+session or result-envelope compatibility.
+
 To inspect a stopped frame, call `get_call_stack` with
 `includeInspectionContext: true`, then pass its `inspectionContextId` with the
 frame ID to `get_scopes` and with each returned reference to `get_variables`.

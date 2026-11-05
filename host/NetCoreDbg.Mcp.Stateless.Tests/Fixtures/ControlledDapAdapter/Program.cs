@@ -1344,6 +1344,12 @@ internal sealed class ControlledDapAdapter
                 await WaitForGracefulReleaseAsync(shouldWait: true, cancellationToken);
                 await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
                 return;
+            case "all-stop-held-continued-restop":
+                await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken);
+                await WaitForGracefulReleaseAsync(shouldWait: true, cancellationToken);
+                await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
+                await WriteStoppedEventAsync(threadId: 2, allThreadsStopped: true, cancellationToken, "admission-restopped-event", reason: "admission-restop");
+                return;
 
             case "partial-stop":
                 await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: false, cancellationToken);

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Source-built native `get_call_stack` and `continue_execution` accept an omitted or null thread ID and the `thread_id` alias, selecting only a currently observed stopped thread under session admission. Explicit session IDs and the native response contract remain required; Python remains the installed default.
 - The source-built native host adds explicit-session `get_stop_context` and `get_exception_context` with bounded stack and first-scope locals, retained output, exception information, and stopped-epoch fencing. Optional inner-exception evaluation can mutate the debuggee and is never retried. Native results omit Python hit counts and full scope parity; Python remains the installed default.
 - The source-built native `start_debug` supports opt-in pre-build with explicit project and configuration, bounded build diagnostics, and admission that never stops an existing session. Windows uses a private Job with zero-process accounting; Unix cleanup is limited to the owned process group and cannot guarantee escaped descendants. Full Python launch parity remains open.
 - The source-built native host resolves project roots for launch profiles and the existing three project-scoped code-search tools. Modern client roots use request-local `input_required` responses; operator pins remain authoritative unless an explicit `projectRoot` is supplied. Python pre-build and full client parity remain open.

@@ -1121,7 +1121,7 @@ internal static class Program
                 }
 
                 using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.AbortToken);
-                var callStack = await session.GetCallStackAsync(
+                var callStack = await session.GetCallStackForOptionalThreadAsync(
                     arguments.ThreadId,
                     arguments.StartFrame,
                     arguments.Levels,
@@ -1980,7 +1980,7 @@ internal static class Program
             RequestId requestId,
             CancellationToken cancellationToken)
         {
-            if (!TryReadStepOverArguments(request.Arguments, out var arguments))
+            if (!TryReadContinueArguments(request.Arguments, out var arguments))
             {
                 return InvalidArguments(ContinueExecution);
             }
@@ -2010,7 +2010,7 @@ internal static class Program
                     return NotFound();
                 }
 
-                var continued = await session.ContinueAsync(arguments.ThreadId, operation.Token).ConfigureAwait(false);
+                var continued = await session.ContinueForOptionalThreadAsync(arguments.ThreadId, operation.Token).ConfigureAwait(false);
                 closeAfterLease = continued.RequiresDrain;
                 return continued.Outcome switch
                 {
@@ -2020,7 +2020,7 @@ internal static class Program
                     DapContinueOutcome.Terminal => Result(new ContinueTerminalContent(
                         "continue_terminal", continued.Terminal!, continued.ExitCode), isError: false),
                     DapContinueOutcome.TimedOut => Result(new ContinueTimedOutContent(
-                        "continue_timed_out", arguments.ThreadId, 30, continued.Acknowledged), isError: false),
+                        "continue_timed_out", continued.ThreadId!.Value, 30, continued.Acknowledged), isError: false),
                     _ => throw new InvalidOperationException("Unknown continue outcome."),
                 };
             }
@@ -3811,6 +3811,27 @@ internal static class Program
             return true;
         }
 
+        private static bool TryReadOptionalThread(IDictionary<string, JsonElement> arguments, out int? threadId)
+        {
+            threadId = null;
+            if (!TryGetAliased(arguments, "threadId", "thread_id", out var value)) return false;
+            if (value.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null) return true;
+            if (!TryReadOutputLineCount(value, out var parsed) || parsed is < int.MinValue or > int.MaxValue) return false;
+            threadId = (int)parsed;
+            return true;
+        }
+
+        private static bool TryReadContinueArguments(IDictionary<string, JsonElement>? arguments, out PauseArguments result)
+        {
+            result = null!;
+            if (arguments is null || arguments.Keys.Any(static name => name is not "debugSessionId" and not "threadId" and not "thread_id")
+                || !arguments.TryGetValue("debugSessionId", out var session)
+                || session.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(session.GetString())
+                || !TryReadOptionalThread(arguments, out var threadId)) return false;
+            result = new PauseArguments(session.GetString()!, threadId);
+            return true;
+        }
+
         private static bool TryReadSetVariableArguments(IDictionary<string, JsonElement>? arguments, out SetVariableArguments result)
         {
             result = null!;
@@ -3960,14 +3981,12 @@ internal static class Program
         {
             result = null!;
             if (arguments is null
-                || arguments.Count is < 2 or > 5
-                || arguments.Keys.Any(static name => name is not "debugSessionId" and not "threadId" and not "startFrame" and not "levels" and not "includeInspectionContext")
+                || arguments.Count is < 1 or > 6
+                || arguments.Keys.Any(static name => name is not "debugSessionId" and not "threadId" and not "thread_id" and not "startFrame" and not "levels" and not "includeInspectionContext")
                 || !arguments.TryGetValue("debugSessionId", out var sessionIdElement)
                 || sessionIdElement.ValueKind != JsonValueKind.String
                 || string.IsNullOrWhiteSpace(sessionIdElement.GetString())
-                || !arguments.TryGetValue("threadId", out var threadIdElement)
-                || threadIdElement.ValueKind != JsonValueKind.Number
-                || !threadIdElement.TryGetInt32(out var threadId))
+                || !TryReadOptionalThread(arguments, out var threadId))
             {
                 return false;
             }
@@ -4125,7 +4144,7 @@ internal static class Program
 
         private sealed record ThreadsSuccessContent(string kind, IReadOnlyList<DapThread> threads);
         private sealed record CompositeArguments(string SessionId, int MaxFrames, int VariableFrames, int OutputEntries, int InnerExceptions);
-        private sealed record CallStackArguments(string SessionId, int ThreadId, uint StartFrame, uint Levels, bool IncludeInspectionContext);
+        private sealed record CallStackArguments(string SessionId, int? ThreadId, uint StartFrame, uint Levels, bool IncludeInspectionContext);
         private sealed record InspectionArguments(string SessionId, string InspectionContextId, int Id, int? Start, int? Count);
         private sealed record ScopesSuccessContent(string kind, string inspectionContextId, IReadOnlyList<DapScope> scopes);
         private sealed record VariablesSuccessContent(string kind, string inspectionContextId, IReadOnlyList<DapVariable> variables);
@@ -4186,11 +4205,11 @@ internal static class Program
                 Tool("get_debug_state", "Get the state of a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("stop_debug", "Stop a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("get_threads", "Get threads in a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
-                Tool("get_call_stack", "Get a bounded stack-frame page for one stopped thread. Opt in to an opaque stopped-epoch inspection context for get_scopes/get_variables; carry numeric IDs with the context from the same observation, not as proof that an ID was issued.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647},\"startFrame\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295},\"levels\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":256},\"includeInspectionContext\":{\"type\":\"boolean\",\"default\":false}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
+                Tool("get_call_stack", "Get a bounded stack-frame page for a stopped thread. Omit threadId or use null to select the current observed stopped thread; thread_id is an alternative spelling. Carry numeric IDs with an opted-in inspection context from the same observation.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1},"threadId":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647},"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647},"startFrame":{"type":"integer","minimum":0,"maximum":4294967295},"levels":{"type":"integer","minimum":1,"maximum":256},"includeInspectionContext":{"type":"boolean","default":false}},"required":["debugSessionId"],"additionalProperties":false,"allOf":[{"not":{"required":["threadId","thread_id"]}}]}"""),
                 Tool("step_over", "Step over one explicitly named stopped thread.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
                 Tool("get_scopes", "Get bounded scopes using a frame ID and inspection context from the same stopped observation. The context is process/session-local and expires on execution or inspection invalidation.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1},\"inspectionContextId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"pattern\":\"\\\\S\"},\"frameId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"inspectionContextId\",\"frameId\"],\"additionalProperties\":false}"),
                 Tool("get_variables", "Get bounded variables using a positive variablesReference and inspection context from the same stopped observation. Optional start and count are sent to the debugger; adapter support determines the result. Zero count requests all remaining children. A returned reference of zero is a leaf. Filtering is not supported.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1},"inspectionContextId":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"},"variablesReference":{"type":"integer","minimum":1,"maximum":2147483647},"start":{"type":["integer","null"],"minimum":0,"maximum":2147483647},"count":{"type":["integer","null"],"minimum":0,"maximum":2147483647}},"required":["debugSessionId","inspectionContextId","variablesReference"],"additionalProperties":false}"""),
-                Tool("continue_execution", "Continue execution using an explicitly named stopped thread; the request resumes all threads. Observe the next stop or terminal event for up to 30 seconds. An acknowledged timeout does not itself close the session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"threadId\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"threadId\"],\"additionalProperties\":false}"),
+                Tool("continue_execution", "Continue from an explicit or current observed stopped thread; the request resumes all threads. Omitted or null threadId selects the current thread; thread_id is an alternative spelling. Observe the next stop or terminal event for up to 30 seconds.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"threadId":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647},"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"required":["debugSessionId"],"additionalProperties":false,"allOf":[{"not":{"required":["threadId","thread_id"]}}]}"""),
                 Tool("pause_execution", "Request a pause while a session is live, including alongside a committed continue. Nonzero threadId selects that exact thread; omitted, null or zero selects the observed current thread or the first bounded discovered thread. Returns the adapter acknowledgement, not a stopped-state claim. Only a real stopped event authorizes inspection; uncertain writes are never retried.", """{"type":"object","properties":{"debugSessionId":{"type":"string","minLength":1,"pattern":"\\S"},"threadId":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"required":["debugSessionId"],"additionalProperties":false}"""),
                 Tool("add_breakpoint", "Add a source breakpoint to a live debug session while preserving its requested source breakpoint sets. Verification is an adapter observation, not proof of a hit. Conditions and hit counts are not supported.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"file\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"line\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"file\",\"line\"],\"additionalProperties\":false}"),
                 Tool("remove_breakpoint", "Remove every requested source breakpoint matching this file and line from a live debug session while preserving the remaining requested order. The source file need not still exist. An absent request returns removed:false without sending setBreakpoints; successful removal confirms adapter acknowledgement, not final Python wire parity.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"file\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"\\\\S\"},\"line\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647}},\"required\":[\"debugSessionId\",\"file\",\"line\"],\"additionalProperties\":false}"),

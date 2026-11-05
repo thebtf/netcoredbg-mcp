@@ -121,6 +121,16 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         return Assert.IsType<bool>(RequireProperty(result!.GetType(), "IsRefused", typeof(bool)).GetValue(result));
     }
 
+    public async Task<bool> GetOptionalCallStackIsRefusedAsync(CancellationToken cancellationToken)
+    {
+        var method = RequireTaskMethod(_session.GetType(), "GetCallStackForOptionalThreadAsync",
+            typeof(int?), typeof(uint), typeof(uint), typeof(bool), typeof(CancellationToken));
+        var result = await AwaitAsyncResult(method.Invoke(_session, [null, 0u, 20u, false, cancellationToken]),
+            "GetCallStackForOptionalThreadAsync", cancellationToken);
+        Assert.NotNull(result);
+        return Assert.IsType<bool>(RequireProperty(result!.GetType(), "IsRefused", typeof(bool)).GetValue(result));
+    }
+
     public async Task<string> GetInspectionContextAsync(CancellationToken cancellationToken)
     {
         var method = RequireTaskMethod(_session.GetType(), "GetCallStackAsync",
@@ -144,6 +154,12 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
     {
         var method = RequireTaskMethod(_session.GetType(), "ContinueAsync", typeof(int), typeof(CancellationToken));
         _ = await AwaitAsyncResult(method.Invoke(_session, [threadId, cancellationToken]), "ContinueAsync", CancellationToken.None);
+    }
+
+    public async Task ContinueOptionalThreadAsync(CancellationToken cancellationToken)
+    {
+        var method = RequireTaskMethod(_session.GetType(), "ContinueForOptionalThreadAsync", typeof(int?), typeof(CancellationToken));
+        _ = await AwaitAsyncResult(method.Invoke(_session, [null, cancellationToken]), "ContinueForOptionalThreadAsync", CancellationToken.None);
     }
 
     public async Task<bool> AddBreakpointIsAddedAsync(string file, int line, CancellationToken cancellationToken)

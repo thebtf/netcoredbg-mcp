@@ -604,8 +604,10 @@ public sealed class NetCoreDbgSessionTests
         Assert.Equal(ExpectedLifecycleEvents, lifecycleEvents);
         Assert.Equal(new DapSessionSnapshot("terminated", stopReason, exitCode), emitting.State);
     }
-    [Fact]
-    public async Task GetCallStack_ContinuedDuringAdmission_WritesBeforeLifecycleTransition()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GetCallStack_ContinuedDuringAdmission_WritesBeforeLifecycleTransition(bool implicitThread)
     {
         await using var session = await StartAsync(new FixtureConfiguration(
             SupportsDelayedStackTraceLoading: true,
@@ -614,7 +616,8 @@ public sealed class NetCoreDbgSessionTests
         await session.Fixture.WaitForEventAsync("stopped", cancellation.Token);
         await session.HoldDapWriteAsync(cancellation.Token);
         var writeHeld = true;
-        var callStack = session.GetCallStackIsRefusedAsync(1, 0, 20, cancellation.Token);
+        var callStack = implicitThread ? session.GetOptionalCallStackIsRefusedAsync(cancellation.Token)
+            : session.GetCallStackIsRefusedAsync(1, 0, 20, cancellation.Token);
         try
         {
             await session.WaitForPendingStackTraceAsync(cancellation.Token);
@@ -642,6 +645,44 @@ public sealed class NetCoreDbgSessionTests
             }
         }
     }
+
+    [Fact]
+    public async Task Continue_ImplicitThread_ContinuedAndRestopCannotOvertakeAdmittedWrite()
+    {
+        await using var session = await StartAsync(new FixtureConfiguration(
+            LifecycleMode: "all-stop-held-continued-restop", NextResponseMode: "continue-hold"));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var cancellation = new CancellationTokenSource();
+        await session.Fixture.WaitForEventAsync("stopped", observation.Token);
+        await session.WaitForReaderBarrierAsync(observation.Token);
+        await session.HoldDapWriteAsync(observation.Token);
+        var writeHeld = true;
+        var operation = session.ContinueOptionalThreadAsync(cancellation.Token);
+        try
+        {
+            await session.WaitForPendingCommandAsync("continue", observation.Token);
+            session.Fixture.ReleaseGracefulShutdown();
+            await session.Fixture.WaitForEventAsync("continued", observation.Token);
+            await session.Fixture.WaitForTranscriptKindAsync("admission-restopped-event", observation.Token);
+            Assert.NotEqual("admission-restop", session.State.StopReason);
+            Assert.DoesNotContain(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "continue");
+            session.ReleaseDapWrite();
+            writeHeld = false;
+            await session.Fixture.WaitForTranscriptKindAsync("continue-ack-gated", observation.Token);
+            await session.WaitForObservedStopReasonAsync("admission-restop", observation.Token);
+            var request = Assert.Single(await session.Fixture.ReadTranscriptAsync(), static entry => entry.Command == "continue");
+            using var arguments = JsonDocument.Parse(Assert.IsType<string>(request.Arguments));
+            Assert.Equal(1, arguments.RootElement.GetProperty("threadId").GetInt32());
+        }
+        finally
+        {
+            if (writeHeld) session.ReleaseDapWrite();
+            cancellation.Cancel();
+            session.Fixture.ReleaseNextResponse();
+            _ = await Record.ExceptionAsync(() => operation);
+        }
+    }
+
 
 
     [Fact]
