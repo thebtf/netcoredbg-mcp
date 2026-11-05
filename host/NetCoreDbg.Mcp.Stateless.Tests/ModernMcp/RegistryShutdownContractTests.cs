@@ -117,6 +117,67 @@ public sealed class RegistryShutdownContractTests
     }
 
     [Fact]
+    public async Task LegacyState_StaleReaderFailureCallbackCannotInvalidateReplacement()
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(SuppressLifecycleEvents: true));
+        harness.EnableLegacyCompat();
+        var channel = new DuplexChannel();
+        using var updates = new SemaphoreSlim(0);
+        var options = new McpServerOptions
+        {
+            ServerInfo = new Implementation { Name = "state-generation-regression", Version = "1.0.0" },
+            Capabilities = new ServerCapabilities { Resources = new ResourcesCapability { Subscribe = true } },
+            Handlers = new McpServerHandlers
+            {
+                ReadResourceHandler = (context, token) => harness.ReadResourceAsync(context.Params.Uri, token),
+                SubscribeToResourcesHandler = (context, token) => harness.SubscribeResourceAsync(context.Server, context.Params.Uri, token),
+            },
+        };
+        await using var resourceServer = McpServer.Create(channel.CreateServerTransport(), options);
+        _ = resourceServer.RunAsync();
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        await using var client = await McpClient.CreateAsync(channel.CreateClientTransport(), new McpClientOptions
+        {
+            ProtocolVersion = "2025-11-25",
+            Handlers = new McpClientHandlers
+            {
+                NotificationHandlers = [new(NotificationMethods.ResourceUpdatedNotification, (notification, _) =>
+            {
+                if (notification.Params?["uri"]?.GetValue<string>() == "debug://state") updates.Release();
+                return ValueTask.CompletedTask;
+            })]
+            },
+        }, cancellationToken: observation.Token);
+        var launch = new JsonObject { ["program"] = harness.ProgramPath, ["pre_build"] = false };
+        var active = false;
+        try
+        {
+            Assert.True(Content(await harness.CallLegacyAsync("start_debug", launch, "stale-state-first"))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            var oldObserver = harness.CaptureResourceObserver();
+            Assert.True(Content(await harness.CallLegacyAsync("stop_debug", new JsonObject(), "stale-state-stop"))["data"]?["success"]?.GetValue<bool>());
+            active = false;
+            Assert.True(Content(await harness.CallLegacyAsync("start_debug", launch, "stale-state-replacement"))["data"]?["success"]?.GetValue<bool>());
+            active = true;
+            _ = ModernMcpProcessDriver.RequireResult(await client.SendRequestAsync(new JsonRpcRequest
+            {
+                Id = new RequestId("stale-state-subscribe"),
+                Method = "resources/subscribe",
+                Params = new JsonObject { ["uri"] = "debug://state" },
+            }, observation.Token));
+            oldObserver("state");
+            Assert.False(await updates.WaitAsync(TimeSpan.FromSeconds(1)), "A late old-generation reader failure must not notify the replacement subscriber.");
+            var state = await harness.ReadResourceAsync("debug://state", observation.Token);
+            var text = Assert.IsType<TextResourceContents>(Assert.Single(state.Contents));
+            Assert.NotEqual("idle", JsonNode.Parse(text.Text)!["state"]?.GetValue<string>());
+        }
+        finally
+        {
+            if (active) await harness.CallLegacyAsync("stop_debug", new JsonObject(), "stale-state-cleanup");
+        }
+    }
+
+    [Fact]
     public async Task LegacyState_NaturalExitRemainsTerminalUntilExplicitStop()
     {
         var script = new JsonObject
@@ -841,6 +902,13 @@ public sealed class RegistryShutdownContractTests
                 var owner = registry.GetType().GetField("_legacyResources", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(registry)!;
                 return Assert.IsType<SemaphoreSlim>(owner.GetType().GetField("_sendGate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(owner));
             }
+        }
+        public Action<string> CaptureResourceObserver()
+        {
+            var owner = registry.GetType().GetField("_legacyResources", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(registry)!;
+            var generation = owner.GetType().GetField("_current", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(owner)!;
+            var observe = generation.GetType().GetMethod("Observe", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            return name => observe.Invoke(generation, [name]);
         }
         public void EnableLegacyCompat() => registry.GetType().GetProperty("LegacyCompat", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(registry, true);
         public ValueTask<ReadResourceResult> ReadResourceAsync(string uri, CancellationToken cancellationToken) =>

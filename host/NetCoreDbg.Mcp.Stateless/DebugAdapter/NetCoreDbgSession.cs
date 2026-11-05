@@ -88,6 +88,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private DapSessionState _state = new(null, null, null);
     private string? _stopDescription;
     private string? _stopText;
+    private DapThread[]? _legacyThreads;
+    private int? _legacyProcessId;
+    private string? _legacyProcessName;
+    private double? _legacyLastStopAt;
+    private double? _legacyLastResumeAt;
+    private JsonElement? _legacyInvalidation;
+    private JsonElement? _legacyMemoryEvent;
+    private bool _legacyEventDetailsIncomplete;
+    private JsonElement? _legacyExceptionInfo;
     private Task? _cleanupTask;
     private Exception? _readerFailure;
     private int _retirementRequested;
@@ -172,6 +181,19 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             return (_state, _loadedSourcesIncomplete ? null : _loadedSources.ToDictionary(
                 static item => item.Key, static item => item.Value.Source, StringComparer.Ordinal), !_loadedSourcesIncomplete);
+        }
+    }
+
+    internal (DapSessionState State, IReadOnlyDictionary<string, DapLoadedSource>? Sources, bool Complete,
+        DapThread[]? Threads, int? ProcessId, string? ProcessName, string? Description, string? Text,
+        double? LastStopAt, double? LastResumeAt, JsonElement? Invalidation, JsonElement? MemoryEvent, JsonElement? ExceptionInfo, bool DetailsComplete) GetLegacyResourceState()
+    {
+        lock (_stateGate)
+        {
+            return (_state, _loadedSourcesIncomplete ? null : _loadedSources.ToDictionary(
+                static item => item.Key, static item => item.Value.Source, StringComparer.Ordinal), !_loadedSourcesIncomplete,
+                _legacyThreads, _legacyProcessId, _legacyProcessName, _stopDescription, _stopText,
+                _legacyLastStopAt, _legacyLastResumeAt, _legacyInvalidation, _legacyMemoryEvent, _legacyExceptionInfo, !_legacyEventDetailsIncomplete);
         }
     }
 
@@ -2627,6 +2649,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 {
                 }
                 RequestRetirement();
+                try { _resourceEventObserver?.Invoke("state"); } catch (Exception) { }
             }
             InvalidateInspectionContext(close: true);
         }
@@ -2768,6 +2791,22 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         if (success.ValueKind == JsonValueKind.True && request.Command == "loadedSources")
         {
             RefreshLoadedSources(body);
+            try { _resourceEventObserver?.Invoke("state"); } catch (Exception) { }
+        }
+        if (_resourceEventObserver is not null && success.ValueKind == JsonValueKind.True && request.Command == "threads")
+        {
+            try
+            {
+                var array = RequireThreads(body);
+                var threads = new DapThread[array.GetArrayLength()];
+                ReadThreads(array, threads);
+                lock (_stateGate) _legacyThreads = threads;
+                _resourceEventObserver("state");
+            }
+            catch (Exception exception) when (exception is InvalidDataException or InvalidOperationException or JsonException or ArgumentException)
+            {
+                lock (_stateGate) _legacyThreads = null;
+            }
         }
         if (_resourceEventObserver is not null && success.ValueKind == JsonValueKind.True && request.InitialBreakpoints is { } initial)
         {
@@ -2881,6 +2920,13 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             var targetCurrent = (request.StackTraceTarget is not { } target || IsCallStackTargetCurrent(target))
                 && (request.InspectionContextId is null
                     || (!_inspectionClosed && StringComparer.Ordinal.Equals(_inspectionContextId, request.InspectionContextId)));
+            if (_resourceEventObserver is not null && request.Command == "exceptionInfo" && targetCurrent && success.ValueKind == JsonValueKind.True)
+            {
+                if (body.ValueKind == JsonValueKind.Object && Encoding.UTF8.GetByteCount(body.GetRawText()) <= 64 * 1024)
+                    _legacyExceptionInfo = body.Clone();
+                else _legacyEventDetailsIncomplete = true;
+                try { _resourceEventObserver("state"); } catch (Exception) { }
+            }
             var responseContext = request.InspectionContextId;
             string? serializedContent = null;
             if (request.Command == "setVariable")
@@ -2942,6 +2988,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             case "process":
                 CaptureNativeSceneTargetIdentity(body);
+                if (_resourceEventObserver is not null)
+                {
+                    lock (_stateGate)
+                    {
+                        _legacyProcessId = TryGetInt32(body, "systemProcessId");
+                        var name = TryGetString(body, "name");
+                        _legacyProcessName = name is not null && Encoding.UTF8.GetByteCount(name) <= 4096 ? name : null;
+                    }
+                }
                 break;
             case "output":
                 if (HandleOutputEvent(body))
@@ -3076,6 +3131,46 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             try { _resourceEventObserver?.Invoke(eventName); }
             catch (Exception) { }
+        }
+        if (eventName is "process" or "loadedSource" or "module" or "progressStart" or "progressUpdate" or "progressEnd"
+            or "thread" or "stopped" or "continued" or "exited" or "terminated" or "invalidated" or "memory")
+        {
+            if (_resourceEventObserver is not null && eventName is ("invalidated" or "memory"))
+            {
+                lock (_stateGate)
+                {
+                    try
+                    {
+                        if (body.ValueKind != JsonValueKind.Object || Encoding.UTF8.GetByteCount(body.GetRawText()) > 4096)
+                            throw new InvalidDataException("Invalid event detail.");
+                        if (eventName == "invalidated")
+                        {
+                            var fields = new Dictionary<string, object?>();
+                            fields["areas"] = body.TryGetProperty("areas", out var areas) ? areas.Clone() : JsonSerializer.SerializeToElement(Array.Empty<string>());
+                            if (body.TryGetProperty("threadId", out var thread) && thread.ValueKind != JsonValueKind.Null) fields["threadId"] = thread.Clone();
+                            if (body.TryGetProperty("stackFrameId", out var frame) && frame.ValueKind != JsonValueKind.Null) fields["stackFrameId"] = frame.Clone();
+                            _legacyInvalidation = JsonSerializer.SerializeToElement(fields);
+                        }
+                        else
+                        {
+                            var reference = body.TryGetProperty("memoryReference", out var referenceElement)
+                                ? referenceElement.ValueKind == JsonValueKind.String
+                                    ? referenceElement.GetString()!
+                                    : throw new InvalidDataException("DAP memoryReference must be a string.")
+                                : string.Empty;
+                            var offset = ReadOptionalMemoryInteger(body, "offset", -MaximumSafeDapInteger);
+                            var count = ReadOptionalMemoryInteger(body, "count", 0);
+                            _legacyMemoryEvent = JsonSerializer.SerializeToElement(new { memoryReference = reference, offset, count });
+                        }
+                    }
+                    catch (Exception exception) when (exception is InvalidDataException or InvalidOperationException or JsonException or ArgumentException)
+                    {
+                        _legacyEventDetailsIncomplete = true;
+                    }
+                }
+            }
+            if (eventName == "thread") { lock (_stateGate) _legacyThreads = null; }
+            try { _resourceEventObserver?.Invoke("state"); } catch (Exception) { }
         }
     }
 
@@ -3577,6 +3672,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 };
                 _stopDescription = TryGetString(body, "description");
                 _stopText = TryGetString(body, "text");
+                _legacyLastStopAt = (double)Stopwatch.GetTimestamp() / Stopwatch.Frequency;
                 ClearCallStackEligibility();
                 _inspectionContextId = null;
                 if (!_inspectionClosed && allThreadsStopped)
@@ -3615,9 +3711,16 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             {
                 _activeContinue?.ObserveContinued();
                 _state = _state with { Event = "continued", CurrentThreadId = null };
+                _legacyLastResumeAt = (double)Stopwatch.GetTimestamp() / Stopwatch.Frequency;
                 _inspectionContextId = null;
                 if (!hasAllThreadsContinued || allThreadsContinued || threadId is null)
                 {
+                    if (_resourceEventObserver is not null && (!hasAllThreadsContinued || allThreadsContinued))
+                    {
+                        _state = _state with { StopReason = null };
+                        _stopDescription = null;
+                        _stopText = null;
+                    }
                     ClearCallStackEligibility();
                     return;
                 }
@@ -4208,6 +4311,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         && value.TryGetInt32(out var number)
             ? number
             : null;
+    private static long ReadOptionalMemoryInteger(JsonElement body, string name, long minimum)
+    {
+        if (!body.TryGetProperty(name, out var value)) return 0;
+        if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt64(out var number)
+            || number < minimum || number > MaximumSafeDapInteger)
+            throw new InvalidDataException($"DAP memory {name} must be a safe integer in range.");
+        return number;
+    }
+
     private static long RequireSafeDapInteger(JsonElement objectElement, string name)
     {
         if (objectElement.ValueKind != JsonValueKind.Object
