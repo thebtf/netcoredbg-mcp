@@ -1158,6 +1158,8 @@ internal sealed class ControlledDapAdapter
         var responseMode = _options.SetBreakpointsResponseMode switch
         {
             "hold-first-runtime" => "success",
+            "mixed-remove" => "mixed",
+            "mixed-missing-id" => "mixed",
             "refuse-first-runtime" => runtimeOrdinal == 1 ? "refused" : "success",
             "missing-verified-first-runtime" => runtimeOrdinal == 1 ? "missing-verified" : "success",
             "too-few-results-first-runtime" => runtimeOrdinal == 1 ? "too-few-results" : "success",
@@ -1187,6 +1189,16 @@ internal sealed class ControlledDapAdapter
                 else
                 {
                     breakpoint["line"] = checked(line + 1);
+                }
+            }
+            if (_options.SetBreakpointsResponseMode == "mixed-missing-id")
+            {
+                if (index == 0) breakpoint.Remove("id");
+                else if (index == 1)
+                {
+                    breakpoint["verified"] = false;
+                    breakpoint.Remove("line");
+                    _initiallyUnverifiedBreakpoints.Add((id, line));
                 }
             }
             return breakpoint;
@@ -1262,6 +1274,11 @@ internal sealed class ControlledDapAdapter
         {
             await WriteEventAsync("breakpoint", new { reason = "changed", breakpoint = new { id, verified = true, line } }, cancellationToken);
             await RecordAsync(new { kind = "breakpoint-verified-event" }, cancellationToken);
+            if (_options.SetBreakpointsResponseMode == "mixed-remove")
+            {
+                await WriteEventAsync("breakpoint", new { reason = "removed", breakpoint = new { id } }, cancellationToken);
+                await RecordAsync(new { kind = "breakpoint-removed-event" }, cancellationToken);
+            }
         }
 
         if (_outputScript.ValueKind == JsonValueKind.Object && _outputScript.TryGetProperty("launch", out var launchOutput))
@@ -2767,6 +2784,13 @@ internal sealed class ControlledDapAdapter
     {
         switch (_options.StackTraceResponseMode)
         {
+            case "legacy-breakpoint-frame":
+                var breakpointSource = Environment.GetEnvironmentVariable("CONTROLLED_DAP_BREAKPOINT_SOURCE")
+                    ?? throw new InvalidOperationException("CONTROLLED_DAP_BREAKPOINT_SOURCE is required.");
+                var breakpointFrames = StackFrames(1, "frame", breakpointSource);
+                breakpointFrames[0]["line"] = 2;
+                await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = breakpointFrames }, cancellationToken);
+                return false;
             case "success":
                 await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = StackFrames(2, "frame") }, cancellationToken);
                 return false;
