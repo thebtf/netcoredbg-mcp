@@ -134,8 +134,10 @@ internal static class Program
                         && (rawArguments is not JsonObject objectArguments
                             || ((name is "configure_exceptions" or "set_variable") && !CanDeserializeMutationArguments(name, objectArguments, sessions.LegacyCompat))))
                     {
-                        // Keep malformed tool inputs on the complete application-error path before SDK deserialization.
-                        call["arguments"] = null;
+                        // A null legacy argument object means defaults; retain an invalid marker instead of executing them.
+                        call["arguments"] = sessions.LegacyCompat
+                            ? new JsonObject { ["__invalid_legacy_arguments"] = true }
+                            : null;
                     }
 
                     await next(context, cancellationToken).ConfigureAwait(false);
@@ -334,7 +336,7 @@ internal static class Program
             if (name is not (StartDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
                 or PauseExecution or ContinueExecution or StopDebug or GetOutput or GetOutputTail
                 or AddBreakpoint or RemoveBreakpoint or GetScopes or GetVariables or EvaluateExpression
-                or SetVariable or ConfigureExceptions or GetExceptionInfo))
+                or SetVariable or ConfigureExceptions or GetExceptionInfo or GetModules or GetProgress or GetLoadedSources or GetStepInTargets))
                 return UnknownTool(name);
             var arguments = context.Params.Arguments is null
                 ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
@@ -357,7 +359,7 @@ internal static class Program
                     && (!arguments.TryGetValue("category", out var categoryOption) || categoryOption.ValueKind == JsonValueKind.Null
                         || (categoryOption.ValueKind == JsonValueKind.String && categoryOption.GetString() == string.Empty));
                 var mutation = name is StartDebug or StopDebug or StepOver or StepInto or StepOut or PauseExecution
-                    or ContinueExecution or AddBreakpoint or RemoveBreakpoint or EvaluateExpression or SetVariable or ConfigureExceptions || consumesOutput;
+                    or ContinueExecution or AddBreakpoint or RemoveBreakpoint or EvaluateExpression or SetVariable or ConfigureExceptions or GetStepInTargets || consumesOutput;
                 var raw = context.JsonRpcRequest.Params as JsonObject;
                 var mux = raw?["_meta"]?["muxSessionId"];
                 if (mux is not null && (mux is not JsonValue muxValue || !muxValue.TryGetValue<string>(out _)))
@@ -485,8 +487,24 @@ internal static class Program
                         : LegacyError("Unsupported or invalid argument.");
                 }
                 if (_legacySessionId is not { } sessionId) return LegacyError("No active debug session.");
+                var targetedStep = false;
                 if (name == StepInto && arguments.Remove("target_id", out var target) && target.ValueKind != JsonValueKind.Null)
-                    return LegacyError("target_id is not supported.");
+                {
+                    if (!TryReadOutputLineCount(target, out var targetNumber) || targetNumber is < int.MinValue or > int.MaxValue)
+                        return LegacyError("Invalid target_id.");
+                    if (arguments.TryGetValue("thread_id", out var targetThread) && targetThread.ValueKind != JsonValueKind.Null)
+                    {
+                        if (!TryReadOutputLineCount(targetThread, out var targetThreadNumber) || targetThreadNumber is < int.MinValue or > int.MaxValue)
+                            return LegacyError("Invalid thread_id.");
+                        if (targetThreadNumber == 0) arguments["thread_id"] = JsonSerializer.SerializeToElement<int?>(null);
+                    }
+                    if (_legacyInspectionSessionId != sessionId || _legacyInspectionContextId is null || _legacyCurrentFrameId is null
+                        || !StringComparer.Ordinal.Equals(_legacyInspectionMuxId, muxId))
+                        return LegacyError("Call get_call_stack for the current stopped context first.");
+                    arguments["target_id"] = JsonSerializer.SerializeToElement((int)targetNumber);
+                    arguments["inspectionContextId"] = JsonSerializer.SerializeToElement(_legacyInspectionContextId);
+                    targetedStep = true;
+                }
                 if (name == PauseExecution && arguments.Remove("thread_id", out var pauseThread))
                 {
                     if (pauseThread.ValueKind == JsonValueKind.Null)
@@ -521,7 +539,7 @@ internal static class Program
                         return LegacyError("Invalid breakpoint line.");
                     arguments["line"] = JsonSerializer.SerializeToElement((int)lineNumber);
                 }
-                if (name is GetScopes or GetVariables or EvaluateExpression or SetVariable)
+                if (name is GetScopes or GetVariables or EvaluateExpression or SetVariable or GetStepInTargets)
                 {
                     if (_legacyInspectionSessionId != sessionId || _legacyInspectionContextId is null || _legacyCurrentFrameId is null
                         || !StringComparer.Ordinal.Equals(_legacyInspectionMuxId, muxId))
@@ -558,9 +576,10 @@ internal static class Program
                         stackRevision = ++_legacyInspectionRevision;
                     }
                 }
-                var inspectionContext = name is GetScopes or GetVariables or EvaluateExpression ? _legacyInspectionContextId : null;
+                var inspectionContext = name is GetScopes or GetVariables or EvaluateExpression or GetStepInTargets ? _legacyInspectionContextId : null;
                 NetCoreDbgSession? inspectionSession = null;
-                if (name is GetCallStack or GetScopes or GetVariables or EvaluateExpression or SetVariable or GetExceptionInfo)
+                if (name is GetCallStack or GetScopes or GetVariables or EvaluateExpression or SetVariable or GetExceptionInfo
+                    or GetStepInTargets or GetModules or GetProgress or GetLoadedSources || targetedStep)
                 {
                     if (!_sessions.TryGetValue(sessionId, out inspectionSession))
                         return LegacyError("No active debug session.");
@@ -607,6 +626,10 @@ internal static class Program
                     SetVariable => await SetVariableAsync(request, cancellationToken).ConfigureAwait(false),
                     ConfigureExceptions => await ConfigureExceptionsAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                     GetExceptionInfo => await GetExceptionInfoAsync(request, cancellationToken).ConfigureAwait(false),
+                    GetModules => await GetRuntimeInventoryAsync(request, modules: true, cancellationToken).ConfigureAwait(false),
+                    GetProgress => await GetRuntimeInventoryAsync(request, modules: false, cancellationToken).ConfigureAwait(false),
+                    GetLoadedSources => await GetLoadedSourcesAsync(request, cancellationToken).ConfigureAwait(false),
+                    GetStepInTargets => await GetStepInTargetsAsync(request, cancellationToken).ConfigureAwait(false),
                     AddBreakpoint => await AddBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                     RemoveBreakpoint => await RemoveBreakpointAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
                     ContinueExecution => await ContinueAsync(request, context.JsonRpcRequest.Id, cancellationToken).ConfigureAwait(false),
@@ -615,13 +638,14 @@ internal static class Program
                 await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
                 gateHeld = true;
                 if (!string.Equals(_legacySessionId, sessionId, StringComparison.Ordinal))
-                    return name is GetCallStack or GetScopes or GetVariables or EvaluateExpression or SetVariable or GetExceptionInfo
+                    return name is GetCallStack or GetScopes or GetVariables or EvaluateExpression or SetVariable or GetExceptionInfo or GetStepInTargets
                         ? LegacyInspectionChanged(name)
                         : LegacyError(consumesOutput ? "Output may have been cleared; do not retry automatically."
                             : name == ConfigureExceptions ? "Exception filters may have changed; do not retry automatically."
+                            : targetedStep ? "Step outcome is unknown; it may have executed. Do not retry automatically."
                             : "Debug session changed before operation completed.", "unknown");
                 var observedState = LegacySnapshot(sessionId).State;
-                if (name is GetScopes or GetVariables or EvaluateExpression)
+                if (name is GetScopes or GetVariables or EvaluateExpression or GetStepInTargets)
                 {
                     var capturedState = stackRevision == _legacyInspectionRevision && inspectionSession is not null
                         && _sessions.TryGetValue(sessionId, out var currentSession) && ReferenceEquals(currentSession, inspectionSession)
@@ -639,9 +663,53 @@ internal static class Program
                         && filterFailure.TryGetProperty("error", out var filterCode)
                         && filterCode.GetString() == "DAP_EXCEPTION_FILTERS_PROTOCOL_ERROR")
                         return LegacyError("Exception filters may have changed; do not retry automatically.", "unknown");
+                    if (targetedStep && result.StructuredContent is { } stepFailure
+                        && stepFailure.TryGetProperty("error", out var stepCode)
+                        && stepCode.GetString() == "DAP_STEP_INTO_PROTOCOL_ERROR")
+                        return LegacyError("Step outcome is unknown; it may have executed. Do not retry automatically.", "unknown");
                     return LegacyNativeError(result, observedState);
                 }
                 var kind = content.GetProperty("kind").GetString();
+                if (name is GetModules or GetProgress or GetLoadedSources)
+                {
+                    if (inspectionSession is null || !_sessions.TryGetValue(sessionId, out var currentSession)
+                        || !ReferenceEquals(currentSession, inspectionSession))
+                        return LegacyError("Debug session changed before operation completed.", "unknown");
+                    if (name == GetModules && kind == "modules_success")
+                        return LegacyResponse(new { modules = content.GetProperty("modules"), count = content.GetProperty("count") }, observedState);
+                    if (name == GetProgress && kind == "progress_success")
+                    {
+                        var mapped = LegacyResponse(new
+                        {
+                            progress = content.GetProperty("progress").EnumerateArray().Select(static item => new
+                            {
+                                progressId = item.GetProperty("progressId"),
+                                progress_id = item.GetProperty("progressId"),
+                                title = item.GetProperty("title"),
+                                message = item.GetProperty("message"),
+                                percentage = item.GetProperty("percentage"),
+                                cancellable = item.GetProperty("cancellable"),
+                                startedAt = item.GetProperty("startedAt"),
+                                started_at = item.GetProperty("startedAt"),
+                            }).ToArray(),
+                            count = content.GetProperty("count")
+                        }, observedState);
+                        return mapped.StructuredContent is { } mappedContent
+                            && Encoding.UTF8.GetByteCount(mappedContent.GetRawText()) <= MaximumSerializedInspectionBytes
+                            ? mapped : LegacyError("RUNTIME_INVENTORY_TOO_LARGE", observedState);
+                    }
+                    if (name == GetLoadedSources && kind == "loaded_sources_success")
+                        return LegacyResponse(new { sources = content.GetProperty("sources"), count = content.GetProperty("count") }, observedState);
+                }
+                if (name == GetStepInTargets && kind == "step_in_targets_success")
+                    return LegacyResponse(new { targets = content.GetProperty("targets").EnumerateArray().Select(static item => new
+                    {
+                        id = item.GetProperty("id"), label = item.GetProperty("label"),
+                    }).ToArray() }, observedState);
+                if (targetedStep && (stackRevision != _legacyInspectionRevision
+                    || (kind == "step_into_success" && (inspectionSession is null
+                        || !_sessions.TryGetValue(sessionId, out var stepSession) || !ReferenceEquals(stepSession, inspectionSession)))))
+                    return LegacyError("Step outcome is unknown; it may have executed. Do not retry automatically.", "unknown");
                 if (name == GetThreads && kind == "threads_success") return LegacyResponse(content.GetProperty("threads"), observedState);
                 if (name == GetCallStack && kind == "call_stack_success")
                 {
@@ -740,6 +808,7 @@ internal static class Program
                     AddBreakpoint => key is not ("file" or "line" or "condition" or "hit_condition"),
                     RemoveBreakpoint => key is not ("file" or "line"),
                     GetScopes => key != "frame_id",
+                    GetStepInTargets => key != "frame_id",
                     GetVariables => key is not ("variables_reference" or "filter" or "start" or "count"),
                     EvaluateExpression => key is not ("expression" or "frame_id"),
                     SetVariable => key is not ("variables_reference" or "name" or "value"),
@@ -4797,8 +4866,12 @@ internal static class Program
                 Tool("set_variable", "Set a variable in the selected stopped context; select a fresh stack afterwards. Uncertain writes must not be retried automatically.", """{"type":"object","properties":{"variables_reference":{"type":"integer","minimum":1,"maximum":2147483647},"name":{"type":"string"},"value":{"type":"string"}},"required":["variables_reference","name","value"],"additionalProperties":false}"""),
                 Tool("configure_exceptions", "Replace exception filters with owner permission. Omitted or null filters select an empty list.", """{"type":"object","properties":{"filters":{"type":["array","null"],"items":{"type":"string"}}},"additionalProperties":false}"""),
                 Tool("get_exception_info", "Read exception information for the observed stopped context and optional thread.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),
+                Tool("get_modules", "Read the bounded module event inventory for the implicit session.", """{"type":"object","properties":{},"additionalProperties":false}"""),
+                Tool("get_progress", "Read the bounded progress event inventory for the implicit session.", """{"type":"object","properties":{},"additionalProperties":false}"""),
+                Tool("get_loaded_sources", "Query and refresh loaded sources when the debugger supports it.", """{"type":"object","properties":{},"additionalProperties":false}"""),
+                Tool("get_step_in_targets", "Query targets for the selected stopped frame; mux ownership is required.", """{"type":"object","properties":{"frame_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),
                 Tool("step_over", "Step one stopped thread; uncertain outcomes are not retried.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"]}},"additionalProperties":false}"""),
-                Tool("step_into", "Step into using a stopped thread. Non-null target_id is unsupported; uncertain outcomes are not retried.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647},"target_id":{"type":"null"}},"additionalProperties":false}"""),
+                Tool("step_into", "Step into using a stopped thread; target_id requires the selected stopped context. Uncertain outcomes are not retried.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647},"target_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),
                 Tool("step_out", "Step out using a stopped thread; uncertain outcomes are not retried.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),
                 Tool("pause_execution", "Request pause; acknowledgement does not itself prove a stopped event.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),
                 Tool("get_output", "Read captured output. Clearing the whole buffer requires mux ownership; filtered reads do not clear it.", """{"type":"object","properties":{"clear":{"type":"boolean"},"category":{"type":["string","null"]}},"additionalProperties":false}"""),

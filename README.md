@@ -50,6 +50,7 @@ The source-built stateful host has an experimental, explicitly selected
 only `start_debug`, `get_debug_state`, `get_threads`, `get_call_stack`,
 `get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`,
 `add_breakpoint`, `remove_breakpoint`, `configure_exceptions`, `get_exception_info`,
+`get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
 `get_output`, `get_output_tail`, and `stop_debug`. Calls
 use implicit session binding and selected Python-style response envelopes.
@@ -91,18 +92,33 @@ must not be retried automatically.
 context. After an admitted attempt, select a fresh stack before inspecting or
 mutating variables again. An uncertain sent mutation may have executed and must
 not be retried automatically. `configure_exceptions` is owner-guarded; omitted
-or null filters mean an empty list. It reports configuration only after native
-acknowledgement, not proof of a later exception stop. `get_exception_info` is a
+or null filters mean an empty list; malformed arguments are rejected without
+changing filters. It reports configuration only after native acknowledgement,
+not proof of a later exception stop. `get_exception_info` is a
 read fenced to the current stopped context. Unlike Python's null result on a
 negative response or missing thread, native capability absence, refusal and a
 missing stopped context are reported as errors. Native inspection and filter
 size bounds still apply.
 
-Legacy `step_into` and `step_out` use the current observed stopped thread when
-omitted; non-null `target_id` is rejected. A successful pause acknowledges the
-request, not a stopped event. State may remain `unknown` until the debugger
-confirms a transition, for example with a continue acknowledgement or DAP event.
-Uncertain execution writes are not retried.
+`get_modules` and `get_progress` read bounded, reader-observed event inventories;
+incomplete or oversized inventories return errors. `get_loaded_sources` asks the
+adapter and refreshes the native live-source view when supported. This does not
+add legacy resources, state exposure or subscription notifications. The legacy
+progress response retains Python's snake-case and camel-case ID/time aliases;
+the expanded response is also size-limited.
+
+`get_step_in_targets` requires mux ownership and the calling client's selected
+stopped frame and context. Omitted, null or zero `frame_id` uses that frame.
+Unlike Python, which returns an empty list on a negative DAP response without a
+capability check, native capability absence or refusal returns an error. Targeted
+`step_into(target_id=...)` uses the selected context and invalidates the selection;
+select a fresh stack afterwards. Target IDs are not tracked as previously issued:
+after reselection a reused numeric ID cannot be distinguished from an old one.
+Both step operations use the observed stopped thread when omitted. An uncertain
+sent step may have executed and must not be retried automatically. A successful
+pause acknowledges the request, not a stopped event. State may remain `unknown`
+until the debugger confirms a transition, for example with a continue
+acknowledgement or DAP event.
 Output is empty before start and after stop; output observed before natural
 termination remains available until stop while the implicit session is retained.
 Filtered `get_output(clear=true)` does not clear; clearing the entire buffer

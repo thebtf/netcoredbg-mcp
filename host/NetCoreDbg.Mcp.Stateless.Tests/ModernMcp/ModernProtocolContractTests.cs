@@ -542,6 +542,12 @@ public sealed class ModernProtocolContractTests
             var denied = await LegacyConsoleCallAsync(driver, "pause_execution", new JsonObject(), other);
             Assert.Contains("owned by another agent", denied["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), action => action.Command == "pause");
+            var malformedPause = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("tools/call", new JsonObject
+            {
+                ["name"] = "pause_execution", ["arguments"] = new JsonArray(), ["_meta"] = owner.DeepClone(),
+            }, new RequestId("legacy-malformed-pause")));
+            Assert.NotNull(ModernMcpProcessDriver.LegacyPayload(malformedPause)?["error"]);
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), action => action.Command == "pause");
             var pause = await LegacyConsoleCallAsync(driver, "pause_execution", new JsonObject { ["thread_id"] = 1 }, owner);
             Assert.True(pause["data"]?["success"]?.GetValue<bool>());
             Assert.Equal(1, pause["data"]?["threadId"]?.GetValue<int>());
@@ -916,6 +922,48 @@ public sealed class ModernProtocolContractTests
         finally { await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
     }
 
+    [Fact]
+    public async Task LegacyCompat_MalformedExceptionFilters_DoNotClearConfiguration()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", ExceptionBreakpointFilters: "supported")),
+            startupTimeout: TimeSpan.FromSeconds(10));
+        var owner = new JsonObject { ["muxSessionId"] = "filter-owner" };
+        var started = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath, ["pre_build"] = false, ["stop_at_entry"] = true,
+        }, owner);
+        Assert.True(started["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            var configured = await LegacyConsoleCallAsync(driver, "configure_exceptions",
+                new JsonObject { ["filters"] = new JsonArray("all") }, owner);
+            Assert.True(configured["data"]?["configured"]?.GetValue<bool>());
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var invalid = new JsonNode[]
+            {
+                new JsonObject { ["filters"] = "all" },
+                new JsonObject { ["filters"] = new JsonArray(1) },
+                new JsonObject { ["filters"] = new JsonObject() },
+                new JsonObject { ["unknown"] = true },
+                new JsonArray(),
+            };
+            var responses = new List<JsonObject>();
+            for (var index = 0; index < invalid.Length; index++)
+            {
+                var result = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("tools/call", new JsonObject
+                {
+                    ["name"] = "configure_exceptions", ["arguments"] = invalid[index], ["_meta"] = owner.DeepClone(),
+                }, new RequestId($"legacy-malformed-filters-{index}")));
+                responses.Add(Assert.IsType<JsonObject>(ModernMcpProcessDriver.LegacyPayload(result)));
+            }
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), action => action.Command == "setExceptionBreakpoints");
+            Assert.All(responses, response => Assert.NotNull(response["error"]));
+        }
+        finally { await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner); }
+    }
+
     [Theory]
     [InlineData(false, "success")]
     [InlineData(true, "refused")]
@@ -1016,6 +1064,165 @@ public sealed class ModernProtocolContractTests
             if (operation is not null) await Record.ExceptionAsync(async () => await operation.WaitAsync(TimeSpan.FromSeconds(10)));
             await Record.ExceptionAsync(async () => await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner));
         }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_Inventories_ObserveEventTransitionsAndRefreshSources()
+    {
+        var script = new JsonObject
+        {
+            ["launch"] = new JsonArray(
+                new JsonObject { ["event"] = "module", ["body"] = new JsonObject { ["reason"] = "new", ["module"] = new JsonObject { ["id"] = 7, ["name"] = "initial", ["version"] = "1" } } },
+                new JsonObject { ["event"] = "progressStart", ["body"] = new JsonObject { ["progressId"] = "build", ["title"] = "Working", ["percentage"] = 20 } }),
+            ["threads"] = new JsonArray(new JsonObject
+            {
+                ["entries"] = new JsonArray(
+                new JsonObject { ["event"] = "module", ["body"] = new JsonObject { ["reason"] = "changed", ["module"] = new JsonObject { ["id"] = 7, ["name"] = "updated", ["version"] = "2" } } },
+                new JsonObject { ["event"] = "progressUpdate", ["body"] = new JsonObject { ["progressId"] = "build", ["message"] = "almost", ["percentage"] = 75 } })
+            }),
+            ["loadedSources"] = new JsonObject { ["sources"] = new JsonArray(new JsonObject { ["name"] = "Marker.cs", ["path"] = "src/Marker.cs" }) },
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", SupportsLoadedSourcesRequest: true),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }),
+            startupTimeout: TimeSpan.FromSeconds(10));
+        var owner = new JsonObject { ["muxSessionId"] = "inventory-owner" };
+        var reader = new JsonObject { ["muxSessionId"] = "inventory-reader" };
+        var started = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["pre_build"] = false,
+            ["stop_at_entry"] = true,
+        }, owner);
+        Assert.True(started["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            var modules = await LegacyConsoleCallAsync(driver, "get_modules", new JsonObject(), reader);
+            Assert.Equal(1, modules["data"]?["count"]?.GetValue<int>());
+            Assert.Equal("initial", Assert.Single(Assert.IsType<JsonArray>(modules["data"]?["modules"]))?["name"]?.GetValue<string>());
+            var progress = await LegacyConsoleCallAsync(driver, "get_progress", new JsonObject(), reader);
+            Assert.Equal(1, progress["data"]?["count"]?.GetValue<int>());
+            var entry = Assert.Single(Assert.IsType<JsonArray>(progress["data"]?["progress"]));
+            Assert.Equal("build", entry?["progressId"]?.GetValue<string>());
+            Assert.Equal("build", entry?["progress_id"]?.GetValue<string>());
+            Assert.Equal(20, entry?["percentage"]?.GetValue<int>());
+            Assert.Equal(entry?["startedAt"]?.GetValue<double>(), entry?["started_at"]?.GetValue<double>());
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var sources = await LegacyConsoleCallAsync(driver, "get_loaded_sources", new JsonObject(), reader);
+            Assert.Equal(1, sources["data"]?["count"]?.GetValue<int>());
+            Assert.Equal("src/Marker.cs", Assert.Single(Assert.IsType<JsonArray>(sources["data"]?["sources"]))?["path"]?.GetValue<string>());
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var updatedModules = await LegacyConsoleCallAsync(driver, "get_modules", new JsonObject(), reader);
+            Assert.Equal("updated", Assert.Single(Assert.IsType<JsonArray>(updatedModules["data"]?["modules"]))?["name"]?.GetValue<string>());
+            var updatedProgress = await LegacyConsoleCallAsync(driver, "get_progress", new JsonObject(), reader);
+            var updatedEntry = Assert.Single(Assert.IsType<JsonArray>(updatedProgress["data"]?["progress"]));
+            Assert.Equal("almost", updatedEntry?["message"]?.GetValue<string>());
+            Assert.Equal(75, updatedEntry?["percentage"]?.GetValue<int>());
+            var refreshed = await LegacyConsoleCallAsync(driver, "get_loaded_sources", new JsonObject(), reader);
+            Assert.Equal(1, refreshed["data"]?["count"]?.GetValue<int>());
+            Assert.Equal(2, (await driver.ReadNativeActionsAsync()).Skip(before).Count(action => action.Command == "loadedSources"));
+        }
+        finally { Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>()); }
+    }
+
+    [Fact]
+    public async Task LegacyCompat_StepTargets_RequireOwnerAndFreshSelectedContext()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", SupportsStepTargets: true)),
+            startupTimeout: TimeSpan.FromSeconds(10));
+        var owner = new JsonObject { ["muxSessionId"] = "targets-owner" };
+        var other = new JsonObject { ["muxSessionId"] = "targets-other" };
+        var started = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["pre_build"] = false,
+            ["stop_at_entry"] = true,
+        }, owner);
+        Assert.True(started["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            var stack = await LegacyConsoleCallAsync(driver, "get_call_stack", new JsonObject(), owner);
+            var frame = Assert.IsType<JsonArray>(stack["data"]?["frames"])[0]!["id"]!.GetValue<int>();
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var deniedQuery = await LegacyConsoleCallAsync(driver, "get_step_in_targets", new JsonObject(), other);
+            var deniedStep = await LegacyConsoleCallAsync(driver, "step_into", new JsonObject { ["target_id"] = 42 }, other);
+            Assert.Contains("owned by another agent", deniedQuery["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("owned by another agent", deniedStep["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(before), action => action.Command is "stepInTargets" or "stepIn");
+            var targets = await LegacyConsoleCallAsync(driver, "get_step_in_targets", new JsonObject(), owner);
+            var target = Assert.Single(Assert.IsType<JsonArray>(targets["data"]?["targets"]));
+            Assert.Equal(42, target?["id"]?.GetValue<int>());
+            Assert.Equal("Call", target?["label"]?.GetValue<string>());
+            var queryWrite = Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before), action => action.Command == "stepInTargets");
+            Assert.Equal(frame, JsonNode.Parse(queryWrite.Detail!)?["arguments"]?["frameId"]?.GetValue<int>());
+            var stepped = await LegacyConsoleCallAsync(driver, "step_into", new JsonObject { ["target_id"] = 42 }, owner, TimeSpan.FromSeconds(35));
+            Assert.Equal("stopped", stepped["state"]?.GetValue<string>());
+            Assert.Equal("step", stepped["reason"]?.GetValue<string>());
+            var stepWrite = Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before), action => action.Command == "stepIn");
+            Assert.True(JsonNode.DeepEquals(new JsonObject { ["threadId"] = 1, ["targetId"] = 42 }, JsonNode.Parse(stepWrite.Detail!)?["arguments"]));
+            var after = (await driver.ReadNativeActionsAsync()).Count;
+            Assert.NotNull((await LegacyConsoleCallAsync(driver, "get_step_in_targets", new JsonObject(), owner))["error"]);
+            Assert.NotNull((await LegacyConsoleCallAsync(driver, "step_into", new JsonObject { ["target_id"] = 42 }, owner))["error"]);
+            Assert.DoesNotContain((await driver.ReadNativeActionsAsync()).Skip(after), action => action.Command is "stepInTargets" or "stepIn");
+        }
+        finally { Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>()); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LegacyCompat_InventoryAndTargets_UnsupportedOrRefusedAreHonest(bool advertised)
+    {
+        var script = new JsonObject
+        {
+            ["loadedSourcesRefused"] = true,
+            ["loadedSources"] = new JsonObject { ["message"] = "private-adapter-detail" },
+        };
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            ClientProtocolVersion: "2025-11-25", HostArguments: ["--legacy-compat"],
+            FixtureConfiguration: new FixtureConfiguration(LifecycleMode: "all-stop", SupportsStepTargets: advertised,
+                StepTargetsMode: "refused", SupportsLoadedSourcesRequest: advertised),
+            AdditionalEnvironment: new Dictionary<string, string?> { ["CONTROLLED_DAP_OUTPUT_SCRIPT"] = script.ToJsonString() }),
+            startupTimeout: TimeSpan.FromSeconds(10));
+        var owner = new JsonObject { ["muxSessionId"] = "unsupported-owner" };
+        var started = await LegacyConsoleCallAsync(driver, "start_debug", new JsonObject
+        {
+            ["program"] = driver.InertProgramPath,
+            ["pre_build"] = false,
+            ["stop_at_entry"] = true,
+        }, owner);
+        Assert.True(started["data"]?["success"]?.GetValue<bool>());
+        try
+        {
+            using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+            _ = await LegacyConsoleCallAsync(driver, "get_threads", new JsonObject(), owner);
+            _ = await LegacyConsoleCallAsync(driver, "get_call_stack", new JsonObject(), owner);
+            var before = (await driver.ReadNativeActionsAsync()).Count;
+            var sources = await LegacyConsoleCallAsync(driver, "get_loaded_sources", new JsonObject(), owner);
+            Assert.NotNull(sources["error"]);
+            Assert.Null(sources["data"]?["sources"]);
+            Assert.DoesNotContain("private-adapter-detail", sources.ToJsonString());
+            var targets = await LegacyConsoleCallAsync(driver, "get_step_in_targets", new JsonObject(), owner);
+            Assert.NotNull(targets["error"]);
+            Assert.Null(targets["data"]?["targets"]);
+            if (!advertised)
+            {
+                var rejectedStep = await LegacyConsoleCallAsync(driver, "step_into", new JsonObject { ["target_id"] = 42 }, owner);
+                Assert.NotNull(rejectedStep["error"]);
+            }
+            var writes = (await driver.ReadNativeActionsAsync()).Skip(before).ToArray();
+            Assert.Equal(advertised ? 1 : 0, writes.Count(action => action.Command == "loadedSources"));
+            Assert.Equal(advertised ? 1 : 0, writes.Count(action => action.Command == "stepInTargets"));
+            Assert.DoesNotContain(writes, action => action.Command == "stepIn");
+        }
+        finally { Assert.True((await LegacyConsoleCallAsync(driver, "stop_debug", new JsonObject(), owner))["data"]?["success"]?.GetValue<bool>()); }
     }
 
     private static async Task<JsonObject> LegacyConsoleCallAsync(ModernMcpProcessDriver driver, string tool,
