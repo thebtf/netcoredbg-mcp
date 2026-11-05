@@ -964,7 +964,11 @@ internal sealed class ControlledDapAdapter
                 }
                 var loadedSourcesRefused = _outputScript.ValueKind == JsonValueKind.Object
                     && _outputScript.TryGetProperty("loadedSourcesRefused", out var refused) && refused.GetBoolean();
+                if (_outputScript.ValueKind == JsonValueKind.Object && _outputScript.TryGetProperty("loadedSourcesBefore", out var beforeSources) && beforeSources.ValueKind == JsonValueKind.Array)
+                    await WriteOutputEntriesAsync(beforeSources, cancellationToken);
                 await WriteResponseAsync(sequence, command, loadedSources, cancellationToken, success: !loadedSourcesRefused);
+                if (_outputScript.ValueKind == JsonValueKind.Object && _outputScript.TryGetProperty("loadedSourcesAfter", out var afterSources) && afterSources.ValueKind == JsonValueKind.Array)
+                    await WriteOutputEntriesAsync(afterSources, cancellationToken);
                 return false;
             case "next":
                 return await HandleNextRequestAsync(sequence, root, cancellationToken);
@@ -2236,6 +2240,8 @@ internal sealed class ControlledDapAdapter
                 for (var index = 0; index < count; index++)
                 {
                     var eventBody = JsonNode.Parse(entry.GetProperty("body").GetRawText());
+                    if (name == "loadedSource" && entry.TryGetProperty("generatedCount", out _))
+                        eventBody!["source"]!["sourceReference"] = offset + index;
                     if (entry.TryGetProperty("generatedTextLength", out var textLength))
                     {
                         // Expand bounded inventory cases here, not in the child-process environment block.
@@ -2252,9 +2258,17 @@ internal sealed class ControlledDapAdapter
                             eventBody!["progressId"] = $"generated-{offset + index}";
                             eventBody["title"] = text;
                         }
+                        else if (name == "loadedSource")
+                        {
+                            eventBody!["source"]!["name"] = text;
+                        }
+                        else if (name == "stopped")
+                        {
+                            eventBody!["reason"] = text;
+                        }
                         else
                         {
-                            throw new InvalidDataException("Generated inventory event must be module or progressStart.");
+                            throw new InvalidDataException("Unsupported generated event.");
                         }
                     }
 

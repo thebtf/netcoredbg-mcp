@@ -221,8 +221,15 @@ Success returns a deduplicated snapshot with `name`, `path`, `sourceReference`,
 `origin`, `presentationHint`, and `adapterData`. Duplicate normalized identities
 replace the earlier value without changing its order. Windows identity comparison
 uses .NET invariant lowercase and is not established as full Python Unicode parity.
-The tool does not maintain the Python live `loadedSource` event view or publish
-its resource updates, so it is not a complete Python cutover replacement.
+`get_debug_state` exposes the session's reader-ordered `loadedSources` map and
+`loadedSourcesComplete` flag. Events update the map; successful snapshots replace
+it before later events are applied. A malformed event or a view exceeding 256
+entries or 252 KiB of serialized map entries yields `loadedSources: null` and a false flag;
+a later valid, bounded snapshot can restore completeness. This view reflects only
+what the adapter reported. MCP resource notifications remain unimplemented, so
+this is not a complete Python cutover replacement.
+If the complete serialized state exceeds 256 KiB, `get_debug_state` returns
+`DEBUG_STATE_TOO_LARGE` without closing the session or returning partial state.
 
 Unsupported and refused requests return distinct fixed errors; malformed,
 timed-out or over-256-KiB application results return a redacted protocol error

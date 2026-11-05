@@ -34,29 +34,8 @@ internal static class DapLoadedSources
         var positions = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (var source in sources.EnumerateArray())
         {
-            if (source.ValueKind != JsonValueKind.Object)
-            {
-                throw new InvalidDataException("DAP loadedSources source must be an object.");
-            }
-
-            var name = OptionalString(source, "name");
-            var path = OptionalString(source, "path");
-            int? reference = null;
-            if (source.TryGetProperty("sourceReference", out var value) && value.ValueKind != JsonValueKind.Null)
-            {
-                if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out var number) || number < 0)
-                {
-                    throw new InvalidDataException("DAP sourceReference must be a nonnegative Int32.");
-                }
-                reference = number;
-            }
-
-            var entry = new DapLoadedSource(name, path, reference, OptionalString(source, "origin"),
-                OptionalString(source, "presentationHint"),
-                source.TryGetProperty("adapterData", out var data) && data.ValueKind != JsonValueKind.Null ? data : null);
-            var key = !string.IsNullOrEmpty(path) ? "path:" + NormalizePath(path)
-                : reference is not null ? "sourceReference:" + reference.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)
-                : !string.IsNullOrEmpty(name) ? "name:" + NormalizePath(name) : "<unknown-source>";
+            var entry = ParseSource(source);
+            var key = Key(entry);
             if (positions.TryGetValue(key, out var index))
             {
                 result[index] = entry;
@@ -69,6 +48,29 @@ internal static class DapLoadedSources
         }
         return result;
     }
+
+    internal static DapLoadedSource ParseSource(JsonElement source)
+    {
+        if (source.ValueKind != JsonValueKind.Object)
+            throw new InvalidDataException("DAP loadedSources source must be an object.");
+        var name = OptionalString(source, "name");
+        var path = OptionalString(source, "path");
+        int? reference = null;
+        if (source.TryGetProperty("sourceReference", out var value) && value.ValueKind != JsonValueKind.Null)
+        {
+            if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out var number) || number < 0)
+                throw new InvalidDataException("DAP sourceReference must be a nonnegative Int32.");
+            reference = number;
+        }
+        return new DapLoadedSource(name, path, reference, OptionalString(source, "origin"),
+            OptionalString(source, "presentationHint"),
+            source.TryGetProperty("adapterData", out var data) && data.ValueKind != JsonValueKind.Null ? data.Clone() : null);
+    }
+
+    internal static string Key(DapLoadedSource source) =>
+        !string.IsNullOrEmpty(source.Path) ? "path:" + NormalizePath(source.Path)
+        : source.SourceReference is not null ? "sourceReference:" + source.SourceReference.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        : !string.IsNullOrEmpty(source.Name) ? "name:" + NormalizePath(source.Name) : "<unknown-source>";
 
     private static string? OptionalString(JsonElement source, string name)
     {

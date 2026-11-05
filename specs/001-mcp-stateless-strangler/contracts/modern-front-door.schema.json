@@ -51,6 +51,84 @@
       },
       "additionalProperties": false
     },
+    "debugState": {
+      "type": "object",
+      "required": [
+        "event",
+        "stopReason",
+        "exitCode",
+        "loadedSources",
+        "loadedSourcesComplete"
+      ],
+      "properties": {
+        "event": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stopReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exitCode": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "currentThreadId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "loadedSources": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "maxProperties": 256,
+              "additionalProperties": {
+                "$ref": "#/$defs/loadedSource"
+              }
+            }
+          ]
+        },
+        "loadedSourcesComplete": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "loadedSourcesComplete": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "loadedSources": {
+                "type": "object"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "loadedSources": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
     "startDebugArguments": {
       "type": "object",
       "properties": {
@@ -1853,7 +1931,23 @@
           "$ref": "#/$defs/debugSessionId"
         },
         "state": {
-          "$ref": "#/$defs/lifecycleState"
+          "$ref": "#/$defs/debugState"
+        }
+      },
+      "additionalProperties": false
+    },
+    "debugStateTooLarge": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "debug_state_too_large"
+        },
+        "error": {
+          "const": "DEBUG_STATE_TOO_LARGE"
         }
       },
       "additionalProperties": false
@@ -3299,6 +3393,9 @@
         },
         {
           "$ref": "#/$defs/debugStateSuccess"
+        },
+        {
+          "$ref": "#/$defs/debugStateTooLarge"
         },
         {
           "$ref": "#/$defs/stopDebugSuccess"
