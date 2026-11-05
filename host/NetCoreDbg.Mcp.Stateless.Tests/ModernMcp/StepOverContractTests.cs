@@ -16,7 +16,7 @@ public sealed class StepOverContractTests
     {
         { "missing_arguments", null },
         { "omitted_debug_session_id", new JsonObject { ["threadId"] = 1 } },
-        { "omitted_thread_id", new JsonObject { ["debugSessionId"] = "opaque" } },
+        { "conflicting_aliases", new JsonObject { ["debugSessionId"] = "opaque", ["threadId"] = null, ["thread_id"] = 1 } },
         { "empty_token", new JsonObject { ["debugSessionId"] = string.Empty, ["threadId"] = 1 } },
         { "whitespace_token", new JsonObject { ["debugSessionId"] = " \t", ["threadId"] = 1 } },
         { "non_string_token", new JsonObject { ["debugSessionId"] = 1, ["threadId"] = 1 } },
@@ -45,10 +45,11 @@ public sealed class StepOverContractTests
         var schema = Assert.IsType<JsonObject>(tool["inputSchema"]);
         Assert.Equal("object", schema["type"]?.GetValue<string>());
         Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
-        Assert.Equal(["debugSessionId", "threadId"], Assert.IsType<JsonArray>(schema["required"]).Select(static value => value?.GetValue<string>()));
+        Assert.Equal(["debugSessionId"], Assert.IsType<JsonArray>(schema["required"]).Select(static value => value?.GetValue<string>()));
         var properties = Assert.IsType<JsonObject>(schema["properties"]);
         Assert.Equal("string", properties["debugSessionId"]?["type"]?.GetValue<string>());
-        Assert.Equal("integer", properties["threadId"]?["type"]?.GetValue<string>());
+        Assert.Equal(["integer", "null"], Assert.IsType<JsonArray>(properties["threadId"]?["type"]).Select(static value => value?.GetValue<string>()));
+        Assert.True(JsonNode.DeepEquals(properties["threadId"], properties["thread_id"]));
         Assert.Equal(int.MinValue, properties["threadId"]?["minimum"]?.GetValue<int>());
         Assert.Equal(int.MaxValue, properties["threadId"]?["maximum"]?.GetValue<int>());
     }
@@ -501,7 +502,7 @@ public sealed class StepOverContractTests
 
         var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(
             Tool,
-            Arguments(debugSessionId, 1),
+            new JsonObject { ["debugSessionId"] = debugSessionId },
             ModernMcpProcessDriver.CurrentMeta(),
             new RequestId("step-over-timeout"),
             timeout: TimeSpan.FromSeconds(35)), isError: false);
@@ -522,18 +523,19 @@ public sealed class StepOverContractTests
         Assert.Equal("continue_execution", tool["name"]?.GetValue<string>());
         var schema = Assert.IsType<JsonObject>(tool["inputSchema"]);
         Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
-        Assert.Equal(["debugSessionId", "threadId"], Assert.IsType<JsonArray>(schema["required"]).Select(static value => value?.GetValue<string>()));
+        Assert.Equal(["debugSessionId"], Assert.IsType<JsonArray>(schema["required"]).Select(static value => value?.GetValue<string>()));
         var properties = Assert.IsType<JsonObject>(schema["properties"]);
-        Assert.Equal(2, properties.Count);
+        Assert.Equal(3, properties.Count);
         Assert.Equal("string", properties["debugSessionId"]?["type"]?.GetValue<string>());
         Assert.Equal(1, properties["debugSessionId"]?["minLength"]?.GetValue<int>());
-        Assert.Equal("integer", properties["threadId"]?["type"]?.GetValue<string>());
+        Assert.Equal(["integer", "null"], Assert.IsType<JsonArray>(properties["threadId"]?["type"]).Select(static value => value?.GetValue<string>()));
+        Assert.True(JsonNode.DeepEquals(properties["threadId"], properties["thread_id"]));
         Assert.Equal(int.MinValue, properties["threadId"]?["minimum"]?.GetValue<int>());
         Assert.Equal(int.MaxValue, properties["threadId"]?["maximum"]?.GetValue<int>());
     }
 
     [Theory]
-    [MemberData(nameof(InvalidArguments))]
+    [MemberData(nameof(InvalidContinueArguments))]
     public async Task ContinueExecution_InvalidInput_ReturnsCompleteInvalidArgumentsWithoutDapIo(string scenario, JsonObject? arguments)
     {
         await using var driver = await StartStepDriverAsync();
@@ -546,6 +548,78 @@ public sealed class StepOverContractTests
         StructuredContentSchemaParityTests.AssertMatchesSchema(content);
         Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
     }
+
+    public static TheoryData<string, JsonObject?> InvalidContinueArguments => new()
+    {
+        { "missing_arguments", null },
+        { "missing_session", new JsonObject { ["threadId"] = 1 } },
+        { "blank_session", new JsonObject { ["debugSessionId"] = " " } },
+        { "fractional", new JsonObject { ["debugSessionId"] = "opaque", ["threadId"] = 1.5 } },
+        { "overflow", new JsonObject { ["debugSessionId"] = "opaque", ["thread_id"] = 2_147_483_648L } },
+        { "aliases", new JsonObject { ["debugSessionId"] = "opaque", ["threadId"] = null, ["thread_id"] = 1 } },
+        { "extra", new JsonObject { ["debugSessionId"] = "opaque", ["singleThread"] = true } },
+    };
+
+    [Theory]
+    [InlineData("omitted")]
+    [InlineData("null")]
+    [InlineData("alias-null")]
+    [InlineData("alias")]
+    [InlineData("explicit")]
+    public async Task ContinueExecution_OptionalThread_UsesObservedOrExplicitThread(string input)
+    {
+        await using var driver = await StartStepDriverAsync(ContinueOptions("continue-breakpoint-terminal"));
+        var session = await StartStoppedSessionAsync(driver, $"optional-continue-{input}-start");
+        var args = new JsonObject { ["debugSessionId"] = session };
+        if (input == "null") args["threadId"] = null;
+        if (input == "alias-null") args["thread_id"] = null;
+        if (input == "alias") args["thread_id"] = 1;
+        if (input == "explicit") args["threadId"] = 1;
+        var before = await driver.ReadNativeActionsAsync();
+        var result = AssertContinueEnvelope(await driver.CallToolRawAsync("continue_execution", args,
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId($"optional-continue-{input}")));
+        Assert.Equal("continue_stopped", result["kind"]?.GetValue<string>());
+        var request = Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before.Count), static action => action.Command == "continue");
+        Assert.Equal(1, JsonNode.Parse(request.Detail!)!["arguments"]!["threadId"]!.GetValue<int>());
+        var next = AssertContinueEnvelope(await driver.CallToolRawAsync("continue_execution", new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId($"optional-restop-{input}")));
+        Assert.Equal("continue_terminal", next["kind"]?.GetValue<string>());
+        var requests = (await driver.ReadNativeActionsAsync()).Skip(before.Count).Where(static action => action.Command == "continue").ToArray();
+        Assert.Equal(2, JsonNode.Parse(requests[1].Detail!)!["arguments"]!["threadId"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task ContinueExecution_OptionalThread_WhenNoStoppedThread_RefusesWithoutWrite()
+    {
+        await using var driver = await StartStepDriverAsync(new ModernMcpStartOptions(
+            DisableFormElicitation: true, FixtureConfiguration: new FixtureConfiguration(SuppressLifecycleEvents: true)));
+        var result = AssertApplicationEnvelope(await driver.CallToolRawAsync("start_debug", new JsonObject { ["program"] = driver.InertProgramPath },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("optional-no-thread-start")), isError: false);
+        var session = result["debugSessionId"]!.GetValue<string>();
+        var before = await driver.ReadNativeActionsAsync();
+        var refused = AssertContinueEnvelope(await driver.CallToolRawAsync("continue_execution", new JsonObject { ["debugSessionId"] = session },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId("optional-no-thread")), isError: true);
+        Assert.Equal("dap_continue_refused", refused["kind"]?.GetValue<string>());
+        Assert.Equal(before.Count, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
+    [Theory]
+    [InlineData("1.0", true)]
+    [InlineData("1e0", true)]
+    [InlineData("1.0000000000000000001", false)]
+    public async Task ContinueExecution_ThreadAlias_UsesExactSchemaInteger(string number, bool valid)
+    {
+        await using var driver = await StartStepDriverAsync(ContinueOptions("continue-breakpoint-terminal"));
+        var session = await StartStoppedSessionAsync(driver, $"continue-integer-{number}-start");
+        var before = await driver.ReadNativeActionsAsync();
+        var result = AssertContinueEnvelope(await driver.CallToolRawAsync("continue_execution",
+            new JsonObject { ["debugSessionId"] = session, ["thread_id"] = JsonNode.Parse(number) },
+            ModernMcpProcessDriver.CurrentMeta(), new RequestId($"continue-integer-{number}")), isError: !valid);
+        Assert.Equal(valid ? "continue_stopped" : "invalid_tool_arguments", result["kind"]?.GetValue<string>());
+        var requests = (await driver.ReadNativeActionsAsync()).Skip(before.Count).Where(static action => action.Command == "continue").ToArray();
+        Assert.Equal(valid ? 1 : 0, requests.Length);
+    }
+
 
     [Theory]
     [InlineData("continue-breakpoint-terminal", "breakpoint", true)]
@@ -698,7 +772,7 @@ public sealed class StepOverContractTests
     {
         await using var driver = await StartStepDriverAsync(ContinueOptions(acknowledged ? "continue-ack-held-stop" : "continue-hold"));
         var session = await StartStoppedSessionAsync(driver, $"continue-timeout-{acknowledged}-start");
-        var operation = driver.CallToolRawAsync("continue_execution", Arguments(session, 1), ModernMcpProcessDriver.CurrentMeta(),
+        var operation = driver.CallToolRawAsync("continue_execution", acknowledged ? new JsonObject { ["debugSessionId"] = session } : Arguments(session, 1), ModernMcpProcessDriver.CurrentMeta(),
             new RequestId($"continue-timeout-{acknowledged}"), timeout: TimeSpan.FromSeconds(35));
         using (var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2)))
         {

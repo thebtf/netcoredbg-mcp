@@ -20,15 +20,15 @@ public sealed class NativeStepPairContractTests
         [
             ("missing_arguments", null),
             ("omitted_debug_session_id", new() { ["threadId"] = 1 }),
-            ("omitted_thread_id", new() { ["debugSessionId"] = "opaque" }),
+            ("conflicting_thread_aliases", new() { ["debugSessionId"] = "opaque", ["threadId"] = null, ["thread_id"] = 1 }),
             ("empty_token", new() { ["debugSessionId"] = "", ["threadId"] = 1 }),
             ("whitespace_token", new() { ["debugSessionId"] = " \t", ["threadId"] = 1 }),
             ("null_token", new() { ["debugSessionId"] = null, ["threadId"] = 1 }),
             ("non_string_token", new() { ["debugSessionId"] = 1, ["threadId"] = 1 }),
-            ("null_thread", new() { ["debugSessionId"] = "opaque", ["threadId"] = null }),
             ("string_thread", new() { ["debugSessionId"] = "opaque", ["threadId"] = "1" }),
             ("boolean_thread", new() { ["debugSessionId"] = "opaque", ["threadId"] = true }),
             ("non_integral_thread", new() { ["debugSessionId"] = "opaque", ["threadId"] = 1.5 }),
+            ("inexact_alias", new() { ["debugSessionId"] = "opaque", ["thread_id"] = JsonNode.Parse("1.0000000000000000001") }),
             ("underflow_thread", new() { ["debugSessionId"] = "opaque", ["threadId"] = -2_147_483_649L }),
             ("overflow_thread", new() { ["debugSessionId"] = "opaque", ["threadId"] = 2_147_483_648L }),
             ("target_is_not_input", new() { ["debugSessionId"] = "opaque", ["threadId"] = 1, ["targetId"] = 3 }),
@@ -65,13 +65,14 @@ public sealed class NativeStepPairContractTests
         var schema = Assert.IsType<JsonObject>(descriptor["inputSchema"]);
         Assert.Equal("object", schema["type"]?.GetValue<string>());
         Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);
-        Assert.Equal(new[] { "debugSessionId", "threadId" },
+        Assert.Equal(new[] { "debugSessionId" },
             Assert.IsType<JsonArray>(schema["required"]).Select(static value => value?.GetValue<string>()));
         var properties = Assert.IsType<JsonObject>(schema["properties"]);
-        Assert.Equal(2, properties.Count);
+        Assert.Equal(3, properties.Count);
         Assert.Equal("string", properties["debugSessionId"]?["type"]?.GetValue<string>());
         Assert.Equal(1, properties["debugSessionId"]?["minLength"]?.GetValue<int>());
-        Assert.Equal("integer", properties["threadId"]?["type"]?.GetValue<string>());
+        Assert.Equal(new[] { "integer", "null" }, Assert.IsType<JsonArray>(properties["threadId"]?["type"]).Select(static value => value?.GetValue<string>()));
+        Assert.True(JsonNode.DeepEquals(properties["threadId"], properties["thread_id"]));
         Assert.Equal(int.MinValue, properties["threadId"]?["minimum"]?.GetValue<int>());
         Assert.Equal(int.MaxValue, properties["threadId"]?["maximum"]?.GetValue<int>());
     }
@@ -95,6 +96,52 @@ public sealed class NativeStepPairContractTests
         Assert.Equal(tool, content["tool"]?.GetValue<string>());
         Assert.Equal(before, (await driver.ReadNativeActionsAsync()).Count);
     }
+
+    [Theory]
+    [InlineData("step_over", "omitted")]
+    [InlineData("step_over", "null")]
+    [InlineData("step_over", "alias")]
+    [InlineData("step_over", "alias-null")]
+    [InlineData("step_over", "zero")]
+    [InlineData("step_into", "omitted")]
+    [InlineData("step_into", "null")]
+    [InlineData("step_into", "alias")]
+    [InlineData("step_into", "alias-null")]
+    [InlineData("step_into", "zero")]
+    [InlineData("step_out", "omitted")]
+    [InlineData("step_out", "null")]
+    [InlineData("step_out", "alias")]
+    [InlineData("step_out", "alias-null")]
+    [InlineData("step_out", "zero")]
+    public async Task StepFamily_OptionalThread_UsesObservedStoppedThread(string tool, string input)
+    {
+        await using var driver = await StartDriverAsync();
+        var session = await StartStoppedSessionAsync(driver);
+        var args = Arguments(session);
+        if (input == "null") args["threadId"] = null;
+        if (input == "alias") args["thread_id"] = JsonNode.Parse("1e0");
+        if (input == "alias-null") args["thread_id"] = null;
+        if (input == "zero") args["threadId"] = 0;
+        var selected = input == "zero" ? 0 : 1;
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+        var result = Envelope(await CallAsync(driver, tool, args), false);
+        Success(result, tool, selected);
+        ExactRequest(Assert.Single((await driver.ReadNativeActionsAsync()).Skip(before)), Command(tool), selected);
+    }
+
+    [Theory]
+    [InlineData("step_over")]
+    [InlineData("step_into")]
+    [InlineData("step_out")]
+    public async Task StepFamily_OptionalThreadWithoutCurrentStop_RefusesWithoutWrite(string tool)
+    {
+        await using var driver = await StartDriverAsync(lifecycleMode: "partial-stop-missing-thread");
+        var session = await StartStoppedSessionAsync(driver);
+        var before = (await driver.ReadNativeActionsAsync()).Count;
+        Refused(Envelope(await CallAsync(driver, tool, Arguments(session)), true), tool);
+        Assert.Equal(before, (await driver.ReadNativeActionsAsync()).Count);
+    }
+
 
     [Theory]
     [InlineData("step_into", "!")]

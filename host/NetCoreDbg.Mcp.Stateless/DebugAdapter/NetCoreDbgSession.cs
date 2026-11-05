@@ -642,8 +642,16 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         CancellationToken cancellationToken) =>
         GetCallStackAsync(threadId, startFrame, levels, false, cancellationToken);
 
-    internal async Task<DapCallStackResult> GetCallStackAsync(
+    internal Task<DapCallStackResult> GetCallStackAsync(
         int threadId,
+        uint startFrame,
+        uint levels,
+        bool includeInspectionContext,
+        CancellationToken cancellationToken) =>
+        GetCallStackForOptionalThreadAsync(threadId, startFrame, levels, includeInspectionContext, cancellationToken);
+
+    internal async Task<DapCallStackResult> GetCallStackForOptionalThreadAsync(
+        int? threadId,
         uint startFrame,
         uint levels,
         bool includeInspectionContext,
@@ -700,7 +708,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         return DapCallStackResult.Succeeded(normalized, totalFrames, response.InspectionContextId);
     }
 
-    internal async Task<DapExceptionInfoResult> GetExceptionInfoAsync(int threadId, CancellationToken cancellationToken)
+    internal Task<DapExceptionInfoResult> GetExceptionInfoAsync(int threadId, CancellationToken cancellationToken) =>
+        GetExceptionInfoForOptionalThreadAsync(threadId, cancellationToken);
+
+    internal async Task<DapExceptionInfoResult> GetExceptionInfoForOptionalThreadAsync(int? threadId, CancellationToken cancellationToken)
     {
         PendingRequest request;
         await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -714,13 +725,13 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 }
             }
 
-            var target = CaptureCallStackTarget(threadId, includeInspectionContext: true);
+            var target = CaptureOptionalCallStackTarget(threadId, includeInspectionContext: true);
             if (target is null)
             {
                 return DapExceptionInfoResult.Refused;
             }
 
-            request = await BeginRequestAsync("exceptionInfo", new { threadId }, _requestTimeout,
+            request = await BeginRequestAsync("exceptionInfo", new { threadId = target.Value.ThreadId }, _requestTimeout,
                 cancellationToken, stackTraceTarget: target).ConfigureAwait(false);
         }
         finally
@@ -1199,7 +1210,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     internal Task<DapStepOverResult> StepOutAsync(int threadId, CancellationToken cancellationToken) =>
         StepAsync(threadId, DapStepKind.Out, cancellationToken);
 
-    private async Task<DapStepOverResult> StepAsync(int threadId, DapStepKind kind, CancellationToken cancellationToken)
+    internal Task<DapStepOverResult> StepForOptionalThreadAsync(int? threadId, DapStepKind kind, CancellationToken cancellationToken) =>
+        StepAsync(threadId, kind, cancellationToken);
+
+    private async Task<DapStepOverResult> StepAsync(int? threadId, DapStepKind kind, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!TryAdmitExecution())
@@ -1215,14 +1229,18 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
+                int selectedThreadId;
                 lock (_stateGate)
                 {
-                    if (_inspectionClosed || !HasStepOverAuthority(threadId))
+                    var selected = threadId ?? _state.CurrentThreadId;
+                    if (_inspectionClosed || (threadId is null && _state.Event != "stopped")
+                        || selected is not { } resolved || !HasStepOverAuthority(resolved))
                     {
                         return DapStepOverResult.Refused;
                     }
 
-                    active = new StepOverRecord(threadId, kind, cancellationToken);
+                    selectedThreadId = resolved;
+                    active = new StepOverRecord(selectedThreadId, kind, cancellationToken);
                     _activeStepOver = active;
                     _state = _state with { CurrentThreadId = null };
                     ClearCallStackEligibility();
@@ -1231,7 +1249,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
                 request = await BeginRequestAsync(
                     active.Command,
-                    new { threadId },
+                    new { threadId = selectedThreadId },
                     _requestTimeout,
                     cancellationToken,
                     stepOver: active).ConfigureAwait(false);
@@ -1261,7 +1279,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             {
                 Interlocked.Exchange(ref _stepOverDrainRequired, 1);
                 closeAdmission = true;
-                return DapStepOverResult.TimedOut(threadId);
+                return DapStepOverResult.TimedOut(active!.ThreadId);
             }
             catch (Exception exception)
             {
@@ -1314,7 +1332,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
-    internal async Task<DapContinueResult> ContinueAsync(int threadId, CancellationToken cancellationToken)
+    internal Task<DapContinueResult> ContinueAsync(int threadId, CancellationToken cancellationToken) =>
+        ContinueForOptionalThreadAsync(threadId, cancellationToken);
+
+    internal async Task<DapContinueResult> ContinueForOptionalThreadAsync(int? threadId, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!TryAdmitExecution())
@@ -1329,14 +1350,18 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
+                int selectedThreadId;
                 lock (_stateGate)
                 {
-                    if (_inspectionClosed || !HasStepOverAuthority(threadId))
+                    var selected = threadId ?? _state.CurrentThreadId;
+                    if (_inspectionClosed || (threadId is null && _state.Event != "stopped")
+                        || selected is not { } resolved || !HasStepOverAuthority(resolved))
                     {
                         return DapContinueResult.Refused;
                     }
 
-                    active = new ContinueRecord(threadId, cancellationToken);
+                    selectedThreadId = resolved;
+                    active = new ContinueRecord(selectedThreadId, cancellationToken);
                     _activeContinue = active;
                     _state = new DapSessionState(null, null, null);
                     ClearCallStackEligibility();
@@ -1345,7 +1370,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
                 request = await BeginRequestAsync(
                     "continue",
-                    new DapContinueArguments(threadId),
+                    new DapContinueArguments(selectedThreadId),
                     ContinueTimeout,
                     cancellationToken,
                     continueExecution: active).ConfigureAwait(false);
@@ -2000,7 +2025,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
     private async Task<(DapResponse? Response, bool IsPaged)> SendStackTraceRequestAsync(
-        int threadId,
+        int? threadId,
         uint startFrame,
         uint levels,
         bool includeInspectionContext,
@@ -2011,14 +2036,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var target = CaptureCallStackTarget(threadId, includeInspectionContext);
+            var target = CaptureOptionalCallStackTarget(threadId, includeInspectionContext);
             if (target is null)
             {
                 return (null, false);
             }
 
             isPaged = target.Value.SupportsPaging;
-            object arguments = isPaged ? new { threadId, startFrame, levels } : new { threadId };
+            var selectedThreadId = target.Value.ThreadId;
+            object arguments = isPaged ? new { threadId = selectedThreadId, startFrame, levels } : new { threadId = selectedThreadId };
             request = await BeginRequestAsync(
                 "stackTrace",
                 arguments,
@@ -3405,7 +3431,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             && (_invalidatedAllThreadTargets is null || !_invalidatedAllThreadTargets.Contains(threadId)))
         || (_threadEligibility is not null && _threadEligibility.ContainsKey(threadId));
 
-    private CapturedCallStackTarget? CaptureCallStackTarget(int threadId, bool includeInspectionContext)
+    private CapturedCallStackTarget? CaptureCallStackTarget(int threadId, bool includeInspectionContext) =>
+        CaptureOptionalCallStackTarget(threadId, includeInspectionContext);
+
+    private CapturedCallStackTarget? CaptureOptionalCallStackTarget(int? threadId, bool includeInspectionContext)
     {
         lock (_stateGate)
         {
@@ -3413,18 +3442,21 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             {
                 return null;
             }
+            if (threadId is null && _state.Event != "stopped") return null;
+            var selected = threadId ?? _state.CurrentThreadId;
+            if (selected is not { } resolved) return null;
 
             var supportsPaging = _stackTraceCapabilities.SupportsDelayedStackTraceLoading;
             if (_allThreadsStoppedEligibility is { } allTargets
-                && (_invalidatedAllThreadTargets is null || !_invalidatedAllThreadTargets.Contains(threadId)))
+                && (_invalidatedAllThreadTargets is null || !_invalidatedAllThreadTargets.Contains(resolved)))
             {
-                return new CapturedCallStackTarget(allTargets, threadId, supportsPaging,
+                return new CapturedCallStackTarget(allTargets, resolved, supportsPaging,
                     includeInspectionContext ? GetOrCreateInspectionContext() : null);
             }
 
             return _threadEligibility is not null
-                && _threadEligibility.TryGetValue(threadId, out var target)
-                    ? new CapturedCallStackTarget(target, threadId, supportsPaging,
+                && _threadEligibility.TryGetValue(resolved, out var target)
+                    ? new CapturedCallStackTarget(target, resolved, supportsPaging,
                         includeInspectionContext ? GetOrCreateInspectionContext() : null)
                     : null;
         }

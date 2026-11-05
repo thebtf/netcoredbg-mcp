@@ -163,6 +163,15 @@ never retried. Each option also accepts its Python snake_case spelling, but not
 both spellings in one call. These native results do not include Python hit counts
 or all scopes; Python remains the installed default.
 
+In the source-built native host, `get_call_stack`, `continue_execution`,
+`step_over`, `step_into`, `step_out`, and `get_exception_info` accept omitted or
+null `threadId` to select the currently observed stopped
+thread. `thread_id` is an alternative spelling; supplying both is invalid.
+An explicit integer, including zero, still selects that exact thread. If no
+current stopped thread is available, the operation is refused without a DAP
+request. The explicit `debugSessionId` is still required; this is not Python
+session or result-envelope compatibility.
+
 To inspect a stopped frame, call `get_call_stack` with
 `includeInspectionContext: true`, then pass its `inspectionContextId` with the
 frame ID to `get_scopes` and with each returned reference to `get_variables`.
@@ -202,8 +211,8 @@ not change Python's installed default or its optional-frame evaluation contract;
 `quick_evaluate`, real-debugger proof and installed delivery remain separate.
 
 The source-built stateful host also exposes
-`get_exception_info(debugSessionId, threadId)`. Both arguments are required:
-use the opaque session token and an explicit Int32 stopped-thread ID. It sends
+`get_exception_info(debugSessionId, threadId?)`. The opaque session token is
+required; the thread can be explicit or the current stopped thread. It sends
 one DAP `exceptionInfo` request only when `supportsExceptionInfoRequest` is true
 in the correlated initialize response or a later capabilities event. An absent
 or false capability returns `DAP_EXCEPTION_INFO_UNSUPPORTED` without a write.
@@ -223,8 +232,7 @@ the existing session owner after releasing the operation lease. Cancellation
 before writer handoff preserves the session; a potentially partial frame drains
 it. Stopping the wait after a fully committed read-only request does not by itself
 close the session or claim a debuggee mutation. No automatic retry is performed.
-This native path neither infers a thread nor updates Python's exception cache
-or provides `get_exception_context`. Python remains the installed default;
+This native path does not update Python's exception cache. Python remains the installed default;
 real-debugger exception-stop and installed-delivery proof remain separate.
 
 The source-built stateful host also accepts
@@ -341,12 +349,11 @@ Serialized application content over 256 KiB returns `OUTPUT_SEARCH_TOO_LARGE`,
 with no partial results or buffer clearing. The surrounding MCP response can be
 larger because it carries both text and structured content.
 
-The source-built stateful host exposes `step_over(debugSessionId, threadId)`,
-`step_into(debugSessionId, threadId)` and `step_out(debugSessionId, threadId)`.
-Both arguments are required: use the opaque session token and an explicit Int32
-thread with current stopped authority. Invalid or extra arguments cause no DAP
-I/O. Each admitted call sends exactly one DAP `next`, `stepIn` or `stepOut`,
-respectively, with only `{threadId}`; target selection is not supported.
+The source-built stateful host exposes `step_over`, `step_into`, and `step_out`
+with the required opaque `debugSessionId` and an optional stopped-thread ID.
+Invalid or extra arguments cause no DAP I/O. Each admitted call sends exactly
+one DAP `next`, `stepIn` or `stepOut`, respectively, with only `{threadId}`;
+step targets beyond the chosen thread are not supported.
 
 A correlated positive acknowledgement is not a completed step. Success requires
 a later `stopped(reason: "step")` event for that exact thread. Pre-acknowledgement,
