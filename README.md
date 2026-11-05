@@ -78,6 +78,10 @@ be distinguished from an old one. Conditional and hit-count breakpoints and
 non-null variable filters are rejected; variable paging is nonnegative. Unlike
 Python, evaluation is subject to mux mutation ownership because expressions can
 change the debuggee. Uncertain evaluation and breakpoint writes are not retried.
+If the stopped context changes before a stack, scope, variable or evaluation
+response is published, the legacy route returns an error instead of mixing
+epochs. A dispatched evaluation may already have executed; an unknown outcome
+must not be retried automatically.
 
 Stack pages are limited to
 256 frames. `stealth_mode=true` and unrecognized arguments are rejected. Python's

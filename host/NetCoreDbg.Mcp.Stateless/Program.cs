@@ -513,6 +513,13 @@ internal static class Program
                     }
                     arguments["inspectionContextId"] = JsonSerializer.SerializeToElement(_legacyInspectionContextId);
                 }
+                var inspectionContext = name is GetScopes or GetVariables or EvaluateExpression ? _legacyInspectionContextId : null;
+                NetCoreDbgSession? inspectionSession = null;
+                if (name is GetCallStack or GetScopes or GetVariables or EvaluateExpression)
+                {
+                    if (!_sessions.TryGetValue(sessionId, out inspectionSession))
+                        return LegacyError("No active debug session.");
+                }
                 var request = LegacyRequest(name, sessionId, arguments);
                 if (name == StopDebug)
                 {
@@ -552,21 +559,37 @@ internal static class Program
                 await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
                 gateHeld = true;
                 if (!string.Equals(_legacySessionId, sessionId, StringComparison.Ordinal))
-                    return LegacyError("Debug session changed before operation completed.", "unknown");
+                    return name is GetCallStack or GetScopes or GetVariables or EvaluateExpression
+                        ? LegacyInspectionChanged(name)
+                        : LegacyError("Debug session changed before operation completed.", "unknown");
                 var observedState = LegacySnapshot(sessionId).State;
+                if (name is GetScopes or GetVariables or EvaluateExpression)
+                {
+                    var capturedState = stackRevision == _legacyInspectionRevision && inspectionSession is not null
+                        && _sessions.TryGetValue(sessionId, out var currentSession) && ReferenceEquals(currentSession, inspectionSession)
+                        && inspectionContext is not null ? inspectionSession.CaptureInspectionState(inspectionContext) : null;
+                    if (capturedState is null) return LegacyInspectionChanged(name);
+                    observedState = ProjectLegacyState(capturedState).State;
+                }
                 if (result.IsError == true || result.StructuredContent is not { } content)
                     return LegacyNativeError(result, observedState);
                 var kind = content.GetProperty("kind").GetString();
                 if (name == GetThreads && kind == "threads_success") return LegacyResponse(content.GetProperty("threads"), observedState);
                 if (name == GetCallStack && kind == "call_stack_success")
                 {
-                    if (stackRevision != _legacyInspectionRevision)
-                        return LegacyError("Stopped context changed before stack selection completed.", observedState);
+                    if (stackRevision != _legacyInspectionRevision
+                        || !content.TryGetProperty("inspectionContextId", out var inspection)
+                        || inspection.ValueKind != JsonValueKind.String || inspection.GetString() is not { } stackContext
+                        || inspectionSession is null || !_sessions.TryGetValue(sessionId, out var currentSession)
+                        || !ReferenceEquals(currentSession, inspectionSession)
+                        || inspectionSession.CaptureInspectionState(stackContext) is not { } stackState)
+                        return LegacyInspectionChanged(name);
+                    observedState = ProjectLegacyState(stackState).State;
                     var frames = content.GetProperty("frames");
-                    if (content.TryGetProperty("inspectionContextId", out var inspection) && frames.GetArrayLength() > 0)
+                    if (frames.GetArrayLength() > 0)
                     {
                         _legacyInspectionSessionId = sessionId;
-                        _legacyInspectionContextId = inspection.GetString();
+                        _legacyInspectionContextId = stackContext;
                         _legacyCurrentFrameId = frames[0].GetProperty("id").GetInt32();
                     }
                     return LegacyResponse(new { frames }, observedState);
@@ -640,7 +663,11 @@ internal static class Program
         private (string State, int? ThreadId, string? Reason, int? ExitCode) LegacySnapshot(string sessionId)
         {
             if (!_sessions.TryGetValue(sessionId, out var session)) return ("unknown", null, null, null);
-            var state = session.State;
+            return ProjectLegacyState(session.State);
+        }
+
+        private static (string State, int? ThreadId, string? Reason, int? ExitCode) ProjectLegacyState(DapSessionState state)
+        {
             if (state.Event == "stopped" && state.CurrentThreadId is null)
                 return ("unknown", null, null, state.ExitCode);
             return (state.Event switch
@@ -668,6 +695,11 @@ internal static class Program
 
         private static CallToolResult LegacyError(string error, string state) =>
             Result(new { error, state, next_actions = LegacyActions(state), message = $"Error: {error}" }, false);
+
+        private static CallToolResult LegacyInspectionChanged(string tool) => LegacyError(
+            tool == EvaluateExpression
+                ? "Evaluation outcome is unknown; it may have executed. Do not retry automatically."
+                : "Stopped inspection context changed before the operation completed.", "unknown");
 
         private CallToolResult LegacyNativeError(CallToolResult result) => LegacyNativeError(result, LegacySnapshot().State);
 

@@ -18,6 +18,107 @@ public sealed class RegistryShutdownContractTests
 {
     private static readonly TimeSpan ObservationTimeout = TimeSpan.FromSeconds(5);
 
+    [Theory]
+    [InlineData("get_call_stack", false)]
+    [InlineData("get_call_stack", true)]
+    [InlineData("get_scopes", false)]
+    [InlineData("get_variables", false)]
+    [InlineData("evaluate_expression", false)]
+    [InlineData("get_variables", true)]
+    public async Task LegacyInspection_ReaderAcceptedResponseBeforeStep_IsNotPublishedAfterEpochChanges(string tool, bool nativeStep)
+    {
+        await using var harness = await RegistryHostHarness.CreateAsync(new FixtureConfiguration(
+            LifecycleMode: "all-stop", SupportsDelayedStackTraceLoading: true,
+            StackTraceResponseMode: tool == "get_call_stack" ? "hold" : "success",
+            ScopesResponseMode: tool == "get_scopes" ? "hold" : "success",
+            VariablesResponseMode: tool == "get_variables" ? "hold" : "success", PauseResponseMode: "negative"));
+        using var observation = new CancellationTokenSource(ObservationTimeout);
+        Task<CallToolResult>? pending = null;
+        Task<CallToolResult>? step = null;
+        var gateHeld = false;
+        try
+        {
+            var started = Content(await harness.CallLegacyAsync("start_debug", new JsonObject
+            {
+                ["program"] = harness.ProgramPath,
+                ["pre_build"] = false,
+                ["stop_at_entry"] = true,
+            }, "legacy-epoch-start"));
+            Assert.True(started["data"]?["success"]?.GetValue<bool>());
+            var token = harness.LegacySessionId;
+            await harness.Fixture.WaitForEventAsync("stopped", observation.Token);
+            Assert.Equal("threads_success", Content(await harness.CallAsync("get_threads", SessionArguments(token), "epoch-initial-barrier"))["kind"]?.GetValue<string>());
+            var frame = 0;
+            if (tool != "get_call_stack")
+            {
+                var stack = Content(await harness.CallLegacyAsync("get_call_stack", new JsonObject(), "epoch-stack"));
+                var frames = Assert.IsType<JsonArray>(stack["data"]?["frames"]);
+                Assert.NotEmpty(frames);
+                frame = frames[0]!["id"]!.GetValue<int>();
+            }
+            var command = tool switch { "get_call_stack" => "stackTrace", "get_scopes" => "scopes", "get_variables" => "variables", _ => "evaluate" };
+            var arguments = new JsonObject();
+            if (tool == "get_variables")
+            {
+                var scopes = Content(await harness.CallLegacyAsync("get_scopes", new JsonObject(), "epoch-scopes"));
+                arguments["variables_reference"] = Assert.IsType<JsonArray>(scopes["data"])[0]!["variablesReference"]!.GetValue<int>();
+            }
+            else if (tool == "evaluate_expression")
+            {
+                arguments["expression"] = "fixture:hold";
+                arguments["frame_id"] = frame;
+            }
+            pending = harness.CallLegacyAsync(tool, arguments, "epoch-inspection");
+            var gated = tool switch { "get_call_stack" => "stack-trace-response-gated", "evaluate_expression" => "evaluate-response-gated", _ => "inspection-response-gated" };
+            await harness.Fixture.WaitForTranscriptKindAsync(gated, observation.Token);
+            var request = Assert.Single(await harness.Fixture.ReadTranscriptAsync(), entry => entry.Kind == "request" && entry.Command == command);
+            var sequence = Assert.IsType<int>(request.Sequence);
+
+            await harness.LegacyGate.WaitAsync(observation.Token);
+            gateHeld = true;
+            if (!nativeStep)
+            {
+                step = harness.CallLegacyAsync("step_over", new JsonObject(), "epoch-step");
+                Assert.False(step.IsCompleted);
+            }
+            harness.Fixture.ReleaseStackTraceResponse();
+            await harness.Fixture.WaitForDapResponseAsync(command, sequence, observation.Token);
+            var barrier = Content(await harness.CallAsync("get_threads", SessionArguments(token), "epoch-reader-barrier", observation.Token));
+            Assert.Equal("threads_success", barrier["kind"]?.GetValue<string>());
+            Assert.False(pending.IsCompleted, "The accepted E1 response must still be waiting for legacy admission.");
+            if (nativeStep)
+            {
+                step = harness.CallAsync("step_over", SessionArguments(token), "native-epoch-step", observation.Token);
+                Assert.Equal("step_over_success", Content(await step.WaitAsync(ObservationTimeout))["kind"]?.GetValue<string>());
+            }
+            else
+            {
+                Assert.False(step!.IsCompleted, "Step admission must remain queued ahead of publication.");
+            }
+            harness.LegacyGate.Release();
+            gateHeld = false;
+
+            var result = Content(await pending.WaitAsync(ObservationTimeout));
+            var stepped = Content(await step!.WaitAsync(ObservationTimeout));
+            if (!nativeStep) Assert.Equal("step", stepped["reason"]?.GetValue<string>());
+            Assert.NotNull(result["error"]);
+            Assert.False(result.ContainsKey("data"), "E1 inspection data must not be published after E2 admission.");
+            if (tool == "evaluate_expression")
+            {
+                Assert.Contains("may have executed", result["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+                Assert.Contains("do not retry", result["error"]?.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            }
+        }
+        finally
+        {
+            if (gateHeld) harness.LegacyGate.Release();
+            harness.Fixture.ReleaseStackTraceResponse();
+            if (pending is not null) await Record.ExceptionAsync(async () => await pending.WaitAsync(ObservationTimeout));
+            if (step is not null) await Record.ExceptionAsync(async () => await step.WaitAsync(ObservationTimeout));
+            await harness.StopAsync(CancellationToken.None);
+        }
+    }
+
     [Fact]
     public async Task ShutdownCancellation_DuringUnpublishedStart_CancelsStartupAndWaitsForOwnedAdapterExit()
     {
@@ -454,6 +555,10 @@ public sealed class RegistryShutdownContractTests
 
         public FixtureProcess Fixture { get; } = fixture;
         public string ProgramPath { get; } = programPath;
+        public SemaphoreSlim LegacyGate => Assert.IsType<SemaphoreSlim>(registry.GetType()
+            .GetField("_legacyGate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(registry));
+        public string LegacySessionId => Assert.IsType<string>(registry.GetType()
+            .GetField("_legacySessionId", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(registry));
 
         public static async Task<RegistryHostHarness> CreateAsync(
             FixtureConfiguration configuration, bool holdLaunchResponse = false, JsonObject? outputScript = null,
@@ -527,7 +632,14 @@ public sealed class RegistryShutdownContractTests
             }
         }
 
-        public Task<CallToolResult> CallAsync(string tool, JsonObject arguments, string id, CancellationToken callerCancellation = default)
+        public Task<CallToolResult> CallAsync(string tool, JsonObject arguments, string id, CancellationToken callerCancellation = default) =>
+            CallCoreAsync(call, tool, arguments, id, callerCancellation);
+
+        public Task<CallToolResult> CallLegacyAsync(string tool, JsonObject arguments, string id, CancellationToken callerCancellation = default) =>
+            CallCoreAsync(registry.GetType().GetMethod("CallLegacyAsync", BindingFlags.Instance | BindingFlags.NonPublic)!,
+                tool, arguments, id, callerCancellation);
+
+        private Task<CallToolResult> CallCoreAsync(MethodInfo method, string tool, JsonObject arguments, string id, CancellationToken callerCancellation)
         {
             var parameters = new CallToolRequestParams
             {
@@ -546,7 +658,7 @@ public sealed class RegistryShutdownContractTests
             {
                 Fixture.MarkAdapterStartAttempted();
             }
-            return ((ValueTask<CallToolResult>)call.Invoke(registry, [context, callerCancellation])!).AsTask();
+            return ((ValueTask<CallToolResult>)method.Invoke(registry, [context, callerCancellation])!).AsTask();
         }
 
         public async Task StopAsync(CancellationToken cancellationToken)
