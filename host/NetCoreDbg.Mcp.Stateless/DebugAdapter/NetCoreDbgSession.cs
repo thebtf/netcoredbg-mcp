@@ -48,6 +48,16 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private readonly SemaphoreSlim _breakpointUpdateGate = new(1, 1);
     private readonly Dictionary<string, DapRequestedBreakpoint[]> _requestedBreakpoints = new(
         OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+    private readonly Dictionary<string, List<LegacyBreakpointObservation>> _legacyBreakpointObservations = new(
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+    private readonly Dictionary<long, LegacyBreakpointObservation> _legacyRemovedBreakpoints = [];
+    private readonly Dictionary<int, long> _legacyBreakpointIds = [];
+    private bool _legacyBreakpointEventsIncomplete;
+    private readonly Dictionary<string, Dictionary<int, long>> _legacyHitCounts = new(
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+    private int _legacyHitCountLocations;
+    private int _legacyHitObservationActive;
+    private bool _legacyHitCountsIncomplete;
     private readonly ConcurrentDictionary<int, PendingRequest> _pending = new();
     private readonly TaskCompletionSource<bool> _initialized = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly object _stateGate = new();
@@ -1670,14 +1680,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 var requested = new DapRequestedBreakpoint[fileBreakpoints.Count];
                 for (var index = 0; index < requested.Length; index++)
                 {
-                    requested[index] = new DapRequestedBreakpoint(fileBreakpoints[index].Line);
+                    requested[index] = new DapRequestedBreakpoint(fileBreakpoints[index].Line, fileBreakpoints[index].Incarnation);
                 }
 
                 var response = await SendRequestAcceptingRefusalAsync(
                     "setBreakpoints",
                     new DapSetBreakpointsArguments(new DapBreakpointSource(file), requested),
                     _requestTimeout,
-                    deadline.Token).ConfigureAwait(false);
+                    deadline.Token, new InitialBreakpointRequest(file, requested)).ConfigureAwait(false);
                 if (!response.Success)
                 {
                     throw new DapBreakpointsException(isRefused: true);
@@ -1752,13 +1762,190 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         return new DapBreakpointObservation(verified.GetBoolean(), actualLine);
     }
 
+    private void ObserveLegacyBreakpointResponse(string file, DapRequestedBreakpoint[] requested, JsonElement body)
+    {
+        var results = RequireBreakpointResults(body, requested.Length);
+        var next = new List<LegacyBreakpointObservation>(requested.Length);
+        var index = 0;
+        foreach (var result in results.EnumerateArray())
+        {
+            var observation = ReadBreakpointObservation(result);
+            var line = requested[index++].Line;
+            var incarnation = requested[index - 1].Incarnation;
+            var count = GetLegacyHitCount(file, line);
+            var id = TryGetInt32(result, "id");
+            if (id is not { } observedId) _legacyBreakpointEventsIncomplete = true;
+            else if (_legacyBreakpointIds.TryGetValue(observedId, out var owner))
+            {
+                if (owner != incarnation) _legacyBreakpointEventsIncomplete = true;
+            }
+            else if (_legacyBreakpointIds.Count >= 4096) _legacyBreakpointEventsIncomplete = true;
+            else _legacyBreakpointIds[observedId] = incarnation;
+            next.Add(new LegacyBreakpointObservation(file, line, incarnation, observation.Verified,
+                observation.ActualLine == line ? null : observation.ActualLine, id, count, false));
+        }
+        if (next.Count == 0) _legacyBreakpointObservations.Remove(file);
+        else _legacyBreakpointObservations[file] = next;
+        try { _resourceEventObserver?.Invoke("breakpoint"); } catch (Exception) { }
+    }
+
+    private void ObserveLegacyBreakpointEvent(JsonElement body)
+    {
+        if (body.ValueKind != JsonValueKind.Object || !body.TryGetProperty("breakpoint", out var value) || value.ValueKind != JsonValueKind.Object
+            || TryGetInt32(value, "id") is not { } id || TryGetString(body, "reason") is not { } reason)
+            return;
+        lock (_stateGate)
+        {
+            if (_legacyBreakpointEventsIncomplete) return;
+            foreach (var observations in _legacyBreakpointObservations.Values)
+            {
+                for (var index = 0; index < observations.Count; index++)
+                {
+                    var previous = observations[index];
+                    if (previous.Id != id || previous.Removed) continue;
+                    LegacyBreakpointObservation updated;
+                    if (reason == "removed") updated = previous with { Removed = true };
+                    else if (reason is "changed" or "new")
+                    {
+                        if (!value.TryGetProperty("verified", out var verified) || verified.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return;
+                        var line = TryGetInt32(value, "line");
+                        updated = previous with { Verified = verified.GetBoolean(), DapLine = line is null ? previous.DapLine : line == previous.Line ? null : line };
+                    }
+                    else return;
+                    if (updated != previous)
+                    {
+                        if (updated.Removed) _legacyRemovedBreakpoints[updated.Incarnation] = updated;
+                        observations[index] = updated;
+                        try { _resourceEventObserver?.Invoke("breakpoint"); } catch (Exception) { }
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    internal LegacyBreakpointObservation[] CaptureLegacyBreakpoints()
+    {
+        lock (_stateGate)
+        {
+            var result = _legacyRemovedBreakpoints.Values.Concat(_legacyBreakpointObservations.Values.SelectMany(static value => value)).ToArray();
+            _legacyRemovedBreakpoints.Clear();
+            return result;
+        }
+    }
+
+    internal long GetLegacyHitCount(string file, int line)
+    {
+        lock (_stateGate)
+            return _legacyHitCounts.TryGetValue(file, out var counts) && counts.TryGetValue(line, out var count) ? count : 0;
+    }
+
+    internal T WithLegacyBreakpointLock<T>(Func<T> action)
+    {
+        lock (_stateGate) return action();
+    }
+
+    internal bool LegacyBreakpointEventsComplete { get { lock (_stateGate) return !_legacyBreakpointEventsIncomplete; } }
+
+    internal static bool TryNormalizeLegacyBreakpointSource(string file, out string normalized, bool requireExistingFile)
+    {
+        normalized = string.Empty;
+        try
+        {
+            var fullPath = Path.GetFullPath(file, Environment.CurrentDirectory);
+            if (requireExistingFile && !File.Exists(fullPath)) return false;
+            var root = Path.GetPathRoot(fullPath)!;
+            var components = fullPath[root.Length..].Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
+            var path = root;
+            for (var index = 0; index < components.Length; index++)
+            {
+                path = Path.Combine(path, components[index]);
+                FileSystemInfo entry = index == components.Length - 1 ? new FileInfo(path) : new DirectoryInfo(path);
+                if (entry.Exists && entry.LinkTarget is not null)
+                {
+                    var target = entry.ResolveLinkTarget(returnFinalTarget: true);
+                    if (target is null) return false;
+                    path = target.FullName;
+                }
+            }
+            if (requireExistingFile && !File.Exists(path)) return false;
+            normalized = path;
+            return true;
+        }
+        catch (Exception exception) when (exception is ArgumentException
+            or IOException or NotSupportedException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            return false;
+        }
+    }
+
+    private void ScheduleLegacyBreakpointHit(int threadId, string context, LegacyBreakpointObservation[] captured)
+    {
+        if (Interlocked.CompareExchange(ref _legacyHitObservationActive, 1, 0) != 0)
+        {
+            lock (_stateGate) _legacyHitCountsIncomplete = true;
+            return;
+        }
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                var stack = await GetCallStackAsync(threadId, 0, 1, true, timeout.Token).ConfigureAwait(false);
+                if (stack.IsRefused || stack.Frames.Count == 0 || stack.Frames[0].Source is not { } frameSource
+                    || stack.Frames[0].Line <= 0 || !TryNormalizeLegacyBreakpointSource(frameSource, out var source, requireExistingFile: false))
+                {
+                    lock (_stateGate) _legacyHitCountsIncomplete = true;
+                    return;
+                }
+                var frame = stack.Frames[0];
+                lock (_stateGate)
+                {
+                    if (_inspectionClosed || _state.Event != "stopped" || _state.CurrentThreadId != threadId
+                        || !StringComparer.Ordinal.Equals(_inspectionContextId, context))
+                    {
+                        _legacyHitCountsIncomplete = true;
+                        return;
+                    }
+                    foreach (var item in captured)
+                    {
+                        if (!item.Removed && _requestedBreakpoints.Comparer.Equals(item.File, source) && (item.Line == frame.Line || item.DapLine == frame.Line))
+                        {
+                            if (!_legacyHitCounts.TryGetValue(source, out var counts))
+                            {
+                                if (_legacyHitCountLocations >= MaximumBreakpointCount) { _legacyHitCountsIncomplete = true; return; }
+                                _legacyHitCounts[source] = counts = [];
+                            }
+                            if (!counts.TryGetValue(item.Line, out var count))
+                            {
+                                if (_legacyHitCountLocations >= MaximumBreakpointCount) { _legacyHitCountsIncomplete = true; return; }
+                                _legacyHitCountLocations++;
+                            }
+                            counts[item.Line] = checked(count + 1);
+                            if (_legacyBreakpointObservations.TryGetValue(source, out var current))
+                            {
+                                var index = current.FindIndex(entry => entry.Incarnation == item.Incarnation);
+                                if (index >= 0) current[index] = current[index] with { HitCount = counts[item.Line] };
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+            catch (Exception) { lock (_stateGate) _legacyHitCountsIncomplete = true; }
+            finally { Volatile.Write(ref _legacyHitObservationActive, 0); }
+        });
+    }
+
+    internal bool LegacyHitCountsComplete { get { lock (_stateGate) return !_legacyHitCountsIncomplete && Volatile.Read(ref _legacyHitObservationActive) == 0; } }
+
     internal Task<DapBreakpointUpdateResult> AddBreakpointAsync(string file, int line, CancellationToken cancellationToken) =>
         UpdateBreakpointAsync(file, line, remove: false, cancellationToken);
 
     internal Task<DapBreakpointUpdateResult> RemoveBreakpointAsync(string file, int line, CancellationToken cancellationToken) =>
         UpdateBreakpointAsync(file, line, remove: true, cancellationToken);
 
-    internal Task<DapBreakpointUpdateResult> ReplaceBreakpointsAsync(string file, int line, bool remove, int[] requestedLines, CancellationToken cancellationToken) =>
+    internal Task<DapBreakpointUpdateResult> ReplaceBreakpointsAsync(string file, int line, bool remove, LegacyRequestedLine[] requestedLines, CancellationToken cancellationToken) =>
         UpdateBreakpointAsync(file, line, remove, cancellationToken, requestedLines);
 
     internal async Task<DapBreakpointUpdateResult> ConfigureExceptionsAsync(string[] filters, CancellationToken cancellationToken)
@@ -1857,7 +2044,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
-    private async Task<DapBreakpointUpdateResult> UpdateBreakpointAsync(string file, int line, bool remove, CancellationToken cancellationToken, int[]? requestedLines = null)
+    private async Task<DapBreakpointUpdateResult> UpdateBreakpointAsync(string file, int line, bool remove, CancellationToken cancellationToken, LegacyRequestedLine[]? requestedLines = null)
     {
         await _breakpointUpdateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         BreakpointUpdate? update = null;
@@ -1887,8 +2074,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                         requested = new DapRequestedBreakpoint[requestedLines.Length];
                         for (var index = 0; index < requestedLines.Length; index++)
                         {
-                            requested[index] = new DapRequestedBreakpoint(requestedLines[index]);
-                            if (!remove && requestedLines[index] == line) targetIndex = index;
+                            requested[index] = new DapRequestedBreakpoint(requestedLines[index].Line, requestedLines[index].Incarnation);
+                            if (!remove && requestedLines[index].Line == line) targetIndex = index;
                         }
                     }
                     else if (remove)
@@ -2087,9 +2274,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         string command,
         object? arguments,
         TimeSpan timeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        InitialBreakpointRequest? initialBreakpoints = null)
     {
-        var request = await BeginRequestAsync(command, arguments, timeout, cancellationToken).ConfigureAwait(false);
+        var request = await BeginRequestAsync(command, arguments, timeout, cancellationToken, initialBreakpoints: initialBreakpoints).ConfigureAwait(false);
         try
         {
             return await WaitForResponseAsync(request, timeout, cancellationToken).ConfigureAwait(false);
@@ -2197,7 +2385,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         ContinueRecord? continueExecution = null,
         BreakpointUpdate? breakpointUpdate = null,
         PauseRecord? pause = null,
-        bool trackLoadedSourcesWrite = false)
+        bool trackLoadedSourcesWrite = false,
+        InitialBreakpointRequest? initialBreakpoints = null)
     {
         if (Volatile.Read(ref _readerFailure) is { } readerFailure)
         {
@@ -2209,7 +2398,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         continueExecution?.SetRequestSequence(sequence);
         breakpointUpdate?.SetRequestSequence(sequence);
         var request = new PendingRequest(sequence, command, stackTraceTarget, stepOver,
-            inspectionContextId ?? stackTraceTarget?.InspectionContextId, continueExecution, breakpointUpdate, pause);
+            inspectionContextId ?? stackTraceTarget?.InspectionContextId, continueExecution, breakpointUpdate, pause, initialBreakpoints);
         if (pause is not null)
         {
             lock (_stateGate)
@@ -2580,6 +2769,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             RefreshLoadedSources(body);
         }
+        if (_resourceEventObserver is not null && success.ValueKind == JsonValueKind.True && request.InitialBreakpoints is { } initial)
+        {
+            lock (_stateGate) ObserveLegacyBreakpointResponse(initial.File, initial.Requested, body);
+        }
 
         if (request.StepOver is { } stepOver)
         {
@@ -2618,6 +2811,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 }
                 else
                 {
+                    if (_resourceEventObserver is not null) ObserveLegacyBreakpointResponse(update.File, update.Requested, body);
                     var results = RequireBreakpointResults(body, update.Requested.Length);
                     var selected = default(DapBreakpointObservation);
                     var index = 0;
@@ -2755,6 +2949,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     try { _resourceEventObserver?.Invoke("output"); }
                     catch (Exception) { }
                 }
+                break;
+            case "breakpoint":
+                if (_resourceEventObserver is not null) ObserveLegacyBreakpointEvent(body);
                 break;
             case "loadedSource":
                 HandleLoadedSourceEvent(body);
@@ -3389,6 +3586,12 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 else if (!_inspectionClosed && threadId is { } stoppedThreadId)
                 {
                     (_threadEligibility ??= new())[stoppedThreadId] = new CallStackEligibility();
+                }
+                if (_resourceEventObserver is not null && _legacyBreakpointObservations.Count != 0 && reason == "breakpoint")
+                {
+                    if (threadId is { } hitThread && HasStepOverAuthority(hitThread))
+                        ScheduleLegacyBreakpointHit(hitThread, GetOrCreateInspectionContext(), _legacyBreakpointObservations.Values.SelectMany(static value => value).ToArray());
+                    else _legacyHitCountsIncomplete = true;
                 }
                 _activeStepOver?.ObserveStopped(message, reason, threadId);
             }
@@ -4945,7 +5148,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         string? inspectionContextId = null,
         ContinueRecord? continueExecution = null,
         BreakpointUpdate? breakpointUpdate = null,
-        PauseRecord? pause = null)
+        PauseRecord? pause = null,
+        InitialBreakpointRequest? initialBreakpoints = null)
     {
         public int Sequence { get; } = sequence;
         public string Command { get; } = command;
@@ -4954,6 +5158,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         public ContinueRecord? ContinueExecution { get; } = continueExecution;
         public BreakpointUpdate? BreakpointUpdate { get; } = breakpointUpdate;
         public PauseRecord? Pause { get; } = pause;
+        public InitialBreakpointRequest? InitialBreakpoints { get; } = initialBreakpoints;
         public string? InspectionContextId { get; } = inspectionContextId;
         private int _writeStarted;
         private int _committedWrite;
@@ -5264,7 +5469,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private sealed record DapBreakpointSource([property: JsonPropertyName("path")] string Path);
 
-    private readonly record struct DapRequestedBreakpoint([property: JsonPropertyName("line")] int Line);
+    private readonly record struct DapRequestedBreakpoint([property: JsonPropertyName("line")] int Line, [property: JsonIgnore] long Incarnation = 0);
+    private sealed record InitialBreakpointRequest(string File, DapRequestedBreakpoint[] Requested);
 
     private readonly record struct DapBreakpointObservation(bool Verified, int? ActualLine);
 
@@ -5329,13 +5535,16 @@ internal sealed class DapStartupCleanupException(Exception startupFailure, Excep
 
 internal sealed class DapLaunchRefusedException() : Exception("DAP launch request was refused.");
 
-internal readonly record struct DapSourceBreakpoint(int Index, string File, int Line);
+internal readonly record struct DapSourceBreakpoint(int Index, string File, int Line, long Incarnation = 0);
+internal readonly record struct LegacyRequestedLine(int Line, long Incarnation);
 
 internal readonly record struct DapInitialBreakpoint(
     [property: JsonPropertyName("index")] int Index,
     [property: JsonPropertyName("verified")] bool Verified,
     [property: JsonPropertyName("actualLine")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? ActualLine);
+
+internal sealed record LegacyBreakpointObservation(string File, int Line, long Incarnation, bool Verified, int? DapLine, int? Id, long HitCount, bool Removed);
 
 internal sealed class DapBreakpointsException(bool isRefused) : Exception(
     isRefused ? "DAP refused source breakpoint configuration." : "DAP source breakpoint configuration failed.")

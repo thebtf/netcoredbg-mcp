@@ -87,7 +87,7 @@ synchronize. A blocked transport can delay any response, but debugger start, sto
 and shutdown do not wait for notification delivery internally.
 Output reads return the current retained buffer, including an empty idle buffer;
 thread reads issue a native threads request and report errors when unavailable.
-`debug://state`, `debug://breakpoints`, and complete resource parity remain open.
+`debug://state` and complete resource parity remain open.
 A second start is refused until the bound session is stopped. An observed DAP
 exit or termination and its observed exit code remain visible until explicit
 stop, including while cleanup is in progress; failed cleanup or a retirement
@@ -123,8 +123,18 @@ an explicit start can resend the desired set after the prior session is cleaned 
 Sources for adds must exist. Paths are relative to the host's startup working
 directory and existing links are resolved, but lexical `..` is collapsed before
 link resolution and dangling links are not resolved, unlike Python `realpath`.
-Listing, clearing, function breakpoints and the breakpoint resource are not
-implemented by this route.
+`list_breakpoints`, `clear_breakpoints` and the subscribable
+`debug://breakpoints` resource cover these unconditional source locations only.
+Verification and adjusted lines come from DAP acknowledgements and matching
+breakpoint events; a matched removal event removes the requested entry. If IDs
+are missing, reused or exceed the observation limit, listing and resource reads
+return an error instead of stale observations, including after stop. Clearing all
+requested entries or a later start with complete observations restores reads.
+Hit counts are derived asynchronously from the current stopped thread's top
+frame and reset on stop. While attribution is pending or unavailable, listing returns
+an error rather than a fabricated count. Clear records all requested removals first;
+on a file-set refusal or uncertain result it stops dispatching further files and
+does not retry automatically. Conditional and function breakpoints remain unsupported.
 
 `set_variable` requires mux ownership and the calling client's selected stopped
 context. After an admitted attempt, select a fresh stack before inspecting or
