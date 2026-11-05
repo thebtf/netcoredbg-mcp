@@ -312,6 +312,9 @@ internal static class Program
         private const int MaximumSerializedCallStackBytes = 256 * 1024;
         private const int MaximumSerializedInspectionBytes = 256 * 1024;
         private const int MaximumBreakpointCount = 256;
+        private readonly Dictionary<string, UtilitySnapshot> _utilitySnapshots = new(StringComparer.Ordinal);
+        private readonly Queue<string> _utilitySnapshotOrder = new();
+        private sealed record UtilitySnapshot(string Name, double Timestamp, string Frame, Dictionary<string, (string Value, string Type)> Variables);
 
         private readonly ConcurrentDictionary<string, NetCoreDbgSession> _sessions = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, SessionSlot> _slots = new(StringComparer.Ordinal);
@@ -731,7 +734,8 @@ internal static class Program
             if (name is not (StartDebug or GetDebugState or GetThreads or GetCallStack or StepOver or StepInto or StepOut
                 or PauseExecution or ContinueExecution or StopDebug or GetOutput or GetOutputTail
                 or AddBreakpoint or RemoveBreakpoint or ListBreakpoints or ClearBreakpoints or GetScopes or GetVariables or EvaluateExpression
-                or SetVariable or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets))
+                or SetVariable or ConfigureExceptions or GetExceptionInfo or GetStopContext or GetExceptionContext or GetModules or GetProgress or GetLoadedSources or GetStepInTargets
+                or "create_snapshot" or "list_snapshots" or "diff_snapshots" or "analyze_collection" or "summarize_object"))
                 return UnknownTool(name);
             var arguments = context.Params.Arguments is null
                 ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
@@ -796,7 +800,8 @@ internal static class Program
                     && (!arguments.TryGetValue("max_inner_exceptions", out var innerDepth)
                         || !TryReadOutputLineCount(innerDepth, out var depth) || depth != 0);
                 var mutation = name is StartDebug or StopDebug or StepOver or StepInto or StepOut or PauseExecution
-                    or ContinueExecution or AddBreakpoint or RemoveBreakpoint or ClearBreakpoints or EvaluateExpression or SetVariable or ConfigureExceptions or GetStepInTargets || consumesOutput || compositeMayEvaluate;
+                    or ContinueExecution or AddBreakpoint or RemoveBreakpoint or ClearBreakpoints or EvaluateExpression or SetVariable or ConfigureExceptions or GetStepInTargets
+                    or "create_snapshot" or "analyze_collection" or "summarize_object" || consumesOutput || compositeMayEvaluate;
                 var raw = context.JsonRpcRequest.Params as JsonObject;
                 var mux = raw?["_meta"]?["muxSessionId"];
                 if (mux is not null && (mux is not JsonValue muxValue || !muxValue.TryGetValue<string>(out _)))
@@ -1057,6 +1062,52 @@ internal static class Program
                     return TryReadOutputTailArguments(idleArguments, out _, out _, out _)
                         ? LegacyResponse(new { total_lines = 0, returned_lines = 0, output = string.Empty })
                         : LegacyError("Unsupported or invalid argument.");
+                }
+                if (name is "list_snapshots" or "diff_snapshots")
+                    return LegacyStoredSnapshots(name, arguments);
+                if (name is "create_snapshot" or "analyze_collection" or "summarize_object")
+                {
+                    if (name == "create_snapshot" && arguments.TryGetValue("name", out var snapshotName)
+                        && snapshotName.ValueKind == JsonValueKind.String && snapshotName.GetString() is { } requestedName
+                        && _utilitySnapshots.ContainsKey(requestedName)) return LegacyError($"Snapshot '{requestedName}' already exists.");
+                    if (_legacySessionId is not { } utilitySession || !_sessions.TryGetValue(utilitySession, out var utilityOwner)
+                        || !_slots.TryGetValue(utilitySession, out var utilitySlot)) return LegacyError("No active debug session.");
+                    var captured = utilityOwner.CaptureStoppedContext();
+                    if (captured is null) return LegacyError("No current stopped context.");
+                    if (name != "create_snapshot" && (_legacyInspectionSessionId != utilitySession
+                        || !StringComparer.Ordinal.Equals(_legacyInspectionMuxId, muxId)
+                        || !StringComparer.Ordinal.Equals(_legacyInspectionContextId, captured.Value.Context)))
+                        return LegacyError("Call get_call_stack for the current stopped context first.");
+                    var revision = _legacyInspectionRevision;
+                    _legacyCompositeEvaluations++;
+                    compositeEvaluationHeld = true;
+                    _legacyGate.Release();
+                    gateHeld = false;
+                    var utility = await ReadLegacyUtilityAsync(name, arguments, utilityOwner, utilitySlot, captured.Value.State.CurrentThreadId!.Value,
+                        captured.Value.Context, cancellationToken).ConfigureAwait(false);
+                    await _legacyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                    gateHeld = true;
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (_legacySessionId != utilitySession || revision != _legacyInspectionRevision
+                        || !_sessions.TryGetValue(utilitySession, out var currentUtility) || !ReferenceEquals(currentUtility, utilityOwner))
+                        return LegacyError("Stopped inspection context changed before the operation completed.", "unknown");
+                    return utilityOwner.WithLegacyBreakpointLock(() =>
+                    {
+                        if (!utilityOwner.IsStoppedContextCurrent(captured.Value.State.CurrentThreadId!.Value, captured.Value.Context))
+                            return LegacyError("Stopped inspection context changed before the operation completed.", "unknown");
+                        if (utility.Error is not null) return LegacyError(utility.Error, "stopped");
+                        var response = LegacyBoundedUtilityResponse(utility.Data!, "stopped");
+                        if (response.StructuredContent is { } failure && failure.TryGetProperty("error", out _)) return response;
+                        if (utility.Snapshot is { } snapshot)
+                        {
+                            if (_utilitySnapshots.ContainsKey(snapshot.Name)) return LegacyError($"Snapshot '{snapshot.Name}' already exists.", "stopped");
+                            if (!TryUtilityLimits(out var maxSnapshots, out _)) return LegacyError("Invalid snapshot limits.", "stopped");
+                            while (_utilitySnapshots.Count >= maxSnapshots) _utilitySnapshots.Remove(_utilitySnapshotOrder.Dequeue());
+                            _utilitySnapshots.Add(snapshot.Name, snapshot);
+                            _utilitySnapshotOrder.Enqueue(snapshot.Name);
+                        }
+                        return response;
+                    });
                 }
                 if (_legacySessionId is not { } sessionId) return LegacyError("No active debug session.");
                 var targetedStep = false;
@@ -1610,6 +1661,11 @@ internal static class Program
                     GetExceptionInfo => key != "thread_id",
                     GetStopContext => key is not ("include_variables" or "include_output_tail"),
                     GetExceptionContext => key is not ("max_frames" or "include_variables_for_frames" or "max_inner_exceptions"),
+                    "create_snapshot" => key != "name",
+                    "list_snapshots" => true,
+                    "diff_snapshots" => key is not ("name1" or "name2"),
+                    "analyze_collection" => key is not ("variables_reference" or "sample_size"),
+                    "summarize_object" => key is not ("variables_reference" or "max_depth" or "max_properties"),
                     StepOver or StepOut or PauseExecution or ContinueExecution => key != "thread_id",
                     StepInto => key is not ("thread_id" or "target_id"),
                     GetOutput => key is not ("clear" or "category"),
@@ -1619,6 +1675,180 @@ internal static class Program
                 if (invalid) return true;
             }
             return false;
+        }
+
+        private sealed record UtilityResult(object? Data = null, UtilitySnapshot? Snapshot = null, string? Error = null);
+
+        private static bool TryUtilityLimits(out int snapshots, out int variables)
+        {
+            static bool Read(string key, int fallback, int maximum, out int value)
+            {
+                var text = Environment.GetEnvironmentVariable(key);
+                value = fallback;
+                return text is null || (int.TryParse(text, System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out value) && value > 0 && value <= maximum);
+            }
+            var valid = Read("NETCOREDBG_MAX_SNAPSHOTS", 20, 1024, out snapshots);
+            return Read("NETCOREDBG_MAX_VARS_PER_SNAPSHOT", 200, 256, out variables) && valid;
+        }
+
+        private CallToolResult LegacyBoundedUtilityResponse(object data, string state)
+        {
+            var result = LegacyResponse(data, state);
+            return result.StructuredContent is { } body && Encoding.UTF8.GetByteCount(body.GetRawText()) <= MaximumSerializedInspectionBytes
+                ? result : LegacyError("Inspection result exceeds 256 KiB.", state);
+        }
+
+        private CallToolResult LegacyStoredSnapshots(string name, Dictionary<string, JsonElement> arguments)
+        {
+            if (name == "list_snapshots")
+                return LegacyBoundedUtilityResponse(new
+                {
+                    snapshots = _utilitySnapshotOrder.Select(key => _utilitySnapshots[key]).Select(static snapshot => new
+                    { name = snapshot.Name, timestamp = snapshot.Timestamp, frame = snapshot.Frame, variable_count = snapshot.Variables.Count }).ToArray()
+                }, LegacySnapshot().State);
+            if (!arguments.TryGetValue("name1", out var first) || first.ValueKind != JsonValueKind.String
+                || !arguments.TryGetValue("name2", out var second) || second.ValueKind != JsonValueKind.String)
+                return LegacyError("Snapshot names are required.");
+            var one = first.GetString()!; var two = second.GetString()!;
+            if (!_utilitySnapshots.TryGetValue(one, out var left) || !_utilitySnapshots.TryGetValue(two, out var right))
+                return LegacyError("Snapshot not found.");
+            var added = new List<object>(); var removed = new List<object>(); var changed = new List<object>(); var unchanged = 0;
+            foreach (var key in left.Variables.Keys.Union(right.Variables.Keys).OrderBy(static item => item, StringComparer.Ordinal))
+            {
+                var hasLeft = left.Variables.TryGetValue(key, out var oldValue);
+                var hasRight = right.Variables.TryGetValue(key, out var newValue);
+                if (!hasLeft) added.Add(new { name = key, value = newValue.Value, type = newValue.Type });
+                else if (!hasRight) removed.Add(new { name = key, value = oldValue.Value, type = oldValue.Type });
+                else if (oldValue != newValue) changed.Add(new { name = key, old_value = oldValue.Value, new_value = newValue.Value, type = newValue.Type });
+                else unchanged++;
+            }
+            return LegacyBoundedUtilityResponse(new { snapshot1 = one, snapshot2 = two, added, removed, changed, unchanged_count = unchanged }, LegacySnapshot().State);
+        }
+
+        private static bool UtilityNumber(Dictionary<string, JsonElement> arguments, string key, int fallback, int minimum, int maximum, out int value)
+        {
+            value = fallback;
+            if (!arguments.TryGetValue(key, out var input)) return true;
+            if (!TryReadOutputLineCount(input, out var number) || number < minimum || number > maximum) return false;
+            value = (int)number;
+            return true;
+        }
+
+        private async Task<UtilityResult> ReadLegacyUtilityAsync(string tool, Dictionary<string, JsonElement> arguments,
+            NetCoreDbgSession session, SessionSlot slot, int thread, string context, CancellationToken cancellationToken)
+        {
+            var lease = slot.TryAcquire();
+            if (lease is null) return new(Error: "No active debug session.");
+            var close = false;
+            try
+            {
+                if (!_isUsable(session)) { close = true; return new(Error: "No active debug session."); }
+                using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.AbortToken);
+                var token = operation.Token;
+                var bytes = 0;
+                async Task<IReadOnlyList<DapVariable>> ReadVariables(int reference)
+                {
+                    var result = await session.GetVariablesAsync(context, reference, null, null, token).ConfigureAwait(false);
+                    if (result.IsRefused) throw new ArgumentException("Stopped inspection context is unavailable.");
+                    foreach (var variable in result.Variables)
+                    {
+                        bytes = checked(bytes + Encoding.UTF8.GetByteCount(variable.Name) + Encoding.UTF8.GetByteCount(variable.Value)
+                            + (variable.Type is null ? 0 : Encoding.UTF8.GetByteCount(variable.Type)) + 64);
+                        if (bytes > MaximumSerializedInspectionBytes) throw new ArgumentException("Inspection work budget exceeded.");
+                    }
+                    return result.Variables;
+                }
+                if (tool == "create_snapshot")
+                {
+                    if (!arguments.TryGetValue("name", out var nameValue) || nameValue.ValueKind != JsonValueKind.String
+                        || nameValue.GetString() is not { } name || name.Length > 1024) return new(Error: "Invalid snapshot name.");
+                    if (!TryUtilityLimits(out _, out var maxVariables)) return new(Error: "Invalid snapshot limits.");
+                    var stack = await session.GetCallStackAsync(thread, 0, 1, true, token).ConfigureAwait(false);
+                    if (stack.IsRefused || stack.InspectionContextId != context || stack.Frames.Count == 0)
+                        return new(Error: "No current stack frame.");
+                    var scopes = await session.GetScopesAsync(context, stack.Frames[0].Id, token).ConfigureAwait(false);
+                    if (scopes.IsRefused) return new(Error: "Stopped inspection context is unavailable.");
+                    var values = new Dictionary<string, (string Value, string Type)>(StringComparer.Ordinal);
+                    foreach (var scope in scopes.Scopes)
+                    {
+                        if (scope.VariablesReference <= 0) continue;
+                        foreach (var variable in await ReadVariables(scope.VariablesReference).ConfigureAwait(false))
+                        {
+                            if (!values.ContainsKey(variable.Name) && values.Count >= maxVariables)
+                                return new(Error: "Snapshot variable limit exceeded.");
+                            values[variable.Name] = (variable.Value, variable.Type ?? "");
+                        }
+                    }
+                    var timestamp = Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
+                    var snapshot = new UtilitySnapshot(name, timestamp, stack.Frames[0].Name, values);
+                    return new(new { name, frame = snapshot.Frame, variable_count = values.Count, timestamp }, snapshot);
+                }
+                if (!arguments.ContainsKey("variables_reference") || !UtilityNumber(arguments, "variables_reference", 0, 1, int.MaxValue, out var reference))
+                    return new(Error: "A valid variables_reference is required.");
+                if (tool == "analyze_collection")
+                {
+                    if (!UtilityNumber(arguments, "sample_size", 5, 1, 256, out var sample)) return new(Error: "Invalid sample_size.");
+                    var items = await ReadVariables(reference).ConfigureAwait(false);
+                    if (items.Count == 0) return new(Error: "No items found. Variable may not be a collection or reference is expired.");
+                    object Project(DapVariable item) => new { name = item.Name, value = item.Value, type = item.Type ?? "" };
+                    var result = new Dictionary<string, object?>
+                    {
+                        ["count"] = items.Count,
+                        ["element_type"] = items[0].Type ?? "unknown",
+                        ["null_count"] = items.Count(static item => item.Value is "null" or "Nothing" or "None" or ""),
+                        ["first_items"] = items.Take(sample).Select(Project).ToArray(),
+                        ["last_items"] = items.Count > sample ? items.TakeLast(sample).Select(Project).ToArray() : Array.Empty<object>(),
+                        ["duplicate_count"] = items.Count - items.Select(static item => item.Value).Distinct(StringComparer.Ordinal).Count()
+                    };
+                    var numeric = new List<double>();
+                    foreach (var item in items)
+                        if (double.TryParse(item.Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var number))
+                        {
+                            if (!double.IsFinite(number)) return new(Error: "Non-finite numeric values are unsupported.");
+                            numeric.Add(number);
+                        }
+                    if (numeric.Count > 0)
+                    {
+                        var sum = numeric.Sum();
+                        if (!double.IsFinite(sum)) return new(Error: "Numeric total is out of range.");
+                        result["min"] = numeric.Min(); result["max"] = numeric.Max(); result["sum"] = sum; result["average"] = sum / numeric.Count;
+                    }
+                    return new(result);
+                }
+                if (!UtilityNumber(arguments, "max_depth", 2, int.MinValue, int.MaxValue, out var depth)
+                    || !UtilityNumber(arguments, "max_properties", 50, 1, 256, out var limit)) return new(Error: "Invalid object summary limits.");
+                depth = Math.Clamp(depth, 1, 5);
+                var properties = new List<object>(); var ancestors = new HashSet<int>(); var requests = 0;
+                async Task Walk(int referenceId, string prefix, int level)
+                {
+                    if (level > depth || properties.Count >= limit) return;
+                    if (!ancestors.Add(referenceId)) { properties.Add(new { path = prefix.Length == 0 ? "<root>" : prefix, value = "<circular ref>", type = "" }); return; }
+                    if (++requests > 256) throw new ArgumentException("Object traversal limit exceeded.");
+                    try
+                    {
+                        foreach (var variable in await ReadVariables(referenceId).ConfigureAwait(false))
+                        {
+                            if (properties.Count >= limit) break;
+                            var path = prefix.Length == 0 ? variable.Name : prefix + "." + variable.Name;
+                            properties.Add(new { path, value = variable.Value, type = variable.Type ?? "" });
+                            if (variable.VariablesReference > 0 && level < depth)
+                                await Walk(variable.VariablesReference, path, level + 1).ConfigureAwait(false);
+                        }
+                    }
+                    finally { ancestors.Remove(referenceId); }
+                }
+                await Walk(reference, "", 0).ConfigureAwait(false);
+                return new(new { properties, total_properties = properties.Count, truncated = properties.Count >= limit, depth_reached = depth });
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { close = session.RequiresInspectionDrain(); throw; }
+            catch (ArgumentException exception) { return new(Error: exception.Message); }
+            catch (Exception) { close = true; return new(Error: "Inspection failed or context became unavailable."); }
+            finally
+            {
+                lease.Dispose();
+                if (close) { try { await slot.CloseAndDrainAsync().ConfigureAwait(false); } catch (Exception) { } }
+            }
         }
 
         private static CallToolRequestParams LegacyRequest(string name, string sessionId, Dictionary<string, JsonElement>? arguments)
@@ -5796,7 +6026,12 @@ internal static class Program
                 Tool("configure_exceptions", "Replace exception filters with owner permission. Omitted or null filters select an empty list.", """{"type":"object","properties":{"filters":{"type":["array","null"],"items":{"type":"string"}}},"additionalProperties":false}"""),
                 Tool("get_exception_info", "Read exception information for the observed stopped context and optional thread.", """{"type":"object","properties":{"thread_id":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647}},"additionalProperties":false}"""),
                 Tool("get_stop_context", "Read the implicit stopped context with bounded frames, first-scope locals, observed breakpoint hit counts and recent output. Pending or unavailable hit counts are refused.", """{"type":"object","properties":{"include_variables":{"type":"boolean"},"include_output_tail":{"type":"integer","minimum":0,"maximum":100}},"additionalProperties":false}"""),
-                Tool("get_exception_context", "Read the implicit exception context. Inner exception evaluation defaults to depth 5, may execute code and requires mux ownership; uncertain outcomes are not retried. Only the first available scope per frame is included.", """{"type":"object","properties":{"max_frames":{"type":"integer","minimum":1,"maximum":20},"include_variables_for_frames":{"type":"integer","minimum":0,"maximum":5},"max_inner_exceptions":{"type":"integer","minimum":0,"maximum":5}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = false, IdempotentHint = false, DestructiveHint = true }),
+                Tool("get_exception_context", "Read the implicit exception context. Inner exception evaluation defaults to depth 5, may execute code and requires mux ownership; uncertain outcomes are not retried. Available scopes are included for selected frames within native bounds.", """{"type":"object","properties":{"max_frames":{"type":"integer","minimum":1,"maximum":20},"include_variables_for_frames":{"type":"integer","minimum":0,"maximum":5},"max_inner_exceptions":{"type":"integer","minimum":0,"maximum":5}},"additionalProperties":false}""", new ToolAnnotations { ReadOnlyHint = false, IdempotentHint = false, DestructiveHint = true }),
+                Tool("create_snapshot", "Capture all current-frame scope variables in a process-local snapshot; requires mux ownership. Oversized snapshots are refused.", """{"type":"object","properties":{"name":{"type":"string","maxLength":1024}},"required":["name"],"additionalProperties":false}"""),
+                Tool("list_snapshots", "List process-local snapshots in creation order.", """{"type":"object","properties":{},"additionalProperties":false}"""),
+                Tool("diff_snapshots", "Compare named process-local snapshots in sorted name order.", """{"type":"object","properties":{"name1":{"type":"string"},"name2":{"type":"string"}},"required":["name1","name2"],"additionalProperties":false}"""),
+                Tool("analyze_collection", "Analyze bounded variables in the selected stopped context; mux ownership is required.", """{"type":"object","properties":{"variables_reference":{"type":"integer","minimum":1,"maximum":2147483647},"sample_size":{"type":"integer","minimum":1,"maximum":256}},"required":["variables_reference"],"additionalProperties":false}"""),
+                Tool("summarize_object", "Summarize a bounded object graph in the selected stopped context; mux ownership is required.", """{"type":"object","properties":{"variables_reference":{"type":"integer","minimum":1,"maximum":2147483647},"max_depth":{"type":"integer"},"max_properties":{"type":"integer","minimum":1,"maximum":256}},"required":["variables_reference"],"additionalProperties":false}"""),
                 Tool("get_modules", "Read the bounded module event inventory for the implicit session.", """{"type":"object","properties":{},"additionalProperties":false}"""),
                 Tool("get_progress", "Read the bounded progress event inventory for the implicit session.", """{"type":"object","properties":{},"additionalProperties":false}"""),
                 Tool("get_loaded_sources", "Query and refresh loaded sources when the debugger supports it.", """{"type":"object","properties":{},"additionalProperties":false}"""),

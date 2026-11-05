@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The opt-in native legacy route adds process-local FIFO snapshots, snapshot diffs, collection statistics and bounded recursive object summaries. Snapshot capture and live inspection require mux ownership and current stopped-epoch fencing; output and traversal limits return errors instead of silent native truncation. Python remains the installed default.
 - The opt-in legacy route adds `debug://state` and connection-scoped update subscriptions, using reader-observed sources, modules and progress. Unknown thread data and active debuggee liveness remain null; incomplete or oversized state returns an error. Inventories are not an atomic debuggee snapshot, and full Python resource parity and consumer proof remain open.
 - The opt-in legacy breakpoint hit counter uses the debugger-adjusted line when present, preventing a requested-line collision from crediting the wrong breakpoint. Shared effective lines make attribution unavailable rather than arbitrary; both behaviors differ from Python's first-match behavior.
 - The opt-in native `--legacy-compat` route adds Python-envelope stop and exception contexts, fenced to one stopped epoch. Exception-chain evaluation defaults to depth 5 and requires mux ownership; uncertain evaluations are not retried. Exception locals include each available scope within native size bounds, and pending hit observations are refused. Python remains the installed default.

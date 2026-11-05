@@ -50,7 +50,8 @@ The source-built stateful host has an experimental, explicitly selected
 only `start_debug`, `get_debug_state`, `get_threads`, `get_call_stack`,
 `get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`,
 `add_breakpoint`, `remove_breakpoint`, `configure_exceptions`, `get_exception_info`,
-`get_stop_context`, `get_exception_context`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`,
+`get_stop_context`, `get_exception_context`, `create_snapshot`, `list_snapshots`,
+`diff_snapshots`, `analyze_collection`, `summarize_object`, `get_modules`, `get_progress`, `get_loaded_sources`, `get_step_in_targets`,
 `step_over`, `step_into`, `step_out`, `pause_execution`, `continue_execution`,
 `get_output`, `get_output_tail`, `stop_debug`, `find_code_symbol`,
 `find_code_references`, and `get_source_context`. Debug operations use implicit
@@ -70,6 +71,18 @@ the modern tool, legacy `max_inner_exceptions` defaults to 5: evaluation may
 run debuggee code and requires mux ownership. Set it to 0 to avoid evaluation.
 An uncertain evaluation is not retried. Native refusal, size and paging limits
 are not full Python parity.
+
+Legacy snapshots are process-local, survive `stop_debug`, reject duplicate names
+and evict oldest first. `NETCOREDBG_MAX_SNAPSHOTS` defaults to 20 (supported
+range 1–1024), and `NETCOREDBG_MAX_VARS_PER_SNAPSHOT` defaults to 200 (1–256).
+Instead of Python's partial capture at the variable limit, the native route
+returns an error. Collection and object tools require a current `get_call_stack`
+selection by the same mux caller. They inspect at most 256 variables per DAP
+response, at most 256 object properties and 256 traversal requests; depth is
+clamped to 1–5. A 256 KiB work budget includes per-variable overhead, and the
+serialized response has a separate 256 KiB bound. Limit violations fail rather
+than returning silent partial data. Sorting uses .NET ordinal string order;
+non-finite numeric collection values are refused. Full Python parity is not claimed.
 
 The three native code-search tools work before and during a session. Their
 Python-style envelopes report the current observed state at response time.
