@@ -17,6 +17,8 @@
     <ProjectReference Include="../NetCoreDbg.Mcp.CodeSearch.Core/NetCoreDbg.Mcp.CodeSearch.Core.csproj" />
   </ItemGroup>
   <ItemGroup>
+    <EmbeddedResource Include="../../LICENSE" LogicalName="NetCoreDbg.Mcp.Stateless.LICENSE" />
+    <None Include="../../LICENSE" Link="LICENSE" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <EmbeddedResource Include="../../specs/004-native-scene-probe/contracts/native-scene-probe.schema.json" Link="NativeScene/native-scene-probe.schema.json" LogicalName="NetCoreDbg.Mcp.Stateless.NativeScene.native-scene-probe.schema.json" />
     <EmbeddedResource Include="../../specs/004-native-scene-probe/contracts/native-scene-probe-v2.schema.json" Link="NativeScene/native-scene-probe-v2.schema.json" LogicalName="NetCoreDbg.Mcp.Stateless.NativeScene.native-scene-probe-v2.schema.json" />
     <EmbeddedResource Include="../../specs/004-native-scene-probe/contracts/native-scene-artifact.schema.json" Link="NativeScene/native-scene-artifact.schema.json" LogicalName="NetCoreDbg.Mcp.Stateless.NativeScene.native-scene-artifact.schema.json" />

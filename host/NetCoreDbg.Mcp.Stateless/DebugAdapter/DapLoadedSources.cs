@@ -115,6 +115,6 @@ internal static class DapLoadedSources
         }
         var normalized = prefix + string.Join(separator, parts);
         if (normalized.Length == 0) normalized = ".";
-        return windows ? normalized.ToLowerInvariant() : normalized;
+        return windows ? Unicode15Lower.Lower(normalized) : normalized;
     }
 }

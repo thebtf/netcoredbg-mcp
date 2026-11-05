@@ -995,6 +995,61 @@ public sealed class OutputContractTests(ITestOutputHelper output)
         Assert.Empty(Assert.IsType<JsonObject>(other["loadedSources"]));
     }
 
+    [Fact]
+    public async Task LoadedSourceUnicode_PreservesPythonLowercaseIdentityForEventsAndSnapshots()
+    {
+        var enabled = InventoryEvent("capabilities", new JsonObject { ["capabilities"] = new JsonObject { ["supportsLoadedSourcesRequest"] = true } });
+        var sourceBody = new JsonObject
+        {
+            ["sources"] = new JsonArray(
+                new JsonObject { ["path"] = "src/\u0130.cs", ["name"] = "dot-old" },
+                new JsonObject { ["path"] = "src/i\u0307.cs", ["name"] = "dot-new" },
+                new JsonObject { ["path"] = "src/\u039f\u03a3", ["name"] = "sigma-old" },
+                new JsonObject { ["path"] = "src/\u03bf\u03c2", ["name"] = "sigma-new" },
+                new JsonObject { ["name"] = "A\u0301\u03a3" },
+                new JsonObject { ["name"] = "a\u0301\u03c2" },
+                new JsonObject { ["path"] = "src/\u039f\u03a3\u0391", ["name"] = "medial" },
+                new JsonObject { ["path"] = "src/\U00010570", ["name"] = "vithkuqi" }),
+        };
+        await using var driver = await StartTailDriverAsync(OutputOptions(
+            launch: new JsonArray(enabled),
+            batches: new JsonArray(Batch(
+                SourceEvent("new", new JsonObject { ["path"] = "src/\u0130.cs", ["name"] = "dot-old" }),
+                SourceEvent("changed", new JsonObject { ["path"] = "src/i\u0307.cs", ["name"] = "dot-new" }),
+                SourceEvent("new", new JsonObject { ["path"] = "src/\u039f\u03a3", ["name"] = "sigma-old" }),
+                SourceEvent("changed", new JsonObject { ["path"] = "src/\u03bf\u03c2", ["name"] = "sigma-new" }),
+                SourceEvent("new", new JsonObject { ["name"] = "A\u0301\u03a3" }),
+                SourceEvent("new", new JsonObject { ["path"] = "src/\u039f\u03a3\u0391", ["name"] = "medial" }),
+                SourceEvent("new", new JsonObject { ["path"] = "src/\U00010570", ["name"] = "vithkuqi" }))),
+            loadedSources: sourceBody));
+        var token = await StartSessionAsync(driver, "source-unicode-start");
+        await AdvanceOutputAsync(driver, token, "source-unicode-events");
+        var events = Assert.IsType<JsonObject>((await ReadSourceStateAsync(driver, token, "source-unicode-event-state"))["loadedSources"]);
+        Assert.Equal(OperatingSystem.IsWindows() ? 5 : 7, events.Count);
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Equal("dot-new", events["path:src\\i\u0307.cs"]?["name"]?.GetValue<string>());
+            Assert.Equal("sigma-new", events["path:src\\\u03bf\u03c2"]?["name"]?.GetValue<string>());
+            Assert.NotNull(events["name:a\u0301\u03c2"]);
+            Assert.NotNull(events["path:src\\\u03bf\u03c3\u03b1"]);
+            Assert.NotNull(events["path:src\\\U00010597"]);
+        }
+
+        var snapshot = AssertApplicationEnvelope(await driver.CallToolRawAsync("get_loaded_sources",
+            new JsonObject { ["debugSessionId"] = token }, ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("source-unicode-snapshot")), false);
+        Assert.Equal(OperatingSystem.IsWindows() ? 5 : 8, snapshot["count"]?.GetValue<int>());
+        var state = await ReadSourceStateAsync(driver, token, "source-unicode-snapshot-state");
+        var sources = Assert.IsType<JsonObject>(state["loadedSources"]);
+        Assert.Equal(OperatingSystem.IsWindows() ? 5 : 8, sources.Count);
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Equal("dot-new", sources["path:src\\i\u0307.cs"]?["name"]?.GetValue<string>());
+            Assert.Equal("sigma-new", sources["path:src\\\u03bf\u03c2"]?["name"]?.GetValue<string>());
+            Assert.Equal("a\u0301\u03c2", sources["name:a\u0301\u03c2"]?["name"]?.GetValue<string>());
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
