@@ -39,6 +39,12 @@ bundle the opt-in .NET preview executable. Corrected preview delivery is separat
 B3 native `step_over`, the native step pair and Native Scene Probe work remain
 modern-host source-only and add no tools to the Python catalog.
 
+The source-built stateful host also accepts initialize-era MCP clients through
+the SDK's version negotiation. Its catalog and explicit `debugSessionId` inputs
+remain native, not the Python tool contract; legacy-client cutover, resources,
+and full catalog parity are still open (Engram #552). The separate published
+read-only preview retains its modern-only protocol boundary.
+
 The source-built stateful host accepts `args`, `cwd`, and `stopAtEntry` in
 `start_debug`. String arguments are sent to DAP in order, including empty
 strings; an explicit empty array is retained. Omitted or null options are not
@@ -51,6 +57,9 @@ An explicit nonempty `cwd` must name an existing directory before the adapter
 starts, or the host returns `START_DEBUG_CWD_UNAVAILABLE` without a token.
 Relative paths are checked from the host working directory. This is a point-in-time
 check, not a pinned directory identity or proof that the debuggee later used it.
+
+The optional `justMyCode` boolean controls the adapter's user-code filtering;
+omitting it leaves the adapter default. Python launches with `justMyCode: false`.
 
 The optional `env` object passes string values, including empty strings, to the
 debugger for the debuggee; a `null` value removes that name from the owned adapter

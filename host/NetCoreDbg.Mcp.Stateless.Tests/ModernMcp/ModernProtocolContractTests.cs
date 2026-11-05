@@ -15,6 +15,43 @@ public sealed class ModernProtocolContractTests
 {
     private const string ValidProgram = "controlled-program.dll";
 
+    [Theory]
+    [InlineData("2025-06-18")]
+    [InlineData("2025-11-25")]
+    public async Task LegacyHandshake_CanUseTheExplicitNativeSession(string version)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(
+            new ModernMcpStartOptions(ClientProtocolVersion: version), startupTimeout: TimeSpan.FromSeconds(10));
+        Assert.Equal(version, driver.Client.NegotiatedProtocolVersion);
+        var response = await driver.SendRawRequestAsync("tools/list", new JsonObject(), new RequestId("legacy-catalog"));
+        AssertCatalog(ModernMcpProcessDriver.RequireResult(response));
+        var started = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("tools/call", new JsonObject
+        {
+            ["name"] = "start_debug",
+            ["arguments"] = new JsonObject { ["program"] = driver.InertProgramPath, ["justMyCode"] = false },
+        }, new RequestId("legacy-start")));
+        Assert.False(started["isError"]?.GetValue<bool>() ?? false);
+        var id = Assert.IsType<string>(started["structuredContent"]?["debugSessionId"]?.GetValue<string>());
+        var state = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("tools/call", new JsonObject
+        {
+            ["name"] = "get_debug_state",
+            ["arguments"] = new JsonObject { ["debugSessionId"] = id },
+        }, new RequestId("legacy-state")));
+        Assert.Equal("debug_state_success", state["structuredContent"]?["kind"]?.GetValue<string>());
+        var missing = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("tools/call", new JsonObject
+        {
+            ["name"] = "get_debug_state",
+            ["arguments"] = new JsonObject(),
+        }, new RequestId("legacy-state-without-id")));
+        Assert.Equal("debug_session_not_found", missing["structuredContent"]?["kind"]?.GetValue<string>());
+        var stopped = ModernMcpProcessDriver.RequireResult(await driver.SendRawRequestAsync("tools/call", new JsonObject
+        {
+            ["name"] = "stop_debug",
+            ["arguments"] = new JsonObject { ["debugSessionId"] = id },
+        }, new RequestId("legacy-stop")));
+        Assert.Equal("stop_debug_success", stopped["structuredContent"]?["kind"]?.GetValue<string>());
+    }
+
     [Fact]
     public async Task Discover_IsSupportedAsTheLiteralFirstFreshProcessRequest_AndDeclaresCacheableTools()
     {

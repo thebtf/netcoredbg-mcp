@@ -19,7 +19,6 @@ namespace NetCoreDbg.Mcp.Stateless;
 
 internal static class Program
 {
-    private const string ProtocolVersion = "2026-07-28";
     private const string UnixProcessGroupProxy = "--unix-process-group-proxy";
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromMinutes(5);
 
@@ -65,7 +64,8 @@ internal static class Program
 
         builder.Services.AddMcpServer(options =>
             {
-                options.ProtocolVersion = ProtocolVersion;
+                // Negotiate initialize-era clients and per-request modern clients independently.
+                options.ProtocolVersion = null;
                 options.ServerInfo = new Implementation { Name = "netcoredbg-mcp-stateless", Version = "1.0.0" };
                 options.Capabilities = new ServerCapabilities { Tools = new ToolsCapability { ListChanged = false } };
             })
@@ -2715,7 +2715,7 @@ internal static class Program
                 return true;
             }
 
-            if (arguments.Count > 6 || arguments.Keys.Any(static name => name is not "program" and not "breakpoints" and not "args" and not "cwd" and not "stopAtEntry" and not "env"))
+            if (arguments.Count > 7 || arguments.Keys.Any(static name => name is not "program" and not "breakpoints" and not "args" and not "cwd" and not "stopAtEntry" and not "justMyCode" and not "env"))
             {
                 return false;
             }
@@ -2767,6 +2767,13 @@ internal static class Program
                 stopAtEntry = stop.GetBoolean();
             }
 
+            bool? justMyCode = null;
+            if (arguments.TryGetValue("justMyCode", out var justMyCodeElement) && justMyCodeElement.ValueKind != JsonValueKind.Null)
+            {
+                if (justMyCodeElement.ValueKind is not JsonValueKind.True and not JsonValueKind.False) return false;
+                justMyCode = justMyCodeElement.GetBoolean();
+            }
+
             Dictionary<string, string?>? environment = null;
             if (arguments.TryGetValue("env", out var env) && env.ValueKind != JsonValueKind.Null)
             {
@@ -2785,8 +2792,8 @@ internal static class Program
                 }
             }
 
-            if (args is not null || cwd is not null || stopAtEntry is not null || environment is { Count: > 0 })
-                options = new DapLaunchOptions(cwd, args, stopAtEntry, environment);
+            if (args is not null || cwd is not null || stopAtEntry is not null || justMyCode is not null || environment is { Count: > 0 })
+                options = new DapLaunchOptions(cwd, args, stopAtEntry, justMyCode, environment);
             return true;
         }
 
@@ -3571,7 +3578,7 @@ internal static class Program
         {
             Tools =
             [
-                Tool("start_debug", "Start debugging a program with optional arguments, working directory, environment overrides, stop-at-entry and request-local source breakpoints. Non-ASCII environment data may be corrupted by some Windows debugger builds. Initial breakpoint verification is not a breakpoint-hit report.", """{"type":"object","properties":{"program":{"type":"string","minLength":1},"breakpoints":{"type":"array","maxItems":256,"items":{"type":"object","properties":{"file":{"type":"string","minLength":1},"line":{"type":"integer","minimum":1,"maximum":2147483647}},"required":["file","line"],"additionalProperties":false}},"args":{"type":["array","null"],"items":{"type":"string"}},"cwd":{"type":["string","null"]},"stopAtEntry":{"type":["boolean","null"]},"env":{"type":["object","null"],"additionalProperties":{"type":["string","null"]}}},"additionalProperties":false}"""),
+                Tool("start_debug", "Start debugging a program with optional arguments, working directory, environment overrides, code filtering, stop-at-entry and request-local source breakpoints. Non-ASCII environment data may be corrupted by some Windows debugger builds. Initial breakpoint verification is not a breakpoint-hit report.", """{"type":"object","properties":{"program":{"type":"string","minLength":1},"breakpoints":{"type":"array","maxItems":256,"items":{"type":"object","properties":{"file":{"type":"string","minLength":1},"line":{"type":"integer","minimum":1,"maximum":2147483647}},"required":["file","line"],"additionalProperties":false}},"args":{"type":["array","null"],"items":{"type":"string"}},"cwd":{"type":["string","null"]},"stopAtEntry":{"type":["boolean","null"]},"justMyCode":{"type":["boolean","null"]},"env":{"type":["object","null"],"additionalProperties":{"type":["string","null"]}}},"additionalProperties":false}"""),
                 Tool("get_debug_state", "Get the state of a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("stop_debug", "Stop a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("get_threads", "Get threads in a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
